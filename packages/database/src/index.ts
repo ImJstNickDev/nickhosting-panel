@@ -4,8 +4,9 @@ import { type Generated, Kysely, PostgresDialect } from 'kysely';
 import { Pool, type PoolConfig } from 'pg';
 import type { AuthTables } from './identity-types.js';
 import type { JobTables } from './job-types.js';
+import type { ServerTables } from './server-types.js';
 
-export interface Database extends AuthTables, JobTables {
+export interface Database extends AuthTables, JobTables, ServerTables {
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;
@@ -51,4 +52,5 @@ export function createDatabase(
 }
 
 export { migrate } from './migrate.js';
+export type { HostSnapshot, ServerLimits } from './server-types.js';
 export * from './settings.js';

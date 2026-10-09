@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AuthContext } from '@nickhosting/core';
-import { assertPermission, DomainError } from '@nickhosting/core';
+import { assertPermission, authSessionId, DomainError } from '@nickhosting/core';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
 import { z } from 'zod';
 import { buildBetterAuth } from './better-auth.js';
@@ -75,6 +75,7 @@ export function createIdentity(options: IdentityOptions) {
     const user = result.rows[0];
     if (!user) throw new DomainError('unauthenticated');
     const context: AuthContext = {
+      [authSessionId]: session.session.id,
       actorUserId: session.user.id,
       subjectUserId: session.user.id,
       role: user.role,

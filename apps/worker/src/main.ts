@@ -1,8 +1,9 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createLogger, DomainError } from '@nickhosting/core';
+import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
-import { startJobWorker } from '@nickhosting/jobs';
+import { processJob, startJobWorker } from '@nickhosting/jobs';
+import { createManagementRuntime } from '@nickhosting/server-management';
 
 export async function main(env: NodeJS.ProcessEnv = process.env) {
   const logger = createLogger((record) => {
@@ -12,16 +13,71 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     throw new DomainError('configuration_invalid');
   const { db } = createDatabase(env.DATABASE_URL);
   try {
+    const management = async () => {
+      if (!env.NH_SECRETS_MASTER_KEY) throw new DomainError('configuration_invalid');
+      const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+      return createManagementRuntime({
+        db,
+        env,
+        codec: new SecretCodec({
+          activeKeyId: keyId,
+          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+        }),
+      });
+    };
     const runtime = await startJobWorker({
       db,
       redisUrl: env.REDIS_URL,
       prefix: env.NH_JOB_PREFIX,
       logger,
+      processor: async (jobId) => {
+        const row = await db
+          .selectFrom('server_operations')
+          .select('job_id')
+          .where('job_id', '=', jobId)
+          .executeTakeFirst();
+        return row ? (await management()).process(jobId) : processJob(db, jobId);
+      },
     });
+    let stopping = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let reconciliation: Promise<void> | undefined;
+    const poll = async () => {
+      try {
+        const server = await db
+          .selectFrom('managed_servers')
+          .select('id')
+          .where('deleted_at', 'is', null)
+          .limit(1)
+          .executeTakeFirst();
+        if (server) {
+          const result = await (await management()).reconcile();
+          if (result.external.failed)
+            logger.log('warn', 'servers.external_recovery_failed', {
+              count: result.external.failed,
+            });
+          if (result.unavailable.length)
+            logger.log('warn', 'servers.reconciliation_unavailable', {
+              count: result.unavailable.length,
+            });
+        }
+      } catch {
+        logger.log('warn', 'servers.reconciliation_failed');
+      } finally {
+        if (!stopping)
+          timer = setTimeout(() => {
+            reconciliation = poll();
+          }, 5000);
+      }
+    };
+    reconciliation = poll();
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
     const close = () => {
       closed ??= (async () => {
+        stopping = true;
+        if (timer) clearTimeout(timer);
+        await reconciliation;
         try {
           await runtime.close();
         } finally {

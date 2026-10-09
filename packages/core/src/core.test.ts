@@ -18,6 +18,101 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('disables total count limits by default while preserving independent pending-work safeguards', () => {
+    expect(resolveConfig().values.maxServersPerUser).toBeNull();
+    expect(resolveConfig().values.maxConcurrentProvisionsPerUser).toBe(4);
+    expect(resolveConfig({ maxServersPerUser: 7 }).values.maxServersPerUser).toBe(7);
+    const unlimited = resolveConfig({ maxServersPerUser: 7 }, { NH_MAX_SERVERS_PER_USER: 'null' });
+    expect(unlimited.values.maxServersPerUser).toBeNull();
+    expect(unlimited.lockedKeys).toContain('maxServersPerUser');
+    expect(() => assertConfigWritable({ maxServersPerUser: 9 }, unlimited)).toThrow('conflict');
+    expect(
+      resolveConfig(
+        { maxServersPerUser: null },
+        { NH_MAX_SERVERS_PER_USER: '31', NH_MAX_CONCURRENT_PROVISIONS_PER_USER: '2' },
+      ).values,
+    ).toMatchObject({ maxServersPerUser: 31, maxConcurrentProvisionsPerUser: 2 });
+    for (const value of ['0', '-1', '', 'off', 'false', '1.5', '10001'])
+      expect(() => resolveConfig({}, { NH_MAX_SERVERS_PER_USER: value })).toThrow(
+        'configuration_invalid',
+      );
+  });
+  it('isolates upload origins from download origins and honors database/environment precedence', () => {
+    const config = resolveConfig(
+      { pterodactylUploadOrigins: ['https://upload.example.test'] },
+      { NH_PTERODACTYL_UPLOAD_ORIGINS: '["https://override.example.test"]' },
+    );
+    expect(config.values.pterodactylUploadOrigins).toEqual(['https://override.example.test']);
+    expect(config.values.pterodactylDownloadOrigins).toEqual([]);
+    expect(config.lockedKeys).toContain('pterodactylUploadOrigins');
+    for (const value of [
+      'file:///private',
+      'https://user:secret@example.test',
+      'https://example.test/path',
+      'https://example.test?token=secret',
+    ])
+      expect(() =>
+        resolveConfig({}, { NH_PTERODACTYL_UPLOAD_ORIGINS: JSON.stringify([value]) }),
+      ).toThrow('configuration_invalid');
+  });
+
+  it('accepts an explicit canonical Unix socket with normal settings precedence and locking', () => {
+    expect(resolveConfig().values.dockerObserverSocket).toBeUndefined();
+    const config = resolveConfig(
+      { dockerObserverSocket: '/fixture/database-observer.sock' },
+      { NH_DOCKER_OBSERVER_SOCKET: '/fixture/environment-observer.sock' },
+    );
+    expect(config.values.dockerObserverSocket).toBe('/fixture/environment-observer.sock');
+    expect(config.sources.dockerObserverSocket).toBe('environment');
+    expect(config.lockedKeys).toContain('dockerObserverSocket');
+    expect(() =>
+      assertConfigWritable({ dockerObserverSocket: '/fixture/other.sock' }, config),
+    ).toThrow('conflict');
+  });
+  it.each([
+    '',
+    'docker.sock',
+    'unix:///fixture/docker.sock',
+    'tcp://example.test:2375',
+    '/',
+    '/fixture/../docker.sock',
+    '/fixture/./docker.sock',
+    '//fixture/docker.sock',
+    '/fixture/docker.sock/',
+    '/fixture/docker.sock\0',
+    '/fixture/docker.sock\n',
+    '/fixture/docker.sock\t',
+    '/fixture/docker.sock\x7f',
+    '/fixture/docker.sock?target=other',
+    '/fixture/docker.sock#fragment',
+  ])('rejects observer socket %j before saving or resolving it', (value) => {
+    expect(() => resolveConfig({ dockerObserverSocket: value })).toThrow('configuration_invalid');
+    expect(() => resolveConfig({}, { NH_DOCKER_OBSERVER_SOCKET: value })).toThrow(
+      'configuration_invalid',
+    );
+    expect(() => assertConfigWritable({ dockerObserverSocket: value }, resolveConfig())).toThrow(
+      'configuration_invalid',
+    );
+  });
+  it('accepts only exact protocol-scoped origins for privileged provider streams', () => {
+    expect(
+      resolveConfig({}, { NH_PTERODACTYL_WEBSOCKET_ORIGINS: '["wss://wings.example.test"]' }).values
+        .pterodactylWebSocketOrigins,
+    ).toEqual(['wss://wings.example.test']);
+    for (const origin of [
+      'https://wings.example.test',
+      'wss://user:secret@wings.example.test',
+      'wss://wings.example.test/path',
+      'wss://wings.example.test?token=value',
+    ]) {
+      expect(() =>
+        resolveConfig({}, { NH_PTERODACTYL_WEBSOCKET_ORIGINS: JSON.stringify([origin]) }),
+      ).toThrow('configuration_invalid');
+    }
+    expect(() =>
+      resolveConfig({}, { NH_PTERODACTYL_DOWNLOAD_ORIGINS: '["file:///tmp/file"]' }),
+    ).toThrow('configuration_invalid');
+  });
   it('resolves defaults then DB then only explicit environment values with provenance', () => {
     const config = resolveConfig(
       { instanceName: 'Owner instance', smtpSecure: true, smtpPort: 2525 },

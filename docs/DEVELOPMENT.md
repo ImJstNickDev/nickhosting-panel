@@ -1,6 +1,8 @@
 # M1 development and validation
 
-M1 is implemented on `milestone/m1-foundation` and remains open for Owner review. M0 PR #1 was
+M1 PR #16 was squash-merged with explicit, one-time Owner authorization into
+`main` at `b1a71ef52721e413e861d410954d06fd743b883c`. Its validation record follows;
+current M2 work is tracked in [M2 validation](M2-VALIDATION.md). M0 PR #1 was
 squash-merged with an explicit, one-time Owner authorization; this does not change
 the standing prohibition on Codex merging milestone PRs. Its reviewed tree is
 the M1 baseline (`aabd3817ace560c10fa687136e0360c8437b1f1a`).

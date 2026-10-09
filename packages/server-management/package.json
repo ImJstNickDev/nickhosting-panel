@@ -1,0 +1,16 @@
+{
+  "name": "@nickhosting/server-management",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/database": "workspace:*",
+    "@nickhosting/game-sdk": "workspace:*",
+    "@nickhosting/jobs": "workspace:*",
+    "@nickhosting/pterodactyl-adapter": "workspace:*",
+    "@nickhosting/external-services": "workspace:*",
+    "kysely": "0.29.6",
+    "zod": "4.6.5"
+  }
+}

@@ -1,7 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 
-/** M1 connection validation only. No lifecycle, allocation or mutation operations. */
+/** Read-only first-run validation, retained for compatibility with M1. */
 export async function validateConnection(
   input: { baseURL: string; applicationKey: string; clientKey?: string },
   fetcher: typeof fetch = fetch,
@@ -50,3 +50,14 @@ export async function validateConnection(
     }
   }
 }
+
+export * from './adapter.js';
+export type { ConsoleEvent, ConsoleRelay, ConsoleRelayOptions, ConsoleStats } from './console.js';
+export { type ContainerObserver, createContainerObserver } from './container-observer.js';
+export type { DownloadProxyOptions, ProxiedDownload } from './downloads.js';
+export { supportsStopConfirmation } from './power.js';
+export type { TransferOptions } from './transfer-guard.js';
+export type { CredentialScope, RemoteOutcome } from './transport.js';
+export { PterodactylError, relativePath } from './transport.js';
+export * from './types.js';
+export type { UploadProxyOptions } from './uploads.js';

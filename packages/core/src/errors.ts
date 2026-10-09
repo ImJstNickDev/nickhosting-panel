@@ -16,6 +16,11 @@ export const domainErrorCodes = [
   'configuration_invalid',
   'secret_invalid',
   'integration_unavailable',
+  'resources_unavailable',
+  'storage_exhausted',
+  'operation_uncertain',
+  'allocation_unavailable',
+  'provenance_mismatch',
   'internal_error',
 ] as const;
 
@@ -39,6 +44,11 @@ const defaultStatuses: Record<DomainErrorCode, number> = {
   configuration_invalid: 400,
   secret_invalid: 500,
   integration_unavailable: 503,
+  resources_unavailable: 409,
+  storage_exhausted: 409,
+  operation_uncertain: 409,
+  allocation_unavailable: 409,
+  provenance_mismatch: 409,
   internal_error: 500,
 };
 

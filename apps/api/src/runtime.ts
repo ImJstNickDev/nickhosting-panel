@@ -15,6 +15,7 @@ import {
 } from '@nickhosting/database';
 import { renderMail } from '@nickhosting/i18n';
 import { validateConnection } from '@nickhosting/pterodactyl-adapter';
+import { createManagementRuntime } from '@nickhosting/server-management';
 import { createTransport } from 'nodemailer';
 import { createApp } from './app.js';
 
@@ -112,6 +113,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
     const app = createApp({
       database,
       codec,
+      management: () => createManagementRuntime({ db: database.db, codec, env }),
       defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
       identity,
       env,

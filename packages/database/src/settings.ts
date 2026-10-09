@@ -57,6 +57,9 @@ export async function updateSettings(
 ) {
   regularOwner(context);
   return db.transaction().execute(async (tx) => {
+    await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
+      tx,
+    );
     await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':settings', 0))`.execute(
       tx,
     );
@@ -68,6 +71,40 @@ export async function updateSettings(
     assertConfigWritable(patch, resolveConfig(previous?.value ?? {}, env));
     const value = { ...previous?.value, ...patch };
     const resolved = resolveConfig(value, env);
+    // Policy changes must validate already committed reservations under the same
+    // lock as admission; switching storage modes cannot hide existing use.
+    const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
+    const servers = await tx
+      .selectFrom('managed_servers as s')
+      .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
+      .select(['s.owner_id', 's.limits', 'm.feature_limits'])
+      .where('s.deleted_at', 'is', null)
+      .execute();
+    const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
+    const owners = new Set([
+      ...reservations.map((r) => r.owner_id),
+      ...servers.map((s) => s.owner_id),
+    ]);
+    for (const owner of owners) {
+      const exception = exceptions.find(
+        (e) => e.user_id === owner && (!e.expires_at || e.expires_at > new Date()),
+      );
+      const memory = exception?.memory_mib ?? resolved.values.defaultUserMemoryMiB;
+      const cpu = exception?.cpu_percent ?? resolved.values.defaultUserCpuPercent;
+      const storage = exception
+        ? Number(exception.storage_mib)
+        : resolved.values.defaultUserStorageMiB;
+      const active = reservations.filter((r) => r.owner_id === owner);
+      if (
+        active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
+        active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
+        (resolved.values.storagePolicy === 'PER_USER_BUDGET' &&
+          servers
+            .filter((r) => r.owner_id === owner)
+            .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)
+      )
+        throw new DomainError('conflict');
+    }
     await tx
       .insertInto('platform_settings')
       .values({ key: 'platform', value })
@@ -83,6 +120,8 @@ export const secretNames = [
   'pterodactylClientKey',
   'discordClientSecret',
   'smtpPassword',
+  'sftpgoApiKey',
+  'cloudflareApiToken',
 ] as const;
 export type SecretName = (typeof secretNames)[number];
 const secretEnv: Record<SecretName, string> = {
@@ -90,6 +129,8 @@ const secretEnv: Record<SecretName, string> = {
   pterodactylClientKey: 'NH_PTERODACTYL_CLIENT_KEY',
   discordClientSecret: 'DISCORD_CLIENT_SECRET',
   smtpPassword: 'SMTP_PASSWORD',
+  sftpgoApiKey: 'NH_SFTPGO_API_KEY',
+  cloudflareApiToken: 'NH_CLOUDFLARE_API_TOKEN',
 };
 
 export async function getSecret(

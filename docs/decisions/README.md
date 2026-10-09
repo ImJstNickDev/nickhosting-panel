@@ -12,5 +12,6 @@ Each ADR is a short record of an intentional project decision and the consequenc
 - [0008 Complete frontend as M6](0008-complete-frontend.md)
 - [0009 Production test permissions](0009-production-safety.md)
 - [0010 M1 identity, configuration and durability](0010-foundation-identity-and-durability.md)
+- [0011 M2 lifecycle, admission and external services](0011-server-lifecycle-and-service-boundaries.md)
 
 When a new decision supersedes an ADR, link a new ADR and mark old one `Superseded`, rather than deleting historical context.

@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 
-/** M1 exposes a real DB-only command. External/game effects are later milestone handlers. */
-export const commandSchema = z
+/** Public foundation command; server operations are enqueued only by admission services. */
+export const foundationCommandSchema = z
   .object({
     type: z.literal('foundation.record-activity'),
     version: z.literal(1),
@@ -11,7 +11,17 @@ export const commandSchema = z
   })
   .strict();
 
+export const serverOperationCommandSchema = z.strictObject({
+  type: z.literal('server.operation'),
+  version: z.literal(1),
+  payload: z.strictObject({ serverId: z.uuid(), operationId: z.uuid() }),
+});
+export const commandSchema = z.discriminatedUnion('type', [
+  foundationCommandSchema,
+  serverOperationCommandSchema,
+]);
 export type JobCommand = z.infer<typeof commandSchema>;
+export type FoundationCommand = z.infer<typeof foundationCommandSchema>;
 
 export const deliverySchema = z.object({ jobId: z.uuid() }).strict();
 export type JobDelivery = z.infer<typeof deliverySchema>;

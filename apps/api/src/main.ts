@@ -1,6 +1,8 @@
+import type { Server } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { type ServerType, serve } from '@hono/node-server';
+import { getRequestListener } from '@hono/node-server';
 import { DomainError } from '@nickhosting/core';
+import { createApiHttpServer } from './http-server.js';
 import { createRuntime } from './runtime.js';
 
 export async function main(env: Readonly<Record<string, string | undefined>> = process.env) {
@@ -9,17 +11,17 @@ export async function main(env: Readonly<Record<string, string | undefined>> = p
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new DomainError('configuration_invalid');
   const runtime = await createRuntime(env);
-  let server: ServerType;
+  let server: Server;
   try {
-    server = await new Promise<ServerType>((resolve, reject) => {
-      const listener = serve(
-        { fetch: runtime.app.fetch, hostname: env.NH_API_BIND_HOST, port },
-        () => {
-          listener.off('error', reject);
-          resolve(listener);
-        },
+    server = await new Promise<Server>((resolve, reject) => {
+      const listener = createApiHttpServer(
+        getRequestListener(runtime.app.fetch, { hostname: env.NH_API_BIND_HOST }),
       );
       listener.once('error', reject);
+      listener.listen(port, env.NH_API_BIND_HOST, () => {
+        listener.off('error', reject);
+        resolve(listener);
+      });
     });
   } catch (error) {
     await runtime.close();

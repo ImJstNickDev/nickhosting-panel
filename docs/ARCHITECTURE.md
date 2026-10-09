@@ -85,7 +85,7 @@ Never store raw game console output, auth secrets, Cloudflare tokens or SFTP pas
 
 1. Pterodactyl 1.x calculates node usage from the **configured** RAM and disk across all servers including stopped ones; NickHosting models RAM admission from *active reservations*. An explicit node/allocation choice avoids some automatic-deployment checks but is **not proven to bypass every server creation/update capacity check**; validate exact installed Panel/Wings version via isolated test servers. See `RESOURCE-AND-OPERATIONS.md`.
 2. Using Pterodactyl privileged keys to obtain console/Wings tokens could leak authority. Build a least-capability backend relay or other verified design.
-3. Shared port number with distinct bound IP addresses works in principle; binding/routing on this actual Docker network requires read-only discovery then Owner-approved deployment changes.
+3. Shared port number with distinct bound IP addresses works in principle; binding/routing on this actual Docker network requires read-only discovery then Owner-approved deployment changes. Provider allocation and effective backend addresses are separate (including explicitly verified Wings loopback remapping). M3 must prove Gateway-namespace reachability and validate every public listener against existing direct Pterodactyl allocations and actual host/Docker bindings before binding; [ADR 0005](decisions/0005-permanent-gateway.md) defines the collision gate.
 4. SFTPGo mapping onto real Wings volumes may require host mounts/permissions changes; do not implement changes on the host automatically.
 5. Satisfactory network wake behavior and TLS/client interaction require empirical protocol tests; do not promise unsupported capabilities.
 
