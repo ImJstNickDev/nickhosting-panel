@@ -3,7 +3,7 @@
 These contracts extend [M2](M2-API.md) and [M3](M3-API.md). They do not introduce
 another lifecycle processor or a Minecraft proxy. All browser routes retain the
 normal session, invitation, origin/CSRF and scoped support-session requirements.
-M6 supplies graphical screens.
+M5 supplies graphical screens and remaining common API integration.
 
 ## Availability and administration
 

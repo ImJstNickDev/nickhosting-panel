@@ -2,6 +2,8 @@
 
 **Status:** Implemented in M1; pending Owner review
 
+**Roadmap annotation, 2026-10-09:** The original decision/evidence below is preserved. Its frontend references to M6 now mean M5 under the [ADR 0008 amendment](0008-complete-frontend.md); no M1/M2 behavior or test history changes. M6 now covers game-specific expansion.
+
 ## Decision
 
 Use Node 24 LTS, Hono, Better Auth 1.7.7, PostgreSQL 18, Kysely with `pg`,

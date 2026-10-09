@@ -24,7 +24,14 @@ Private, invite-only, free game-server hosting for friends. The public website `
 - **User:** Home, Servers, Activity, Settings. A server has Overview, Console (terminal + CPU/RAM/network), Files/SFTP, Backups, Automation, Settings, and conditional game-integrated sections.
 - **Owner:** Overview, Users, Servers, Infrastructure, Game Integrations, Operations, Settings. User administration includes quotas, invites, permissions, per-user server inventory, support sessions; node and gateway diagnostics, job monitoring, rollout controls.
 - Search, keyboard access, responsive operation, meaningful loading/empty/failure states, real progress when known, no fake percentages.
-- **M6 only:** a complete, coherent, production-quality frontend with real screenshots for review. No temporary MVP frontend or AI-generic dashboard. Earlier milestones test via APIs and fixtures.
+- **M5:** a complete, coherent WebPanel with real screenshots and [common platform readiness](M5-COMMON-INTEGRATION.md). Earlier milestones test via APIs and fixtures; M6 adds game integrations to the finished shared interface. No temporary MVP, mock dashboard or dead navigation.
+
+The panel is an operational application. Put server state, connection details and
+the next useful action first. Avoid marketing headlines, promotional hero sections,
+decorative KPI cards, filler copy and technical architecture explanations in normal
+user journeys. Use a restrained, consistent visual system and concise English/Italian
+microcopy. Apply the documented [usability and accessibility requirements](FRONTEND-I18N.md)
+to the real account, server and Owner tasks.
 
 ## Owner controls
 
@@ -33,11 +40,11 @@ Private, invite-only, free game-server hosting for friends. The public website `
 - Per-game availability lifecycle: **development**, **allowlisted testers**, **public**, **disabled for new creations**. Disabled-for-new-creation must not orphan existing servers; existing-compatible management continues.
 - **Owner support session** (also called assisted/impersonation session): interface in another user's context but Owner authority belongs only to this specifically scoped temporary session. The user's existing sessions and permissions do not change. Preserve `actor` and `subject` separately in audit.
 
-## Launch game set
+## Game delivery and truthful availability
 
-**Minecraft Java:** Vanilla, Paper, Folia, Fabric, Forge, plus other profiles (e.g. Pumpkin) only if verified and clearly marked supported/experimental; profiles have version-aware runtime and protocol handling, operations (OP/whitelist/players with optional MCHeads), mod/modpack/plugin/world managers, properties, sleep/wake, customizable subdomain+SRV. A modpack dictates loader and Minecraft version, so omit redundant wizard steps.
+**M5 Minecraft Java:** Vanilla is the only runtime with M4 real-server verification; availability still requires the exact version/runtime evidence and Owner enablement. Paper, Folia, Fabric, Forge and other profiles remain hidden from ordinary users until their required evidence passes. Profile/protocol support states, test evidence and experimental testing controls belong to Owner administration, not ordinary creation screens. Existing rollout/tester allowlists govern private testing; an Owner checkbox cannot establish compatibility. Supported features include version-aware runtime/protocol handling, OP/whitelist/players with optional MCHeads, applicable content/world management, properties, sleep/wake and subdomain/SRV configuration. A supported modpack determines loader and Minecraft version, so omit redundant questions. Do not expose mod/plugin actions on Vanilla as if it supported those runtimes.
 
-**Satisfactory:** dedicated wizard, multiple required ports, static host+port strategy, game settings, save management, SMR catalog, support for SMM remote management via SFTPGo and relevant mod tooling, game-specific idle/sleep/wake capability tested before declared supported. Do not promise in-game wake messages when protocol/client cannot display them.
+**M6 Satisfactory:** dedicated wizard, multiple required ports, static host+port strategy, game settings, save management, SMR catalog, SMM remote management via SFTPGo and relevant mod tooling, with game-specific idle/sleep/wake tested before it is declared supported. Do not promise in-game messages when the client cannot display them. Satisfactory is not a dependency for M5: its shared wizard, tab, networking, file, SFTP, backup and job foundations must already work through the M5 common platform. Do not ship fake Satisfactory screens to satisfy M5.
 
 After launch, add other games **one at a time**, with individual UX and integration work. Plugins are trusted, repo-owned versioned modules, not untrusted runtime code packages or a public marketplace.
 
@@ -52,4 +59,8 @@ After launch, add other games **one at a time**, with individual UX and integrat
 
 ## Acceptance principle
 
-Each feature must be genuinely functional for its declared support matrix. If a runtime or protocol is not tested, mark it unsupported/experimental. Prefer a clear capability limitation to a fake UI control.
+Each offered feature must function for its declared support matrix. Record untested
+runtime/protocol states as unsupported, unverified or experimental in internal and
+Owner administration; ordinary users see only eligible choices. Prefer an
+actionable capability limitation to a fake UI control. M5 requires the complete
+shared platform and UX acceptance; M6 adds separately verified game behavior.

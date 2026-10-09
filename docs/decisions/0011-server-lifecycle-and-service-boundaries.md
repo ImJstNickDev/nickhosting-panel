@@ -4,6 +4,8 @@
 the Owner for M2 only. Completion evidence is tracked in
 [M2 validation](../M2-VALIDATION.md).
 
+**Roadmap annotation, 2026-10-09:** The original decision/evidence below is preserved. Its frontend references to M6 now mean M5 under the [ADR 0008 amendment](0008-complete-frontend.md); no M1/M2 behavior or test history changes. M6 now covers game-specific expansion.
+
 ## Decision
 
 Keep the Pterodactyl adapter as the only provider boundary. NickHosting UUIDs,

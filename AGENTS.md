@@ -53,15 +53,15 @@ When an operation requires approval, give: exact proposed change, why necessary,
 4. Run local checks (`pnpm` lint, types, unit/integration tests as available) and report results honestly.
 5. Update docs/ADRs when behavior changes; keep changes within the milestone.
 6. Push to a milestone branch, open a **draft PR** while work is ongoing, then mark ready for review when finished; **never merge**.
-7. PR must contain requirements checklist, test outcomes, affected APIs/config, safety statement, unresolved issues, rollback instructions and screenshots for M6.
+7. PR must contain requirements checklist, test outcomes, affected APIs/config, safety statement, unresolved issues, rollback instructions and screenshots for M5 and later UI changes.
 
 No GitHub Actions are required. Do not create CI workflows or enable external automation unless specifically requested.
 
 ## Quality bar
 
-Do not substitute mock screens for finished M6 UI. Before M6, exercise backend behavior with test clients and fixtures. In M6, deliver complete user and Owner flows, take browser screenshots across desktop/mobile, error/loading/empty and game-specific screens; iterate on visual defects. No hardcoded user-facing text, silent API errors, unverified success claims, or invented progress percentages.
+Do not substitute mock screens for finished M5 UI. Before M5, exercise backend behavior with test clients and fixtures. M5 delivers the complete WebPanel and common backend/API integration needed by its supported capabilities; M6 adds Satisfactory and evidence-dependent game/runtime expansion. Satisfactory is not an M5 prerequisite. In M5, deliver complete user and Owner flows, take real browser screenshots across desktop/mobile, loading/empty/error/blocked/uncertain and supported game-specific screens; iterate on visual defects. No hardcoded user-facing text, silent API errors, unverified success claims, or invented progress percentages.
 
-Use concise product microcopy. Avoid generic dashboard templates, gratuitous gradients, UX filler, and invented features.
+NickHosting is an application, not a marketing landing page. Follow [M5 UX/content standards](docs/FRONTEND-I18N.md): task flows before visuals, factual compact English/Italian copy, WCAG 2.2 AA and keyboard/focus checks, meaningful information density, reviewed screenshots, and independent UX/content review. No promotional copy, automatic heading subtitles, decorative statistics, generic dashboard templates, gratuitous gradients/glass, filler or unsupported choices. Use capability descriptors rather than scattered game-specific checks. Keep unverified runtimes behind Owner evidence/rollout controls. Issue #18 remains a separate production-release gate.
 
 ## Work-report format
 

@@ -11,7 +11,126 @@ The checkpoints below retain failed and partial attempts; only the final evidenc
 chain establishes the recorded Vanilla combination. No production deployment
 or public rollout was performed.
 
-## Current validation summary
+## Final verification and roadmap amendment — 2026-10-09
+
+The closing pass began by confirming PR #20 was **OPEN**, ready for review,
+unmerged, targeting `main`, with exact approved HEAD
+`14b2eac9bfeeceb574683b067745cce531c7ebe7` and a clean working tree. GitHub identity
+was `ImJstNickDev`. All implementation, test, dependency and infrastructure
+configuration files remain unchanged from that source baseline. This pass changes
+only documentation/governance and the explicitly approved GitHub roadmap metadata.
+It does not begin M5, create its branch, deploy the app or expand game support.
+
+### Full suites on the final source
+
+Each requested suite ran once. No regression failed and no corrective code or
+additional targeted rerun was needed. The results below supersede the original
+**567-test integration checkpoint** for final-source verification; that historical
+record remains intact later in this document.
+
+| Command | Actual closing result |
+| --- | --- |
+| `scripts/dev.sh pnpm test` | **814 passed**, 44 files, 18.61 seconds |
+| `scripts/dev.sh pnpm test:m3` | **584 passed + 3 expected failures**, 31 files, 272.01 seconds; exit 0 |
+| `scripts/dev.sh pnpm typecheck` | Passed |
+| `scripts/dev.sh pnpm lint` | Passed; 213 files, no fixes |
+| `scripts/dev.sh pnpm format:check` | Passed; 213 files, no fixes |
+| `python3 scripts/check-governance.py` | Passed before changes and again after staging the final roadmap/docs |
+| Tracked-content/private-state audit | Seven protected values, zero matches; all 14 private baseline files unchanged; environments, original ledgers and local notes remain ignored |
+| Documentation consistency | Seven numbered milestones preserved; current WebPanel references point to M5 and Satisfactory/expansion to M6; old assignments remain only as explicitly annotated history |
+
+Logs are retained locally as `/tmp/m4-close-{unit,integration,types,lint,format}.log`.
+The three expected failures are the unchanged SFTPGo retained-SSH-transport
+regressions. They are **not security passes**; no strict-mode success is claimed.
+The existing isolated M2 PostgreSQL/Redis/SFTPGo services were already running.
+`scripts/test-env.ts --m2` verified their project/service/configuration-directory
+labels, isolated network and endpoint exposure before the tests. The existing
+Owner approval covers that stack. No Docker/Compose start, restart, deployment,
+network change, directory preparation or cleanup operation was required or run.
+The nine-server live Minecraft scenario was deliberately not repeated.
+
+### Independent read-only cleanup audit
+
+At **2026-10-09T19:33:16.370Z**, the independent reviewer executed:
+
+```sh
+bash scripts/dev.sh pnpm exec tsx .codex/local/m4-independent-cleanup-audit.ts
+```
+
+This exact-run private helper and its exclusive, protected receipt
+`mountdata/test-assets/m4-independent-cleanup-audit-20261009.json` are gitignored
+and mode 0600. The recorded command is evidence of execution, not an instruction
+to overwrite/replay that receipt. Original plan, provenance and ledger identities
+were pinned; the helper enforced **GET only** through the existing adapter.
+There were **27 provider GET requests and zero writes**.
+
+- All nine exact IDs **44–52**, UUIDs and original external IDs were absent from
+  the full Application API inventory. Each direct ID and original external-ID
+  lookup returned 404. Their exact UUIDs are preserved in the original table below.
+- Their shared original allocation still exists with its original binding,
+  `assigned=false` and no current server reference. All **400 allocation records**
+  match the pre-M4 survey.
+- The observer inspected all **94 Docker containers**, including stopped ones,
+  with verified daemon/host-namespace identity. All exact server and installer
+  names for these nine UUIDs were **absent**, not merely stopped. No matching
+  running or stopped residual container was found.
+- Temporary Gateway and nonce endpoints have no TCP/UDP host-listener overlap,
+  including wildcard/IPv4/IPv6 cases, and no configured or active Docker published
+  binding overlap. No process was stopped or listener changed by this audit.
+- All **24 pre-existing server UUIDs** remain and there are no additional server UUIDs in
+  the inventory. All **140 recorded M4 mutation attempts** target ledger-owned
+  assets. Original provenance ledgers were unchanged. This corroborates recorded
+  isolation; the UUID/allocation baseline does not prove every historical
+  pre-existing configuration/file byte or exclude unrelated out-of-band changes.
+
+The exact backup `de42aab0-d339-45ab-b4af-b4033bf14840` has its original
+provider-confirmed deletion receipt at **19:05:08.878Z** and empty-inventory
+receipt at **19:05:09.394Z**. Current backup lookup/list requests return 404 because
+the parent server is deleted. Therefore a separate current backup-inventory
+absence check is **not independently distinguishable** through this API; rely on
+the preserved exact deletion/empty-inventory chain, not an invented fresh listing.
+No physical-backup-erasure claim is made. No residual live resource was found,
+no production mutation or cleanup was performed, and no additional infrastructure
+approval was needed. Local forensic schemas, fixtures and ledgers remain retained
+as already documented; they are not unreported cleanup failures.
+
+### Approved roadmap and review
+
+[ADR 0008's dated amendment](decisions/0008-complete-frontend.md) preserves its
+original decision and moves the complete WebPanel plus necessary common platform
+integration to M5. M6 now owns Satisfactory and evidence-dependent game/runtime
+expansion. M0–M4 behavior/evidence and exactly seven numbered milestones remain.
+[M5 common integration acceptance](M5-COMMON-INTEGRATION.md) identifies real gaps
+from current APIs, while recognizing existing auth, first-start orchestration,
+large streaming transfers and backup restoration. No implementation was added.
+[Frontend standards](FRONTEND-I18N.md) now require task flows, factual EN/IT copy,
+NN/G and GOV.UK usability guidance, WCAG 2.2 AA, real browser screenshots and an
+independent UX/content review; Satisfactory is not an M5 prerequisite.
+
+Existing GitHub objects and histories are preserved:
+
+- [M5, milestone ID 6](https://github.com/ImJstNickDev/nickhosting-panel/milestone/6):
+  Complete WebPanel and Common Platform Readiness; issues
+  [#14](https://github.com/ImJstNickDev/nickhosting-panel/issues/14) and
+  [#15](https://github.com/ImJstNickDev/nickhosting-panel/issues/15).
+- [M6, milestone ID 7](https://github.com/ImJstNickDev/nickhosting-panel/milestone/7):
+  Satisfactory and Game Integration Expansion; issues
+  [#12](https://github.com/ImJstNickDev/nickhosting-panel/issues/12) and
+  [#13](https://github.com/ImJstNickDev/nickhosting-panel/issues/13).
+- [#18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18) stays OPEN and
+  high priority as an independent production-release gate, detached from its
+  former frontend milestone. Its strict revocation criteria and approval limits
+  are unchanged; neither M5 completion nor M6 scheduling waives the gate.
+
+Titles, acceptance and dependencies were updated; unrelated labels, assignees,
+issue state, milestone state/dates and M0–M4 tracking were preserved. Future branch
+names are `milestone/m5-webpanel` and `milestone/m6-game-integrations`; neither was
+created. The independent final reviewer found no must-fix source, roadmap or API
+inventory findings. Vanilla remains the only real-server-verified runtime.
+Production deployment prerequisites and the audit limits above remain explicit.
+PR #20 stays OPEN, ready for Owner/ChatGPT review and unmerged.
+
+## Original M4 acceptance summary (historical checkpoint)
 
 Commands run from the repository with the pinned user-local development runtime:
 
@@ -79,7 +198,7 @@ durable provenance corroborated with the live API. Secrets, private infrastructu
 notes and test ledgers stay ignored. No system Java installation is changed.
 
 The temporary SFTPGo revocation exception and [issue #18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18)
-are unchanged. No Minecraft limbo, M5 implementation or M6 frontend is included.
+are unchanged. No Minecraft limbo, M5 WebPanel implementation or M6 game expansion is included.
 
 Rollback during development: keep the reviewed M3 baseline in service. Do not
 deploy this branch or drop durable state to roll back an uncertain external effect.

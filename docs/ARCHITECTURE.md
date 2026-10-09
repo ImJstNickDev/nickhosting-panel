@@ -2,13 +2,13 @@
 
 ## Deployment shape (one physical machine initially)
 
-- `apps/web`: React/TypeScript user + Owner app, single product but separate from existing public website.
+- `apps/web`: M5 React/TypeScript user + Owner app, single product but separate from existing public website.
 - `apps/api`: Hono + Better Auth, policy engine, public APIs, administration, authorization, configuration.
 - `apps/worker`: BullMQ consumers, install/provisioning/backup jobs, reconciliation and game integration handlers.
 - `apps/game-gateway`: standalone long-running Node/TypeScript process bound only to configured public game endpoints of NickHosting-managed servers; TCP+UDP routing and protocol-specific behavior.
 - `packages/database`: PostgreSQL migrations and typed data access.
 - `packages/auth`, `packages/core`, `packages/pterodactyl-adapter`, `packages/game-sdk`, `packages/ui`, `packages/i18n`, `packages/content-providers`.
-- `games/minecraft` and `games/satisfactory`: first-party, versioned integrations, backend + optional UI contributions and protocol handlers.
+- `games/minecraft` and the planned M6 `games/satisfactory`: first-party, versioned integrations, backend + capability-driven UI contributions and protocol handlers.
 - Supporting services: PostgreSQL, Redis/BullMQ, SFTPGo (for per-server external SFTP), Pterodactyl/Wings (existing; outside repository).
 
 Use **pnpm workspaces**. Do not introduce Nx/Turborepo without measured need. Use TypeScript type sharing where appropriate; validate every external payload at runtime (e.g., Zod). The `docs` package is not a separate running app.
@@ -109,7 +109,31 @@ Complete multiport readiness/idle evidence and a bounded forwarding fence preven
 sleep based on a partial or outdated zero-session report. Short route leases and
 lease-aware deletion prevent stale routing into reassigned backend allocations.
 [ADR 0012](decisions/0012-gateway-leases-and-sleep.md) records the recovery choices.
-Real game handlers remain M4/M5; the graphical app remains M6.
+Real game handlers belong to M4 (Minecraft) and M6 (Satisfactory/expansion);
+the complete graphical app and common platform readiness belong to M5.
+
+## M5 shared platform boundary
+
+M5 completes the WebPanel and the reusable Core/API/worker/SDK functionality its
+journeys require. [M5 common integration readiness](M5-COMMON-INTEGRATION.md)
+is an acceptance gate, not a post-frontend follow-up. The web app consumes existing
+typed contracts and capability declarations; it must not duplicate lifecycle,
+resource admission, provider integration, evidence verification or job recovery.
+
+Conditional wizard rendering, contributed management tabs, multiport TCP/UDP
+connection presentation, files/SFTP, backups/restore, authorization and durable
+operations are common platform responsibilities even when an additional game
+motivates them. Exercise these contracts with isolated SDK fixtures and supported
+Vanilla journeys in M5. A fixture does not establish Satisfactory protocol or
+runtime compatibility. M6 supplies those game-specific implementations and their
+complete UI contributions through the already working M5 extension surfaces.
+
+Only evidence-backed, Owner-enabled combinations enter ordinary creation;
+Vanilla is the sole runtime with M4 real-server verification. Owner-only support
+administration and private tester controls remain distinct from user wizard data.
+Follow [Frontend and i18n](FRONTEND-I18N.md) for the M5 UX, internationalization,
+accessibility and screenshot acceptance requirements. Reordering milestones does
+not authorize any production deployment or expand infrastructure permissions.
 
 ## M4 Minecraft boundaries
 

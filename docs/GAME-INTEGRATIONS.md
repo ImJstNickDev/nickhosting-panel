@@ -49,6 +49,21 @@ interface ProtocolHandler {
 
 Design final contracts before code, keep them small. Do not make every optional method mandatory. Every custom handler receives authorized capability-limited services, not a direct application admin API key.
 
+## Milestone ownership
+
+M4 establishes Minecraft contracts and verified Vanilla behavior. M5 completes the
+WebPanel and **all shared integration readiness** in
+[M5 common integration readiness](M5-COMMON-INTEGRATION.md): conditional wizards,
+capability-driven tabs, translated UI contributions, multiport/transport roles,
+connection presentation, files/SFTP, backups, authorization, jobs and recovery.
+Use isolated SDK fixtures to prove contracts not exercised by Vanilla; do not
+claim those fixtures prove another game's compatibility.
+
+M6 adds Satisfactory and evidence-backed game/runtime expansion through that
+working platform. Satisfactory-specific saves, SMR/SML/SMM and protocol behavior
+remain M6; generic capabilities must not wait for Satisfactory. No fake game page,
+unsupported action or placeholder integration counts toward M5 readiness.
+
 ## Runtime ↔ Pterodactyl mapping
 
 - In Owner Center, each `(game, runtime profile)` references a configured Pterodactyl **nest + egg**, validated against installed versions. Optionally support multiple mappings per Egg version/runtime preset.
@@ -62,7 +77,7 @@ Top-level steps always `Choose a game → Configure → Resources → Create`; `
 
 Minecraft example:
 
-- Vanilla/Paper/Folia/Fabric/Forge/runtime selection with compatible version lists.
+- Show only evidence-backed, Owner-enabled runtime/version choices. Vanilla is the only runtime with M4 real-server verification; Paper/Folia/Fabric/Forge remain unavailable to ordinary users until their evidence passes. Private testing follows the existing rollout/allowlist contracts.
 - If user **selects a modpack**, detect loader and Minecraft version from modpack metadata and skip redundant runtime/version selection. Still ask operators/whitelist and relevant gameplay options.
 - Players/OP UI may use MCHeads renders via `https://api.mcheads.org/head/{player}/{size}` but must verify account UUID/identity separately and handle cache/errors.
 - Existing-server modpack install triggers explicit wipe warning and pre-wipe verified backup option, never a silent merge.
@@ -86,6 +101,13 @@ Providers are independent adapters with capabilities `search`, `versions`, `reso
 ## Plugin availability and rollout
 
 States: `development`, `private-testing`, `public`, `disabled-for-new-servers`. The allowlist for private testing consists of NickHosting user IDs; Owner always retains access. Visibility is filtered consistently on game catalog, creation API and dynamic routes. Existing servers stay manageable when an integration is disabled for new creations; handling removed plugin binaries requires a migration/fallback strategy.
+
+The M5 Owner area exposes signed compatibility evidence, tested combinations,
+runtime/egg mappings and internal support states. Ordinary creation uses simple
+eligible release/runtime choices: no protocol IDs, support checklist or experimental
+badges. Owner enablement cannot manufacture missing compatibility evidence. Missing
+provider credentials or unsupported capabilities produce honest actionable states,
+never a working-looking control backed by a placeholder.
 
 ## Game protocol versioning
 

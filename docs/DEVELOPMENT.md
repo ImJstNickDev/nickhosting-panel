@@ -79,7 +79,7 @@ ports, external frontend network or existing resources were used.
 
 No Pterodactyl, Wings, DNS, firewall, existing network, game server or production
 state is needed for M1 tests. Provider behavior is exercised through isolated
-fixtures. Graphical application flows remain M6 work.
+fixtures. Graphical application flows and common integration belong to M5.
 
 
 ## Running the backend locally

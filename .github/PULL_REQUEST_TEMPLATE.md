@@ -18,6 +18,8 @@ Copy the assigned milestone's acceptance requirements from `docs/MILESTONES.md` 
 - Configuration and migrations:
 - Updated ADRs/docs:
 - Known limitations or deferred functionality (must not contradict milestone acceptance):
+- Capability gating / common API integration acceptance (M5) or new game evidence (M6):
+- Production-release gates, including unresolved SFTPGo issue #18 (separate from milestone implementation):
 
 ## Verification (real results only)
 
@@ -26,7 +28,7 @@ Copy the assigned milestone's acceptance requirements from `docs/MILESTONES.md` 
 | Lint/typecheck | | | |
 | Unit/integration | | | |
 | Production-safe Pterodactyl test (if used) | | | |
-| Browser/screenshots (M6) | | | |
+| Browser/screenshots + UX/content review (M5; later UI changes) | | | |
 
 ## Production safety and test provenance
 

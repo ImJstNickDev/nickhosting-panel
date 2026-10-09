@@ -1,8 +1,8 @@
 # M2 server and service contracts
 
 These contracts extend [M1](M1-API.md). They describe the backend for the future
-M6 frontend; game gateway behavior remains M3 and game-specific readiness remains
-M4/M5. [M2 validation](M2-VALIDATION.md) records actual test results, unresolved
+M5 WebPanel; game gateway behavior remains M3 and game-specific readiness remains
+M4/M6. [M2 validation](M2-VALIDATION.md) records actual test results, unresolved
 findings and live-test cleanup. This document is not a completion or deployment
 approval. See also [ADR 0011](decisions/0011-server-lifecycle-and-service-boundaries.md).
 

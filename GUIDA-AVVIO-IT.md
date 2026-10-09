@@ -1,6 +1,6 @@
 # Come iniziare con Codex
 
-M0 è stato approvato e unito con un'autorizzazione esplicita valida soltanto per la PR #1. M1 introduce il backend, la configurazione e l'identità su un ramo dedicato; la relativa PR rimane aperta per la review. Consultare [sviluppo e test](docs/DEVELOPMENT.md) e [contratti API](docs/M1-API.md). Nessuna infrastruttura di produzione è stata modificata; PostgreSQL/Redis di test sono risorse isolate autorizzate separatamente. Il frontend completo resta in M6.
+M0–M3 sono stati approvati e uniti con autorizzazioni esplicite per le rispettive PR. M4 resta aperto nella PR #20 per la review. Consultare [sviluppo e test](docs/DEVELOPMENT.md) e [roadmap](docs/MILESTONES.md). M5 realizzerà il WebPanel completo e le integrazioni comuni necessarie, partendo da Minecraft Vanilla verificato; M6 aggiungerà Satisfactory e ulteriori giochi/runtime dopo test reali. Nessuna nuova implementazione o modifica alla produzione è autorizzata dalla sola riorganizzazione.
 
 ## Sequenza operativa
 
@@ -8,7 +8,7 @@ M0 è stato approvato e unito con un'autorizzazione esplicita valida soltanto pe
 2. Copia qui l'intero contenuto del pacchetto (anche le cartelle nascoste `.codex` e `.github`). Se `.codex` esiste già, fallo **integrare**, senza sovrascrivere configurazioni non collegate al progetto.
 3. Avvia Codex e usa il prompt **Prepping** da `docs/CODEX-PROMPTS.md` (o `PREPPING.md`). Controlla che le verifiche siano passate.
 4. Il bootstrap M0 è già completato; non reinizializzare Git o ricreare la repository. Usare il prompt del solo milestone autorizzato.
-5. Condividi il link della PR del milestone per la review. Codex non può unire M1 né iniziare M2 senza una nuova autorizzazione.
+5. Condividi il link della PR del milestone per la review. Codex non può unire la PR né iniziare il milestone successivo senza una nuova autorizzazione.
 
 ## Regola sui server di test
 

@@ -1,7 +1,7 @@
 # M3 Gateway and sleep/wake contracts
 
 M3 provides reusable backend contracts and synthetic protocol fixtures. Minecraft,
-Satisfactory and their protocol compatibility remain M4/M5. See
+Satisfactory and their protocol compatibility belong to M4/M6. See
 [Gateway design](GAME-GATEWAY.md), [ADR 0012](decisions/0012-gateway-leases-and-sleep.md)
 and [validation](M3-VALIDATION.md). M1 identity and M2 lifecycle/admission remain
 authoritative; no new user identity, provider key or resource scheduler is introduced.

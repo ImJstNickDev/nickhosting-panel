@@ -1,5 +1,8 @@
 # M3 implementation and validation record
 
+**Historical roadmap note, 2026-10-09:** Milestone references in this M3 evidence record retain their original meaning. The [ADR 0008 amendment](decisions/0008-complete-frontend.md) now assigns the full WebPanel/common integration to M5 and Satisfactory/expansion to M6. This does not alter the recorded M3 tests or production boundaries.
+
+
 **Status: M3 acceptance passed; open for Owner/ChatGPT review.** Branch
 `milestone/m3-game-gateway`; [PR #19](https://github.com/ImJstNickDev/nickhosting-panel/pull/19).
 Scope is issues [#8](https://github.com/ImJstNickDev/nickhosting-panel/issues/8) and
