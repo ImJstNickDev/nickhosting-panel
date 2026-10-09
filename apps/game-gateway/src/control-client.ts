@@ -25,6 +25,14 @@ export interface GatewayControlClient extends GatewayControl {
   requestJson(action: string, body?: unknown): Promise<unknown>;
   close(): void;
 }
+/** Only minted from Core's authenticated, bounded explicit revision precondition.
+ * It grants no routing authority or lease extension. */
+export class GatewayRouteRevisionStaleError extends Error {
+  constructor() {
+    super('gateway_route_revision_stale');
+    this.name = 'GatewayRouteRevisionStaleError';
+  }
+}
 
 export function createGatewayControlClient(
   options: GatewayControlClientOptions,
@@ -76,7 +84,6 @@ export function createGatewayControlClient(
         redirect: 'error',
         signal: controller.signal,
       });
-      if (!response.ok) throw new DomainError('integration_unavailable');
       if (response.status === 204) return undefined;
       const reader = response.body?.getReader();
       if (!reader) throw new DomainError('integration_unavailable');
@@ -96,9 +103,42 @@ export function createGatewayControlClient(
       } finally {
         reader.releaseLock();
       }
-      return JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')) as unknown;
-    } catch {
+      const parsed: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
+      if (!response.ok) {
+        const precondition = z
+          .object({
+            error: z.object({
+              code: z.literal('conflict'),
+              messageKey: z.literal('errors.conflict'),
+            }),
+          })
+          .safeParse(parsed);
+        const requested = z
+          .object({ routeId: z.uuid(), routeRevision: z.number().int().positive() })
+          .strict()
+          .safeParse(body);
+        if (
+          response.status === 412 &&
+          ['context', 'proof-read', 'proof-write'].includes(action) &&
+          precondition.success &&
+          (requested.success ||
+            (action === 'proof-write' &&
+              z
+                .object({
+                  routeId: z.uuid(),
+                  routeRevision: z.number().int().positive(),
+                  proof: z.unknown(),
+                })
+                .strict()
+                .safeParse(body).success))
+        )
+          throw new GatewayRouteRevisionStaleError();
+        throw new DomainError('integration_unavailable');
+      }
+      return parsed;
+    } catch (error) {
       if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
+      if (error instanceof GatewayRouteRevisionStaleError) throw error;
       throw new DomainError('integration_unavailable');
     } finally {
       clearTimeout(timer);

@@ -44,7 +44,9 @@ export function registerGatewayRoutes(
   const route = async (input: unknown) => {
     const value = routeRequest.safeParse(input);
     if (!value.success) throw new DomainError('validation_failed');
-    return requireGatewayRoute(db, value.data.routeId, value.data.routeRevision, env);
+    return requireGatewayRoute(db, value.data.routeId, value.data.routeRevision, env, {
+      revisionPrecondition: true,
+    });
   };
   app.use('/internal/gateway/*', async (c, next) => {
     // Browser sessions/support tokens are never service authentication. Constant

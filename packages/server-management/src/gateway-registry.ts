@@ -401,11 +401,16 @@ export async function requireGatewayRoute(
   routeId: string,
   revision: number | undefined,
   env: Environment = {},
+  options: { revisionPrecondition?: boolean } = {},
 ) {
   const snapshot = await getGatewaySnapshot(db, env),
     route = snapshot.routes.find((row) => row.id === routeId);
   if (!route) throw new DomainError('not_found');
-  if (revision !== undefined && route.revision !== revision) throw new DomainError('conflict');
+  // A supplied route revision is an authenticated HTTP precondition. Keep this
+  // distinguishable from unknown topology/ownership failures so Gateway can
+  // fetch and fully validate a fresh snapshot within its existing lease.
+  if (revision !== undefined && route.revision !== revision)
+    throw new DomainError('conflict', options.revisionPrecondition ? 412 : 409);
   return route;
 }
 export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {

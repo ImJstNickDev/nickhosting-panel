@@ -19,6 +19,7 @@ import {
   frameMinecraftPacket,
   readMinecraftFrame,
 } from '../../../games/minecraft/src/protocol.js';
+import { GatewayRouteRevisionStaleError } from './control-client.js';
 import { createGatewayDataPlane, type GatewayDataPlanePolicy } from './data-plane.js';
 
 const policy: GatewayDataPlanePolicy = {
@@ -1071,6 +1072,120 @@ describe('sleep protocol handling and observations', () => {
 });
 
 describe('lease, reconciliation and shutdown safety', () => {
+  it('revalidates one fresh snapshot after a revision race without interrupting committed TCP sessions', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port);
+    const f = plane([r]);
+    await f.gateway.start();
+    const socket = connect(backend.port, '127.0.0.1');
+    cleanups.push(async () => {
+      socket.destroy();
+    });
+    await once(socket, 'connect');
+    const first = once(socket, 'data');
+    socket.write('before');
+    expect((await first)[0].toString()).toBe('before');
+    vi.mocked(f.control.fetchSnapshot)
+      .mockReset()
+      .mockResolvedValueOnce(f.snapshot([{ ...r, revision: 2 }], 2))
+      .mockResolvedValueOnce(f.snapshot([{ ...r, revision: 3 }], 3));
+    vi.mocked(f.safety.validate)
+      .mockClear()
+      .mockRejectedValueOnce(new GatewayRouteRevisionStaleError());
+    await f.gateway.refresh();
+    expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(f.safety.validate).mock.calls[1]?.[0].revision).toBe(3);
+    expect(f.gateway.health()).toMatchObject({ revision: 3, controlAvailable: true, routes: 1 });
+    const second = once(socket, 'data');
+    socket.write('after');
+    expect((await second)[0].toString()).toBe('after');
+  });
+  it.each(['revoked', 'collision'] as const)(
+    'closes committed sessions when revision retry reveals %s',
+    async (reason) => {
+      const backend = await tcpFixture();
+      const r = route(backend.port);
+      const f = plane([r]);
+      await f.gateway.start();
+      const socket = connect(backend.port, '127.0.0.1');
+      await once(socket, 'connect');
+      const closed = once(socket, 'close');
+      vi.mocked(f.control.fetchSnapshot)
+        .mockReset()
+        .mockResolvedValueOnce(f.snapshot([{ ...r, revision: 2 }], 2))
+        .mockResolvedValueOnce(f.snapshot(reason === 'revoked' ? [] : [{ ...r, revision: 3 }], 3));
+      vi.mocked(f.safety.validate).mockRejectedValueOnce(new GatewayRouteRevisionStaleError());
+      if (reason === 'collision') {
+        vi.mocked(f.safety.validate).mockRejectedValueOnce(
+          new DomainError('allocation_unavailable'),
+        );
+        await expect(f.gateway.refresh()).rejects.toThrow('allocation_unavailable');
+      } else await f.gateway.refresh();
+      await closed;
+      expect(f.gateway.health().routes).toBe(0);
+      await refuses(backend.port);
+    },
+  );
+  it('does not extend committed or observation leases during repeated revision races', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port);
+    const f = plane([r], { lease: 150 });
+    await f.gateway.start();
+    const originalLease = f.gateway.health().expiresAt;
+    vi.mocked(f.control.fetchSnapshot)
+      .mockReset()
+      .mockResolvedValue(f.snapshot([{ ...r, revision: 2 }], 2, 60000));
+    vi.mocked(f.safety.validate).mockRejectedValue(new GatewayRouteRevisionStaleError());
+    await expect(f.gateway.refresh()).rejects.toBeInstanceOf(GatewayRouteRevisionStaleError);
+    expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
+    expect(f.gateway.health()).toMatchObject({
+      revision: 1,
+      expiresAt: originalLease,
+      controlAvailable: false,
+    });
+    expect((await exchange(backend.port, 'original lease')).toString()).toBe('original lease');
+    await delay(200);
+    vi.mocked(f.control.reportObservation).mockClear();
+    await f.gateway.observe();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    await refuses(backend.port);
+    expect(f.gateway.metrics().leaseExpirations).toBe(1);
+  });
+  it('never binds a first listener from repeatedly stale candidates', async () => {
+    const backend = await tcpFixture();
+    const f = plane([route(backend.port)], {
+      safety: {
+        validate: vi.fn(async () => {
+          throw new GatewayRouteRevisionStaleError();
+        }),
+      },
+    });
+    await f.gateway.start();
+    expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
+    expect(f.gateway.health()).toMatchObject({ routes: 0, revision: null, expiresAt: null });
+    await f.gateway.observe();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    await refuses(backend.port);
+  });
+  it('rolls back staged new listeners when the final pre-bind check detects a stale revision', async () => {
+    const first = await tcpFixture();
+    const second = await tcpFixture();
+    const f = plane([route(first.port), route(second.port)]);
+    vi.mocked(f.safety.validate)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new GatewayRouteRevisionStaleError());
+    await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toBeInstanceOf(
+      GatewayRouteRevisionStaleError,
+    );
+    await refuses(first.port);
+    await refuses(second.port);
+    await f.gateway.observe();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    expect(f.gateway.health()).toMatchObject({ routes: 0, revision: null, expiresAt: null });
+  });
   it('rejects stale/replayed or same-revision changed routes without replacing a valid cache', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port);

@@ -227,7 +227,7 @@ describe('M3 Core service authentication and managed control plane', () => {
           routeRevision: route.revision + 1,
         })
       ).status,
-    ).toBe(409);
+    ).toBe(412);
     expect((await request(`${prefix()}/context`, { routeId: randomUUID() })).status).toBe(404);
     expect(
       (
@@ -248,6 +248,41 @@ describe('M3 Core service authentication and managed control plane', () => {
         })
       ).status,
     ).toBe(400);
+  });
+  it('distinguishes an idle-state revision race from ownership or topology failures', async () => {
+    // A normal idle observation changes sleepEligibleAt while the Gateway is
+    // collecting inventory and reachability evidence for an earlier snapshot.
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({
+        state: 'online',
+        idle_since: new Date(),
+        readiness_observed_at: new Date(),
+        process_started_at: new Date().toISOString(),
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running', intent: 'auto_wake_enabled' })
+      .where('id', '=', serverId)
+      .execute();
+    const fresh = (await getGatewaySnapshot(f.db, env)).routes[0];
+    expect(fresh?.revision).toBeGreaterThan(route.revision);
+    for (const action of ['context', 'proof-read']) {
+      const response = await request(`${prefix()}/${action}`, {
+        routeId: route.id,
+        routeRevision: route.revision,
+      });
+      expect(response.status).toBe(412);
+      expect(await response.json()).toMatchObject({
+        error: { code: 'conflict', messageKey: 'errors.conflict', status: 412 },
+      });
+    }
+    expect(
+      (await request(`${prefix()}/context`, { routeId: route.id, routeRevision: fresh?.revision }))
+        .status,
+    ).toBe(200);
   });
   it('persists scoped reachability evidence and rejects tampering/replay', async () => {
     const proof = {

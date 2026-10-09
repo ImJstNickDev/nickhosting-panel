@@ -61,6 +61,15 @@ and managed wake authority; keep its service and configuration protected.
 | `POST proof-read` | `{routeId,routeRevision?}`; persisted exact topology/reachability proof or null. |
 | `POST proof-write` | `{routeId,routeRevision,proof}`; exact route/server/allocation identity and a recent proof. |
 
+`context`, `proof-read` and `proof-write` return HTTP 412 with the ordinary
+`conflict` error only when an explicitly supplied route revision has changed.
+The authenticated Gateway retries this precondition failure once, fetching a new
+snapshot and repeating all topology, ownership and reachability checks. No stale
+candidate may open a listener or extend a committed or observation lease. Existing
+connections retain only their original lease during that bounded retry; route
+revocation, actual safety failures and lease expiry still close them. Other errors,
+including ordinary HTTP 409 conflicts, do not receive this special handling.
+
 A snapshot is `{gatewayId,revision,issuedAt,expiresAt,routes}`. Each strict route
 has managed UUIDs (`id`, `serverId`, `nodeId`, `allocationId`), monotonic revision,
 consent `generation`, optional `wakeJobId`, `public:{address,port,transport}`,

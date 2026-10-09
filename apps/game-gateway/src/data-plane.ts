@@ -14,6 +14,7 @@ import {
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
 import { z } from 'zod';
+import { GatewayRouteRevisionStaleError } from './control-client.js';
 
 const positive = z.number().int().positive().max(2_147_483_647);
 export const gatewayDataPlanePolicySchema = z
@@ -570,6 +571,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       )
         throw new DomainError('conflict');
     }
+    const previousCandidate = candidateSnapshot;
     candidateSnapshot = next;
     for (const route of next.routes) {
       if (stopping) throw new DomainError('integration_unavailable');
@@ -583,6 +585,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           await options.safety.validate(route, owned);
         });
       } catch (error) {
+        // Core may advance a route while fresh inventory/protocol evidence is
+        // collected. This candidate never becomes authoritative; the already
+        // committed route keeps only its original lease during a bounded retry.
+        if (error instanceof GatewayRouteRevisionStaleError) {
+          candidateSnapshot = previousCandidate;
+          throw error;
+        }
         const unsafe = listeners.get(route.id);
         if (unsafe) {
           listeners.delete(route.id);
@@ -655,6 +664,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         )
           wakeRequests.delete(serverId);
     } catch (error) {
+      if (error instanceof GatewayRouteRevisionStaleError) candidateSnapshot = previousCandidate;
       await Promise.all(staged.map((listener) => closeListener(listener)));
       throw error;
     }
@@ -666,10 +676,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   };
   const refresh = () => {
     if (refreshing) return refreshing;
-    const fetchStartedAt = now();
-    refreshing = options.control
-      .fetchSnapshot()
-      .then((input) => applySnapshot(input, fetchStartedAt))
+    refreshing = (async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const fetchStartedAt = now();
+        try {
+          const input = await options.control.fetchSnapshot();
+          await applySnapshot(input, fetchStartedAt);
+          return;
+        } catch (error) {
+          if (!(error instanceof GatewayRouteRevisionStaleError) || attempt === 1) throw error;
+        }
+      }
+    })()
       .catch((error: unknown) => {
         controlAvailable = false;
         counters.snapshotErrors++;
