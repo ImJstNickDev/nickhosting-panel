@@ -8,6 +8,7 @@ import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { minecraftManifest } from '@nickhosting/minecraft';
 import type { ConsoleRelayOptions, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { createManagementRuntime } from '@nickhosting/server-management';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -846,6 +847,41 @@ describe('M2 Hono API with real invitation, password and session authentication'
   });
   it('protects Minecraft launch inputs in every browser mutation without blocking worlds or mods', async () => {
     const server = await f.server();
+    // A Minecraft profile must belong to a Minecraft mapping. Keep the generic
+    // M2 fixture untouched: trusted dispatch correctly rejects a retained game
+    // profile under an unrelated mapping before reaching any file hook.
+    await f.db
+      .insertInto('game_integrations')
+      .values({
+        id: minecraftManifest.id,
+        version: minecraftManifest.version,
+        manifest: minecraftManifest,
+      })
+      .onConflict((conflict) => conflict.column('id').doNothing())
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const minecraftMappingId = randomUUID();
+    await f.db
+      .insertInto('runtime_egg_mappings')
+      .values({
+        ...mapping,
+        id: minecraftMappingId,
+        game_id: minecraftManifest.id,
+        runtime_id: 'fabric',
+        environment: JSON.stringify(mapping.environment),
+        port_roles: JSON.stringify(mapping.port_roles),
+        feature_limits: JSON.stringify(mapping.feature_limits),
+      })
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ mapping_id: minecraftMappingId })
+      .where('id', '=', server)
+      .execute();
     const choiceId = randomUUID();
     const binding = {
       profile: 'fabric',
@@ -863,7 +899,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       .insertInto('minecraft_combinations')
       .values({
         id: choiceId,
-        mapping_id: f.mappingId,
+        mapping_id: minecraftMappingId,
         combination: '{}',
         resolved_runtime: '{}',
         binding: JSON.stringify(binding),

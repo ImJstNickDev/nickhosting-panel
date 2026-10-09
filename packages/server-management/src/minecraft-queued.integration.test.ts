@@ -8,6 +8,7 @@ import type {
   PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { reserveStart } from './admission.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
   inspectMinecraftCombination,
@@ -16,6 +17,13 @@ import {
 } from './minecraft-registry.js';
 import { createManagedServer, enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect, createManagementRuntime } from './runtime.js';
+import {
+  createSchedule,
+  getAutomationConsent,
+  runDueSchedules,
+  setAutomationConsent,
+  updateSchedule,
+} from './schedules.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -453,6 +461,107 @@ describe('host-bound Minecraft runtime image evidence', () => {
     });
     return { ...operation, external, observer, codec, management };
   }
+  it.each(['consent', 'schedule'] as const)(
+    'rechecks scheduled %s revocation after a deferred runtime provider proof',
+    async (revoked) => {
+      const value = await installed();
+      const consent = await getAutomationConsent(f.db, f.context, value.serverId);
+      await setAutomationConsent(
+        f.db,
+        f.context,
+        value.serverId,
+        { allowed: true, expectedIntent: consent.expectedIntent },
+        env,
+      );
+      const at = new Date(Date.now() + 1000);
+      const input = {
+        name: 'Isolated scheduled start',
+        action: 'start' as const,
+        timing: { kind: 'once' as const, at: at.toISOString() },
+        timeZone: 'UTC',
+        enabled: true,
+      };
+      const schedule = await createSchedule(f.db, f.context, value.serverId, input, env);
+      expect(await runDueSchedules(f.db, env, { now: at })).toEqual({ dispatched: 1, skipped: 0 });
+      const occurrence = await f.db
+        .selectFrom('schedule_occurrences')
+        .select('job_id')
+        .where('schedule_id', '=', schedule.id)
+        .executeTakeFirstOrThrow();
+      if (!occurrence.job_id) throw new Error('Missing scheduled test job');
+      const jobId = occurrence.job_id;
+      const power = vi.fn(async () => {});
+      Object.assign(value.external.adapter, { power });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      // Defer only the final, post-preparation authorization's provider proof.
+      // Earlier authorizations must pass, otherwise this cannot reproduce the race.
+      const processing = processServerOperation(f.db, jobId, {
+        ...value.management.lifecycle,
+        reserveStart: (serverId, id, action, db) => reserveStart(db, serverId, id, action, env),
+        checkpoint: async (point) => {
+          if (point !== 'prepared') return;
+          const remote = await value.external.adapter.getApplicationServer(1);
+          vi.mocked(value.external.adapter.getApplicationServer).mockImplementationOnce(
+            async () => {
+              entered.resolve();
+              await release.promise;
+              return remote;
+            },
+          );
+        },
+      });
+      try {
+        await Promise.race([
+          entered.promise,
+          processing.then(() => {
+            throw new Error('Operation finished before the deferred provider proof');
+          }),
+        ]);
+        expect(power).not.toHaveBeenCalled();
+        if (revoked === 'consent') {
+          const current = await getAutomationConsent(f.db, f.context, value.serverId);
+          await setAutomationConsent(
+            f.db,
+            f.context,
+            value.serverId,
+            { allowed: false, expectedIntent: current.expectedIntent },
+            env,
+          );
+        } else {
+          await updateSchedule(
+            f.db,
+            f.context,
+            value.serverId,
+            schedule.id,
+            { ...input, enabled: false, revision: schedule.revision },
+            env,
+          );
+        }
+      } finally {
+        release.resolve();
+      }
+      expect(await processing).toBe('failed');
+      expect(power).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .select(['effect_state', 'plan'])
+          .where('job_id', '=', jobId)
+          .executeTakeFirstOrThrow(),
+      ).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, powerEffectPrepared: false },
+      });
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirst(),
+      ).toBeUndefined();
+    },
+  );
   it('distinguishes absent initial containers from proof required for playable readiness', async () => {
     const value = await installed();
     value.observer.imageIdentity.mockResolvedValue(null);

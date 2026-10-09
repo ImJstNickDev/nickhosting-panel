@@ -11,6 +11,7 @@ import {
   getGatewayState,
   listGatewayRoutes,
   type ManagementRuntime,
+  recordGatewayContact,
   reportGatewayObservation,
   requestGatewayWake,
   requireGatewayRoute,
@@ -67,6 +68,11 @@ export function registerGatewayRoutes(
     )
       throw new DomainError('unauthenticated');
     await next();
+    if (c.res.status < 400) {
+      // Diagnostic contact only; absence of a receipt must never invalidate a
+      // completed control-plane action or manufacture listener readiness.
+      await recordGatewayContact(db, match[1] ?? '').catch(() => {});
+    }
   });
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/configuration`, async (c) => {

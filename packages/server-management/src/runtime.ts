@@ -1,6 +1,3 @@
-import { resolve } from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
-import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
 import {
   type AuthContext,
   assertAuthContext,
@@ -9,13 +6,11 @@ import {
 } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
-import { minecraftRuntimeMappingSchema } from '@nickhosting/minecraft';
 import {
   type ContainerObserver,
   createContainerObserver,
   createPterodactylAdapter,
   type PterodactylAdapter,
-  provisionPlanSchema,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import {
@@ -30,29 +25,16 @@ import {
   type ExternalServiceOptions,
   reconcileExternalServices,
 } from './external.js';
+import { createGameRuntimeDispatcher, trustedGameModules } from './game-modules.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   createLifecycleProcessor,
   reconcileManagedServer,
   verifyManagedIdentity,
 } from './lifecycle.js';
-import {
-  assertMinecraftLaunchInputs,
-  assertMinecraftRuntimePathsPreserved,
-  configureMinecraftProvision,
-  type MinecraftContentOptions,
-  processMinecraftContent,
-  verifyMinecraftRestore,
-} from './minecraft-content.js';
-import { requireMinecraftChoice } from './minecraft-registry.js';
-import {
-  assertMinecraftEggEnvironment,
-  assertMinecraftRemoteLaunch,
-  assertMinecraftVerifiedLaunch,
-  minecraftProvisionEnvironment,
-  requireMinecraftRuntimeImageEvidence,
-} from './minecraft-runtime-evidence.js';
+import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
+import { authorizeScheduledEffect } from './schedules.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
@@ -134,14 +116,9 @@ export async function authorizeQueuedEffect(
       : 'server:manage',
   );
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
-  if (['start', 'restart'].includes(operation.action)) {
-    const minecraft = await db
-      .selectFrom('minecraft_server_profiles')
-      .select('installed')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (minecraft && !minecraft.installed) throw new DomainError('conflict');
-  }
+  if (operation.plan.scheduleAutomation !== undefined)
+    await authorizeScheduledEffect(db, jobId, serverId);
+  const game = await trustedGameModules.resolve(db, serverId);
 
   if (operation.plan.gatewayAutomation !== undefined) {
     const marker = operation.plan.gatewayAutomation;
@@ -202,74 +179,32 @@ export async function authorizeQueuedEffect(
     if (
       !evaluateGameAccess(
         { gameId: mapping.game_id, state: rollout.state, allowedUserIds: rollout.allowlist },
-        mapping.game_id === 'minecraft-java'
+        game.module?.provisionAsResourceOwner
           ? { userId: owner.id, role: owner.role }
           : { userId: context.subjectUserId, role: context.role },
       ).canCreate
     )
       throw new DomainError('forbidden');
-    const profile = await db
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', server.id)
-      .executeTakeFirst();
-    if (mapping.game_id === 'minecraft-java' || profile) {
-      if (!profile || mapping.game_id !== 'minecraft-java')
-        throw new DomainError('configuration_invalid');
-      // The queued actor remains separately authorized above. Compatibility and
-      // tester eligibility belong to the resource owner, never an elevated helper.
-      const choice = await requireMinecraftChoice(
-        db,
-        {
-          actorUserId: owner.id,
-          subjectUserId: owner.id,
-          role: owner.role,
-          sessionType: 'regular',
-          ownerElevation: false,
-        },
-        profile.combination_id,
-        env,
-      );
-      const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
-      const plan = provisionPlanSchema.parse(operation.plan.provision);
-      const variables = await minecraftProvisionEnvironment(db, serverId, choice);
-      if (!adapter) throw new DomainError('configuration_invalid');
-      await assertMinecraftEggEnvironment(adapter, choice, variables);
-      if (
-        choice.row.mapping_id !== server.mapping_id ||
-        choice.row.mapping_digest !== choice.mappingDigest ||
-        choice.combination.profile !== mapping.runtime_id ||
-        binding.image !== mapping.docker_image ||
-        plan.dockerImage !== binding.image ||
-        plan.eggId !== mapping.egg_id ||
-        plan.startup !== mapping.startup ||
-        !isDeepStrictEqual(plan.environment, variables)
-      )
-        throw new DomainError('configuration_invalid');
-      {
-        const allocation = await db
-          .selectFrom('server_allocations')
-          .selectAll()
-          .where('server_id', '=', serverId)
-          .where('is_primary', '=', true)
-          .executeTakeFirstOrThrow();
-        const evidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env);
-        assertMinecraftVerifiedLaunch(
-          plan.startup,
-          {
-            ...variables,
-            SERVER_MEMORY: String(plan.limits.memory),
-            SERVER_IP: allocation.address,
-            SERVER_PORT: String(allocation.port),
-            P_SERVER_UUID: server.pterodactyl_uuid ?? 'unassigned',
-          },
-          binding.profile,
-          binding.artifactPaths.server,
-          evidence.report,
-        );
-      }
-    }
   }
+  if (game.module) {
+    const resourceOwner = await db
+      .selectFrom('user')
+      .select(['id', 'role'])
+      .where('id', '=', server.owner_id)
+      .executeTakeFirst();
+    if (!resourceOwner) throw new DomainError('forbidden');
+    await game.module.authorizeOperation({
+      db,
+      server,
+      mapping: game.mapping,
+      operation,
+      context,
+      resourceOwner,
+      env,
+      adapter,
+    });
+  }
+
   return context;
 }
 
@@ -381,82 +316,31 @@ export async function createManagementRuntime(options: ManagementOptions) {
       throw new DomainError('integration_unavailable');
     return digest;
   }
-  async function assertMinecraftRuntimeImage(
+  const minecraft = createMinecraftModuleRuntime({
+    db,
+    codec: options.codec,
+    env,
+    adapter,
+    observedImageDigest,
+    authorizeJob: (connection, jobId, serverId) =>
+      authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
+  });
+  const gameRuntime = createGameRuntimeDispatcher(
+    trustedGameModules,
+    new Map([[minecraft.id, minecraft]]),
+  );
+  // Kept for existing M4 callers; common hooks below dispatch through game identity.
+  const minecraftOptions = minecraft.minecraftOptions;
+  const assertMinecraftRuntimeImage = minecraft.assertMinecraftRuntimeImage;
+  async function assertRuntimeImage(
     serverId: string,
-    connection: Kysely<Database> = db,
+    connection: Kysely<Database>,
     requireObserved = true,
   ) {
-    const profile = await connection
-      .selectFrom('minecraft_server_profiles')
-      .select('server_id')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!profile) {
-      const mapping = await connection
-        .selectFrom('managed_servers as server')
-        .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
-        .select('mapping.game_id')
-        .where('server.id', '=', serverId)
-        .executeTakeFirst();
-      if (mapping?.game_id === 'minecraft-java') throw new DomainError('integration_unavailable');
-      return;
-    }
-    const observed = await observedImageDigest(connection, serverId);
-    const server = await connection
-      .selectFrom('managed_servers')
-      .selectAll()
-      .where('id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    await assertMinecraftRemoteLaunch(
-      connection,
+    return (await gameRuntime(connection, serverId))?.assertRuntimeImage(
       serverId,
-      await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
-      env,
-      adapter,
-    );
-    const evidence = await requireMinecraftRuntimeImageEvidence(
       connection,
-      serverId,
-      observed,
-      env,
-    );
-    if (requireObserved && !evidence.verified) throw new DomainError('integration_unavailable');
-    return evidence;
-  }
-  const launchEpochs = new Map<string, string>();
-  async function assertLaunchFiles(serverId: string, connection: Kysely<Database>) {
-    const profile = await connection
-      .selectFrom('minecraft_server_profiles')
-      .select('server_id')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!profile) return;
-    const server = await connection
-      .selectFrom('managed_servers')
-      .selectAll()
-      .where('id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    await assertMinecraftLaunchInputs(
-      {
-        db: connection,
-        server,
-        adapter,
-        authorize: async () => {
-          await verifyManagedIdentity(
-            connection,
-            server,
-            await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
-          );
-          await assertMinecraftRemoteLaunch(
-            connection,
-            serverId,
-            await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
-            env,
-            adapter,
-          );
-        },
-      },
-      { env, observedImageDigest },
+      requireObserved,
     );
   }
   async function assertFileMutation(
@@ -464,99 +348,23 @@ export async function createManagementRuntime(options: ManagementOptions) {
     paths: readonly string[],
     connection: Kysely<Database> = db,
   ) {
-    const profile = await connection
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!profile) return;
-    const choice = await connection
-      .selectFrom('minecraft_combinations')
-      .select('binding')
-      .where('id', '=', profile.combination_id)
-      .executeTakeFirstOrThrow();
-    const binding = minecraftRuntimeMappingSchema.parse(choice.binding);
-    const additional = Object.values(binding.artifactPaths).filter(
-      (path): path is string => typeof path === 'string',
+    await (await gameRuntime(connection, serverId))?.assertFileMutation(
+      serverId,
+      paths,
+      connection,
     );
-    if (binding.profile === 'fabric') additional.push('fabric-server-launcher.properties');
-    if (binding.profile === 'forge') additional.push('user_jvm_args.txt');
-    assertMinecraftRuntimePathsPreserved(paths, [
-      ...(profile.installed_manifest as { path: string }[]),
-      ...additional.map((path) => ({ path })),
-    ]);
-    const server = await connection
-      .selectFrom('managed_servers')
-      .select('pterodactyl_identifier')
-      .where('id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    if (!server.pterodactyl_identifier) throw new DomainError('conflict');
-    // An SFTP-created alias must not turn an otherwise ordinary browser path
-    // into a write through a protected launch file or its parent directory.
-    for (const path of paths) {
-      const components = path.split('/');
-      let directory = '';
-      for (const component of components) {
-        const matches = (await adapter.listFiles(server.pterodactyl_identifier, directory)).filter(
-          (entry) => entry.name.toLowerCase() === component.toLowerCase(),
-        );
-        if (
-          matches.length > 1 ||
-          matches.some((entry) => entry.is_symlink || entry.name !== component)
-        )
-          throw new DomainError('conflict');
-        if (!matches.length) break;
-        directory = [directory, component].filter(Boolean).join('/');
-      }
-    }
-    launchEpochs.delete(serverId);
-  }
-  /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
-  async function minecraftOptions(): Promise<MinecraftContentOptions> {
-    const { values: minecraft } = await getSettings(db, env);
-    if (!minecraft.minecraftMetadataUserAgent) throw new DomainError('configuration_invalid');
-    const http = new SafeContentHttp({
-      userAgent: minecraft.minecraftMetadataUserAgent,
-      allowedOrigins: [
-        'https://api.modrinth.com',
-        'https://api.curseforge.com',
-        ...minecraft.minecraftDownloadOrigins,
-      ],
-    });
-    const key = await getSecret(db, options.codec, 'curseforgeApiKey', env);
-    const mountdataRoot = resolve(minecraft.minecraftContentRoot);
-    return {
-      http,
-      mountdataRoot,
-      sourceRoot: resolve(minecraft.minecraftSourceRoot),
-      userAgent: minecraft.minecraftMetadataUserAgent,
-      env,
-      observedImageDigest,
-      curseforge: key ? new CurseForgeProvider(http, { apiKey: key }) : undefined,
-      authorizeJob: (connection, jobId, serverId) =>
-        authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
-    };
   }
   const lifecycle = {
     env,
-    configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) => {
-      const profile = await context.db
-        .selectFrom('minecraft_server_profiles')
-        .select('server_id')
-        .where('server_id', '=', context.server.id)
-        .executeTakeFirst();
-      return profile ? configureMinecraftProvision(context, await minecraftOptions()) : true;
+    configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
+    processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      const module = await gameRuntime(context.db, context.server.id);
+      if (!module) throw new DomainError('integration_unavailable');
+      return module.processContent(context);
     },
-    processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) =>
-      processMinecraftContent(context, await minecraftOptions()),
-    verifyGameRestore: async (context: import('./lifecycle.js').GameLifecycleContext) => {
-      const profile = await context.db
-        .selectFrom('minecraft_server_profiles')
-        .select('server_id')
-        .where('server_id', '=', context.server.id)
-        .executeTakeFirst();
-      return profile ? verifyMinecraftRestore(context, await minecraftOptions()) : true;
-    },
+    verifyGameRestore: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.verifyRestore(context) ?? true,
     verifyObservationHost,
     confirmAlreadyStopped: async (serverId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);
@@ -594,23 +402,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
         server,
         await adapter.getApplicationServer(server.pterodactyl_id),
       );
-      const before = await containerObserver.processStartedAt(server.pterodactyl_uuid);
-      const image = await assertMinecraftRuntimeImage(serverId, connection);
-      if (!image) return before;
-      if (before !== null) {
-        const proof = `${before}:${image.report.runId}`;
-        if (launchEpochs.get(serverId) !== proof) {
-          await assertLaunchFiles(serverId, connection);
-          // Store only after the second epoch read confirms the same process.
-        }
-      }
-      // Image and process reads are separate pinned observations. A replacement
-      // between them must not attach an old image proof to a new process epoch.
-      const after = await containerObserver.processStartedAt(server.pterodactyl_uuid);
-      if (before !== after) throw new DomainError('operation_uncertain');
-      if (after !== null) launchEpochs.set(serverId, `${after}:${image.report.runId}`);
-      else launchEpochs.delete(serverId);
-      return after;
+      const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
+      const uuid = server.pterodactyl_uuid;
+      const before = await processStartedAt(uuid);
+      const module = await gameRuntime(connection, serverId);
+      return module
+        ? module.verifyProcessEpoch(serverId, connection, before, () => processStartedAt(uuid))
+        : before;
     },
     adapter,
     authorizeEffect: async (jobId: string, serverId: string, connection: Kysely<Database>) => {
@@ -624,8 +422,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
       if (
         ['start', 'restart'].includes(operation.action) ||
         (operation.action === 'provision' && operation.phase === 'initial_start')
-      )
-        await assertMinecraftRuntimeImage(serverId, connection, false);
+      ) {
+        await assertRuntimeImage(serverId, connection, false);
+        // Observer/provider proofs can outlive an automation grant. Re-read the
+        // current actor, schedule revision, consent and Gateway generation only
+        // after those slow proofs, at the final handoff to a new remote effect.
+        await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);
+      }
     },
     reserveInstallation: async (serverId: string, jobId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);
@@ -639,9 +442,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
       connection: Kysely<Database>,
     ) => {
       await verifyObservationHost(serverId, connection);
-      await assertMinecraftRuntimeImage(serverId, connection, false);
-      launchEpochs.delete(serverId);
-      await assertLaunchFiles(serverId, connection);
+      await assertRuntimeImage(serverId, connection, false);
+      const module = await gameRuntime(connection, serverId);
+      module?.invalidateLaunchEpoch(serverId);
+      await module?.assertLaunchFiles(serverId, connection);
       await refreshObservations(connection);
       await reserveStart(connection, serverId, jobId, action, env);
     },

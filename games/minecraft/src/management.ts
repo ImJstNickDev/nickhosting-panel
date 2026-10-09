@@ -94,6 +94,14 @@ const numeric: Record<string, [number, number]> = {
   'spawn-protection': [0, 29_999_984],
   'player-idle-timeout': [0, 2_147_483_647],
 };
+export const minecraftEditablePropertyKeys: readonly string[] = Object.freeze([
+  ...booleans,
+  ...Object.keys(numeric),
+  'difficulty',
+  'gamemode',
+  'motd',
+]);
+
 /** Product fields exclude bind addresses, ports, RCON, online-mode and service credentials. */
 export function editMinecraftProperties(
   source: string,

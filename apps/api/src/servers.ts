@@ -221,6 +221,7 @@ export function registerServerRoutes(
         context,
         c.req.param('id'),
         await body(c),
+        env,
       ),
     );
   });

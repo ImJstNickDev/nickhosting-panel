@@ -4,10 +4,12 @@ import { type Generated, Kysely, PostgresDialect } from 'kysely';
 import { Pool, type PoolConfig } from 'pg';
 import type { GatewayRouteTables } from './gateway-route-types.js';
 import type { GatewayTables } from './gateway-types.js';
+import type { HealthTables } from './health-types.js';
 import type { AuthTables } from './identity-types.js';
 import type { JobTables } from './job-types.js';
 import type { MinecraftSourceTables } from './minecraft-source-types.js';
 import type { MinecraftTables } from './minecraft-types.js';
+import type { ScheduleTables } from './schedule-types.js';
 import type { ServerTables } from './server-types.js';
 
 export interface Database
@@ -17,7 +19,9 @@ export interface Database
     GatewayTables,
     GatewayRouteTables,
     MinecraftTables,
-    MinecraftSourceTables {
+    MinecraftSourceTables,
+    ScheduleTables,
+    HealthTables {
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;
@@ -64,5 +68,6 @@ export function createDatabase(
 
 export type { GatewayServerState, GatewayTables } from './gateway-types.js';
 export { migrate } from './migrate.js';
+export type { ScheduleAction, ScheduleTiming } from './schedule-types.js';
 export type { HostSnapshot, ServerLimits } from './server-types.js';
 export * from './settings.js';

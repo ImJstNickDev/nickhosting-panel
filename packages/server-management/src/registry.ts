@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
   assertPermission,
+  authSessionId,
   DomainError,
   type Permission,
 } from '@nickhosting/core';
@@ -857,7 +858,10 @@ export async function enqueueServerOperation(
       // M3 consent changes are interactive effects. Do not carry authority
       // across either lock wait. Legacy internal M2 calls without a Gateway
       // policy retain their existing context contract.
-      const actor = policy ? await currentInteractiveContext(tx, context, env) : context;
+      const actor =
+        policy || context[authSessionId]
+          ? await currentInteractiveContext(tx, context, env)
+          : context;
       await authorizeServer(tx, actor, serverId, 'server:operate');
       await tx
         .updateTable('managed_servers')
@@ -898,7 +902,7 @@ export async function enqueueServerOperation(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     const actor =
-      policy || value.action === 'minecraft-content'
+      policy || context[authSessionId] || value.action === 'minecraft-content'
         ? await currentInteractiveContext(tx, context, env)
         : context;
     const result = await enqueueLockedServerOperation(

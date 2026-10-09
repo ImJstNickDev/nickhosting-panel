@@ -78,6 +78,10 @@ export const platformConfigSchema = z
     sftpgoBaseUrl: httpUrl.optional(),
     sftpgoDataRoot: z.string().startsWith('/').optional(),
     sftpgoInstanceId: z.uuid().optional(),
+    // Public SSH endpoint is explicitly configured, never inferred from the
+    // private SFTPGo HTTP management URL or the Wings filesystem mapping.
+    sftpPublicHostname: z.union([z.hostname(), z.ipv4(), z.ipv6()]).optional(),
+    sftpPublicPort: z.number().int().min(1).max(65535).optional(),
     dnsInstanceId: z.uuid().optional(),
     sftpCredentialTtlSeconds: z.number().int().min(60).max(86400),
     cloudflareZoneId: z
@@ -203,6 +207,8 @@ export const configEnvironmentKeys = {
   sftpgoBaseUrl: 'NH_SFTPGO_BASE_URL',
   sftpgoDataRoot: 'NH_SFTPGO_DATA_ROOT',
   sftpgoInstanceId: 'NH_SFTPGO_INSTANCE_ID',
+  sftpPublicHostname: 'NH_SFTP_PUBLIC_HOSTNAME',
+  sftpPublicPort: 'NH_SFTP_PUBLIC_PORT',
   sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
   cloudflareZoneId: 'NH_CLOUDFLARE_ZONE_ID',
   dnsInstanceId: 'NH_DNS_INSTANCE_ID',
@@ -245,6 +251,7 @@ const numericKeys = new Set<PlatformConfigKey>([
   'maxConcurrentProvisionsPerUser',
   'observationMaxAgeSeconds',
   'sftpCredentialTtlSeconds',
+  'sftpPublicPort',
   'gatewayLeaseSeconds',
   'minecraftSourceGlobalBytes',
   'minecraftSourceUserBytes',

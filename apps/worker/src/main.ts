@@ -1,10 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { processJob, startJobWorker } from '@nickhosting/jobs';
-import { createManagementRuntime } from '@nickhosting/server-management';
+import { createManagementRuntime, recordWorkerHeartbeat } from '@nickhosting/server-management';
 import { reconcileServers } from './reconcile.js';
+import { pollSchedules } from './schedules.js';
 
 export async function main(env: NodeJS.ProcessEnv = process.env) {
   const logger = createLogger((record) => {
@@ -41,14 +43,29 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
     });
     let stopping = false;
+    const workerInstanceId = randomUUID();
+    const heartbeat = async (state: 'running' | 'degraded' | 'stopped') => {
+      try {
+        await recordWorkerHeartbeat(db, workerInstanceId, env.NH_JOB_PREFIX ?? '', state);
+      } catch {
+        logger.log('warn', 'worker.heartbeat_unavailable');
+      }
+    };
     let timer: ReturnType<typeof setTimeout> | undefined;
     let reconciliation: Promise<void> | undefined;
     const poll = async () => {
+      let successful = false;
       try {
+        const schedules = await pollSchedules(db, env, logger);
         await reconcileServers(db, management, logger, env);
+        successful =
+          schedules !== null &&
+          runtime.worker.isRunning() &&
+          (await runtime.queue.getBackend().client).status === 'ready';
       } catch {
         logger.log('warn', 'servers.reconciliation_failed');
       } finally {
+        await heartbeat(successful ? 'running' : 'degraded');
         if (!stopping)
           timer = setTimeout(() => {
             reconciliation = poll();
@@ -66,6 +83,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         try {
           await runtime.close();
         } finally {
+          await heartbeat('stopped');
           await db.destroy();
         }
         logger.log('info', 'worker.stopped');

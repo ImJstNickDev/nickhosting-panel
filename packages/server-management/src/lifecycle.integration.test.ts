@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DomainError } from '@nickhosting/core';
+import { authSessionId, DomainError } from '@nickhosting/core';
 import { createDatabase, type Database } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { commandDigest, enqueueCommand } from '@nickhosting/jobs';
@@ -1509,6 +1509,111 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     ).toHaveLength(1);
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it.each(['revoked', 'expired', 'demoted'] as const)(
+    'rejects Owner resolution when the bound session is %s during provider proof',
+    async (change) => {
+      const f = await fixture('configure', {
+        build: {
+          memory: 256,
+          cpu: 10,
+          disk: 64,
+          swap: 0,
+          io: 500,
+          allocation: providerSequence + 1,
+          feature_limits: { databases: 0, allocations: 1, backups: 1 },
+        },
+      });
+      f.adapter.updateBuild.mockImplementation(async () => {
+        throw new PterodactylError('unavailable', 'application', 'unknown');
+      });
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe('waiting');
+      await f.prepareReservation();
+      await f.db
+        .updateTable('server_operations')
+        .set({ effect_started_at: new Date(Date.now() - 121_000) })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      await f.db.updateTable('user').set({ role: 'owner' }).where('id', '=', f.ownerId).execute();
+      const sessionId = randomUUID();
+      await f.db
+        .insertInto('session')
+        .values({
+          id: sessionId,
+          token: randomUUID(),
+          userId: f.ownerId,
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .execute();
+      const before = {
+        operation: await f.operation(),
+        reservation: await f.reservation(),
+        server: await f.server(),
+      };
+      const resources = await f.adapter.getResources();
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      f.adapter.getResources.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return resources;
+      });
+      const pending = resolveUncertainOperation(
+        f.db,
+        f.options.adapter,
+        {
+          actorUserId: f.ownerId,
+          subjectUserId: f.ownerId,
+          role: 'owner',
+          sessionType: 'regular',
+          ownerElevation: false,
+          [authSessionId]: sessionId,
+        },
+        f.serverId,
+        { jobId: f.jobId, confirm: true, reason: 'Isolated current Owner authorization test' },
+      ).then(
+        (result) => result,
+        (error: unknown) => error,
+      );
+      try {
+        await entered.promise;
+        if (change === 'revoked')
+          await f.db.deleteFrom('session').where('id', '=', sessionId).execute();
+        else if (change === 'expired')
+          await f.db
+            .updateTable('session')
+            .set({ expiresAt: new Date(0) })
+            .where('id', '=', sessionId)
+            .execute();
+        else
+          await f.db
+            .updateTable('user')
+            .set({ role: 'user' })
+            .where('id', '=', f.ownerId)
+            .execute();
+      } finally {
+        release.resolve();
+      }
+      const outcome = await pending;
+      await f.db.updateTable('user').set({ role: 'user' }).where('id', '=', f.ownerId).execute();
+      expect(outcome).toMatchObject({
+        code: change === 'demoted' ? 'forbidden' : 'unauthenticated',
+      });
+      expect(await f.operation()).toEqual(before.operation);
+      expect(await f.reservation()).toEqual(before.reservation);
+      expect(await f.server()).toEqual(before.server);
+      expect(
+        await f.db
+          .selectFrom('audit_events')
+          .select('id')
+          .where('action', '=', 'server.operation.owner_resolution')
+          .where('actor_user_id', '=', f.ownerId)
+          .execute(),
+      ).toHaveLength(0);
+      expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+    },
+  );
   it('tracks retries per effect so a multi-batch wipe cannot exhaust the job retry constraint', async () => {
     const f = await fixture('wipe');
     f.setFiles(Array.from({ length: 3500 }, (_, index) => `fixture-${index}`));

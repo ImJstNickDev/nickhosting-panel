@@ -4,8 +4,10 @@ import { type createDatabase, getSettings, registerGame } from '@nickhosting/dat
 import {
   createMinecraftIdentityProvider,
   minecraftAvatarUrl,
+  minecraftEditablePropertyKeys,
   minecraftManifest,
   minecraftWizard,
+  parseMinecraftProperties,
   verifyMinecraftPlayer,
 } from '@nickhosting/minecraft';
 import {
@@ -32,6 +34,7 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import { requireMinecraftRuntimeImageEvidence } from '../../../packages/server-management/src/minecraft-runtime-evidence.js';
 import type { Variables } from './app.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -457,7 +460,8 @@ export function registerMinecraftRoutes(
   });
   app.get('/v1/servers/:id/minecraft', async (c) => {
     const serverId = c.req.param('id');
-    await authorizeServer(db, await principal(c), serverId);
+    const context = await principal(c);
+    await authorizeServer(db, context, serverId);
     const profile = await db
       .selectFrom('minecraft_server_profiles')
       .selectAll()
@@ -465,6 +469,25 @@ export function registerMinecraftRoutes(
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
     const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
+    const imageEvidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env).catch(
+      () => null,
+    );
+    const service = await management();
+    const effectiveProperties = await service.access(
+      context,
+      serverId,
+      false,
+      async (identifier) => {
+        const properties = parseMinecraftProperties(
+          Buffer.from(
+            await service.adapter.readFile(identifier, 'server.properties', 1048576),
+          ).toString('utf8'),
+        );
+        return Object.fromEntries(
+          Object.entries(properties).filter(([key]) => minecraftEditablePropertyKeys.includes(key)),
+        );
+      },
+    );
     const content = await db
       .selectFrom('minecraft_content_items')
       .select(['path', 'artifact', 'installed_at'])
@@ -474,6 +497,10 @@ export function registerMinecraftRoutes(
       choiceId: profile.combination_id,
       version: choice.combination.release,
       runtime: choice.combination.profile,
+      supportedProperties: (imageEvidence?.report.server?.supportedProperties ?? []).filter((key) =>
+        minecraftEditablePropertyKeys.includes(key),
+      ),
+      effectiveProperties,
       installed: profile.installed,
       configuration: profile.configuration,
       content,
