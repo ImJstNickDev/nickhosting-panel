@@ -6,6 +6,7 @@ import { commandDigest, enqueueCommand } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
   type Backup,
+  type BackupActivity,
   type BuildUpdate,
   type PterodactylAdapter,
   PterodactylError,
@@ -18,7 +19,9 @@ import {
   type LifecycleOptions,
   processServerOperation,
   reconcileManagedServer,
+  resolveUncertainOperation,
 } from './lifecycle.js';
+import { enqueueServerOperation } from './registry.js';
 
 let providerSequence = 0;
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -130,6 +133,7 @@ async function fixture(
   let uptime = 100_000;
   let files = ['world', 'settings.cfg'];
   const backups: Backup[] = [];
+  const activities: BackupActivity[] = [];
   const adapter = {
     getApplicationServer: vi.fn(async () => {
       if (!exists) throw new PterodactylError('not_found', 'application', 'rejected', 404);
@@ -158,7 +162,44 @@ async function fixture(
       state = signal === 'stop' ? 'offline' : 'running';
       if (signal === 'restart') uptime = 1;
     }),
-    reinstall: vi.fn(async () => {}),
+    stopWithConfirmation: vi.fn(
+      async (
+        _applicationId: number,
+        _identifier: string,
+        input: { authorize: () => Promise<boolean>; onConfirmed: () => Promise<void> },
+      ) => {
+        if (!(await input.authorize()))
+          throw new PterodactylError('permission_denied', 'client', 'rejected');
+        state = 'offline';
+        await input.onConfirmed();
+        return { confirmed: true };
+      },
+    ),
+    confirmInstallation: vi.fn(
+      async (
+        _applicationId: number,
+        _identifier: string,
+        input: { authorize: () => Promise<boolean>; onConfirmed: () => Promise<void> },
+      ) => {
+        if (!(await input.authorize())) return { confirmed: false };
+        await input.onConfirmed();
+        return { confirmed: true };
+      },
+    ),
+    reinstallWithConfirmation: vi.fn(
+      async (
+        _applicationId: number,
+        identifier: string,
+        input: { authorize: () => Promise<boolean>; onConfirmed: () => Promise<void> },
+      ) => {
+        if (!(await input.authorize()))
+          throw new PterodactylError('permission_denied', 'client', 'rejected');
+        await adapter.reinstall(identifier);
+        await input.onConfirmed();
+        return { confirmed: true };
+      },
+    ),
+    reinstall: vi.fn(async (_identifier: string) => {}),
     deleteServer: vi.fn(async () => {
       exists = false;
     }),
@@ -193,6 +234,7 @@ async function fixture(
       return value;
     }),
     listBackups: vi.fn(async () => backups),
+    listBackupActivity: vi.fn(async () => activities),
     getBackup: vi.fn(async (_identifier: string, id: string) => {
       const value = backups.find((b) => b.uuid === id);
       if (!value) throw new PterodactylError('not_found', 'client', 'rejected');
@@ -305,6 +347,7 @@ async function fixture(
           owner_id: ownerId,
           physical_host_id: hostId,
           memory_mib: 128,
+          physical_memory_mib: 148,
           cpu_percent: 10,
           operation_id: jobId,
           state: action === 'restart' ? 'restarting' : 'starting',
@@ -319,6 +362,19 @@ async function fixture(
     authorizeEffect: async () => {},
     now: () => clock,
     reserveStart,
+    reserveInstallation: async (_serverId, _jobId, connection) => {
+      await connection
+        .insertInto('installation_reservations')
+        .values({
+          server_id: serverId,
+          physical_host_id: hostId,
+          operation_id: jobId,
+          memory_mib: 1178,
+          cpu_percent: 100,
+        })
+        .onConflict((c) => c.column('server_id').doNothing())
+        .execute();
+    },
   };
   return {
     db,
@@ -331,11 +387,16 @@ async function fixture(
     adapter,
     options,
     backups,
+    activities,
+    now: () => clock,
     setState(value: Resources['current_state']) {
       state = value;
     },
     setExists(value: boolean) {
       exists = value;
+    },
+    setFiles(value: string[]) {
+      files = value;
     },
     setUptime(value: number) {
       uptime = value;
@@ -359,6 +420,13 @@ async function fixture(
         .selectAll()
         .where('id', '=', serverId)
         .executeTakeFirstOrThrow();
+    },
+    async installationReservation() {
+      return db
+        .selectFrom('installation_reservations')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
     },
     async reservation() {
       return db
@@ -384,6 +452,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
     expect(f.adapter.power).not.toHaveBeenCalled();
     expect(await f.reservation()).toBeUndefined();
+    expect(await f.installationReservation()).toBeUndefined();
     expect(await f.server()).toMatchObject({
       pterodactyl_uuid: f.remote.uuid,
       runtime_state: 'offline',
@@ -462,8 +531,12 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.run()).toBe('succeeded');
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
   });
-  it('retains stopping reservations through the provider resource cache interval', async () => {
+  it('retains stopping reservations when cached offline does not prove terminal stop', async () => {
     const f = await fixture('stop');
+    f.adapter.stopWithConfirmation.mockImplementation(async () => {
+      f.setState('offline');
+      return { confirmed: false };
+    });
     await f.prepareReservation();
     f.setState('running');
     expect(await f.run()).toBe('waiting');
@@ -471,9 +544,152 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.run()).toBe('waiting');
     expect(await f.reservation()).toBeDefined();
     f.tick(17_000);
+    expect(await f.run()).toBe('waiting');
+    expect(await f.reservation()).toBeDefined();
+    expect((await f.operation()).plan.waitReason).toBe('stop_terminal_unproven');
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+  });
+  it('completes a proven offline stop without power and leaves start, repeated stop and delete usable', async () => {
+    const f = await fixture('provision');
     expect(await f.run()).toBe('succeeded');
+    const context = {
+      actorUserId: f.ownerId,
+      subjectUserId: f.ownerId,
+      role: 'user' as const,
+      sessionType: 'regular' as const,
+      ownerElevation: false,
+    };
+    const enqueue = async (action: 'start' | 'stop' | 'delete') =>
+      enqueueServerOperation(f.db, context, f.serverId, {
+        action,
+        idempotencyKey: randomUUID(),
+        ...(action === 'delete' ? { confirm: true } : {}),
+      });
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    const stopped = await enqueue('stop');
+    f.tick(1000);
+    expect(await processServerOperation(f.db, stopped.jobId, f.options)).toBe('succeeded');
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
     expect(await f.reservation()).toBeUndefined();
-    expect((await f.server()).intent).toBe('manually_stopped');
+    expect((await f.server()).active_operation_id).toBeNull();
+    expect(
+      await f.db
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', stopped.jobId)
+        .executeTakeFirstOrThrow(),
+    ).toMatchObject({ phase: 'complete', effect_started_at: null, plan: { stopNoOp: true } });
+    const at = new Date();
+    await f.db
+      .insertInto('host_observations')
+      .values({
+        host_id: f.hostId,
+        observer_id: 'fixture',
+        observed_at: at,
+        snapshot: JSON.stringify({
+          totalMemoryMiB: 2048,
+          availableMemoryMiB: 2048,
+          cpuCapacityPercent: 200,
+          cpuBusyPercent: 0,
+          availableDiskMiB: 10000,
+          managed: {},
+          observedAt: at.toISOString(),
+        }),
+      })
+      .execute();
+    const started = await enqueue('start');
+    expect(await processServerOperation(f.db, started.jobId, f.options)).toBe('waiting');
+    f.tick();
+    expect(await processServerOperation(f.db, started.jobId, f.options)).toBe('succeeded');
+    const qualifiedStop = await enqueue('stop');
+    expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('waiting');
+    f.tick();
+    expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    const repeatedStop = await enqueue('stop');
+    expect(await processServerOperation(f.db, repeatedStop.jobId, f.options)).toBe('succeeded');
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    const deleted = await enqueue('delete');
+    expect(await processServerOperation(f.db, deleted.jobId, f.options)).toBe('waiting');
+    f.tick();
+    expect(await processServerOperation(f.db, deleted.jobId, f.options)).toBe('waiting');
+    f.tick();
+    expect(await processServerOperation(f.db, deleted.jobId, f.options)).toBe('succeeded');
+    expect((await f.server()).deleted_at).not.toBeNull();
+    expect(f.adapter.deleteServer).toHaveBeenCalledTimes(1);
+  });
+  it.each(['false', 'throws'] as const)(
+    'does not complete an offline stop when physical confirmation %s',
+    async (proof) => {
+      const f = await fixture('stop');
+      f.options.confirmAlreadyStopped = async () => {
+        if (proof === 'throws') throw new Error('isolated observer unavailable');
+        return false;
+      };
+      expect(await f.run()).toBe('waiting');
+      expect(await f.operation()).toMatchObject({
+        phase: 'planned',
+        effect_started_at: null,
+        plan: { waitReason: 'already_stopped_unproven' },
+      });
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it('never bypasses strict stop evidence for a held uncertain reservation', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    await f.db
+      .updateTable('resource_reservations')
+      .set({ state: 'uncertain' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect((await f.reservation())?.state).toBe('uncertain');
+    expect((await f.operation()).plan.stopNoOp).not.toBe(true);
+    expect(f.options.confirmAlreadyStopped).not.toHaveBeenCalled();
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+  });
+  it.each(['compute', 'installer'] as const)(
+    'rechecks a %s reservation created during offline proof in the locked finish transaction',
+    async (kind) => {
+      const f = await fixture('stop');
+      f.options.confirmAlreadyStopped = async () => {
+        if (kind === 'compute') await f.prepareReservation();
+        else await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+        return true;
+      };
+      expect(await f.run()).toBe('waiting');
+      expect(await f.operation()).toMatchObject({
+        phase: 'planned',
+        effect_started_at: null,
+        plan: { waitReason: 'already_stopped_reservation_changed' },
+      });
+      expect((await f.operation()).plan.stopNoOp).not.toBe(true);
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      expect(
+        kind === 'compute' ? await f.reservation() : await f.installationReservation(),
+      ).toBeDefined();
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
+  it('rechecks current job authorization before completing an offline no-op stop', async () => {
+    const f = await fixture('stop');
+    f.options.confirmAlreadyStopped = async () => true;
+    f.options.authorizeEffect = async () => {
+      throw new DomainError('forbidden');
+    };
+    expect(await f.run()).toBe('failed');
+    expect((await f.operation()).plan.stopNoOp).not.toBe(true);
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
   });
   it('retains restart reservation during transient offline and never reissues unknown restart', async () => {
     const f = await fixture('restart');
@@ -503,6 +719,194 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.run()).toBe('waiting');
     expect((await f.operation()).plan.waitReason).toBe('restart_outcome_unknown');
     expect(await f.reservation()).toBeDefined();
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it('confirms a fast restart from a new physical process despite missing the cached uptime reset', async () => {
+    const f = await fixture('restart');
+    const baseline = new Date(f.now().getTime() - 100_000).toISOString();
+    const observer = vi.fn<NonNullable<LifecycleOptions['observeProcessStart']>>(
+      async () => baseline,
+    );
+    f.options.observeProcessStart = observer;
+    f.setState('running');
+    f.setUptime(5_000);
+    f.adapter.power.mockImplementation(async () => {
+      expect((await f.operation()).plan.previousProcessStartedAt).toBe(baseline);
+      f.setUptime(25_000);
+    });
+    expect(await f.run()).toBe('waiting');
+    const effect = (await f.operation()).effect_started_at;
+    if (!effect) throw new Error('missing durable restart intent');
+    const startedAt = new Date(effect.getTime() + 1500).toISOString().replace('Z', '123456Z');
+    observer.mockResolvedValue(startedAt);
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.operation()).toMatchObject({
+      phase: 'complete',
+      plan: {
+        previousProcessStartedAt: baseline,
+        restartConfirmed: true,
+        restartConfirmedAt: f.now().toISOString(),
+        restartProcessStartedAt: startedAt,
+      },
+    });
+    expect((await f.reservation())?.state).toBe('running');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    expect(observer).toHaveBeenCalledTimes(2);
+    expect(observer.mock.calls[0]?.[0]).toBe(f.serverId);
+  });
+  it('allows restart from a verified offline baseline and records its null process start', async () => {
+    const f = await fixture('restart');
+    const observer = vi.fn<NonNullable<LifecycleOptions['observeProcessStart']>>(async () => null);
+    f.options.observeProcessStart = observer;
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.previousProcessStartedAt).toBeNull();
+    const startedAt = new Date(f.now().getTime() + 1000).toISOString();
+    observer.mockResolvedValue(startedAt);
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan.restartProcessStartedAt).toBe(startedAt);
+    expect((await f.reservation())?.state).toBe('running');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it('recovers a persisted uncertain restart in a new worker connection without replaying power', async () => {
+    const f = await fixture('restart');
+    const baseline = new Date(f.now().getTime() - 100_000).toISOString();
+    f.options.observeProcessStart = async () => baseline;
+    f.options.checkpoint = async (point) => {
+      if (point === 'remote_succeeded') throw new Error('simulated worker exit');
+    };
+    f.setState('running');
+    expect(await f.run()).toBe('waiting');
+    expect(await f.operation()).toMatchObject({ phase: 'power', effect_state: 'prepared' });
+    const startedAt = new Date(f.now().getTime() + 1000).toISOString();
+    f.setUptime(200_000);
+    f.tick();
+    const restartedWorker = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
+      options: `-c search_path=${database.schema}`,
+      max: 1,
+      connectionTimeoutMillis: 1000,
+    });
+    try {
+      const recoveredOptions: LifecycleOptions = {
+        adapter: f.options.adapter,
+        authorizeEffect: async () => {},
+        now: f.now,
+        observeProcessStart: async () => startedAt,
+      };
+      expect(await processServerOperation(restartedWorker.db, f.jobId, recoveredOptions)).toBe(
+        'succeeded',
+      );
+      expect((await f.operation()).plan.restartProcessStartedAt).toBe(startedAt);
+      expect((await f.reservation())?.state).toBe('running');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    } finally {
+      await restartedWorker.db.destroy();
+    }
+  });
+  it('recovers a historical restart without a physical baseline using strictly newer physical proof', async () => {
+    const f = await fixture('restart');
+    f.setState('running');
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan).not.toHaveProperty('previousProcessStartedAt');
+    const startedAt = new Date(f.now().getTime() + 1000).toISOString();
+    f.options.observeProcessStart = async () => startedAt;
+    f.setUptime(200_000);
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan.restartConfirmed).toBe(true);
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it.each(['unavailable', 'malformed', 'future', 'zero'] as const)(
+    'does not issue restart power when the physical baseline is %s',
+    async (kind) => {
+      const f = await fixture('restart');
+      f.setState('running');
+      f.options.observeProcessStart = async () => {
+        if (kind === 'unavailable') throw new Error('isolated observer unavailable');
+        if (kind === 'malformed') return 'not a timestamp';
+        if (kind === 'zero') return '0001-01-01T00:00:00Z';
+        return new Date(f.now().getTime() + 1).toISOString();
+      };
+      expect(await f.run()).toBe('waiting');
+      expect(await f.operation()).toMatchObject({
+        phase: 'planned',
+        plan: { waitReason: 'restart_baseline_unavailable' },
+      });
+      expect(await f.reservation()).toBeDefined();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'null',
+    'unavailable',
+    'malformed',
+    'invalid_date',
+    'zero',
+    'epoch',
+    'future',
+    'future_nanosecond',
+    'unchanged',
+    'equal_intent',
+    'before_intent',
+  ] as const)(
+    'retains restart reservation for %s physical proof even when telemetry reports an uptime reset',
+    async (kind) => {
+      const f = await fixture('restart');
+      const baseline = new Date(f.now().getTime() - 100_000).toISOString();
+      f.setState('running');
+      f.options.observeProcessStart = async () => baseline;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing durable restart intent');
+      f.tick();
+      f.options.observeProcessStart = async () => {
+        switch (kind) {
+          case 'null':
+            return null;
+          case 'unavailable':
+            throw new Error('isolated observer unavailable');
+          case 'malformed':
+            return 'not a timestamp';
+          case 'invalid_date':
+            return '2026-02-30T00:00:00Z';
+          case 'zero':
+            return '0001-01-01T00:00:00Z';
+          case 'epoch':
+            return '1970-01-01T00:00:00Z';
+          case 'future':
+            return new Date(f.now().getTime() + 1).toISOString();
+          case 'future_nanosecond':
+            return f.now().toISOString().replace('Z', '000001Z');
+          case 'unchanged':
+            return baseline;
+          case 'equal_intent':
+            return effect.toISOString();
+          case 'before_intent':
+            return new Date(effect.getTime() - 1).toISOString();
+        }
+      };
+      expect(await f.run()).toBe('waiting');
+      expect((await f.operation()).plan.waitReason).toBe('restart_terminal_unproven');
+      expect((await f.operation()).plan.restartConfirmed).not.toBe(true);
+      expect((await f.reservation())?.state).toBe('restarting');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('compares physical evidence at nanosecond precision beyond the durable intent boundary', async () => {
+    const f = await fixture('restart');
+    const baseline = new Date(f.now().getTime() - 100_000).toISOString();
+    f.setState('running');
+    f.options.observeProcessStart = async () => baseline;
+    expect(await f.run()).toBe('waiting');
+    const effect = (await f.operation()).effect_started_at;
+    if (!effect) throw new Error('missing durable restart intent');
+    const startedAt = effect.toISOString().replace('Z', '000001Z');
+    f.options.observeProcessStart = async () => startedAt;
+    f.setUptime(200_000);
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan.restartProcessStartedAt).toBe(startedAt);
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
   });
   it('refuses every mutation when a pinned identity or allocation changes', async () => {
@@ -552,8 +956,9 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     ]);
     expect(f.adapter.reinstall).toHaveBeenCalledTimes(1);
   });
-  it('never repeats uncertain reinstall without an observed installation transition', async () => {
+  it('never repeats uncertain reinstall and requires authenticated terminal proof', async () => {
     const f = await fixture('reinstall');
+    f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
     f.adapter.reinstall.mockImplementation(async () => {
       throw new PterodactylError('unavailable', 'client', 'unknown');
     });
@@ -569,12 +974,17 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     f.remote.status = null;
     f.remote.container.installed = true;
     f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.adapter.confirmInstallation.mockImplementationOnce(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    f.tick();
     expect(await f.run()).toBe('succeeded');
     expect(f.adapter.reinstall).toHaveBeenCalledTimes(1);
   });
   it('confirms lost deletion response via pinned remote absence, releasing allocations atomically', async () => {
     const f = await fixture('delete');
-    await f.prepareReservation();
     f.adapter.deleteServer.mockImplementation(async () => {
       f.setExists(false);
       throw new PterodactylError('unavailable', 'application', 'unknown');
@@ -629,6 +1039,17 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     f.setState('running');
     expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
     expect(await f.reservation()).toBeDefined();
+    expect(await f.reservation()).toMatchObject({ memory_mib: 128, physical_memory_mib: 148 });
+    await reconcileManagedServer(f.db, f.serverId, {
+      ...f.options,
+      env: { NH_NODE_MEMORY_OVERHEAD_PERCENT: '200' },
+    });
+    expect((await f.reservation())?.physical_memory_mib).toBe(256);
+    await reconcileManagedServer(f.db, f.serverId, {
+      ...f.options,
+      env: { NH_NODE_MEMORY_OVERHEAD_PERCENT: '100' },
+    });
+    expect((await f.reservation())?.physical_memory_mib).toBe(256);
     expect(f.adapter.power).not.toHaveBeenCalled();
     expect(await reconcileManagedServer(f.db, randomUUID(), f.options)).toBe('deferred');
     f.setState('offline');
@@ -637,7 +1058,47 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.reservation()).toBeDefined();
     f.tick(22_000);
     await reconcileManagedServer(f.db, f.serverId, f.options);
-    expect(await f.reservation()).toBeUndefined();
+    expect((await f.reservation())?.state).toBe('uncertain');
+  });
+  it('raises retained installer physical memory during reconciliation without reducing old maxima', async () => {
+    const f = await fixture('reinstall');
+    await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+    expect(
+      (
+        await f.db
+          .selectFrom('installation_reservations')
+          .selectAll()
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).memory_mib,
+    ).toBe(1178);
+    await reconcileManagedServer(f.db, f.serverId, {
+      ...f.options,
+      env: { NH_NODE_MEMORY_OVERHEAD_PERCENT: '200' },
+    });
+    expect(
+      (
+        await f.db
+          .selectFrom('installation_reservations')
+          .selectAll()
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).memory_mib,
+    ).toBe(2048);
+    await reconcileManagedServer(f.db, f.serverId, {
+      ...f.options,
+      env: { NH_NODE_MEMORY_OVERHEAD_PERCENT: '100' },
+    });
+    expect(
+      (
+        await f.db
+          .selectFrom('installation_reservations')
+          .selectAll()
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirstOrThrow()
+      ).memory_mib,
+    ).toBe(2048);
+    expect(f.adapter.power).not.toHaveBeenCalled();
   });
   it('rejects direct generic enqueue of a server operation before it can bypass admission', async () => {
     const f = await fixture('start');
@@ -723,6 +1184,12 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     f.tick();
     expect(await f.run()).toBe('waiting');
     f.remote.status = null;
+    f.activities.push({
+      id: '1'.repeat(40),
+      event: 'server:backup.restore-complete',
+      timestamp: f.options.now?.().toISOString() ?? '',
+      properties: { name: 'fixture' },
+    });
     f.tick();
     expect(await f.run()).toBe('succeeded');
     expect(f.adapter.restoreBackup).toHaveBeenCalledTimes(1);
@@ -760,5 +1227,483 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     started.tick();
     expect(await started.run()).toBe('succeeded');
     expect(started.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it('does not call restore complete when Panel merely clears restoration status', async () => {
+    const id = randomUUID();
+    const f = await fixture('restore', { backupId: id, truncate: true });
+    f.backups.push({
+      uuid: id,
+      name: 'unique-restore',
+      is_successful: true,
+      is_locked: false,
+      ignored_files: [],
+      checksum: 'sha256:fixture',
+      bytes: 100,
+      created_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.waitReason).toBe('restore_evidence_pending');
+    f.activities.push({
+      id: '2'.repeat(40),
+      event: 'server.backup.restore-failed',
+      timestamp: f.options.now?.().toISOString() ?? '',
+      properties: { name: 'unique-restore' },
+    });
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.restoreBackup).toHaveBeenCalledTimes(1);
+  });
+  it('rejects ambiguous backup names and excludes baseline or unrelated restoration events', async () => {
+    const id = randomUUID();
+    const f = await fixture('restore', { backupId: id, truncate: true });
+    const backup = {
+      uuid: id,
+      name: 'same-name',
+      is_successful: true,
+      is_locked: false,
+      ignored_files: [],
+      checksum: 'sha256:fixture',
+      bytes: 100,
+      created_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+    };
+    f.backups.push(backup, { ...backup, uuid: randomUUID() });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.restoreBackup).not.toHaveBeenCalled();
+    const next = await fixture('restore', { backupId: id, truncate: true });
+    next.backups.push(backup);
+    next.activities.push({
+      id: '3'.repeat(40),
+      event: 'server:backup.restore-complete',
+      timestamp: next.options.now?.().toISOString() ?? '',
+      properties: { name: 'same-name' },
+    });
+    expect(await next.run()).toBe('waiting');
+    next.tick();
+    expect(await next.run()).toBe('waiting');
+    next.tick();
+    next.activities.push({
+      id: '4'.repeat(40),
+      event: 'server:backup.restore-complete',
+      timestamp: next.options.now?.().toISOString() ?? '',
+      properties: { name: 'other-backup' },
+    });
+    expect(await next.run()).toBe('waiting');
+    expect(next.adapter.restoreBackup).toHaveBeenCalledTimes(1);
+  });
+  it('quarantines Owner resolution and audits failed-only acknowledgment without releasing capacity', async () => {
+    const f = await fixture('configure', {
+      build: {
+        memory: 256,
+        cpu: 10,
+        disk: 64,
+        swap: 0,
+        io: 500,
+        allocation: providerSequence + 1,
+        feature_limits: { databases: 0, allocations: 1, backups: 1 },
+      },
+    });
+    f.adapter.updateBuild.mockImplementation(async () => {
+      throw new PterodactylError('unavailable', 'application', 'unknown');
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    await f.prepareReservation();
+    const context = {
+      actorUserId: f.ownerId,
+      subjectUserId: f.ownerId,
+      role: 'owner',
+      sessionType: 'regular',
+      ownerElevation: false,
+    } as const;
+    const input = {
+      jobId: f.jobId,
+      confirm: true,
+      reason: 'Inspected and acknowledged uncertain remote outcome',
+    };
+    await expect(
+      resolveUncertainOperation(f.db, f.options.adapter, context, f.serverId, input),
+    ).rejects.toThrow('conflict');
+    await f.db
+      .updateTable('server_operations')
+      .set({ effect_started_at: new Date(Date.now() - 121000) })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    f.setState('running');
+    await expect(
+      resolveUncertainOperation(f.db, f.options.adapter, context, f.serverId, input),
+    ).rejects.toThrow('conflict');
+    f.setState('offline');
+    expect(
+      await resolveUncertainOperation(f.db, f.options.adapter, context, f.serverId, input),
+    ).toBe('resolved');
+    expect((await f.operation()).phase).toBe('owner_resolved_failed');
+    expect(await f.reservation()).toBeDefined();
+    expect((await f.server()).active_operation_id).toBeNull();
+    expect(
+      await f.db
+        .selectFrom('audit_events')
+        .select('id')
+        .where('action', '=', 'server.operation.owner_resolution')
+        .where('actor_user_id', '=', f.ownerId)
+        .execute(),
+    ).toHaveLength(1);
+    expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+  });
+  it('tracks retries per effect so a multi-batch wipe cannot exhaust the job retry constraint', async () => {
+    const f = await fixture('wipe');
+    f.setFiles(Array.from({ length: 3500 }, (_, index) => `fixture-${index}`));
+    let result = 'waiting';
+    for (let attempt = 0; attempt < 20 && result === 'waiting'; attempt++) {
+      result = await f.run();
+      f.tick();
+    }
+    expect(result).toBe('succeeded');
+    expect(f.adapter.deleteFiles).toHaveBeenCalledTimes(4);
+    expect(f.adapter.reinstall).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await f.db
+          .selectFrom('operation_jobs')
+          .select('attempts')
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow()
+      ).attempts,
+    ).toBe(1);
+  });
+  it('bounds safe absolute configuration retries while retaining uncertain state for review', async () => {
+    const f = await fixture('configure', {
+      build: {
+        memory: 256,
+        cpu: 10,
+        disk: 64,
+        swap: 0,
+        io: 500,
+        allocation: providerSequence + 1,
+        feature_limits: { databases: 0, allocations: 1, backups: 1 },
+      },
+    });
+    f.adapter.updateBuild.mockImplementation(async () => {
+      throw new PterodactylError('unavailable', 'application', 'unknown');
+    });
+    for (let attempt = 0; attempt < 7; attempt++) {
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+    }
+    expect(f.adapter.updateBuild).toHaveBeenCalledTimes(3);
+    expect(
+      (
+        await f.db
+          .selectFrom('operation_jobs')
+          .select('attempts')
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow()
+      ).attempts,
+    ).toBe(3);
+    expect((await f.server()).active_operation_id).toBe(f.jobId);
+  });
+  it('restores previously confirmed limits after a definitively rejected build change', async () => {
+    const f = await fixture('configure', {
+      previousLimits: { memory: 128, cpu: 10, disk: 64, swap: 0, io: 500 },
+      build: {
+        memory: 256,
+        cpu: 10,
+        disk: 128,
+        swap: 0,
+        io: 500,
+        allocation: providerSequence + 1,
+        feature_limits: { databases: 0, allocations: 1, backups: 1 },
+      },
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ limits: JSON.stringify({ memory: 256, cpu: 10, disk: 128, swap: 0, io: 500 }) })
+      .where('id', '=', f.serverId)
+      .execute();
+    f.adapter.updateBuild.mockImplementation(async () => {
+      throw new PterodactylError('invalid_request', 'application', 'rejected', 422);
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect((await f.server()).limits).toMatchObject({ memory: 128, disk: 64 });
+    expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+  });
+  it('retains accepted start reservations through a long offline preboot and does not replay power', async () => {
+    for (const action of ['start', 'provision'] as const) {
+      const f = await fixture(action, { autoStart: true });
+      f.adapter.power.mockImplementation(async () => {});
+      expect(await f.run()).toBe('waiting');
+      f.tick(130000);
+      expect(await f.run()).toBe('waiting');
+      expect(await f.reservation()).toBeDefined();
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      f.setState('running');
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    }
+  });
+  it('rejects stop and installation proof when observations belong to another physical host', async () => {
+    const stop = await fixture('stop');
+    stop.setState('running');
+    await stop.prepareReservation();
+    stop.options.verifyObservationHost = vi.fn(async (serverId, connection) => {
+      expect(serverId).toBe(stop.serverId);
+      expect(
+        await connection
+          .selectFrom('managed_servers')
+          .select('id')
+          .where('id', '=', serverId)
+          .executeTakeFirst(),
+      ).toBeDefined();
+      throw new DomainError('configuration_invalid');
+    });
+    expect(await stop.run()).toBe('failed');
+    expect(stop.options.verifyObservationHost).toHaveBeenCalledTimes(1);
+    expect((await stop.operation()).plan.stopConfirmed).toBeUndefined();
+    expect((await stop.server()).runtime_state).toBe('running');
+    expect(await stop.reservation()).toBeDefined();
+    expect(stop.adapter.power).not.toHaveBeenCalled();
+
+    const install = await fixture('provision');
+    install.options.verifyObservationHost = vi.fn(async () => {
+      throw new DomainError('configuration_invalid');
+    });
+    expect(await install.run()).toBe('waiting');
+    expect(install.options.verifyObservationHost).toHaveBeenCalledTimes(1);
+    expect((await install.operation()).plan.installConfirmed).toBeUndefined();
+    expect((await install.server()).installation_state).toBe('installing');
+    expect(await install.installationReservation()).toBeDefined();
+    expect(install.adapter.power).not.toHaveBeenCalled();
+    expect(install.adapter.reinstall).not.toHaveBeenCalled();
+  });
+  it('releases stop reservations only after persisted terminal proof and cache settlement', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.stopConfirmed).toBe(true);
+    f.tick(5000);
+    expect(await f.run()).toBe('waiting');
+    expect(await f.reservation()).toBeDefined();
+    f.tick(17000);
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('recovers persisted stop proof after worker loss before the provider helper returned', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      f.setState('offline');
+      await input.onConfirmed();
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.stopConfirmed).toBe(true);
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+  });
+  it('does not accept a claimed helper success without its persisted stop evidence callback', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.adapter.stopWithConfirmation.mockImplementation(async () => {
+      f.setState('offline');
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(await f.reservation()).toBeDefined();
+  });
+  it('blocks offline destructive effects while any uncertain compute reservation remains', async () => {
+    for (const action of ['configure', 'reinstall', 'wipe', 'restore', 'delete'] as const) {
+      const f = await fixture(action);
+      await f.prepareReservation();
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe('waiting');
+      expect(f.adapter.updateBuild).not.toHaveBeenCalled();
+      expect(f.adapter.reinstall).not.toHaveBeenCalled();
+      expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
+      expect(f.adapter.restoreBackup).not.toHaveBeenCalled();
+      expect(f.adapter.deleteServer).not.toHaveBeenCalled();
+      expect(await f.reservation()).toBeDefined();
+    }
+  });
+  it('releases only a newly created reservation when no start could have been sent', async () => {
+    const f = await fixture('start', { reservationCreated: true });
+    await f.prepareReservation();
+    f.options.authorizeEffect = async () => {
+      throw new DomainError('forbidden');
+    };
+    expect(await f.run()).toBe('failed');
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    const rejected = await fixture('start', { reservationCreated: true });
+    rejected.adapter.power.mockImplementation(async () => {
+      throw new PterodactylError('permission_denied', 'client', 'rejected');
+    });
+    expect(await rejected.run()).toBe('failed');
+    expect(await rejected.reservation()).toBeUndefined();
+    const previous = await fixture('restart', { reservationCreated: false });
+    await previous.prepareReservation();
+    previous.options.authorizeEffect = async () => {
+      throw new DomainError('forbidden');
+    };
+    expect(await previous.run()).toBe('failed');
+    expect(await previous.reservation()).toBeDefined();
+  });
+  it('restores durable installation state after denied or definitively rejected reinstall', async () => {
+    for (const preEffectDenied of [false, true]) {
+      const f = await fixture('reinstall');
+      await f.db
+        .updateTable('managed_servers')
+        .set({ installation_state: 'installed' })
+        .where('id', '=', f.serverId)
+        .execute();
+      if (preEffectDenied)
+        f.options.authorizeEffect = async () => {
+          throw new DomainError('forbidden');
+        };
+      f.adapter.reinstallWithConfirmation.mockImplementation(async () => {
+        throw new PterodactylError('permission_denied', 'client', 'rejected');
+      });
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe('failed');
+      expect((await f.server()).installation_state).toBe('installed');
+      expect((await f.operation()).plan.previousInstallationState).toBe('installed');
+      expect(await f.installationReservation()).toBeUndefined();
+      expect(f.adapter.reinstallWithConfirmation).toHaveBeenCalledTimes(preEffectDenied ? 0 : 1);
+    }
+  });
+  it('deletes a never-created local registry record only using durable no-effect evidence and provider absence', async () => {
+    for (const foreignRemoteAppears of [false, true]) {
+      const f = await fixture('provision');
+      f.options.authorizeEffect = async () => {
+        throw new DomainError('forbidden');
+      };
+      expect(await f.run()).toBe('failed');
+      expect((await f.operation()).plan.noExternalEffect).toBe(true);
+      expect(f.adapter.createServer).not.toHaveBeenCalled();
+      f.options.authorizeEffect = async () => {};
+      const deletion = await enqueueServerOperation(
+        f.db,
+        {
+          actorUserId: f.ownerId,
+          subjectUserId: f.ownerId,
+          role: 'user',
+          sessionType: 'regular',
+          ownerElevation: false,
+        },
+        f.serverId,
+        { action: 'delete', confirm: true, idempotencyKey: randomUUID() },
+      );
+      f.setExists(foreignRemoteAppears);
+      f.tick();
+      const result = await processServerOperation(f.db, deletion.jobId, f.options);
+      expect(result).toBe(foreignRemoteAppears ? 'failed' : 'succeeded');
+      expect(!!(await f.server()).deleted_at).toBe(!foreignRemoteAppears);
+      expect(f.adapter.deleteServer).not.toHaveBeenCalled();
+    }
+  });
+  it('reserves installer capacity before create and releases only definitive rejection or proof', async () => {
+    const denied = await fixture('provision');
+    denied.adapter.createServer.mockImplementation(async () => {
+      expect(await denied.installationReservation()).toBeDefined();
+      throw new PterodactylError('permission_denied', 'application', 'rejected');
+    });
+    expect(await denied.run()).toBe('failed');
+    expect(await denied.installationReservation()).toBeUndefined();
+    const unknown = await fixture('provision');
+    unknown.adapter.createServer.mockImplementation(async () => {
+      expect(await unknown.installationReservation()).toBeDefined();
+      throw new PterodactylError('unavailable', 'application', 'unknown');
+    });
+    expect(await unknown.run()).toBe('waiting');
+    expect(await unknown.installationReservation()).toBeDefined();
+    const noPower = await fixture('provision');
+    noPower.options.authorizeEffect = async () => {
+      throw new DomainError('forbidden');
+    };
+    expect(await noPower.run()).toBe('failed');
+    expect(await noPower.installationReservation()).toBeUndefined();
+    expect(noPower.adapter.createServer).not.toHaveBeenCalled();
+  });
+  it('does not infer installation completion after a daemon reset clears Panel status', async () => {
+    for (const action of ['provision', 'reinstall', 'wipe'] as const) {
+      const f = await fixture(action, { autoStart: true });
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+      for (let attempt = 0; attempt < 7; attempt++) {
+        expect(await f.run()).toBe('waiting');
+        f.tick();
+      }
+      expect((await f.server()).installation_state).toBe('installing');
+      expect(await f.installationReservation()).toBeDefined();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect((await f.server()).installation_state).toBe('installing');
+    }
+  });
+  it('records reinstall_failed as a terminal failure instead of installed', async () => {
+    const f = await fixture('reinstall');
+    f.adapter.reinstallWithConfirmation.mockImplementation(async () => {
+      f.remote.status = 'reinstall_failed';
+      return { confirmed: false };
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('failed');
+    expect((await f.server()).installation_state).toBe('failed');
+  });
+  it('preserves initial reservation provenance through crash and later admission denial', async () => {
+    const f = await fixture('provision', { autoStart: true });
+    const reserve = f.options.reserveStart;
+    if (!reserve) throw new Error('fixture reserve callback missing');
+    f.options.reserveStart = async (...args) => {
+      await reserve(...args);
+      throw new Error('simulated crash after reservation commit');
+    };
+    expect(await f.run()).toBe('waiting');
+    expect(await f.reservation()).toBeDefined();
+    expect((await f.operation()).plan.reservationCreated).toBe(true);
+    f.options.reserveStart = async () => {
+      throw new DomainError('resources_unavailable');
+    };
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan.reservationCreated).toBe(true);
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('clears a new initial-start reservation when authorization is revoked after installation', async () => {
+    const f = await fixture('provision', { autoStart: true });
+    let calls = 0;
+    f.options.authorizeEffect = async () => {
+      calls++;
+      if (calls > 1) throw new DomainError('forbidden');
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.reservation()).toBeUndefined();
+    expect((await f.server()).pterodactyl_id).toBe(f.remote.id);
   });
 });

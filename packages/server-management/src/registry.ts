@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
+import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
   assertPermission,
@@ -7,7 +9,11 @@ import {
 } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
-import type { ProvisionPlan, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import {
+  type ProvisionPlan,
+  type PterodactylAdapter,
+  supportsStopConfirmation,
+} from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import {
@@ -103,26 +109,22 @@ export async function authorizeServer(
 
 export async function listServers(db: DB, context: AuthContext) {
   assertPermission(context, 'server:read', { ownerUserId: context.subjectUserId });
-  const rows = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('deleted_at', 'is', null)
-    .orderBy('created_at', 'desc')
-    .limit(1000)
-    .execute();
-  const members = await db
-    .selectFrom('project_members')
-    .select('project_id')
-    .where('user_id', '=', context.subjectUserId)
-    .execute();
-  return rows
-    .filter(
-      (r) =>
-        context.role === 'owner' ||
-        r.owner_id === context.subjectUserId ||
-        members.some((m) => m.project_id === r.project_id),
-    )
-    .map(publicServer);
+  let query = db.selectFrom('managed_servers').selectAll().where('deleted_at', 'is', null);
+  if (context.role !== 'owner' || context.sessionType !== 'regular') {
+    query = query.where((expression) =>
+      expression.or([
+        expression('owner_id', '=', context.subjectUserId),
+        expression.exists(
+          expression
+            .selectFrom('project_members')
+            .select('project_id')
+            .whereRef('project_members.project_id', '=', 'managed_servers.project_id')
+            .where('project_members.user_id', '=', context.subjectUserId),
+        ),
+      ]),
+    );
+  }
+  return (await query.orderBy('created_at', 'desc').limit(1000).execute()).map(publicServer);
 }
 export function publicServer(row: Awaited<ReturnType<typeof authorizeServer>>) {
   return {
@@ -306,13 +308,53 @@ export async function createManagedServer(
     );
     const inventory = await adapter.listAllocations(node.pterodactyl_node_id);
     const owned = await tx
-      .selectFrom('server_allocations')
-      .select('pterodactyl_allocation_id')
-      .where('node_id', '=', node.id)
+      .selectFrom('server_allocations as allocation')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select([
+        'allocation.pterodactyl_allocation_id',
+        'allocation.node_id',
+        'allocation.address',
+        'allocation.port',
+      ])
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
       .execute();
-    const free = inventory.filter(
-      (a) => !a.assigned && !owned.some((o) => o.pterodactyl_allocation_id === a.id),
-    );
+    const canonical = (address: string) =>
+      isIP(address) === 6 ? new URL(`http://[${address}]`).hostname : address;
+    const wildcard = (address: string) => ['0.0.0.0', '[::]'].includes(canonical(address));
+    const overlaps = (a: string, b: string) =>
+      canonical(a) === canonical(b) || wildcard(a) || wildcard(b);
+    const free: typeof inventory = [];
+    for (const allocation of inventory) {
+      if (allocation.assigned || !isIP(allocation.ip)) continue;
+      if (
+        inventory.some(
+          (existing) =>
+            existing.assigned &&
+            existing.port === allocation.port &&
+            // Invalid assigned addresses are also unsafe to assume disjoint.
+            (!isIP(existing.ip) || overlaps(existing.ip, allocation.ip)),
+        )
+      )
+        continue;
+      if (
+        owned.some(
+          (existing) =>
+            (existing.node_id === node.id &&
+              existing.pterodactyl_allocation_id === allocation.id) ||
+            (existing.port === allocation.port && overlaps(existing.address, allocation.ip)),
+        )
+      )
+        continue;
+      if (
+        free.some(
+          (existing) =>
+            existing.id === allocation.id ||
+            (existing.port === allocation.port && overlaps(existing.ip, allocation.ip)),
+        )
+      )
+        continue;
+      free.push(allocation);
+    }
     const roles = mapping.port_roles;
     if (!roles.length || free.length < roles.length || roles.filter((r) => r.primary).length !== 1)
       throw new DomainError('allocation_unavailable');
@@ -356,6 +398,14 @@ export async function createManagedServer(
     await tx.insertInto('server_allocations').values(allocationRows).execute();
     const primary = allocationRows.find((r) => r.is_primary);
     if (!primary) throw new DomainError('configuration_invalid');
+    const environment = { ...mapping.environment };
+    for (const role of roles) {
+      const variable = (role as typeof role & { environmentVariable?: string }).environmentVariable;
+      if (variable)
+        environment[variable] = String(
+          allocationRows.find((allocation) => allocation.role === role.role)?.port,
+        );
+    }
     const provision: ProvisionPlan = {
       name: value.name,
       externalId,
@@ -363,7 +413,7 @@ export async function createManagedServer(
       eggId: mapping.egg_id,
       dockerImage: mapping.docker_image,
       startup: mapping.startup,
-      environment: mapping.environment,
+      environment,
       limits: value.limits,
       featureLimits: mapping.feature_limits,
       allocation: {
@@ -415,16 +465,42 @@ export async function enqueueServerOperation(
         !['delete', 'reinstall', 'wipe'].includes(value.action))
     )
       throw new DomainError('conflict');
+    if (
+      await tx
+        .selectFrom('installation_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst()
+    )
+      throw new DomainError('operation_uncertain');
     const jobId = randomUUID();
     const plan: Record<string, unknown> = {};
+    const reservation = await tx
+      .selectFrom('resource_reservations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (
+      ['configure', 'reinstall', 'wipe', 'restore', 'delete'].includes(value.action) &&
+      reservation
+    )
+      throw new DomainError('operation_uncertain');
+    if (value.action === 'start' || value.action === 'restart')
+      plan.reservationCreated = !reservation;
     if (value.action === 'start' || value.action === 'restart')
       await reserveStartInTransaction(tx, serverId, jobId, value.action, env);
-    if (value.action === 'stop')
+    if (value.action === 'stop') {
       await tx
         .updateTable('resource_reservations')
         .set({ state: 'stopping', operation_id: jobId, updated_at: new Date() })
         .where('server_id', '=', serverId)
         .execute();
+      await tx
+        .updateTable('managed_servers')
+        .set({ intent: 'manually_stopped' })
+        .where('id', '=', serverId)
+        .execute();
+    }
     if (
       ['wipe', 'reinstall', 'restore', 'configure', 'delete'].includes(value.action) &&
       !['offline', 'unknown'].includes(server.runtime_state)
@@ -531,6 +607,10 @@ export async function setProjectMember(
     if (!project) throw new DomainError('not_found');
     assertPermission(context, 'server:manage', { ownerUserId: project.owner_id });
     if (value.userId === project.owner_id) throw new DomainError('conflict');
+    if (
+      !(await tx.selectFrom('user').select('id').where('id', '=', value.userId).executeTakeFirst())
+    )
+      throw new DomainError('not_found');
     if (value.role)
       await tx
         .insertInto('project_members')
@@ -572,11 +652,16 @@ export async function setRuntimeMapping(
           .array(
             z
               .object({
-                role: z.string(),
+                role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+                environmentVariable: z
+                  .string()
+                  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
+                  .optional(),
                 protocols: z
                   .array(z.enum(['tcp', 'udp']))
                   .min(1)
-                  .max(2),
+                  .max(2)
+                  .refine((protocols) => new Set(protocols).size === protocols.length),
                 primary: z.boolean(),
               })
               .strict(),
@@ -605,7 +690,12 @@ export async function setRuntimeMapping(
     !manifest.runtimes.some((r) => r.id === value.runtimeId) ||
     value.portRoles.filter((r) => r.primary).length !== 1 ||
     new Set(value.portRoles.map((r) => r.role)).size !== value.portRoles.length ||
-    value.featureLimits.allocations < value.portRoles.length
+    value.featureLimits.allocations < value.portRoles.length ||
+    new Set(
+      value.portRoles.flatMap((role) =>
+        role.environmentVariable ? [role.environmentVariable] : [],
+      ),
+    ).size !== value.portRoles.filter((role) => role.environmentVariable).length
   )
     throw new DomainError('validation_failed');
   for (const port of manifest.ports) {
@@ -625,6 +715,7 @@ export async function setRuntimeMapping(
   await adapter.getNode(node.pterodactyl_node_id);
   const egg = await adapter.getEgg(value.nestId, value.eggId);
   if (
+    !supportsStopConfirmation(egg) ||
     egg.nest !== value.nestId ||
     ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(value.dockerImage)
   )
@@ -632,16 +723,6 @@ export async function setRuntimeMapping(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const mappingId = value.id ?? randomUUID();
-    if (
-      value.id &&
-      (await tx
-        .selectFrom('managed_servers')
-        .select('id')
-        .where('mapping_id', '=', value.id)
-        .where('deleted_at', 'is', null)
-        .executeTakeFirst())
-    )
-      throw new DomainError('conflict');
     const row = {
       id: mappingId,
       game_id: value.gameId,
@@ -656,6 +737,36 @@ export async function setRuntimeMapping(
       feature_limits: JSON.stringify(value.featureLimits),
       enabled: value.enabled,
     };
+    const previous = value.id
+      ? await tx
+          .selectFrom('runtime_egg_mappings')
+          .selectAll()
+          .where('id', '=', value.id)
+          .executeTakeFirst()
+      : undefined;
+    if (
+      previous &&
+      (await tx
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('mapping_id', '=', mappingId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst())
+    ) {
+      for (const key of [
+        'game_id',
+        'runtime_id',
+        'node_id',
+        'nest_id',
+        'egg_id',
+        'docker_image',
+        'startup',
+      ] as const)
+        if (previous[key] !== row[key]) throw new DomainError('conflict');
+      for (const key of ['environment', 'port_roles', 'feature_limits'] as const)
+        if (!isDeepStrictEqual(previous[key], JSON.parse(row[key])))
+          throw new DomainError('conflict');
+    }
     await tx
       .insertInto('runtime_egg_mappings')
       .values(row)

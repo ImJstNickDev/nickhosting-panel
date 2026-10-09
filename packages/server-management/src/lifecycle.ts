@@ -1,31 +1,47 @@
 import { randomUUID } from 'node:crypto';
-import { DomainError, safeError } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type AuthContext, assertPermission, DomainError, safeError } from '@nickhosting/core';
+import { type Database, recordAudit } from '@nickhosting/database';
 import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
   type BuildUpdate,
   type PterodactylAdapter,
   PterodactylError,
+  limitsSchema as providerLimitsSchema,
   provisionPlanSchema,
   type Resources,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
-import { lockResources } from './admission.js';
+import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
+import { effectiveNodeOverhead } from './configuration.js';
 
 type Server = Selectable<Database['managed_servers']>;
 type Operation = Selectable<Database['server_operations']>;
 type Result = 'succeeded' | 'failed' | 'waiting' | 'deferred' | 'duplicate' | 'missing';
 export interface LifecycleOptions {
   adapter: PterodactylAdapter;
+  env?: Environment;
   /** Rechecks current actor, subject, support lifetime and project access before new effects. */
   authorizeEffect: (jobId: string, serverId: string, connection: Kysely<Database>) => Promise<void>;
+  /** Production binds host-local observations to this server's current physical host. */
+  verifyObservationHost?: (serverId: string, connection: Kysely<Database>) => Promise<void>;
+  /** Trusted host-bound running process start. Null proves non-running/absent;
+   * unavailability must throw. Production always supplies this observer. */
+  observeProcessStart?: (serverId: string, connection: Kysely<Database>) => Promise<string | null>;
+  /** Physical proof for a no-op stop, only when no compute/installer reservation exists. */
+  confirmAlreadyStopped?: (serverId: string, connection: Kysely<Database>) => Promise<boolean>;
   /** Fresh admission revalidation before a power effect, not an implicit reservation. */
   reserveStart?: (
     serverId: string,
     jobId: string,
     action: 'start' | 'restart',
+    connection: Kysely<Database>,
+  ) => Promise<void>;
+  /** Physical-only installer admission, refreshed before each new installer effect. */
+  reserveInstallation?: (
+    serverId: string,
+    jobId: string,
     connection: Kysely<Database>,
   ) => Promise<void>;
   /** Revokes external access and DNS first; must itself reconcile uncertain effects. */
@@ -48,6 +64,21 @@ const installationPending = (remote: ApplicationServer) =>
   remote.status === 'installing' || !remote.container.installed;
 const nowOf = (options: LifecycleOptions) => options.now?.() ?? new Date();
 const settleOf = (options: LifecycleOptions) => options.settleMs ?? 21_000;
+
+/** Docker RFC3339Nano timestamps cannot be compared through Date alone: doing
+ * so loses sub-millisecond evidence at the intent or future-time boundary. */
+function processStartTime(value: unknown): bigint | null {
+  if (typeof value !== 'string' || !z.iso.datetime({ offset: true }).safeParse(value).success)
+    return null;
+  const parts = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+    value,
+  );
+  if (!parts) return null;
+  const seconds = Date.parse(`${parts[1]}${parts[3]}`);
+  if (!Number.isFinite(seconds)) return null;
+  const nanos = BigInt(seconds) * 1_000_000n + BigInt((parts[2] ?? '').padEnd(9, '0'));
+  return nanos > 0n ? nanos : null;
+}
 
 /** A PostgreSQL session lock spans bounded provider calls but no DB transaction does. */
 async function withServerLock<T>(
@@ -232,7 +263,12 @@ export async function processServerOperation(
         .execute();
     };
     const wait = async (reason = 'waiting', errorCode: string | null = null): Promise<Result> => {
-      const next = new Date(nowOf(options).getTime() + 2_000);
+      const poll = typeof operation.plan.pollCount === 'number' ? operation.plan.pollCount + 1 : 1;
+      const next = new Date(
+        nowOf(options).getTime() +
+          Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4)) +
+          Math.floor(Math.random() * 500),
+      );
       await db.transaction().execute(async (tx) => {
         await tx
           .updateTable('operation_jobs')
@@ -255,8 +291,9 @@ export async function processServerOperation(
           .where('job_id', '=', jobId)
           .execute();
       });
-      if (operation.plan.waitReason !== reason) {
-        await update({ plan: { ...operation.plan, waitReason: reason } });
+      const changed = operation.plan.waitReason !== reason;
+      await update({ plan: { ...operation.plan, waitReason: reason, pollCount: poll } });
+      if (changed) {
         await event('servers.operation.waiting', { phase: operation.phase, reason });
       }
       return 'waiting';
@@ -265,9 +302,77 @@ export async function processServerOperation(
       success: boolean,
       release = false,
       code: string | null = null,
+      alreadyStopped = false,
     ): Promise<Result> => {
-      await db.transaction().execute(async (tx) => {
+      let rollbackLimits: Record<string, unknown> | undefined;
+      if (
+        !success &&
+        operation.action === 'configure' &&
+        operation.plan.rejected === true &&
+        operation.effect_state === 'none'
+      ) {
+        const previous = providerLimitsSchema.safeParse(operation.plan.previousLimits);
+        if (previous.success) {
+          let remote: ApplicationServer;
+          try {
+            remote = await ownedRemote(db, server, options);
+          } catch {
+            return wait('configuration_rollback_verification', 'integration_unavailable');
+          }
+          if (
+            ['memory', 'cpu', 'disk', 'swap', 'io'].every(
+              (key) =>
+                remote.limits[key as keyof typeof remote.limits] ===
+                previous.data[key as keyof typeof previous.data],
+            ) &&
+            (remote.limits.threads ?? '') === (previous.data.threads ?? '')
+          )
+            rollbackLimits = { ...previous.data, threads: previous.data.threads ?? undefined };
+        }
+      }
+      const completed = await db.transaction().execute(async (tx) => {
         await lockResources(tx);
+        if (alreadyStopped) {
+          const compute = await tx
+            .selectFrom('resource_reservations')
+            .select('server_id')
+            .where('server_id', '=', server.id)
+            .executeTakeFirst();
+          const installation = await tx
+            .selectFrom('installation_reservations')
+            .select('server_id')
+            .where('server_id', '=', server.id)
+            .executeTakeFirst();
+          if (compute || installation) return false;
+          await tx
+            .updateTable('managed_servers')
+            .set({ intent: 'manually_stopped' })
+            .where('id', '=', server.id)
+            .execute();
+        }
+        if (
+          !success &&
+          operation.action === 'reinstall' &&
+          (operation.plan.installationEffectPrepared !== true ||
+            (operation.plan.rejected === true && operation.effect_state === 'none')) &&
+          ['pending', 'installing', 'installed', 'failed'].includes(
+            String(operation.plan.previousInstallationState),
+          )
+        )
+          await tx
+            .updateTable('managed_servers')
+            .set({
+              installation_state: operation.plan
+                .previousInstallationState as Server['installation_state'],
+            })
+            .where('id', '=', server.id)
+            .execute();
+        if (rollbackLimits)
+          await tx
+            .updateTable('managed_servers')
+            .set({ limits: JSON.stringify(rollbackLimits) })
+            .where('id', '=', server.id)
+            .execute();
         await tx
           .selectFrom('managed_servers')
           .select('id')
@@ -287,8 +392,30 @@ export async function processServerOperation(
             .where('server_id', '=', server.id)
             .execute();
         }
+        if (
+          operation.plan.installConfirmed === true ||
+          operation.plan.installationEffectPrepared !== true ||
+          (operation.effect_state === 'none' && operation.plan.rejected === true)
+        )
+          await tx
+            .deleteFrom('installation_reservations')
+            .where('server_id', '=', server.id)
+            .where('operation_id', '=', jobId)
+            .execute();
         if (release)
           await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
+        else if (
+          operation.plan.reservationCreated === true &&
+          (operation.action === 'start' ||
+            (operation.action === 'provision' && operation.plan.autoStart === true)) &&
+          (operation.plan.powerEffectPrepared !== true ||
+            (operation.effect_state === 'none' && operation.plan.rejected === true))
+        )
+          await tx
+            .deleteFrom('resource_reservations')
+            .where('server_id', '=', server.id)
+            .where('operation_id', '=', jobId)
+            .execute();
         await tx
           .updateTable('managed_servers')
           .set({ active_operation_id: null, updated_at: nowOf(options) })
@@ -308,6 +435,19 @@ export async function processServerOperation(
         await tx
           .updateTable('server_operations')
           .set({
+            plan: alreadyStopped
+              ? JSON.stringify({
+                  ...operation.plan,
+                  stopNoOp: true,
+                  stopAlreadyOfflineConfirmedAt: nowOf(options).toISOString(),
+                })
+              : !success &&
+                  operation.action === 'provision' &&
+                  server.pterodactyl_id === null &&
+                  operation.phase === 'planned' &&
+                  operation.effect_state === 'none'
+                ? JSON.stringify({ ...operation.plan, noExternalEffect: true })
+                : undefined,
             phase: success ? 'complete' : 'failed',
             effect_state: success ? 'confirmed' : operation.effect_state,
             lease_token: null,
@@ -337,8 +477,23 @@ export async function processServerOperation(
           })
           .execute();
         await tx.deleteFrom('job_outbox').where('job_id', '=', jobId).execute();
+        return true;
       });
+      if (!completed) return wait('already_stopped_reservation_changed', 'operation_uncertain');
       return success ? 'succeeded' : 'failed';
+    };
+    const requireQuiescentReservation = async () => {
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        if (
+          await tx
+            .selectFrom('resource_reservations')
+            .select('server_id')
+            .where('server_id', '=', server.id)
+            .executeTakeFirst()
+        )
+          throw new DomainError('operation_uncertain');
+      });
     };
     const effect = async <T>(
       phase: string,
@@ -346,6 +501,25 @@ export async function processServerOperation(
       patch?: (result: T) => Record<string, unknown>,
     ): Promise<boolean> => {
       await options.authorizeEffect(jobId, server.id, db);
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        if (
+          await tx
+            .selectFrom('installation_reservations')
+            .select('server_id')
+            .where('server_id', '=', server.id)
+            .where('operation_id', '!=', jobId)
+            .executeTakeFirst()
+        )
+          throw new DomainError('operation_uncertain');
+      });
+      if (['configure', 'reinstall', 'wipe', 'restore', 'delete'].includes(operation.action))
+        await requireQuiescentReservation();
+      const attempts = z
+        .record(z.string(), z.number().int().nonnegative())
+        .parse(operation.plan.effectAttempts ?? {});
+      const attempt = (attempts[phase] ?? 0) + 1;
+      if (attempt > job.max_attempts) throw new DomainError('operation_uncertain');
       // Corroborate immediately before the effect, not only when the job was authorized.
       if (operation.action !== 'provision' || server.pterodactyl_id !== null)
         await ownedRemote(db, server, options);
@@ -353,11 +527,20 @@ export async function processServerOperation(
         phase,
         effect_state: 'prepared',
         effect_started_at: nowOf(options),
-        plan: { ...operation.plan, acknowledged: false, waitReason: null },
+        plan: {
+          ...operation.plan,
+          acknowledged: false,
+          waitReason: null,
+          effectAttempts: { ...attempts, [phase]: attempt },
+          ...(['power', 'initial_start'].includes(phase) ? { powerEffectPrepared: true } : {}),
+          ...(['provision', 'reinstall'].includes(phase)
+            ? { installationEffectPrepared: true }
+            : {}),
+        },
       });
       await db
         .updateTable('operation_jobs')
-        .set({ attempts: sql<number>`attempts + 1` })
+        .set({ attempts: sql<number>`greatest(attempts, ${attempt})` })
         .where('id', '=', jobId)
         .execute();
       await event('servers.operation.effect_prepared', { phase });
@@ -383,6 +566,56 @@ export async function processServerOperation(
       });
       await options.checkpoint?.('confirmed', operation);
       return true;
+    };
+    const installationCallbacks = (mutating: boolean) => ({
+      authorize: async () => {
+        try {
+          await options.verifyObservationHost?.(server.id, db);
+          if (mutating) await options.authorizeEffect(jobId, server.id, db);
+          await ownedRemote(db, server, options);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      onConfirmed: async () => {
+        await db.transaction().execute(async (tx) => {
+          await lockResources(tx);
+          await tx
+            .updateTable('server_operations')
+            .set({
+              plan: JSON.stringify({
+                ...operation.plan,
+                installConfirmed: true,
+                installConfirmedAt: nowOf(options).toISOString(),
+              }),
+              updated_at: nowOf(options),
+            })
+            .where('job_id', '=', jobId)
+            .execute();
+          await tx
+            .deleteFrom('installation_reservations')
+            .where('server_id', '=', server.id)
+            .where('operation_id', '=', jobId)
+            .execute();
+        });
+        operation = await db
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', jobId)
+          .executeTakeFirstOrThrow();
+        await event('servers.operation.install_confirmed');
+      },
+    });
+    const observeInstallation = async () => {
+      if (operation.plan.installConfirmed === true) return true;
+      await options.adapter.confirmInstallation(
+        server.pterodactyl_id ?? 0,
+        server.pterodactyl_identifier ?? '',
+        installationCallbacks(false),
+      );
+      // A return value or a later cleared Panel status cannot substitute for persisted proof.
+      return operation.plan.installConfirmed === true;
     };
     const settled = () =>
       operation.effect_started_at !== null &&
@@ -459,6 +692,8 @@ export async function processServerOperation(
         if (!server.pterodactyl_id) {
           if (operation.phase === 'planned') {
             if (remote) throw new DomainError('conflict');
+            if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
+            await options.reserveInstallation(server.id, jobId, db);
             await effect('provision', () => options.adapter.createServer(plan));
             remote = await options.adapter.findServerByExternalId(server.external_id);
           }
@@ -478,7 +713,7 @@ export async function processServerOperation(
               pterodactyl_id: remote.id,
               pterodactyl_uuid: remote.uuid,
               pterodactyl_identifier: remote.identifier,
-              installation_state: installed(remote) ? 'installed' : 'installing',
+              installation_state: 'installing',
               updated_at: nowOf(options),
             })
             .where('id', '=', server.id)
@@ -491,7 +726,7 @@ export async function processServerOperation(
           await update({ phase: 'installation', effect_state: 'confirmed' });
         }
         remote = await ownedRemote(db, server, options);
-        if (remote.status === 'install_failed') {
+        if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'failed' })
@@ -499,6 +734,9 @@ export async function processServerOperation(
             .execute();
           return finish(false, false, 'integration_unavailable');
         }
+        if (!(await observeInstallation()))
+          return wait('installation_terminal_unproven', 'operation_uncertain');
+        remote = await ownedRemote(db, server, options);
         if (!installed(remote)) return wait('installation');
         const current = await resources();
         await db
@@ -519,15 +757,21 @@ export async function processServerOperation(
             });
             return finish(true);
           }
-          if (current.current_state === 'offline') {
-            await event('servers.operation.initial_start_failed');
-            return finish(true, true);
-          }
+          if (current.current_state === 'offline')
+            return wait('start_preboot_or_unknown', 'operation_uncertain');
           return wait('power_confirmation');
         }
         if (current.current_state !== 'offline') return wait('unexpected_provision_power_state');
         if (operation.plan.autoStart === true) {
           if (!options.reserveStart) throw new DomainError('configuration_invalid');
+          if (typeof operation.plan.reservationCreated !== 'boolean') {
+            const priorReservation = await db
+              .selectFrom('resource_reservations')
+              .select('server_id')
+              .where('server_id', '=', server.id)
+              .executeTakeFirst();
+            await update({ plan: { ...operation.plan, reservationCreated: !priorReservation } });
+          }
           try {
             await options.reserveStart(server.id, jobId, 'start', db);
           } catch (error) {
@@ -560,15 +804,14 @@ export async function processServerOperation(
           .where('operation.action', '=', 'provision')
           .executeTakeFirst();
         if (
-          !rejected ||
-          rejected.state !== 'failed' ||
+          rejected?.state !== 'failed' ||
           rejected.effect_state !== 'none' ||
-          rejected.plan.rejected !== true
+          (rejected.plan.rejected !== true && rejected.plan.noExternalEffect !== true)
         )
           throw new DomainError('operation_uncertain');
         if (await options.adapter.findServerByExternalId(server.external_id))
           throw new DomainError('provenance_mismatch');
-        // Definitively rejected provisioning has no remote identity and no possible remote effect.
+        // Durable pre-effect failure or definite rejection plus corroborated absence proves no remote asset.
         return finish(true, true);
       }
       let remote: ApplicationServer;
@@ -590,6 +833,27 @@ export async function processServerOperation(
         const action = operation.action as 'start' | 'stop' | 'restart';
         const current = await resources();
         if (operation.phase === 'planned') {
+          if (
+            action === 'stop' &&
+            current.current_state === 'offline' &&
+            options.confirmAlreadyStopped
+          ) {
+            const reservation = await db
+              .selectFrom('resource_reservations')
+              .select('server_id')
+              .where('server_id', '=', server.id)
+              .executeTakeFirst();
+            if (!reservation) {
+              try {
+                if (!(await options.confirmAlreadyStopped(server.id, db)))
+                  return wait('already_stopped_unproven', 'operation_uncertain');
+              } catch {
+                return wait('already_stopped_unproven', 'operation_uncertain');
+              }
+              await options.authorizeEffect(jobId, server.id, db);
+              return finish(true, false, null, true);
+            }
+          }
           if (action !== 'stop') {
             for (const key of ['memory', 'cpu', 'disk', 'swap', 'io'] as const) {
               if (remote.limits[key] !== server.limits[key])
@@ -605,16 +869,74 @@ export async function processServerOperation(
               .executeTakeFirst();
             if (!reservation) throw new DomainError('conflict');
           }
+          let previousProcessStartedAt: string | null | undefined;
+          if (action === 'restart' && options.observeProcessStart) {
+            try {
+              previousProcessStartedAt = await options.observeProcessStart(server.id, db);
+              const previousTime = processStartTime(previousProcessStartedAt);
+              if (
+                previousProcessStartedAt !== null &&
+                (previousTime === null ||
+                  previousTime > BigInt(nowOf(options).getTime()) * 1_000_000n)
+              )
+                return wait('restart_baseline_unavailable', 'operation_uncertain');
+            } catch {
+              return wait('restart_baseline_unavailable', 'operation_uncertain');
+            }
+          }
           await update({
-            plan: { ...operation.plan, previousUptime: current.resources.uptime ?? null },
+            plan: {
+              ...operation.plan,
+              previousUptime: current.resources.uptime ?? null,
+              ...(action === 'restart' && options.observeProcessStart
+                ? { previousProcessStartedAt }
+                : {}),
+            },
           });
-          await effect('power', () =>
-            options.adapter.power(server.pterodactyl_identifier ?? '', action),
-          );
+          if (action === 'stop') {
+            await effect('power', async () => {
+              const result = await options.adapter.stopWithConfirmation(
+                server.pterodactyl_id ?? 0,
+                server.pterodactyl_identifier ?? '',
+                {
+                  authorize: async () => {
+                    try {
+                      await options.verifyObservationHost?.(server.id, db);
+                      await options.authorizeEffect(jobId, server.id, db);
+                      await ownedRemote(db, server, options);
+                      return true;
+                    } catch {
+                      return false;
+                    }
+                  },
+                  onConfirmed: async () => {
+                    await update({
+                      plan: {
+                        ...operation.plan,
+                        stopConfirmed: true,
+                        stopConfirmedAt: nowOf(options).toISOString(),
+                      },
+                    });
+                    await event('servers.operation.stop_confirmed');
+                  },
+                },
+              );
+              // The persisted callback is the proof. A bare helper return cannot replace it.
+              if (!result.confirmed || operation.plan.stopConfirmed !== true)
+                throw new PterodactylError('unavailable', 'client', 'unknown');
+            });
+          } else
+            await effect('power', () =>
+              options.adapter.power(server.pterodactyl_identifier ?? '', action),
+            );
           return wait('power_confirmation');
         }
         if (!settled()) return wait('resource_cache_expiry');
         if (action === 'stop' && current.current_state === 'offline') {
+          // The backend adapter must corroborate its ordered WebSocket transition
+          // with trusted, host-bound Docker non-running evidence before persisting proof.
+          if (operation.plan.stopConfirmed !== true)
+            return wait('stop_terminal_unproven', 'operation_uncertain');
           await db
             .updateTable('managed_servers')
             .set({ intent: 'manually_stopped' })
@@ -623,13 +945,44 @@ export async function processServerOperation(
           return finish(true, true);
         }
         if (action !== 'stop' && current.current_state === 'running') {
-          const restarted =
-            operation.plan.acknowledged === true ||
-            operation.plan.transitionObserved === true ||
-            (typeof operation.plan.previousUptime === 'number' &&
-              current.resources.uptime !== undefined &&
-              current.resources.uptime < operation.plan.previousUptime);
-          if (action === 'restart' && !restarted) return wait('restart_outcome_unknown');
+          if (action === 'restart' && options.observeProcessStart) {
+            let startedAt: string | null;
+            try {
+              startedAt = await options.observeProcessStart(server.id, db);
+            } catch {
+              return wait('restart_terminal_unproven', 'operation_uncertain');
+            }
+            const started = processStartTime(startedAt);
+            const previous = operation.plan.previousProcessStartedAt;
+            const previousTime = processStartTime(previous);
+            if (
+              started === null ||
+              !operation.effect_started_at ||
+              started <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
+              started > BigInt(nowOf(options).getTime()) * 1_000_000n ||
+              (previous !== undefined &&
+                previous !== null &&
+                (previousTime === null || started === previousTime))
+            )
+              return wait('restart_terminal_unproven', 'operation_uncertain');
+            await update({
+              plan: {
+                ...operation.plan,
+                restartConfirmed: true,
+                restartConfirmedAt: nowOf(options).toISOString(),
+                restartProcessStartedAt: startedAt,
+              },
+            });
+          } else if (action === 'restart') {
+            // Isolated legacy fixtures can omit the host observer. Production
+            // always supplies it and must never fall back to cached uptime.
+            const restarted =
+              operation.plan.transitionObserved === true ||
+              (typeof operation.plan.previousUptime === 'number' &&
+                current.resources.uptime !== undefined &&
+                current.resources.uptime < operation.plan.previousUptime);
+            if (!restarted) return wait('restart_outcome_unknown');
+          }
           await db
             .updateTable('resource_reservations')
             .set({ state: 'running', updated_at: nowOf(options) })
@@ -638,7 +991,7 @@ export async function processServerOperation(
           return finish(true);
         }
         if (action === 'start' && current.current_state === 'offline')
-          return finish(false, true, 'integration_unavailable');
+          return wait('start_preboot_or_unknown', 'operation_uncertain');
         if (action === 'restart' && current.current_state !== 'running')
           await update({ plan: { ...operation.plan, transitionObserved: true } });
         return wait('power_confirmation');
@@ -647,6 +1000,7 @@ export async function processServerOperation(
         if (await backup()) return finish(true);
         return wait('backup_confirmation');
       }
+      await requireQuiescentReservation();
       if (!(await offline())) return wait('offline_confirmation');
       if (operation.plan.backupBefore === true && operation.plan.backupComplete !== true) {
         if (!(await backup())) return wait('backup_confirmation');
@@ -756,25 +1110,40 @@ export async function processServerOperation(
       }
       if (operation.action === 'reinstall' || operation.action === 'wipe') {
         if (operation.phase !== 'reinstall') {
+          if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
+          await options.reserveInstallation(server.id, jobId, db);
+          if (operation.plan.previousInstallationState === undefined)
+            await update({
+              plan: { ...operation.plan, previousInstallationState: server.installation_state },
+            });
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'installing' })
             .where('id', '=', server.id)
             .execute();
-          await effect('reinstall', () =>
-            options.adapter.reinstall(server.pterodactyl_identifier ?? ''),
-          );
+          await effect('reinstall', async () => {
+            await options.adapter.reinstallWithConfirmation(
+              server.pterodactyl_id ?? 0,
+              server.pterodactyl_identifier ?? '',
+              installationCallbacks(true),
+            );
+            if (operation.plan.installConfirmed !== true)
+              throw new PterodactylError('unavailable', 'client', 'unknown');
+          });
           return wait('installation');
         }
-        if (installationPending(remote))
-          await update({ plan: { ...operation.plan, transitionObserved: true } });
-        if (remote.status === 'install_failed')
+        if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
+          await db
+            .updateTable('managed_servers')
+            .set({ installation_state: 'failed' })
+            .where('id', '=', server.id)
+            .execute();
           return finish(false, false, 'integration_unavailable');
-        if (
-          installed(remote) &&
-          settled() &&
-          (operation.plan.acknowledged === true || operation.plan.transitionObserved === true)
-        ) {
+        }
+        if (!(await observeInstallation()))
+          return wait('installation_terminal_unproven', 'operation_uncertain');
+        remote = await ownedRemote(db, server, options);
+        if (installed(remote) && settled()) {
           await db
             .updateTable('managed_servers')
             .set({ installation_state: 'installed' })
@@ -793,6 +1162,21 @@ export async function processServerOperation(
           );
           if (!snapshot.completed_at || !snapshot.is_successful || !snapshot.checksum)
             throw new DomainError('validation_failed');
+          const copies = (
+            await options.adapter.listBackups(server.pterodactyl_identifier ?? '')
+          ).filter((backup) => backup.name === snapshot.name);
+          if (copies.length !== 1 || copies[0]?.uuid !== backupId)
+            throw new DomainError('conflict');
+          const baseline = await options.adapter.listBackupActivity(
+            server.pterodactyl_identifier ?? '',
+          );
+          await update({
+            plan: {
+              ...operation.plan,
+              restoreBackupName: snapshot.name,
+              restoreActivityBaseline: baseline.map((event) => event.id),
+            },
+          });
           await effect('restore', () =>
             options.adapter.restoreBackup(
               server.pterodactyl_identifier ?? '',
@@ -802,15 +1186,50 @@ export async function processServerOperation(
           );
           return wait('restore_confirmation');
         }
-        if (remote.status === 'restoring_backup')
-          await update({ plan: { ...operation.plan, transitionObserved: true } });
+        // Panel clears restoring_backup for both success and failure. Only a new
+        // correlated terminal activity event proves the outcome; HTTP 204 is not success.
         if (
-          !remote.status &&
-          settled() &&
-          (operation.plan.acknowledged === true || operation.plan.transitionObserved === true)
+          !operation.effect_started_at ||
+          typeof operation.plan.restoreBackupName !== 'string' ||
+          !Array.isArray(operation.plan.restoreActivityBaseline)
         )
-          return finish(true, true);
-        return wait('restore_outcome_unknown');
+          return wait('restore_evidence_missing', 'operation_uncertain');
+        const baseline = new Set(z.array(z.string()).parse(operation.plan.restoreActivityBaseline));
+        const activities = await options.adapter.listBackupActivity(
+          server.pterodactyl_identifier ?? '',
+        );
+        const boundary = Math.floor(operation.effect_started_at.getTime() / 1000) * 1000;
+        const terminal = activities.filter(
+          (event) =>
+            !baseline.has(event.id) &&
+            event.properties.name === operation.plan.restoreBackupName &&
+            Date.parse(event.timestamp) >= boundary &&
+            Date.parse(event.timestamp) <= nowOf(options).getTime() + 1000 &&
+            [
+              'server:backup.restore-complete',
+              'server.backup.restore-failed',
+              'server:backup.restore-failed',
+            ].includes(event.event),
+        );
+        if (terminal.length !== 1 || remote.status || !settled())
+          return wait('restore_evidence_pending', 'operation_uncertain');
+        const evidence = terminal[0];
+        if (!evidence) return wait('restore_evidence_pending', 'operation_uncertain');
+        await update({
+          plan: {
+            ...operation.plan,
+            restoreEvidence: {
+              id: evidence.id,
+              event: evidence.event,
+              timestamp: evidence.timestamp,
+            },
+          },
+        });
+        return finish(
+          evidence.event === 'server:backup.restore-complete',
+          true,
+          evidence.event === 'server:backup.restore-complete' ? null : 'integration_unavailable',
+        );
       }
       throw new DomainError('validation_failed');
     } catch (error) {
@@ -873,7 +1292,17 @@ export async function reconcileManagedServer(
       .where('deleted_at', 'is', null)
       .executeTakeFirst();
     if (!server?.pterodactyl_id) return 'deferred';
-    await ownedRemote(db, server, options);
+    const remote = await ownedRemote(db, server, options);
+    const state = ['install_failed', 'reinstall_failed'].includes(remote.status ?? '')
+      ? 'failed'
+      : installationPending(remote)
+        ? 'installing'
+        : server.installation_state;
+    await db
+      .updateTable('managed_servers')
+      .set({ installation_state: state })
+      .where('id', '=', server.id)
+      .execute();
     const current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
     const now = nowOf(options);
     await observation(db, server, current, now);
@@ -908,6 +1337,29 @@ export async function reconcileManagedServer(
         .selectAll()
         .where('server_id', '=', server.id)
         .executeTakeFirst();
+      const overhead = effectiveNodeOverhead(node, options.env);
+      const physicalMemory = physicalMemoryMiB(server.limits.memory, overhead);
+      const installation = await tx
+        .selectFrom('installation_reservations')
+        .selectAll()
+        .where('server_id', '=', server.id)
+        .executeTakeFirst();
+      const installationMemory = physicalMemoryMiB(
+        Math.max(server.limits.memory, node.installer_memory_mib),
+        overhead,
+      );
+      if (installation && installationMemory > installation.memory_mib)
+        await tx
+          .updateTable('installation_reservations')
+          .set({ memory_mib: installationMemory, updated_at: now })
+          .where('server_id', '=', server.id)
+          .execute();
+      if (reservation && physicalMemory > reservation.physical_memory_mib)
+        await tx
+          .updateTable('resource_reservations')
+          .set({ physical_memory_mib: physicalMemory, updated_at: now })
+          .where('server_id', '=', server.id)
+          .execute();
       if (current.current_state !== 'offline') {
         if (reservation && !locked.active_operation_id)
           await tx
@@ -926,6 +1378,7 @@ export async function reconcileManagedServer(
               owner_id: server.owner_id,
               physical_host_id: node.physical_host_id,
               memory_mib: server.limits.memory,
+              physical_memory_mib: physicalMemory,
               cpu_percent: server.limits.cpu,
               operation_id: locked.active_operation_id ?? randomUUID(),
               state: current.current_state === 'running' ? 'running' : 'uncertain',
@@ -946,30 +1399,131 @@ export async function reconcileManagedServer(
             .execute();
         }
       } else if (reservation && !locked.active_operation_id) {
-        if (reservation.state !== 'uncertain') {
-          await tx
-            .updateTable('resource_reservations')
-            .set({ state: 'uncertain', updated_at: now })
-            .where('server_id', '=', server.id)
-            .execute();
-          return;
-        }
-        const latest = await tx
-          .selectFrom('server_operations')
-          .select('effect_started_at')
+        // Wings automatic crash recovery can remain offline while a new start is
+        // already executing. A cached offline sample does not prove final quiescence.
+        await tx
+          .updateTable('resource_reservations')
+          .set({ state: 'uncertain', updated_at: now })
           .where('server_id', '=', server.id)
-          .where('effect_started_at', 'is not', null)
-          .orderBy('effect_started_at', 'desc')
-          .limit(1)
-          .executeTakeFirst();
-        const barrier = Math.max(
-          reservation.updated_at.getTime(),
-          latest?.effect_started_at?.getTime() ?? 0,
-        );
-        if (now.getTime() - barrier >= settleOf(options))
-          await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
+          .execute();
       }
     });
     return 'observed';
+  });
+}
+
+/** Owner acknowledgment ends a quarantined ambiguous job without claiming remote success. */
+export async function resolveUncertainOperation(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  context: AuthContext,
+  serverId: string,
+  input: unknown,
+): Promise<'resolved' | 'deferred'> {
+  assertPermission(context, 'platform:manage');
+  if (context.sessionType !== 'regular') throw new DomainError('forbidden');
+  const parsed = z
+    .strictObject({
+      jobId: z.uuid(),
+      confirm: z.literal(true),
+      reason: z.string().trim().min(12).max(500),
+    })
+    .safeParse(input);
+  if (!parsed.success || !z.uuid().safeParse(serverId).success)
+    throw new DomainError('validation_failed');
+  return withServerLock(db, serverId, async (connection) => {
+    const server = await connection
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    const operation = await connection
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', parsed.data.jobId)
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (!server || !operation) throw new DomainError('not_found');
+    if (
+      server.active_operation_id !== operation.job_id ||
+      !operation.effect_started_at ||
+      Date.now() - operation.effect_started_at.getTime() < 120_000
+    )
+      throw new DomainError('conflict');
+    if (
+      ['start', 'restart', 'stop'].includes(operation.action) ||
+      operation.phase === 'initial_start'
+    )
+      throw new DomainError('operation_uncertain');
+    if (!server.pterodactyl_id) throw new DomainError('operation_uncertain');
+    const remote = await adapter.getApplicationServer(server.pterodactyl_id);
+    await verifyManagedIdentity(connection, server, remote);
+    const resources = await adapter.getResources(server.pterodactyl_identifier ?? '');
+    if (remote.status || !installed(remote) || resources.current_state !== 'offline')
+      throw new DomainError('conflict');
+    await connection.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      await tx
+        .updateTable('operation_jobs')
+        .set({
+          state: 'failed',
+          error_code: 'operation_uncertain',
+          completed_at: new Date(),
+          updated_at: new Date(),
+        })
+        .where('id', '=', operation.job_id)
+        .execute();
+      await tx
+        .updateTable('server_operations')
+        .set({
+          phase: 'owner_resolved_failed',
+          plan: JSON.stringify({
+            ...operation.plan,
+            ownerResolution: {
+              actorId: context.actorUserId,
+              reason: parsed.data.reason,
+              at: new Date().toISOString(),
+            },
+          }),
+          lease_token: null,
+          lease_until: null,
+          updated_at: new Date(),
+        })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+      await tx
+        .updateTable('managed_servers')
+        .set({ active_operation_id: null, runtime_state: 'offline', updated_at: new Date() })
+        .where('id', '=', serverId)
+        .where('active_operation_id', '=', operation.job_id)
+        .execute();
+      // Retained reservations stay quarantined; elapsed offline time does not prove quiescence.
+      await tx
+        .updateTable('resource_reservations')
+        .set({ state: 'uncertain', updated_at: new Date() })
+        .where('server_id', '=', serverId)
+        .execute();
+      await tx.deleteFrom('job_outbox').where('job_id', '=', operation.job_id).execute();
+      await recordAudit(tx, context, 'server.operation.owner_resolution', {
+        serverId,
+        jobId: operation.job_id,
+        reason: parsed.data.reason,
+        outcome: 'acknowledged_unknown_failure',
+      });
+      await tx
+        .insertInto('server_events')
+        .values({
+          server_id: serverId,
+          job_id: operation.job_id,
+          actor_id: context.actorUserId,
+          subject_id: context.subjectUserId,
+          support_session_id: null,
+          message_key: 'servers.operation.owner_resolution',
+          data: JSON.stringify({ outcome: 'acknowledged_unknown_failure' }),
+        })
+        .execute();
+    });
+    return 'resolved' as const;
   });
 }

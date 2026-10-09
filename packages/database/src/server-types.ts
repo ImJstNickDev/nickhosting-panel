@@ -39,6 +39,9 @@ export interface ServerTables {
     physical_host_id: string;
     pterodactyl_node_id: number;
     provision_user_id: number;
+    installer_memory_mib: Generated<number>;
+    installer_cpu_percent: Generated<number>;
+    memory_overhead_percent: Generated<number>;
     enabled: Generated<boolean>;
   };
   runtime_egg_mappings: {
@@ -51,7 +54,14 @@ export interface ServerTables {
     docker_image: string;
     startup: string;
     environment: Json<Record<string, string>>;
-    port_roles: Json<Array<{ role: string; protocols: ('tcp' | 'udp')[]; primary: boolean }>>;
+    port_roles: Json<
+      Array<{
+        role: string;
+        protocols: ('tcp' | 'udp')[];
+        primary: boolean;
+        environmentVariable?: string;
+      }>
+    >;
     feature_limits: Json<{ databases: number; allocations: number; backups: number }>;
     enabled: Generated<boolean>;
   };
@@ -95,6 +105,7 @@ export interface ServerTables {
     owner_id: string;
     physical_host_id: string;
     memory_mib: number;
+    physical_memory_mib: number;
     cpu_percent: number;
     operation_id: string;
     state: 'starting' | 'running' | 'restarting' | 'stopping' | 'uncertain';
@@ -107,6 +118,15 @@ export interface ServerTables {
     cpu_percent: number;
     storage_mib: string;
     expires_at: Date | null;
+    updated_at: Generated<Date>;
+  };
+  installation_reservations: {
+    server_id: string;
+    physical_host_id: string;
+    operation_id: string;
+    memory_mib: number;
+    cpu_percent: number;
+    created_at: Generated<Date>;
     updated_at: Generated<Date>;
   };
   host_observations: {

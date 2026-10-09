@@ -15,6 +15,7 @@ export type ConsoleEvent =
   | { type: 'console'; data: string }
   | { type: 'status'; data: 'offline' | 'starting' | 'running' | 'stopping' }
   | { type: 'stats'; data: ConsoleStats }
+  | { type: 'installation'; phase: 'completed' }
   | { type: 'error'; code: 'integration_unavailable' }
   | { type: 'closed' };
 const statsSchema = z.object({
@@ -198,7 +199,7 @@ export async function createConsoleRelay(
         return;
       }
       const event = z
-        .object({ event: z.string(), args: z.array(z.unknown()).max(32) })
+        .object({ event: z.string(), args: z.array(z.unknown()).max(32).default([]) })
         .parse(JSON.parse(text));
       if (event.event === 'auth success') {
         authenticated = true;
@@ -228,6 +229,9 @@ export async function createConsoleRelay(
           type: 'status',
           data: parseInput(z.enum(['offline', 'starting', 'running', 'stopping']), event.args[0]),
         });
+      } else if (event.event === 'install completed') {
+        // This is a completion notification, never an installation-success claim.
+        emit({ type: 'installation', phase: 'completed' });
       } else if (event.event === 'stats') {
         const stats = parseInput(z.string().max(16384), event.args[0]);
         emit({ type: 'stats', data: statsSchema.parse(JSON.parse(stats)) });

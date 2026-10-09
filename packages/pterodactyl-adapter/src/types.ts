@@ -57,8 +57,14 @@ export const eggSchema = z.object({
   docker_image: z.string(),
   docker_images: z.record(z.string(), z.string()).optional(),
   startup: z.string(),
+  config: z
+    .object({ stop: z.string().nullable(), extends: z.number().nullable().optional() })
+    .optional(),
   relationships: z
     .object({
+      config: z
+        .object({ attributes: z.object({ stop: z.string().nullable() }).nullable() })
+        .optional(),
       variables: z
         .object({
           object: z.literal('list'),
@@ -173,6 +179,14 @@ export type ClientServer = z.infer<typeof clientServerSchema>;
 export type Resources = z.infer<typeof resourcesSchema>;
 export type ServerFile = z.infer<typeof fileSchema>;
 export type Backup = z.infer<typeof backupSchema>;
+/** Safe restore evidence; upstream IPs, actor metadata and unrelated properties are stripped. */
+export const backupActivitySchema = z.object({
+  id: z.string().regex(/^[a-f0-9]{40}$/),
+  event: z.string(),
+  timestamp: z.string().datetime({ offset: true }),
+  properties: z.object({ name: z.string().optional() }).catch({}),
+});
+export type BackupActivity = z.infer<typeof backupActivitySchema>;
 export type ApplicationUser = z.infer<typeof userSchema>;
 
 export const provisionPlanSchema = z.strictObject({

@@ -234,7 +234,10 @@ export function planDnsChanges(input: {
           !ownedIds.has(entry.id) &&
           !(
             entry.comment === marker &&
-            desired.some((candidate) => key(entry as DnsRecord) === key(candidate) && equal(entry as DnsRecord, candidate))
+            desired.some(
+              (candidate) =>
+                key(entry as DnsRecord) === key(candidate) && equal(entry as DnsRecord, candidate),
+            )
           ),
       )
     )
@@ -326,7 +329,9 @@ export class CloudflareDnsProvider {
       .object({
         success: z.literal(true),
         result: z.unknown(),
-        result_info: z.object({ total_pages: z.number().int().nonnegative().optional() }).optional(),
+        result_info: z
+          .object({ total_pages: z.number().int().nonnegative().optional() })
+          .optional(),
       })
       .safeParse(response.data);
     if (!parsed.success) throw new DomainError('integration_unavailable');
@@ -380,6 +385,33 @@ export class CloudflareDnsProvider {
     ).flat();
     return planDnsChanges({ ...input, observed });
   }
+
+  /** Recover only existing records proven by the durable assignment intent; never creates DNS. */
+  async inspectOwned(input: {
+    zoneId: string;
+    ownership: DnsOwnership;
+    desired: readonly DnsRecord[];
+  }): Promise<OwnedDnsRecord[]> {
+    this.#checkOwnership(input.ownership);
+    const recovered: OwnedDnsRecord[] = [];
+    for (const desired of input.desired.map(record)) {
+      const owned = (await this.listAtName(input.zoneId, desired.name)).filter(
+        (entry) =>
+          entry.comment === ownershipMarker(input.ownership) &&
+          key(entry as DnsRecord) === key(desired),
+      );
+      if (owned.length > 1 || owned.some((entry) => !equal(entry as DnsRecord, desired)))
+        throw new DomainError('conflict');
+      if (owned[0])
+        recovered.push({
+          id: owned[0].id,
+          zoneId: input.zoneId,
+          ownership: input.ownership,
+          record: desired,
+        });
+    }
+    return recovered;
+  }
   async apply(
     changes: readonly DnsChange[],
     input: {
@@ -394,21 +426,20 @@ export class CloudflareDnsProvider {
       const desired = record(change.record);
       if (change.action === 'create') {
         const atName = await this.listAtName(zoneId, desired.name);
-        if (atName.some((entry) => entry.comment !== ownershipMarker(ownership))) throw new DomainError('conflict');
+        if (atName.some((entry) => entry.comment !== ownershipMarker(ownership)))
+          throw new DomainError('conflict');
         const matching = atName.filter((entry) => key(entry as DnsRecord) === key(desired));
         // A durable create intent plus exact marker/content recovers an acknowledged-lost POST.
         if (matching.length) {
-          if (
-            matching.length !== 1 ||
-            !equal(matching[0] as DnsRecord, desired)
-          )
+          if (matching.length !== 1 || !equal(matching[0] as DnsRecord, desired))
             throw new DomainError('conflict');
           const recovered = matching[0];
           if (!recovered) throw new DomainError('conflict');
           await input.onRecordCreated({ id: recovered.id, zoneId, ownership, record: desired });
           continue;
         }
-        if (atName.some((entry) => entry.type === 'CNAME' || desired.type === 'CNAME')) throw new DomainError('conflict');
+        if (atName.some((entry) => entry.type === 'CNAME' || desired.type === 'CNAME'))
+          throw new DomainError('conflict');
         const response = (await this.#request(zoneId, '', 'POST', {
           ...desired,
           comment: ownershipMarker(ownership),
@@ -437,7 +468,8 @@ export class CloudflareDnsProvider {
         } else {
           if (key(desired) !== key(change.previous.record)) throw new DomainError('conflict');
           const atName = await this.listAtName(zoneId, desired.name);
-          if (atName.some((entry) => entry.comment !== ownershipMarker(ownership))) throw new DomainError('conflict');
+          if (atName.some((entry) => entry.comment !== ownershipMarker(ownership)))
+            throw new DomainError('conflict');
           const updated = (await this.#request(zoneId, `/${change.previous.id}`, 'PUT', {
             ...desired,
             comment: ownershipMarker(ownership),

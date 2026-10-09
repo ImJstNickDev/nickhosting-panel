@@ -246,6 +246,26 @@ export class SftpGoAdapter {
     };
   }
 
+  /** Read-only recovery, including expired/disabled credentials. Never creates or re-enables an account. */
+  async inspectCredential(
+    input: Pick<SftpCredentialRequest, 'serverId' | 'externalServerUuid' | 'credentialId'>,
+  ): Promise<SftpCredentialRef | null> {
+    validate(uuid, input.serverId);
+    validate(uuid, input.externalServerUuid);
+    validate(uuid, input.credentialId);
+    const user = await this.#read(this.#name(input.credentialId));
+    if (!user) return null;
+    this.#assertOwned(user, input);
+    return {
+      ...input,
+      instanceId: this.#instanceId,
+      username: user.username,
+      externalUserId: user.id,
+      expiresAt: user.expiration_date,
+      quotaBytes: user.quota_size,
+    };
+  }
+
   async rotateCredential(
     ref: SftpCredentialRef,
     update: { password: string; expiresAt: number },

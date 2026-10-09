@@ -5,6 +5,7 @@
   "dependencies": {
     "@nickhosting/core": "workspace:*",
     "@nickhosting/database": "workspace:*",
-    "@nickhosting/jobs": "workspace:*"
+    "@nickhosting/jobs": "workspace:*",
+    "@nickhosting/server-management": "workspace:*"
   }
 }

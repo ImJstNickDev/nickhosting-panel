@@ -22,11 +22,13 @@ import {
 } from '@nickhosting/database';
 import { localizeAuthError, localizeError, resolveLocale } from '@nickhosting/i18n';
 import { enqueueCommand, getJobStatus } from '@nickhosting/jobs';
+import type { ManagementRuntime } from '@nickhosting/server-management';
 import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
+import { registerServerRoutes } from './servers.js';
 
 type Store = ReturnType<typeof createDatabase>;
 interface Options {
@@ -37,8 +39,9 @@ interface Options {
   env?: Readonly<Record<string, string | undefined>>;
   defaultLocale?: () => Promise<'en' | 'it'>;
   log?: (event: Record<string, unknown>) => void;
+  management?: () => Promise<ManagementRuntime>;
 }
-type Variables = {
+export type Variables = {
   identity: Identity;
   requestId: string;
   authHeaders: Headers;
@@ -329,5 +332,15 @@ export function createApp(options: Options) {
   app.get('/v1/jobs/:id', async (c) =>
     c.json(await getJobStatus(db, c.req.param('id'), await principal(c))),
   );
+  registerServerRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
   return app;
 }

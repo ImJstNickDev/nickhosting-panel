@@ -1,4 +1,8 @@
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
+import { type WebSocket, WebSocketServer } from 'ws';
+import type { ConsoleEvent, ConsoleRelay } from './console.js';
 import { createPterodactylAdapter, type ProvisionPlan, PterodactylError } from './index.js';
 
 export const fixtureUUID = 'f729c8a1-6773-467a-af3f-a7ea8704f0bd';
@@ -86,6 +90,63 @@ const config = {
 };
 
 describe('typed Pterodactyl boundary', () => {
+  it('accepts installed Panel null_resource configuration on an egg without inheritance', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        attributes: {
+          id: 2,
+          uuid: fixtureUUID,
+          name: 'fixture',
+          nest: 1,
+          description: null,
+          docker_image: 'fixture:image',
+          startup: 'fixture',
+          config: { stop: 'end', extends: null },
+          relationships: { config: { object: 'null_resource', attributes: null } },
+        },
+      }),
+    );
+    const egg = await createPterodactylAdapter({ ...config, fetcher }).getEgg(1, 2);
+    expect(egg.config?.stop).toBe('end');
+    expect(egg.relationships?.config?.attributes).toBeNull();
+  });
+  it('exposes only the API account identity and sanitized restore activity', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          attributes: {
+            id: 2,
+            admin: true,
+            email: 'private@example.test',
+            username: 'private-name',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        list([
+          {
+            id: 'a'.repeat(40),
+            event: 'server:backup.restore-complete',
+            timestamp: '2026-10-09T00:00:00+00:00',
+            properties: { name: 'unique-backup', token: 'private-token' },
+            ip: 'private-address',
+            actor: { email: 'private@example.test' },
+          },
+        ]),
+      );
+    const adapter = createPterodactylAdapter({ ...config, fetcher });
+    expect(await adapter.getAccount()).toEqual({ id: 2, admin: true });
+    expect(await adapter.listBackupActivity('f729c8a1')).toEqual([
+      {
+        id: 'a'.repeat(40),
+        event: 'server:backup.restore-complete',
+        timestamp: '2026-10-09T00:00:00+00:00',
+        properties: { name: 'unique-backup' },
+      },
+    ]);
+    expect(String(fetcher.mock.calls[1]?.[0])).toContain('filter%5Bevent%5D=backup.restore');
+  });
   it('paginates locally constructed URLs; strips token fields and keeps allocated resources distinct', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -393,4 +454,105 @@ it('uses typed backup endpoints and explicit destructive restore semantics', asy
     { path: `/api/client/servers/f729c8a1/backups/${fixtureUUID}`, method: 'DELETE' },
   ]);
   expect(JSON.parse(String(fetcher.mock.calls[3]?.[1]?.body))).toEqual({ truncate: true });
+});
+
+async function withOmittedArgsWire(
+  work: (fixture: {
+    relay: ConsoleRelay;
+    events: ConsoleEvent[];
+    incoming: { event: string; args: string[] }[];
+    send(frame: { event: string; args?: unknown[] }): void;
+  }) => Promise<void>,
+) {
+  const upstream = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await once(upstream, 'listening');
+  const origin = `ws://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+  let connected: WebSocket | undefined;
+  const incoming: { event: string; args: string[] }[] = [];
+  upstream.on('connection', (socket) => {
+    connected = socket;
+    socket.on('message', (raw) => {
+      const frame = JSON.parse(raw.toString());
+      incoming.push(frame);
+      // Wings Message.Args uses json omitempty: these control frames have no args key.
+      if (frame.event === 'auth') socket.send(JSON.stringify({ event: 'auth success' }));
+    });
+  });
+  const events: ConsoleEvent[] = [];
+  let relay: ConsoleRelay | undefined;
+  try {
+    const adapter = createPterodactylAdapter({
+      ...config,
+      webSocketOrigins: [origin],
+      timeoutMs: 1000,
+      fetcher: vi.fn<typeof fetch>().mockImplementation(async (url) =>
+        String(url).endsWith('/websocket')
+          ? Response.json({
+              data: {
+                token: `isolated-jwt-${incoming.length}`,
+                socket: `${origin}/api/servers/${fixtureUUID}/ws`,
+              },
+            })
+          : Response.json({ attributes: clientServer }),
+      ),
+    });
+    relay = await adapter.relayConsole(clientServer.identifier, {
+      authorize: async () => true,
+      onEvent: (event) => events.push(event),
+    });
+    await work({
+      relay,
+      events,
+      incoming,
+      send(frame) {
+        if (!connected) throw new Error('Isolated WebSocket not connected');
+        connected.send(JSON.stringify(frame));
+      },
+    });
+  } finally {
+    relay?.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+}
+
+describe('installed Wings control frame wire compatibility', () => {
+  it('authenticates and refreshes when auth success and token expiring omit args', async () => {
+    await withOmittedArgsWire(async ({ relay, events, incoming, send }) => {
+      expect(incoming[0]?.event).toBe('auth');
+      expect(events).toEqual([]);
+      send({ event: 'token expiring' });
+      await vi.waitFor(() =>
+        expect(incoming.filter((frame) => frame.event === 'auth')).toHaveLength(2),
+      );
+      await relay.requestStats();
+      send({ event: 'status', args: ['running'] });
+      await vi.waitFor(() => expect(events).toEqual([{ type: 'status', data: 'running' }]));
+    });
+  });
+  it('closes safely when token expired omits args', async () => {
+    await withOmittedArgsWire(async ({ events, send }) => {
+      send({ event: 'token expired' });
+      await vi.waitFor(() =>
+        expect(events).toEqual([
+          { type: 'error', code: 'integration_unavailable' },
+          { type: 'closed' },
+        ]),
+      );
+    });
+  });
+  it.each(['status', 'console output', 'install output', 'stats'])(
+    'still requires a payload for %s',
+    async (event) => {
+      await withOmittedArgsWire(async ({ events, send }) => {
+        send({ event });
+        await vi.waitFor(() =>
+          expect(events).toEqual([
+            { type: 'error', code: 'integration_unavailable' },
+            { type: 'closed' },
+          ]),
+        );
+      });
+    },
+  );
 });

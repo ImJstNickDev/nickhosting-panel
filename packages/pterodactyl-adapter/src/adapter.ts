@@ -2,6 +2,8 @@ import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
 import { createDownloadProxy, type DownloadProxyOptions } from './downloads.js';
+import { confirmInstallation } from './installation.js';
+import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import {
   createTransport,
   numericId,
@@ -16,6 +18,7 @@ import {
   allocationSchema,
   applicationServerSchema,
   type BuildUpdate,
+  backupActivitySchema,
   backupSchema,
   clientServerSchema,
   eggSchema,
@@ -47,15 +50,25 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     `${clientServer(identifier)}/backups/${parseInput(z.string().uuid(), backupId)}`;
   const download = createDownloadProxy(options);
   const adapter = {
+    getAccount: () =>
+      transport.entity(
+        'client',
+        'account',
+        z.object({ id: z.number().int().positive(), admin: z.boolean().optional() }),
+      ),
     listNodes: () => transport.list('application', 'nodes', nodeSchema),
     getNode: (id: number) => transport.entity('application', `nodes/${numericId(id)}`, nodeSchema),
     listNests: () => transport.list('application', 'nests', nestSchema),
     listEggs: (nestId: number) =>
-      transport.list('application', `nests/${numericId(nestId)}/eggs?include=variables`, eggSchema),
+      transport.list(
+        'application',
+        `nests/${numericId(nestId)}/eggs?include=variables,config`,
+        eggSchema,
+      ),
     getEgg: (nestId: number, eggId: number) =>
       transport.entity(
         'application',
-        `nests/${numericId(nestId)}/eggs/${numericId(eggId)}?include=variables`,
+        `nests/${numericId(nestId)}/eggs/${numericId(eggId)}?include=variables,config`,
         eggSchema,
       ),
     listAllocations: (nodeId: number) =>
@@ -193,6 +206,50 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     /** Installed Panel caches this snapshot for 20 seconds; it is not immediate stop confirmation. */
     getResources: (identifier: string) =>
       transport.entity('client', `${clientServer(identifier)}/resources`, resourcesSchema),
+    confirmInstallation(
+      applicationId: number,
+      identifier: string,
+      input: StopConfirmationOptions,
+    ): Promise<{ confirmed: boolean }> {
+      return confirmInstallation(
+        adapter,
+        applicationId,
+        identifier,
+        input,
+        false,
+        300000,
+        options.containerObserver,
+      );
+    },
+    reinstallWithConfirmation(
+      applicationId: number,
+      identifier: string,
+      input: StopConfirmationOptions,
+    ): Promise<{ confirmed: boolean }> {
+      return confirmInstallation(
+        adapter,
+        applicationId,
+        identifier,
+        input,
+        true,
+        300000,
+        options.containerObserver,
+      );
+    },
+    stopWithConfirmation(
+      applicationId: number,
+      identifier: string,
+      input: StopConfirmationOptions,
+    ): Promise<{ confirmed: boolean }> {
+      return stopWithConfirmation(
+        adapter,
+        applicationId,
+        identifier,
+        input,
+        60000,
+        options.containerObserver,
+      );
+    },
     power(identifier: string, signal: PowerAction) {
       return transport.empty('client', `${clientServer(identifier)}/power`, 'POST', {
         signal: parseInput(z.enum(['start', 'stop', 'restart', 'kill']), signal),
@@ -281,6 +338,12 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     },
     listBackups: (identifier: string) =>
       transport.list('client', `${clientServer(identifier)}/backups`, backupSchema),
+    listBackupActivity: (identifier: string) =>
+      transport.list(
+        'client',
+        `${clientServer(identifier)}/activity?filter%5Bevent%5D=backup.restore&sort=-timestamp`,
+        backupActivitySchema,
+      ),
     getBackup: (identifier: string, backupId: string) =>
       transport.entity('client', backupPath(identifier, backupId), backupSchema),
     createBackup(

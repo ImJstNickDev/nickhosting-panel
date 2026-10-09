@@ -6,10 +6,85 @@ import { type AuthContext, assertPermission, DomainError } from '@nickhosting/co
 import { type Database, getSettings, type HostSnapshot, recordAudit } from '@nickhosting/database';
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
-import { resolveHostOverride } from './configuration.js';
+import { effectiveNodeOverhead, resolveHostOverride } from './configuration.js';
 
 export type DB = Kysely<Database> | Transaction<Database>;
 export type Environment = Readonly<Record<string, string | undefined>>;
+/** Using binary MiB for the full configured maximum is deliberately conservative
+ * against Wings' decimal-byte conversion and its Owner-verified overhead bound. */
+export function physicalMemoryMiB(configuredMiB: number, overheadPercent: number): number {
+  if (
+    !Number.isSafeInteger(configuredMiB) ||
+    configuredMiB <= 0 ||
+    !Number.isInteger(overheadPercent) ||
+    overheadPercent < 100 ||
+    overheadPercent > 400
+  )
+    throw new DomainError('configuration_invalid');
+  const value = Math.ceil((configuredMiB * overheadPercent) / 100);
+  if (!Number.isSafeInteger(value) || value > 2147483647)
+    throw new DomainError('configuration_invalid');
+  return value;
+}
+
+/** Never lower a durable commitment. An increased runtime override immediately
+ * raises accounting for existing reservations, before their next reconciliation. */
+export async function reservedPhysicalCompute(
+  db: DB,
+  hostId: string,
+  env: Environment = {},
+  exclude: { gameServerId?: string; installationServerId?: string } = {},
+) {
+  const games = await db
+    .selectFrom('resource_reservations as reservation')
+    .innerJoin('managed_servers as server', 'server.id', 'reservation.server_id')
+    .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+    .select([
+      'reservation.server_id',
+      'reservation.memory_mib',
+      'reservation.physical_memory_mib',
+      'reservation.cpu_percent',
+      'node.memory_overhead_percent',
+    ])
+    .where('reservation.physical_host_id', '=', hostId)
+    .execute();
+  const installations = await db
+    .selectFrom('installation_reservations as reservation')
+    .innerJoin('managed_servers as server', 'server.id', 'reservation.server_id')
+    .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+    .select([
+      'reservation.server_id',
+      'reservation.memory_mib',
+      'reservation.cpu_percent',
+      'server.limits',
+      'node.installer_memory_mib',
+      'node.memory_overhead_percent',
+    ])
+    .where('reservation.physical_host_id', '=', hostId)
+    .execute();
+  let memoryMiB = 0,
+    cpuPercent = 0;
+  for (const row of games)
+    if (row.server_id !== exclude.gameServerId) {
+      memoryMiB += Math.max(
+        row.physical_memory_mib,
+        physicalMemoryMiB(row.memory_mib, effectiveNodeOverhead(row, env)),
+      );
+      cpuPercent += row.cpu_percent;
+    }
+  for (const row of installations)
+    if (row.server_id !== exclude.installationServerId) {
+      memoryMiB += Math.max(
+        row.memory_mib,
+        physicalMemoryMiB(
+          Math.max(row.limits.memory, row.installer_memory_mib),
+          effectiveNodeOverhead(row, env),
+        ),
+      );
+      cpuPercent += row.cpu_percent;
+    }
+  return { memoryMiB, cpuPercent };
+}
 const quantity = z.number().finite().nonnegative();
 export const hostSnapshotSchema = z
   .object({
@@ -62,6 +137,107 @@ export async function checkedObservation(tx: DB, hostId: string, env: Environmen
   return { host, snapshot: parsed.data, config };
 }
 
+/** Full durable maxima are charged in addition to sampled host usage: telemetry
+ * is not a coherent source of credits for either game or installer containers. */
+function assertPhysicalCompute(
+  { host, snapshot }: Awaited<ReturnType<typeof checkedObservation>>,
+  memoryMiB: number,
+  cpuPercent: number,
+) {
+  const freeMemory = Math.min(
+    snapshot.availableMemoryMiB,
+    host.memory_limit_mib - (snapshot.totalMemoryMiB - snapshot.availableMemoryMiB),
+  );
+  const freeCpu =
+    Math.min(host.cpu_limit_percent, snapshot.cpuCapacityPercent) - snapshot.cpuBusyPercent;
+  if (
+    freeMemory - host.memory_headroom_mib < memoryMiB ||
+    freeCpu - host.cpu_headroom_percent < cpuPercent
+  )
+    throw new DomainError('resources_unavailable');
+}
+
+/** Installation is physical host work, independent of the user's active game quota. */
+export async function reserveInstallationInTransaction(
+  tx: Transaction<Database>,
+  serverId: string,
+  jobId: string,
+  env: Environment = {},
+) {
+  await lockResources(tx);
+  const server = await tx
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (!server) throw new DomainError('not_found');
+  if (server.active_operation_id && server.active_operation_id !== jobId)
+    throw new DomainError('conflict');
+  const operation = await tx
+    .selectFrom('server_operations')
+    .select('action')
+    .where('job_id', '=', jobId)
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  if (!operation || !['provision', 'reinstall', 'wipe'].includes(operation.action))
+    throw new DomainError('forbidden');
+  const node = await tx
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', server.node_id)
+    .executeTakeFirstOrThrow();
+  if (!node.enabled) throw new DomainError('resources_unavailable');
+  const observed = await checkedObservation(tx, node.physical_host_id, env);
+  const installations = await tx
+    .selectFrom('installation_reservations')
+    .selectAll()
+    .where('physical_host_id', '=', node.physical_host_id)
+    .execute();
+  const current = installations.find((row) => row.server_id === serverId);
+  if (current && current.operation_id !== jobId) throw new DomainError('conflict');
+  const memoryMiB = Math.max(
+    current?.memory_mib ?? 0,
+    physicalMemoryMiB(
+      Math.max(server.limits.memory, node.installer_memory_mib),
+      effectiveNodeOverhead(node, env),
+    ),
+  );
+  const cpuPercent = Math.max(server.limits.cpu, node.installer_cpu_percent);
+  const reserved = await reservedPhysicalCompute(tx, node.physical_host_id, env, {
+    installationServerId: serverId,
+  });
+  assertPhysicalCompute(observed, reserved.memoryMiB + memoryMiB, reserved.cpuPercent + cpuPercent);
+  await tx
+    .insertInto('installation_reservations')
+    .values({
+      server_id: serverId,
+      physical_host_id: node.physical_host_id,
+      operation_id: jobId,
+      memory_mib: memoryMiB,
+      cpu_percent: cpuPercent,
+    })
+    .onConflict((conflict) =>
+      conflict.column('server_id').doUpdateSet({
+        memory_mib: memoryMiB,
+        cpu_percent: cpuPercent,
+        updated_at: new Date(),
+      }),
+    )
+    .execute();
+}
+
+export async function reserveInstallation(
+  db: Kysely<Database>,
+  serverId: string,
+  jobId: string,
+  env: Environment = {},
+) {
+  return db
+    .transaction()
+    .execute((tx) => reserveInstallationInTransaction(tx, serverId, jobId, env));
+}
+
 export async function reserveStartInTransaction(
   tx: Transaction<Database>,
   serverId: string,
@@ -83,7 +259,8 @@ export async function reserveStartInTransaction(
     .where('id', '=', server.node_id)
     .executeTakeFirstOrThrow();
   if (!node.enabled) throw new DomainError('resources_unavailable');
-  const { host, snapshot, config } = await checkedObservation(tx, node.physical_host_id, env);
+  const observed = await checkedObservation(tx, node.physical_host_id, env);
+  const { host, config } = observed;
   const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
   const current = reservations.find((r) => r.server_id === serverId);
   const limits = await tx
@@ -103,32 +280,20 @@ export async function reserveStartInTransaction(
     mine.reduce((sum, r) => sum + r.cpu_percent, 0) + server.limits.cpu > userCpu
   )
     throw new DomainError('resources_unavailable');
-  // The host snapshot already includes ALL processes, including direct Pterodactyl
-  // and unrelated services. Add only the unconsumed portion of active reservations.
-  const hostReservations = reservations.filter(
-    (r) => r.physical_host_id === host.id && r.server_id !== serverId,
+  // The host sample includes all actual workload. Panel telemetry may be cached for
+  // twenty seconds and is not coherent with this sample: crediting it can count
+  // recently freed memory twice. M2 therefore reserves the FULL configured maximum
+  // in addition to measured host usage. This deliberately errs toward admission denial.
+  const reserved = await reservedPhysicalCompute(tx, host.id, env, { gameServerId: serverId });
+  const physicalMemory = Math.max(
+    current?.physical_memory_mib ?? 0,
+    physicalMemoryMiB(server.limits.memory, effectiveNodeOverhead(node, env)),
   );
-  let pendingMemory = 0,
-    pendingCpu = 0;
-  for (const reservation of hostReservations) {
-    const usage = snapshot.managed[reservation.server_id];
-    pendingMemory += Math.max(0, reservation.memory_mib - (usage?.memoryMiB ?? 0));
-    pendingCpu += Math.max(0, reservation.cpu_percent - (usage?.cpuPercent ?? 0));
-  }
-  const ownUsage = snapshot.managed[serverId];
-  const additionalMemory = Math.max(0, server.limits.memory - (ownUsage?.memoryMiB ?? 0));
-  const additionalCpu = Math.max(0, server.limits.cpu - (ownUsage?.cpuPercent ?? 0));
-  const freeMemory = Math.min(
-    snapshot.availableMemoryMiB,
-    host.memory_limit_mib - (snapshot.totalMemoryMiB - snapshot.availableMemoryMiB),
+  assertPhysicalCompute(
+    observed,
+    reserved.memoryMiB + physicalMemory,
+    reserved.cpuPercent + server.limits.cpu,
   );
-  const freeCpu =
-    Math.min(host.cpu_limit_percent, snapshot.cpuCapacityPercent) - snapshot.cpuBusyPercent;
-  if (
-    freeMemory - host.memory_headroom_mib < pendingMemory + additionalMemory ||
-    freeCpu - host.cpu_headroom_percent < pendingCpu + additionalCpu
-  )
-    throw new DomainError('resources_unavailable');
   if (
     current &&
     current.state !== 'running' &&
@@ -143,18 +308,18 @@ export async function reserveStartInTransaction(
       owner_id: server.owner_id,
       physical_host_id: host.id,
       memory_mib: server.limits.memory,
+      physical_memory_mib: physicalMemory,
       cpu_percent: server.limits.cpu,
       operation_id: jobId,
       state: action === 'restart' ? 'restarting' : 'starting',
     })
     .onConflict((c) =>
-      c
-        .column('server_id')
-        .doUpdateSet({
-          operation_id: jobId,
-          state: action === 'restart' ? 'restarting' : 'starting',
-          updated_at: new Date(),
-        }),
+      c.column('server_id').doUpdateSet({
+        physical_memory_mib: physicalMemory,
+        operation_id: jobId,
+        state: action === 'restart' ? 'restarting' : 'starting',
+        updated_at: new Date(),
+      }),
     )
     .execute();
 }
@@ -200,20 +365,9 @@ export async function checkStorage(
     additionalMiB > snapshot.availableDiskMiB - Number(host.disk_headroom_mib)
   )
     throw new DomainError('storage_exhausted');
-  // Unconsumed disk allowances remain reserved while offline; concurrent creations
-  // cannot rely repeatedly on the same free filesystem sample.
-  const usage = await tx
-    .selectFrom('server_metrics')
-    .select(['server_id', 'disk_bytes'])
-    .distinctOn('server_id')
-    .orderBy('server_id')
-    .orderBy('observed_at', 'desc')
-    .execute();
-  const used = new Map(usage.map((r) => [r.server_id, Number(r.disk_bytes) / 1048576]));
-  const unconsumed = active
-    .filter((r) => r.physical_host_id === hostId)
-    .reduce((sum, r) => sum + Math.max(0, allowance(r) - (used.get(r.id) ?? 0)), 0);
-  if (unconsumed + additionalMiB > snapshot.availableDiskMiB - Number(host.disk_headroom_mib))
+  // Persisted file telemetry is not a coherent filesystem sample and can be stale
+  // after a user removes content. Do not credit it against durable disk allowances.
+  if (hostReserved + additionalMiB > snapshot.availableDiskMiB - Number(host.disk_headroom_mib))
     throw new DomainError('storage_exhausted');
   if (config.storagePolicy === 'PER_USER_BUDGET') {
     const limits = await tx
@@ -348,13 +502,11 @@ export async function observeLocalHost(
       observed_at: now,
     })
     .onConflict((c) =>
-      c
-        .column('host_id')
-        .doUpdateSet({
-          snapshot: JSON.stringify(snapshot),
-          observed_at: now,
-          observer_id: observerId,
-        }),
+      c.column('host_id').doUpdateSet({
+        snapshot: JSON.stringify(snapshot),
+        observed_at: now,
+        observer_id: observerId,
+      }),
     )
     .execute();
   return snapshot;

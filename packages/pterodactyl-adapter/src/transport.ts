@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import type { ContainerObserver } from './container-observer.js';
 
 export type CredentialScope = 'application' | 'client';
 export type RemoteOutcome = 'rejected' | 'unknown';
@@ -28,6 +29,7 @@ export class PterodactylError extends DomainError {
   }
 }
 export interface TransportOptions {
+  containerObserver?: ContainerObserver;
   baseURL: string;
   applicationKey: string;
   clientKey?: string;

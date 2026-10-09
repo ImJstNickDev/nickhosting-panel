@@ -16,6 +16,10 @@ export const permissions = [
 ] as const;
 export type Permission = (typeof permissions)[number];
 
+/** Internal request-session binding. Symbols survive context spreads but are
+ * deliberately omitted from public JSON, durable jobs and encrypted intents. */
+export const authSessionId = Symbol('nickhosting.authSessionId');
+
 export interface SupportMetadata {
   id: string;
   startedAt: Date;
@@ -30,6 +34,7 @@ export interface SupportMetadata {
 
 /** Build exclusively from verified session + database records, never client JSON. */
 export interface AuthContext {
+  [authSessionId]?: string;
   actorUserId: string;
   subjectUserId: string;
   role: PlatformRole;

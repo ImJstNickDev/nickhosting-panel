@@ -1,3 +1,4 @@
+import { posix } from 'node:path';
 import { z } from 'zod';
 import { DomainError } from './errors.js';
 
@@ -15,6 +16,15 @@ const httpUrl = z
     );
   });
 
+const origin = (protocols: string[]) =>
+  z
+    .string()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return protocols.includes(url.protocol) && url.origin === value;
+    });
+
 export const platformConfigSchema = z
   .object({
     instanceName: z.string().trim().min(1).max(100),
@@ -22,6 +32,23 @@ export const platformConfigSchema = z
     publicUrl: httpUrl.optional(),
     apiUrl: httpUrl.optional(),
     pterodactylBaseUrl: httpUrl.optional(),
+    dockerObserverSocket: z
+      .string()
+      .refine(
+        (value) =>
+          posix.isAbsolute(value) &&
+          value !== '/' &&
+          posix.normalize(value) === value &&
+          !value.endsWith('/') &&
+          !/[?#]/.test(value) &&
+          !Array.from(value).some((character) => {
+            const code = character.charCodeAt(0);
+            return code < 32 || code === 127;
+          }),
+      )
+      .optional(),
+    pterodactylWebSocketOrigins: z.array(origin(['ws:', 'wss:'])).max(50),
+    pterodactylDownloadOrigins: z.array(origin(['http:', 'https:'])).max(50),
     registrationInviteTtlSeconds: z.number().int().min(60).max(31_536_000),
     supportIdleTtlSeconds: z.number().int().min(60).max(900),
     supportAbsoluteTtlSeconds: z.number().int().min(60).max(3600),
@@ -41,10 +68,8 @@ export const platformConfigSchema = z
     observationMaxAgeSeconds: z.number().int().min(1).max(30),
     sftpgoBaseUrl: httpUrl.optional(),
     sftpgoDataRoot: z.string().startsWith('/').optional(),
-    sftpgoInstanceId: z
-      .string()
-      .regex(/^[a-zA-Z0-9_-]{1,64}$/)
-      .optional(),
+    sftpgoInstanceId: z.uuid().optional(),
+    dnsInstanceId: z.uuid().optional(),
     sftpCredentialTtlSeconds: z.number().int().min(60).max(86400),
     cloudflareZoneId: z
       .string()
@@ -64,6 +89,8 @@ export type ConfigSource = 'default' | 'database' | 'environment';
 export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   instanceName: 'NickHosting',
   defaultLocale: 'en',
+  pterodactylWebSocketOrigins: [],
+  pterodactylDownloadOrigins: [],
   registrationInviteTtlSeconds: 86_400,
   supportIdleTtlSeconds: 300,
   supportAbsoluteTtlSeconds: 900,
@@ -86,6 +113,9 @@ export const configEnvironmentKeys = {
   publicUrl: 'NH_PUBLIC_URL',
   apiUrl: 'NH_API_URL',
   pterodactylBaseUrl: 'NH_PTERODACTYL_BASE_URL',
+  dockerObserverSocket: 'NH_DOCKER_OBSERVER_SOCKET',
+  pterodactylWebSocketOrigins: 'NH_PTERODACTYL_WEBSOCKET_ORIGINS',
+  pterodactylDownloadOrigins: 'NH_PTERODACTYL_DOWNLOAD_ORIGINS',
   registrationInviteTtlSeconds: 'NH_INVITE_TTL_SECONDS',
   supportIdleTtlSeconds: 'NH_SUPPORT_IDLE_TTL_SECONDS',
   supportAbsoluteTtlSeconds: 'NH_SUPPORT_ABSOLUTE_TTL_SECONDS',
@@ -108,6 +138,7 @@ export const configEnvironmentKeys = {
   sftpgoInstanceId: 'NH_SFTPGO_INSTANCE_ID',
   sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
   cloudflareZoneId: 'NH_CLOUDFLARE_ZONE_ID',
+  dnsInstanceId: 'NH_DNS_INSTANCE_ID',
   dnsBaseDomain: 'NH_DNS_BASE_DOMAIN',
   dnsTarget: 'NH_DNS_TARGET',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
@@ -156,7 +187,13 @@ export function resolveConfig(
     const value = env[configEnvironmentKeys[key]];
     if (value === undefined) continue;
     if (value.trim() === '') invalid([key]);
-    if (numericKeys.has(key)) {
+    if (key === 'pterodactylWebSocketOrigins' || key === 'pterodactylDownloadOrigins') {
+      try {
+        merged[key] = JSON.parse(value);
+      } catch {
+        invalid([key]);
+      }
+    } else if (numericKeys.has(key)) {
       if (!/^(0|[1-9]\d*)$/.test(value)) invalid([key]);
       merged[key] = Number(value);
     } else if (key === 'smtpSecure') {

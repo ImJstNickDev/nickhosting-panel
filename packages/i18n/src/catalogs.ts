@@ -1,7 +1,10 @@
 export const en = {
   'errors.validation_failed': 'Check the submitted information.',
   'servers.operation.waiting': 'Waiting for confirmation.',
+  'servers.operation.owner_resolution': 'The Owner resolved an uncertain operation.',
   'servers.operation.effect_prepared': 'Operation prepared.',
+  'servers.operation.stop_confirmed': 'Server stop confirmed.',
+  'servers.operation.install_confirmed': 'Installation completion confirmed.',
   'servers.operation.succeeded': 'Server operation completed.',
   'servers.operation.failed': 'Server operation failed.',
   'servers.operation.initial_start_failed': 'Server created; its first start failed.',
@@ -75,7 +78,10 @@ export type MessageKey = keyof typeof en;
 export const it: Record<MessageKey, string> = {
   'errors.validation_failed': 'Controlla le informazioni inserite.',
   'servers.operation.waiting': 'In attesa di conferma.',
+  'servers.operation.owner_resolution': 'Il Proprietario ha risolto un’operazione incerta.',
   'servers.operation.effect_prepared': 'Operazione preparata.',
+  'servers.operation.stop_confirmed': 'Arresto del server confermato.',
+  'servers.operation.install_confirmed': 'Completamento dell’installazione confermato.',
   'servers.operation.succeeded': 'Operazione sul server completata.',
   'servers.operation.failed': 'Operazione sul server non riuscita.',
   'servers.operation.initial_start_failed': 'Server creato; il primo avvio non è riuscito.',

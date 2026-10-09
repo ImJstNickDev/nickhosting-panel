@@ -59,6 +59,9 @@ importers:
       '@nickhosting/pterodactyl-adapter':
         specifier: workspace:*
         version: link:../../packages/pterodactyl-adapter
+      '@nickhosting/server-management':
+        specifier: workspace:*
+        version: link:../../packages/server-management
       hono:
         specifier: 4.13.13
         version: 4.13.13
@@ -80,6 +83,9 @@ importers:
       '@nickhosting/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
+      '@nickhosting/server-management':
+        specifier: workspace:*
+        version: link:../../packages/server-management
 
   packages/auth:
     dependencies:

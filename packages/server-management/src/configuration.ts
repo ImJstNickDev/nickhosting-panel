@@ -5,8 +5,22 @@ import { type Database, recordAudit } from '@nickhosting/database';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
-import { type Environment, lockResources } from './admission.js';
+import { type Environment, lockResources, reservedPhysicalCompute } from './admission.js';
 import { ownerOnly, parse } from './registry.js';
+
+/** Explicit environment override wins over the Owner's per-node verified bound. */
+export function effectiveNodeOverhead(
+  node: { memory_overhead_percent: number },
+  env: Environment = {},
+) {
+  const value =
+    env.NH_NODE_MEMORY_OVERHEAD_PERCENT === undefined
+      ? node.memory_overhead_percent
+      : Number(env.NH_NODE_MEMORY_OVERHEAD_PERCENT);
+  const parsed = z.number().int().min(100).max(400).safeParse(value);
+  if (!parsed.success) throw new DomainError('configuration_invalid');
+  return parsed.data;
+}
 
 export const hostPolicySchema = z
   .object({
@@ -24,7 +38,10 @@ export const hostPolicySchema = z
   })
   .strict()
   .refine(
-    (v) => v.memoryLimitMiB > v.memoryHeadroomMiB && v.cpuLimitPercent > v.cpuHeadroomPercent,
+    (v) =>
+      v.memoryLimitMiB > v.memoryHeadroomMiB &&
+      v.cpuLimitPercent > v.cpuHeadroomPercent &&
+      v.storagePoolMiB > v.diskHeadroomMiB,
   );
 
 /** Optional explicit host-policy override is resolved over each Owner database row. */
@@ -103,16 +120,25 @@ export async function setPhysicalHost(
       enabled: value.enabled,
       updated_at: new Date(),
     };
-    const reservations = await tx
-      .selectFrom('resource_reservations')
-      .selectAll()
-      .where('physical_host_id', '=', hostId)
+    const reserved = await reservedPhysicalCompute(tx, hostId, env);
+    if (
+      reserved.memoryMiB > value.memoryLimitMiB - value.memoryHeadroomMiB ||
+      reserved.cpuPercent > value.cpuLimitPercent - value.cpuHeadroomPercent
+    )
+      throw new DomainError('conflict');
+    const occupied = await tx
+      .selectFrom('managed_servers as server')
+      .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+      .select(['server.limits', 'mapping.feature_limits'])
+      .where('node.physical_host_id', '=', hostId)
+      .where('server.deleted_at', 'is', null)
       .execute();
     if (
-      reservations.reduce((sum, r) => sum + r.memory_mib, 0) >
-        value.memoryLimitMiB - value.memoryHeadroomMiB ||
-      reservations.reduce((sum, r) => sum + r.cpu_percent, 0) >
-        value.cpuLimitPercent - value.cpuHeadroomPercent
+      occupied.reduce(
+        (sum, server) => sum + server.limits.disk * (1 + server.feature_limits.backups),
+        0,
+      ) > value.storagePoolMiB
     )
       throw new DomainError('conflict');
     await tx
@@ -131,6 +157,7 @@ export async function setManagedNode(
   adapter: PterodactylAdapter,
   context: AuthContext,
   input: unknown,
+  env: Environment = {},
 ) {
   ownerOnly(context);
   const value = parse(
@@ -140,11 +167,16 @@ export async function setManagedNode(
         physicalHostId: z.uuid(),
         pterodactylNodeId: z.number().int().positive(),
         provisionUserId: z.number().int().positive(),
+        installerMemoryMiB: z.number().int().positive().max(1048576).default(1024),
+        installerCpuPercent: z.number().int().positive().max(100000).default(100),
+        memoryOverheadPercent: z.number().int().min(100).max(400).default(115),
         enabled: z.boolean().default(true),
       })
       .strict(),
     input,
   );
+  if (env.NH_NODE_MEMORY_OVERHEAD_PERCENT !== undefined)
+    effectiveNodeOverhead({ memory_overhead_percent: value.memoryOverheadPercent }, env);
   await adapter.getNode(value.pterodactylNodeId);
   const users = await adapter.listUsers();
   if (!users.some((u) => u.id === value.provisionUserId))
@@ -152,8 +184,36 @@ export async function setManagedNode(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const nodeId = value.id ?? randomUUID();
+    const host = await tx
+      .selectFrom('physical_hosts')
+      .select('id')
+      .where('id', '=', value.physicalHostId)
+      .executeTakeFirst();
+    if (!host) throw new DomainError('not_found');
+    const previous = value.id
+      ? await tx
+          .selectFrom('managed_nodes')
+          .selectAll()
+          .where('id', '=', value.id)
+          .executeTakeFirst()
+      : undefined;
+    const overhead =
+      env.NH_NODE_MEMORY_OVERHEAD_PERCENT === undefined
+        ? value.memoryOverheadPercent
+        : (previous?.memory_overhead_percent ?? 115);
     if (
-      value.id &&
+      env.NH_NODE_MEMORY_OVERHEAD_PERCENT !== undefined &&
+      typeof input === 'object' &&
+      input !== null &&
+      Object.hasOwn(input, 'memoryOverheadPercent') &&
+      value.memoryOverheadPercent !== overhead
+    )
+      throw new DomainError('conflict');
+    if (
+      previous &&
+      (previous.physical_host_id !== value.physicalHostId ||
+        previous.pterodactyl_node_id !== value.pterodactylNodeId ||
+        previous.provision_user_id !== value.provisionUserId) &&
       (await tx
         .selectFrom('managed_servers')
         .select('id')
@@ -162,11 +222,41 @@ export async function setManagedNode(
         .executeTakeFirst())
     )
       throw new DomainError('conflict');
+    if (previous && previous.memory_overhead_percent !== overhead) {
+      const game = await tx
+        .selectFrom('resource_reservations as reservation')
+        .innerJoin('managed_servers as server', 'server.id', 'reservation.server_id')
+        .select('reservation.server_id')
+        .where('server.node_id', '=', nodeId)
+        .executeTakeFirst();
+      const installer = await tx
+        .selectFrom('installation_reservations as reservation')
+        .innerJoin('managed_servers as server', 'server.id', 'reservation.server_id')
+        .select('reservation.server_id')
+        .where('server.node_id', '=', nodeId)
+        .executeTakeFirst();
+      if (game || installer) throw new DomainError('conflict');
+    }
+    if (
+      previous &&
+      (previous.installer_memory_mib !== value.installerMemoryMiB ||
+        previous.installer_cpu_percent !== value.installerCpuPercent) &&
+      (await tx
+        .selectFrom('installation_reservations as installation')
+        .innerJoin('managed_servers as server', 'server.id', 'installation.server_id')
+        .select('installation.server_id')
+        .where('server.node_id', '=', nodeId)
+        .executeTakeFirst())
+    )
+      throw new DomainError('conflict');
     const row = {
       id: nodeId,
       physical_host_id: value.physicalHostId,
       pterodactyl_node_id: value.pterodactylNodeId,
       provision_user_id: value.provisionUserId,
+      installer_memory_mib: value.installerMemoryMiB,
+      installer_cpu_percent: value.installerCpuPercent,
+      memory_overhead_percent: overhead,
       enabled: value.enabled,
     };
     await tx
@@ -174,7 +264,12 @@ export async function setManagedNode(
       .values(row)
       .onConflict((c) => c.column('id').doUpdateSet(row))
       .execute();
-    await recordAudit(tx, context, 'resource.node.updated', { nodeId });
+    await recordAudit(tx, context, 'resource.node.updated', {
+      nodeId,
+      installerMemoryMiB: value.installerMemoryMiB,
+      installerCpuPercent: value.installerCpuPercent,
+      memoryOverheadPercent: overhead,
+    });
     return { id: nodeId };
   });
 }

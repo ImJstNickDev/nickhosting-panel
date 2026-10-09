@@ -13,6 +13,7 @@
     "@hono/node-server": "2.1.4",
     "zod": "4.6.5",
     "nodemailer": "10.0.16",
-    "@nickhosting/pterodactyl-adapter": "workspace:*"
+    "@nickhosting/pterodactyl-adapter": "workspace:*",
+    "@nickhosting/server-management": "workspace:*"
   }
 }
