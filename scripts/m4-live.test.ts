@@ -608,6 +608,67 @@ describe('reviewed M4 live resource envelope', () => {
         minecraftLiveReadyRoute(current, snapshot, health, serverId, generation, now, mode),
       ).toBeUndefined();
     }
+    // Manual stop intentionally revokes the policy generation. Even after the
+    // data plane has committed the new stopped route, the old policy can never
+    // satisfy this wait; only the freshly read post-stop generation is eligible.
+    const postStopGeneration = randomUUID();
+    const stoppedState = {
+      ...state,
+      state: 'manually_stopped' as const,
+      generation: postStopGeneration,
+      sleepEligibleAt: null,
+    };
+    const { sleepEligibleAt: _manualIdleDeadline, ...beforeStoppedRoute } = route;
+    const stoppedRoute = {
+      ...beforeStoppedRoute,
+      mode: 'manually_stopped' as const,
+      generation: postStopGeneration,
+    };
+    const stoppedSnapshot = { ...snapshot, routes: [stoppedRoute] };
+    expect(
+      minecraftLiveReadyRoute(
+        stoppedState,
+        stoppedSnapshot,
+        health,
+        serverId,
+        generation,
+        now,
+        'manually_stopped',
+      ),
+    ).toBeUndefined();
+    expect(
+      minecraftLiveReadyRoute(
+        stoppedState,
+        snapshot,
+        health,
+        serverId,
+        postStopGeneration,
+        now,
+        'manually_stopped',
+      ),
+    ).toBeUndefined();
+    expect(
+      minecraftLiveReadyRoute(
+        stoppedState,
+        stoppedSnapshot,
+        health,
+        serverId,
+        postStopGeneration,
+        now,
+        'manually_stopped',
+      ),
+    ).toBe(stoppedRoute);
+    expect(
+      minecraftLiveReadyRoute(
+        stoppedState,
+        stoppedSnapshot,
+        { ...health, revision: health.revision - 1 },
+        serverId,
+        postStopGeneration,
+        now,
+        'manually_stopped',
+      ),
+    ).toBeUndefined();
   });
   it('retains failed-run schema, bootstrap evidence and failure history after explicit asset cleanup', async () => {
     const scenario = {

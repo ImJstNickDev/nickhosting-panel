@@ -1542,6 +1542,11 @@ export async function runMinecraftLiveScenario(options: {
         let matched: GatewayRoute | undefined;
         await until(async () => {
           const state = await getGatewayState(db, asset.managedServerId, { env });
+          assert.equal(
+            state.generation,
+            generation,
+            'Live route wait lost its pinned consent generation',
+          );
           const snapshot = await getGatewaySnapshot(db, env);
           matched = minecraftLiveReadyRoute(
             state,
@@ -1784,7 +1789,20 @@ export async function runMinecraftLiveScenario(options: {
         consoleSha256: digest(saveOutput),
       });
       await stage('minecraft.client.manual-stop');
-      await waitCurrentRoute(manualPolicy.generation, 'manual stop snapshot', 'manually_stopped');
+      // A manual stop revokes the earlier policy's consent and rotates its
+      // generation. Pin the confirmed post-stop state, never the pre-stop policy.
+      const manuallyStopped = await getGatewayState(db, asset.managedServerId, { env });
+      assert.equal(manuallyStopped.state, 'manually_stopped');
+      assert.notEqual(manuallyStopped.generation, manualPolicy.generation);
+      await event('minecraft.manual-stop-consent-revoked', {
+        previousGeneration: manualPolicy.generation,
+        generation: manuallyStopped.generation,
+      });
+      await waitCurrentRoute(
+        manuallyStopped.generation,
+        'manual stop snapshot',
+        'manually_stopped',
+      );
       const manualReply = await independentClient(
         plan.gatewayAddress,
         pin.port,
@@ -1793,11 +1811,12 @@ export async function runMinecraftLiveScenario(options: {
         'disconnect',
       );
       assert(manualReply.disconnect?.includes('Server stopped'));
-      assert.equal(
-        (await getGatewayState(db, asset.managedServerId, { env })).state,
-        'manually_stopped',
-      );
-      await event('minecraft.manual-stop-suppresses-wake');
+      const afterManualJoin = await getGatewayState(db, asset.managedServerId, { env });
+      assert.equal(afterManualJoin.state, 'manually_stopped');
+      assert.equal(afterManualJoin.generation, manuallyStopped.generation);
+      await event('minecraft.manual-stop-suppresses-wake', {
+        generation: afterManualJoin.generation,
+      });
       const host = await db
         .selectFrom('physical_hosts')
         .selectAll()
@@ -1849,6 +1868,7 @@ export async function runMinecraftLiveScenario(options: {
       assert(denied.disconnect?.includes('cannot start'));
       const blocked = await getGatewayState(db, asset.managedServerId, { env });
       assert.equal(blocked.state, 'blocked');
+      assert.equal(blocked.generation, denialPolicy.generation);
       assert.equal(blocked.errorCode, 'resources_unavailable');
       assert(denialMs < 5000, 'Admission refusal must be immediate, without a waiting queue');
       await waitCurrentRoute(denialPolicy.generation, 'blocked before repeat join', 'blocked');
