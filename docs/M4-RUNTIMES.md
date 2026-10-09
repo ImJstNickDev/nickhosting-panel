@@ -22,7 +22,7 @@ Metadata reads allow only the enumerated official HTTPS origins, omit credential
 `MinecraftRuntimeMapping` requires:
 
 - Exact profile/release, selected image and separately verified image Java major.
-- Explicit semantic variable bindings (`release`, `buildId`, `loaderVersion`, `installerVersion`, optional artifact URLs) to actual egg variable names discovered through the adapter.
+- Explicit semantic variable bindings (`release`, `buildId`, `loaderVersion`, `installerVersion`, optional artifact URLs) to actual egg variable names discovered through the adapter. Forge additionally supports `loaderCoordinate`, the verified `release-loaderVersion` Maven coordinate, for eggs expecting the complete coordinate. It can replace the bare loader-version binding, while the release binding remains mandatory. Other profiles cannot bind this Forge-only value; both forms still enforce unique variable destinations.
 - Fixed variables, declared egg variables, installation kind, safe relative `artifactPaths`, and the tested `supportedProperties` list.
 
 `validateMinecraftRuntimeMapping` rejects missing required exact-version bindings, undeclared/duplicate destinations, fixed-variable collisions, wrong runtime/installation kind, and an image Java major different from the resolved requirement. A newer Java image is not silently substituted. The adapter must independently validate the image/egg mapping at execution time. No egg/nest IDs or infrastructure paths are defined by the Minecraft package.

@@ -367,6 +367,7 @@ export type MinecraftRuntimeVariable =
   | 'release'
   | 'buildId'
   | 'loaderVersion'
+  | 'loaderCoordinate'
   | 'installerVersion'
   | 'serverArtifactUrl'
   | 'installerArtifactUrl';
@@ -396,6 +397,7 @@ export const minecraftRuntimeMappingSchema = z
         release: z.string().optional(),
         buildId: z.string().optional(),
         loaderVersion: z.string().optional(),
+        loaderCoordinate: z.string().optional(),
         installerVersion: z.string().optional(),
         serverArtifactUrl: z.string().optional(),
         installerArtifactUrl: z.string().optional(),
@@ -454,13 +456,21 @@ export function validateMinecraftRuntimeMapping(
     release: runtime.release,
     buildId: runtime.buildId?.toString(),
     loaderVersion: runtime.loaderVersion,
+    loaderCoordinate:
+      runtime.profile === 'forge' && runtime.loaderVersion
+        ? `${runtime.release}-${runtime.loaderVersion}`
+        : undefined,
     installerVersion: runtime.installerVersion,
     serverArtifactUrl: runtime.artifacts.find((item) => item.role === 'server')?.url,
     installerArtifactUrl: runtime.artifacts.find((item) => item.role === 'installer')?.url,
   };
   const required: MinecraftRuntimeVariable[] = ['release'];
   if (runtime.buildId !== undefined) required.push('buildId');
-  if (runtime.loaderVersion !== undefined) required.push('loaderVersion');
+  if (
+    runtime.loaderVersion !== undefined &&
+    !(runtime.profile === 'forge' && mapping.bindings.loaderCoordinate)
+  )
+    required.push('loaderVersion');
   if (runtime.installerVersion !== undefined) required.push('installerVersion');
   if (required.some((key) => !mapping.bindings[key]))
     throw new DomainError('configuration_invalid');

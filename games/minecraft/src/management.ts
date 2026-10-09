@@ -27,13 +27,15 @@ interface PropertyLine {
 function propertyLines(source: string): PropertyLine[] {
   if (Buffer.byteLength(source) > 1024 * 1024 || source.includes('\0'))
     return invalid('minecraft_properties_invalid');
-  const lines = source.split(/\r?\n/);
+  // java.util.Properties treats CR, LF and CRLF as line endings, and only
+  // space, tab and form feed as syntactic whitespace (not JS's broader \s).
+  const lines = source.split(/\r\n|[\r\n]/);
   const result: PropertyLine[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < lines.length; i++) {
     let text = lines[i] ?? '';
     let raw = text;
-    if (/^\s*[#!]/.test(text)) {
+    if (/^[ \t\f]*[#!]/.test(text)) {
       result.push({ raw });
       continue;
     }
@@ -41,9 +43,9 @@ function propertyLines(source: string): PropertyLine[] {
       if (++i >= lines.length) return invalid('minecraft_properties_continuation');
       const next = lines[i] ?? '';
       raw += `\n${next}`;
-      text = text.slice(0, -1) + next.trimStart();
+      text = text.slice(0, -1) + next.replace(/^[ \t\f]*/, '');
     }
-    const trimmed = text.trimStart();
+    const trimmed = text.replace(/^[ \t\f]*/, '');
     if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) {
       result.push({ raw });
       continue;
@@ -54,10 +56,10 @@ function propertyLines(source: string): PropertyLine[] {
         split++;
         continue;
       }
-      if (/\s|=|:/.test(trimmed[split] ?? '')) break;
+      if (/[ \t\f=:]/.test(trimmed[split] ?? '')) break;
     }
     const key = unescapeProperty(trimmed.slice(0, split));
-    const value = unescapeProperty(trimmed.slice(split).replace(/^\s*[:=]?\s*/, ''));
+    const value = unescapeProperty(trimmed.slice(split).replace(/^[ \t\f]*[:=]?[ \t\f]*/, ''));
     if (seen.has(key) || /\\u(?![0-9a-fA-F]{4})/.test(trimmed))
       return invalid('minecraft_properties_ambiguous');
     seen.add(key);

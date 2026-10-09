@@ -20,6 +20,28 @@ const player = {
   verifiedAt: '2026-10-10T00:00:00.000Z',
 };
 describe('Minecraft properties plans', () => {
+  it.each(['\r', '\n', '\r\n'])(
+    'recognizes Java line endings %j before launcher redirects',
+    (ending) => {
+      expect(parseMinecraftProperties(`#generated${ending}serverJar=other.jar${ending}`)).toEqual({
+        serverJar: 'other.jar',
+      });
+      expect(parseMinecraftProperties(`serverJar=other\\${ending}\t \f.jar${ending}`)).toEqual({
+        serverJar: 'other.jar',
+      });
+    },
+  );
+  it('uses Java whitespace rather than treating Unicode whitespace as syntax', () => {
+    expect(
+      parseMinecraftProperties(
+        ' \t\fserverJar \t\f: \t\fother.jar\n\u00a0serverJar=literal\nvalue=\u00a0keep\n',
+      ),
+    ).toEqual({
+      serverJar: 'other.jar',
+      '\u00a0serverJar': 'literal',
+      value: '\u00a0keep',
+    });
+  });
   it('preserves unrelated values/comments and uses verified version-specific supported keys', () => {
     const input = '# custom\nmotd=Old\nserver-port=25565\nprivate-custom=value\n';
     const plan = editMinecraftProperties(

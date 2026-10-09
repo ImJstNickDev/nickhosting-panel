@@ -173,6 +173,40 @@ describe('Minecraft exact runtime metadata', () => {
     );
     expect(runtime.installation).toEqual({ kind: 'forge-installer', args: ['--installServer'] });
     expect(runtime.artifacts[1]).toMatchObject({ sha1: 'd'.repeat(40) });
+    const mapping: MinecraftRuntimeMapping = {
+      profile: 'forge',
+      release: '1.21.4',
+      image: 'example.invalid/java:21',
+      imageJavaMajor: 21,
+      declaredEggVariables: ['MINECRAFT_VERSION', 'FORGE_VERSION'],
+      bindings: { release: 'MINECRAFT_VERSION', loaderCoordinate: 'FORGE_VERSION' },
+      fixedVariables: {},
+      installationKind: 'forge-installer',
+      artifactPaths: {},
+      supportedProperties: [],
+    };
+    expect(validateMinecraftRuntimeMapping(runtime, mapping)).toEqual({
+      MINECRAFT_VERSION: '1.21.4',
+      FORGE_VERSION: '1.21.4-54.1.16',
+    });
+    expect(
+      validateMinecraftRuntimeMapping(runtime, {
+        ...mapping,
+        bindings: { release: 'MINECRAFT_VERSION', loaderVersion: 'FORGE_VERSION' },
+      }).FORGE_VERSION,
+    ).toBe('54.1.16');
+    expect(() =>
+      validateMinecraftRuntimeMapping(runtime, {
+        ...mapping,
+        bindings: { loaderCoordinate: 'FORGE_VERSION' },
+      }),
+    ).toThrow();
+    expect(() =>
+      validateMinecraftRuntimeMapping(runtime, {
+        ...mapping,
+        bindings: { ...mapping.bindings, loaderVersion: 'FORGE_VERSION' },
+      }),
+    ).toThrow();
     await expect(
       resolveMinecraftRuntime(
         { release: '1.21.4', profile: 'forge', loaderVersion: '55.0.0' },
@@ -231,6 +265,7 @@ describe('Minecraft exact runtime metadata', () => {
       { release: '1.21.4' },
       { profile: 'paper' as const },
       { bindings: {} },
+      { bindings: { release: 'MC_RELEASE', loaderCoordinate: 'SERVER_URL' } },
       { declaredEggVariables: [] },
       { bindings: { release: 'MC_RELEASE', serverArtifactUrl: 'MC_RELEASE' } },
       { fixedVariables: { MC_RELEASE: 'other' } },
