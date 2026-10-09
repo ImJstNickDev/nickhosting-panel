@@ -81,6 +81,17 @@ def main():
             VALUES ('{claim}','{host}','{server}','{actor}',1024,67584,
                 '{{"fixture":"{marker}"}}','{'0' * 64}');'''])
 
+    if M2:
+        gateway, route, generation = (str(uuid.uuid4()) for _ in range(3))
+        run(psql + [f'''SET search_path="{schema}";
+            INSERT INTO gateway_server_states(server_id,generation,enabled,protocol_id,game_version,state,
+                idle_timeout_seconds,readiness_timeout_seconds,readiness_max_age_seconds,estimate_max_age_seconds,wake_retry_seconds,wake_job_id)
+            VALUES ('{server}','{generation}',true,'fixture','1','waking',60,60,15,3600,10,'{job}');
+            INSERT INTO gateway_routes(id,gateway_id,server_id,allocation_id,public_address,public_port,transport,lease_expires_at)
+            VALUES ('{route}','{gateway}','{server}','{allocation}','192.0.2.1',25565,'tcp',TIMESTAMPTZ '2099-01-01 00:00:00+00');
+            INSERT INTO gateway_control_state(gateway_id,revision,snapshot_hash) VALUES ('{gateway}',7,'{marker}');
+            INSERT INTO gateway_reachability_proofs(route_id,proof) VALUES ('{route}','{{"fixture":"{marker}"}}');'''])
+
     assert redis("SET", key, marker) == "OK"
     subprocess.run(COMPOSE + ["restart", "postgres", "redis"], check=True)
     subprocess.run(COMPOSE + ["up", "-d", "--wait", "--no-recreate", "postgres", "redis"], check=True)
@@ -110,9 +121,22 @@ def main():
             reserved_bytes::text || ':' || (scope->>'fixture')
             FROM "{schema}".upload_ingestion_claims WHERE id='{claim}' AND physical_host_id='{host}'
             ''']) == f"{server}:1024:67584:{marker}"
+    if M2:
+        assert run(psql + [f'''SELECT generation::text || ':' || state || ':' || wake_job_id::text
+            FROM "{schema}".gateway_server_states WHERE server_id='{server}'
+            ''']) == f"{generation}:waking:{job}"
+        assert run(psql + [f'''SELECT revision FROM "{schema}".gateway_control_state
+            WHERE gateway_id='{gateway}' AND snapshot_hash='{marker}'
+            ''']) == '7'
+        assert run(psql + [f'''SELECT count(*) FROM "{schema}".gateway_routes
+            WHERE id='{route}' AND allocation_id='{allocation}' AND lease_expires_at=TIMESTAMPTZ '2099-01-01 00:00:00+00'
+            ''']) == '1'
+        assert run(psql + [f'''SELECT proof->>'fixture' FROM "{schema}".gateway_reachability_proofs
+            WHERE route_id='{route}'
+            ''']) == marker
     run(psql + [f'DROP SCHEMA "{schema}" CASCADE'])
     assert redis("DEL", key) == "1"
-    claims = ", immutable provider/effective allocation addresses, ambiguous upload claim" if M2 else ""
+    claims = ", immutable provider/effective allocation addresses, ambiguous upload claim, Gateway wake generation/job, route lease/revision and reachability proof" if M2 else ""
     print(f"PASS: PostgreSQL migrations, settings, queued job, outbox/checkpoint{claims} and Redis marker survived approved scoped restart; only generated fixtures cleaned.")
 
 

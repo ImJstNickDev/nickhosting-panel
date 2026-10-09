@@ -55,6 +55,7 @@ export * from './adapter.js';
 export type { ConsoleEvent, ConsoleRelay, ConsoleRelayOptions, ConsoleStats } from './console.js';
 export { type ContainerObserver, createContainerObserver } from './container-observer.js';
 export type { DownloadProxyOptions, ProxiedDownload } from './downloads.js';
+export * from './network-observer.js';
 export { supportsStopConfirmation } from './power.js';
 export type { TransferOptions } from './transfer-guard.js';
 export type { CredentialScope, RemoteOutcome } from './transport.js';

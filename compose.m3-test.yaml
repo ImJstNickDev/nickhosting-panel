@@ -1,0 +1,61 @@
+name: nickhosting-m3-network-tests
+
+# Proposal only: operation-specific Owner approval is required before up/start.
+# A normal isolated project bridge is necessary for actual Docker NAT bindings;
+# internal:true suppresses publishing on this Docker version.
+x-fixture: &fixture
+  image: node:24.20.0-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
+  user: "1000:1000"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  mem_limit: 128m
+  cpus: 0.5
+  pids_limit: 64
+  restart: "no"
+  command: [node, /fixture/server.mjs]
+  volumes:
+    - ./scripts/m3-network-fixture-server.mjs:/fixture/server.mjs:ro
+  healthcheck:
+    test: [CMD, node, /fixture/server.mjs, --health]
+    interval: 2s
+    timeout: 2s
+    retries: 20
+
+services:
+  game:
+    <<: *fixture
+    container_name: ${NH_M3_FIXTURE_UUID:?Prepared fixture UUID required}
+    labels:
+      Service: Pterodactyl
+      ContainerType: server_process
+      ing.nickhost.test-asset: m3-network-fixture
+    environment:
+      NH_FIXTURE_MODE: game
+      NH_FIXTURE_PORTS: ${NH_M3_GAME_PORT:?Prepared game port required},${NH_M3_QUERY_PORT:?Prepared query port required}
+    ports:
+      - "${NH_M3_BACKEND_IP:?Prepared private bridge address required}:${NH_M3_GAME_PORT}:${NH_M3_GAME_PORT}/tcp"
+      - "${NH_M3_BACKEND_IP}:${NH_M3_GAME_PORT}:${NH_M3_GAME_PORT}/udp"
+      - "${NH_M3_BACKEND_IP}:${NH_M3_QUERY_PORT}:${NH_M3_QUERY_PORT}/tcp"
+      - "${NH_M3_BACKEND_IP}:${NH_M3_QUERY_PORT}:${NH_M3_QUERY_PORT}/udp"
+  node-probe:
+    <<: *fixture
+    labels:
+      ing.nickhost.test-asset: m3-network-fixture
+    environment:
+      NH_FIXTURE_MODE: node
+      NH_FIXTURE_PORTS: ${NH_M3_NODE_PROBE_PORT:?Prepared probe port required}
+    ports:
+      - "${NH_M3_BACKEND_IP}:${NH_M3_NODE_PROBE_PORT}:${NH_M3_NODE_PROBE_PORT}/tcp"
+      - "${NH_M3_BACKEND_IP}:${NH_M3_NODE_PROBE_PORT}:${NH_M3_NODE_PROBE_PORT}/udp"
+
+networks:
+  default:
+    name: nickhosting-m3-network-tests
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: nat
+    ipam:
+      config:
+        - subnet: ${NH_M3_SUBNET:?Prepared non-overlapping private subnet required}
+          gateway: ${NH_M3_BACKEND_IP}

@@ -1,0 +1,12 @@
+{
+  "name": "@nickhosting/gateway-safety",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/game-sdk": "workspace:*",
+    "@nickhosting/pterodactyl-adapter": "workspace:*",
+    "zod": "4.6.5"
+  }
+}

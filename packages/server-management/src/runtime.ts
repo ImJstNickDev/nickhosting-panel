@@ -31,7 +31,7 @@ import {
   reconcileManagedServer,
   verifyManagedIdentity,
 } from './lifecycle.js';
-import { authorizeServer } from './registry.js';
+import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
@@ -112,6 +112,39 @@ export async function authorizeQueuedEffect(
       : 'server:manage',
   );
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
+  if (operation.plan.gatewayAutomation !== undefined) {
+    const marker = operation.plan.gatewayAutomation;
+    if (
+      typeof marker !== 'object' ||
+      marker === null ||
+      !('generation' in marker) ||
+      typeof marker.generation !== 'string' ||
+      !('kind' in marker) ||
+      !['wake', 'sleep'].includes(String(marker.kind))
+    )
+      throw new DomainError('forbidden');
+    const policy = await db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (
+      !policy?.enabled ||
+      policy.generation !== marker.generation ||
+      ['manually_stopped', 'maintenance'].includes(server.intent) ||
+      (marker.kind === 'wake' &&
+        (operation.action !== 'start' ||
+          policy.wake_job_id !== jobId ||
+          policy.state !== 'waking')) ||
+      (marker.kind === 'sleep' &&
+        (operation.action !== 'stop' ||
+          policy.sleep_job_id !== jobId ||
+          server.intent !== 'sleeping'))
+    )
+      throw new DomainError('forbidden');
+    assertGatewaySleepFence(operation.plan, new Date(), true);
+  }
+
   if (operation.action === 'provision') {
     const mapping = await db
       .selectFrom('runtime_egg_mappings')
@@ -396,6 +429,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   return {
     adapter,
+    containerObserver,
     refreshObservations,
     process,
     reconcile,

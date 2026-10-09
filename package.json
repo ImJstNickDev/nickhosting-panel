@@ -18,7 +18,9 @@
     "dev:api": "tsx --env-file=.env apps/api/src/main.ts",
     "dev:worker": "tsx --env-file=.env apps/worker/src/main.ts",
     "test:isolated": "tsx scripts/test-env.ts pnpm test:integration",
-    "test:m2": "tsx scripts/test-env.ts --m2 pnpm test:integration"
+    "test:m2": "tsx scripts/test-env.ts --m2 pnpm test:integration",
+    "dev:gateway": "tsx --env-file=.env.gateway.local apps/game-gateway/src/main.ts",
+    "test:m3": "tsx scripts/test-env.ts --m2 pnpm test:integration"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",

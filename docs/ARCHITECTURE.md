@@ -92,3 +92,21 @@ Never store raw game console output, auth secrets, Cloudflare tokens or SFTP pas
 ## Technology selection
 
 Node.js (current supported LTS, verify compatibility), TypeScript, pnpm workspaces, React + Vite + TanStack Router/Query as appropriate, Hono, Better Auth, PostgreSQL, Redis + BullMQ, game gateway TCP/UDP. UI primitives may use accessible libraries but visual system must be bespoke. Select ORM after evaluating migration ergonomics, Better Auth adapter compatibility and transaction support. Follow existing conventions after M0 rather than overbuilding an abstraction hierarchy.
+
+## Implemented M3 boundaries
+
+`apps/game-gateway` is a separate persistent process with authenticated leased
+control snapshots, bounded TCP/UDP data paths and a private diagnostics socket.
+`packages/gateway-safety` checks complete provider inventory and read-only adapter
+host/Docker observations before binding. Core persists explicit routes and
+reachability proofs; the worker reuses M2 jobs/admission for sleep and wake.
+Migrations 010/011 add `gateway_server_states`, `gateway_startup_samples`,
+`gateway_routes`, `gateway_control_state` and `gateway_reachability_proofs` without
+instance seeds. Existing conceptual interface sketches above are not wire formats;
+[M3 API](M3-API.md) contains the implemented contracts.
+
+Complete multiport readiness/idle evidence and a bounded forwarding fence prevent
+sleep based on a partial or outdated zero-session report. Short route leases and
+lease-aware deletion prevent stale routing into reassigned backend allocations.
+[ADR 0012](decisions/0012-gateway-leases-and-sleep.md) records the recovery choices.
+Real game handlers remain M4/M5; the graphical app remains M6.

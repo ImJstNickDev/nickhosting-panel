@@ -46,3 +46,13 @@ Gateway only listens to endpoints in its own persisted registry. Validate bind c
 - Route switch before/after readiness, worker/API outages, gateway restart/recovery.
 - Same port on distinct bound IPs; no interference with a pre-existing unrelated Pterodactyl server.
 - Runtime route lookup and telemetry. No permanent modification to live Docker or DNS without approval.
+
+## M3 implementation
+
+The standalone `apps/game-gateway` executable, `packages/gateway-safety`, SDK
+protocol contracts and Core/worker orchestration implement this boundary. See
+[M3 APIs/configuration](M3-API.md) and [ADR 0012](decisions/0012-gateway-leases-and-sleep.md)
+for route leases, multiport evidence, forwarding fences and restart behavior.
+[Validation](M3-VALIDATION.md) distinguishes isolated fixture evidence from
+unverified production deployment prerequisites. No Minecraft/Satisfactory
+compatibility or production Gateway listener is claimed by M3.

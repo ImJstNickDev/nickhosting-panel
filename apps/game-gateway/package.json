@@ -1,0 +1,12 @@
+{
+  "name": "@nickhosting/game-gateway",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/game-sdk": "workspace:*",
+    "zod": "4.6.5",
+    "@nickhosting/gateway-safety": "workspace:*",
+    "@nickhosting/pterodactyl-adapter": "workspace:*"
+  }
+}

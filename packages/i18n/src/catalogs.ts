@@ -1,4 +1,10 @@
 export const en = {
+  'gateway.states.sleeping': 'Sleeping',
+  'gateway.states.waking': 'Starting the game',
+  'gateway.states.online': 'Ready to play',
+  'gateway.states.blocked': 'Unavailable',
+  'gateway.states.maintenance': 'Under maintenance',
+  'gateway.states.manually_stopped': 'Stopped manually',
   'errors.validation_failed': 'Check the submitted information.',
   'servers.operation.waiting': 'Waiting for confirmation.',
   'servers.operation.owner_resolution': 'The Owner resolved an uncertain operation.',
@@ -76,6 +82,12 @@ export const en = {
 export type MessageKey = keyof typeof en;
 
 export const it: Record<MessageKey, string> = {
+  'gateway.states.sleeping': 'In sospensione',
+  'gateway.states.waking': 'Avvio del gioco',
+  'gateway.states.online': 'Pronto per giocare',
+  'gateway.states.blocked': 'Non disponibile',
+  'gateway.states.maintenance': 'In manutenzione',
+  'gateway.states.manually_stopped': 'Arrestato manualmente',
   'errors.validation_failed': 'Controlla le informazioni inserite.',
   'servers.operation.waiting': 'In attesa di conferma.',
   'servers.operation.owner_resolution': 'Il Proprietario ha risolto un’operazione incerta.',

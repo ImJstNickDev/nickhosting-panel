@@ -2,11 +2,18 @@ import type { EncryptedSecret, PlatformConfig } from '@nickhosting/core';
 import type { GameRolloutState } from '@nickhosting/game-sdk';
 import { type Generated, Kysely, PostgresDialect } from 'kysely';
 import { Pool, type PoolConfig } from 'pg';
+import type { GatewayRouteTables } from './gateway-route-types.js';
+import type { GatewayTables } from './gateway-types.js';
 import type { AuthTables } from './identity-types.js';
 import type { JobTables } from './job-types.js';
 import type { ServerTables } from './server-types.js';
 
-export interface Database extends AuthTables, JobTables, ServerTables {
+export interface Database
+  extends AuthTables,
+    JobTables,
+    ServerTables,
+    GatewayTables,
+    GatewayRouteTables {
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;
@@ -51,6 +58,7 @@ export function createDatabase(
   return { db, pool };
 }
 
+export type { GatewayServerState, GatewayTables } from './gateway-types.js';
 export { migrate } from './migrate.js';
 export type { HostSnapshot, ServerLimits } from './server-types.js';
 export * from './settings.js';

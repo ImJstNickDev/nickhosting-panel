@@ -30,6 +30,7 @@ import {
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
+import { currentInteractiveContext } from './interactive-context.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
@@ -470,6 +471,201 @@ export async function createManagedServer(
   });
 }
 
+export interface GatewayAutomationOperation {
+  generation: string;
+  kind: 'wake' | 'sleep';
+  quiescenceUntil?: string;
+}
+
+/** Sleep permission is a short-lived Gateway ingress fence. A persisted handoff
+ * only exempts ongoing confirmation, never a new external power effect. */
+export function assertGatewaySleepFence(
+  plan: Record<string, unknown>,
+  now: Date,
+  allowExistingHandoff = false,
+): void {
+  const marker = plan.gatewayAutomation;
+  if (
+    typeof marker !== 'object' ||
+    marker === null ||
+    !('kind' in marker) ||
+    marker.kind !== 'sleep'
+  )
+    return;
+  const deadline =
+    'quiescenceUntil' in marker &&
+    typeof marker.quiescenceUntil === 'string' &&
+    z.iso.datetime().safeParse(marker.quiescenceUntil).success
+      ? Date.parse(marker.quiescenceUntil)
+      : NaN;
+  const handoff =
+    typeof plan.gatewaySleepHandoffAt === 'string' &&
+    z.iso.datetime().safeParse(plan.gatewaySleepHandoffAt).success
+      ? Date.parse(plan.gatewaySleepHandoffAt)
+      : NaN;
+  if (!Number.isFinite(deadline)) throw new DomainError('forbidden');
+  if (allowExistingHandoff && Number.isFinite(handoff) && handoff > 0 && handoff < deadline) return;
+  if (deadline <= now.getTime()) throw new DomainError('forbidden');
+}
+
+/** Caller holds the global resource lock shared with snapshot issuance. Disabled
+ * routes retain their last issued lease until it expires; never shorten it. */
+export async function revokeGatewayRoutesForDeletion(
+  tx: Transaction<Database>,
+  serverId: string,
+  now: Date,
+): Promise<boolean> {
+  await tx
+    .updateTable('gateway_routes')
+    .set({
+      enabled: false,
+      revision: sql<string>`revision + 1`,
+      payload_hash: null,
+      updated_at: now,
+    })
+    .where('server_id', '=', serverId)
+    .where('enabled', '=', true)
+    .execute();
+  const last = await tx
+    .selectFrom('gateway_routes')
+    .select('lease_expires_at')
+    .where('server_id', '=', serverId)
+    .where('lease_expires_at', 'is not', null)
+    .orderBy('lease_expires_at', 'desc')
+    .executeTakeFirst();
+  return !last?.lease_expires_at || last.lease_expires_at.getTime() < now.getTime();
+}
+
+/** Internal composition boundary. Caller holds the global resource transaction lock;
+ * ordinary requests additionally serialize their request key before taking it. */
+export async function enqueueLockedServerOperation(
+  tx: Transaction<Database>,
+  context: AuthContext,
+  serverId: string,
+  input: unknown,
+  env: Environment = {},
+  automation?: GatewayAutomationOperation,
+) {
+  const value = parse(operationSchema, input);
+  const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
+  const server = await authorizeServer(
+    tx,
+    context,
+    serverId,
+    ['start', 'stop', 'restart', 'backup'].includes(value.action)
+      ? 'server:operate'
+      : 'server:manage',
+  );
+  if (server.active_operation_id) throw new DomainError('conflict');
+  await assertNoPendingUpload(tx, serverId);
+  if (
+    (!server.pterodactyl_id && value.action !== 'delete') ||
+    (server.installation_state !== 'installed' &&
+      !['delete', 'reinstall', 'wipe'].includes(value.action))
+  )
+    throw new DomainError('conflict');
+  if (
+    await tx
+      .selectFrom('installation_reservations')
+      .select('server_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst()
+  )
+    throw new DomainError('operation_uncertain');
+  const jobId = randomUUID();
+  const plan: Record<string, unknown> = automation ? { gatewayAutomation: automation } : {};
+  const reservation = await tx
+    .selectFrom('resource_reservations')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  if (['configure', 'reinstall', 'wipe', 'restore', 'delete'].includes(value.action) && reservation)
+    throw new DomainError('operation_uncertain');
+  if (value.action === 'start' || value.action === 'restart')
+    plan.reservationCreated = !reservation;
+  if (value.action === 'start' || value.action === 'restart')
+    await reserveStartInTransaction(tx, serverId, jobId, value.action, env);
+  if (value.action === 'stop') {
+    await tx
+      .updateTable('resource_reservations')
+      .set({ state: 'stopping', operation_id: jobId, updated_at: new Date() })
+      .where('server_id', '=', serverId)
+      .execute();
+    await tx
+      .updateTable('managed_servers')
+      .set({ intent: automation?.kind === 'sleep' ? 'sleeping' : 'manually_stopped' })
+      .where('id', '=', serverId)
+      .execute();
+  }
+  if (
+    ['wipe', 'reinstall', 'restore', 'configure', 'delete'].includes(value.action) &&
+    !['offline', 'unknown'].includes(server.runtime_state)
+  )
+    throw new DomainError('conflict');
+  if ('backupBefore' in value) plan.backupBefore = value.backupBefore;
+  if (value.action === 'restore') {
+    plan.backupId = value.backupId;
+    plan.truncate = value.truncate;
+  }
+  if (value.action === 'configure') {
+    const node = await tx
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', server.node_id)
+      .executeTakeFirstOrThrow();
+    const mapping = await tx
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    await checkStorage(
+      tx,
+      server.owner_id,
+      node.physical_host_id,
+      value.limits.disk * (1 + mapping.feature_limits.backups),
+      env,
+      serverId,
+    );
+    if (value.limits.disk < server.limits.disk) throw new DomainError('conflict');
+    const primary = await tx
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .where('is_primary', '=', true)
+      .executeTakeFirstOrThrow();
+    plan.build = {
+      ...value.limits,
+      allocation: primary.pterodactyl_allocation_id,
+      feature_limits: mapping.feature_limits,
+    };
+    // Reserve expanded persistent allowance before the remote effect.
+    plan.previousLimits = server.limits;
+    await tx
+      .updateTable('managed_servers')
+      .set({
+        limits: JSON.stringify({
+          ...server.limits,
+          memory: Math.max(server.limits.memory, value.limits.memory),
+          cpu: Math.max(server.limits.cpu, value.limits.cpu),
+          disk: Math.max(server.limits.disk, value.limits.disk),
+        }),
+      })
+      .where('id', '=', serverId)
+      .execute();
+  }
+  if (value.action === 'delete') await revokeGatewayRoutesForDeletion(tx, serverId, new Date());
+  return insertOperation(
+    tx,
+    context,
+    server,
+    jobId,
+    value.idempotencyKey,
+    hash,
+    value.action,
+    plan,
+  );
+}
+
 export async function enqueueServerOperation(
   db: Kysely<Database>,
   context: AuthContext,
@@ -479,129 +675,97 @@ export async function enqueueServerOperation(
 ) {
   const value = parse(operationSchema, input);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
-  return db.transaction().execute(async (tx) => {
-    await requestLock(tx, context, value.idempotencyKey);
-    const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
-    if (previous) return previous;
-    await lockResources(tx);
-    const server = await authorizeServer(
-      tx,
-      context,
-      serverId,
-      ['start', 'stop', 'restart', 'backup'].includes(value.action)
-        ? 'server:operate'
-        : 'server:manage',
-    );
-    if (server.active_operation_id) throw new DomainError('conflict');
-    await assertNoPendingUpload(tx, serverId);
-    if (
-      (!server.pterodactyl_id && value.action !== 'delete') ||
-      (server.installation_state !== 'installed' &&
-        !['delete', 'reinstall', 'wipe'].includes(value.action))
-    )
-      throw new DomainError('conflict');
-    if (
-      await tx
-        .selectFrom('installation_reservations')
-        .select('server_id')
+  if (value.action === 'stop') {
+    // A manual stop immediately revokes wake consent, even if a previously queued
+    // lifecycle operation prevents enqueueing the stop itself. Never roll consent
+    // back with that conflict, and never silently enqueue a waiting stop.
+    const replay = await db.transaction().execute(async (tx) => {
+      await requestLock(tx, context, value.idempotencyKey);
+      const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
+      if (previous) return previous;
+      await lockResources(tx);
+      const policy = await tx
+        .selectFrom('gateway_server_states')
+        .select('generation')
         .where('server_id', '=', serverId)
-        .executeTakeFirst()
-    )
-      throw new DomainError('operation_uncertain');
-    const jobId = randomUUID();
-    const plan: Record<string, unknown> = {};
-    const reservation = await tx
-      .selectFrom('resource_reservations')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (
-      ['configure', 'reinstall', 'wipe', 'restore', 'delete'].includes(value.action) &&
-      reservation
-    )
-      throw new DomainError('operation_uncertain');
-    if (value.action === 'start' || value.action === 'restart')
-      plan.reservationCreated = !reservation;
-    if (value.action === 'start' || value.action === 'restart')
-      await reserveStartInTransaction(tx, serverId, jobId, value.action, env);
-    if (value.action === 'stop') {
-      await tx
-        .updateTable('resource_reservations')
-        .set({ state: 'stopping', operation_id: jobId, updated_at: new Date() })
-        .where('server_id', '=', serverId)
-        .execute();
+        .executeTakeFirst();
+      // M3 consent changes are interactive effects. Do not carry authority
+      // across either lock wait. Legacy internal M2 calls without a Gateway
+      // policy retain their existing context contract.
+      const actor = policy ? await currentInteractiveContext(tx, context, env) : context;
+      await authorizeServer(tx, actor, serverId, 'server:operate');
       await tx
         .updateTable('managed_servers')
         .set({ intent: 'manually_stopped' })
         .where('id', '=', serverId)
         .execute();
+      if (policy) {
+        const generation = randomUUID();
+        await tx
+          .updateTable('gateway_server_states')
+          .set({
+            generation,
+            state: 'manually_stopped',
+            readiness_observed_at: null,
+            idle_since: null,
+            updated_at: new Date(),
+          })
+          .where('server_id', '=', serverId)
+          .execute();
+        await recordAudit(tx, actor, 'gateway.consent.revoked', {
+          serverId,
+          generation,
+          previousGeneration: policy.generation,
+          reason: 'manual_stop',
+        });
+      }
+    });
+    if (replay) return replay;
+  }
+  return db.transaction().execute(async (tx) => {
+    await requestLock(tx, context, value.idempotencyKey);
+    const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
+    if (previous) return previous;
+    await lockResources(tx);
+    const policy = await tx
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    const actor = policy ? await currentInteractiveContext(tx, context, env) : context;
+    const result = await enqueueLockedServerOperation(tx, actor, serverId, value, env);
+    if (value.action === 'start' || value.action === 'restart') {
+      if (policy) {
+        const current = await tx
+          .selectFrom('managed_servers')
+          .select('intent')
+          .where('id', '=', serverId)
+          .executeTakeFirstOrThrow();
+        const maintenance = current.intent === 'maintenance';
+        await tx
+          .updateTable('gateway_server_states')
+          .set({
+            generation: randomUUID(),
+            state: maintenance ? 'maintenance' : 'waking',
+            wake_job_id: result.jobId,
+            sleep_job_id: null,
+            process_started_at: null,
+            readiness_observed_at: null,
+            idle_since: null,
+            error_code: null,
+            startup_deadline_at: new Date(Date.now() + policy.readiness_timeout_seconds * 1000),
+            updated_at: new Date(),
+          })
+          .where('server_id', '=', serverId)
+          .execute();
+        await tx
+          .updateTable('managed_servers')
+          .set({ intent: maintenance ? 'maintenance' : 'auto_wake_enabled', readiness: 'loading' })
+          .where('id', '=', serverId)
+          .execute();
+      }
     }
-    if (
-      ['wipe', 'reinstall', 'restore', 'configure', 'delete'].includes(value.action) &&
-      !['offline', 'unknown'].includes(server.runtime_state)
-    )
-      throw new DomainError('conflict');
-    if ('backupBefore' in value) plan.backupBefore = value.backupBefore;
-    if (value.action === 'restore') {
-      plan.backupId = value.backupId;
-      plan.truncate = value.truncate;
-    }
-    if (value.action === 'configure') {
-      const node = await tx
-        .selectFrom('managed_nodes')
-        .selectAll()
-        .where('id', '=', server.node_id)
-        .executeTakeFirstOrThrow();
-      const mapping = await tx
-        .selectFrom('runtime_egg_mappings')
-        .selectAll()
-        .where('id', '=', server.mapping_id)
-        .executeTakeFirstOrThrow();
-      await checkStorage(
-        tx,
-        server.owner_id,
-        node.physical_host_id,
-        value.limits.disk * (1 + mapping.feature_limits.backups),
-        env,
-        serverId,
-      );
-      if (value.limits.disk < server.limits.disk) throw new DomainError('conflict');
-      const primary = await tx
-        .selectFrom('server_allocations')
-        .selectAll()
-        .where('server_id', '=', serverId)
-        .where('is_primary', '=', true)
-        .executeTakeFirstOrThrow();
-      plan.build = {
-        ...value.limits,
-        allocation: primary.pterodactyl_allocation_id,
-        feature_limits: mapping.feature_limits,
-      };
-      // Reserve expanded persistent allowance before the remote effect.
-      plan.previousLimits = server.limits;
-      await tx
-        .updateTable('managed_servers')
-        .set({
-          limits: JSON.stringify({
-            ...server.limits,
-            memory: Math.max(server.limits.memory, value.limits.memory),
-            cpu: Math.max(server.limits.cpu, value.limits.cpu),
-            disk: Math.max(server.limits.disk, value.limits.disk),
-          }),
-        })
-        .where('id', '=', serverId)
-        .execute();
-    }
-    return insertOperation(
-      tx,
-      context,
-      server,
-      jobId,
-      value.idempotencyKey,
-      hash,
-      value.action,
-      plan,
-    );
+    return result;
   });
 }
 
