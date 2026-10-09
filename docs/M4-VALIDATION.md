@@ -123,7 +123,7 @@ Final scoped cleanup completed at **2026-10-09T19:05:54Z**: the backup was
 conclusively attributed to its original job and deleted through the provider;
 its exact lookup returned absence and the server backup inventory was empty.
 Core stop/delete confirmed server API absence, allocation release and terminal
-container absence. This is provider-confirmed backup deletion, not an independent
+container state (stopped or absent). This is provider-confirmed backup deletion, not an independent
 claim of physical erasure. The exact known nonce process then exited on SIGTERM;
 its TCP/UDP sockets and the loopback Gateway listener were confirmed absent.
 
