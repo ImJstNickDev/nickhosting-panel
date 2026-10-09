@@ -35,6 +35,11 @@ import { minecraftStoredConfigurationSchema } from '../../../packages/server-man
 import type { Variables } from './app.js';
 
 type C = Context<{ Variables: Variables }>;
+// Public choices carry all runtime-selection authority; an Owner-only mapping
+// selector is neither required nor accepted by the dedicated creation endpoint.
+const minecraftCreateSchema = createServerSchema.omit({ mappingId: true }).required({
+  minecraft: true,
+});
 export function registerMinecraftRoutes(
   app: Hono<{ Variables: Variables }>,
   options: {
@@ -350,10 +355,8 @@ export function registerMinecraftRoutes(
   });
   app.post('/v1/minecraft/servers', async (c) => {
     const context = await principal(c);
-    const input = parse(createServerSchema, await body(c));
-    if (!input.minecraft) throw new DomainError('validation_failed');
+    const input = parse(minecraftCreateSchema, await body(c));
     const choice = await requireMinecraftChoice(db, context, input.minecraft.choiceId, env);
-    if (choice.row.mapping_id !== input.mappingId) throw new DomainError('validation_failed');
     const { service, options: content } = await contentOptions(context);
     const prepared = await prepareMinecraftCreationConfig(
       db,
@@ -366,7 +369,11 @@ export function registerMinecraftRoutes(
         db,
         service.adapter,
         context,
-        { ...input, minecraft: { ...input.minecraft, configuration: prepared.configuration } },
+        {
+          ...input,
+          mappingId: choice.row.mapping_id,
+          minecraft: { ...input.minecraft, configuration: prepared.configuration },
+        },
         env,
         { minecraftInitialContent: prepared.initialContent },
       ),

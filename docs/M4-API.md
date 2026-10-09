@@ -45,10 +45,16 @@ unverified combinations stay hidden. See [protocol evidence](M4-PROTOCOL.md).
 - `GET /v1/minecraft/content/versions`: `choiceId`, `provider`, `projectId`.
 - `GET /v1/minecraft/players/:name`: independently cross-check Mojang name/UUID
   lookups; `avatar=true` adds an optional MCHeads rendering URL.
-- `POST /v1/minecraft/servers`: M2 creation fields plus
+- `POST /v1/minecraft/servers`: M2 creation fields **except `mappingId`**, plus
   `minecraft:{choiceId,configuration}`. Configuration includes explicit
   `eula:true`, optional controlled properties, operator/whitelist names and
   optionally `modpack:{provider:'modrinth',projectId,versionId}` or `{sourceId}`.
+
+The public catalog/wizard's opaque `choiceId` is sufficient for runtime selection.
+Core authorizes that choice and derives its immutable Owner-configured mapping;
+the dedicated endpoint rejects a supplied `mappingId`. Users do not need access
+to Owner runtime metadata. Creation rechecks current availability, evidence and
+rollout permission under the existing M2 resource lock.
 
 The initial content plan is resolved before provisioning and bound atomically to
 its new managed server. Workers install/configure only after the egg completes
