@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M1 merged; M2 server management, resource admission and external services ready for review in PR #17; unmerged.
+**Status:** M1 merged; M2 review corrections complete on PR #17; ready for Owner/ChatGPT review, unmerged.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
@@ -53,3 +53,5 @@ Project docs are the source of truth; update the relevant documents and ADRs whe
 - [Wings Docker bindings](https://github.com/pterodactyl/wings/blob/develop/environment/allocations.go)
 - [Better Auth linking behavior](https://www.better-auth.com/docs/concepts/users-accounts)
 - [GitHub PR templates](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests)
+
+The current M2 correction round is documented in [`docs/M2-REVIEW-REVISIONS.md`](docs/M2-REVIEW-REVISIONS.md).

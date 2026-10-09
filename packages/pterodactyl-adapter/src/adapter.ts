@@ -34,12 +34,15 @@ import {
   type StartupUpdate,
   userSchema,
 } from './types.js';
+import { createUploadProxy, type UploadProxyOptions } from './uploads.js';
 
 export interface PterodactylOptions extends TransportOptions {
   /** Exact trusted Wings origins; never supplied by a browser. */
   webSocketOrigins?: string[];
   /** Exact trusted Wings/S3 origins used only by the backend download proxy. */
   downloadOrigins?: string[];
+  /** Separately approved exact Wings upload origins; never backup/S3 origins. */
+  uploadOrigins?: string[];
 }
 export function createPterodactylAdapter(options: PterodactylOptions) {
   const transport = createTransport(options);
@@ -49,6 +52,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
   const backupPath = (identifier: string, backupId: string) =>
     `${clientServer(identifier)}/backups/${parseInput(z.string().uuid(), backupId)}`;
   const download = createDownloadProxy(options);
+  const upload = createUploadProxy(options);
   const adapter = {
     getAccount: () =>
       transport.entity(
@@ -374,6 +378,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       });
     },
     async downloadBackup(identifier: string, backupId: string, input: DownloadProxyOptions) {
+      if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
       const result = await transport.entity(
         'client',
         `${backupPath(identifier, backupId)}/download`,
@@ -382,12 +387,23 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       return download(result.url, input);
     },
     async downloadFile(identifier: string, path: string, input: DownloadProxyOptions) {
+      if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
       const result = await transport.entity(
         'client',
         `${clientServer(identifier)}/files/download?file=${filePath(path)}`,
         z.object({ url: z.string() }),
       );
       return download(result.url, input);
+    },
+    async uploadFile(identifier: string, path: string, input: UploadProxyOptions) {
+      if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
+      relativePath(path);
+      const result = await transport.entity(
+        'client',
+        `${clientServer(identifier)}/files/upload`,
+        z.object({ url: z.string() }),
+      );
+      return upload(result.url, path, input);
     },
     async relayConsole(identifier: string, input: ConsoleRelayOptions) {
       const server = await adapter.getClientServer(identifier);

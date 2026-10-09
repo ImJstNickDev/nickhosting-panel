@@ -1,13 +1,17 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
+import { relativePath } from '@nickhosting/pterodactyl-adapter';
 import {
   assignServerDns,
   authorizeServer,
+  backendAllocationPoolOverrides,
   createManagedServer,
   createProject,
   createSftpCredential,
   deleteServerDns,
+  effectiveBackendAllocationPool,
   effectiveNodeOverhead,
+  effectiveUploadPolicy,
   enqueueServerOperation,
   listServerDns,
   listServers,
@@ -17,6 +21,8 @@ import {
   parse,
   previewServerDns,
   publicServer,
+  recoverUploadIngestion,
+  reserveUploadIngestion,
   resolveHostOverride,
   resolveUncertainOperation,
   revokeSftpCredential,
@@ -27,6 +33,7 @@ import {
   setRuntimeMapping,
   setUserLimits,
   updateServerDns,
+  uploadPolicyOverrides,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -40,6 +47,7 @@ export interface ServerRouteOptions {
   env: Readonly<Record<string, string | undefined>>;
   principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
   management: () => Promise<ManagementRuntime>;
+  acquireUploadSlot: () => () => void;
 }
 async function body(c: C): Promise<unknown> {
   if (!c.req.header('content-type')?.startsWith('application/json'))
@@ -93,11 +101,27 @@ export function registerServerRoutes(
       hosts.map((host) => ({
         stored: host,
         effective: resolveHostOverride(host, env),
+        effectiveUploadPolicy: effectiveUploadPolicy(host, env),
+        uploadPolicyLocked: Object.hasOwn(uploadPolicyOverrides(env), host.id),
         locked:
           env.NH_HOST_POLICIES !== undefined &&
           Object.hasOwn(JSON.parse(env.NH_HOST_POLICIES), host.id),
       })),
     );
+  });
+  app.get('/v1/owner/uploads', async (c) => {
+    await owner(c);
+    return c.json(
+      await db
+        .selectFrom('upload_ingestion_claims')
+        .selectAll()
+        .orderBy('created_at', 'asc')
+        .execute(),
+    );
+  });
+  app.post('/v1/owner/uploads/:claimId/recover', async (c) => {
+    await recoverUploadIngestion(db, await owner(c), c.req.param('claimId'), await body(c), env);
+    return c.body(null, 204);
   });
   app.put('/v1/owner/resource-hosts', async (c) =>
     c.json(await setPhysicalHost(db, await owner(c), await body(c), env)),
@@ -108,6 +132,8 @@ export function registerServerRoutes(
     return c.json(
       nodes.map((node) => ({
         ...node,
+        effectiveBackendAllocationPool: effectiveBackendAllocationPool(node, env),
+        backendAllocationPoolLocked: Object.hasOwn(backendAllocationPoolOverrides(env), node.id),
         effectiveMemoryOverheadPercent: effectiveNodeOverhead(node, env),
         memoryOverheadLocked: env.NH_NODE_MEMORY_OVERHEAD_PERCENT !== undefined,
       })),
@@ -295,17 +321,104 @@ export function registerServerRoutes(
   app.get('/v1/servers/:id/files/content', async (c) => {
     const context = await principal(c),
       service = await management();
-    const data = await service.access(context, c.req.param('id'), false, (id) =>
-      service.adapter.readFile(id, c.req.query('path') ?? ''),
-    );
-    return new Response(new Uint8Array(data), {
+    const serverId = c.req.param('id');
+    const id = await service.access(context, serverId, false, async (identifier) => identifier);
+    const download = await service.adapter.downloadFile(id, c.req.query('path') ?? '', {
+      signal: c.req.raw.signal,
+      authorize: () => service.authorizeTransfer(context, serverId, false),
+    });
+    return new Response(download.body, {
       headers: {
-        'content-type': 'application/octet-stream',
+        'content-type': download.contentType,
+        ...(download.contentLength === undefined
+          ? {}
+          : { 'content-length': String(download.contentLength) }),
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
         'content-disposition': 'attachment',
       },
     });
+  });
+  app.put('/v1/servers/:id/files/upload', async (c) => {
+    const context = await principal(c),
+      service = await management();
+    const declared = c.req.header('x-nh-upload-length');
+    const rawLength = c.req.header('content-length');
+    if (
+      c.req.header('content-type') !== 'application/octet-stream' ||
+      (c.req.header('content-encoding') && c.req.header('content-encoding') !== 'identity') ||
+      declared === undefined ||
+      !/^\d+$/.test(declared) ||
+      !Number.isSafeInteger(Number(declared)) ||
+      (rawLength !== undefined &&
+        (!/^\d+$/.test(rawLength) || Number(rawLength) !== Number(declared)))
+    )
+      throw new DomainError('validation_failed');
+    const contentLength = Number(declared);
+    const path = c.req.query('path') ?? '';
+    relativePath(path);
+    const slash = path.lastIndexOf('/');
+    const directory = slash === -1 ? '' : path.slice(0, slash);
+    const name = path.slice(slash + 1);
+    const serverId = c.req.param('id');
+    const release = options.acquireUploadSlot();
+    try {
+      await service.access(context, serverId, true, async (id, connection, current) => {
+        const server = await authorizeServer(connection, current, serverId, 'server:manage');
+        const maxBytes = server.limits.disk * 1024 * 1024;
+        if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
+          throw new DomainError('validation_failed', 413);
+        const [resources, files] = await Promise.all([
+          service.adapter.getResources(id),
+          service.adapter.listFiles(id, directory),
+        ]);
+        const existing = files.find((file) => file.name === name);
+        if (existing && (!existing.is_file || existing.is_symlink))
+          throw new DomainError('conflict');
+        // Native Wings filesystem quotas remain authoritative against concurrent
+        // game/provider writes. This conservative preflight never invents storage.
+        if (resources.resources.disk_bytes - (existing?.size ?? 0) + contentLength > maxBytes)
+          throw new DomainError('validation_failed', 413);
+        await service.authorizeTransfer(current, serverId, true, connection);
+        await recordAudit(connection, current, 'server.files.requested', {
+          serverId,
+          action: 'upload',
+          bytes: contentLength,
+        });
+        const claim = await reserveUploadIngestion(
+          connection,
+          current,
+          serverId,
+          contentLength,
+          env,
+        );
+        try {
+          await service.adapter.uploadFile(id, path, {
+            body:
+              c.req.raw.body ??
+              new ReadableStream({
+                start(controller) {
+                  controller.close();
+                },
+              }),
+            contentLength,
+            maxBytes,
+            signal: c.req.raw.signal,
+            authorize: () => service.authorizeTransfer(current, serverId, true, connection),
+          });
+          await claim.complete();
+        } finally {
+          await claim.unlock();
+        }
+        await recordAudit(connection, current, 'server.files.uploaded', {
+          serverId,
+          bytes: contentLength,
+        });
+      });
+    } finally {
+      release();
+    }
+    return c.body(null, 204);
   });
   app.post('/v1/servers/:id/files', async (c) => {
     const context = await principal(c),
@@ -376,15 +489,18 @@ export function registerServerRoutes(
   app.get('/v1/servers/:id/backups/:backupId/download', async (c) => {
     const context = await principal(c),
       service = await management();
-    const download = await service.access(context, c.req.param('id'), false, (id) =>
-      service.adapter.downloadBackup(id, c.req.param('backupId'), {
-        maxBytes: 1073741824,
-        signal: c.req.raw.signal,
-      }),
-    );
+    const serverId = c.req.param('id');
+    const id = await service.access(context, serverId, false, async (identifier) => identifier);
+    const download = await service.adapter.downloadBackup(id, c.req.param('backupId'), {
+      signal: c.req.raw.signal,
+      authorize: () => service.authorizeTransfer(context, serverId, false),
+    });
     return new Response(download.body, {
       headers: {
         'content-type': download.contentType,
+        ...(download.contentLength === undefined
+          ? {}
+          : { 'content-length': String(download.contentLength) }),
         'cache-control': 'no-store',
         'content-disposition': 'attachment',
         'x-content-type-options': 'nosniff',

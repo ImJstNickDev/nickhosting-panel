@@ -31,6 +31,9 @@ import { z } from 'zod';
 import { registerServerRoutes } from './servers.js';
 
 type Store = ReturnType<typeof createDatabase>;
+// Shared by every application/runtime using this pool; uploads cannot consume
+// the connections needed for logout, role changes and ordinary reads.
+const uploadSlots = new WeakMap<Store['pool'], { active: number }>();
 interface Options {
   database: Store;
   identity: () => Promise<Identity>;
@@ -99,19 +102,28 @@ export function createApp(options: Options) {
     cors({
       origin: async (origin) => ((await origins()).includes(origin) ? origin : undefined),
       credentials: true,
-      allowHeaders: ['Content-Type', 'X-NH-Support-Token', 'X-Invitation-Token'],
+      allowHeaders: [
+        'Content-Type',
+        'X-NH-Support-Token',
+        'X-Invitation-Token',
+        'X-NH-Upload-Length',
+      ],
       allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     }),
   );
-  app.use(
-    '*',
-    bodyLimit({
-      maxSize: 65_536,
-      onError: () => {
-        throw new DomainError('validation_failed', 413);
-      },
-    }),
-  );
+  const jsonBodyLimit = bodyLimit({
+    maxSize: 65_536,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
+  app.use('*', async (c, next) => {
+    // Only this authenticated binary route streams its body. Its handler checks
+    // exact declared size, server storage, live authorization and actual bytes.
+    if (c.req.method === 'PUT' && /^\/v1\/servers\/[^/]+\/files\/upload$/.test(c.req.path))
+      return next();
+    return jsonBodyLimit(c, next);
+  });
   app.use('*', async (c, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
       const origin = c.req.header('origin');
@@ -336,6 +348,24 @@ export function createApp(options: Options) {
     db,
     env,
     principal,
+    acquireUploadSlot: () => {
+      let slots = uploadSlots.get(pool);
+      if (!slots) {
+        slots = { active: 0 };
+        uploadSlots.set(pool, slots);
+      }
+      const poolSize = pool.options.max ?? 10;
+      const capacity = Math.max(0, poolSize - (poolSize > 2 ? 2 : 1));
+      if (slots.active >= capacity) throw new DomainError('conflict');
+      slots.active++;
+      let released = false;
+      return () => {
+        if (!released) {
+          released = true;
+          slots.active--;
+        }
+      };
+    },
     management:
       options.management ??
       (async () => {

@@ -49,6 +49,7 @@ export const platformConfigSchema = z
       .optional(),
     pterodactylWebSocketOrigins: z.array(origin(['ws:', 'wss:'])).max(50),
     pterodactylDownloadOrigins: z.array(origin(['http:', 'https:'])).max(50),
+    pterodactylUploadOrigins: z.array(origin(['http:', 'https:'])).max(50),
     registrationInviteTtlSeconds: z.number().int().min(60).max(31_536_000),
     supportIdleTtlSeconds: z.number().int().min(60).max(900),
     supportAbsoluteTtlSeconds: z.number().int().min(60).max(3600),
@@ -64,7 +65,8 @@ export const platformConfigSchema = z
     defaultUserMemoryMiB: z.number().int().min(1).max(1048576),
     defaultUserCpuPercent: z.number().int().min(1).max(100000),
     defaultUserStorageMiB: z.number().int().min(1).max(1073741824),
-    maxServersPerUser: z.number().int().min(1).max(10000),
+    maxServersPerUser: z.number().int().min(1).max(10000).nullable(),
+    maxConcurrentProvisionsPerUser: z.number().int().min(1).max(100),
     observationMaxAgeSeconds: z.number().int().min(1).max(30),
     sftpgoBaseUrl: httpUrl.optional(),
     sftpgoDataRoot: z.string().startsWith('/').optional(),
@@ -91,6 +93,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   defaultLocale: 'en',
   pterodactylWebSocketOrigins: [],
   pterodactylDownloadOrigins: [],
+  pterodactylUploadOrigins: [],
   registrationInviteTtlSeconds: 86_400,
   supportIdleTtlSeconds: 300,
   supportAbsoluteTtlSeconds: 900,
@@ -102,7 +105,8 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   defaultUserMemoryMiB: 16384,
   defaultUserCpuPercent: 400,
   defaultUserStorageMiB: 32768,
-  maxServersPerUser: 20,
+  maxServersPerUser: null,
+  maxConcurrentProvisionsPerUser: 4,
   observationMaxAgeSeconds: 15,
   sftpCredentialTtlSeconds: 3600,
 });
@@ -116,6 +120,7 @@ export const configEnvironmentKeys = {
   dockerObserverSocket: 'NH_DOCKER_OBSERVER_SOCKET',
   pterodactylWebSocketOrigins: 'NH_PTERODACTYL_WEBSOCKET_ORIGINS',
   pterodactylDownloadOrigins: 'NH_PTERODACTYL_DOWNLOAD_ORIGINS',
+  pterodactylUploadOrigins: 'NH_PTERODACTYL_UPLOAD_ORIGINS',
   registrationInviteTtlSeconds: 'NH_INVITE_TTL_SECONDS',
   supportIdleTtlSeconds: 'NH_SUPPORT_IDLE_TTL_SECONDS',
   supportAbsoluteTtlSeconds: 'NH_SUPPORT_ABSOLUTE_TTL_SECONDS',
@@ -132,6 +137,7 @@ export const configEnvironmentKeys = {
   defaultUserCpuPercent: 'NH_DEFAULT_USER_CPU_PERCENT',
   defaultUserStorageMiB: 'NH_DEFAULT_USER_STORAGE_MIB',
   maxServersPerUser: 'NH_MAX_SERVERS_PER_USER',
+  maxConcurrentProvisionsPerUser: 'NH_MAX_CONCURRENT_PROVISIONS_PER_USER',
   observationMaxAgeSeconds: 'NH_OBSERVATION_MAX_AGE_SECONDS',
   sftpgoBaseUrl: 'NH_SFTPGO_BASE_URL',
   sftpgoDataRoot: 'NH_SFTPGO_DATA_ROOT',
@@ -154,6 +160,7 @@ const numericKeys = new Set<PlatformConfigKey>([
   'defaultUserCpuPercent',
   'defaultUserStorageMiB',
   'maxServersPerUser',
+  'maxConcurrentProvisionsPerUser',
   'observationMaxAgeSeconds',
   'sftpCredentialTtlSeconds',
 ]);
@@ -187,12 +194,18 @@ export function resolveConfig(
     const value = env[configEnvironmentKeys[key]];
     if (value === undefined) continue;
     if (value.trim() === '') invalid([key]);
-    if (key === 'pterodactylWebSocketOrigins' || key === 'pterodactylDownloadOrigins') {
+    if (
+      key === 'pterodactylWebSocketOrigins' ||
+      key === 'pterodactylDownloadOrigins' ||
+      key === 'pterodactylUploadOrigins'
+    ) {
       try {
         merged[key] = JSON.parse(value);
       } catch {
         invalid([key]);
       }
+    } else if (key === 'maxServersPerUser' && value === 'null') {
+      merged[key] = null;
     } else if (numericKeys.has(key)) {
       if (!/^(0|[1-9]\d*)$/.test(value)) invalid([key]);
       merged[key] = Number(value);

@@ -1,6 +1,25 @@
 import type { ColumnType, Generated } from 'kysely';
 
 type Json<T> = ColumnType<T, string, string>;
+export interface BackendAllocationPool {
+  allocations: Array<{ allocationId: number; address: string; port: number }>;
+  gatewayBindAddresses: string[];
+}
+export interface UploadPolicy {
+  providerMaxFileBytes: number;
+  temporaryDiskPath: string;
+  temporaryDiskBudgetBytes: number;
+  temporaryDiskHeadroomBytes: number;
+}
+export interface UploadScope {
+  observerId: string;
+  nodeId: string;
+  pterodactylNodeId: number;
+  pterodactylServerId: number;
+  pterodactylServerUuid: string;
+  externalId: string;
+  policy: UploadPolicy;
+}
 export interface ServerLimits {
   memory: number;
   cpu: number;
@@ -30,15 +49,32 @@ export interface ServerTables {
     cpu_headroom_percent: number;
     disk_headroom_mib: string;
     local_disk_path: string;
+    upload_policy: ColumnType<UploadPolicy | null, string | null | undefined, string | null>;
     observer_id: string;
     enabled: Generated<boolean>;
     updated_at: Generated<Date>;
+  };
+  upload_ingestion_claims: {
+    id: string;
+    physical_host_id: string;
+    server_id: string;
+    actor_user_id: string;
+    declared_bytes: string;
+    reserved_bytes: string;
+    scope: Json<UploadScope>;
+    scope_hash: string;
+    created_at: Generated<Date>;
   };
   managed_nodes: {
     id: string;
     physical_host_id: string;
     pterodactyl_node_id: number;
     provision_user_id: number;
+    backend_allocation_pool: ColumnType<
+      BackendAllocationPool | null,
+      string | null | undefined,
+      string | null
+    >;
     installer_memory_mib: Generated<number>;
     installer_cpu_percent: Generated<number>;
     memory_overhead_percent: Generated<number>;

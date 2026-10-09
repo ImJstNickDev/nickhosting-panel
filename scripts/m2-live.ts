@@ -26,6 +26,7 @@ import {
   type PterodactylAdapter,
 } from '../packages/pterodactyl-adapter/src/index.js';
 import {
+  backendAllocationPoolSchema,
   createManagedServer,
   createManagementRuntime,
   enqueueServerOperation,
@@ -54,12 +55,15 @@ interface Plan {
   dockerObserverSocket: string;
   memoryOverheadPercent: number;
   fixtureWingsMemoryMultiplier: number;
+  backendAllocationPool: unknown;
   count: number;
   memoryMiB: number;
   cpuPercent: number;
   diskMiB: number;
 }
 const plan: Plan = JSON.parse(readFileSync(planPath, 'utf8'));
+// A historical plan without a reviewed private backend pool cannot create fixtures.
+const backendAllocationPool = backendAllocationPoolSchema.parse(plan.backendAllocationPool);
 function defined<T>(value: T | null | undefined): T {
   assert.ok(value !== undefined && value !== null);
   return value;
@@ -371,6 +375,14 @@ const adapter = new Proxy(raw, {
         for (const id of [input.allocation.default, ...(input.allocation.additional ?? [])]) {
           const selected = free.find((a) => a.id === id && !a.assigned);
           assert.ok(selected);
+          assert.ok(
+            backendAllocationPool.allocations.some(
+              (pin) =>
+                pin.allocationId === id &&
+                pin.address === selected.ip &&
+                pin.port === selected.port,
+            ),
+          );
           // A conservative live fixture avoids a port used by any direct server.
           assert.ok(!free.some((a) => a.assigned && a.port === selected.port));
         }
@@ -553,6 +565,7 @@ try {
       pterodactylNodeId: plan.nodeId,
       provisionUserId: plan.provisionUserId,
       memoryOverheadPercent: plan.memoryOverheadPercent,
+      backendAllocationPool,
     });
     const mapping = await setRuntimeMapping(db, adapter, context, {
       gameId,
@@ -630,6 +643,7 @@ try {
       pterodactylNodeId: plan.nodeId,
       provisionUserId: plan.provisionUserId,
       memoryOverheadPercent: plan.memoryOverheadPercent,
+      backendAllocationPool,
     });
     ledger.failure = '';
     ledger.failureLocation = '';

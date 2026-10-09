@@ -13,7 +13,8 @@ handles power, files, console, telemetry and backups. Privileged keys, signed
 download URLs and WebSocket tokens remain on the backend. Independent direct
 Pterodactyl servers are neither imported nor mutated by reconciliation.
 
-Provision through explicitly selected free allocations and stable external IDs,
+Provision through an Owner-configured, validated private backend allocation pool
+and stable external IDs,
 with `start_on_completion=false`. Automatic deployment's configured-capacity
 selector is unsuitable for the installation's intentional stopped-server
 over-allocation. Installed-source investigation and safe test-owned live evidence
@@ -22,7 +23,14 @@ capacity compatibility. Do not change Panel/Wings capacity or over-allocation
 settings. Serialize NickHosting allocation claims, refresh inventory before a
 remote create and verify resulting identity/allocations. Pterodactyl provides no
 cross-client atomic claim shared with a direct administrator; surface conflicts
-rather than asserting that independent provider writers cannot race.
+rather than asserting that independent provider writers cannot race. Migration
+007 adds a nullable per-node pool with exact allocation IDs/private IPs/ports and
+disjoint declared gateway addresses; null prevents new provisioning. Environment
+pool overrides take precedence. Validate fresh provider inventory both when
+reserving and before creating, and never fall back to unrelated public allocations.
+Existing claims remain stable; an already-created owned server can still recover
+when a pool is later disabled. Pool configuration applies no network or provider
+allocation changes.
 
 PostgreSQL is authoritative for registry, persistent storage/port claims,
 compute reservations, operation phases and external-effect intent. Redis/BullMQ
@@ -65,11 +73,15 @@ power transition. A retained reservation always follows the strict stop proof;
 missing evidence cannot be treated as successful completion.
 
 Host observations include actual memory/CPU usage by direct servers, the OS and
-other workloads. In addition to that measured usage, M2 subtracts the full
-managed reservation and configured headroom. It deliberately gives no credit for
-cached managed telemetry, which is not coherent with a newer host sample and can
-double-count released memory. This conservative choice can reject additional
-starts early. CPU percentage limits do not promise dedicated physical cores.
+other workloads. New starts subtract full commitments and configured headroom
+from measured free capacity. Same-resource restarts retain their commitment and
+have zero incremental RAM/CPU demand; they must not be denied by charging that
+commitment again. Fresh host headroom, user limits and aggregate hard ceilings
+still apply. Positive growth uses the delta plus other full commitments only if
+the previous commitment predates the sample; otherwise the proposed full amount
+is charged conservatively, preventing repeated growth against one stale sample.
+No reservation shrinks and no cached telemetry creates credits. CPU percentage
+limits do not promise dedicated physical cores.
 Unknown or stale observations deny admission. The configured local observer must
 actually observe the game host and its target filesystem; container deployment
 does not authorize inventing a host-capacity measurement. An explicit
@@ -110,9 +122,45 @@ Persistent storage reserves each server's disk maximum plus each allowed backup
 slot. `GLOBAL_POOL` remains the default; `PER_USER_BUDGET` additionally checks a
 user allowance. Both respect filesystem headroom. These are conservative
 admission limits, not an instantaneous filesystem quota against external writers.
+Total server-count limits are optional and disabled by default (`null`). Storage,
+backend allocation ownership and invite-only authorization remain enforced. A
+separate configurable pending-provision limit defaults to four; it does not count
+completed offline servers, and uncertain provisioning cannot evade it. These
+checks share the atomic creation lock. Explicit environment overrides can enable
+or disable the Owner's total cap.
+
 Audited Owner user-limit overrides never bypass physical safety. Multiport roles
 own stable allocations while offline and may inject their actual assigned port
 into a declared egg environment variable. Gateway bindings remain M3.
+
+Browser file management includes raw binary uploads and streamed file/backup
+downloads through the adapter. Uploads declare an exact byte length and are bounded
+by server storage policy/provider limits, not a small fixed browser-upload cap.
+One server lock covers each upload, multipart framing is generated incrementally,
+and completion requires exact bytes plus a successful provider response. Downloads
+have no fixed total byte or duration cap; both directions enforce idle bounds,
+backpressure, cancellation and current authorization. Distinct exact upload origins
+prevent a backup download destination from implicitly becoming an upload target.
+No API key or signed transfer URL reaches the browser. Failed uploads may leave a
+partial provider file; there is no false atomic-write or rollback guarantee.
+Existing provider upload limits require a separate Owner decision if insufficient.
+
+Native Wings parses/spools multipart bodies before applying its per-file upload
+limit. Therefore migration 008 adds a disabled-by-default Owner upload policy and
+one durable ingestion claim per physical host. Admission verifies the provider
+bound before requesting a signed URL, observes the actual configured disk-backed
+staging and destination filesystems, and reserves twice the payload plus bounded
+framing without overwrite credit (temporary and final copies can coexist). Claim scope pins provider/server/host/observer/policy identity.
+Success releases the claim; an ambiguous result or crash retains it and blocks
+new host uploads and affected-server mutations. Only audited regular-Owner
+recovery with external completion/cleanup evidence can release an inactive claim;
+there is no automatic expiry or destructive cleanup. This does not modify Wings.
+
+The API keeps database capacity available for authentication and revocation;
+contending interactive writes reject immediately. Node's total request deadline
+is replaced only for the canonical raw upload route, retaining ordinary-body,
+header and inactivity limits. These are backend contracts for M6, not gateway
+or frontend implementation.
 
 SFTPGo credentials have encrypted, durable intent; random instance/server/
 credential identity; bounded expiry; one-time secret delivery; and one verified

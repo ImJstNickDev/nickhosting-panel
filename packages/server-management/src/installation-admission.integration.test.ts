@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { updateSettings } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { reserveInstallation, reserveStart, setUserLimits } from './admission.js';
@@ -45,6 +46,7 @@ describe('physical installation resource admission', () => {
   });
 
   it('serializes concurrent installers below the physical memory ceiling', async () => {
+    await updateSettings(f.db, f.owner, { maxConcurrentProvisionsPerUser: 8 });
     const jobs = await Promise.all(Array.from({ length: 8 }, () => pending()));
     await f.db
       .updateTable('physical_hosts')
@@ -65,6 +67,7 @@ describe('physical installation resource admission', () => {
     expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
   });
   it('enforces installer CPU floors independently of ample memory', async () => {
+    await updateSettings(f.db, f.owner, { maxConcurrentProvisionsPerUser: 8 });
     const jobs = await Promise.all(Array.from({ length: 5 }, () => pending()));
     await f.db
       .updateTable('physical_hosts')

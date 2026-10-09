@@ -1,11 +1,19 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
+import { resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { getRequestListener } from '@hono/node-server';
 import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
+import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
+import type { ConsoleRelayOptions, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { createManagementRuntime } from '@nickhosting/server-management';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
+import { createDownloadProxy } from '../../../packages/pterodactyl-adapter/src/downloads.js';
+import { createUploadProxy } from '../../../packages/pterodactyl-adapter/src/uploads.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp } from './app.js';
 
@@ -28,6 +36,42 @@ describe('M2 Hono API with real invitation, password and session authentication'
   const writeFile = vi.fn(async () => {}),
     sendCommand = vi.fn(async () => {}),
     deleteBackup = vi.fn(async () => {});
+  const uploadFile = vi
+    .fn<PterodactylAdapter['uploadFile']>()
+    .mockImplementation(async (_id, path, input) => {
+      const proxy = createUploadProxy({
+        baseURL: 'https://panel.example.test',
+        applicationKey: 'isolated-key',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher: async (_url, init) => {
+          await new Response(init?.body).arrayBuffer();
+          return new Response(null, { status: 204 });
+        },
+      });
+      await proxy('https://wings.example.test/upload/file?token=isolated-private-token', path, {
+        ...input,
+        authorizationIntervalMs: 10,
+      });
+    });
+  async function upload(
+    client: AuthClient | null,
+    server: string,
+    data: Uint8Array | ReadableStream<Uint8Array>,
+    length: number,
+    headers: Record<string, string> = {},
+  ) {
+    const requestHeaders = client?.headers() ?? new Headers({ origin });
+    requestHeaders.set('content-type', 'application/octet-stream');
+    requestHeaders.set('x-nh-upload-length', String(length));
+    for (const [key, value] of Object.entries(headers)) requestHeaders.set(key, value);
+    const init: RequestInit & { duplex: 'half' } = {
+      method: 'PUT',
+      headers: requestHeaders,
+      body: data as BodyInit,
+      duplex: 'half',
+    };
+    return app.request(`${origin}/v1/servers/${server}/files/upload?path=world.bin`, init);
+  }
   const relayClose = vi.fn();
   let consoleAuthorization: ConsoleRelayOptions['authorize'] | undefined;
   async function request(
@@ -59,6 +103,25 @@ describe('M2 Hono API with real invitation, password and session authentication'
     );
     client?.absorb(response);
     return response;
+  }
+  async function recoverFixtureUploads() {
+    const response = await request(owner, '/v1/owner/uploads');
+    expect(response.status).toBe(200);
+    const claims: { id: string; scope_hash: string }[] = await response.json();
+    for (const claim of claims)
+      expect(
+        (
+          await request(owner, `/v1/owner/uploads/${claim.id}/recover`, {
+            confirm: true,
+            remoteTransferFinished: true,
+            temporaryFilesRemoved: true,
+            scopeHash: claim.scope_hash,
+            reason: 'Isolated provider fixture completed',
+            evidence:
+              'Mock provider has finished; no real staging files or remote writes exist in this test.',
+          })
+        ).status,
+      ).toBe(204);
   }
   async function verify(client: AuthClient, email: string) {
     const message = mails.findLast((mail) => mail.to === email && mail.template === 'verify-email');
@@ -169,6 +232,25 @@ describe('M2 Hono API with real invitation, password and session authentication'
         },
       ]),
       readFile: vi.fn(async () => Buffer.from('fixture-data')),
+      downloadFile: vi.fn(async (_id, _path, input) =>
+        createDownloadProxy({
+          baseURL: 'https://panel.example.test',
+          applicationKey: 'isolated-key',
+          fetcher: async () => new Response('fixture-data'),
+        })('https://panel.example.test/file?token=private-fixture', input),
+      ),
+      uploadFile,
+      getResources: vi.fn(async () => ({
+        current_state: 'offline',
+        is_suspended: false,
+        resources: {
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          disk_bytes: 0,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+        },
+      })),
       writeFile,
       sendCommand,
       deleteBackup,
@@ -205,7 +287,21 @@ describe('M2 Hono API with real invitation, password and session authentication'
       listNests: vi.fn(async () => []),
       discoverCapabilities: vi.fn(async () => ({ application: true, client: true })),
     });
+    await f.db
+      .updateTable('physical_hosts')
+      .set({
+        local_disk_path: resolve('mountdata/m2-tests'),
+        upload_policy: JSON.stringify({
+          providerMaxFileBytes: 64 * 1024 ** 2,
+          temporaryDiskPath: resolve('mountdata/m2-tests'),
+          temporaryDiskBudgetBytes: 128 * 1024 ** 2,
+          temporaryDiskHeadroomBytes: 1024 ** 2,
+        }),
+      })
+      .where('id', '=', f.hostId)
+      .execute();
     Object.assign(env, {
+      NH_OBSERVER_ID: 'isolated-observer',
       NH_STATIC_GAME_HOSTNAME: 'games.example.test',
       NH_SFTPGO_BASE_URL: 'https://sftp.example.test',
       NH_SFTPGO_DATA_ROOT: '/isolated-api-fixture',
@@ -253,6 +349,9 @@ describe('M2 Hono API with real invitation, password and session authentication'
     outsiderId = await invited(outsider, 'servers-outsider@example.test');
     f.context.actorUserId = userId;
     f.context.subjectUserId = userId;
+  });
+  beforeEach(async () => {
+    await f.observe();
   });
   afterAll(async () => {
     await database?.destroy();
@@ -318,6 +417,66 @@ describe('M2 Hono API with real invitation, password and session authentication'
     } finally {
       delete env.NH_NODE_MEMORY_OVERHEAD_PERCENT;
     }
+  });
+  it('exposes the effective backend pool and refuses disabled-pool creation or locked Owner edits', async () => {
+    const stored = (
+      await f.db
+        .selectFrom('managed_nodes')
+        .selectAll()
+        .where('id', '=', f.nodeId)
+        .executeTakeFirstOrThrow()
+    ).backend_allocation_pool;
+    expect(stored?.allocations.length).toBeGreaterThan(0);
+    env.NH_BACKEND_ALLOCATION_POOLS = JSON.stringify({ [f.nodeId]: null });
+    try {
+      const response = await request(owner, '/v1/owner/nodes');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual([
+        expect.objectContaining({
+          id: f.nodeId,
+          backend_allocation_pool: stored,
+          effectiveBackendAllocationPool: null,
+          backendAllocationPoolLocked: true,
+        }),
+      ]);
+      const create = await request(user, '/v1/servers', f.input());
+      expect(create.status).toBe(409);
+      expect((await create.json()).error.code).toBe('allocation_unavailable');
+      expect(await f.db.selectFrom('managed_servers').select('id').execute()).toEqual([]);
+      expect(
+        (
+          await request(
+            owner,
+            '/v1/owner/nodes',
+            {
+              id: f.nodeId,
+              physicalHostId: f.hostId,
+              pterodactylNodeId: f.providerNodeId,
+              provisionUserId: 1,
+              backendAllocationPool: null,
+            },
+            { method: 'PUT' },
+          )
+        ).status,
+      ).toBe(409);
+      expect(
+        (
+          await f.db
+            .selectFrom('managed_nodes')
+            .selectAll()
+            .where('id', '=', f.nodeId)
+            .executeTakeFirstOrThrow()
+        ).backend_allocation_pool,
+      ).toEqual(stored);
+    } finally {
+      delete env.NH_BACKEND_ALLOCATION_POOLS;
+    }
+    expect(await (await request(owner, '/v1/owner/nodes')).json()).toEqual([
+      expect.objectContaining({
+        effectiveBackendAllocationPool: stored,
+        backendAllocationPoolLocked: false,
+      }),
+    ]);
   });
   it('creates durable operations over HTTP, validates confirmation and origin, and exposes safe history', async () => {
     const input = f.input();
@@ -685,6 +844,576 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(writeFile.mock.calls.length).toBe(before);
     expect(JSON.stringify(logs)).not.toContain(providerSecret);
   });
+  it('uploads binary data larger than the JSON/text limits through the authorized streaming route', async () => {
+    const server = await f.server();
+    const binary = new Uint8Array(2 * 1024 * 1024 + 17).fill(0xa5);
+    const response = await upload(user, server, binary, binary.length);
+    expect(response.status).toBe(204);
+    expect(uploadFile).toHaveBeenLastCalledWith(
+      expect.any(String),
+      'world.bin',
+      expect.objectContaining({ contentLength: binary.length, maxBytes: 64 * 1024 ** 2 }),
+    );
+    const audits = await f.db
+      .selectFrom('audit_events')
+      .select(['action', 'metadata'])
+      .where('action', '=', 'server.files.uploaded')
+      .execute();
+    expect(audits).toHaveLength(1);
+    expect(JSON.stringify(audits)).not.toMatch(/private-token|a5a5/);
+    expect(JSON.stringify(logs)).not.toMatch(/private-token/);
+  });
+
+  it('enforces binary upload authentication, current project permissions and origin', async () => {
+    const project = await (
+      await request(user, '/v1/projects', { name: 'Transfer authorization' })
+    ).json();
+    const server = await f.server({ projectId: project.id });
+    const before = uploadFile.mock.calls.length;
+    expect((await upload(null, server, new Uint8Array(1), 1)).status).toBe(401);
+    expect((await upload(outsider, server, new Uint8Array(1), 1)).status).toBe(403);
+    expect(
+      (
+        await upload(user, server, new Uint8Array(1), 1, {
+          origin: 'https://attacker.example.test',
+        })
+      ).status,
+    ).toBe(403);
+    for (const role of ['viewer', 'operator']) {
+      expect(
+        (
+          await request(
+            user,
+            `/v1/projects/${project.id}/members`,
+            { userId: peerId, role },
+            { method: 'PUT' },
+          )
+        ).status,
+      ).toBe(204);
+      expect((await upload(peer, server, new Uint8Array(1), 1)).status).toBe(403);
+    }
+    expect(uploadFile.mock.calls.length).toBe(before);
+    expect(
+      (
+        await request(
+          user,
+          `/v1/projects/${project.id}/members`,
+          { userId: peerId, role: 'manager' },
+          { method: 'PUT' },
+        )
+      ).status,
+    ).toBe(204);
+    expect((await upload(peer, server, new Uint8Array(1), 1)).status).toBe(204);
+  });
+
+  it('rejects invalid upload declarations, quota violations and lifecycle conflicts before provider writes', async () => {
+    const server = await f.server();
+    const before = uploadFile.mock.calls.length;
+    for (const headers of [
+      { 'content-type': 'application/json' },
+      { 'x-nh-upload-length': '-1' },
+      { 'x-nh-upload-length': 'NaN' },
+      { 'content-length': '2' },
+      { 'content-encoding': 'gzip' },
+    ] as Record<string, string>[])
+      expect((await upload(user, server, new Uint8Array(1), 1, headers)).status).toBe(400);
+    expect((await upload(user, server, new Uint8Array(1), 65 * 1024 ** 2)).status).toBe(413);
+    vi.mocked(f.adapter.getResources).mockResolvedValueOnce({
+      current_state: 'offline',
+      is_suspended: false,
+      resources: {
+        memory_bytes: 0,
+        cpu_absolute: 0,
+        disk_bytes: 64 * 1024 ** 2,
+        network_rx_bytes: 0,
+        network_tx_bytes: 0,
+      },
+    });
+    expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(413);
+    expect(
+      (
+        await request(user, `/v1/servers/${server}/operations`, {
+          action: 'stop',
+          idempotencyKey: randomUUID(),
+        })
+      ).status,
+    ).toBe(202);
+    expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(409);
+    expect(uploadFile.mock.calls.length).toBe(before);
+  });
+
+  it('rejects disabled or over-provider uploads without requesting a token or reading browser bytes', async () => {
+    const server = await f.server();
+    const original = await f.db
+      .selectFrom('physical_hosts')
+      .selectAll()
+      .where('id', '=', f.hostId)
+      .executeTakeFirstOrThrow();
+    if (!original.upload_policy) throw new Error('Missing isolated upload policy');
+    const before = uploadFile.mock.calls.length;
+    let reads = 0;
+    const source = () =>
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            reads++;
+            controller.enqueue(new Uint8Array(2));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    try {
+      env.NH_UPLOAD_POLICIES = JSON.stringify({ [f.hostId]: null });
+      const disabled = await upload(user, server, source(), 2);
+      expect(disabled.status).toBe(400);
+      expect((await disabled.json()).error.code).toBe('configuration_invalid');
+      const policy = { ...original.upload_policy, providerMaxFileBytes: 1 };
+      env.NH_UPLOAD_POLICIES = JSON.stringify({ [f.hostId]: policy });
+      expect((await upload(user, server, source(), 2)).status).toBe(413);
+      const hosts = await request(owner, '/v1/owner/resource-hosts');
+      expect(hosts.status).toBe(200);
+      expect(await hosts.json()).toEqual([
+        expect.objectContaining({ effectiveUploadPolicy: policy, uploadPolicyLocked: true }),
+      ]);
+      const edit = await request(
+        owner,
+        '/v1/owner/resource-hosts',
+        {
+          id: original.id,
+          name: original.name,
+          memoryLimitMiB: original.memory_limit_mib,
+          cpuLimitPercent: original.cpu_limit_percent,
+          storagePoolMiB: Number(original.storage_pool_mib),
+          memoryHeadroomMiB: original.memory_headroom_mib,
+          cpuHeadroomPercent: original.cpu_headroom_percent,
+          diskHeadroomMiB: Number(original.disk_headroom_mib),
+          localDiskPath: original.local_disk_path,
+          observerId: original.observer_id,
+          enabled: original.enabled,
+          uploadPolicy: policy,
+        },
+        { method: 'PUT' },
+      );
+      expect(edit.status).toBe(409);
+    } finally {
+      delete env.NH_UPLOAD_POLICIES;
+    }
+    expect(reads).toBe(0);
+    expect(uploadFile.mock.calls.length).toBe(before);
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+  });
+
+  it('does not use overwrite credit for the temporary multipart and destination copies', async () => {
+    const server = await f.server(),
+      bytes = 2 * 1024 ** 2;
+    const original = await f.db
+      .selectFrom('physical_hosts')
+      .select('upload_policy')
+      .where('id', '=', f.hostId)
+      .executeTakeFirstOrThrow();
+    if (!original.upload_policy) throw new Error('Missing isolated upload policy');
+    env.NH_UPLOAD_POLICIES = JSON.stringify({
+      [f.hostId]: { ...original.upload_policy, temporaryDiskBudgetBytes: bytes },
+    });
+    vi.mocked(f.adapter.getResources).mockResolvedValueOnce({
+      current_state: 'offline',
+      is_suspended: false,
+      resources: {
+        memory_bytes: 0,
+        cpu_absolute: 0,
+        disk_bytes: 64 * 1024 ** 2,
+        network_rx_bytes: 0,
+        network_tx_bytes: 0,
+      },
+    });
+    vi.mocked(f.adapter.listFiles).mockResolvedValueOnce([
+      {
+        name: 'world.bin',
+        size: bytes,
+        mode: '-rw-r--r--',
+        is_file: true,
+        is_symlink: false,
+        mimetype: 'application/octet-stream',
+        created_at: new Date().toISOString(),
+        modified_at: new Date().toISOString(),
+      },
+    ]);
+    const before = uploadFile.mock.calls.length;
+    let reads = 0;
+    try {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            reads++;
+            controller.enqueue(new Uint8Array(1));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      expect((await upload(user, server, body, bytes)).status).toBe(413);
+      expect(reads).toBe(0);
+      expect(uploadFile.mock.calls.length).toBe(before);
+    } finally {
+      delete env.NH_UPLOAD_POLICIES;
+    }
+  });
+
+  it('never reports success for truncated or excess binary uploads', async () => {
+    const server = await f.server();
+    for (const actual of [1, 3]) {
+      const response = await upload(user, server, new Uint8Array(actual), 2);
+      expect(response.status).toBe(503);
+      expect(await response.text()).not.toMatch(/private-token|wings.example/);
+      await recoverFixtureUploads();
+    }
+    const audits = await f.db
+      .selectFrom('audit_events')
+      .select('metadata')
+      .where('action', '=', 'server.files.uploaded')
+      .execute();
+    expect(
+      audits.some((entry) => (entry.metadata as { serverId: string }).serverId === server),
+    ).toBe(false);
+  });
+
+  it.each(['file', 'backup'])(
+    'ends an established %s download when the real session is revoked',
+    async (kind) => {
+      const server = await f.server();
+      const sessions = await f.db
+        .selectFrom('session')
+        .selectAll()
+        .where('userId', '=', userId)
+        .execute();
+      let cancelled = false;
+      const proxy = createDownloadProxy({
+        baseURL: 'https://panel.example.test',
+        applicationKey: 'isolated-key',
+        fetcher: async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new Uint8Array([1]));
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+          ),
+      });
+      const method = kind === 'file' ? f.adapter.downloadFile : f.adapter.downloadBackup;
+      vi.mocked(method).mockImplementationOnce(async (_id, _path, input) =>
+        proxy('https://panel.example.test/file?token=private', {
+          ...input,
+          authorizationIntervalMs: 10,
+        }),
+      );
+      try {
+        const response = await request(
+          user,
+          `/v1/servers/${server}/${kind === 'file' ? 'files/content?path=world.bin' : `backups/${backupId}/download`}`,
+        );
+        expect(response.status).toBe(200);
+        const reader = response.body?.getReader();
+        expect((await reader?.read())?.value).toEqual(new Uint8Array([1]));
+        await f.db.deleteFrom('session').where('userId', '=', userId).execute();
+        await expect(reader?.read()).rejects.toMatchObject({ reason: 'unavailable' });
+        expect(cancelled).toBe(true);
+      } finally {
+        await f.db.insertInto('session').values(sessions).execute();
+      }
+    },
+  );
+
+  it('revokes a streaming upload after a real session expires and retains the lifecycle lock until it ends', async () => {
+    const server = await f.server();
+    const sessions = await f.db
+      .selectFrom('session')
+      .selectAll()
+      .where('userId', '=', userId)
+      .execute();
+    let cancelled = false,
+      expired = false;
+    const source = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          if (expired) return new Promise<void>(() => {});
+          expired = true;
+          await delay(20);
+          await f.db
+            .updateTable('session')
+            .set({ expiresAt: new Date(0) })
+            .where('userId', '=', userId)
+            .execute();
+          if (!cancelled) controller.enqueue(new Uint8Array(1024));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    try {
+      const response = await upload(user, server, source, 1024 ** 2);
+      expect(response.status).toBe(503);
+      expect(cancelled).toBe(true);
+      expect(await response.text()).not.toContain('private-token');
+    } finally {
+      for (const session of sessions)
+        await f.db
+          .updateTable('session')
+          .set({ expiresAt: session.expiresAt })
+          .where('id', '=', session.id)
+          .execute();
+    }
+    // Ambiguous uploads retain their ingestion claim until the Owner verifies cleanup.
+    const blocked = await request(user, `/v1/servers/${server}/files`, {
+      action: 'write',
+      path: 'fixture',
+      content: 'not-before-review',
+    });
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json()).error.code).toBe('operation_uncertain');
+    await recoverFixtureUploads();
+    // A subsequent write can take the same server lock after reviewed fixture cleanup.
+    expect(
+      (
+        await request(user, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'fixture',
+          content: 'after-cancel',
+        })
+      ).status,
+    ).toBe(204);
+  });
+
+  it('reserves pool capacity for logout and reads across distinct-server uploads and app instances', async () => {
+    const first = await f.server(),
+      second = await f.server();
+    const small = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
+      max: 2,
+      options: `-c search_path=${database.schema}`,
+    });
+    const identity = createIdentity({
+      pool: small.pool,
+      baseURL: origin,
+      authSecret: randomBytes(32).toString('base64url'),
+      mail: async () => {},
+      completeSetup: async () => {},
+    });
+    const client = new AuthClient(identity);
+    expect(
+      (await client.request('/sign-in/email', { email: 'servers-user@example.test', password }))
+        .status,
+    ).toBe(200);
+    const settings = {
+      database: small,
+      env,
+      identity: async () => identity,
+      codec,
+      origins: [origin],
+      management: () => createManagementRuntime({ db: small.db, codec, adapter: f.adapter, env }),
+    };
+    const primary = createApp(settings),
+      sibling = createApp(settings);
+    const entered = Promise.withResolvers<void>();
+    let cancelled = false;
+    const source = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          await delay(5);
+          if (!cancelled) {
+            entered.resolve();
+            controller.enqueue(new Uint8Array(1024));
+          }
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const uploadHeaders = client.headers();
+    uploadHeaders.set('content-type', 'application/octet-stream');
+    uploadHeaders.set('x-nh-upload-length', String(1024 ** 2));
+    const init: RequestInit & { duplex: 'half' } = {
+      method: 'PUT',
+      headers: uploadHeaders,
+      body: source,
+      duplex: 'half',
+    };
+    const inProgress = primary.request(
+      `${origin}/v1/servers/${first}/files/upload?path=world.bin`,
+      init,
+    );
+    try {
+      await Promise.race([
+        entered.promise,
+        Promise.resolve(inProgress).then(async (response) => {
+          throw new Error(
+            `Upload ended before first byte: ${response.status} ${await response.text()}`,
+          );
+        }),
+      ]);
+      const claimsResponse = await request(owner, '/v1/owner/uploads');
+      expect(claimsResponse.status).toBe(200);
+      const claims = (await claimsResponse.json()) as { id: string; scope_hash: string }[];
+      expect(claims).toHaveLength(1);
+      const claim = claims[0];
+      if (!claim) throw new Error('Missing active claim');
+      const recovery = {
+        confirm: true,
+        remoteTransferFinished: true,
+        temporaryFilesRemoved: true,
+        scopeHash: claim.scope_hash,
+        reason: 'Isolated recovery must wait',
+        evidence: 'The fixture upload is active, so this request must be refused.',
+      };
+      expect((await request(user, '/v1/owner/uploads')).status).toBe(403);
+      expect((await request(user, `/v1/owner/uploads/${claim.id}/recover`, recovery)).status).toBe(
+        403,
+      );
+      expect((await request(owner, `/v1/owner/uploads/${claim.id}/recover`, recovery)).status).toBe(
+        409,
+      );
+      const contenders = await Promise.all(
+        Array.from({ length: 8 }, (_, index) => {
+          const headers = client.headers();
+          headers.set('content-type', 'application/octet-stream');
+          headers.set('x-nh-upload-length', '1');
+          return (index % 2 ? primary : sibling).request(
+            `${origin}/v1/servers/${index % 2 ? first : second}/files/upload?path=world.bin`,
+            { method: 'PUT', headers, body: new Uint8Array(1) },
+          );
+        }),
+      );
+      expect(contenders.map((response) => response.status)).toEqual(Array(8).fill(409));
+      const jsonHeaders = client.headers();
+      jsonHeaders.set('content-type', 'application/json');
+      const write = await sibling.request(`${origin}/v1/servers/${first}/files`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ action: 'write', path: 'fixture', content: 'must-not-wait' }),
+      });
+      expect(write.status).toBe(409);
+      const read = await sibling.request(`${origin}/v1/servers/${second}/files`, {
+        headers: client.headers(),
+      });
+      expect(read.status).toBe(200);
+      const logout = await sibling.request(`${origin}/api/auth/sign-out`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: '{}',
+      });
+      expect(logout.status).toBe(200);
+      expect((await inProgress).status).toBe(503);
+      expect(cancelled).toBe(true);
+      await recoverFixtureUploads();
+      expect(
+        (await client.request('/sign-in/email', { email: 'servers-user@example.test', password }))
+          .status,
+      ).toBe(200);
+      const headers = client.headers();
+      headers.set('content-type', 'application/octet-stream');
+      headers.set('x-nh-upload-length', '1');
+      expect(
+        (
+          await sibling.request(`${origin}/v1/servers/${second}/files/upload?path=world.bin`, {
+            method: 'PUT',
+            headers,
+            body: new Uint8Array(1),
+          })
+        ).status,
+      ).toBe(204);
+    } finally {
+      const current = await identity.authenticate(client.headers()).catch(() => null);
+      if (current)
+        await small.db.deleteFrom('session').where('id', '=', current.sessionId).execute();
+      await inProgress;
+      await small.db.destroy();
+    }
+  });
+
+  it('streams binary uploads and downloads through the actual Node/Hono HTTP bridge', async () => {
+    const serverId = await f.server();
+    const binary = new Uint8Array(2 * 1024 ** 2 + 11).fill(0xa5);
+    const server = createServer(getRequestListener(app.fetch));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing test listener');
+    const base = `http://127.0.0.1:${address.port}/v1/servers/${serverId}`;
+    vi.mocked(f.adapter.downloadFile).mockImplementationOnce(async (_id, _path, input) =>
+      createDownloadProxy({
+        baseURL: 'https://panel.example.test',
+        applicationKey: 'isolated-key',
+        fetcher: async () =>
+          new Response(binary, { headers: { 'Content-Length': String(binary.length) } }),
+      })('https://panel.example.test/file?token=private', input),
+    );
+    try {
+      const headers = user.headers();
+      headers.set('content-type', 'application/octet-stream');
+      headers.set('x-nh-upload-length', String(binary.length));
+      const uploaded = await fetch(`${base}/files/upload?path=world.bin`, {
+        method: 'PUT',
+        headers,
+        body: binary,
+      });
+      expect(uploaded.status).toBe(204);
+      const downloaded = await fetch(`${base}/files/content?path=world.bin`, {
+        headers: user.headers(),
+      });
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers.get('content-length')).toBe(String(binary.length));
+      expect(Buffer.from(await downloaded.arrayBuffer())).toEqual(Buffer.from(binary));
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('propagates a real browser HTTP disconnect through Hono to the provider stream', async () => {
+    const serverId = await f.server();
+    let cancelled = false;
+    const server = createServer(getRequestListener(app.fetch));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing test listener');
+    vi.mocked(f.adapter.downloadFile).mockImplementationOnce(async (_id, _path, input) =>
+      createDownloadProxy({
+        baseURL: 'https://panel.example.test',
+        applicationKey: 'isolated-key',
+        fetcher: async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new Uint8Array(64 * 1024));
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+          ),
+      })('https://panel.example.test/file?token=private', input),
+    );
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/v1/servers/${serverId}/files/content?path=world.bin`,
+        { headers: user.headers() },
+      );
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      await reader?.read();
+      await reader?.cancel();
+      await vi.waitFor(() => expect(cancelled).toBe(true), { timeout: 1000 });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('filters visibility before list pagination even with many newer unrelated servers', async () => {
     const server = await f.server();
     await database.pool.query(
@@ -704,7 +1433,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
   });
   it.each(['regular-logout', 'support-revoked', 'support-parent-logout', 'owner-demoted'] as const)(
-    'denies an actual queued HTTP file mutation after %s without issuing provider writes',
+    'denies an HTTP file mutation after %s during provider verification without issuing writes',
     async (reason) => {
       const server = await f.server();
       const client = new AuthClient(owner.identity);
@@ -731,33 +1460,24 @@ describe('M2 Hono API with real invitation, password and session authentication'
       const headers = supportToken ? { 'x-nh-support-token': supportToken } : undefined;
       const me = await request(client, '/v1/me', undefined, { headers });
       expect(await me.text()).not.toContain(authenticated.sessionId);
-      const lock = await database.pool.connect();
       const before = writeFile.mock.calls.length;
-      let response: Promise<Response> | undefined;
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      const original = vi.mocked(f.adapter.getApplicationServer).getMockImplementation();
+      if (!original) throw new Error('Missing identity fixture');
+      vi.mocked(f.adapter.getApplicationServer).mockImplementationOnce(async (id) => {
+        entered.resolve();
+        await release.promise;
+        return original(id);
+      });
+      const response = request(
+        client,
+        `/v1/servers/${server}/files`,
+        { action: 'write', path: 'fixture', content: 'must-never-write' },
+        { headers },
+      );
       try {
-        const {
-          rows: [backend],
-        } = await lock.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
-        if (!backend) throw new Error('Missing lock fixture PID');
-        await lock.query('SELECT pg_advisory_lock(hashtextextended(current_schema() || $1,0))', [
-          `:nickhosting:server:${server}`,
-        ]);
-        response = request(
-          client,
-          `/v1/servers/${server}/files`,
-          { action: 'write', path: 'fixture', content: 'must-never-write' },
-          { headers },
-        );
-        await vi.waitFor(
-          async () => {
-            const waiting = await database.pool.query<{ count: string }>(
-              'SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
-              [backend.pid],
-            );
-            expect(Number(waiting.rows[0]?.count)).toBe(1);
-          },
-          { timeout: 3000, interval: 10 },
-        );
+        await entered.promise;
         if (reason === 'regular-logout' || reason === 'support-parent-logout')
           await database.pool.query('DELETE FROM session WHERE id=$1', [authenticated.sessionId]);
         else if (reason === 'support-revoked')
@@ -771,8 +1491,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
             .where('id', '=', authenticated.context.actorUserId)
             .execute();
       } finally {
-        await lock.query('SELECT pg_advisory_unlock_all()');
-        lock.release();
+        release.resolve();
       }
       try {
         const result = await response;

@@ -8,6 +8,30 @@ import { vi } from 'vitest';
 import { createManagedServer } from './registry.js';
 
 let sequence = 100;
+/** A persisted ambiguous upload, without contacting any file provider. */
+export async function pendingUploadFixture(db: Kysely<Database>, serverId: string) {
+  const server = await db
+    .selectFrom('managed_servers as server')
+    .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
+    .select(['server.owner_id', 'node.physical_host_id'])
+    .where('server.id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  const claimId = randomUUID();
+  await db
+    .insertInto('upload_ingestion_claims')
+    .values({
+      id: claimId,
+      physical_host_id: server.physical_host_id,
+      server_id: serverId,
+      actor_user_id: server.owner_id,
+      declared_bytes: '1024',
+      reserved_bytes: '67584',
+      scope: JSON.stringify({ fixture: true }),
+      scope_hash: '0'.repeat(64),
+    })
+    .execute();
+  return claimId;
+}
 export async function managementFixture(db: Kysely<Database>) {
   const ownerId = 'isolated-platform-owner';
   const userId = randomUUID();
@@ -121,10 +145,23 @@ export async function managementFixture(db: Kysely<Database>) {
     .execute();
   const inventory: Allocation[] = Array.from({ length: 100 }, (_, index) => ({
     id: ++sequence,
-    ip: '127.0.0.1',
+    ip: '10.0.0.2',
     port: 20000 + index,
     assigned: false,
   }));
+  const backendAllocationPool = {
+    allocations: inventory.map((allocation) => ({
+      allocationId: allocation.id,
+      address: allocation.ip,
+      port: allocation.port,
+    })),
+    gatewayBindAddresses: ['192.0.2.10'],
+  };
+  await db
+    .updateTable('managed_nodes')
+    .set({ backend_allocation_pool: JSON.stringify(backendAllocationPool) })
+    .where('id', '=', nodeId)
+    .execute();
   const adapter = {
     listAllocations: vi.fn(async () => structuredClone(inventory)),
     getNode: vi.fn(async () => ({ id: providerNodeId })),
@@ -211,6 +248,7 @@ export async function managementFixture(db: Kysely<Database>) {
     providerNodeId,
     manifest,
     inventory,
+    backendAllocationPool,
     adapter,
     observe,
     limits,

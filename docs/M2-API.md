@@ -9,7 +9,8 @@ approval. See also [ADR 0011](decisions/0011-server-lifecycle-and-service-bounda
 ## Authentication, errors and identifiers
 
 Routes require a verified session. Mutations require the configured browser
-`Origin` and JSON content type, including empty `{}` bodies where specified.
+`Origin` and JSON content type, including empty `{}` bodies where specified;
+the binary upload route instead requires `application/octet-stream`.
 Errors retain the M1 safe error code, message key, en/it message and request ID
 contract. JSON requests are bounded to 65,536 bytes. Responses use `no-store`.
 SSE and binary download routes are the exceptions to JSON response bodies.
@@ -134,18 +135,93 @@ project clients should use the authorized per-server operation view above.
 | GET `/v1/servers/:id/console` | SSE relay of allowlisted console/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. |
 | POST `/v1/servers/:id/console` | `{command}` (1–4,096 characters) → `204`. Audit records the request, not raw command text. |
 | GET `/v1/servers/:id/files?path=` | Directory listing under the server root. |
-| GET `/v1/servers/:id/files/content?path=...` | Bounded binary attachment, maximum 1 MiB. |
+| GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; no fixed total byte limit, signed URL remains private. |
+| PUT `/v1/servers/:id/files/upload?path=...` | Raw `application/octet-stream` body and exact `X-NH-Upload-Length` header; `204` only after a complete provider upload. |
 | POST `/v1/servers/:id/files` | `write`: `{action,path,content}` (text ≤60,000 characters); `mkdir`: `{action,root,name}`; `rename`: `{action,root,files:[{from,to}]}`; `delete`: `{action,root,files:[name],confirm:true}`. Rename/delete batches contain 1–100 entries. Returns `204`. |
 | GET `/v1/servers/:id/backups` | Provider backup metadata. Create and restore use durable lifecycle operations. |
 | DELETE `/v1/servers/:id/backups/:backupId` | `{confirm:true}` → `204`. |
-| GET `/v1/servers/:id/backups/:backupId/download` | Backend-proxied attachment, maximum 1 GiB; no signed provider URL is returned. |
+| GET `/v1/servers/:id/backups/:backupId/download` | Backend-streamed attachment with no fixed total byte limit; no signed provider URL is returned. |
 
 Paths are validated and scoped through the adapter. File/command/backup-delete
 mutations share the lifecycle server lock and reject an active lifecycle job.
+Contending interactive writes return `409` instead of waiting with a database
+connection. A shared per-pool upload gate leaves connections available for
+authentication, authorization refresh and logout; a one-connection pool cannot
+accept uploads. Saturated upload slots also return `409`.
 Provider failures stay failures; no synthetic success response is produced.
-The browser API currently supports bounded text edits, not arbitrary large binary
-uploads. Larger file transfer uses separately configured SFTP. Console output
+The JSON text-edit action remains bounded; binary transfers use the separate raw
+upload endpoint. `path` is a relative server path, with traversal, control
+characters, separators/encoding tricks and root escapes rejected. The browser
+must supply the exact file size in `X-NH-Upload-Length` (browsers cannot manually
+set `Content-Length`); if `Content-Length` is present it must match. Zero-byte
+files are supported. The API validates the server's configured disk allowance
+and observed usage, accounting for an existing regular file when overwriting.
+Native provider filesystem quotas remain authoritative against concurrent game
+writes. Uploading onto a directory or symlink is refused.
+
+Uploads stream one generated multipart `files` part to the private Wings signed
+upload URL; the body is never accumulated in `FormData` or a full-file buffer.
+The server write lock remains held until completion/failure; actual bytes must
+exactly match the declaration. A failed/aborted upload can leave a partial
+provider file and is never reported as success or blindly deleted as rollback.
+The installed Wings upload limit remains a provider policy. Read-only inspection
+found **500 MiB per file** on the current installation. Wings checks this after
+multipart parsing, so its native rejection alone does not protect temporary disk.
+NickHosting must reject an upload above the configured provider bound before
+fetching a signed URL or reading its body. Increasing that bound requires verified
+provider support; this PR does not change or bypass Wings configuration.
+
+Uploads also require a per-physical-host `uploadPolicy`, initially `null`:
+`{providerMaxFileBytes,temporaryDiskPath,temporaryDiskBudgetBytes,
+temporaryDiskHeadroomBytes}`. All byte values are safe integers. The Owner must
+verify the provider bound against every Wings node on that physical host and
+identify the actual disk-backed multipart staging filesystem; it is not inferred
+from the server-data path. The API's `NH_OBSERVER_ID` must match that host's
+observer. `NH_UPLOAD_POLICIES` maps host UUIDs to policies or `null` and overrides
+stored settings. `NH_HOST_POLICIES` rejects nested `uploadPolicy`; the dedicated
+override is the only environment upload-policy input. A container deployment may require a separately approved
+read-only observation mount; merely storing a path is not proof of the correct
+filesystem.
+
+Migration 008 adds one durable upload-ingestion claim per physical host. Admission
+checks fresh space on both the staging and server-data filesystems and reserves
+twice the declared payload plus 65,536 bytes for bounded multipart framing, with
+no overwrite credit. The multipart tempfile can coexist with the destination
+copy. The temporary budget and both free-space observations minus headroom must
+cover this conservative peak; destination headroom is at least the host disk
+headroom. Known RAM-backed staging/data filesystems are rejected. Sibling
+nodes share the host claim. Provider success after complete transfer releases it;
+abort, timeout, crash or uncertain completion retains it without a timer-based
+expiry. Further uploads on that host and mutations of the affected server fail
+closed. Existing game/provider writes can still consume space concurrently;
+the Owner's staging budget and headroom must account for these workloads.
+
+Only the regular Owner can inspect `/v1/owner/uploads` and POST
+`/v1/owner/uploads/:claimId/recover` with
+`{confirm:true,remoteTransferFinished:true,temporaryFilesRemoved:true,scopeHash,
+reason,evidence}`. The current claim hash must match. Recovery rejects a claim
+held by an active upload and records the reason and external verification
+evidence; it never removes provider files. Confirm actual provider completion and
+temporary-file cleanup before using it. Host/policy identity changes cannot
+silently retarget outstanding claims, and recovery does not declare an upload
+successful.
+
+File and backup downloads stream with backpressure, no 1 MiB/1 GiB cutoff and no
+fixed total transfer deadline. Active transfers require progress within a 30-second
+idle window; session/role/project/support authorization is refreshed at least once
+per second, including while idle. Cancellation, revoked access, malformed sizes,
+truncated responses or provider failures abort the stream. Buffers are bounded
+independently of file size. Downloads do not hold a database connection for their
+whole lifetime. API errors expose no raw provider body, privileged credentials or
+signed URL. Upload destinations require the separate exact
+`pterodactylUploadOrigins` allowlist, and redirects are refused. Console output
 is streamed with bounded buffering, not persisted in ordinary audit records.
+
+The executable Node listener removes the total request-body deadline only for the
+canonical binary upload route. Ordinary request bodies retain a 300-second total
+deadline, headers a 60-second deadline and sockets a 30-second inactivity timeout.
+An early response closes an unread request body. Reverse-proxy limits remain
+separate deployment settings and are not changed by the application.
 
 ## Owner infrastructure and resource configuration
 
@@ -154,14 +230,16 @@ is streamed with bounded buffering, not persisted in ordinary audit records.
 | GET `/v1/owner/infrastructure` | Read-only node/nest discovery and adapter capabilities. |
 | GET `/v1/owner/nests/:id/eggs` | Eggs for a numeric provider nest ID. |
 | GET `/v1/owner/nodes/:id/allocations` | Allocation inventory for a numeric provider node ID. |
-| GET/PUT `/v1/owner/resource-hosts` | Stored/effective host policy with environment lock, or validated host policy save. |
-| GET/PUT `/v1/owner/nodes` | Managed node mappings, or `{id?,physicalHostId,pterodactylNodeId,provisionUserId,installerMemoryMiB?,installerCpuPercent?,memoryOverheadPercent?,enabled?}`. |
+| GET/PUT `/v1/owner/resource-hosts` | Stored/effective host policy and upload policy with environment locks, or validated host policy save. |
+| GET `/v1/owner/uploads` | Outstanding durable upload claims with pinned scope/hash; regular Owner only. |
+| POST `/v1/owner/uploads/:claimId/recover` | Audited release after externally verified completion/cleanup; cannot release an active transfer. |
+| GET/PUT `/v1/owner/nodes` | Managed node mappings, or `{id?,physicalHostId,pterodactylNodeId,provisionUserId,installerMemoryMiB?,installerCpuPercent?,memoryOverheadPercent?,backendAllocationPool?,enabled?}`. |
 | GET/PUT `/v1/owner/runtime-mappings` | Owner runtime mappings, or mapping request described below. |
 | PUT `/v1/owner/user-limits` | `{userId,memoryMiB,cpuPercent,storageMiB,expiresAt?,reason}`; explicit audited limits, optional future expiry. Returns `204`. |
 
 Host policy fields are `{id?,name,memoryLimitMiB,cpuLimitPercent,storagePoolMiB,
 memoryHeadroomMiB,cpuHeadroomPercent,diskHeadroomMiB,localDiskPath,observerId,
-enabled?}`. RAM/disk headroom must each be at least 256 MiB and less than their
+uploadPolicy?,enabled?}`. RAM/disk headroom must each be at least 256 MiB and less than their
 policy capacity; these validation minimums are not recommended production sizes.
 `localDiskPath` must be an absolute path on the filesystem whose capacity is being
 admitted. Provisioning users/nodes must exist in discovered provider metadata.
@@ -177,6 +255,28 @@ Node overhead changes with outstanding reservations are refused. Owner node read
 include `effectiveMemoryOverheadPercent` and `memoryOverheadLocked`; an environment
 override refuses conflicting Owner overhead edits while allowing unrelated node
 fields to be changed.
+
+Provisioning requires an explicitly configured `backendAllocationPool` on the
+managed node. Its shape is `{allocations:[{allocationId,address,port}],
+gatewayBindAddresses:[address,...]}`. There is **no inferred/default pool**.
+Backend pins must be exact private RFC1918 IPv4 or IPv6 ULA addresses, not public,
+loopback, wildcard or mapped addresses. The declared gateway addresses must be
+exact, non-wildcard and disjoint from backend binds. IDs, addresses and ports are
+checked against fresh inventory on the selected provider node. Other managed
+nodes on the same host cannot claim overlapping backend/gateway namespaces.
+These declarations neither bind gateway listeners nor create/change allocations.
+
+`NH_BACKEND_ALLOCATION_POOLS` is an optional JSON object keyed by managed-node
+UUID; each value is the complete pool or `null` to disable new provisioning.
+It overrides stored Owner pools. Node reads include `effectiveBackendAllocationPool`
+and `backendAllocationPoolLocked`; conflicting Owner edits of environment-locked
+pools are refused. A pool edit cannot silently retarget/remove existing claims.
+Unconfigured, exhausted, reassigned or drifted pins fail closed at enqueue and
+again before new provider creation. Recovery of an already-created, proven owned
+server remains possible if the pool was subsequently disabled. Existing public
+Pterodactyl allocations are never used as a fallback. Approving a pool is a
+NickHosting configuration operation; any necessary real allocation/network changes
+still require separate, exact Owner approval.
 
 Runtime mappings require `{id?,gameId,runtimeId,nodeId,nestId,eggId,dockerImage,
 startup,environment,portRoles,featureLimits,enabled?}`. `nodeId` is a NickHosting
@@ -200,10 +300,23 @@ Admission uses a PostgreSQL lock for shared user/physical-host budgets. Stopped
 servers have no active compute charge; starting, running, restarting, stopping
 and uncertain reservations retain their full configured limits until eligible
 release. A fresh host observation includes unrelated running servers, operating
-system and other services. M2 conservatively subtracts full managed reservations
-as well as measured use, without crediting stale provider telemetry. This may
-reject work before an optimistic allocator would, but avoids counting recently
-freed memory twice. CPU percentages are limits, not reserved dedicated cores.
+system and other services. New starts conservatively charge full commitments
+alongside measured use. A restart retaining the same reservation has zero new
+RAM/CPU demand and does not re-charge existing commitments against sampled free
+capacity. It still requires fresh host evidence, safety headroom, valid ownership,
+user budgets and aggregate physical hard ceilings. Growth charges only the positive
+resource delta plus other commitments when its prior commitment predates the host
+sample; otherwise it conservatively charges the proposed full commitment to avoid
+spending one stale sample repeatedly. RAM and CPU are evaluated independently;
+reservations never shrink during restart. Cached provider telemetry creates no
+capacity credits. CPU percentages are limits, not reserved dedicated cores.
+
+There is no default total server-count limit. An Owner can opt into a numeric
+`maxServersPerUser`; setting it to `null` disables it. Persistent storage, backend
+allocation availability, invite-only access, idempotency and the separately
+configurable pending-provision limit still apply. Completed offline servers do
+not consume that pending limit; uncertain provisioning remains counted until its
+outcome is safely resolved. Checks are atomic with server creation.
 
 Persistent allowance is `disk MiB × (1 + permitted backup slots)` per undeleted
 server, including stopped servers. Admission checks the Owner pool and actual
@@ -270,10 +383,12 @@ optional overrides; do not seed its example values into PostgreSQL.
 | `defaultUserMemoryMiB` | `NH_DEFAULT_USER_MEMORY_MIB` | `16384` |
 | `defaultUserCpuPercent` | `NH_DEFAULT_USER_CPU_PERCENT` | `400` |
 | `defaultUserStorageMiB` | `NH_DEFAULT_USER_STORAGE_MIB` | `32768` |
-| `maxServersPerUser` | `NH_MAX_SERVERS_PER_USER` | `20` |
+| `maxServersPerUser` | `NH_MAX_SERVERS_PER_USER` | `null` (no total-count cap); positive integer enables it, literal `null` overrides a stored cap |
+| `maxConcurrentProvisionsPerUser` | `NH_MAX_CONCURRENT_PROVISIONS_PER_USER` | `4`; limits pending provisioning only, range 1–100 |
 | `observationMaxAgeSeconds` | `NH_OBSERVATION_MAX_AGE_SECONDS` | `15` (maximum `30`) |
 | `pterodactylWebSocketOrigins` | `NH_PTERODACTYL_WEBSOCKET_ORIGINS` | `[]`, JSON array of exact `ws`/`wss` origins |
 | `pterodactylDownloadOrigins` | `NH_PTERODACTYL_DOWNLOAD_ORIGINS` | `[]`, JSON array of exact HTTP(S) origins |
+| `pterodactylUploadOrigins` | `NH_PTERODACTYL_UPLOAD_ORIGINS` | `[]`, separate exact HTTP(S) Wings upload origins |
 | `sftpgoBaseUrl`, `sftpgoDataRoot`, `sftpgoInstanceId` | `NH_SFTPGO_BASE_URL`, `NH_SFTPGO_DATA_ROOT`, `NH_SFTPGO_INSTANCE_ID` | Unset; absolute provider-visible root, instance UUID |
 | `sftpCredentialTtlSeconds` | `NH_SFTP_CREDENTIAL_TTL_SECONDS` | `3600`, range 60–86400 |
 | `cloudflareZoneId`, `dnsInstanceId` | `NH_CLOUDFLARE_ZONE_ID`, `NH_DNS_INSTANCE_ID` | Unset; provider zone and stable instance UUID |

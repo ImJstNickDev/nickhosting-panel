@@ -2,11 +2,11 @@
 
 ## Active compute quota
 
-**Core invariant:** configured RAM/CPU of a stopped server does not consume that user's active compute budget. Creating many offline servers is allowed subject to persistent storage, IP/port allocations and reasonable platform abuse safeguards.
+**Core invariant:** configured RAM/CPU of a stopped server does not consume that user's active compute budget. Creating many offline servers is allowed subject to persistent storage, IP/port allocations and reasonable platform abuse safeguards. Numeric total-count limits are optional and disabled by default; a separate configurable pending-provision limit protects concurrent work without limiting completed offline servers.
 
 Illustration: 16 GiB active RAM allowance, three 4 GiB servers running, one other 4 GiB offline, and an additional 16 GiB offline server. User can create and retain both offline servers. Starting the 16 GiB server requires freeing all 12 GiB currently reserved first.
 
-Reservations count servers in `starting`, `running`, `restarting`, `stopping` (until stop *confirmed*). Restart **retains** reserved compute. Reserve atomically under PostgreSQL locking/transactions; idempotency on start requests avoids double reservation. Pterodactyl/Wings actual state is reconciled; do not free resources on merely receiving stop request.
+Reservations count servers in `starting`, `running`, `restarting`, `stopping` (until stop *confirmed*). Restart **retains** reserved compute and only increased commitments require new admission; an unchanged reservation is not charged again against sampled free RAM/CPU. Fresh host safety headroom and hard capacity ceilings still apply. Reserve atomically under PostgreSQL locking/transactions; idempotency on start requests avoids double reservation. Pterodactyl/Wings actual state is reconciled; do not free resources on merely receiving stop request.
 
 Per-user budget is a limit; physical node admission separately verifies an Owner-configured safe compute capacity and headroom. CPU limits require a documented mapping from Pterodactyl percentages to a meaningful NickHosting quota; avoid claiming guaranteed physical-core reservations if underlying mechanism only enforces a CPU percentage.
 
@@ -23,6 +23,7 @@ Per-user budget is a limit; physical node admission separately verifies an Owner
 
 - Each game/runtime profile declares required `port roles`, protocol TCP/UDP and optional additional ports. Stable public endpoint(s) owned by gateway; separate private backend bind IP, usually **same numeric port** when IP differs.
 - Pterodactyl direct Owner-created servers use their normal public allocations, outside gateway namespace/routes.
+- Provision only from an explicit Owner-configured private backend allocation pool, validated against provider IDs, exact bind addresses/ports and disjoint declared gateway addresses; no fallback to unrelated public allocations. Configuration does not authorize any production allocation/network change.
 - Allocations remain owned/reserved while a server is offline. Detect allocation exhaustion against verified inventory; historical host capacity observations belong only in local infrastructure notes.
 - For Gateway routing, require a verified public bind vs backend bind matrix; no accidental wildcard IP binds that conflict with existing Docker published ports.
 

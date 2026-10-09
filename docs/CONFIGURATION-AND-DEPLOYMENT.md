@@ -32,6 +32,37 @@ The protected setup flow should ask for Owner identity/auth, display name/brandi
 
 Connectivity checks must be read-only unless an explicit test action is approved. A simple test call must not secretly write Pterodactyl settings or Cloudflare DNS.
 
+## M2 backend allocation and transfer prerequisites
+
+New provisioning requires an Owner-configured exact private backend allocation
+pool and disjoint declared gateway bind addresses for each managed node. Migration
+007 leaves existing nodes unconfigured; it does not select public allocations or
+seed host-specific values. `NH_BACKEND_ALLOCATION_POOLS` can explicitly override
+stored pools. The [M2 API contract](M2-API.md) defines validation and environment
+locking. Do not create allocations or change host networking merely to satisfy
+this prerequisite without an operation-specific Owner approval.
+
+Browser uploads require a separate trusted Wings origin allowlist
+(`NH_PTERODACTYL_UPLOAD_ORIGINS`) and a verified per-host `uploadPolicy`.
+Migration 008 leaves uploads disabled until the Owner supplies the provider's
+maximum file size and actual disk-backed multipart staging path, budget and
+headroom. `NH_UPLOAD_POLICIES` overrides stored policies; `NH_OBSERVER_ID` must
+identify the correct host. Do not assume that server data and temporary uploads
+share a filesystem. Any observation mount requires separate infrastructure
+approval. Ambiguous uploads retain a PostgreSQL claim until audited Owner
+recovery using external completion/cleanup evidence; see [M2 API](M2-API.md).
+
+Files and backups stream through the backend. The current Wings setting permits
+**500 MiB per uploaded file**; larger uploads require a separate provider-limit
+decision. That limit is checked after native multipart spooling, so NickHosting
+checks its verified mirror before forwarding. No reverse-proxy, Panel/Wings upload
+limit, host mount or service setting is changed automatically. Node allows
+progressing binary uploads without a total body deadline while retaining idle
+and header protection. Total server-count limits default to disabled;
+`NH_MAX_SERVERS_PER_USER=null` explicitly disables a stored cap. The separate
+`NH_MAX_CONCURRENT_PROVISIONS_PER_USER` guard limits pending work, not retained
+offline servers.
+
 ## Approval handoff for infrastructure tasks
 
 Whenever new operational settings are necessary, Codex must produce:

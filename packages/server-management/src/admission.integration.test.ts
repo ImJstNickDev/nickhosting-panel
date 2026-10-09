@@ -22,16 +22,11 @@ afterAll(async () => {
 
 describe('atomic active compute and persistent resource admission', () => {
   it('permits many stopped high-RAM servers without consuming active compute', async () => {
-    const results = await Promise.all(
-      Array.from({ length: 12 }, () =>
-        createManagedServer(
-          f.db,
-          f.adapter,
-          f.context,
-          f.input({ limits: { ...f.limits, memory: 16384 } }),
-        ),
-      ),
-    );
+    const results = [];
+    // Complete each fixture provision before the next: this tests retaining many
+    // stopped servers, independently of the concurrent-provision anti-abuse cap.
+    for (let i = 0; i < 12; i++)
+      results.push(await f.server({ limits: { ...f.limits, memory: 16384 } }));
     expect(results).toHaveLength(12);
     expect(
       await f.db

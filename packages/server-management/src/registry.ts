@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
 import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
@@ -23,6 +22,14 @@ import {
   lockResources,
   reserveStartInTransaction,
 } from './admission.js';
+
+import {
+  allocationAddressesOverlap,
+  assertBackendPoolNamespace,
+  canonicalAllocationAddress,
+  validatedBackendInventory,
+} from './allocation-pool.js';
+import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
   .object({
@@ -298,7 +305,39 @@ export async function createManagedServer(
       .where('owner_id', '=', context.subjectUserId)
       .where('deleted_at', 'is', null)
       .executeTakeFirstOrThrow();
-    if (Number(count.n) >= config.maxServersPerUser) throw new DomainError('resources_unavailable');
+    if (config.maxServersPerUser !== null && Number(count.n) >= config.maxServersPerUser)
+      throw new DomainError('resources_unavailable');
+    const pending = await tx
+      .selectFrom('managed_servers as server')
+      .select(tx.fn.countAll<string>().as('n'))
+      .where('server.owner_id', '=', context.subjectUserId)
+      .where('server.deleted_at', 'is', null)
+      .where((eb) =>
+        eb.or([
+          eb.exists(
+            eb
+              .selectFrom('server_operations as operation')
+              .select('operation.job_id')
+              .whereRef('operation.job_id', '=', 'server.active_operation_id')
+              .where('operation.action', '=', 'provision'),
+          ),
+          eb.exists(
+            eb
+              .selectFrom('installation_reservations as installation')
+              .innerJoin(
+                'server_operations as operation',
+                'operation.job_id',
+                'installation.operation_id',
+              )
+              .select('installation.server_id')
+              .whereRef('installation.server_id', '=', 'server.id')
+              .where('operation.action', '=', 'provision'),
+          ),
+        ]),
+      )
+      .executeTakeFirstOrThrow();
+    if (Number(pending.n) >= config.maxConcurrentProvisionsPerUser)
+      throw new DomainError('resources_unavailable');
     await checkStorage(
       tx,
       context.subjectUserId,
@@ -306,7 +345,8 @@ export async function createManagedServer(
       value.limits.disk * (1 + mapping.feature_limits.backups),
       env,
     );
-    const inventory = await adapter.listAllocations(node.pterodactyl_node_id);
+    const { pool, allocations: inventory } = await validatedBackendInventory(adapter, node, env);
+    await assertBackendPoolNamespace(tx, node, pool, env);
     const owned = await tx
       .selectFrom('server_allocations as allocation')
       .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
@@ -318,30 +358,16 @@ export async function createManagedServer(
       ])
       .where('ownerNode.physical_host_id', '=', node.physical_host_id)
       .execute();
-    const canonical = (address: string) =>
-      isIP(address) === 6 ? new URL(`http://[${address}]`).hostname : address;
-    const wildcard = (address: string) => ['0.0.0.0', '[::]'].includes(canonical(address));
-    const overlaps = (a: string, b: string) =>
-      canonical(a) === canonical(b) || wildcard(a) || wildcard(b);
     const free: typeof inventory = [];
     for (const allocation of inventory) {
-      if (allocation.assigned || !isIP(allocation.ip)) continue;
-      if (
-        inventory.some(
-          (existing) =>
-            existing.assigned &&
-            existing.port === allocation.port &&
-            // Invalid assigned addresses are also unsafe to assume disjoint.
-            (!isIP(existing.ip) || overlaps(existing.ip, allocation.ip)),
-        )
-      )
-        continue;
+      if (allocation.assigned) continue;
       if (
         owned.some(
           (existing) =>
             (existing.node_id === node.id &&
               existing.pterodactyl_allocation_id === allocation.id) ||
-            (existing.port === allocation.port && overlaps(existing.address, allocation.ip)),
+            (existing.port === allocation.port &&
+              allocationAddressesOverlap(existing.address, allocation.ip)),
         )
       )
         continue;
@@ -349,7 +375,8 @@ export async function createManagedServer(
         free.some(
           (existing) =>
             existing.id === allocation.id ||
-            (existing.port === allocation.port && overlaps(existing.ip, allocation.ip)),
+            (existing.port === allocation.port &&
+              allocationAddressesOverlap(existing.ip, allocation.ip)),
         )
       )
         continue;
@@ -388,7 +415,7 @@ export async function createManagedServer(
         server_id: serverId,
         node_id: node.id,
         pterodactyl_allocation_id: allocation.id,
-        address: allocation.ip,
+        address: canonicalAllocationAddress(allocation.ip),
         port: allocation.port,
         role: role.role,
         protocols: role.protocols,
@@ -459,6 +486,7 @@ export async function enqueueServerOperation(
         : 'server:manage',
     );
     if (server.active_operation_id) throw new DomainError('conflict');
+    await assertNoPendingUpload(tx, serverId);
     if (
       (!server.pterodactyl_id && value.action !== 'delete') ||
       (server.installation_state !== 'installed' &&

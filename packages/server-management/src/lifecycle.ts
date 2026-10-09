@@ -14,7 +14,9 @@ import {
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
+import { assertServerBackendAllocations } from './allocation-pool.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
 type Operation = Selectable<Database['server_operations']>;
@@ -503,6 +505,7 @@ export async function processServerOperation(
       await options.authorizeEffect(jobId, server.id, db);
       await db.transaction().execute(async (tx) => {
         await lockResources(tx);
+        await assertNoPendingUpload(tx, server.id);
         if (
           await tx
             .selectFrom('installation_reservations')
@@ -693,6 +696,19 @@ export async function processServerOperation(
           if (operation.phase === 'planned') {
             if (remote) throw new DomainError('conflict');
             if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
+            const backend = await assertServerBackendAllocations(
+              db,
+              options.adapter,
+              server.id,
+              options.env,
+            );
+            const plannedIds = [plan.allocation.default, ...(plan.allocation.additional ?? [])];
+            if (
+              new Set(plannedIds).size !== plannedIds.length ||
+              backend.length !== plannedIds.length ||
+              backend.some((allocation) => !plannedIds.includes(allocation.id))
+            )
+              throw new DomainError('allocation_unavailable');
             await options.reserveInstallation(server.id, jobId, db);
             await effect('provision', () => options.adapter.createServer(plan));
             remote = await options.adapter.findServerByExternalId(server.external_id);
@@ -1247,6 +1263,7 @@ export async function processServerOperation(
           'conflict',
           'provenance_mismatch',
           'resources_unavailable',
+          'allocation_unavailable',
         ].includes(error.code)
       )
         return finish(false, false, code);

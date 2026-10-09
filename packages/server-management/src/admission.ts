@@ -137,8 +137,8 @@ export async function checkedObservation(tx: DB, hostId: string, env: Environmen
   return { host, snapshot: parsed.data, config };
 }
 
-/** Full durable maxima are charged in addition to sampled host usage: telemetry
- * is not a coherent source of credits for either game or installer containers. */
+/** New work is charged in addition to sampled host usage. Cached managed telemetry
+ * is never a coherent source of credits for game or installer containers. */
 function assertPhysicalCompute(
   { host, snapshot }: Awaited<ReturnType<typeof checkedObservation>>,
   memoryMiB: number,
@@ -153,6 +153,22 @@ function assertPhysicalCompute(
   if (
     freeMemory - host.memory_headroom_mib < memoryMiB ||
     freeCpu - host.cpu_headroom_percent < cpuPercent
+  )
+    throw new DomainError('resources_unavailable');
+}
+
+/** Retaining work still respects both the policy and the physical hard ceiling,
+ * even when its already committed resources need no new free-space admission. */
+function assertPhysicalCommitmentLimit(
+  { host, snapshot }: Awaited<ReturnType<typeof checkedObservation>>,
+  memoryMiB: number,
+  cpuPercent: number,
+) {
+  if (
+    memoryMiB >
+      Math.min(host.memory_limit_mib, snapshot.totalMemoryMiB) - host.memory_headroom_mib ||
+    cpuPercent >
+      Math.min(host.cpu_limit_percent, snapshot.cpuCapacityPercent) - host.cpu_headroom_percent
   )
     throw new DomainError('resources_unavailable');
 }
@@ -253,6 +269,8 @@ export async function reserveStartInTransaction(
     .where('deleted_at', 'is', null)
     .executeTakeFirst();
   if (!server) throw new DomainError('not_found');
+  if (server.active_operation_id && server.active_operation_id !== jobId)
+    throw new DomainError('conflict');
   const node = await tx
     .selectFrom('managed_nodes')
     .selectAll()
@@ -263,6 +281,18 @@ export async function reserveStartInTransaction(
   const { host, config } = observed;
   const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
   const current = reservations.find((r) => r.server_id === serverId);
+  if (current && (current.owner_id !== server.owner_id || current.physical_host_id !== host.id))
+    throw new DomainError('conflict');
+  if (
+    current &&
+    current.state !== 'running' &&
+    current.operation_id !== jobId &&
+    server.active_operation_id !== jobId
+  )
+    throw new DomainError('conflict');
+  // A smaller setting cannot silently release previously committed resources.
+  const memoryMiB = Math.max(current?.memory_mib ?? 0, server.limits.memory);
+  const cpuPercent = Math.max(current?.cpu_percent ?? 0, server.limits.cpu);
   const limits = await tx
     .selectFrom('resource_user_limits')
     .selectAll()
@@ -276,46 +306,65 @@ export async function reserveStartInTransaction(
     (r) => r.owner_id === server.owner_id && r.server_id !== serverId,
   );
   if (
-    mine.reduce((sum, r) => sum + r.memory_mib, 0) + server.limits.memory > userMemory ||
-    mine.reduce((sum, r) => sum + r.cpu_percent, 0) + server.limits.cpu > userCpu
+    mine.reduce((sum, r) => sum + r.memory_mib, 0) + memoryMiB > userMemory ||
+    mine.reduce((sum, r) => sum + r.cpu_percent, 0) + cpuPercent > userCpu
   )
     throw new DomainError('resources_unavailable');
-  // The host sample includes all actual workload. Panel telemetry may be cached for
-  // twenty seconds and is not coherent with this sample: crediting it can count
-  // recently freed memory twice. M2 therefore reserves the FULL configured maximum
-  // in addition to measured host usage. This deliberately errs toward admission denial.
   const reserved = await reservedPhysicalCompute(tx, host.id, env, { gameServerId: serverId });
   const physicalMemory = Math.max(
     current?.physical_memory_mib ?? 0,
-    physicalMemoryMiB(server.limits.memory, effectiveNodeOverhead(node, env)),
+    physicalMemoryMiB(memoryMiB, effectiveNodeOverhead(node, env)),
   );
-  assertPhysicalCompute(
+  assertPhysicalCommitmentLimit(
     observed,
     reserved.memoryMiB + physicalMemory,
-    reserved.cpuPercent + server.limits.cpu,
+    reserved.cpuPercent + cpuPercent,
   );
-  if (
-    current &&
-    current.state !== 'running' &&
-    current.operation_id !== jobId &&
-    server.active_operation_id !== jobId
-  )
-    throw new DomainError('conflict');
+  if (current) {
+    const memoryGrowth = physicalMemory - current.physical_memory_mib;
+    const cpuGrowth = cpuPercent - current.cpu_percent;
+    // Retaining a commitment is not a new allocation. In particular, neither
+    // the current nor other durable reservations are charged against sampled
+    // free capacity for a zero-delta restart or a repeated worker admission.
+    // Fresh host headroom is still checked, independently from the hard ceiling.
+    // For growth, other commitments remain fully charged. If this row changed
+    // at/after the sample, its prior growth may be unobserved: conservatively
+    // charge the full proposed row rather than repeatedly spending one sample.
+    const sampledAfterCommitment =
+      current.updated_at.getTime() < new Date(observed.snapshot.observedAt).getTime();
+    assertPhysicalCompute(
+      observed,
+      memoryGrowth === 0
+        ? 0
+        : reserved.memoryMiB + (sampledAfterCommitment ? memoryGrowth : physicalMemory),
+      cpuGrowth === 0 ? 0 : reserved.cpuPercent + (sampledAfterCommitment ? cpuGrowth : cpuPercent),
+    );
+  } else {
+    // A new start still reserves its full maximum in addition to all existing
+    // commitments and measured host usage, without crediting cached telemetry.
+    assertPhysicalCompute(
+      observed,
+      reserved.memoryMiB + physicalMemory,
+      reserved.cpuPercent + cpuPercent,
+    );
+  }
   await tx
     .insertInto('resource_reservations')
     .values({
       server_id: serverId,
       owner_id: server.owner_id,
       physical_host_id: host.id,
-      memory_mib: server.limits.memory,
+      memory_mib: memoryMiB,
       physical_memory_mib: physicalMemory,
-      cpu_percent: server.limits.cpu,
+      cpu_percent: cpuPercent,
       operation_id: jobId,
       state: action === 'restart' ? 'restarting' : 'starting',
     })
     .onConflict((c) =>
       c.column('server_id').doUpdateSet({
+        memory_mib: memoryMiB,
         physical_memory_mib: physicalMemory,
+        cpu_percent: cpuPercent,
         operation_id: jobId,
         state: action === 'restart' ? 'restarting' : 'starting',
         updated_at: new Date(),

@@ -22,6 +22,7 @@ import {
   resolveUncertainOperation,
 } from './lifecycle.js';
 import { enqueueServerOperation } from './registry.js';
+import { pendingUploadFixture } from './test-fixtures.js';
 
 let providerSequence = 0;
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -84,6 +85,10 @@ async function fixture(
       physical_host_id: hostId,
       pterodactyl_node_id: providerId,
       provision_user_id: 1,
+      backend_allocation_pool: JSON.stringify({
+        allocations: [{ allocationId: providerId, address: '10.0.0.2', port: 25000 }],
+        gatewayBindAddresses: ['203.0.113.2'],
+      }),
     })
     .execute();
   await db
@@ -122,7 +127,7 @@ async function fixture(
     relationships: {
       allocations: {
         object: 'list',
-        data: [{ attributes: { id: providerId, ip: '127.0.0.1', port: 25000, assigned: true } }],
+        data: [{ attributes: { id: providerId, ip: '10.0.0.2', port: 25000, assigned: true } }],
       },
     },
     created_at: clock.toISOString(),
@@ -135,6 +140,10 @@ async function fixture(
   const backups: Backup[] = [];
   const activities: BackupActivity[] = [];
   const adapter = {
+    getNode: vi.fn(async () => ({ id: providerId })),
+    listAllocations: vi.fn(async () => [
+      { id: providerId, ip: '10.0.0.2', port: 25000, assigned: exists },
+    ]),
     getApplicationServer: vi.fn(async () => {
       if (!exists) throw new PterodactylError('not_found', 'application', 'rejected', 404);
       return structuredClone(remote);
@@ -301,7 +310,7 @@ async function fixture(
       server_id: serverId,
       node_id: nodeId,
       pterodactyl_allocation_id: providerId,
-      address: '127.0.0.1',
+      address: '10.0.0.2',
       port: 25000,
       role: 'game',
       protocols: ['tcp'],
@@ -442,6 +451,62 @@ async function fixture(
 }
 
 describe('durable provider lifecycle with real PostgreSQL', () => {
+  it('retains an ambiguous upload and refuses a queued provider effect after worker recovery', async () => {
+    const f = await fixture('backup');
+    const claimId = await pendingUploadFixture(f.db, f.serverId);
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.createBackup).not.toHaveBeenCalled();
+    expect((await f.operation()).effect_state).toBe('none');
+    expect(
+      await f.db
+        .selectFrom('upload_ingestion_claims')
+        .select('id')
+        .where('id', '=', claimId)
+        .executeTakeFirst(),
+    ).toEqual({ id: claimId });
+  });
+  it.each(['unconfigured', 'environment-disabled', 'assigned', 'address-drift', 'foreign-plan'])(
+    'rejects %s backend allocations before installer admission or provider creation',
+    async (change) => {
+      const f = await fixture('provision');
+      if (change === 'unconfigured')
+        await f.db
+          .updateTable('managed_nodes')
+          .set({ backend_allocation_pool: null })
+          .where('id', '=', f.nodeId)
+          .execute();
+      else if (change === 'environment-disabled')
+        f.options.env = { NH_BACKEND_ALLOCATION_POOLS: JSON.stringify({ [f.nodeId]: null }) };
+      else if (change === 'assigned')
+        f.adapter.listAllocations.mockResolvedValue([
+          { id: f.remote.allocation, ip: '10.0.0.2', port: 25000, assigned: true },
+        ]);
+      else if (change === 'address-drift')
+        f.adapter.listAllocations.mockResolvedValue([
+          { id: f.remote.allocation, ip: '203.0.113.2', port: 25000, assigned: false },
+        ]);
+      else {
+        const operation = await f.operation();
+        await f.db
+          .updateTable('server_operations')
+          .set({
+            plan: JSON.stringify({
+              ...operation.plan,
+              provision: {
+                ...(operation.plan.provision as Record<string, unknown>),
+                allocation: { default: f.remote.allocation + 100000 },
+              },
+            }),
+          })
+          .where('job_id', '=', f.jobId)
+          .execute();
+      }
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.createServer).not.toHaveBeenCalled();
+      expect(await f.installationReservation()).toBeUndefined();
+      expect((await f.operation()).effect_started_at).toBeNull();
+    },
+  );
   it('provisions stopped servers without compute reservation and snapshots intent before the effect', async () => {
     const f = await fixture('provision');
     f.options.checkpoint = async (point) => {
@@ -468,6 +533,12 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.run()).toBe('waiting');
     expect(await f.operation()).toMatchObject({ phase: 'provision', effect_state: 'prepared' });
     expect((await f.server()).pterodactyl_id).toBeNull();
+    // A newly disabled pool blocks new creates, not recovery of our confirmed identity.
+    await f.db
+      .updateTable('managed_nodes')
+      .set({ backend_allocation_pool: null })
+      .where('id', '=', f.nodeId)
+      .execute();
     delete f.options.checkpoint;
     f.tick();
     expect(await f.run()).toBe('succeeded');

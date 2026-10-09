@@ -376,7 +376,7 @@ describe('files and backup credential isolation', () => {
     const result = await adapter.downloadFile('f729c8a1', 'fixture.txt', { maxBytes: 100 });
     expect(await new Response(result.body).text()).toBe('fixture-data');
     expect(JSON.stringify(result)).not.toContain('signed-fixture-secret');
-    expect(fetcher.mock.calls[1]?.[1]).not.toHaveProperty('headers');
+    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).has('Authorization')).toBe(false);
     expect(fetcher.mock.calls[1]?.[1]?.redirect).toBe('error');
   });
   it('refuses an untrusted signed download host before it can receive a request', async () => {

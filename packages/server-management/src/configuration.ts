@@ -1,12 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources, reservedPhysicalCompute } from './admission.js';
+import {
+  assertBackendPoolNamespace,
+  backendAllocationPoolOverrides,
+  backendAllocationPoolSchema,
+  effectiveBackendAllocationPool,
+  validatedBackendInventory,
+} from './allocation-pool.js';
 import { ownerOnly, parse } from './registry.js';
+import { uploadPolicyOverrides, uploadPolicySchema } from './upload-policy.js';
 
 /** Explicit environment override wins over the Owner's per-node verified bound. */
 export function effectiveNodeOverhead(
@@ -33,6 +42,7 @@ export const hostPolicySchema = z
     cpuHeadroomPercent: z.number().int().nonnegative(),
     diskHeadroomMiB: z.number().int().min(256),
     localDiskPath: z.string().min(1).refine(isAbsolute),
+    uploadPolicy: uploadPolicySchema.nullable().optional(),
     observerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
     enabled: z.boolean().default(true),
   })
@@ -67,7 +77,11 @@ export function resolveHostOverride<
     throw new DomainError('configuration_invalid');
   }
   const parsed = z.record(z.uuid(), hostPolicySchema).safeParse(raw);
-  if (!parsed.success) throw new DomainError('configuration_invalid');
+  if (
+    !parsed.success ||
+    Object.values(parsed.data).some((value) => value.uploadPolicy !== undefined)
+  )
+    throw new DomainError('configuration_invalid');
   const override = parsed.data[host.id];
   if (!override) return host;
   return {
@@ -106,6 +120,34 @@ export async function setPhysicalHost(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const hostId = value.id ?? randomUUID();
+    const previous = await tx
+      .selectFrom('physical_hosts')
+      .selectAll()
+      .where('id', '=', hostId)
+      .executeTakeFirst();
+    const uploadPolicy =
+      value.uploadPolicy === undefined ? (previous?.upload_policy ?? null) : value.uploadPolicy;
+    const uploadOverrides = uploadPolicyOverrides(env);
+    if (
+      Object.hasOwn(uploadOverrides, hostId) &&
+      value.uploadPolicy !== undefined &&
+      !isDeepStrictEqual(value.uploadPolicy, previous?.upload_policy ?? null)
+    )
+      throw new DomainError('conflict');
+    const uploadClaim = await tx
+      .selectFrom('upload_ingestion_claims')
+      .select('id')
+      .where('physical_host_id', '=', hostId)
+      .executeTakeFirst();
+    if (
+      uploadClaim &&
+      (!previous ||
+        !isDeepStrictEqual(uploadPolicy, previous.upload_policy) ||
+        value.observerId !== previous.observer_id ||
+        value.localDiskPath !== previous.local_disk_path ||
+        value.enabled !== previous.enabled)
+    )
+      throw new DomainError('conflict');
     const row = {
       id: hostId,
       name: value.name,
@@ -116,6 +158,7 @@ export async function setPhysicalHost(
       cpu_headroom_percent: value.cpuHeadroomPercent,
       disk_headroom_mib: String(value.diskHeadroomMiB),
       local_disk_path: value.localDiskPath,
+      upload_policy: uploadPolicy === null ? null : JSON.stringify(uploadPolicy),
       observer_id: value.observerId,
       enabled: value.enabled,
       updated_at: new Date(),
@@ -170,6 +213,7 @@ export async function setManagedNode(
         installerMemoryMiB: z.number().int().positive().max(1048576).default(1024),
         installerCpuPercent: z.number().int().positive().max(100000).default(100),
         memoryOverheadPercent: z.number().int().min(100).max(400).default(115),
+        backendAllocationPool: backendAllocationPoolSchema.nullable().optional(),
         enabled: z.boolean().default(true),
       })
       .strict(),
@@ -177,7 +221,8 @@ export async function setManagedNode(
   );
   if (env.NH_NODE_MEMORY_OVERHEAD_PERCENT !== undefined)
     effectiveNodeOverhead({ memory_overhead_percent: value.memoryOverheadPercent }, env);
-  await adapter.getNode(value.pterodactylNodeId);
+  const remoteNode = await adapter.getNode(value.pterodactylNodeId);
+  if (remoteNode.id !== value.pterodactylNodeId) throw new DomainError('validation_failed');
   const users = await adapter.listUsers();
   if (!users.some((u) => u.id === value.provisionUserId))
     throw new DomainError('validation_failed');
@@ -197,6 +242,59 @@ export async function setManagedNode(
           .where('id', '=', value.id)
           .executeTakeFirst()
       : undefined;
+    const pool =
+      value.backendAllocationPool === undefined
+        ? (previous?.backend_allocation_pool ?? null)
+        : value.backendAllocationPool;
+    const poolOverrides = backendAllocationPoolOverrides(env);
+    if (
+      Object.hasOwn(poolOverrides, nodeId) &&
+      value.backendAllocationPool !== undefined &&
+      !isDeepStrictEqual(value.backendAllocationPool, previous?.backend_allocation_pool ?? null)
+    )
+      throw new DomainError('conflict');
+    const effectivePool = effectiveBackendAllocationPool(
+      { id: nodeId, backend_allocation_pool: pool },
+      env,
+    );
+    const claims = await tx
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('node_id', '=', nodeId)
+      .execute();
+    if (
+      claims.some(
+        (claim) =>
+          !effectivePool?.allocations.some(
+            (pin) =>
+              pin.allocationId === claim.pterodactyl_allocation_id &&
+              pin.address === claim.address &&
+              pin.port === claim.port,
+          ),
+      )
+    )
+      throw new DomainError('conflict');
+    if (effectivePool) {
+      const validated = await validatedBackendInventory(
+        adapter,
+        { id: nodeId, pterodactyl_node_id: value.pterodactylNodeId, backend_allocation_pool: pool },
+        env,
+      );
+      if (
+        validated.allocations.some(
+          (allocation) =>
+            allocation.assigned &&
+            !claims.some((claim) => claim.pterodactyl_allocation_id === allocation.id),
+        )
+      )
+        throw new DomainError('allocation_unavailable');
+      await assertBackendPoolNamespace(
+        tx,
+        { id: nodeId, physical_host_id: value.physicalHostId },
+        effectivePool,
+        env,
+      );
+    }
     const overhead =
       env.NH_NODE_MEMORY_OVERHEAD_PERCENT === undefined
         ? value.memoryOverheadPercent
@@ -257,6 +355,7 @@ export async function setManagedNode(
       installer_memory_mib: value.installerMemoryMiB,
       installer_cpu_percent: value.installerCpuPercent,
       memory_overhead_percent: overhead,
+      backend_allocation_pool: pool === null ? null : JSON.stringify(pool),
       enabled: value.enabled,
     };
     await tx
@@ -269,6 +368,8 @@ export async function setManagedNode(
       installerMemoryMiB: value.installerMemoryMiB,
       installerCpuPercent: value.installerCpuPercent,
       memoryOverheadPercent: overhead,
+      backendPoolConfigured: pool !== null,
+      backendAllocationIds: pool?.allocations.map((allocation) => allocation.allocationId) ?? [],
     });
     return { id: nodeId };
   });

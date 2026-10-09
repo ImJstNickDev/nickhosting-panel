@@ -60,7 +60,7 @@ async function fixture() {
               {
                 attributes: {
                   id: plan.allocation.default,
-                  ip: '127.0.0.1',
+                  ip: '10.0.0.2',
                   port: 20000,
                   assigned: true,
                 },

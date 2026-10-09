@@ -1,5 +1,10 @@
 # M2 implementation and validation record
 
+The results below describe the original delivery at `a6f693986fdfe1624b8e1b06fc4f4ff16b8eee79`.
+The subsequent Owner review corrections, current validation and cleanup are recorded
+in [M2 review revisions](M2-REVIEW-REVISIONS.md); its newer contracts supersede the
+original count limit, allocation selection and browser transfer restrictions.
+
 M2 is **complete for Owner/ChatGPT review** on `milestone/m2-server-management`,
 subject to the explicit temporary SFTPGo exception below.
 [PR #17](https://github.com/ImJstNickDev/nickhosting-panel/pull/17) is the review

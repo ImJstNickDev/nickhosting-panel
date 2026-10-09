@@ -32,6 +32,7 @@ import {
   verifyManagedIdentity,
 } from './lifecycle.js';
 import { authorizeServer } from './registry.js';
+import { assertNoPendingUpload } from './upload-admission.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
 export async function authorizeQueuedEffect(
@@ -176,6 +177,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       clientKey,
       webSocketOrigins: values.pterodactylWebSocketOrigins,
       downloadOrigins: values.pterodactylDownloadOrigins,
+      uploadOrigins: values.pterodactylUploadOrigins,
       containerObserver,
     });
   const externalOptions: ExternalServiceOptions = {
@@ -319,6 +321,28 @@ export async function createManagementRuntime(options: ManagementOptions) {
       .execute();
     return { observed: servers.length - failures.length, unavailable: failures, external };
   }
+  /** Streaming transfers must not retain a session/role snapshot. Uploads use
+   * their already-pinned lock connection; downloads borrow only for each check. */
+  async function authorizeTransfer(
+    context: AuthContext,
+    serverId: string,
+    write: boolean,
+    connection: Kysely<Database> = db,
+  ): Promise<void> {
+    const current = await currentInteractiveContext(connection, context, env);
+    const server = await authorizeServer(
+      connection,
+      current,
+      serverId,
+      write ? 'server:manage' : 'server:read',
+    );
+    if (
+      !server.pterodactyl_id ||
+      !server.pterodactyl_identifier ||
+      (write && server.active_operation_id)
+    )
+      throw new DomainError('conflict');
+  }
   /** Direct file/command mutations share the lifecycle lock, so wipe/delete cannot race them. */
   async function access<T>(
     context: AuthContext,
@@ -327,10 +351,14 @@ export async function createManagementRuntime(options: ManagementOptions) {
     work: (identifier: string, connection: Kysely<Database>, current: AuthContext) => Promise<T>,
   ) {
     return db.connection().execute(async (connection) => {
-      if (write)
-        await sql`select pg_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`.execute(
+      if (write) {
+        const lock = await sql<{
+          acquired: boolean;
+        }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`.execute(
           connection,
         );
+        if (!lock.rows[0]?.acquired) throw new DomainError('conflict');
+      }
       try {
         const current = await currentInteractiveContext(connection, context, env);
         const server = await authorizeServer(
@@ -342,6 +370,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
         if (write && server.active_operation_id) throw new DomainError('conflict');
+        if (write) await assertNoPendingUpload(connection, serverId);
         await verifyManagedIdentity(
           connection,
           server,
@@ -365,6 +394,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
       }
     });
   }
-  return { adapter, refreshObservations, process, reconcile, access, lifecycle, externalOptions };
+  return {
+    adapter,
+    refreshObservations,
+    process,
+    reconcile,
+    access,
+    authorizeTransfer,
+    lifecycle,
+    externalOptions,
+  };
 }
 export type ManagementRuntime = Awaited<ReturnType<typeof createManagementRuntime>>;

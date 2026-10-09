@@ -12,7 +12,7 @@ import {
   setProjectMember,
   setRuntimeMapping,
 } from './registry.js';
-import { managementFixture } from './test-fixtures.js';
+import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let f: Awaited<ReturnType<typeof managementFixture>>;
@@ -43,6 +43,25 @@ function mappingInput() {
 }
 
 describe('managed registry, projects, runtime mapping and allocation ownership', () => {
+  it('refuses lifecycle work while a persisted ambiguous upload still owns its server', async () => {
+    const serverId = await f.server();
+    await pendingUploadFixture(f.db, serverId);
+    for (const action of ['start', 'restart', 'stop', 'backup', 'delete'] as const) {
+      await expect(
+        enqueueServerOperation(f.db, f.context, serverId, {
+          action,
+          idempotencyKey: randomUUID(),
+          ...(action === 'delete' ? { confirm: true } : {}),
+        }),
+      ).rejects.toThrow('operation_uncertain');
+    }
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .select('active_operation_id')
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.active_operation_id).toBeNull();
+  });
   it('deduplicates concurrent creation and rejects reusing an idempotency key for different limits', async () => {
     const input = f.input();
     const results = await Promise.all(
@@ -117,29 +136,35 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
         .execute(),
     ).toHaveLength(0);
   });
-  it('rejects same-address and wildcard collisions across two nodes sharing a physical host', async () => {
+  it('rejects same-address claims across two nodes sharing a physical host', async () => {
     const second = await managementFixture(f.db);
+    await f.server();
     await second.db
       .updateTable('managed_nodes')
       .set({ physical_host_id: f.hostId })
       .where('id', '=', second.nodeId)
       .execute();
-    const first = f.inventory[0];
-    if (!first) throw new Error('allocation missing');
-    first.ip = '0.0.0.0';
-    f.inventory.splice(1);
-    second.inventory.splice(1);
-    await f.server();
+    await second.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          ...second.backendAllocationPool,
+          allocations: second.backendAllocationPool.allocations.slice(0, 1),
+        }),
+      })
+      .where('id', '=', second.nodeId)
+      .execute();
     await expect(
       createManagedServer(second.db, second.adapter, second.context, second.input()),
     ).rejects.toThrow('allocation_unavailable');
   });
-  it('excludes overlaps with provider-assigned wildcard and equivalent IPv6 allocations', async () => {
+  it('fails closed for assigned wildcard or equivalent IPv6 collisions with the pinned pool', async () => {
     for (const [assigned, candidate] of [
-      ['0.0.0.0', '127.0.0.1'],
-      ['::', '2001:db8::1'],
-      ['2001:0db8:0000:0000:0000:0000:0000:0001', '2001:db8::1'],
-      ['127.0.0.1', '127.0.0.1'],
+      ['0.0.0.0', '10.0.0.2'],
+      ['::ffff:10.0.0.2', '10.0.0.2'],
+      ['::', 'fd00::2'],
+      ['fd00:0000:0000:0000:0000:0000:0000:0002', 'fd00::2'],
+      ['10.0.0.2', '10.0.0.2'],
     ]) {
       f.inventory.splice(
         0,
@@ -147,11 +172,31 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
         { id: 1, ip: assigned ?? '', port: 20000, assigned: true },
         { id: 2, ip: candidate ?? '', port: 20000, assigned: false },
       );
+      await f.db
+        .updateTable('managed_nodes')
+        .set({
+          backend_allocation_pool: JSON.stringify({
+            gatewayBindAddresses: ['192.0.2.10'],
+            allocations: [{ allocationId: 2, address: candidate, port: 20000 }],
+          }),
+        })
+        .where('id', '=', f.nodeId)
+        .execute();
       await expect(createManagedServer(f.db, f.adapter, f.context, f.input())).rejects.toThrow(
         'allocation_unavailable',
       );
     }
-    f.inventory.push({ id: 3, ip: '127.0.0.1', port: 20001, assigned: false });
+    f.inventory.push({ id: 3, ip: '10.0.0.2', port: 20001, assigned: false });
+    await f.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          gatewayBindAddresses: ['192.0.2.10'],
+          allocations: [{ allocationId: 3, address: '10.0.0.2', port: 20001 }],
+        }),
+      })
+      .where('id', '=', f.nodeId)
+      .execute();
     const created = await createManagedServer(f.db, f.adapter, f.context, f.input());
     const selected = await f.db
       .selectFrom('server_allocations')

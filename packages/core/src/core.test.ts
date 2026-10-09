@@ -18,6 +18,44 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('disables total count limits by default while preserving independent pending-work safeguards', () => {
+    expect(resolveConfig().values.maxServersPerUser).toBeNull();
+    expect(resolveConfig().values.maxConcurrentProvisionsPerUser).toBe(4);
+    expect(resolveConfig({ maxServersPerUser: 7 }).values.maxServersPerUser).toBe(7);
+    const unlimited = resolveConfig({ maxServersPerUser: 7 }, { NH_MAX_SERVERS_PER_USER: 'null' });
+    expect(unlimited.values.maxServersPerUser).toBeNull();
+    expect(unlimited.lockedKeys).toContain('maxServersPerUser');
+    expect(() => assertConfigWritable({ maxServersPerUser: 9 }, unlimited)).toThrow('conflict');
+    expect(
+      resolveConfig(
+        { maxServersPerUser: null },
+        { NH_MAX_SERVERS_PER_USER: '31', NH_MAX_CONCURRENT_PROVISIONS_PER_USER: '2' },
+      ).values,
+    ).toMatchObject({ maxServersPerUser: 31, maxConcurrentProvisionsPerUser: 2 });
+    for (const value of ['0', '-1', '', 'off', 'false', '1.5', '10001'])
+      expect(() => resolveConfig({}, { NH_MAX_SERVERS_PER_USER: value })).toThrow(
+        'configuration_invalid',
+      );
+  });
+  it('isolates upload origins from download origins and honors database/environment precedence', () => {
+    const config = resolveConfig(
+      { pterodactylUploadOrigins: ['https://upload.example.test'] },
+      { NH_PTERODACTYL_UPLOAD_ORIGINS: '["https://override.example.test"]' },
+    );
+    expect(config.values.pterodactylUploadOrigins).toEqual(['https://override.example.test']);
+    expect(config.values.pterodactylDownloadOrigins).toEqual([]);
+    expect(config.lockedKeys).toContain('pterodactylUploadOrigins');
+    for (const value of [
+      'file:///private',
+      'https://user:secret@example.test',
+      'https://example.test/path',
+      'https://example.test?token=secret',
+    ])
+      expect(() =>
+        resolveConfig({}, { NH_PTERODACTYL_UPLOAD_ORIGINS: JSON.stringify([value]) }),
+      ).toThrow('configuration_invalid');
+  });
+
   it('accepts an explicit canonical Unix socket with normal settings precedence and locking', () => {
     expect(resolveConfig().values.dockerObserverSocket).toBeUndefined();
     const config = resolveConfig(

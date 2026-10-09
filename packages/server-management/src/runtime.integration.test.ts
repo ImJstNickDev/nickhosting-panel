@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, authSessionId, SecretCodec } from '@nickhosting/core';
+import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +12,7 @@ import {
   setProjectMember,
 } from './registry.js';
 import { authorizeQueuedEffect, createManagementRuntime } from './runtime.js';
-import { managementFixture } from './test-fixtures.js';
+import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
 describe('management runtime execution-time authorization', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -23,6 +25,32 @@ describe('management runtime execution-time authorization', () => {
   afterEach(async () => {
     await database?.destroy();
   });
+  async function providerIdentity(serverId: string): Promise<ApplicationServer> {
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const allocations = await f.db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .execute();
+    return {
+      id: server.pterodactyl_id,
+      uuid: server.pterodactyl_uuid,
+      identifier: server.pterodactyl_identifier,
+      external_id: server.external_id,
+      node: f.providerNodeId,
+      user: 1,
+      allocation: allocations.find((row) => row.is_primary)?.pterodactyl_allocation_id,
+      relationships: {
+        allocations: {
+          data: allocations.map((row) => ({ attributes: { id: row.pterodactyl_allocation_id } })),
+        },
+      },
+    } as ApplicationServer;
+  }
   async function stop(context: AuthContext = f.context, serverId?: string) {
     const server = serverId ?? (await f.server());
     const operation = await enqueueServerOperation(f.db, context, server, {
@@ -270,7 +298,7 @@ describe('management runtime execution-time authorization', () => {
     'support-parent-revoked',
     'support-parent-expired',
   ] as const)(
-    'revalidates %s on the pinned connection after a blocking interactive server lock',
+    'revalidates %s on the pinned connection after provider identity lookup waits',
     async (reason) => {
       const server = await f.server();
       const supportSession = reason.startsWith('support') ? await support() : undefined;
@@ -284,36 +312,23 @@ describe('management runtime execution-time authorization', () => {
           'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
           [sessionId, randomUUID(), context.actorUserId],
         );
+      const remote = await providerIdentity(server);
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
       const getRemote = vi.fn(async () => {
-        throw new Error('Unauthorized provider call');
+        entered.resolve();
+        await release.promise;
+        return remote;
       });
       Object.assign(f.adapter, { getApplicationServer: getRemote });
       const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
       const effect = vi.fn(async () => {});
-      const lock = await database.pool.connect();
-      let outcome: Promise<unknown> | undefined;
+      const outcome = runtime.access(context, server, true, effect).then(
+        () => ({ success: true }),
+        (error: unknown) => error,
+      );
       try {
-        const {
-          rows: [backend],
-        } = await lock.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
-        if (!backend) throw new Error('Missing lock fixture PID');
-        await lock.query('SELECT pg_advisory_lock(hashtextextended(current_schema() || $1,0))', [
-          `:nickhosting:server:${server}`,
-        ]);
-        outcome = runtime.access(context, server, true, effect).then(
-          () => ({ success: true }),
-          (error: unknown) => error,
-        );
-        await vi.waitFor(
-          async () => {
-            const pending = await database.pool.query<{ count: string }>(
-              'SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
-              [backend.pid],
-            );
-            expect(Number(pending.rows[0]?.count)).toBe(1);
-          },
-          { timeout: 3000, interval: 10 },
-        );
+        await entered.promise;
         if (reason === 'regular-revoked' || reason === 'support-parent-revoked')
           await database.pool.query('DELETE FROM session WHERE id=$1', [sessionId]);
         else if (reason === 'regular-expired' || reason === 'support-parent-expired')
@@ -342,8 +357,7 @@ describe('management runtime execution-time authorization', () => {
             [supportSession?.id],
           );
       } finally {
-        await lock.query('SELECT pg_advisory_unlock_all()');
-        lock.release();
+        release.resolve();
       }
       expect(await outcome).toMatchObject({
         code:
@@ -355,10 +369,89 @@ describe('management runtime execution-time authorization', () => {
                 ? 'support_invalid'
                 : 'support_expired',
       });
-      expect(getRemote).not.toHaveBeenCalled();
+      expect(getRemote).toHaveBeenCalledOnce();
       expect(effect).not.toHaveBeenCalled();
     },
   );
+  it('blocks later interactive mutations after an ambiguous upload, while preserving authorized reads', async () => {
+    const serverId = await f.server();
+    const sessionId = randomUUID();
+    await database.pool.query(
+      'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
+      [sessionId, randomUUID(), f.context.actorUserId],
+    );
+    const context = { ...f.context, [authSessionId]: sessionId };
+    const remote = await providerIdentity(serverId);
+    Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+    await pendingUploadFixture(f.db, serverId);
+    const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    const write = vi.fn(async () => {});
+    await expect(runtime.access(context, serverId, true, write)).rejects.toThrow(
+      'operation_uncertain',
+    );
+    expect(write).not.toHaveBeenCalled();
+    await expect(runtime.access(context, serverId, false, async () => 'read')).resolves.toBe(
+      'read',
+    );
+  });
+  it('keeps a two-connection pool available for reads and revocation while an upload holds its server lock', async () => {
+    const serverId = await f.server(),
+      sessionId = randomUUID();
+    await database.pool.query(
+      'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
+      [sessionId, randomUUID(), f.context.actorUserId],
+    );
+    const context = { ...f.context, [authSessionId]: sessionId };
+    const remote = await providerIdentity(serverId);
+    Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+    const small = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
+      max: 2,
+      options: `-c search_path=${database.schema}`,
+    });
+    const runtime = await createManagementRuntime({ db: small.db, codec, adapter: f.adapter });
+    const entered = Promise.withResolvers<void>();
+    let finish = false,
+      checks = 0;
+    const transfer = runtime
+      .access(context, serverId, true, async (_id, connection, current) => {
+        entered.resolve();
+        while (!finish) {
+          await runtime.authorizeTransfer(current, serverId, true, connection);
+          checks++;
+          await delay(5);
+        }
+      })
+      .then(
+        () => ({ success: true }),
+        (error: unknown) => error,
+      );
+    try {
+      await entered.promise;
+      const effect = vi.fn(async () => {});
+      const contenders = await Promise.all(
+        Array.from({ length: 12 }, () =>
+          runtime.access(context, serverId, true, effect).then(
+            () => ({ success: true }),
+            (error: unknown) => error,
+          ),
+        ),
+      );
+      expect(contenders).toEqual(
+        Array.from({ length: 12 }, () => expect.objectContaining({ code: 'conflict' })),
+      );
+      expect(effect).not.toHaveBeenCalled();
+      await expect(runtime.access(context, serverId, false, async () => 'read')).resolves.toBe(
+        'read',
+      );
+      await small.db.deleteFrom('session').where('id', '=', sessionId).execute();
+      await expect(transfer).resolves.toMatchObject({ code: 'unauthenticated' });
+      expect(checks).toBeGreaterThan(0);
+    } finally {
+      finish = true;
+      await transfer;
+      await small.db.destroy();
+    }
+  });
   it('refuses an unbound interactive context while durable regular jobs survive logout', async () => {
     const queued = await stop();
     const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });

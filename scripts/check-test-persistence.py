@@ -56,6 +56,27 @@ def main():
         INSERT INTO job_outbox(job_id) VALUES ('{job}');
         INSERT INTO job_steps(job_id,step) VALUES ('{job}','fixture.checkpoint');'''])
 
+    if M2:
+        host, node, mapping, server, claim = (str(uuid.uuid4()) for _ in range(5))
+        # Only this generated isolated schema is populated. No provider request
+        # or real filesystem path is involved in the durable-claim restart test.
+        run(psql + [f'''SET search_path="{schema}";
+            INSERT INTO physical_hosts(id,name,memory_limit_mib,cpu_limit_percent,storage_pool_mib,
+                memory_headroom_mib,cpu_headroom_percent,disk_headroom_mib,local_disk_path,observer_id)
+            VALUES ('{host}','Restart fixture',2048,200,4096,256,20,256,'/isolated-fixture','fixture');
+            INSERT INTO managed_nodes(id,physical_host_id,pterodactyl_node_id,provision_user_id)
+            VALUES ('{node}','{host}',1,1);
+            INSERT INTO game_integrations(id,version,manifest) VALUES ('{mapping}','1','{{}}');
+            INSERT INTO runtime_egg_mappings(id,game_id,runtime_id,node_id,nest_id,egg_id,
+                docker_image,startup,environment,port_roles,feature_limits)
+            VALUES ('{mapping}','{mapping}','fixture','{node}',1,1,'fixture','fixture','{{}}','[]','{{}}');
+            INSERT INTO managed_servers(id,owner_id,mapping_id,node_id,name,external_id,limits)
+            VALUES ('{server}','{actor}','{mapping}','{node}','Restart fixture','{server}','{{}}');
+            INSERT INTO upload_ingestion_claims(id,physical_host_id,server_id,actor_user_id,
+                declared_bytes,reserved_bytes,scope,scope_hash)
+            VALUES ('{claim}','{host}','{server}','{actor}',1024,67584,
+                '{{"fixture":"{marker}"}}','{'0' * 64}');'''])
+
     assert redis("SET", key, marker) == "OK"
     subprocess.run(COMPOSE + ["restart", "postgres", "redis"], check=True)
     subprocess.run(COMPOSE + ["up", "-d", "--wait", "--no-recreate", "postgres", "redis"], check=True)
@@ -64,9 +85,15 @@ def main():
     assert run(psql + [f"SELECT count(*) FROM \"{schema}\".job_outbox WHERE job_id='{job}'"]) == "1"
     assert run(psql + [f"SELECT step FROM \"{schema}\".job_steps WHERE job_id='{job}'"]) == "fixture.checkpoint"
     assert redis("GET", key) == marker
+    if M2:
+        assert run(psql + [f'''SELECT server_id::text || ':' || declared_bytes::text || ':' ||
+            reserved_bytes::text || ':' || (scope->>'fixture')
+            FROM "{schema}".upload_ingestion_claims WHERE id='{claim}' AND physical_host_id='{host}'
+            ''']) == f"{server}:1024:67584:{marker}"
     run(psql + [f'DROP SCHEMA "{schema}" CASCADE'])
     assert redis("DEL", key) == "1"
-    print("PASS: PostgreSQL migrations, settings, queued job, outbox/checkpoint and Redis marker survived approved scoped restart; only generated fixtures cleaned.")
+    claims = ", ambiguous upload claim" if M2 else ""
+    print(f"PASS: PostgreSQL migrations, settings, queued job, outbox/checkpoint{claims} and Redis marker survived approved scoped restart; only generated fixtures cleaned.")
 
 
 if __name__ == "__main__":
