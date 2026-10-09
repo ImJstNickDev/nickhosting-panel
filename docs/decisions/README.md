@@ -1,0 +1,15 @@
+# Architecture decision records
+
+Each ADR is a short record of an intentional project decision and the consequences it creates. `Accepted` means approved direction; it does **not** mean technically implemented or validated.
+
+- [0001 Separate panel repository & milestone PRs](0001-repository-and-reviews.md)
+- [0002 TypeScript stack, config and jobs](0002-stack-and-runtime-configuration.md)
+- [0003 Invite auth, linking and first-run](0003-authentication-and-setup.md)
+- [0004 Active compute quotas](0004-resource-policy.md)
+- [0005 Permanent gateway isolation](0005-permanent-gateway.md)
+- [0006 Game SDK and connection policies](0006-game-integrations-and-domains.md)
+- [0007 SFTPGo and persistent mounts](0007-file-transfer-and-storage.md)
+- [0008 Complete frontend as M6](0008-complete-frontend.md)
+- [0009 Production test permissions](0009-production-safety.md)
+
+When a new decision supersedes an ADR, link a new ADR and mark old one `Superseded`, rather than deleting historical context.
