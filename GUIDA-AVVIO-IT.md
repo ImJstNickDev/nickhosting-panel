@@ -1,14 +1,14 @@
 # Come iniziare con Codex
 
-Questa repository contiene **documentazione e configurazioni di governance per M0**, non il codice dell'applicazione. La repository GitHub è stata creata; nessuna configurazione di Pterodactyl/Docker o altra infrastruttura di produzione è stata modificata. M1 richiede una nuova autorizzazione dopo la review.
+M0 è stato approvato e unito con un'autorizzazione esplicita valida soltanto per la PR #1. M1 introduce il backend, la configurazione e l'identità su un ramo dedicato; la relativa PR rimane aperta per la review. Consultare [sviluppo e test](docs/DEVELOPMENT.md) e [contratti API](docs/M1-API.md). Nessuna infrastruttura di produzione è stata modificata; PostgreSQL/Redis di test sono risorse isolate autorizzate separatamente. Il frontend completo resta in M6.
 
 ## Sequenza operativa
 
 1. Scegli la cartella locale destinata alla **nuova** repository `nickhosting-panel`. Non usare la repository del sito `nickhost.ing`.
 2. Copia qui l'intero contenuto del pacchetto (anche le cartelle nascoste `.codex` e `.github`). Se `.codex` esiste già, fallo **integrare**, senza sovrascrivere configurazioni non collegate al progetto.
 3. Avvia Codex e usa il prompt **Prepping** da `docs/CODEX-PROMPTS.md` (o `PREPPING.md`). Controlla che le verifiche siano passate.
-4. Avvia Codex con il prompt **M0**. Codex dovrà creare la repository pubblica tramite `gh`, GitHub Milestones, Issue template e la PR di M0. Non farà merge.
-5. Condividi il link della PR: la rivedremo prima di autorizzare il merge e passare a M1.
+4. Il bootstrap M0 è già completato; non reinizializzare Git o ricreare la repository. Usare il prompt del solo milestone autorizzato.
+5. Condividi il link della PR del milestone per la review. Codex non può unire M1 né iniziare M2 senza una nuova autorizzazione.
 
 ## Regola sui server di test
 

@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M0 repository and governance bootstrap; application implementation not started.
+**Status:** M1 backend foundation, configuration and invite-only identity; awaiting milestone review.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
@@ -10,7 +10,7 @@
 
 **Public website:** `nickhost.ing` — separate existing repository, out of scope.
 
-This repository contains the **approved documentation and agent-governance baseline**, not an implemented application. M0 creates repository governance and an open review PR. **No live server, DNS record, Docker deployment or production configuration has been changed.** M1 requires separate authorization after review.
+M0 governance is merged. M1 adds executable Hono API/worker foundations, PostgreSQL migrations, durable jobs, configuration and identity contracts with isolated integration tests. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`docs/M1-API.md`](docs/M1-API.md). The complete graphical frontend remains M6 work. **No production server, DNS record or infrastructure configuration has been changed.** Only the separately approved, project-owned PostgreSQL/Redis test services were created.
 
 ## Read in this order
 
