@@ -156,8 +156,13 @@ function plane(
   cleanups.push(() => gateway.stop());
   return { gateway, snapshot, control, safety };
 }
-async function exchange(port: number, data: Uint8Array | string, fragments = false) {
-  const socket = connect({ host: '127.0.0.1', port });
+async function exchange(
+  port: number,
+  data: Uint8Array | string,
+  fragments = false,
+  host = '127.0.0.1',
+) {
+  const socket = connect({ host, port });
   const chunks: Buffer[] = [];
   socket.on('data', (bytes: Buffer) => chunks.push(bytes));
   const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
@@ -511,12 +516,34 @@ describe('persistent Gateway fixture forwarding', () => {
     const second = await tcpFixture();
     const a = route(first.port);
     const b = route(second.port);
+    // Reserving ephemeral backend ports on 127.0.0.2 does not reserve those
+    // numbers on 127.0.0.1. Other unit files bind independent ephemeral HTTP
+    // listeners there, so give this successful-bind fixture its own address.
+    const publicAddress = '127.0.0.70';
+    a.public.address = publicAddress;
+    b.public.address = publicAddress;
     const f = plane([a, b]);
-    await f.gateway.start();
+    // Preserve native bind errors in a setup failure instead of start()'s
+    // deliberate unavailable-control handling hiding their diagnostic cause.
+    await f.gateway.applySnapshot(f.snapshot());
     expect(f.safety.validate).toHaveBeenCalledTimes(4);
     expect(vi.mocked(f.safety.validate).mock.calls[3]).toEqual([b, [a.public]]);
-    expect((await exchange(first.port, 'first')).toString()).toBe('first');
-    expect((await exchange(second.port, 'second')).toString()).toBe('second');
+    expect((await exchange(first.port, 'first', false, publicAddress)).toString()).toBe('first');
+    expect((await exchange(second.port, 'second', false, publicAddress)).toString()).toBe('second');
+  });
+  it('preserves an occupied public endpoint when a two-route fixture fails its first native bind', async () => {
+    const direct = await tcpFixture('127.0.0.1');
+    const backend = await tcpFixture();
+    const first = route(direct.port);
+    const second = route(backend.port);
+    const f = plane([first, second]);
+    await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toMatchObject({
+      code: 'EADDRINUSE',
+    });
+    // Both route preflights and only the first immediate pre-bind check run.
+    expect(f.safety.validate).toHaveBeenCalledTimes(3);
+    expect(f.gateway.health().routes).toBe(0);
+    expect((await exchange(direct.port, 'unrelated fixture')).toString()).toBe('unrelated fixture');
   });
 });
 
