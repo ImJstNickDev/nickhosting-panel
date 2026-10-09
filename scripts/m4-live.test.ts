@@ -3,14 +3,20 @@ import { createRequire } from 'node:module';
 import type { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { canonicalMinecraftJarSha256 } from '../games/minecraft/src/generated-launcher.js';
-import type { PterodactylAdapter } from '../packages/pterodactyl-adapter/src/index.js';
+import {
+  type PterodactylAdapter,
+  PterodactylError,
+} from '../packages/pterodactyl-adapter/src/index.js';
 import {
   guardMinecraftLiveAdapter,
   type MinecraftLiveLedger,
   type MinecraftLivePlan,
 } from './m4-live.js';
 import {
+  cleanupMinecraftLiveBackups,
   finalizeMinecraftLiveCleanup,
+  type MinecraftLiveBackupJob,
+  type MinecraftLiveBackupPreparation,
   minecraftBootstrapManifest,
   minecraftLiveReadyRoute,
   promoteMinecraftInstallationEvidence,
@@ -141,6 +147,226 @@ function fixture() {
     },
   };
 }
+
+function backupFixture() {
+  const { ledger } = fixture();
+  ledger.runId = randomUUID();
+  const asset = ledger.assets[0];
+  if (!asset) throw new Error('Missing fixture');
+  const now = Date.now();
+  asset.createdAt = new Date(now - 30000).toISOString();
+  const ownerId = randomUUID();
+  const backupId = randomUUID();
+  const job: MinecraftLiveBackupJob = {
+    jobId: randomUUID(),
+    serverId: asset.managedServerId,
+    actorId: ownerId,
+    subjectId: ownerId,
+    resourceOwnerId: ownerId,
+    supportSessionId: null,
+    state: 'succeeded',
+    action: 'minecraft-content',
+    plan: { backupId, minecraftContent: { backupBefore: true } },
+    createdAt: new Date(now - 20000),
+    completedAt: new Date(now - 1000),
+  };
+  const prepared: MinecraftLiveBackupPreparation = {
+    jobId: job.jobId,
+    serverId: asset.managedServerId,
+    actorId: ownerId,
+    subjectId: ownerId,
+    supportSessionId: null,
+    messageKey: 'servers.operation.effect_prepared',
+    data: { phase: 'backup' },
+    createdAt: new Date(now - 15000),
+  };
+  const backup = {
+    uuid: backupId,
+    name: `nickhosting-operation-${job.jobId}`,
+    is_successful: true,
+    is_locked: false,
+    ignored_files: [],
+    checksum: 'sha1:isolated-fixture',
+    bytes: 4096,
+    created_at: new Date(now - 10000).toISOString(),
+    completed_at: new Date(now - 5000).toISOString(),
+  };
+  const inventory = new Map<string, typeof backup>([[backupId, backup]]);
+  const order: string[] = [];
+  const prove = vi.fn(async () => {
+    order.push('prove');
+  });
+  const listBackups = vi.fn(async () => [...inventory.values()]);
+  const getBackup = vi.fn(async (_identifier: string, id: string) => {
+    const value = inventory.get(id);
+    if (!value) throw new PterodactylError('not_found', 'client', 'rejected', 404);
+    return { ...value };
+  });
+  const deleteBackup = vi.fn(async (_identifier: string, id: string) => {
+    order.push('delete');
+    inventory.delete(id);
+  });
+  const options = {
+    asset,
+    ledger,
+    ownerId,
+    jobs: [job],
+    preparations: [prepared],
+    adapter: { listBackups, getBackup, deleteBackup },
+    prove,
+    event: vi.fn(async (event: string, details: Record<string, unknown>) => {
+      order.push(event);
+      ledger.events.push({ at: new Date().toISOString(), event, details });
+    }),
+  };
+  return { options, backup, job, prepared, inventory, order, ...options.adapter };
+}
+
+describe('M4 live test backup cleanup provenance', () => {
+  it('persists the exact deletion intent, deletes the owned backup, then verifies provider absence', async () => {
+    const f = backupFixture();
+    await cleanupMinecraftLiveBackups(f.options);
+    expect(f.deleteBackup).toHaveBeenCalledExactlyOnceWith(
+      f.options.asset.identifier,
+      f.backup.uuid,
+    );
+    expect(f.order.indexOf('cleanup.backup.delete-intent')).toBeLessThan(f.order.indexOf('delete'));
+    expect(f.order.indexOf('delete')).toBeLessThan(
+      f.order.indexOf('cleanup.backup.provider-deletion-confirmed'),
+    );
+    expect(f.options.ledger.events.at(-1)?.details).toMatchObject({
+      verifiedBackupCount: 1,
+      directStorageErasureVerified: false,
+    });
+    expect(f.options.prove).toHaveBeenCalled();
+  });
+  it('rejects unknown backups before deleting even the known backup', async () => {
+    const f = backupFixture();
+    const unknown = randomUUID();
+    f.inventory.set(unknown, { ...f.backup, uuid: unknown });
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('Unknown backup');
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+  });
+  it('does not infer ownership from the generated name or list alone', async () => {
+    const f = backupFixture();
+    f.options.jobs = [];
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('Unknown backup');
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+  });
+  it('requires the actual durable creation event, not only a plan reference', async () => {
+    const f = backupFixture();
+    f.prepared.data.phase = 'restore';
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('Unknown backup');
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+  });
+  for (const field of ['actorId', 'subjectId', 'resourceOwnerId', 'serverId'] as const) {
+    it(`refuses a mismatched ${field}`, async () => {
+      const f = backupFixture();
+      f.job[field] = randomUUID();
+      await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow();
+      expect(f.deleteBackup).not.toHaveBeenCalled();
+    });
+  }
+  it('rejects an active job, ambiguous creation attempts, or a non-creation action', async () => {
+    for (const mutation of [
+      (f: ReturnType<typeof backupFixture>) => {
+        f.job.state = 'running';
+      },
+      (f: ReturnType<typeof backupFixture>) => {
+        f.options.preparations.push({ ...f.prepared });
+      },
+      (f: ReturnType<typeof backupFixture>) => {
+        f.job.action = 'restore';
+      },
+    ]) {
+      const f = backupFixture();
+      mutation(f);
+      await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow();
+      expect(f.deleteBackup).not.toHaveBeenCalled();
+    }
+  });
+  it('rejects old, locked, incomplete or changed backups', async () => {
+    for (const change of [
+      { created_at: new Date(0).toISOString() },
+      { is_locked: true },
+      { completed_at: null },
+      { uuid: randomUUID() },
+    ]) {
+      const f = backupFixture();
+      f.getBackup.mockResolvedValueOnce({ ...f.backup, ...change } as typeof f.backup);
+      await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow();
+      expect(f.deleteBackup).not.toHaveBeenCalled();
+    }
+    const f = backupFixture();
+    f.getBackup
+      .mockResolvedValueOnce(f.backup)
+      .mockResolvedValueOnce({ ...f.backup, checksum: 'changed-after-proof' });
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('Backup changed');
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+  });
+  it('retains uncertainty after a lost response; an explicit rerun can confirm the exact absent backup', async () => {
+    const f = backupFixture();
+    f.deleteBackup.mockImplementationOnce(async (_identifier, id) => {
+      f.inventory.delete(id);
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('uncertain');
+    expect(f.options.ledger.events.at(-1)?.event).toBe('cleanup.backup.deletion-uncertain');
+    expect(f.order).not.toContain('cleanup.backup.provider-deletion-confirmed');
+    await cleanupMinecraftLiveBackups(f.options);
+    expect(f.deleteBackup).toHaveBeenCalledTimes(1);
+    expect(f.order).toContain('cleanup.backup.provider-absence-reconciled');
+  });
+  it('never retries an unresolved deletion while the backup still exists', async () => {
+    const f = backupFixture();
+    f.deleteBackup.mockRejectedValueOnce(new Error('unavailable'));
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('uncertain');
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow(
+      'Unresolved deletion intent',
+    );
+    expect(f.deleteBackup).toHaveBeenCalledTimes(1);
+  });
+  it('cannot reconcile an absent backup without the exact prior run and identity-bound intent', async () => {
+    const f = backupFixture();
+    f.inventory.clear();
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('no durable');
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+  });
+  it('does not treat permission or transport failures as backup absence', async () => {
+    for (const error of [
+      new PterodactylError('permission_denied', 'client', 'rejected', 403),
+      new PterodactylError('unavailable', 'client', 'unknown'),
+      new PterodactylError('not_found', 'application', 'rejected', 404),
+    ]) {
+      const f = backupFixture();
+      f.getBackup
+        .mockResolvedValueOnce(f.backup)
+        .mockResolvedValueOnce(f.backup)
+        .mockRejectedValueOnce(error);
+      await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('uncertain');
+      expect(f.order).not.toContain('cleanup.backup.provider-deletion-confirmed');
+    }
+  });
+  it('requires durable intent persistence before the remote effect', async () => {
+    const f = backupFixture();
+    const record = f.options.event.getMockImplementation();
+    f.options.event.mockImplementation(async (name, details) => {
+      if (name === 'cleanup.backup.delete-intent') throw new Error('fsync failed');
+      await record?.(name, details);
+    });
+    await expect(cleanupMinecraftLiveBackups(f.options)).rejects.toThrow('fsync failed');
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+  });
+  it('allows a conclusively empty backup inventory for assets that never created one', async () => {
+    const f = backupFixture();
+    f.options.jobs = [];
+    f.options.preparations = [];
+    f.inventory.clear();
+    await cleanupMinecraftLiveBackups(f.options);
+    expect(f.deleteBackup).not.toHaveBeenCalled();
+    expect(f.options.ledger.events.at(-1)?.details?.verifiedBackupCount).toBe(0);
+  });
+});
 
 describe('reviewed M4 live resource envelope', () => {
   it('waits for the current generation and committed snapshot before a real client can join', () => {

@@ -39,9 +39,11 @@ import {
   gameManifestSchema,
 } from '../packages/game-sdk/src/index.js';
 import {
+  backupSchema,
   createContainerObserver,
   createPterodactylAdapter,
   type PterodactylAdapter,
+  PterodactylError,
 } from '../packages/pterodactyl-adapter/src/index.js';
 import {
   backendAllocationPoolSchema,
@@ -202,6 +204,192 @@ export function minecraftLiveReadyRoute(
   )
     return undefined;
   return route;
+}
+export interface MinecraftLiveBackupJob {
+  jobId: string;
+  serverId: string;
+  actorId: string;
+  subjectId: string;
+  resourceOwnerId: string;
+  supportSessionId: string | null;
+  state: string;
+  action: string;
+  plan: Record<string, unknown>;
+  createdAt: Date;
+  completedAt: Date | null;
+}
+export interface MinecraftLiveBackupPreparation {
+  jobId: string | null;
+  serverId: string;
+  actorId: string | null;
+  subjectId: string | null;
+  supportSessionId: string | null;
+  messageKey: string;
+  data: Record<string, unknown>;
+  createdAt: Date;
+}
+/** Test-only cleanup: inventory establishes completeness, never backup ownership. */
+export async function cleanupMinecraftLiveBackups(options: {
+  asset: MinecraftLiveAsset;
+  ledger: MinecraftLiveLedger;
+  ownerId: string;
+  jobs: readonly MinecraftLiveBackupJob[];
+  preparations: readonly MinecraftLiveBackupPreparation[];
+  adapter: Pick<PterodactylAdapter, 'listBackups' | 'getBackup' | 'deleteBackup'>;
+  prove(): Promise<unknown>;
+  event(name: string, details: Record<string, unknown>): Promise<void>;
+}) {
+  const { asset, ledger, adapter } = options;
+  const identifier = defined(asset.identifier);
+  const assetTime = Date.parse(defined(asset.createdAt));
+  assert(Number.isFinite(assetTime));
+  assert(!asset.deletedAt, 'Cannot inspect backups after server deletion');
+  assert(ledger.assets.includes(asset), 'Asset is absent from the protected ledger');
+  const claims = new Map<string, { job: MinecraftLiveBackupJob; preparedAt: number }>();
+  for (const job of options.jobs) {
+    assert.equal(job.serverId, asset.managedServerId, 'Job belongs to another server');
+    assert(['succeeded', 'failed'].includes(job.state), 'Active job forbids backup cleanup');
+    const preparations = options.preparations.filter(
+      (entry) =>
+        entry.jobId === job.jobId &&
+        entry.messageKey === 'servers.operation.effect_prepared' &&
+        entry.data.phase === 'backup',
+    );
+    // A restore may reference a backup but never proves that this run created it.
+    if (job.plan.backupId === undefined || preparations.length === 0) continue;
+    assert.equal(job.actorId, options.ownerId, 'Backup job actor mismatch');
+    assert.equal(job.subjectId, options.ownerId, 'Backup job subject mismatch');
+    assert.equal(job.resourceOwnerId, options.ownerId, 'Backup job owner mismatch');
+    assert.equal(job.supportSessionId, null, 'Support session cannot own this fixture');
+    assert(job.completedAt && Number.isFinite(job.completedAt.getTime()));
+    assert(job.createdAt.getTime() >= assetTime - 5000, 'Backup job predates this asset');
+    const content = job.plan.minecraftContent as { backupBefore?: unknown } | undefined;
+    assert(
+      job.action === 'backup' ||
+        (['reinstall', 'wipe', 'delete'].includes(job.action) && job.plan.backupBefore === true) ||
+        (job.action === 'minecraft-content' && content?.backupBefore === true),
+      'Job did not request backup creation',
+    );
+    assert.equal(preparations.length, 1, 'Ambiguous backup creation attempts');
+    const prepared = defined(preparations[0]);
+    assert.equal(prepared.serverId, asset.managedServerId);
+    assert.equal(prepared.actorId, options.ownerId);
+    assert.equal(prepared.subjectId, options.ownerId);
+    assert.equal(prepared.supportSessionId, null);
+    const preparedAt = prepared.createdAt.getTime();
+    assert(
+      Number.isFinite(preparedAt) &&
+        preparedAt >= job.createdAt.getTime() - 5000 &&
+        preparedAt <= job.completedAt.getTime(),
+      'Backup creation chronology is invalid',
+    );
+    const backupId = backupSchema.shape.uuid.parse(job.plan.backupId);
+    assert(!claims.has(backupId), 'Backup is claimed by multiple creation jobs');
+    claims.set(backupId, { job, preparedAt });
+  }
+  const inventory = async () => {
+    await options.prove();
+    const entries = await adapter.listBackups(identifier);
+    assert.equal(new Set(entries.map((entry) => entry.uuid)).size, entries.length);
+    assert(
+      entries.every((entry) => claims.has(entry.uuid)),
+      'Unknown backup forbids backup and server deletion',
+    );
+    return entries;
+  };
+  // Check the entire inventory before deleting even a conclusively owned backup.
+  const initial = await inventory();
+  for (const [backupId, { job, preparedAt }] of claims) {
+    const scope = {
+      runId: ledger.runId,
+      serverId: asset.managedServerId,
+      serverUuid: defined(asset.uuid),
+      externalId: asset.externalId,
+      apiIdentitySha256: ledger.apiIdentitySha256,
+      apiAccountId: ledger.apiAccountId,
+      jobId: job.jobId,
+      backupId,
+    };
+    const validate = (value: unknown) => {
+      const backup = backupSchema.parse(value);
+      assert.equal(backup.uuid, backupId);
+      // The name corroborates the persisted UUID and scoped creation event only.
+      assert.equal(backup.name, `nickhosting-operation-${job.jobId}`);
+      assert(!backup.is_locked, 'Locked backup requires independent Owner review');
+      assert(backup.completed_at, 'Incomplete backup forbids cleanup');
+      const created = Date.parse(backup.created_at);
+      const completed = Date.parse(backup.completed_at);
+      assert(
+        Number.isFinite(created) &&
+          Number.isFinite(completed) &&
+          created >= preparedAt - 5000 &&
+          created >= assetTime - 5000 &&
+          completed >= created &&
+          completed <= Date.now() + 5000,
+        'Backup creation metadata does not match this test run',
+      );
+      return backup;
+    };
+    const previous = ledger.events.filter(
+      (entry) =>
+        entry.event === 'cleanup.backup.delete-intent' &&
+        Object.entries(scope).every(([key, value]) => entry.details?.[key] === value),
+    );
+    assert(previous.length <= 1, 'Multiple deletion intents require independent review');
+    const confirmAbsent = async () => {
+      await options.prove();
+      try {
+        await adapter.getBackup(identifier, backupId);
+      } catch (error) {
+        if (
+          error instanceof PterodactylError &&
+          error.scope === 'client' &&
+          error.reason === 'not_found' &&
+          error.upstreamStatus === 404
+        ) {
+          assert(!(await inventory()).some((entry) => entry.uuid === backupId));
+          return;
+        }
+        throw error;
+      }
+      throw new Error('Backup deletion is not confirmed by the provider');
+    };
+    if (!initial.some((entry) => entry.uuid === backupId)) {
+      assert.equal(previous.length, 1, 'Missing backup has no durable deletion intent');
+      validate(previous[0]?.details?.backup);
+      await confirmAbsent();
+      await options.event('cleanup.backup.provider-absence-reconciled', scope);
+      continue;
+    }
+    assert.equal(previous.length, 0, 'Unresolved deletion intent requires independent review');
+    await options.prove();
+    const backup = validate(await adapter.getBackup(identifier, backupId));
+    await options.event('cleanup.backup.provenance-confirmed', { ...scope, backup });
+    await inventory();
+    await options.prove();
+    assert.deepEqual(
+      validate(await adapter.getBackup(identifier, backupId)),
+      backup,
+      'Backup changed before deletion',
+    );
+    // event() fsyncs the protected ledger; the guarded adapter proves ownership again.
+    await options.event('cleanup.backup.delete-intent', { ...scope, backup });
+    try {
+      await adapter.deleteBackup(identifier, backupId);
+      await confirmAbsent();
+    } catch {
+      await options.event('cleanup.backup.deletion-uncertain', scope);
+      throw new Error('Backup deletion is uncertain; retain server and schema for review');
+    }
+    await options.event('cleanup.backup.provider-deletion-confirmed', scope);
+  }
+  assert.equal((await inventory()).length, 0, 'Backups remain before server deletion');
+  await options.event('cleanup.backups.provider-inventory-empty', {
+    serverId: asset.managedServerId,
+    serverUuid: asset.uuid,
+    verifiedBackupCount: claims.size,
+    directStorageErasureVerified: false,
+  });
 }
 class MinecraftLiveClientFailure extends Error {
   constructor(
@@ -734,6 +922,51 @@ export async function runMinecraftLiveScenario(options: {
   async function remove(asset: MinecraftLiveAsset) {
     await prove(asset);
     await operation(asset.managedServerId, { action: 'stop' });
+    const [jobs, preparations] = await Promise.all([
+      db
+        .selectFrom('server_operations as operation')
+        .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+        .select([
+          'job.id as jobId',
+          'operation.server_id as serverId',
+          'job.actor_id as actorId',
+          'job.subject_id as subjectId',
+          'job.resource_owner_id as resourceOwnerId',
+          'job.support_session_id as supportSessionId',
+          'job.state',
+          'operation.action',
+          'operation.plan',
+          'job.created_at as createdAt',
+          'job.completed_at as completedAt',
+        ])
+        .where('operation.server_id', '=', asset.managedServerId)
+        .execute(),
+      db
+        .selectFrom('server_events')
+        .select([
+          'job_id as jobId',
+          'server_id as serverId',
+          'actor_id as actorId',
+          'subject_id as subjectId',
+          'support_session_id as supportSessionId',
+          'message_key as messageKey',
+          'data',
+          'created_at as createdAt',
+        ])
+        .where('server_id', '=', asset.managedServerId)
+        .where('message_key', '=', 'servers.operation.effect_prepared')
+        .execute(),
+    ]);
+    await cleanupMinecraftLiveBackups({
+      asset,
+      ledger,
+      ownerId: scenario.ownerId,
+      jobs,
+      preparations,
+      adapter,
+      prove: () => prove(asset),
+      event,
+    });
     await operation(asset.managedServerId, {
       action: 'delete',
       confirm: true,
@@ -1164,7 +1397,18 @@ export async function runMinecraftLiveScenario(options: {
       gateway = await createGatewayRuntime(env, {
         protocols: [createMinecraftGatewayModuleAdapter()],
         // Actual authenticated HTTP route handlers, in process: no additional host listener.
-        fetcher: async (input, init) => api.fetch(new Request(input, init)),
+        fetcher: async (input, init) => {
+          const request = new Request(input, init);
+          const response = await api.fetch(request);
+          if (!response.ok) {
+            const action = new URL(request.url).pathname.split('/').at(-1);
+            await event('gateway.control-http-failure', {
+              action: action && /^[a-z-]{1,64}$/.test(action) ? action : 'unknown',
+              status: response.status,
+            });
+          }
+          return response;
+        },
       });
       const until = async (
         predicate: () => Promise<boolean>,

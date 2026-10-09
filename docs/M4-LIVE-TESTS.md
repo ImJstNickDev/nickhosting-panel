@@ -220,6 +220,26 @@ that ledger's generated test schema after all deletions are confirmed. It never
 adopts a lost create response, deletes an uncertain asset or automatically runs
 after failure. Signing/encryption test keys stay in the mode-0600 ignored ledger.
 
+Both normal completion and explicit cleanup remove test-owned backups **before**
+deleting the server. Server deletion alone is not backup cleanup: Panel/Wings may
+keep backup archives outside the server filesystem. Each backup UUID must come
+from a terminal, Owner-scoped Core job's persisted plan and its actual
+`servers.operation.effect_prepared` event with `phase: backup`. The live scoped
+backup response must corroborate the UUID, creation chronology, completed state
+and unlocked status. A generated name or a listing never establishes ownership;
+an unknown backup blocks all backup deletions and the server deletion.
+
+The mode-0600 ledger records the run/API/server/job/backup identity, observed
+metadata and fsynced deletion intent before the guarded API call. Cleanup requires
+the exact backup endpoint to return 404 and a fresh server backup inventory to
+exclude it; the final inventory must be empty. Permission failures, locked or
+incomplete backups, metadata drift and uncertain delete responses preserve the
+server and schema for review. A later explicit cleanup can confirm an already
+absent backup only using that exact retained deletion intent; it never silently
+retries an unresolved deletion. These events report **provider-confirmed backup
+deletion**, not independently verified erasure of Wings storage. The harness does
+not access backup directories or delete files directly on the host.
+
 For a reviewed terminal failure where the approved bootstrap remains useful, add
 the explicit cleanup-only flag `--retain-schema`. This still runs ordinary Core
 stop/delete and verifies provider absence and terminal containers for every owned
