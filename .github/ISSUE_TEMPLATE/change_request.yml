@@ -1,0 +1,40 @@
+name: Change request
+description: Propose a scoped feature, integration or design adjustment
+title: "[Change] "
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Problem / user story
+      placeholder: What is the user trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: Proposed behavior / acceptance
+      placeholder: Describe observable behavior and non-goals
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options:
+        - Core / API
+        - Auth / Owner
+        - Gateway
+        - Minecraft
+        - Satisfactory
+        - Frontend / i18n
+        - Infrastructure / documentation
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: External dependencies or approval needed
+      placeholder: Include affected production services if applicable
+    validations:
+      required: false

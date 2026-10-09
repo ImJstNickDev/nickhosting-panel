@@ -1,0 +1,4 @@
+# Project-local Codex agent settings. Merge with any existing .codex config.
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 3
