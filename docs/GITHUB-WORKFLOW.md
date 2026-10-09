@@ -39,7 +39,8 @@ git switch -c milestone/m0-repository
 # Import reviewed files, including the intact full README and Prepping fixes.
 git add -- README.md AGENTS.md PREPPING.md GUIDA-AVVIO-IT.md \
   .gitignore .env.example .codex/config.toml .codex/agents \
-  .github/ISSUE_TEMPLATE .github/PULL_REQUEST_TEMPLATE.md docs
+  .github/ISSUE_TEMPLATE .github/PULL_REQUEST_TEMPLATE.md docs scripts/check-governance.py
+python3 scripts/check-governance.py
 git diff --cached --check
 git diff --cached --name-status
 git diff --cached
@@ -60,6 +61,12 @@ Run the example step by step only after M0 authorization, stopping on any failed
 To create milestones GitHub CLI can use `gh api -X POST repos/OWNER/nickhosting-panel/milestones -f title='M0 — Repository' ...` and similar for M1–M6; verify whether they already exist first. Create labels via `gh label create` as needed. Create Issues via `gh issue create --milestone ...` only after the milestone exists. Do not batch create many hundreds of issues.
 
 The PR body template is meant to guide evidence; when using `--body-file`, **fill out the template with actual status and links**, do not submit an empty checklist as if requirements passed.
+
+## Local M0 validation
+
+After explicitly staging the intended public files, run `python3 scripts/check-governance.py` from the repository. The [checker](../scripts/check-governance.py) uses Python 3.11's standard library and the Git index to validate text file modes, local Markdown link targets, TOML/profile contracts, excluded paths, heuristic credential/private-address patterns and whitespace. It tests ignore rules in disposable temporary Git metadata without staging fixture files in this repository. No package installation, application scaffold, production access or GitHub write is involved.
+
+The checker validates indexed content, including after a commit; unstaged edits are outside its scope. It does not fetch external links, validate heading anchors or prove the absence of every secret. Inspect the staged diff manually before publication. App lint/types/unit/browser tests begin in their assigned milestones; no such scripts exist in M0.
 
 ## Review routine
 
