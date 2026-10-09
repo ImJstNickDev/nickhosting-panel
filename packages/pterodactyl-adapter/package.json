@@ -1,0 +1,10 @@
+{
+  "name": "@nickhosting/pterodactyl-adapter",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "zod": "4.6.5"
+  }
+}

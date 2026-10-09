@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check M0's Git index before publication; heuristic scans are not a secret audit."""
+"""Check the Git index before publication; heuristic scans are not a secret audit."""
 
 import ipaddress
 import os
@@ -66,7 +66,7 @@ def main():
         name = PurePosixPath(path).name
         real_env = (name == ".env" or name.startswith(".env.")) and name != ".env.example"
         if forbidden.search(path) or real_env:
-            failures.append(f"{path}: prohibited M0 publication path")
+            failures.append(f"{path}: prohibited publication path")
         if secrets.search(content):
             failures.append(f"{path}: possible credential signature (value redacted)")
         if path.endswith((".md", ".toml", ".example")):
@@ -150,7 +150,7 @@ def main():
           f"{len(tomls)} TOML files and {len(excluded) + len(allowed)} ignore cases.")
     for failure in failures:
         print(f"FAIL: {failure}")
-    print("FAIL" if failures else "PASS: M0 index governance checks (secret scan is heuristic).")
+    print("FAIL" if failures else "PASS: index governance checks (secret scan is heuristic).")
     return int(bool(failures))
 
 

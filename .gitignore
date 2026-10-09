@@ -59,6 +59,8 @@ coverage/
 *.log
 .tmp/
 .cache/
+__pycache__/
+*.py[cod]
 
 # Browser diagnostics and private screenshots; add sanitized screenshots deliberately to PRs
 playwright-report/

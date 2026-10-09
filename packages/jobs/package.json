@@ -1,0 +1,14 @@
+{
+  "name": "@nickhosting/jobs",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@nickhosting/database": "workspace:*",
+    "@nickhosting/core": "workspace:*",
+    "bullmq": "6.3.11",
+    "ioredis": "6.0.0",
+    "kysely": "0.29.6",
+    "zod": "4.6.5"
+  }
+}

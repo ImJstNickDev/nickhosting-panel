@@ -1,0 +1,15 @@
+{
+  "name": "@nickhosting/database",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "dependencies": {
+    "kysely": "0.29.6",
+    "pg": "8.23.1",
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/game-sdk": "workspace:*"
+  }
+}
