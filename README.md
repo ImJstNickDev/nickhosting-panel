@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M1 merged; M2 review corrections complete on PR #17; ready for Owner/ChatGPT review, unmerged.
+**Status:** M2 merged; M3 Gateway and sleep/wake implementation in progress. See [M3 validation](docs/M3-VALIDATION.md). No production deployment is authorized.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
