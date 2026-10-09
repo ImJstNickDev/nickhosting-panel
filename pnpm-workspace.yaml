@@ -1,0 +1,6 @@
+packages:
+  - apps/*
+  - packages/*
+strictPeerDependencies: true
+autoInstallPeers: false
+onlyBuiltDependencies: []
