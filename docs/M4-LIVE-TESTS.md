@@ -10,9 +10,10 @@ never copy its addresses, credentials, infrastructure paths or API identity into
 public evidence. The current plan targets PR #20. `scripts/m4-live.ts` provides
 read-only preflight, provenance verification, a real protocol probe, the explicitly
 gated nonce responder, and a provenance guard for composition into the existing
-M2/M3 Core runner. `scripts/m4-live-scenario.ts` now prepares an executable
-Vanilla scenario using the actual Core, Gateway and an independent Minecraft
-protocol client. Its preparation/typecheck is not live acceptance evidence.
+M2/M3 Core runner. The Owner's current M4 acceptance scope uses a real Vanilla
+scenario with Core, Gateway and an independent Minecraft protocol client. Live
+Paper/Folia/Fabric/Forge egg tests are deferred; their prepared capture paths and
+metadata are not live compatibility evidence.
 
 ## Exact proposed changes and approval
 
@@ -68,7 +69,8 @@ across stopped servers are not treated as physical consumption. Resource
 observations repeat before creation, start/restart and reinstallation. Failure
 does not trigger retries that create more servers or shut down other workloads.
 
-These are **metadata-resolved candidates**, not verified compatibility claims:
+These are **metadata-resolved candidates**, not verified compatibility claims.
+Only Vanilla is in the current live acceptance run:
 
 | Profile | Exact candidate | Required Java |
 | --- | --- | --- |
@@ -86,6 +88,26 @@ must match the official selected Folia hash before launch. Fabric/Forge generate
 files and actual Java/runtime behavior require independent installation evidence.
 An installer download alone does not pass that check. Image digests, Java output,
 exact files and runtime status must be recorded; system Java is never changed.
+Read-only inspection of the installed Fabric recipe confirms that its generated
+launcher replaces `server.jar`, while `minecraft-server.jar` contains Mojang's
+server and the companion property selects it. Capture checks those actual files
+and hashes; this recipe observation alone does not establish compatibility.
+
+The pinned Forge installer metadata places the bundled Mojang JAR under
+`libraries/`, extracts a root shim and generates versioned argument files. The
+configured egg deletes the installer; capture obtains its trusted metadata
+separately. Empty-URL client-generated entries do not become required server files,
+while server processor outputs remain mandatory. This follows the upstream
+[server installer](https://github.com/MinecraftForge/Installer/blob/2.0/src/main/java/net/minecraftforge/installer/actions/ServerInstall.java)
+and [library handling](https://github.com/MinecraftForge/Installer/blob/2.0/src/main/java/net/minecraftforge/installer/actions/Action.java).
+
+A read-only scan of the pinned Forge installer and 18 hash-verified processor
+dependencies found base class versions no newer than Java 8. This does not prove
+successful execution. On 2026-10-09 the configured installer image
+`openjdk:8-jdk-slim` was absent locally and its registry manifest was unavailable;
+Any future Forge creation needs an Owner-provided usable egg/installer image.
+This historical finding does not block the authorized Vanilla-only M4 acceptance.
+Runtime Java 21 availability does not resolve the separate installer-image requirement.
 
 ## Available commands and runner stages
 
@@ -118,14 +140,25 @@ scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec tsx scripts/m4-l
 ```
 
 `bootstrap` creates an explicitly separate M2 validation mapping and server. It
-uses the exact resolved Vanilla artifact and approved image, with a fixture
-startup prefix that records actual `java -version` output. It verifies the
-downloaded artifact against upstream hashes, the Docker image configuration
+uses the exact resolved profile artifacts and approved image. Forge's new test
+mapping invokes the installer-verified library `unix_args.txt` directly; it does
+not follow the egg's root symlink or shell conditional. Other profiles retain
+their direct reviewed egg startup. No installed egg is changed.
+The actual inspected yolk entrypoint already prints `java -version`; that output
+is captured without prefixing shell commands. Its `eval echo` substitution makes
+semicolon prefixes unsafe: an initial failed fixture demonstrated swallowed
+server stdout and remained conservatively in an unresolved Core start state.
+The recovery procedure below retains that failure instead of declaring success.
+The corrected bootstrap verifies the
+downloaded artifacts against upstream hashes, the Docker image configuration
 digest, real status/ping readiness and actual generated property keys. Only
 installation/status/readiness are marked true in a signed
 `installation-bootstrap` report. This admits private validation as experimental;
 it does not establish full Minecraft or client compatibility. The bootstrap
 server must be stopped and conclusively deleted before the next stage.
+Pterodactyl/Wings execute the authoritative egg installation and reinstallation.
+The helper only reads installed files and trusted metadata to verify the result;
+it never runs a second egg installer or executes downloaded Java code.
 
 `minecraft` then uses `createManagedServer` and `createManagementRuntime` with
 the real M4 configuration hook, immutable combination and actual signed bootstrap
@@ -152,9 +185,22 @@ evidence of deliberately exhausted production resources.
 Both stages retain an auditable isolated schema and ledger. The optional trusted
 `afterProtocol` callback exported by the runner permits a separately reviewed
 content/world/backup scenario on the same stopped asset. It is a local function,
-never a JSON/configuration input. The standalone command does not claim those
-content checks passed. Current executable scope is deliberately gated to Vanilla;
-the other four mappings are resolved and registered but not yet executed.
+never a JSON/configuration input. The CLI's explicit `--content` flag selects
+`scripts/m4-live-content.ts`; without that completed hook no full compatibility
+report is promoted. After protocol and content checks, fresh read-only capture
+verifies the immutable runtime set again. Fabric's signed canonical launch-JAR
+identity survives bootstrap, real-evidence promotion and subsequent installations
+with different ZIP timestamps. Mutable companion properties do not become raw
+immutable hash requirements.
+
+Prepared `paper`, `folia`, `fabric` and `forge` scenarios remain for future reviewed
+egg validation; do not execute them during the current Vanilla-only acceptance.
+A new mapping requires a new reviewed run. The preparation supports all five
+profiles; each future live outcome remains separate.
+In particular, Fabric must expose the verified modern generated launcher and a
+distinct Mojang server JAR, and Forge's actual processor outputs must match its
+pinned installer metadata. Unknown installed formats fail before server start;
+egg labels or variable names cannot establish installation success.
 
 Explicit cleanup, after inspecting any failure and its complete provenance:
 
@@ -166,6 +212,45 @@ Cleanup runs Core stop/delete only for conclusively proven assets and drops only
 that ledger's generated test schema after all deletions are confirmed. It never
 adopts a lost create response, deletes an uncertain asset or automatically runs
 after failure. Signing/encryption test keys stay in the mode-0600 ignored ledger.
+
+For a reviewed terminal failure where the approved bootstrap remains useful, add
+the explicit cleanup-only flag `--retain-schema`. This still runs ordinary Core
+stop/delete and verifies provider absence and terminal containers for every owned
+asset. It retains the schema, signed bootstrap evidence, completed-bootstrap list,
+the original failed jobs unchanged and historical `failedAt`; it records a separate
+asset-cleanup event. It neither retries nor resets a failed job. A later reviewed
+`--phase minecraft` creates a fresh asset and operation with a new execution-code
+receipt. No completed-Minecraft claim is added by cleanup.
+
+For a **failed M2-only bootstrap with an unresolved start**, ordinary Core cleanup
+cannot bypass the active job. `scripts/m4-live-recover.ts` is a separately reviewed
+test-only procedure. It requires the exact protected ledger, confirmation that
+the known runner PID no longer exists, the same PostgreSQL server lock, no Gateway
+route and no other pending operation. It snapshots the original Core state,
+corroborates live identity, requests a confirmed stop, proves both server and
+installer containers stopped, and only then deletes the owned server. Full cleanup
+requires API UUID/ID/external-ID absence, the allocation unassigned and both
+containers absent. The original unresolved job and schema are retained; this is
+not a successful Core recovery claim. There is no automatic kill/delete fallback
+after an uncertain stop. Use only the coordinator-reviewed exact run/PID:
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec tsx scripts/m4-live-recover.ts --plan .codex/local/m4-live-plan.json --ledger mountdata/test-assets/m4-live-RUN_UUID.json --stopped-runner-pid REVIEWED_PID --owner-approved-failed-bootstrap-cleanup
+```
+
+If that scoped stop has already failed, a separately reviewed invocation may add
+`--force-stopped-fixture-cleanup`. This explicit path records a force-stop intent
+before sending `kill` through the ownership guard. It must freshly prove both
+exact containers stopped and the provider offline before deletion; missing proof
+halts cleanup. Its ledger records forced test cleanup and possible loss of test
+data, never graceful shutdown or milestone acceptance. The original unresolved
+Core job and schema remain quarantined. This flag is only for the already proven
+failed bootstrap fixture, not a product recovery operation.
+
+`asset.deletedAt` alone records API deletion. Only the ledger's
+`bootstrap.recovery.remote-cleanup-confirmed` event and `scenario.recoveredAt`
+establish the full cleanup proof. Keep a recovered failed schema quarantined from
+workers. No production schema, server or configuration is changed by this procedure.
 
 For an existing run produced by that runner, replace the placeholder below with
 its actual generated ledger filename:
@@ -191,6 +276,12 @@ Every later mutation rechecks those values, the current API account, node and
 selected egg against the live API. Names are never proof. A lost create response
 leaves an uncertain intent and **stops**; no automatic replay or adoption occurs.
 Unresolved previous M4 assets prevent a new run.
+
+Each invocation also fsyncs a `scenario.execution-code` event before effects:
+the current Git HEAD, whether the workspace is dirty, and SHA256 hashes of the
+four approved runner/capture/content source files. Reusing a ledger does not
+attribute later fixes to the original bootstrap's HEAD. No private file is hashed
+for this code receipt.
 
 Execution and extensions still need to demonstrate:
 

@@ -364,6 +364,7 @@ export function registerServerRoutes(
     const release = options.acquireUploadSlot();
     try {
       await service.access(context, serverId, true, async (id, connection, current) => {
+        await service.assertFileMutation(serverId, [path], connection);
         const server = await authorizeServer(connection, current, serverId, 'server:manage');
         const maxBytes = server.limits.disk * 1024 * 1024;
         if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
@@ -451,6 +452,24 @@ export function registerServerRoutes(
       await body(c),
     );
     await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
+      const paths: string[] = [];
+      if (input.action === 'write') {
+        relativePath(input.path);
+        paths.push(input.path);
+      } else {
+        relativePath(input.root, true);
+        const names =
+          input.action === 'mkdir'
+            ? [input.name]
+            : input.action === 'delete'
+              ? input.files
+              : input.files.flatMap((file) => [file.from, file.to]);
+        for (const name of names) {
+          relativePath(name);
+          paths.push([input.root, name].filter(Boolean).join('/'));
+        }
+      }
+      await service.assertFileMutation(c.req.param('id'), paths, connection);
       await recordAudit(connection, current, 'server.files.requested', {
         serverId: c.req.param('id'),
         action: input.action,

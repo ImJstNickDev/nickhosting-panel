@@ -844,6 +844,92 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(writeFile.mock.calls.length).toBe(before);
     expect(JSON.stringify(logs)).not.toContain(providerSecret);
   });
+  it('protects Minecraft launch inputs in every browser mutation without blocking worlds or mods', async () => {
+    const server = await f.server();
+    const choiceId = randomUUID();
+    const binding = {
+      profile: 'fabric',
+      release: '1.21.1',
+      image: 'fixture/image:1',
+      imageJavaMajor: 21,
+      declaredEggVariables: [],
+      bindings: {},
+      fixedVariables: {},
+      installationKind: 'fabric-installer',
+      artifactPaths: { server: 'server.jar' },
+      supportedProperties: [],
+    };
+    await f.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: choiceId,
+        mapping_id: f.mappingId,
+        combination: '{}',
+        resolved_runtime: '{}',
+        binding: JSON.stringify(binding),
+        mapping_digest: 'a'.repeat(64),
+        identity_digest: 'b'.repeat(64),
+      })
+      .execute();
+    await f.db
+      .insertInto('minecraft_server_profiles')
+      .values({
+        server_id: server,
+        combination_id: choiceId,
+        configuration: '{}',
+        installed: true,
+        installed_manifest: JSON.stringify([
+          { path: 'server.jar', sha256: 'c'.repeat(64), size: 1 },
+          { path: 'libraries/fabric/loader.jar', sha256: 'd'.repeat(64), size: 1 },
+        ]),
+      })
+      .execute();
+    for (const input of [
+      { action: 'write', path: 'server.jar', content: 'bad' },
+      {
+        action: 'write',
+        path: 'fabric-server-launcher.properties',
+        content: 'serverJar=other.jar',
+      },
+      { action: 'delete', root: '', files: ['libraries'], confirm: true },
+      { action: 'rename', root: '', files: [{ from: 'libraries', to: 'elsewhere' }] },
+      { action: 'rename', root: '', files: [{ from: 'world.bin', to: 'server.jar' }] },
+      { action: 'mkdir', root: '', name: 'server.jar' },
+    ])
+      expect((await request(user, `/v1/servers/${server}/files`, input)).status).toBe(400);
+    const headers = user.headers();
+    headers.set('content-type', 'application/octet-stream');
+    headers.set('x-nh-upload-length', '1');
+    expect(
+      (
+        await app.request(`${origin}/v1/servers/${server}/files/upload?path=server.jar`, {
+          method: 'PUT',
+          headers,
+          body: new Uint8Array([1]),
+        })
+      ).status,
+    ).toBe(400);
+    expect(uploadFile).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(
+      (
+        await request(user, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'mods/config.txt',
+          content: 'allowed',
+        })
+      ).status,
+    ).toBe(204);
+    expect(
+      (
+        await request(user, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'world/config.txt',
+          content: 'allowed',
+        })
+      ).status,
+    ).toBe(204);
+  });
   it('uploads binary data larger than the JSON/text limits through the authorized streaming route', async () => {
     const server = await f.server();
     const binary = new Uint8Array(2 * 1024 * 1024 + 17).fill(0xa5);

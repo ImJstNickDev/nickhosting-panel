@@ -27,6 +27,27 @@ import { currentInteractiveContext } from './interactive-context.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
+/** Freeze the complete actual egg-variable set and each value. Defaults are an
+ * Owner registration input, never a dynamic fallback during provisioning/play. */
+export function assertMinecraftDeclaredEnvironment(
+  frozen: readonly string[],
+  actual: readonly string[],
+  environment: Readonly<Record<string, string>>,
+  assignedPortVariables: readonly string[] = [],
+): void {
+  if (
+    new Set(actual).size !== actual.length ||
+    new Set(frozen).size !== frozen.length ||
+    frozen.length !== actual.length ||
+    frozen.some((key) => !actual.includes(key)) ||
+    actual.some(
+      (key) => !Object.hasOwn(environment, key) && !assignedPortVariables.includes(key),
+    ) ||
+    Object.keys(environment).some((key) => !actual.includes(key)) ||
+    assignedPortVariables.some((key) => !actual.includes(key))
+  )
+    throw new DomainError('configuration_invalid');
+}
 export function minecraftMappingDigest(mapping: Mapping): string {
   const { enabled: _enabled, ...identity } = mapping;
   return minecraftDigest(identity);
@@ -98,12 +119,21 @@ export async function registerMinecraftCombination(
   if (
     value.binding.image !== mapping.docker_image ||
     value.binding.profile !== mapping.runtime_id ||
-    value.binding.declaredEggVariables.some((name) => !declared.includes(name))
+    egg.id !== mapping.egg_id ||
+    egg.nest !== mapping.nest_id
   )
     throw new DomainError('configuration_invalid');
   // Image availability is a deployment prerequisite, not protocol incompatibility.
   // A pending Owner egg/image update leaves this immutable choice unavailable until tested.
-  validateMinecraftRuntimeMapping(runtime, value.binding);
+  const variables = validateMinecraftRuntimeMapping(runtime, value.binding);
+  assertMinecraftDeclaredEnvironment(
+    value.binding.declaredEggVariables,
+    declared,
+    { ...mapping.environment, ...variables },
+    mapping.port_roles.flatMap((role) =>
+      role.environmentVariable ? [role.environmentVariable] : [],
+    ),
+  );
   const combination = minecraftCombinationSchema.parse({
     release: runtime.release,
     releaseType: runtime.releaseType,

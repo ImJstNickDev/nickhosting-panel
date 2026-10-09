@@ -65,3 +65,14 @@ public Gateway bind or new provider credential is implied by these APIs.
 See [M4 APIs](../M4-API.md), [protocol](../M4-PROTOCOL.md),
 [content](../M4-CONTENT.md), [research/licenses](../M4-CONTENT-RESEARCH.md) and
 [validation](../M4-VALIDATION.md).
+
+## Installation ownership
+
+Pterodactyl/Wings executes the selected egg's installation and reinstall scripts.
+The integration's metadata resolver and read-only artifact verifier do not run a
+second loader installer. Core waits for provider installation confirmation and
+a verified stopped state before game configuration or content changes. New
+installation behavior beyond an egg's capabilities needs explicit capability
+checks; it must not compete with the egg installer. The Owner approved Vanilla
+alone for M4 live acceptance, with other profile/egg combinations remaining
+unverified until future real tests.

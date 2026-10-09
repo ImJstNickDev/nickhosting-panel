@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
@@ -26,6 +26,8 @@ const env = {
   NH_OBSERVER_ID: 'isolated-observer',
   NH_MINECRAFT_METADATA_USER_AGENT: 'NickHosting isolated test',
 };
+const serverJar = Buffer.from('isolated verified runtime');
+const serverHash = createHash('sha256').update(serverJar).digest('hex');
 const imageDigest = `sha256:${'f'.repeat(64)}`;
 const combination = {
   release: '1.21.1',
@@ -42,7 +44,7 @@ const runtime = {
   releaseType: 'release',
   profile: 'vanilla',
   javaMajor: 21,
-  artifacts: [{ role: 'server', url: 'https://example.test/server.jar', sha256: 'e'.repeat(64) }],
+  artifacts: [{ role: 'server', url: 'https://example.test/server.jar', sha256: serverHash }],
   installation: { kind: 'server-jar' },
   evidence: [],
 };
@@ -78,7 +80,7 @@ beforeEach(async () => {
     .execute();
   await f.db
     .updateTable('runtime_egg_mappings')
-    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla', startup: 'java -jar server.jar' })
     .where('id', '=', f.mappingId)
     .execute();
   const mapping = await f.db
@@ -86,6 +88,15 @@ beforeEach(async () => {
     .selectAll()
     .where('id', '=', f.mappingId)
     .executeTakeFirstOrThrow();
+  Object.assign(f.adapter, {
+    getEgg: vi.fn(async () => ({
+      id: 1,
+      nest: 1,
+      relationships: {
+        variables: { object: 'list', data: [{ attributes: { env_variable: 'VERSION' } }] },
+      },
+    })),
+  });
   choiceId = randomUUID();
   await f.db
     .insertInto('minecraft_combinations')
@@ -126,7 +137,7 @@ async function evidence(
     server: {
       uuid: randomUUID(),
       externalId: 'isolated-image-test',
-      artifactSha256: 'e'.repeat(64),
+      artifactSha256: serverHash,
       imageDigest,
       javaMajor: 21,
     },
@@ -170,7 +181,12 @@ function lifecycleFixture() {
       nest: 1,
       egg: plan.eggId,
       status: null,
-      container: { startup_command: plan.startup, image: plan.dockerImage, installed: 1 },
+      container: {
+        startup_command: plan.startup,
+        image: plan.dockerImage,
+        installed: 1,
+        environment: { ...plan.environment },
+      },
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       relationships: {
@@ -194,6 +210,10 @@ function lifecycleFixture() {
   const findServerByExternalId = vi.fn(async () => remote);
   const adapter = {
     ...f.adapter,
+    listFiles: vi.fn(async () => [
+      { name: 'server.jar', is_file: true, is_symlink: false, size: serverJar.length },
+    ]),
+    downloadFile: vi.fn(async () => ({ body: new Response(serverJar).body })),
     createServer,
     findServerByExternalId,
     getApplicationServer: vi.fn(async () => remote),
@@ -221,7 +241,7 @@ function lifecycleFixture() {
     adapter,
     env,
     authorizeEffect: async (jobId, serverId, connection) => {
-      await authorizeQueuedEffect(connection, jobId, serverId, env);
+      await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);
     },
     reserveInstallation: async (serverId, jobId, connection) => {
       await connection
@@ -240,54 +260,92 @@ function lifecycleFixture() {
   return { options, adapter, createServer, findServerByExternalId };
 }
 describe('queued Minecraft provisioning evidence revalidation', () => {
-  it.each(['revoked', 'failed-report', 'tampered-plan', 'mapping-change'] as const)(
-    'prevents any create effect after %s',
-    async (change) => {
-      const operation = await queued();
-      const external = lifecycleFixture();
-      if (change === 'revoked')
-        await f.db
-          .updateTable('minecraft_combinations')
-          .set({ enabled: false })
-          .where('id', '=', choiceId)
-          .execute();
-      if (change === 'failed-report') await evidence(true);
-      if (change === 'mapping-change')
-        await f.db
-          .updateTable('runtime_egg_mappings')
-          .set({ startup: 'changed' })
-          .where('id', '=', f.mappingId)
-          .execute();
-      if (change === 'tampered-plan') {
-        const row = await f.db
-          .selectFrom('server_operations')
-          .select('plan')
-          .where('job_id', '=', operation.jobId)
-          .executeTakeFirstOrThrow();
-        const provision = row.plan.provision as Record<string, unknown>;
-        await f.db
-          .updateTable('server_operations')
-          .set({
-            plan: JSON.stringify({
-              ...row.plan,
-              provision: { ...provision, environment: { VERSION: '26.1' } },
-            }),
-          })
-          .where('job_id', '=', operation.jobId)
-          .execute();
-      }
-      await processServerOperation(f.db, operation.jobId, external.options);
-      expect(external.findServerByExternalId).toHaveBeenCalledOnce();
-      expect(external.createServer).not.toHaveBeenCalled();
-      const stored = await f.db
+  it.each([
+    'revoked',
+    'failed-report',
+    'tampered-plan',
+    'tampered-startup',
+    'extra-environment',
+    'mapping-change',
+  ] as const)('prevents any create effect after %s', async (change) => {
+    const operation = await queued();
+    const external = lifecycleFixture();
+    if (change === 'revoked')
+      await f.db
+        .updateTable('minecraft_combinations')
+        .set({ enabled: false })
+        .where('id', '=', choiceId)
+        .execute();
+    if (change === 'failed-report') await evidence(true);
+    if (change === 'mapping-change')
+      await f.db
+        .updateTable('runtime_egg_mappings')
+        .set({ startup: 'changed' })
+        .where('id', '=', f.mappingId)
+        .execute();
+    if (['tampered-plan', 'tampered-startup', 'extra-environment'].includes(change)) {
+      const row = await f.db
         .selectFrom('server_operations')
-        .selectAll()
+        .select('plan')
         .where('job_id', '=', operation.jobId)
         .executeTakeFirstOrThrow();
-      expect(stored.effect_state).toBe('none');
-      expect(stored.effect_started_at).toBeNull();
-    },
-  );
+      const provision = row.plan.provision as Record<string, unknown>;
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          plan: JSON.stringify({
+            ...row.plan,
+            provision: {
+              ...provision,
+              ...(change === 'tampered-startup'
+                ? { startup: 'java -jar other.jar' }
+                : {
+                    environment:
+                      change === 'extra-environment'
+                        ? { VERSION: '1.21.1', JDK_JAVA_OPTIONS: '-Dfabric.gameJarPath=other.jar' }
+                        : { VERSION: '26.1' },
+                  }),
+            },
+          }),
+        })
+        .where('job_id', '=', operation.jobId)
+        .execute();
+    }
+    await processServerOperation(f.db, operation.jobId, external.options);
+    expect(external.findServerByExternalId).toHaveBeenCalledOnce();
+    expect(external.createServer).not.toHaveBeenCalled();
+    const stored = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', operation.jobId)
+      .executeTakeFirstOrThrow();
+    expect(stored.effect_state).toBe('none');
+    expect(stored.effect_started_at).toBeNull();
+  });
+  it('refuses a queued provision after the actual egg gains an unbound default variable', async () => {
+    const operation = await queued();
+    const external = lifecycleFixture();
+    vi.mocked(external.adapter.getEgg).mockResolvedValue({
+      id: 1,
+      nest: 1,
+      relationships: {
+        variables: {
+          object: 'list',
+          data: [
+            { attributes: { env_variable: 'VERSION' } },
+            {
+              attributes: {
+                env_variable: 'UNBOUND_FLAGS',
+                default_value: '-Dfabric.gameJarPath=other.jar',
+              },
+            },
+          ],
+        },
+      },
+    } as Awaited<ReturnType<PterodactylAdapter['getEgg']>>);
+    await processServerOperation(f.db, operation.jobId, external.options);
+    expect(external.createServer).not.toHaveBeenCalled();
+  });
   it('rechecks a revocation during durable effect preparation before the provider call', async () => {
     const operation = await queued();
     const external = lifecycleFixture();
@@ -408,6 +466,89 @@ describe('host-bound Minecraft runtime image evidence', () => {
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).rejects.toThrow('integration_unavailable');
     expect(value.observer.processStartedAt).toHaveBeenCalledOnce();
+  });
+  it.each([
+    'startup',
+    'environment',
+    'implicit-jvm',
+    'missing-environment',
+    'unknown-variable',
+  ] as const)('rejects current provider %s drift before power or readiness', async (change) => {
+    const value = await installed();
+    const remote = await value.external.adapter.getApplicationServer(1);
+    if (change === 'startup')
+      remote.container.startup_command = 'java -Dfabric.gameJarPath=other.jar -jar server.jar';
+    else if (change === 'environment') remote.container.environment = { VERSION: 'other' };
+    else if (change === 'implicit-jvm')
+      remote.container.environment = {
+        ...remote.container.environment,
+        JDK_JAVA_OPTIONS: '-Dfabric.gameJarPath=other.jar',
+      };
+    else if (change === 'unknown-variable')
+      remote.container.environment = { ...remote.container.environment, UNBOUND: 'changed' };
+    else delete remote.container.environment;
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).rejects.toThrow('provenance_mismatch');
+    const job = await enqueueServerOperation(
+      f.db,
+      f.context,
+      value.serverId,
+      { action: 'start', idempotencyKey: randomUUID() },
+      env,
+    );
+    const power = vi.fn(async () => {});
+    Object.assign(value.external.adapter, { power });
+    expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
+      'failed',
+    );
+    expect(power).not.toHaveBeenCalled();
+  });
+  it('rehashes launch inputs for each process epoch and rejects an out-of-band file change', async () => {
+    const value = await installed();
+    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
+    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
+    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(1);
+    value.observer.processStartedAt.mockResolvedValue('2026-10-09T11:00:00.000000001Z');
+    vi.mocked(value.external.adapter.downloadFile).mockResolvedValue({
+      body: new Response(Buffer.alloc(serverJar.length, 0x65)).body,
+    } as Awaited<ReturnType<PterodactylAdapter['downloadFile']>>);
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).rejects.toThrow('conflict');
+    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
+    const job = await enqueueServerOperation(
+      f.db,
+      f.context,
+      value.serverId,
+      { action: 'start', idempotencyKey: randomUUID() },
+      env,
+    );
+    const power = vi.fn(async () => {});
+    Object.assign(value.external.adapter, { power });
+    expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
+      'failed',
+    );
+    expect(power).not.toHaveBeenCalled();
+  });
+  it('accepts the standard derived allocation-limit metadata only when both provider fields match the immutable mapping', async () => {
+    const value = await installed();
+    const remote = await value.external.adapter.getApplicationServer(1);
+    remote.container.environment = {
+      ...remote.container.environment,
+      P_SERVER_ALLOCATION_LIMIT: remote.feature_limits.allocations,
+    };
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId),
+    ).resolves.toMatchObject({ verified: true });
+    remote.container.environment.P_SERVER_ALLOCATION_LIMIT = remote.feature_limits.allocations + 1;
+    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
+      'provenance_mismatch',
+    );
+    remote.feature_limits.allocations += 1;
+    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
+      'provenance_mismatch',
+    );
   });
   it('rejects changed actual image contents under an unchanged mutable image tag', async () => {
     const value = await installed();

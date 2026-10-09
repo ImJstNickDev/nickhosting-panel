@@ -1,13 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   importMinecraftEvidence,
   inspectMinecraftCombination,
   minecraftCatalog,
   minecraftMappingDigest,
+  registerMinecraftCombination,
   requireMinecraftChoice,
   setMinecraftAvailability,
   signMinecraftEvidence,
@@ -102,6 +104,98 @@ async function attest(kind: 'protocol-fixture' | 'real-server' = 'real-server') 
   );
 }
 describe('Minecraft Owner evidence and user eligibility', () => {
+  it('registers only a complete explicitly frozen actual egg environment', async () => {
+    const versionUrl = 'https://piston-meta.mojang.com/v1/packages/fixture/1.21.1.json';
+    const version = Buffer.from(
+      JSON.stringify({
+        id: '1.21.1',
+        javaVersion: { majorVersion: 21 },
+        downloads: {
+          server: {
+            url: 'https://piston-data.mojang.com/v1/objects/fixture/server.jar',
+            sha1: 'a'.repeat(40),
+            size: 1,
+          },
+        },
+      }),
+    );
+    const manifest = Buffer.from(
+      JSON.stringify({
+        versions: [
+          {
+            id: '1.21.1',
+            type: 'release',
+            url: versionUrl,
+            sha1: createHash('sha1').update(version).digest('hex'),
+          },
+        ],
+      }),
+    );
+    const metadata = {
+      read: async (url: string) => ({
+        bytes: url === versionUrl ? version : manifest,
+        evidence: { url, sha256: 'b'.repeat(64), retrievedAt: new Date().toISOString() },
+      }),
+    };
+    const protocols = async () => ({
+      source: { url: 'https://example.test/protocols', sha256: 'c'.repeat(64) },
+      releases: new Map([
+        [
+          '1.21.1',
+          {
+            release: '1.21.1',
+            protocolId: 767,
+            family: 'netty' as const,
+            transfer: false,
+            releaseType: 'release' as const,
+          },
+        ],
+      ]),
+    });
+    const adapter = {
+      ...f.adapter,
+      getEgg: async () => ({
+        id: 1,
+        nest: 1,
+        relationships: {
+          variables: {
+            object: 'list',
+            data: [
+              { attributes: { env_variable: 'VERSION', default_value: 'latest' } },
+              { attributes: { env_variable: 'FLAGS', default_value: 'untrusted-default' } },
+            ],
+          },
+        },
+      }),
+    } as unknown as PterodactylAdapter;
+    const input = {
+      mappingId: f.mappingId,
+      runtime: { release: '1.21.1', profile: 'vanilla' },
+      binding: {
+        profile: 'vanilla',
+        release: '1.21.1',
+        image: 'fixture/image:1',
+        imageJavaMajor: 21,
+        declaredEggVariables: ['VERSION'],
+        bindings: { release: 'VERSION' },
+        fixedVariables: {},
+        installationKind: 'server-jar',
+        artifactPaths: { server: 'server.jar' },
+        supportedProperties: [],
+      },
+    };
+    await expect(
+      registerMinecraftCombination(f.db, adapter, f.owner, input, env, { metadata, protocols }),
+    ).rejects.toThrow('configuration_invalid');
+    input.binding.declaredEggVariables.push('FLAGS');
+    await expect(
+      registerMinecraftCombination(f.db, adapter, f.owner, input, env, { metadata, protocols }),
+    ).rejects.toThrow('configuration_invalid');
+    input.binding.fixedVariables = { FLAGS: '' };
+    await expect(
+      registerMinecraftCombination(f.db, adapter, f.owner, input, env, { metadata, protocols }),
+    ).resolves.toEqual({ id: expect.any(String) });
+  });
   it('an Owner checkbox cannot manufacture compatibility', async () => {
     await setMinecraftAvailability(f.db, f.owner, choiceId, { enabled: true }, env);
     expect((await inspectMinecraftCombination(f.db, choiceId, env)).support).toBe('unverified');

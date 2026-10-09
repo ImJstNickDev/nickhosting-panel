@@ -53,7 +53,10 @@ import {
 import type { Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
-import { requireMinecraftRuntimeImageEvidence } from './minecraft-runtime-evidence.js';
+import {
+  assertMinecraftRemoteLaunch,
+  requireMinecraftRuntimeImageEvidence,
+} from './minecraft-runtime-evidence.js';
 import { createMinecraftSourceStore, reserveMinecraftStaging } from './minecraft-sources.js';
 import { reserveUploadIngestion } from './upload-admission.js';
 
@@ -355,7 +358,8 @@ function worldDataVersion(choice: Awaited<ReturnType<typeof inspectMinecraftComb
 }
 
 /** Every ancestor is checked; Wings accepts paths but does not make symlink ownership ours. */
-async function remoteEntry(context: GameLifecycleContext, path: string) {
+type MinecraftReadContext = Pick<GameLifecycleContext, 'db' | 'server' | 'adapter' | 'authorize'>;
+async function remoteEntry(context: MinecraftReadContext, path: string) {
   safeArchivePath(path);
   const parts = path.split('/');
   let directory = '';
@@ -376,7 +380,7 @@ async function remoteEntry(context: GameLifecycleContext, path: string) {
   return undefined;
 }
 export async function hashMinecraftRemoteFile(
-  context: GameLifecycleContext,
+  context: MinecraftReadContext,
   path: string,
   options: { maxBytes?: number; onChunk?: (chunk: Uint8Array) => void } = {},
 ): Promise<{ sha256: string; sha1: string; size: number } | null> {
@@ -585,8 +589,8 @@ async function verifyMinecraftInitialConfiguration(context: GameLifecycleContext
     .execute();
 }
 async function verifyInstalledRuntime(
-  context: GameLifecycleContext,
-  options: MinecraftContentOptions,
+  context: MinecraftReadContext,
+  options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
 ) {
   const env = options.env ?? {};
   const profile = await context.db
@@ -598,6 +602,7 @@ async function verifyInstalledRuntime(
   const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
   const runtime = choice.row.resolved_runtime as ResolvedMinecraftRuntime;
   const remote = await context.adapter.getApplicationServer(context.server.pterodactyl_id ?? 0);
+  await assertMinecraftRemoteLaunch(context.db, context.server.id, remote, env, context.adapter);
   if (
     remote.egg !== choice.mapping.egg_id ||
     remote.container.image !== binding.image ||
@@ -617,7 +622,9 @@ async function verifyInstalledRuntime(
     const path = binding.artifactPaths.server;
     if (!artifact || !path || (!artifact.sha1 && !artifact.sha256))
       throw new DomainError('configuration_invalid');
-    const actual = await hashMinecraftRemoteFile(context, path);
+    const actual = await hashMinecraftRemoteFile(context, path, {
+      maxBytes: artifact.size ?? 512 * 1024 ** 2,
+    });
     if (
       !actual ||
       (artifact.sha1 && artifact.sha1 !== actual.sha1) ||
@@ -631,6 +638,8 @@ async function verifyInstalledRuntime(
     // the trusted runner's signed exact-combination manifest can establish them.
     const report = imageEvidence.report;
     if (!report?.server?.installedFiles?.length) throw new DomainError('integration_unavailable');
+    if (report.server.installedFiles.reduce((total, file) => total + file.size, 0) > 2 * 1024 ** 3)
+      throw new DomainError('configuration_invalid');
     for (const file of report.server.installedFiles) {
       const generatedLauncher = file.role === 'fabric-launcher';
       if (
@@ -658,7 +667,7 @@ async function verifyInstalledRuntime(
                 offset += chunk.byteLength;
               },
             }
-          : {},
+          : { maxBytes: file.size },
       );
       if (!actual) throw new DomainError('conflict');
       if (bytes) {
@@ -693,7 +702,9 @@ async function verifyInstalledRuntime(
           (entry) => entry.path === serverPath && entry.role === undefined,
         );
         const artifact = runtime.artifacts.find((entry) => entry.role === 'server');
-        const server = await hashMinecraftRemoteFile(context, serverPath);
+        const server = await hashMinecraftRemoteFile(context, serverPath, {
+          maxBytes: declared?.size ?? 512 * 1024 ** 2,
+        });
         if (
           !declared ||
           !artifact ||
@@ -715,6 +726,15 @@ async function verifyInstalledRuntime(
     }
   }
   return { profile, choice, verified, imageEvidence };
+}
+/** Read-only launch attestation. Re-run before power and for a new process epoch:
+ * SFTP/provider writes do not pass through browser mutation authorization. */
+export async function assertMinecraftLaunchInputs(
+  context: MinecraftReadContext,
+  options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
+): Promise<void> {
+  const verified = await verifyInstalledRuntime(context, options);
+  if (!verified.profile.installed) throw new DomainError('integration_unavailable');
 }
 export async function resolveMinecraftConfigurationPlayers(
   configuration: z.infer<typeof minecraftConfigurationSchema>,

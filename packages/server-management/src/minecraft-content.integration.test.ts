@@ -221,6 +221,8 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     semantic?: boolean;
   }) {
     const profile = launcher ? 'fabric' : 'vanilla';
+    const image = 'fixture-java:21';
+    const startup = `java -jar ${launcher ? (launcher.boundPath ?? 'fabric-server-launch.jar') : 'server.jar'} nogui`;
     const f = await managementFixture(database.db);
     const serverId = await f.server();
     const server = await f.db
@@ -241,7 +243,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       .execute();
     await f.db
       .updateTable('runtime_egg_mappings')
-      .set({ game_id: 'minecraft-java', runtime_id: profile })
+      .set({ game_id: 'minecraft-java', runtime_id: profile, docker_image: image, startup })
       .where('id', '=', f.mappingId)
       .execute();
     const mapping = await f.db
@@ -261,15 +263,14 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       runtimeDigest: 'a'.repeat(64),
       protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
     };
-    const image = 'fixture-java:21';
     const imageDigest = `sha256:${'f'.repeat(64)}`;
     const binding = {
       profile,
       release: '1.21.1',
       image,
       imageJavaMajor: 21,
-      declaredEggVariables: [],
-      bindings: {},
+      declaredEggVariables: ['VERSION'],
+      bindings: { release: 'VERSION' },
       fixedVariables: {},
       installationKind: launcher ? 'fabric-installer' : 'server-jar',
       artifactPaths: {
@@ -359,7 +360,19 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     ]);
     if (launcher) files.set('fabric-server-launch.jar', launcher.installed);
     const adapter = {
-      getApplicationServer: async () => ({ egg: mapping.egg_id, container: { image } }),
+      getEgg: async () => ({
+        id: mapping.egg_id,
+        nest: mapping.nest_id,
+        relationships: {
+          variables: { object: 'list', data: [{ attributes: { env_variable: 'VERSION' } }] },
+        },
+      }),
+      getApplicationServer: async () => ({
+        egg: mapping.egg_id,
+        uuid: server.pterodactyl_uuid,
+        limits: server.limits,
+        container: { image, startup_command: startup, environment: { VERSION: '1.21.1' } },
+      }),
       listFiles: async (_id: string, root = '') =>
         [
           ...new Set(
@@ -467,6 +480,10 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       ]),
     );
     f.files.set(propertiesPath, Buffer.from('serverJar=another.jar\n'));
+    await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    f.files.set(propertiesPath, Buffer.from('#generated\rserverJar=other.jar\r'));
     await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toMatchObject({
       code: 'conflict',
     });

@@ -102,11 +102,21 @@ describe('typed Pterodactyl boundary', () => {
           docker_image: 'fixture:image',
           startup: 'fixture',
           config: { stop: 'end', extends: null },
+          script: {
+            install: 'private-installation-recipe',
+            entry: 'bash',
+            container: 'fixture:1',
+            privileged: false,
+            extends: null,
+          },
           relationships: { config: { object: 'null_resource', attributes: null } },
         },
       }),
     );
     const egg = await createPterodactylAdapter({ ...config, fetcher }).getEgg(1, 2);
+    expect(egg.script?.install).toBe('private-installation-recipe');
+    expect(JSON.stringify(egg)).not.toContain('private-installation-recipe');
+    expect({ ...egg }).not.toHaveProperty('script');
     expect(egg.config?.stop).toBe('end');
     expect(egg.relationships?.config?.attributes).toBeNull();
   });
@@ -180,6 +190,8 @@ describe('typed Pterodactyl boundary', () => {
     expect(payload).not.toHaveProperty('node');
     expect(result.container.installed).toBe(0);
     expect(result.status).toBe('installing');
+    expect(result.container.environment).toEqual({ GAME_SECRET: 'do-not-expose' });
+    expect({ ...result.container }).not.toHaveProperty('environment');
     expect(JSON.stringify(result)).not.toContain('do-not-expose');
     await expect(
       createPterodactylAdapter({ ...config, fetcher }).createServer({

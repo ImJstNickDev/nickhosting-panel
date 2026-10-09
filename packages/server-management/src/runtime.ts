@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
 import {
   type AuthContext,
@@ -8,11 +9,7 @@ import {
 } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
-import {
-  minecraftRuntimeMappingSchema,
-  type ResolvedMinecraftRuntime,
-  validateMinecraftRuntimeMapping,
-} from '@nickhosting/minecraft';
+import { minecraftRuntimeMappingSchema } from '@nickhosting/minecraft';
 import {
   type ContainerObserver,
   createContainerObserver,
@@ -40,13 +37,21 @@ import {
   verifyManagedIdentity,
 } from './lifecycle.js';
 import {
+  assertMinecraftLaunchInputs,
+  assertMinecraftRuntimePathsPreserved,
   configureMinecraftProvision,
   type MinecraftContentOptions,
   processMinecraftContent,
   verifyMinecraftRestore,
 } from './minecraft-content.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
-import { requireMinecraftRuntimeImageEvidence } from './minecraft-runtime-evidence.js';
+import {
+  assertMinecraftEggEnvironment,
+  assertMinecraftRemoteLaunch,
+  assertMinecraftVerifiedLaunch,
+  minecraftProvisionEnvironment,
+  requireMinecraftRuntimeImageEvidence,
+} from './minecraft-runtime-evidence.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
@@ -56,6 +61,7 @@ export async function authorizeQueuedEffect(
   jobId: string,
   serverId: string,
   env: Environment = {},
+  adapter?: PterodactylAdapter,
 ) {
   const job = await db
     .selectFrom('operation_jobs')
@@ -226,10 +232,9 @@ export async function authorizeQueuedEffect(
       );
       const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
       const plan = provisionPlanSchema.parse(operation.plan.provision);
-      const variables = validateMinecraftRuntimeMapping(
-        choice.row.resolved_runtime as ResolvedMinecraftRuntime,
-        binding,
-      );
+      const variables = await minecraftProvisionEnvironment(db, serverId, choice);
+      if (!adapter) throw new DomainError('configuration_invalid');
+      await assertMinecraftEggEnvironment(adapter, choice, variables);
       if (
         choice.row.mapping_id !== server.mapping_id ||
         choice.row.mapping_digest !== choice.mappingDigest ||
@@ -237,9 +242,32 @@ export async function authorizeQueuedEffect(
         binding.image !== mapping.docker_image ||
         plan.dockerImage !== binding.image ||
         plan.eggId !== mapping.egg_id ||
-        Object.entries(variables).some(([name, value]) => plan.environment[name] !== value)
+        plan.startup !== mapping.startup ||
+        !isDeepStrictEqual(plan.environment, variables)
       )
         throw new DomainError('configuration_invalid');
+      {
+        const allocation = await db
+          .selectFrom('server_allocations')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .where('is_primary', '=', true)
+          .executeTakeFirstOrThrow();
+        const evidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env);
+        assertMinecraftVerifiedLaunch(
+          plan.startup,
+          {
+            ...variables,
+            SERVER_MEMORY: String(plan.limits.memory),
+            SERVER_IP: allocation.address,
+            SERVER_PORT: String(allocation.port),
+            P_SERVER_UUID: server.pterodactyl_uuid ?? 'unassigned',
+          },
+          binding.profile,
+          binding.artifactPaths.server,
+          evidence.report,
+        );
+      }
     }
   }
   return context;
@@ -374,6 +402,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
       return;
     }
     const observed = await observedImageDigest(connection, serverId);
+    const server = await connection
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await assertMinecraftRemoteLaunch(
+      connection,
+      serverId,
+      await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
+      env,
+      adapter,
+    );
     const evidence = await requireMinecraftRuntimeImageEvidence(
       connection,
       serverId,
@@ -382,6 +422,94 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
     if (requireObserved && !evidence.verified) throw new DomainError('integration_unavailable');
     return evidence;
+  }
+  const launchEpochs = new Map<string, string>();
+  async function assertLaunchFiles(serverId: string, connection: Kysely<Database>) {
+    const profile = await connection
+      .selectFrom('minecraft_server_profiles')
+      .select('server_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (!profile) return;
+    const server = await connection
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await assertMinecraftLaunchInputs(
+      {
+        db: connection,
+        server,
+        adapter,
+        authorize: async () => {
+          await verifyManagedIdentity(
+            connection,
+            server,
+            await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
+          );
+          await assertMinecraftRemoteLaunch(
+            connection,
+            serverId,
+            await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
+            env,
+            adapter,
+          );
+        },
+      },
+      { env, observedImageDigest },
+    );
+  }
+  async function assertFileMutation(
+    serverId: string,
+    paths: readonly string[],
+    connection: Kysely<Database> = db,
+  ) {
+    const profile = await connection
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (!profile) return;
+    const choice = await connection
+      .selectFrom('minecraft_combinations')
+      .select('binding')
+      .where('id', '=', profile.combination_id)
+      .executeTakeFirstOrThrow();
+    const binding = minecraftRuntimeMappingSchema.parse(choice.binding);
+    const additional = Object.values(binding.artifactPaths).filter(
+      (path): path is string => typeof path === 'string',
+    );
+    if (binding.profile === 'fabric') additional.push('fabric-server-launcher.properties');
+    if (binding.profile === 'forge') additional.push('user_jvm_args.txt');
+    assertMinecraftRuntimePathsPreserved(paths, [
+      ...(profile.installed_manifest as { path: string }[]),
+      ...additional.map((path) => ({ path })),
+    ]);
+    const server = await connection
+      .selectFrom('managed_servers')
+      .select('pterodactyl_identifier')
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    if (!server.pterodactyl_identifier) throw new DomainError('conflict');
+    // An SFTP-created alias must not turn an otherwise ordinary browser path
+    // into a write through a protected launch file or its parent directory.
+    for (const path of paths) {
+      const components = path.split('/');
+      let directory = '';
+      for (const component of components) {
+        const matches = (await adapter.listFiles(server.pterodactyl_identifier, directory)).filter(
+          (entry) => entry.name.toLowerCase() === component.toLowerCase(),
+        );
+        if (
+          matches.length > 1 ||
+          matches.some((entry) => entry.is_symlink || entry.name !== component)
+        )
+          throw new DomainError('conflict');
+        if (!matches.length) break;
+        directory = [directory, component].filter(Boolean).join('/');
+      }
+    }
+    launchEpochs.delete(serverId);
   }
   /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
   async function minecraftOptions(): Promise<MinecraftContentOptions> {
@@ -406,7 +534,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       observedImageDigest,
       curseforge: key ? new CurseForgeProvider(http, { apiKey: key }) : undefined,
       authorizeJob: (connection, jobId, serverId) =>
-        authorizeQueuedEffect(connection, jobId, serverId, env),
+        authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
     };
   }
   const lifecycle = {
@@ -469,16 +597,25 @@ export async function createManagementRuntime(options: ManagementOptions) {
       const before = await containerObserver.processStartedAt(server.pterodactyl_uuid);
       const image = await assertMinecraftRuntimeImage(serverId, connection);
       if (!image) return before;
+      if (before !== null) {
+        const proof = `${before}:${image.report.runId}`;
+        if (launchEpochs.get(serverId) !== proof) {
+          await assertLaunchFiles(serverId, connection);
+          // Store only after the second epoch read confirms the same process.
+        }
+      }
       // Image and process reads are separate pinned observations. A replacement
       // between them must not attach an old image proof to a new process epoch.
       const after = await containerObserver.processStartedAt(server.pterodactyl_uuid);
       if (before !== after) throw new DomainError('operation_uncertain');
+      if (after !== null) launchEpochs.set(serverId, `${after}:${image.report.runId}`);
+      else launchEpochs.delete(serverId);
       return after;
     },
     adapter,
     authorizeEffect: async (jobId: string, serverId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);
-      await authorizeQueuedEffect(connection, jobId, serverId, env);
+      await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);
       const operation = await connection
         .selectFrom('server_operations')
         .select(['action', 'phase'])
@@ -503,6 +640,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     ) => {
       await verifyObservationHost(serverId, connection);
       await assertMinecraftRuntimeImage(serverId, connection, false);
+      launchEpochs.delete(serverId);
+      await assertLaunchFiles(serverId, connection);
       await refreshObservations(connection);
       await reserveStart(connection, serverId, jobId, action, env);
     },
@@ -623,6 +762,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     externalOptions,
     minecraftOptions,
     assertMinecraftRuntimeImage,
+    assertFileMutation,
   };
 }
 export type ManagementRuntime = Awaited<ReturnType<typeof createManagementRuntime>>;

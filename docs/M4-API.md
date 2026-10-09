@@ -152,3 +152,25 @@ M2 multipart ingestion and M4 source/expanded staging charge the same outstandin
 disk-claim total under the shared resource lock. Until separate filesystem
 identities are proven, unresolved claims count conservatively across configured
 roots and hosts; distinct path strings do not establish separate capacity.
+
+## Runtime launch attestation and generic file management
+
+A Minecraft combination freezes the complete declared egg environment, startup
+command, image and bound artifact paths. Remote provider values are rechecked
+against that immutable configuration. An omitted default is not inferred later
+from a potentially changed egg. Image identity and release labels alone do not
+establish which launch inputs actually execute.
+
+Before each admitted start, Core rehashes the actual runtime launch inputs. The
+first playable proof for a new process/evidence epoch repeats that verification
+and confirms the process did not change during observation. Fabric generated
+launchers use exact canonical entry hashes to tolerate only ZIP timestamp
+differences; their external Java-properties target still binds the independently
+verified Mojang server. Java CR/LF/CRLF and syntactic whitespace rules apply.
+
+Browser binary uploads and write/delete/rename/mkdir operations cannot overwrite
+verified runtime files, their ancestors, bound launch paths or protected launcher
+configuration. Mods, plugins and worlds retain their separate management paths.
+Out-of-band filesystem changes are not assumed impossible: prestart/process
+verification fails closed when the attested launch inputs no longer match. This
+is separate from the unchanged SFTPGo transport-revocation exception.
