@@ -1,6 +1,7 @@
 # M5 task flows and implementation plan
 
-Status: implementation in progress, not acceptance evidence. M4 PR #20 was
+Status: implemented journeys; actual results and limitations are in
+[M5 validation](M5-VALIDATION.md). M4 PR #20 was
 squash-merged with the Owner's exact-HEAD authorization on 2026-10-09. The new
 main is `45fff047781899d0543a47f02dcb106487123ffe`; issues #10/#11 closed.
 M5 starts on `milestone/m5-webpanel`. No production deployment is authorized.
@@ -17,7 +18,8 @@ optional organization within Servers. Server navigation groups frequent work
 (Overview, Console), data (Files, Backups), connection/automation and Settings,
 with trusted game sections contributed through the SDK. Owner navigation is a
 separate context: Overview, Users, Servers, Infrastructure, Integrations,
-Operations and Settings. Support mode shows actor, subject, expiry and Exit on
+Operations, Audit and Settings. Regular platform operators receive only audit
+and read-only settings. Support mode shows actor, subject, expiry and Exit on
 every screen, never changing the subject's ordinary sessions.
 
 | Entry and task | Authority and existing contract | Required completion/result | Failure/recovery and evidence |
@@ -52,6 +54,13 @@ empty cards. Use system fonts, a compact consistent spacing scale and tabular
 numbers for resources. Desktop uses a narrow navigation rail and readable working
 area; mobile has an accessible navigation disclosure and keeps primary actions
 reachable. Tables scroll within their own labeled regions when needed.
+
+Owner clarification during M5: game choices and game/server list cards include
+recognizable game artwork, not just a text badge. The common SDK and card renderer
+own accessible presentation, aspect ratios, cropping and fallbacks; each trusted
+game integration owns its bundled art and provenance. No scattered game-name
+conditions or arbitrary remote image URLs. Artwork complements useful state and
+actions without turning these task screens into promotional pages.
 
 Reusable vocabulary: labeled fields with inline errors, focused error summaries,
 task-named buttons, compact tables/lists, state badges, native accessible dialogs,

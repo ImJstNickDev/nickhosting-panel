@@ -1,0 +1,250 @@
+# M5 WebPanel and common-platform contracts
+
+Implementation checkpoint: 2026-10-09. This supplements the [M1](M1-API.md),
+[M2](M2-API.md), [M3](M3-API.md) and [M4](M4-API.md) contracts; their existing
+routes and list shapes remain supported. See [common integration acceptance](M5-COMMON-INTEGRATION.md)
+for implementation/test traceability. The backend is authoritative: UI capability
+and availability hints never grant permission, admission or compatibility.
+
+## Requests, authority and browser transport
+
+The same-origin application uses the existing verified Better Auth session,
+mutation Origin/CSRF checks and structured errors (`code`, `messageKey`, request
+identity where supplied). JSON mutations require `application/json` and validated
+bodies. TypeScript return types are shared through erased type imports; dates
+become ISO strings on the wire. Ordinary users, project collaborators, regular
+Owners and assisted sessions retain their existing distinct authority. Sensitive
+writes refresh interactive authorization under the relevant resource lock.
+
+The client disables automatic mutation retries. An explicitly retried logical
+request retains its idempotency key; accepting a job displays its identity/state,
+not completion. The application never stores Pterodactyl tokens or support tokens
+in JavaScript-readable storage. Locale preference is not an authentication token.
+
+| Method/path | Result or behavior |
+| --- | --- |
+| `GET /v1/web/config` | Safe instance name/default locale, email/Discord configuration availability, supported passkey/TOTP flows and whether a support cookie is present. Presence is not proof of authorization. |
+| `GET /v1/web/session` | Current `context`, safe `actor` and `subject` profiles. Actor and effective subject are displayed separately in assisted mode. |
+| `POST /v1/web/support` | Existing regular-Owner step-up/reason/grant requirements; sets `nh.support` as HttpOnly, SameSite Strict, path `/`, HTTPS Secure when configured. Returns grant metadata/expiry, never its token. |
+| `POST /v1/web/support/exit` | Revokes the exact grant when the parent session authorizes it and clears the browser cookie. Expired/invalid parent authority still permits local cookie removal; this does not claim durable revocation of an unauthenticated grant. Storage failures remain errors. |
+
+Existing header clients can still send `X-NH-Support-Token`. Header/cookie disagreement
+is rejected. Regular-only identity/admin endpoints reject either assisted transport.
+Native file/backup downloads carry the same HttpOnly cookie and authorization as
+API calls, without returning privileged upstream URLs. Original user sessions are
+unchanged by assisted access or Exit.
+
+## Scoped platform queries
+
+[Platform routes](../apps/api/src/platform.ts) delegate to
+[typed queries](../packages/server-management/src/platform-queries.ts). Paginated
+collections return `{items,nextCursor}`. Common page size is 1–100 (default 30),
+with validated opaque descending timestamp/identity cursors. Search text is a
+literal substring, not a user-supplied SQL wildcard. User/audit identities may be
+text; server/project/job identities are UUIDs. Invalid cursors are domain errors.
+
+| Method/path | Filters/body and contract |
+| --- | --- |
+| `GET /v1/platform/servers` | `limit`, `cursor`, `q`, `state`, `gameId`, `ownerId`, `projectId` (UUID or `none`). Only managed, undeleted servers in current owner/project scope; regular Owner can discover all. |
+| `GET /v1/platform/servers/:id` | Existing public server fields plus `gameId`, `runtimeId`, `gameNameKey`, `capabilities`, `permissions`, `availableActions`, `sleepState`, `firstStart`. |
+| `PATCH /v1/platform/servers/:id` | Strict `{name?,projectId?}`. Manage permission for rename; resource owner or regular Owner for regrouping. Destination project belongs to the same resource owner. Runtime mapping, provider identity and allocation claims are immutable here. |
+| `GET /v1/platform/projects` | Paginated `q` search; current membership and effective management role. |
+| `GET /v1/platform/projects/:id` | Project metadata, safe owner and member profiles/roles. |
+| `PATCH /v1/platform/projects/:id` | `{name}`; project owner or regular platform Owner, under the resource lock. |
+| `DELETE /v1/platform/projects/:id` | `{confirm:true}` with project-owner or regular-Owner authority; returns detached-server count. Deletes grouping/memberships, retains servers and their owner/resource charges. |
+| `POST /v1/platform/projects/:id/collaborator` | Exact verified-email lookup, available only to the project owner or regular platform Owner; `{user: safeProfile|null}`. No ordinary global account directory. |
+| `GET /v1/platform/quotas` | Effective subject's current quota, commitments, measurements and override state. |
+| `GET /v1/platform/activity` | Paginated `state`, `action`, `serverId` filters; current server/project scope. |
+| `GET /v1/platform/jobs/:id` | Scoped operation detail, current effect/phase, up to 200 associated events, `retry`, `ownerRecovery`. |
+| `POST /v1/platform/jobs/:id/retry` | `{idempotencyKey}`; returns 202 for an authorized safe new operation intent. Never resets the historical job. |
+| `GET /v1/platform/owner/users` | Regular Owner; paginated search/role filtering of NickHosting identities. |
+| `GET /v1/platform/owner/users/:id` | Safe identity profile and quota summary; historical quota actions remain available through audit. |
+| `GET /v1/platform/owner/audit` | Regular session with `audit:read` (Owner or platform operator); cursor pagination and action/actor/subject/user filters. Preserves actor/subject attribution. |
+| `GET /v1/platform/owner/games` | Stored manifests, rollout policies and tester IDs; not a public compatibility catalog. |
+
+Project creation and membership mutation reuse `POST /v1/projects` and
+`PUT /v1/projects/:id/members` with `{userId,role}`; `role:null` revokes access.
+Revocation applies on subsequent requests and existing live-authority checks.
+
+Server `permissions` separates `read`, `operate`, `manage` and `sharing`.
+`availableActions` additionally considers installation, process state, pending
+operation/upload, provider identity and resource reservations. It is advisory:
+lifecycle handlers recheck permissions, configuration, evidence and admission.
+Readiness, process state and sleep state must not be collapsed into one badge.
+`firstStart` reports the historical durable `denied` event/message/timestamp when
+creation succeeded but initial compute admission failed. It is not a new start
+request or a declaration that a later successful start failed.
+
+Quota results separate `limits`, `committed`, `remaining`, `override`, `measured`,
+`missingMeasurements` and `observedAt`. Active reservations count RAM/CPU;
+storage includes configured server and backup allowance. Unlimited count/global
+storage allowances are `null`, not zero. Expired overrides remain visible but
+inactive. Measurements retain timestamps/staleness and units; absent samples are
+not fabricated as zero. Regular Owner quota/role/invitation writes reuse M1/M2
+routes and their audit rules.
+
+## Transfer, network, telemetry and sleep descriptors
+
+| Path suffix under `/v1/platform/servers/:id` | Contract |
+| --- | --- |
+| `/transfers` | `files`, bounded text-editor capacity, upload availability/reason/provider byte ceiling/server disk allowance, streaming download support, public SFTP endpoint/configuration/issuance hints and backup permissions. Download total-size limit is `null`; real provider/storage limits still apply. |
+| `/connections` | Connection mode, configured public hostname/SRV metadata, DNS assignment states and every allocation role/transport. Each port has public hostname/port and `unconfigured`, `disabled`, `unavailable` or `available` route status. No guessed backend-to-public mapping. |
+| `/metrics` | `limit` 1–500 (default 100), `from`, `to`, `before` ISO timestamps; `{items,nextBefore}` in descending observation order. Missing intervals remain gaps. |
+| `/sleep-policy` | `{policy,state}`; nulls when unconfigured. Complete editable enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; state reuses M3 readiness and startup estimates. |
+
+SFTP connection details require explicit `sftpPublicHostname` and `sftpPublicPort`;
+the private SFTPGo API URL is never used as a public fallback. These settings follow
+defaults → Owner database settings → environment overrides. Both service configuration
+and actual handler permission are still required. `retainedTransportRevocationLimited`
+remains true while [issue #18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18)
+is unresolved; credential deletion is not an assurance that an established SSH
+transport has closed.
+
+File, backup, console, metrics and DNS actions reuse M2 endpoints. Browser uploads
+send `Blob` through XHR with declared `X-NH-Upload-Length`, observable byte progress
+and cancellation; server admission/stream verification remains authoritative.
+Downloads use a native same-origin link, without creating a whole-file browser
+JavaScript blob. The text editor alone caps input at 60,000 characters and bounds
+its streaming read to 240,000 bytes. Binary transfers have no such editor cap.
+Console display retains at most 300 lines, each truncated to 8,192 characters;
+the API independently bounds outstanding SSE output (256 KiB/64 events with a
+five-second slow-consumer timeout). Reconnecting does not promise replay of missed
+console output. Authorization remains live; stale data is not current telemetry.
+
+## Durable schedules and explicit automation consent
+
+[Schedule routes](../apps/api/src/schedules.ts) use
+[the existing resource lock and lifecycle jobs](../packages/server-management/src/schedules.ts).
+Migrations 014 and 015 add schedule/occurrence and service-heartbeat state without
+instance seeds. Redis remains delivery infrastructure; PostgreSQL owns execution
+intent and occurrence history.
+
+| Method/path under `/v1/servers/:id` | Contract |
+| --- | --- |
+| `GET /automation-consent` | `allowed`, `expectedIntent`, Gateway configured/enabled flags and nullable `grantBlockedReason`. |
+| `PUT /automation-consent` | Strict `{allowed,expectedIntent}` with current regular manage authority. Does not implicitly start a server or deploy/enable a Gateway. |
+| `GET /schedules` | Current schedules with revision, timing, zone, action, next run and timestamps. |
+| `POST /schedules` | `{name,action,timing,timeZone,enabled}`; 201 on durable creation. |
+| `PUT /schedules/:scheduleId` | Same fields plus current `revision`; stale updates conflict. |
+| `DELETE /schedules/:scheduleId` | `{revision}`; soft deletion retains occurrence history, returns 204. |
+| `GET /schedules/:scheduleId/outcomes` | Bounded cursor-paginated occurrence history and associated job/effect outcome. |
+
+Actions are `start`, `stop`, `restart`, `backup`. Timing is either
+`{kind:'once',at: ISO}` or `{kind:'interval',firstAt: ISO,everySeconds}` (300 through
+31,536,000 seconds). `timeZone` must be an IANA zone recognized by `Intl`; execution
+uses UTC instants and elapsed intervals, not a hidden DST/cron interpretation.
+Missed interval runs collapse to the latest due occurrence; more than five minutes
+late is recorded as skipped. No capacity waiting queue or retrospective burst.
+
+Occurrence claim, admission, operation and outbox are one PostgreSQL transaction.
+Duplicate workers cannot dispatch the same occurrence twice. Before each **new**
+provider effect, the lifecycle authorizer rechecks creator identity/verification,
+current manage permission, schedule revision/enabled/deleted state, occurrence/job
+identity, regular actor=subject authority and manual-stop/Gateway generation.
+Unknown prepared effects continue conservative reconciliation, not blind replay.
+
+Manual stop/maintenance suppress automatic starts. Granting automatic-start
+consent is explicit, compares the current intent and is blocked until unfinished
+operations, uploads, installation and uncertain reservations settle. Revocation
+is immediate and rotates existing Gateway generation/readiness without cancelling
+history or releasing resources prematurely. Scheduled stop also revokes future
+start consent even when an operation conflict prevents that stop dispatch. An
+Owner must deliberately permit automatic starts again; a schedule cannot grant
+itself consent.
+
+## Retry, recovery and reconciliation
+
+`retry.allowed` is true only for authorized failed start/stop/restart/backup jobs
+whose durable evidence proves no provider effect was started (`effect_state=none`,
+no effect timestamp, not Owner-resolved). Retrying creates a new operation through
+existing admission/idempotency. It never resubmits unknown external side effects.
+
+`ownerRecovery` is null except for an eligible regular Owner inspecting the active,
+queued/running, prepared/uncertain non-power operation. Otherwise it contains
+`{available,availableAt}` after the existing minimum 120-second effect age. This is
+an eligibility/timing hint, not proof that resolving is safe. The existing
+`POST /v1/owner/servers/:id/resolve` still requires `{jobId,confirm:true,reason}`,
+current Owner authority under the lock, corroborated managed provider identity
+and installed/offline state. It records `owner_resolved_failed`, preserves the
+unknown outcome and audit, and never claims rollback, success or permission to
+replay. Power/initial-start uncertainty does not use this manual path.
+
+`POST /v1/owner/reconcile` returns actual checked/failed subsets. Partial provider
+failure must not be rendered as “all checked.” Upload recovery remains a separate
+existing Owner operation with its own remote-write settlement proof; it is not a
+shortcut around active upload claims.
+
+## Owner health, configuration and trusted integrations
+
+`GET /v1/owner/health` is regular-Owner-only, even for a cached result. Read-only
+provider probes coalesce for five seconds and retain one in-flight probe when slow.
+The response is `no-store` and includes `checkedAt`, API/database, Redis, worker,
+Gateway, provider read scopes, physical-host observations, operation counts and
+SFTP/DNS configuration indicators. Status values distinguish `healthy`, `degraded`,
+`unavailable`, `stale`, `unknown`, `unconfigured`, `disabled`.
+
+Worker health is fresh polling progress scoped to the job prefix (30-second
+freshness); it is not inferred merely from Redis availability. Authenticated
+Gateway contact proves control-plane contact only. `listenerReadiness` remains
+unknown here; route leases, topology/reachability and actual game readiness use M3
+proofs. Host health checks observer identity, timestamp and snapshot validity.
+Provider write scopes, SFTP connectivity and DNS writes are explicitly unverified
+by this read-only health request. No restart/deployment action is performed.
+
+Owner-only `GET /v1/owner/servers/:id/allocations` returns stored managed allocation
+claims, including provider and effective backend addresses. `GET /v1/owner/provider-users`
+returns safe provider identifiers for mapping, not the NickHosting account directory.
+
+Regular platform operators retain `audit:read` and `settings:read`. Their
+Administration navigation exposes only `/owner/audit` and `/owner/settings`;
+settings show values, sources and secret configuration presence without mutation
+controls. Owner health/users/infrastructure and writes remain forbidden. Changes
+to the role take effect through the existing current-session authorization.
+
+Existing `/v1/owner/settings` reads expose resolved values, source provenance,
+environment locks and secret configuration status. New `GET /v1/owner/settings/schema`
+uses the same typed configuration schema as backend validation.
+`DELETE /v1/owner/settings/:key` removes a permitted database override; it does not edit the
+environment. PATCH retains validation/audit. `PUT /v1/owner/secrets/:name` is
+write-only and respects environment precedence; raw secrets never enter read DTOs.
+
+`GET /v1/owner/game-modules` returns compiled trusted `{id,manifest}` modules.
+Existing `PUT /v1/owner/games` persists manifests/rollout/tester policy; public
+`GET /v1/games` dispatches filtering through the trusted backend registry.
+Database JSON cannot import executable code. Dispatch requires managed identity
+and matching runtime/profile integrity. M4 Minecraft hooks still enforce signed
+runtime, image, launch, protected files, process epoch and compatibility evidence.
+Existing Minecraft registration/runtime aliases remain compatible.
+
+## Trusted browser SDK and Minecraft management
+
+[`@nickhosting/game-sdk/ui`](../packages/game-sdk/src/ui.ts) is browser-safe;
+server SDK imports/secrets are not bundled. Static first-party modules provide
+validated descriptors, EN/IT catalogs, bundled artwork and named executable
+handlers. Registry validation rejects missing/duplicate handlers, invalid field
+bounds/dependencies and missing translation keys. API/Owner JSON cannot register
+code or arbitrary asset URLs.
+
+The shared shell owns identity, resources, projects, lifecycle, Activity, services,
+network and automation. Generic wizard/section renderers consume typed field
+constraints, conditional visibility, asynchronous choices, commands and capability
+requirements. Every availability decision combines actual permissions, verified
+runtime, rollout/provider configuration and current state; declarations alone do
+not authorize an action. Isolated multiport/conditional-form fixtures prove the
+extension mechanism without offering Satisfactory or unsupported runtimes.
+
+`GET /v1/servers/:id/minecraft` retains its M4 fields and adds
+`effectiveProperties`, parsed from the actual provider `server.properties` with a
+1 MiB read bound under current managed-server access. Only safe editable keys are
+returned. `supportedProperties` is also intersected with those keys and comes from
+signed server evidence. The form initializes from effective file values, not the
+old provisioning configuration; writes still use existing durable verification.
+Unavailable/malformed provider files produce real errors, not invented defaults.
+
+Vanilla remains the only M4 real-server-verified runtime. Minecraft UI exposes
+eligible choices and safe world/player/content operations; it does not present
+ordinary mod/plugin installation on Vanilla. Owner evidence administration is
+separate from normal creation. The browser fixture's signed synthetic reports,
+server artifacts and provider adapters exercise integration only and cannot
+certify another runtime, protocol or egg. Egg installation remains Pterodactyl/
+Wings responsibility.

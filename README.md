@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M3 merged with explicit Owner authorization; M4 Minecraft acceptance passed and PR #20 awaits Owner/ChatGPT review. See [M4 validation](docs/M4-VALIDATION.md). No production deployment is authorized.
+**Status:** M4 merged with explicit Owner authorization; M5 WebPanel is on [PR #21](https://github.com/ImJstNickDev/nickhosting-panel/pull/21) for Owner/ChatGPT review. See [M5 validation](docs/M5-VALIDATION.md) and the preserved [M4 evidence](docs/M4-VALIDATION.md). No production deployment is authorized.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
@@ -68,6 +68,22 @@ Its [API contracts](docs/M4-API.md), [Owner-only protocol evidence](docs/M4-PROT
 separate implementation, fixtures and real-server verification. The graphical app
 belongs to M5; a listed upstream version is not by itself a compatibility claim.
 
-## Approved next milestones
+## Approved roadmap
 
-The Owner-approved 2026-10-09 [ADR 0008 amendment](docs/decisions/0008-complete-frontend.md) moves the complete WebPanel and common API integration to **M5**, followed by **M6 Satisfactory and game integration expansion**. [M5 common integration acceptance](docs/M5-COMMON-INTEGRATION.md) records actual backend gaps. Future branches are `milestone/m5-webpanel` and `milestone/m6-game-integrations`; neither is started by this M4 closing pass. Exactly M0–M6 remain. The [SFTPGo production-release gate #18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18) remains open independently of milestone implementation.
+The Owner-approved 2026-10-09 [ADR 0008 amendment](docs/decisions/0008-complete-frontend.md) moves the complete WebPanel and common API integration to **M5**, followed by **M6 Satisfactory and game integration expansion**. [M5 common integration acceptance](docs/M5-COMMON-INTEGRATION.md) preserves the original gap audit and current implementation traceability. M5 uses `milestone/m5-webpanel`; the future `milestone/m6-game-integrations` branch requires separate authorization. Exactly M0–M6 remain. The [SFTPGo production-release gate #18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18) remains open independently of milestone implementation.
+
+### M5 WebPanel development
+
+The React application is in `apps/web`. Use `scripts/dev.sh pnpm dev:web` for
+loopback development, `scripts/dev.sh pnpm build` for static assets, and
+`scripts/dev.sh pnpm test:browser` for isolated real-handler browser journeys.
+See [WebPanel contracts](docs/M5-API-CONTRACTS.md),
+[common acceptance traceability](docs/M5-COMMON-INTEGRATION.md) and
+[deployment prerequisites](docs/CONFIGURATION-AND-DEPLOYMENT.md).
+The WebPanel does not authorize production deployment; SFTPGo issue #18 remains
+a production-release gate. M5 does not certify additional Minecraft runtimes or
+implement Satisfactory.
+
+[Reviewed browser screenshots](docs/M5-SCREENSHOTS.md) cover the actual application;
+[validation](docs/M5-VALIDATION.md) distinguishes real handlers, external fixtures,
+full-suite results and targeted review corrections.

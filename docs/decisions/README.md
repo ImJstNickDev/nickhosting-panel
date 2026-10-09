@@ -23,3 +23,5 @@ retaining the original decision and consequences, as in ADR 0008. Read its curre
 status and amendment before applying historical milestone numbers.
 
 - [0013 — Minecraft evidence and recoverable content](0013-minecraft-evidence-and-content.md)
+
+- [0014 — WebPanel and common platform contracts](0014-webpanel-and-common-contracts.md)
