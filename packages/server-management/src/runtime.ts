@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
 import {
   type AuthContext,
   assertAuthContext,
@@ -7,10 +9,16 @@ import {
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
+  minecraftRuntimeMappingSchema,
+  type ResolvedMinecraftRuntime,
+  validateMinecraftRuntimeMapping,
+} from '@nickhosting/minecraft';
+import {
   type ContainerObserver,
   createContainerObserver,
   createPterodactylAdapter,
   type PterodactylAdapter,
+  provisionPlanSchema,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import {
@@ -31,6 +39,14 @@ import {
   reconcileManagedServer,
   verifyManagedIdentity,
 } from './lifecycle.js';
+import {
+  configureMinecraftProvision,
+  type MinecraftContentOptions,
+  processMinecraftContent,
+  verifyMinecraftRestore,
+} from './minecraft-content.js';
+import { requireMinecraftChoice } from './minecraft-registry.js';
+import { requireMinecraftRuntimeImageEvidence } from './minecraft-runtime-evidence.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
@@ -112,6 +128,15 @@ export async function authorizeQueuedEffect(
       : 'server:manage',
   );
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
+  if (['start', 'restart'].includes(operation.action)) {
+    const minecraft = await db
+      .selectFrom('minecraft_server_profiles')
+      .select('installed')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (minecraft && !minecraft.installed) throw new DomainError('conflict');
+  }
+
   if (operation.plan.gatewayAutomation !== undefined) {
     const marker = operation.plan.gatewayAutomation;
     if (
@@ -157,6 +182,12 @@ export async function authorizeQueuedEffect(
       .where('id', '=', mapping.node_id)
       .executeTakeFirst();
     if (!mapping.enabled || !node?.enabled) throw new DomainError('forbidden');
+    const owner = await db
+      .selectFrom('user')
+      .select(['id', 'role'])
+      .where('id', '=', server.owner_id)
+      .executeTakeFirst();
+    if (!owner) throw new DomainError('forbidden');
     const rollout = await db
       .selectFrom('game_rollouts')
       .selectAll()
@@ -165,10 +196,51 @@ export async function authorizeQueuedEffect(
     if (
       !evaluateGameAccess(
         { gameId: mapping.game_id, state: rollout.state, allowedUserIds: rollout.allowlist },
-        { userId: context.subjectUserId, role: context.role },
+        mapping.game_id === 'minecraft-java'
+          ? { userId: owner.id, role: owner.role }
+          : { userId: context.subjectUserId, role: context.role },
       ).canCreate
     )
       throw new DomainError('forbidden');
+    const profile = await db
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', server.id)
+      .executeTakeFirst();
+    if (mapping.game_id === 'minecraft-java' || profile) {
+      if (!profile || mapping.game_id !== 'minecraft-java')
+        throw new DomainError('configuration_invalid');
+      // The queued actor remains separately authorized above. Compatibility and
+      // tester eligibility belong to the resource owner, never an elevated helper.
+      const choice = await requireMinecraftChoice(
+        db,
+        {
+          actorUserId: owner.id,
+          subjectUserId: owner.id,
+          role: owner.role,
+          sessionType: 'regular',
+          ownerElevation: false,
+        },
+        profile.combination_id,
+        env,
+      );
+      const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
+      const plan = provisionPlanSchema.parse(operation.plan.provision);
+      const variables = validateMinecraftRuntimeMapping(
+        choice.row.resolved_runtime as ResolvedMinecraftRuntime,
+        binding,
+      );
+      if (
+        choice.row.mapping_id !== server.mapping_id ||
+        choice.row.mapping_digest !== choice.mappingDigest ||
+        choice.combination.profile !== mapping.runtime_id ||
+        binding.image !== mapping.docker_image ||
+        plan.dockerImage !== binding.image ||
+        plan.eggId !== mapping.egg_id ||
+        Object.entries(variables).some(([name, value]) => plan.environment[name] !== value)
+      )
+        throw new DomainError('configuration_invalid');
+    }
   }
   return context;
 }
@@ -261,8 +333,102 @@ export async function createManagementRuntime(options: ManagementOptions) {
       throw new DomainError('configuration_invalid');
     await containerObserver.preflight();
   }
+  async function observedImageDigest(connection: Kysely<Database>, serverId: string) {
+    await verifyObservationHost(serverId, connection);
+    const server = await connection
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    if (!server?.pterodactyl_uuid || !server.pterodactyl_id || !containerObserver?.imageIdentity)
+      throw new DomainError('configuration_invalid');
+    await verifyManagedIdentity(
+      connection,
+      server,
+      await adapter.getApplicationServer(server.pterodactyl_id),
+    );
+    const digest = await containerObserver.imageIdentity(server.pterodactyl_uuid);
+    if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest))
+      throw new DomainError('integration_unavailable');
+    return digest;
+  }
+  async function assertMinecraftRuntimeImage(
+    serverId: string,
+    connection: Kysely<Database> = db,
+    requireObserved = true,
+  ) {
+    const profile = await connection
+      .selectFrom('minecraft_server_profiles')
+      .select('server_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (!profile) {
+      const mapping = await connection
+        .selectFrom('managed_servers as server')
+        .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+        .select('mapping.game_id')
+        .where('server.id', '=', serverId)
+        .executeTakeFirst();
+      if (mapping?.game_id === 'minecraft-java') throw new DomainError('integration_unavailable');
+      return;
+    }
+    const observed = await observedImageDigest(connection, serverId);
+    const evidence = await requireMinecraftRuntimeImageEvidence(
+      connection,
+      serverId,
+      observed,
+      env,
+    );
+    if (requireObserved && !evidence.verified) throw new DomainError('integration_unavailable');
+    return evidence;
+  }
+  /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
+  async function minecraftOptions(): Promise<MinecraftContentOptions> {
+    const { values: minecraft } = await getSettings(db, env);
+    if (!minecraft.minecraftMetadataUserAgent) throw new DomainError('configuration_invalid');
+    const http = new SafeContentHttp({
+      userAgent: minecraft.minecraftMetadataUserAgent,
+      allowedOrigins: [
+        'https://api.modrinth.com',
+        'https://api.curseforge.com',
+        ...minecraft.minecraftDownloadOrigins,
+      ],
+    });
+    const key = await getSecret(db, options.codec, 'curseforgeApiKey', env);
+    const mountdataRoot = resolve(minecraft.minecraftContentRoot);
+    return {
+      http,
+      mountdataRoot,
+      sourceRoot: resolve(minecraft.minecraftSourceRoot),
+      userAgent: minecraft.minecraftMetadataUserAgent,
+      env,
+      observedImageDigest,
+      curseforge: key ? new CurseForgeProvider(http, { apiKey: key }) : undefined,
+      authorizeJob: (connection, jobId, serverId) =>
+        authorizeQueuedEffect(connection, jobId, serverId, env),
+    };
+  }
   const lifecycle = {
     env,
+    configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      const profile = await context.db
+        .selectFrom('minecraft_server_profiles')
+        .select('server_id')
+        .where('server_id', '=', context.server.id)
+        .executeTakeFirst();
+      return profile ? configureMinecraftProvision(context, await minecraftOptions()) : true;
+    },
+    processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      processMinecraftContent(context, await minecraftOptions()),
+    verifyGameRestore: async (context: import('./lifecycle.js').GameLifecycleContext) => {
+      const profile = await context.db
+        .selectFrom('minecraft_server_profiles')
+        .select('server_id')
+        .where('server_id', '=', context.server.id)
+        .executeTakeFirst();
+      return profile ? verifyMinecraftRestore(context, await minecraftOptions()) : true;
+    },
     verifyObservationHost,
     confirmAlreadyStopped: async (serverId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);
@@ -300,12 +466,29 @@ export async function createManagementRuntime(options: ManagementOptions) {
         server,
         await adapter.getApplicationServer(server.pterodactyl_id),
       );
-      return containerObserver.processStartedAt(server.pterodactyl_uuid);
+      const before = await containerObserver.processStartedAt(server.pterodactyl_uuid);
+      const image = await assertMinecraftRuntimeImage(serverId, connection);
+      if (!image) return before;
+      // Image and process reads are separate pinned observations. A replacement
+      // between them must not attach an old image proof to a new process epoch.
+      const after = await containerObserver.processStartedAt(server.pterodactyl_uuid);
+      if (before !== after) throw new DomainError('operation_uncertain');
+      return after;
     },
     adapter,
     authorizeEffect: async (jobId: string, serverId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);
       await authorizeQueuedEffect(connection, jobId, serverId, env);
+      const operation = await connection
+        .selectFrom('server_operations')
+        .select(['action', 'phase'])
+        .where('job_id', '=', jobId)
+        .executeTakeFirstOrThrow();
+      if (
+        ['start', 'restart'].includes(operation.action) ||
+        (operation.action === 'provision' && operation.phase === 'initial_start')
+      )
+        await assertMinecraftRuntimeImage(serverId, connection, false);
     },
     reserveInstallation: async (serverId: string, jobId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);
@@ -319,6 +502,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       connection: Kysely<Database>,
     ) => {
       await verifyObservationHost(serverId, connection);
+      await assertMinecraftRuntimeImage(serverId, connection, false);
       await refreshObservations(connection);
       await reserveStart(connection, serverId, jobId, action, env);
     },
@@ -437,6 +621,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     authorizeTransfer,
     lifecycle,
     externalOptions,
+    minecraftOptions,
+    assertMinecraftRuntimeImage,
   };
 }
 export type ManagementRuntime = Awaited<ReturnType<typeof createManagementRuntime>>;

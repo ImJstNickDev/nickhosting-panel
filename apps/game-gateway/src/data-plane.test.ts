@@ -13,6 +13,12 @@ import type {
   GatewaySnapshot,
 } from '@nickhosting/game-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createMinecraftProtocolAdapter,
+  encodeMinecraftVarInt,
+  frameMinecraftPacket,
+  readMinecraftFrame,
+} from '../../../games/minecraft/src/protocol.js';
 import { createGatewayDataPlane, type GatewayDataPlanePolicy } from './data-plane.js';
 
 const policy: GatewayDataPlanePolicy = {
@@ -185,6 +191,195 @@ async function refuses(port: number) {
 }
 
 describe('persistent Gateway fixture forwarding', () => {
+  it('runs actual Minecraft status/ping dialogue without wakes and distinguishes compatible joins', async () => {
+    const backend = await tcpFixture();
+    const minecraft = createMinecraftProtocolAdapter({
+      versions: [
+        { release: '1.20.4', protocolId: 765, family: 'netty', transfer: false },
+        { release: '1.20.5', protocolId: 766, family: 'netty', transfer: true },
+      ],
+      supportedReleases: ['1.20.5'],
+    });
+    const gameRoute = route(backend.port, 'tcp', 'sleeping');
+    gameRoute.protocol = {
+      handlerId: 'minecraft-java',
+      gameVersion: '1.20.5',
+      role: 'game',
+      minecraft: {
+        release: '1.20.5',
+        protocolId: 766,
+        family: 'netty',
+        transfer: true,
+        acceptsTransfers: false,
+        choiceId: randomUUID(),
+        choiceDigest: 'a'.repeat(64),
+        evidenceRunId: randomUUID(),
+        evidenceExpiresAt: new Date(Date.now() + 60000).toISOString(),
+      },
+    };
+    const f = plane([gameRoute], { protocols: [minecraft] });
+    await f.gateway.start();
+    const handshake = (intent: number, version = 766) =>
+      frameMinecraftPacket(
+        0,
+        Buffer.concat([
+          encodeMinecraftVarInt(version),
+          Buffer.from([9]),
+          Buffer.from('localhost'),
+          Buffer.from([0x63, 0xdd, intent]),
+        ]),
+      );
+    const probes = await Promise.all(
+      Array.from({ length: 16 }, async (_, index) => {
+        const nonce = Buffer.alloc(8, index);
+        const response = await exchange(
+          backend.port,
+          Buffer.concat([handshake(1), frameMinecraftPacket(0), frameMinecraftPacket(1, nonce)]),
+          true,
+        );
+        const status = readMinecraftFrame(response, 1024);
+        expect(status?.body[0]).toBe(0);
+        expect(status?.body.toString()).toContain('sleeping');
+        expect(response.subarray(status?.bytes)).toEqual(frameMinecraftPacket(1, nonce));
+      }),
+    );
+    expect(probes).toHaveLength(16);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    expect((await exchange(backend.port, handshake(2, 765))).toString()).toContain(
+      'version selected',
+    );
+    expect((await exchange(backend.port, handshake(3))).toString()).toContain('directly');
+    expect(await exchange(backend.port, handshake(2, 999999))).toHaveLength(0);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    const joins = await Promise.all(
+      Array.from({ length: 16 }, () => exchange(backend.port, handshake(2))),
+    );
+    expect(joins.every((bytes) => bytes.toString().includes('starting'))).toBe(true);
+    expect(f.control.requestWake).toHaveBeenCalledTimes(1);
+    const stopped = { ...gameRoute, revision: 2, mode: 'manually_stopped' as const };
+    await f.gateway.applySnapshot(f.snapshot([stopped], 2));
+    expect((await exchange(backend.port, handshake(2))).toString()).toContain(
+      'Start it from the panel',
+    );
+    expect(f.control.requestWake).toHaveBeenCalledTimes(1);
+  });
+  it('isolates stateful offline conversations, retaining status sockets for ping without waking', async () => {
+    const backend = await tcpFixture();
+    const signals: AbortSignal[] = [];
+    const protocol = fixtureProtocol({
+      classify: () => {
+        throw new Error('stateless fallback used');
+      },
+      createSession(context) {
+        signals.push(context.signal);
+        let first = true;
+        let echo = '';
+        return {
+          classify(input) {
+            const text = Buffer.from(input).toString();
+            const newline = text.indexOf('\n');
+            if (newline < 0) return { kind: 'need-more', consumedBytes: 0 };
+            const line = text.slice(0, newline);
+            echo = line;
+            const kind =
+              first && line === 'STATUS'
+                ? 'status'
+                : !first && line.startsWith('PING:')
+                  ? 'status'
+                  : 'unsupported';
+            first = false;
+            return { kind, consumedBytes: newline + 1 };
+          },
+          response(mode) {
+            return {
+              bytes: Buffer.from(`${echo === 'STATUS' ? mode : echo}\n`),
+              close: echo !== 'STATUS',
+            };
+          },
+        };
+      },
+    });
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], { protocols: [protocol] });
+    await f.gateway.start();
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        exchange(backend.port, `STATUS\nPING:${index}\n`, true),
+      ),
+    );
+    expect(responses.map((value) => value.toString())).toEqual(
+      Array.from({ length: 12 }, (_, index) => `sleeping\nPING:${index}\n`),
+    );
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    expect(signals).toHaveLength(12);
+    await delay(10);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+  it('bounds the entire stateful conversation and refuses invalid consumption instead of looping', async () => {
+    const backend = await tcpFixture();
+    const protocol = fixtureProtocol({
+      createSession() {
+        return {
+          classify: (bytes) => ({ kind: 'status', consumedBytes: bytes.length }),
+          response: () => ({ bytes: Buffer.from('reply'), close: false }),
+        };
+      },
+    });
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      protocols: [protocol],
+      policy: { maxProtocolResponseBytes: 4 },
+    });
+    await f.gateway.start();
+    expect(await exchange(backend.port, 'STATUS')).toHaveLength(0);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    await f.gateway.stop();
+    for (const consumedBytes of [0, -1, 1000, Number.NaN]) {
+      const invalid = plane([route(backend.port, 'tcp', 'sleeping')], {
+        protocols: [
+          fixtureProtocol({
+            createSession: () => ({
+              classify: () => ({ kind: 'continue', consumedBytes }),
+              response: () => ({ close: false }),
+            }),
+          }),
+        ],
+      });
+      await invalid.gateway.start();
+      expect(await exchange(backend.port, 'request')).toHaveLength(0);
+      await invalid.gateway.stop();
+    }
+  });
+  it('deduplicates stateful joins and rejects explicit incompatible intents without waking', async () => {
+    const backend = await tcpFixture();
+    const protocol = fixtureProtocol({
+      createSession: () => ({
+        classify: (bytes) => ({
+          kind: Buffer.from(bytes).toString() === 'JOIN' ? 'join' : 'reject',
+          consumedBytes: bytes.length,
+        }),
+        response: (mode) => ({ bytes: Buffer.from(mode), close: true }),
+      }),
+    });
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], { protocols: [protocol] });
+    await f.gateway.start();
+    expect((await exchange(backend.port, 'MISMATCH')).toString()).toBe('sleeping');
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => exchange(backend.port, 'JOIN')),
+    );
+    expect(results.every((bytes) => bytes.toString() === 'waking')).toBe(true);
+    expect(f.control.requestWake).toHaveBeenCalledTimes(1);
+  });
+  it('preserves online opaque forwarding even when a stateful game parser would reject it', async () => {
+    const backend = await tcpFixture();
+    const createSession = vi.fn(() => {
+      throw new Error('must not parse ready traffic');
+    });
+    const f = plane([route(backend.port)], { protocols: [fixtureProtocol({ createSession })] });
+    await f.gateway.start();
+    const encrypted = Buffer.alloc(65536, 0xff);
+    expect(await exchange(backend.port, encrypted)).toEqual(encrypted);
+    expect(createSession).not.toHaveBeenCalled();
+  });
   it('streams binary TCP with half-close and concurrent clients on the same numeric port at distinct addresses', async () => {
     const backend = await tcpFixture();
     const f = plane([route(backend.port)]);

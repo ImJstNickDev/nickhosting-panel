@@ -1,0 +1,774 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { installedContentChange } from '@nickhosting/content-providers';
+import { createTestDatabase } from '@nickhosting/database/testing';
+import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ZipFile } from 'yazl';
+import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
+import type { GameLifecycleContext } from './lifecycle.js';
+import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
+import {
+  configureMinecraftProvision,
+  type MinecraftContentOptions,
+  processMinecraftContent,
+  verifyMinecraftPendingContent,
+  verifyMinecraftRestore,
+} from './minecraft-content.js';
+import { minecraftMappingDigest, signMinecraftEvidence } from './minecraft-registry.js';
+import { enqueueServerOperation } from './registry.js';
+import { managementFixture } from './test-fixtures.js';
+import { reserveUploadIngestion } from './upload-admission.js';
+
+describe('Minecraft durable lifecycle and ingestion boundaries', () => {
+  let database: Awaited<ReturnType<typeof createTestDatabase>>;
+  beforeEach(async () => {
+    database = await createTestDatabase();
+  });
+  afterEach(async () => {
+    await database?.destroy();
+  });
+  async function launcherJar(
+    mtime: string,
+    properties = 'launch.mainClass=net.fabricmc.loader.impl.launch.knot.KnotServer\n',
+  ) {
+    const zip = new ZipFile();
+    zip.addBuffer(
+      Buffer.from(
+        'Manifest-Version: 1.0\r\nMain-Class: net.fabricmc.loader.impl.launch.server.FabricServerLauncher\r\n\r\n',
+      ),
+      'META-INF/MANIFEST.MF',
+      { mtime: new Date(mtime) },
+    );
+    zip.addBuffer(Buffer.from(properties), 'fabric-server-launch.properties', {
+      mtime: new Date(mtime),
+    });
+    zip.end();
+    const chunks: Buffer[] = [];
+    await pipeline(
+      zip.outputStream,
+      new Writable({
+        write(chunk, _encoding, done) {
+          chunks.push(Buffer.from(chunk));
+          done();
+        },
+      }),
+    );
+    return Buffer.concat(chunks);
+  }
+
+  it('does not replay the installer when game configuration changes phase and waits', async () => {
+    const f = await managementFixture(database.db);
+    const serverId = await f.server();
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const allocations = await f.db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .execute();
+    const remote = {
+      id: server.pterodactyl_id,
+      uuid: server.pterodactyl_uuid,
+      identifier: server.pterodactyl_identifier,
+      external_id: server.external_id,
+      node: f.providerNodeId,
+      user: 1,
+      egg: 1,
+      allocation: allocations.find((a) => a.is_primary)?.pterodactyl_allocation_id,
+      status: null,
+      suspended: false,
+      container: { installed: true },
+      limits: server.limits,
+      relationships: {
+        allocations: {
+          data: allocations.map((a) => ({
+            attributes: {
+              id: a.pterodactyl_allocation_id,
+              ip: a.address,
+              port: a.port,
+              assigned: true,
+            },
+          })),
+        },
+      },
+    } as ApplicationServer;
+    const reinstalled = vi.fn(
+      async (_id: number, _identifier: string, callbacks: { onConfirmed: () => Promise<void> }) => {
+        await callbacks.onConfirmed();
+        return { confirmed: true };
+      },
+    );
+    const adapter = {
+      ...f.adapter,
+      getApplicationServer: async () => remote,
+      getResources: async () => ({
+        current_state: 'offline',
+        is_suspended: false,
+        resources: {
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          disk_bytes: 0,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+        },
+      }),
+      reinstallWithConfirmation: reinstalled,
+    } as unknown as PterodactylAdapter;
+    const operation = await enqueueServerOperation(f.db, f.context, serverId, {
+      action: 'reinstall',
+      confirm: true,
+      idempotencyKey: randomUUID(),
+      backupBefore: false,
+    });
+    let time = Date.now();
+    const hook = vi.fn(
+      async (context: Parameters<NonNullable<LifecycleOptions['configureGameProvision']>>[0]) => {
+        if (hook.mock.calls.length === 1) {
+          await context.update({ phase: 'minecraft.config.prepared' });
+          return false;
+        }
+        return true;
+      },
+    );
+    const options: LifecycleOptions = {
+      adapter,
+      settleMs: 0,
+      now: () => new Date(time),
+      authorizeEffect: async () => {},
+      reserveInstallation: async () => {},
+      configureGameProvision: hook,
+    };
+    const results: string[] = [];
+    for (let index = 0; index < 6; index++) {
+      results.push(await processServerOperation(f.db, operation.jobId, options));
+      time += 20_000;
+      if (results.at(-1) === 'succeeded') break;
+    }
+    expect(results.at(-1)).toBe('succeeded');
+    expect(hook).toHaveBeenCalledTimes(2);
+    expect(reinstalled).toHaveBeenCalledOnce();
+  });
+
+  it('permits ingestion only for the exact running lifecycle operation and its attributed actor', async () => {
+    const f = await managementFixture(database.db);
+    const serverId = await f.server();
+    const provision = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ state: 'running', completed_at: null })
+      .where('id', '=', provision.job_id)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: provision.job_id })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('physical_hosts')
+      .set({
+        upload_policy: JSON.stringify({
+          providerMaxFileBytes: 1024 ** 2,
+          temporaryDiskPath: '/isolated-minecraft-upload',
+          temporaryDiskBudgetBytes: 16 * 1024 ** 2,
+          temporaryDiskHeadroomBytes: 1024 ** 2,
+        }),
+      })
+      .where('id', '=', f.hostId)
+      .execute();
+    const env = { NH_OBSERVER_ID: 'isolated-observer' };
+    const disk = { availableBytes: async () => 1024n ** 3n };
+    await f.db.connection().execute(async (connection) => {
+      await expect(
+        reserveUploadIngestion(connection, f.context, serverId, 1, env, disk),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      await expect(
+        reserveUploadIngestion(connection, f.context, serverId, 1, env, {
+          ...disk,
+          operationId: randomUUID(),
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      await expect(
+        reserveUploadIngestion(connection, f.owner, serverId, 1, env, {
+          ...disk,
+          operationId: provision.job_id,
+        }),
+      ).rejects.toMatchObject({ code: 'forbidden' });
+      const claim = await reserveUploadIngestion(connection, f.context, serverId, 1, env, {
+        ...disk,
+        operationId: provision.job_id,
+      });
+      await claim.complete();
+      await claim.unlock();
+    });
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+  });
+
+  async function minecraftFixture(launcher?: {
+    bootstrap: Buffer;
+    installed: Buffer;
+    digest: string;
+    boundPath?: string;
+    semantic?: boolean;
+  }) {
+    const profile = launcher ? 'fabric' : 'vanilla';
+    const f = await managementFixture(database.db);
+    const serverId = await f.server();
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const combinationId = randomUUID();
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft-java', version: 'fixture', manifest: {} })
+      .onConflict((conflict) => conflict.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft-java', runtime_id: profile })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const runtimeBytes = Buffer.from('fixture runtime jar');
+    const runtimeHash = createHash('sha256').update(runtimeBytes).digest('hex');
+    const combination = {
+      release: '1.21.1',
+      releaseType: 'release',
+      protocolId: 767,
+      family: 'netty',
+      profile,
+      javaMajor: 21,
+      runtimeDigest: 'a'.repeat(64),
+      protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
+    };
+    const image = 'fixture-java:21';
+    const imageDigest = `sha256:${'f'.repeat(64)}`;
+    const binding = {
+      profile,
+      release: '1.21.1',
+      image,
+      imageJavaMajor: 21,
+      declaredEggVariables: [],
+      bindings: {},
+      fixedVariables: {},
+      installationKind: launcher ? 'fabric-installer' : 'server-jar',
+      artifactPaths: {
+        server: launcher ? (launcher.boundPath ?? 'fabric-server-launch.jar') : 'server.jar',
+      },
+      supportedProperties: ['motd'],
+    };
+    const runtime = {
+      profile,
+      release: '1.21.1',
+      javaMajor: 21,
+      installation: { kind: launcher ? 'fabric-installer' : 'server-jar', args: [] },
+      artifacts: [{ role: 'server', sha256: runtimeHash, size: runtimeBytes.length }],
+    };
+    await f.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: combinationId,
+        mapping_id: f.mappingId,
+        identity_digest: '1'.repeat(64),
+        combination: JSON.stringify(combination),
+        resolved_runtime: JSON.stringify(runtime),
+        binding: JSON.stringify(binding),
+        mapping_digest: minecraftMappingDigest(mapping),
+      })
+      .execute();
+    const env = { NH_MINECRAFT_EVIDENCE_KEY: '1'.repeat(64) };
+    const report = {
+      runId: randomUUID(),
+      kind: 'real-server',
+      combinationDigest: minecraftDigest(combination),
+      choiceDigest: '1'.repeat(64),
+      mappingDigest: minecraftMappingDigest(mapping),
+      recordedAt: new Date().toISOString(),
+      checks: Object.fromEntries(minecraftVerificationChecks.map((check) => [check, true])),
+      evidenceSha256: 'd'.repeat(64),
+      server: {
+        uuid: randomUUID(),
+        externalId: 'isolated-fixture',
+        artifactSha256: runtimeHash,
+        imageDigest,
+        javaMajor: 21,
+        ...(launcher
+          ? {
+              installedFiles: [
+                { path: 'server.jar', sha256: runtimeHash, size: runtimeBytes.length },
+                {
+                  path: 'fabric-server-launch.jar',
+                  sha256: createHash('sha256').update(launcher.bootstrap).digest('hex'),
+                  size: launcher.bootstrap.length,
+                  ...(launcher.semantic === false
+                    ? {}
+                    : {
+                        role: 'fabric-launcher',
+                        jarEntriesSha256: launcher.digest,
+                        minecraftServerPath: 'server.jar',
+                      }),
+                },
+              ],
+            }
+          : {}),
+      },
+      client: { implementation: 'test-fixture', version: '1.0.0', protocolId: 767 },
+    };
+    await f.db
+      .insertInto('minecraft_verification_evidence')
+      .values({
+        id: report.runId,
+        combination_id: combinationId,
+        report: JSON.stringify(report),
+        signature: signMinecraftEvidence(report, env),
+      })
+      .execute();
+    await f.db
+      .insertInto('minecraft_server_profiles')
+      .values({
+        server_id: serverId,
+        combination_id: combinationId,
+        configuration: JSON.stringify({ eula: true }),
+        installed: false,
+      })
+      .execute();
+    const files = new Map<string, Buffer>([
+      ['eula.txt', Buffer.from('eula=true\n')],
+      ['server.jar', runtimeBytes],
+      ['server.properties', Buffer.from('motd=Fixture\n')],
+    ]);
+    if (launcher) files.set('fabric-server-launch.jar', launcher.installed);
+    const adapter = {
+      getApplicationServer: async () => ({ egg: mapping.egg_id, container: { image } }),
+      listFiles: async (_id: string, root = '') =>
+        [
+          ...new Set(
+            [...files.keys()]
+              .filter((path) => !root || path.startsWith(`${root}/`))
+              .map((path) => (root ? path.slice(root.length + 1) : path).split('/')[0] as string),
+          ),
+        ].map((name) => ({
+          name,
+          is_file: files.has([root, name].filter(Boolean).join('/')),
+          is_symlink: false,
+          size: files.get([root, name].filter(Boolean).join('/'))?.length ?? 0,
+        })),
+      writeFile: async (_id: string, path: string, content: string) => {
+        files.set(path, Buffer.from(content));
+      },
+      readFile: async (_id: string, path: string) => files.get(path) ?? Buffer.alloc(0),
+      downloadFile: async (_id: string, path: string) => ({
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(files.get(path) ?? Buffer.alloc(0));
+            controller.close();
+          },
+        }),
+      }),
+    } as unknown as PterodactylAdapter;
+    const context = {
+      db: f.db,
+      server,
+      adapter,
+      operation: () => operation,
+      authorize: async () => {},
+      assertStopped: async () => {},
+      event: async () => {},
+      update: async (patch) => {
+        Object.assign(operation, patch);
+      },
+      effect: async (phase, perform) => {
+        operation.phase = phase;
+        operation.effect_state = 'prepared';
+        await perform();
+        operation.effect_state = 'confirmed';
+        return true;
+      },
+      backup: async () => false,
+    } as GameLifecycleContext;
+    const options: MinecraftContentOptions = {
+      env,
+      userAgent: 'isolated fixture',
+      mountdataRoot: '/unused/mountdata',
+      http: { json: vi.fn(), download: vi.fn() },
+      observedImageDigest: async () => imageDigest,
+      authorizeJob: async () => f.context,
+    };
+    return { f, serverId, operation, combinationId, files, context, options };
+  }
+
+  it('verifies timestamp-variable Fabric launchers using signed entry contents and stores the actual target receipt', async () => {
+    const bootstrap = await launcherJar('2026-01-01T00:00:00Z');
+    const installed = await launcherJar('2026-01-02T00:00:00Z');
+    expect(installed.equals(bootstrap)).toBe(false);
+    const f = await minecraftFixture({
+      bootstrap,
+      installed,
+      digest: await canonicalMinecraftJarSha256(bootstrap),
+    });
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ configuration_state: '{}' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    expect(await verifyMinecraftRestore(f.context, f.options)).toBe(true);
+    const profile = await f.f.db
+      .selectFrom('minecraft_server_profiles')
+      .select('installed_manifest')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.installed_manifest).toEqual(
+      expect.arrayContaining([
+        {
+          path: 'fabric-server-launch.jar',
+          sha256: createHash('sha256').update(installed).digest('hex'),
+          size: installed.length,
+        },
+      ]),
+    );
+    const propertiesPath = 'fabric-server-launcher.properties';
+    f.files.set(propertiesPath, Buffer.from('# First generated timestamp\nserverJar=server.jar\n'));
+    expect(await verifyMinecraftRestore(f.context, f.options)).toBe(true);
+    const properties = Buffer.from('# Different generated timestamp\nserverJar=server.jar\n');
+    f.files.set(propertiesPath, properties);
+    expect(await verifyMinecraftRestore(f.context, f.options)).toBe(true);
+    const refreshed = await f.f.db
+      .selectFrom('minecraft_server_profiles')
+      .select('installed_manifest')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(refreshed.installed_manifest).toEqual(
+      expect.arrayContaining([
+        {
+          path: propertiesPath,
+          sha256: createHash('sha256').update(properties).digest('hex'),
+          size: properties.length,
+        },
+      ]),
+    );
+    f.files.set(propertiesPath, Buffer.from('serverJar=another.jar\n'));
+    await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    f.files.set(propertiesPath, properties);
+    f.files.set(
+      'fabric-server-launch.jar',
+      await launcherJar('2026-01-02T00:00:00Z', 'launch.mainClass=wrong.Class\n'),
+    );
+    await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    f.files.set('fabric-server-launch.jar', installed);
+    f.files.set('server.jar', Buffer.from('altered upstream server'));
+    await expect(verifyMinecraftRestore(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+  });
+  it('keeps raw generated-file checks without explicit signed semantic evidence and rejects an unbound launcher role', async () => {
+    const bootstrap = await launcherJar('2026-01-01T00:00:00Z');
+    const installed = await launcherJar('2026-01-02T00:00:00Z');
+    const base = { bootstrap, installed, digest: await canonicalMinecraftJarSha256(bootstrap) };
+    const raw = await minecraftFixture({ ...base, semantic: false });
+    await expect(verifyMinecraftRestore(raw.context, raw.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    const unbound = await minecraftFixture({ ...base, boundPath: 'another-launcher.jar' });
+    await expect(verifyMinecraftRestore(unbound.context, unbound.options)).rejects.toMatchObject({
+      code: 'configuration_invalid',
+    });
+  });
+
+  it('fences initial security configuration before the first write and clears it only after a complete retry', async () => {
+    const { f, serverId, operation, files, context, options } = await minecraftFixture();
+    const player = {
+      uuid: '11111111-1111-1111-1111-111111111111',
+      name: 'Player',
+      source: 'mojang',
+      verifiedAt: new Date().toISOString(),
+    };
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration: JSON.stringify({
+          eula: true,
+          whitelist: ['Player'],
+          playerIdentities: { operators: [], whitelist: [player] },
+        }),
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    files.delete('eula.txt');
+    const originalEffect = context.effect;
+    const whitelistStep = `minecraft.text.${createHash('sha256').update('whitelist.json').digest('hex')}`;
+    let fail = true;
+    context.effect = async (phase, perform) => {
+      if (phase === whitelistStep && fail) {
+        fail = false;
+        throw new Error('interrupted before whitelist effect');
+      }
+      return originalEffect(phase, perform);
+    };
+    await expect(configureMinecraftProvision(context, options)).rejects.toThrow(
+      'interrupted before whitelist effect',
+    );
+    expect(files.get('eula.txt')?.toString()).toBe('eula=true\n');
+    expect(files.has('whitelist.json')).toBe(false);
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).configuration_state,
+    ).toMatchObject({
+      status: 'planned',
+      jobId: operation.job_id,
+      files: expect.arrayContaining([{ path: 'whitelist.json', sha256: expect.any(String) }]),
+    });
+    await expect(verifyMinecraftRestore(context, options)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await expect(
+      enqueueServerOperation(f.db, f.context, serverId, {
+        action: 'start',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(await configureMinecraftProvision(context, options)).toBe(true);
+    expect(JSON.parse(files.get('whitelist.json')?.toString() ?? 'null')).toEqual([
+      { uuid: player.uuid, name: player.name },
+    ]);
+    expect(
+      await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select(['installed', 'configuration_state'])
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ installed: true, configuration_state: {} });
+    // Later authorized player changes must not remain pinned to the initial hash.
+    files.set('whitelist.json', Buffer.from('[]'));
+    operation.action = 'minecraft-content';
+    expect(await verifyMinecraftRestore(context, options)).toBe(true);
+  });
+
+  it('does not verify a fresh installation before its configuration was even planned', async () => {
+    const { context, options } = await minecraftFixture();
+    await expect(verifyMinecraftRestore(context, options)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+  });
+  it('requires the exact confirmed pre-operation backup to supersede incomplete configuration', async () => {
+    const { f, serverId, operation, context, options } = await minecraftFixture();
+    const backupId = randomUUID();
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify({ backupComplete: true, backupId }) })
+      .where('job_id', '=', operation.job_id)
+      .execute();
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ configuration_state: JSON.stringify({ status: 'pending', jobId: operation.job_id }) })
+      .where('server_id', '=', serverId)
+      .execute();
+    const restore = {
+      ...operation,
+      action: 'restore' as const,
+      job_id: randomUUID(),
+      plan: { backupId: randomUUID() },
+    };
+    const restoreContext = { ...context, operation: () => restore };
+    await expect(verifyMinecraftRestore(restoreContext, options)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    restore.plan.backupId = backupId;
+    expect(await verifyMinecraftRestore(restoreContext, options)).toBe(true);
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('configuration_state')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).configuration_state,
+    ).toEqual({});
+  });
+  it('does not bypass requested initial modpack completion using correct configuration files alone', async () => {
+    const { f, serverId, operation, files, context, options } = await minecraftFixture();
+    const digest = '7'.repeat(64);
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration_state: JSON.stringify({
+          status: 'planned',
+          jobId: operation.job_id,
+          files: [
+            {
+              path: 'eula.txt',
+              sha256: createHash('sha256')
+                .update(files.get('eula.txt') ?? Buffer.alloc(0))
+                .digest('hex'),
+            },
+          ],
+          initialContentDigest: digest,
+        }),
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    await f.db
+      .insertInto('job_steps')
+      .values({ job_id: operation.job_id, step: `minecraft.initial-content.${'8'.repeat(64)}` })
+      .execute();
+    await expect(verifyMinecraftRestore(context, options)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await f.db
+      .insertInto('job_steps')
+      .values({ job_id: operation.job_id, step: `minecraft.initial-content.${digest}` })
+      .execute();
+    expect(await verifyMinecraftRestore(context, options)).toBe(true);
+  });
+
+  it('blocks start and verification while any partial-install file, removal or pre-wipe proof is missing', async () => {
+    const { f, serverId, operation, combinationId, files, context, options } =
+      await minecraftFixture();
+    const desired = Buffer.from('verified dedicated-server mod');
+    const sha256 = createHash('sha256').update(desired).digest('hex');
+    const contentState = {
+      jobId: operation.job_id,
+      kind: 'content',
+      planDigest: '3'.repeat(64),
+      files: [{ path: 'mods/new.jar', sha256, size: desired.length }],
+      absentPaths: ['mods/old.jar'],
+      wipes: [{ jobId: operation.job_id, path: 'mods' }],
+      inventory: [
+        {
+          path: 'mods/new.jar',
+          sha256,
+          provider: 'modrinth',
+          projectId: 'fixture',
+          versionId: 'fixture',
+          dependencies: [],
+        },
+      ],
+      removeInventoryPaths: ['mods/old.jar'],
+    };
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        installed: false,
+        installed_manifest: JSON.stringify([
+          { path: 'server.jar', sha256: '4'.repeat(64), size: 4 },
+        ]),
+        content_state: JSON.stringify(contentState),
+        configuration_state: '{}',
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    await expect(
+      enqueueServerOperation(f.db, f.context, serverId, {
+        action: 'start',
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(verifyMinecraftPendingContent(context)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await expect(verifyMinecraftRestore(context, options)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    const unrelated = {
+      ...operation,
+      job_id: randomUUID(),
+      action: 'minecraft-content' as const,
+      plan: {
+        minecraftContent: {
+          combinationId,
+          command: { kind: 'properties', changes: { motd: 'Cannot clear fence' } },
+          backupBefore: false,
+        },
+      },
+    };
+    await expect(
+      processMinecraftContent({ ...context, operation: () => unrelated }, options),
+    ).rejects.toMatchObject({ code: 'operation_uncertain' });
+    files.set('mods/new.jar', desired);
+    await expect(verifyMinecraftPendingContent(context)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    await f.db
+      .insertInto('job_steps')
+      .values({
+        job_id: operation.job_id,
+        step: `minecraft.remove.${createHash('sha256').update('mods').digest('hex')}`,
+      })
+      .execute();
+    files.set('mods/old.jar', Buffer.from('must be removed'));
+    await expect(verifyMinecraftPendingContent(context)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('installed')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).installed,
+    ).toBe(false);
+    files.delete('mods/old.jar');
+    await verifyMinecraftPendingContent(context);
+    expect(
+      await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select(['installed', 'content_state'])
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ installed: true, content_state: {} });
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_content_items')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .execute()
+      ).map((file) => file.path),
+    ).toEqual(['mods/new.jar']);
+    operation.action = 'minecraft-content';
+    await verifyMinecraftRestore(context, options);
+    const retained = await f.db
+      .selectFrom('minecraft_content_items')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(retained.map((file) => file.path)).toEqual(['mods/new.jar']);
+    expect(
+      installedContentChange(
+        retained.map(
+          (file) => file.artifact as Parameters<typeof installedContentChange>[0][number],
+        ),
+        { remove: { provider: 'modrinth', projectId: 'fixture' } },
+      ).removePaths,
+    ).toEqual(['mods/new.jar']);
+  });
+});

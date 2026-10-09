@@ -110,3 +110,16 @@ sleep based on a partial or outdated zero-session report. Short route leases and
 lease-aware deletion prevent stale routing into reassigned backend allocations.
 [ADR 0012](decisions/0012-gateway-leases-and-sleep.md) records the recovery choices.
 Real game handlers remain M4/M5; the graphical app remains M6.
+
+## M4 Minecraft boundaries
+
+`games/minecraft` supplies metadata/runtime resolution, controlled management
+plans, wizard descriptors and a protocol module loaded by the existing Gateway.
+`packages/content-providers` handles provider semantics and verified staging;
+`packages/server-management` owns authorization, resource claims, persistent
+installation effects and partial-failure recovery. The Pterodactyl adapter remains
+the sole provider boundary, including minimal read-only runtime-image observation.
+The signed compatibility registry is Owner-only; public discovery contains simple
+eligible release/runtime choices. [M4 APIs](M4-API.md) and
+[ADR 0013](decisions/0013-minecraft-evidence-and-content.md) describe the contracts.
+Actual compatibility claims are limited to [recorded validation](M4-VALIDATION.md).

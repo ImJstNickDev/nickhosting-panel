@@ -17,3 +17,5 @@ Each ADR is a short record of an intentional project decision and the consequenc
 - [0012 M3 Gateway leases and sleep authority](0012-gateway-leases-and-sleep.md)
 
 When a new decision supersedes an ADR, link a new ADR and mark old one `Superseded`, rather than deleting historical context.
+
+- [0013 — Minecraft evidence and recoverable content](0013-minecraft-evidence-and-content.md)

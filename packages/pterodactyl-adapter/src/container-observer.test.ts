@@ -209,6 +209,51 @@ describe('explicit read-only Docker container observation', () => {
   });
 });
 
+describe('actual server image identity', () => {
+  const image = `sha256:${'c'.repeat(64)}`;
+  it.each([{ status: 'created' }, { status: 'running', running: true }])(
+    'reads immutable image content from an existing server container: %j',
+    async (state) => {
+      const { exec, observer } = fixture([listed(), inspected(state, { image }), listed()]);
+      await expect(observer.imageIdentity(uuid)).resolves.toBe(image);
+      const args = exec.mock.calls[1]?.[1] ?? [];
+      expect(args.at(-1)).toBe(containerId);
+      expect(args[5]).toContain('{{json .Image}}');
+      expect(args[5]).not.toContain('.Config.Image');
+      expect(args[5]).not.toContain('.Config.Env');
+      expect(exec.mock.calls[2]?.[1]).toEqual(exec.mock.calls[0]?.[1]);
+    },
+  );
+  it('reports absence without substituting a cached tag or an installer image', async () => {
+    const { exec, observer } = fixture(['']);
+    await expect(observer.imageIdentity(uuid)).resolves.toBeNull();
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec.mock.calls[0]?.[1]).toContain(`name=^/${uuid}$`);
+  });
+  it.each([
+    [listed(), inspected({}, { image: 'repo/server:java25' })],
+    [listed(), inspected({}, { image: 'sha256:short' })],
+    [listed(), inspected({}, { image, service: 'unrelated' })],
+    [listed(), inspected({}, { image, containerType: 'server_installer' })],
+    [listed(), inspected({}, { image, id: otherId })],
+    [listed(), inspected({}, { image }), listed(otherId)],
+    [listed(), inspected({}, { image }), ''],
+  ])('rejects tags, unrelated containers and replacement races', async (...outputs) => {
+    const { observer } = fixture(outputs);
+    await expect(observer.imageIdentity(uuid)).rejects.toThrow('integration_unavailable');
+  });
+  it('validates the UUID and sanitizes failures', async () => {
+    const { exec, observer } = fixture([new Error('fixture-secret')]);
+    await expect(observer.imageIdentity(`${uuid}_installer`)).rejects.toThrow(
+      'configuration_invalid',
+    );
+    expect(exec).not.toHaveBeenCalled();
+    const error = await observer.imageIdentity(uuid).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: 'integration_unavailable' });
+    expect(String(error)).not.toContain('fixture-secret');
+  });
+});
+
 describe('independent process start identity', () => {
   const startedAt = '2026-10-09T11:59:59.123456789Z';
   const running = (state: Record<string, unknown> = {}, fields: Record<string, unknown> = {}) =>

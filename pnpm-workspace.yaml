@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - games/*
 strictPeerDependencies: true
 autoInstallPeers: false
 onlyBuiltDependencies: []

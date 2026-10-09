@@ -26,8 +26,10 @@ draft until its actual acceptance tests and independent review pass.
 
 ## Safety and existing limitations
 
-No production Gateway deployment, public game bind, network/egg change or real DNS
-write is authorized by this milestone. Any additional test infrastructure requires
+No production Gateway deployment, network/egg change or real DNS write is
+authorized. The Owner separately approved the exact existing test allocation and
+its possible exposure, loopback Gateway and scoped nonce endpoint described in
+[M4 live tests](M4-LIVE-TESTS.md), and accepted the Minecraft EULA for these tests. Any additional test infrastructure requires
 the exact documented approval before execution. Test-server mutations require
 durable provenance corroborated with the live API. Secrets, private infrastructure
 notes and test ledgers stay ignored. No system Java installation is changed.
@@ -38,3 +40,28 @@ are unchanged. No Minecraft limbo, M5 implementation or M6 frontend is included.
 Rollback during development: keep the reviewed M3 baseline in service. Do not
 deploy this branch or drop durable state to roll back an uncertain external effect.
 Precise migration/job rollback instructions will accompany the implemented APIs.
+
+## Integrated checkpoint — 2026-10-09 (work continues)
+
+- `scripts/dev.sh pnpm test`: 691 passed across 41 files. This checkpoint
+  predates the final generated-loader-JAR evidence correction and live helpers.
+- `scripts/dev.sh pnpm test:m3`: 541 passed and **3 expected failures** across
+  31 files. Uses the previously approved M2 isolated PostgreSQL/Redis/SFTPGo
+  services. The expected failures are exactly the accepted SFTPGo transport
+  revocation defect; they are not passing security assertions.
+- `scripts/dev.sh pnpm audit --prod --json`: no reported advisories among
+  216 production dependencies. This is a dependency advisory check, not proof
+  that application logic has no vulnerabilities.
+- Independent review confirmed fixes for persisted content conflicts, scoped
+  archive reuse, UUID/OP-level persistence, inventory preservation, shared disk
+  claims, queued authorization, runtime-image identity and initial-configuration
+  fencing. The live-runner review additionally required positive resource caps
+  and cleanup independent of creation capacity/upstream availability; both fixed.
+- First bootstrap attempt failed during isolated local mapping validation before
+  any provider server creation. Its empty-asset ledger was preserved and its
+  exact generated database schema was subsequently cleaned. The fixture manifest
+  namespace was corrected and regression-tested. No compatibility evidence was
+  issued from that attempt.
+
+Live acceptance, full final checks and independent review remain in progress.
+The PR stays draft; there is no completed M4 compatibility claim at this checkpoint.

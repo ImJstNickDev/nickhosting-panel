@@ -280,6 +280,83 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       socket.pipe(backend).pipe(socket);
       return;
     }
+    const handler = protocol(listener.route);
+    if (handler?.createSession) {
+      const sessionRoute = listener.route;
+      const controller = new AbortController();
+      let session: ReturnType<NonNullable<GatewayProtocolAdapter['createSession']>>;
+      try {
+        session = handler.createSession({ route: sessionRoute, signal: controller.signal });
+      } catch {
+        controller.abort();
+        socket.destroy();
+        return;
+      }
+      let buffered = Buffer.alloc(0);
+      let inputBytes = 0;
+      let outputBytes = 0;
+      const timer = setTimeout(() => socket.destroy(), policy.classificationTimeoutMs);
+      timer.unref();
+      socket.once('close', () => {
+        clearTimeout(timer);
+        controller.abort();
+      });
+      const valid = () =>
+        !socket.destroyed &&
+        !controller.signal.aborted &&
+        active(listener) &&
+        listener.route.revision === sessionRoute.revision &&
+        !quiescence.has(sessionRoute.serverId);
+      const consume = async () => {
+        while (buffered.length && valid()) {
+          const intent = session.classify(buffered);
+          if (
+            !Number.isSafeInteger(intent.consumedBytes) ||
+            intent.consumedBytes < 0 ||
+            intent.consumedBytes > buffered.length ||
+            (intent.kind === 'need-more' ? intent.consumedBytes !== 0 : intent.consumedBytes === 0)
+          )
+            return void socket.destroy();
+          if (intent.kind === 'need-more') return;
+          buffered = buffered.subarray(intent.consumedBytes);
+          if (intent.kind === 'unsupported') return void socket.destroy();
+          if (intent.kind === 'continue') continue;
+          const state =
+            intent.kind === 'join' &&
+            (sessionRoute.mode === 'sleeping' || sessionRoute.mode === 'blocked')
+              ? await wake(sessionRoute)
+              : sessionRoute.mode;
+          if (!valid()) return void socket.destroy();
+          const result = session.response(state);
+          outputBytes += result.bytes?.byteLength ?? 0;
+          if (outputBytes > policy.maxProtocolResponseBytes) return void socket.destroy();
+          if (result.close) {
+            if (result.bytes) socket.end(result.bytes);
+            else socket.end();
+            return;
+          }
+          if (result.bytes?.byteLength)
+            await new Promise<void>((resolve, reject) =>
+              socket.write(result.bytes as Uint8Array, (error) =>
+                error ? reject(error) : resolve(),
+              ),
+            );
+        }
+        if (!valid()) socket.destroy();
+      };
+      socket.on('data', (chunk: Buffer) => {
+        inputBytes += chunk.length;
+        if (inputBytes > policy.maxClassificationBytes) return void socket.destroy();
+        buffered = Buffer.concat([buffered, chunk]);
+        socket.pause();
+        void consume()
+          .then(() => {
+            if (!socket.destroyed && !socket.writableEnded) socket.resume();
+          })
+          .catch(() => socket.destroy());
+      });
+      return;
+    }
     let bytes = Buffer.alloc(0);
     let processing = false;
     const timer = setTimeout(() => socket.destroy(), policy.classificationTimeoutMs);

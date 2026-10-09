@@ -11,5 +11,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "vitest*.ts"]
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "games/**/*.ts", "scripts/**/*.ts", "vitest*.ts"]
 }

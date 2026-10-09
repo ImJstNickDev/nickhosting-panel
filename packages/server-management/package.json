@@ -11,6 +11,8 @@
     "@nickhosting/pterodactyl-adapter": "workspace:*",
     "@nickhosting/external-services": "workspace:*",
     "kysely": "0.29.6",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "@nickhosting/minecraft": "workspace:*",
+    "@nickhosting/content-providers": "workspace:*"
   }
 }

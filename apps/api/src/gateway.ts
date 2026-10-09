@@ -275,7 +275,7 @@ export function registerGatewayRoutes(
   );
   app.get('/v1/servers/:id/gateway', async (c) => {
     await authorizeServer(db, await options.principal(c), c.req.param('id'), 'server:read');
-    return c.json(await getGatewayState(db, c.req.param('id')));
+    return c.json(await getGatewayState(db, c.req.param('id'), { env }));
   });
   app.put('/v1/servers/:id/gateway', async (c) =>
     c.json(

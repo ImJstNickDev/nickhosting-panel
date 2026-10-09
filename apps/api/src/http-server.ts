@@ -19,7 +19,7 @@ export const httpServerPolicy: Readonly<HttpServerPolicy> = Object.freeze({
 // normal Hono route. Queries do not change the route; encoded/slash variants and
 // every other method keep the ordinary request deadline.
 const uploadPath =
-  /^\/v1\/servers\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/files\/upload(?:\?[^#]*)?$/i;
+  /^\/v1\/(?:servers\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/files|minecraft\/sources\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/upload(?:\?[^#]*)?$/i;
 
 /** Node's default requestTimeout is a total body deadline, even while an upload
  * makes progress. Replace it with a route-aware deadline while retaining native

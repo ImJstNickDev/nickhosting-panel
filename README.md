@@ -61,3 +61,9 @@ Project docs are the source of truth; update the relevant documents and ADRs whe
 The current M2 correction round is documented in [`docs/M2-REVIEW-REVISIONS.md`](docs/M2-REVIEW-REVISIONS.md).
 The final Wings loopback compatibility correction and M3 collision gate are
 documented in [`docs/M2-LOOPBACK-REVIEW.md`](docs/M2-LOOPBACK-REVIEW.md).
+
+M4 Minecraft backend work is tracked in [`docs/M4-VALIDATION.md`](docs/M4-VALIDATION.md).
+Its [API contracts](docs/M4-API.md), [Owner-only protocol evidence](docs/M4-PROTOCOL.md),
+[runtime resolution](docs/M4-RUNTIMES.md) and [content research/licensing](docs/M4-CONTENT-RESEARCH.md)
+separate implementation, fixtures and real-server verification. The graphical app
+remains M6; a listed upstream version is not by itself a compatibility claim.
