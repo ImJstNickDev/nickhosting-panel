@@ -33,6 +33,26 @@ export const platformConfigSchema = z
     smtpSecure: z.boolean(),
     smtpUser: z.string().trim().min(1).max(320).optional(),
     smtpFrom: z.string().trim().min(1).max(320).optional(),
+    storagePolicy: z.enum(['GLOBAL_POOL', 'PER_USER_BUDGET']),
+    defaultUserMemoryMiB: z.number().int().min(1).max(1048576),
+    defaultUserCpuPercent: z.number().int().min(1).max(100000),
+    defaultUserStorageMiB: z.number().int().min(1).max(1073741824),
+    maxServersPerUser: z.number().int().min(1).max(10000),
+    observationMaxAgeSeconds: z.number().int().min(1).max(30),
+    sftpgoBaseUrl: httpUrl.optional(),
+    sftpgoDataRoot: z.string().startsWith('/').optional(),
+    sftpgoInstanceId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{1,64}$/)
+      .optional(),
+    sftpCredentialTtlSeconds: z.number().int().min(60).max(86400),
+    cloudflareZoneId: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .optional(),
+    dnsBaseDomain: z.string().min(1).max(253).optional(),
+    dnsTarget: z.string().min(1).max(253).optional(),
+    staticGameHostname: z.string().min(1).max(253).optional(),
   })
   .strict();
 
@@ -51,6 +71,13 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   logLevel: 'info',
   smtpPort: 587,
   smtpSecure: false,
+  storagePolicy: 'GLOBAL_POOL',
+  defaultUserMemoryMiB: 16384,
+  defaultUserCpuPercent: 400,
+  defaultUserStorageMiB: 32768,
+  maxServersPerUser: 20,
+  observationMaxAgeSeconds: 15,
+  sftpCredentialTtlSeconds: 3600,
 });
 
 export const configEnvironmentKeys = {
@@ -70,6 +97,20 @@ export const configEnvironmentKeys = {
   smtpSecure: 'SMTP_SECURE',
   smtpUser: 'SMTP_USER',
   smtpFrom: 'SMTP_FROM',
+  storagePolicy: 'NH_STORAGE_POLICY',
+  defaultUserMemoryMiB: 'NH_DEFAULT_USER_MEMORY_MIB',
+  defaultUserCpuPercent: 'NH_DEFAULT_USER_CPU_PERCENT',
+  defaultUserStorageMiB: 'NH_DEFAULT_USER_STORAGE_MIB',
+  maxServersPerUser: 'NH_MAX_SERVERS_PER_USER',
+  observationMaxAgeSeconds: 'NH_OBSERVATION_MAX_AGE_SECONDS',
+  sftpgoBaseUrl: 'NH_SFTPGO_BASE_URL',
+  sftpgoDataRoot: 'NH_SFTPGO_DATA_ROOT',
+  sftpgoInstanceId: 'NH_SFTPGO_INSTANCE_ID',
+  sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
+  cloudflareZoneId: 'NH_CLOUDFLARE_ZONE_ID',
+  dnsBaseDomain: 'NH_DNS_BASE_DOMAIN',
+  dnsTarget: 'NH_DNS_TARGET',
+  staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
 } as const satisfies Record<PlatformConfigKey, string>;
 
 const numericKeys = new Set<PlatformConfigKey>([
@@ -78,6 +119,12 @@ const numericKeys = new Set<PlatformConfigKey>([
   'supportAbsoluteTtlSeconds',
   'sessionTtlSeconds',
   'smtpPort',
+  'defaultUserMemoryMiB',
+  'defaultUserCpuPercent',
+  'defaultUserStorageMiB',
+  'maxServersPerUser',
+  'observationMaxAgeSeconds',
+  'sftpCredentialTtlSeconds',
 ]);
 
 function invalid(fields: string[]): never {

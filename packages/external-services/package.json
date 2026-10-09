@@ -1,14 +1,14 @@
 {
-  "name": "@nickhosting/pterodactyl-adapter",
+  "name": "@nickhosting/external-services",
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
     "@nickhosting/core": "workspace:*",
-    "zod": "4.6.5",
-    "ws": "8.22.0"
+    "zod": "4.6.5"
   },
   "devDependencies": {
-    "@types/ws": "8.18.2"
+    "@types/ssh2": "1.15.6",
+    "ssh2": "1.17.0"
   }
 }

@@ -134,6 +134,8 @@ export async function startJobWorker(options: {
   prefix: string;
   logger: Logger;
   handlers?: JobHandlers;
+  /** Routes approved external-effect commands to their durable state machine. */
+  processor?: (jobId: string) => Promise<string>;
   concurrency?: number;
   pollIntervalMs?: number;
   recoveryIntervalMs?: number;
@@ -165,7 +167,9 @@ export async function startJobWorker(options: {
     async (delivery) => {
       const parsed = deliverySchema.safeParse(delivery.data);
       if (!parsed.success) throw new DomainError('validation_failed');
-      const result = await processJob(options.db, parsed.data.jobId, options.handlers);
+      const result = options.processor
+        ? await options.processor(parsed.data.jobId)
+        : await processJob(options.db, parsed.data.jobId, options.handlers);
       options.logger.log(result === 'failed' ? 'error' : 'info', 'jobs.delivery_processed', {
         jobId: parsed.data.jobId,
         result,

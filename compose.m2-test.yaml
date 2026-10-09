@@ -1,0 +1,61 @@
+name: nickhosting-m2-tests
+
+# Execute only after operation-specific Owner approval. Never joins live networks.
+services:
+  postgres:
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      POSTGRES_USER: nickhosting_test
+      POSTGRES_DB: nickhosting_test
+      POSTGRES_PASSWORD: ${NH_TEST_POSTGRES_PASSWORD:?Isolated password required}
+    ports: ["127.0.0.1::5432"]
+    volumes: [./mountdata/m2-tests/postgres:/var/lib/postgresql]
+    mem_limit: 384m
+    cpus: 1
+    restart: "no"
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U nickhosting_test -d nickhosting_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    environment:
+      REDIS_PASSWORD: ${NH_TEST_REDIS_PASSWORD:?Isolated password required}
+    command: [/bin/sh, -c, 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
+    ports: ["127.0.0.1::6379"]
+    volumes: [./mountdata/m2-tests/redis:/data]
+    mem_limit: 192m
+    cpus: 1
+    restart: "no"
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  sftpgo:
+    image: drakkan/sftpgo:v2.7.6@sha256:1edd28d80de2a008863fbfc58c8ff7db47b1b410bae48d4e6076192337809b11
+    user: "${NH_TEST_UID:?Current user UID required}:${NH_TEST_GID:?Current user GID required}"
+    environment:
+      SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN: "true"
+      SFTPGO_DEFAULT_ADMIN_USERNAME: ${NH_TEST_SFTPGO_ADMIN:?Isolated admin required}
+      SFTPGO_DEFAULT_ADMIN_PASSWORD: ${NH_TEST_SFTPGO_PASSWORD:?Isolated password required}
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_CLIENT: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_REST_API: "true"
+      SFTPGO_SFTPD__ENABLED_SSH_COMMANDS: ""
+    ports: ["127.0.0.1::8080", "127.0.0.1::2022"]
+    volumes:
+      - ./mountdata/m2-tests/sftpgo/state:/var/lib/sftpgo
+      - ./mountdata/m2-tests/sftpgo/data:/srv/sftpgo/data
+    mem_limit: 256m
+    cpus: 1
+    restart: "no"
+    healthcheck:
+      test: [CMD, sftpgo, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+networks:
+  default:
+    internal: true

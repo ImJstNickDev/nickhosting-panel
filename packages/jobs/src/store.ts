@@ -80,6 +80,7 @@ export async function enqueueCommand(
     .safeParse({ ...input, maxAttempts: input.maxAttempts ?? 3 });
   if (!parsed.success) throw new DomainError('validation_failed');
   const command = parseCommand(input.command);
+  if (command.type !== 'foundation.record-activity') throw new DomainError('forbidden');
   const digest = commandDigest({
     command,
     subjectId: input.context.subjectUserId,
@@ -148,10 +149,10 @@ export interface HandlerContext {
   /** Handlers must perform DB-only work using this transaction, never external effects. */
   tx: Transaction<Database>;
   job: Selectable<Database['operation_jobs']>;
-  command: JobCommand;
+  command: Extract<JobCommand, { type: 'foundation.record-activity' }>;
 }
 export type JobHandler = (context: HandlerContext) => Promise<void>;
-export type JobHandlers = Readonly<Record<JobCommand['type'], JobHandler>>;
+export type JobHandlers = Readonly<Record<'foundation.record-activity', JobHandler>>;
 
 export const foundationHandlers: JobHandlers = {
   'foundation.record-activity': async ({ tx, job, command }) => {
@@ -199,6 +200,7 @@ export async function processJob(
     await sql`savepoint job_attempt`.execute(tx);
     try {
       const command = parseCommand(job.command);
+      if (command.type !== 'foundation.record-activity') throw new DomainError('forbidden');
       await handlers[command.type]({ tx, job, command });
       await tx
         .insertInto('job_steps')
