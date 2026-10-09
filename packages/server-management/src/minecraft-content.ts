@@ -595,8 +595,12 @@ async function applyTextPlan(
   build: () => Promise<TextChange[]>,
   beforeEffects?: (plan: TextChange[]) => Promise<void>,
 ) {
-  if (context.operation().plan.minecraftText === undefined)
-    await context.update({ plan: { ...context.operation().plan, minecraftText: await build() } });
+  if (context.operation().plan.minecraftText === undefined) {
+    // Builders may persist authority (for example a verified player UUID).
+    // Read the latest plan only after they finish; an earlier spread loses it.
+    const changes = await build();
+    await context.update({ plan: { ...context.operation().plan, minecraftText: changes } });
+  }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
   await beforeEffects?.(plan);
   for (const change of plan) await applyMinecraftTextChange(context, change);
@@ -853,6 +857,105 @@ export function applyMinecraftStoredPlayerChange(
   configuration.playerIdentities[command.list] = players;
   configuration[command.list] = players.map((entry) => entry.name);
   return minecraftStoredConfigurationSchema.parse(configuration);
+}
+/** Recover only the historical ADD receipt-loss bug against unchanged durable
+ * intent and an already applied exact file. REMOVE lacks the removed identity
+ * in its after-image, so missing REMOVE authority remains explicitly uncertain. */
+async function recoverMinecraftPlayerReceipt(
+  context: GameLifecycleContext,
+  options: MinecraftContentOptions,
+  command: Extract<MinecraftContentCommand, { kind: 'player' }>,
+) {
+  if (context.operation().plan.minecraftPlayerChange === undefined) {
+    if (command.action !== 'add') throw new DomainError('operation_uncertain');
+    const changes = z
+      .array(textChangeSchema)
+      .length(1)
+      .parse(context.operation().plan.minecraftText);
+    const change = changes[0];
+    const path = command.list === 'operators' ? 'ops.json' : 'whitelist.json';
+    if (
+      !change ||
+      change.path !== path ||
+      sha256(change.content) !== change.afterSha256 ||
+      (await hashMinecraftRemoteFile(context, path))?.sha256 !== change.afterSha256
+    )
+      throw new DomainError('operation_uncertain');
+    const player = await verifyMinecraftPlayer(
+      command.name,
+      options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent }),
+    );
+    let entries: unknown;
+    try {
+      entries = JSON.parse(change.content);
+    } catch {
+      throw new DomainError('operation_uncertain');
+    }
+    if (!Array.isArray(entries)) throw new DomainError('operation_uncertain');
+    const matches = entries.filter(
+      (entry) => entry && entry.uuid === player.uuid && entry.name === player.name,
+    );
+    if (matches.length !== 1) throw new DomainError('operation_uncertain');
+    const entry = matches[0];
+    if (
+      command.list === 'operators' &&
+      ((command.operatorLevel !== undefined && command.operatorLevel !== entry.level) ||
+        (command.bypassesPlayerLimit !== undefined &&
+          command.bypassesPlayerLimit !== entry.bypassesPlayerLimit))
+    )
+      throw new DomainError('operation_uncertain');
+    const identity = minecraftStoredPlayerSchema.parse({
+      ...player,
+      ...(command.list === 'operators'
+        ? { level: entry.level, bypassesPlayerLimit: entry.bypassesPlayerLimit }
+        : {}),
+    });
+    const reconstructed = planMinecraftPlayerList(change.content, command.list, 'add', identity, {
+      operatorLevel: identity.level,
+      bypassesPlayerLimit: identity.bypassesPlayerLimit,
+    });
+    if (
+      reconstructed.content !== change.content ||
+      reconstructed.afterSha256 !== change.afterSha256
+    )
+      throw new DomainError('operation_uncertain');
+    await context.authorize();
+    await context.assertStopped();
+    if ((await hashMinecraftRemoteFile(context, path))?.sha256 !== change.afterSha256)
+      throw new DomainError('operation_uncertain');
+    await context.update({
+      plan: {
+        ...context.operation().plan,
+        minecraftPlayerChange: identity,
+        minecraftPlayerRecovery: {
+          path,
+          afterSha256: change.afterSha256,
+          identitySha256: minecraftDigest(identity),
+          verifiedAt: identity.verifiedAt,
+          reason: 'missing_add_receipt_confirmed_after_image',
+        },
+      },
+    });
+  }
+  const recovery = context.operation().plan.minecraftPlayerRecovery;
+  if (!recovery) return;
+  const marker = z
+    .object({
+      path: z.enum(['ops.json', 'whitelist.json']),
+      afterSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      identitySha256: z.string().regex(/^[a-f0-9]{64}$/),
+      verifiedAt: z.iso.datetime({ offset: true }),
+      reason: z.literal('missing_add_receipt_confirmed_after_image'),
+    })
+    .strict()
+    .parse(recovery);
+  if (marker.identitySha256 !== minecraftDigest(context.operation().plan.minecraftPlayerChange))
+    throw new DomainError('operation_uncertain');
+  const auditStep = stepId('player-recovery-audit', minecraftDigest(marker));
+  if (!(await completed(context, auditStep))) {
+    await context.event('minecraft.player.receipt_recovered', marker);
+    await complete(context, auditStep);
+  }
 }
 export async function configureMinecraftProvision(
   context: GameLifecycleContext,
@@ -1358,62 +1461,79 @@ async function applyPreparedContent(
       (configuration.operators.length || configuration.whitelist.length)
     )
       throw new DomainError('configuration_invalid');
-    await applyTextPlan(context, async () => {
-      if (command.kind === 'properties') {
-        const snapshot = await textSnapshot(context, 'server.properties', '');
-        const source = snapshot.content;
-        const result = editMinecraftProperties(source, command.changes, {
-          release: choice.combination.release,
-          supportedKeys: Object.keys(parseMinecraftProperties(source)),
+    if (command.kind === 'player' && context.operation().plan.minecraftText !== undefined)
+      await recoverMinecraftPlayerReceipt(context, options, command);
+    await applyTextPlan(
+      context,
+      async () => {
+        if (command.kind === 'properties') {
+          const snapshot = await textSnapshot(context, 'server.properties', '');
+          const source = snapshot.content;
+          const result = editMinecraftProperties(source, command.changes, {
+            release: choice.combination.release,
+            supportedKeys: Object.keys(parseMinecraftProperties(source)),
+          });
+          return [await plannedText(context, 'server.properties', result.content, snapshot.hash)];
+        }
+        const path = command.list === 'operators' ? 'ops.json' : 'whitelist.json';
+        const player = await verifyMinecraftPlayer(
+          command.name,
+          options.identityProvider ??
+            createMinecraftIdentityProvider({ userAgent: options.userAgent }),
+        );
+        const snapshot = await textSnapshot(context, path, '[]');
+        const currentList = JSON.parse(snapshot.content) as {
+          uuid?: string;
+          level?: number;
+          bypassesPlayerLimit?: boolean;
+        }[];
+        const currentEntry = Array.isArray(currentList)
+          ? currentList.find((entry) => entry.uuid === player.uuid)
+          : undefined;
+        const storedEntry = configuration.playerIdentities?.[command.list].find(
+          (entry) => entry.uuid === player.uuid,
+        );
+        const storedPlayer = minecraftStoredPlayerSchema.parse({
+          ...player,
+          ...(command.list === 'operators'
+            ? {
+                level: command.operatorLevel ?? storedEntry?.level ?? currentEntry?.level ?? 4,
+                bypassesPlayerLimit:
+                  command.bypassesPlayerLimit ??
+                  storedEntry?.bypassesPlayerLimit ??
+                  currentEntry?.bypassesPlayerLimit ??
+                  false,
+              }
+            : {}),
         });
-        return [await plannedText(context, 'server.properties', result.content, snapshot.hash)];
-      }
-      const path = command.list === 'operators' ? 'ops.json' : 'whitelist.json';
-      const player = await verifyMinecraftPlayer(
-        command.name,
-        options.identityProvider ??
-          createMinecraftIdentityProvider({ userAgent: options.userAgent }),
-      );
-      const snapshot = await textSnapshot(context, path, '[]');
-      const currentList = JSON.parse(snapshot.content) as {
-        uuid?: string;
-        level?: number;
-        bypassesPlayerLimit?: boolean;
-      }[];
-      const currentEntry = Array.isArray(currentList)
-        ? currentList.find((entry) => entry.uuid === player.uuid)
-        : undefined;
-      const storedEntry = configuration.playerIdentities?.[command.list].find(
-        (entry) => entry.uuid === player.uuid,
-      );
-      const storedPlayer = minecraftStoredPlayerSchema.parse({
-        ...player,
-        ...(command.list === 'operators'
-          ? {
-              level: command.operatorLevel ?? storedEntry?.level ?? currentEntry?.level ?? 4,
-              bypassesPlayerLimit:
-                command.bypassesPlayerLimit ??
-                storedEntry?.bypassesPlayerLimit ??
-                currentEntry?.bypassesPlayerLimit ??
-                false,
-            }
-          : {}),
-      });
-      await context.update({
-        plan: { ...context.operation().plan, minecraftPlayerChange: storedPlayer },
-      });
-      const result = planMinecraftPlayerList(
-        snapshot.content,
-        command.list,
-        command.action,
-        player,
-        {
-          operatorLevel: storedPlayer.level,
-          bypassesPlayerLimit: storedPlayer.bypassesPlayerLimit,
-        },
-      );
-      return [await plannedText(context, path, result.content, snapshot.hash)];
-    });
+        await context.update({
+          plan: { ...context.operation().plan, minecraftPlayerChange: storedPlayer },
+        });
+        const result = planMinecraftPlayerList(
+          snapshot.content,
+          command.list,
+          command.action,
+          player,
+          {
+            operatorLevel: storedPlayer.level,
+            bypassesPlayerLimit: storedPlayer.bypassesPlayerLimit,
+          },
+        );
+        return [await plannedText(context, path, result.content, snapshot.hash)];
+      },
+      async () => {
+        if (command.kind !== 'player') return;
+        const receipt = minecraftStoredPlayerSchema.safeParse(
+          context.operation().plan.minecraftPlayerChange,
+        );
+        if (
+          !receipt.success ||
+          (command.list === 'operators' &&
+            (receipt.data.level === undefined || receipt.data.bypassesPlayerLimit === undefined))
+        )
+          throw new DomainError('operation_uncertain');
+      },
+    );
     if (command.kind === 'properties')
       configuration.properties = { ...configuration.properties, ...command.changes };
     else {

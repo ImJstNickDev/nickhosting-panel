@@ -10,6 +10,7 @@ import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pteroda
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
+import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
@@ -456,6 +457,309 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     f.context.adapter.uploadFile = vi.fn();
     return f;
   }
+
+  async function playerChangeFixture(
+    list: 'operators' | 'whitelist',
+    action: 'add' | 'remove' = 'add',
+  ) {
+    const f = await minecraftFixture();
+    const identity = {
+      uuid: '11111111-1111-4111-8111-111111111111',
+      name: 'Player',
+      source: 'mojang' as const,
+      verifiedAt: new Date().toISOString(),
+      ...(list === 'operators' ? { level: 2, bypassesPlayerLimit: false } : {}),
+    };
+    const path = list === 'operators' ? 'ops.json' : 'whitelist.json';
+    const initial =
+      action === 'remove'
+        ? planMinecraftPlayerList('[]', list, 'add', identity, {
+            operatorLevel: 2,
+            bypassesPlayerLimit: false,
+          }).content
+        : '[]';
+    f.files.set(path, Buffer.from(initial));
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration_state: '{}',
+        configuration: JSON.stringify({
+          eula: true,
+          [list]: action === 'remove' ? ['Player'] : [],
+          playerIdentities: {
+            operators: action === 'remove' && list === 'operators' ? [identity] : [],
+            whitelist: action === 'remove' && list === 'whitelist' ? [identity] : [],
+          },
+        }),
+      })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await verifyMinecraftRestore(f.context, f.options);
+    const command = {
+      kind: 'player' as const,
+      list,
+      action,
+      name: 'Player',
+      ...(list === 'operators' ? { operatorLevel: 2, bypassesPlayerLimit: false } : {}),
+    };
+    const prepared = await prepareMinecraftContentPlan(f.f.db, f.serverId, command, {
+      ...f.options,
+      adapter: f.context.adapter,
+    });
+    f.context.update = async (patch) => {
+      const { plan, ...fields } = patch;
+      await f.f.db
+        .updateTable('server_operations')
+        .set({
+          ...fields,
+          ...(plan === undefined ? {} : { plan: JSON.stringify(plan) }),
+        })
+        .where('job_id', '=', f.operation.job_id)
+        .execute();
+      Object.assign(
+        f.operation,
+        await f.f.db
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', f.operation.job_id)
+          .executeTakeFirstOrThrow(),
+      );
+    };
+    await f.context.update({
+      plan: { ...f.operation.plan, pollCount: 9, minecraftContent: prepared },
+    });
+    const writeFile = vi.fn(f.context.adapter.writeFile);
+    f.context.adapter.writeFile = writeFile;
+    const provider = {
+      lookupName: vi.fn(async () => ({
+        id: identity.uuid.replaceAll('-', ''),
+        name: identity.name,
+      })),
+      lookupUuid: vi.fn(async () => ({
+        id: identity.uuid.replaceAll('-', ''),
+        name: identity.name,
+      })),
+    };
+    f.options.identityProvider = provider;
+    const event = vi.fn(async (messageKey: string, data: Record<string, unknown> = {}) => {
+      await f.f.db
+        .insertInto('server_events')
+        .values({
+          server_id: f.serverId,
+          job_id: f.operation.job_id,
+          actor_id: f.f.context.actorUserId,
+          subject_id: f.f.context.subjectUserId,
+          support_session_id: null,
+          message_key: messageKey,
+          data: JSON.stringify(data),
+        })
+        .execute();
+    });
+    f.context.event = event;
+    const legacy = async () => {
+      const planned = planMinecraftPlayerList(initial, list, action, identity, {
+        operatorLevel: 2,
+        bypassesPlayerLimit: false,
+      });
+      const { requiresStoppedServer: _stopped, ...text } = planned;
+      const phase = `minecraft.text.${createHash('sha256').update(path).digest('hex')}`;
+      await f.context.update({
+        plan: { ...f.operation.plan, minecraftText: [text] },
+        phase,
+        effect_state: 'confirmed',
+      });
+      f.files.set(path, Buffer.from(text.content));
+      await f.f.db
+        .insertInto('job_steps')
+        .values({ job_id: f.operation.job_id, step: phase })
+        .execute();
+      return text;
+    };
+    return { ...f, command, path, identity, provider, event, writeFile, legacy };
+  }
+
+  it.each([
+    ['operators', 'add'],
+    ['operators', 'remove'],
+    ['whitelist', 'add'],
+    ['whitelist', 'remove'],
+  ] as const)(
+    'preserves the durable %s %s identity when publishing its text plan and on retry',
+    async (list, action) => {
+      const f = await playerChangeFixture(list, action);
+      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      const plan = (
+        await f.f.db
+          .selectFrom('server_operations')
+          .select('plan')
+          .where('job_id', '=', f.operation.job_id)
+          .executeTakeFirstOrThrow()
+      ).plan;
+      expect(plan.minecraftPlayerChange).toMatchObject({
+        uuid: f.identity.uuid,
+        name: f.identity.name,
+        ...(list === 'operators' ? { level: 2, bypassesPlayerLimit: false } : {}),
+      });
+      expect(plan.minecraftText).toHaveLength(1);
+      expect(plan.pollCount).toBe(9);
+      const profile = await f.f.db
+        .selectFrom('minecraft_server_profiles')
+        .select('configuration')
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow();
+      expect(profile.configuration).toMatchObject({ [list]: action === 'add' ? ['Player'] : [] });
+      expect(f.writeFile).toHaveBeenCalledTimes(1);
+      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      expect(f.writeFile).toHaveBeenCalledTimes(1);
+      expect(f.provider.lookupName).toHaveBeenCalledTimes(1);
+      expect(f.provider.lookupUuid).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['operators', 'whitelist'] as const)(
+    'recovers only the exact already-applied %s ADD receipt without rewriting or replacing its original text plan',
+    async (list) => {
+      const f = await playerChangeFixture(list);
+      const text = await f.legacy();
+      const beforePhase = f.operation.phase;
+      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      const plan = (
+        await f.f.db
+          .selectFrom('server_operations')
+          .select('plan')
+          .where('job_id', '=', f.operation.job_id)
+          .executeTakeFirstOrThrow()
+      ).plan;
+      expect(plan.minecraftText).toEqual([text]);
+      const { verifiedAt: oldVerifiedAt, ...stableIdentity } = f.identity;
+      expect(plan.minecraftPlayerChange).toMatchObject(stableIdentity);
+      expect(
+        Date.parse((plan.minecraftPlayerChange as { verifiedAt: string }).verifiedAt),
+      ).toBeGreaterThanOrEqual(Date.parse(oldVerifiedAt));
+      expect(plan.minecraftPlayerRecovery).toMatchObject({
+        path: f.path,
+        afterSha256: text.afterSha256,
+        reason: 'missing_add_receipt_confirmed_after_image',
+      });
+      expect(f.operation.phase).toBe(beforePhase);
+      expect(f.operation.effect_state).toBe('confirmed');
+      expect(f.writeFile).not.toHaveBeenCalled();
+      expect(f.event).toHaveBeenCalledExactlyOnceWith(
+        'minecraft.player.receipt_recovered',
+        expect.objectContaining({ path: f.path, afterSha256: text.afterSha256 }),
+      );
+      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      expect(f.event).toHaveBeenCalledTimes(1);
+      expect(f.provider.lookupName).toHaveBeenCalledTimes(1);
+      expect(f.writeFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains the recovered identity across an audit outage but cannot finalize without its audit', async () => {
+    const f = await playerChangeFixture('operators');
+    const text = await f.legacy();
+    f.event.mockRejectedValueOnce(new Error('isolated audit outage'));
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
+      'isolated audit outage',
+    );
+    expect(f.operation.plan.minecraftPlayerChange).toBeDefined();
+    expect(f.operation.plan.minecraftText).toEqual([text]);
+    const profile = await f.f.db
+      .selectFrom('minecraft_server_profiles')
+      .select('configuration')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.configuration).toMatchObject({ operators: [] });
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(f.event).toHaveBeenCalledTimes(2);
+    expect(f.provider.lookupName).toHaveBeenCalledTimes(1);
+    expect(f.writeFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'reclaimed-uuid',
+    'changed-canonical-name',
+    'remote-drift',
+    'after-hash',
+    'path',
+    'privilege',
+    'malformed-receipt',
+  ] as const)(
+    'refuses missing-receipt recovery on %s without any remote write',
+    async (problem) => {
+      const f = await playerChangeFixture('operators');
+      const text = await f.legacy();
+      if (problem === 'reclaimed-uuid') {
+        const changed = { id: '22222222222242228222222222222222', name: 'Player' };
+        f.provider.lookupName.mockResolvedValue(changed);
+        f.provider.lookupUuid.mockResolvedValue(changed);
+      } else if (problem === 'changed-canonical-name') {
+        const changed = { id: f.identity.uuid.replaceAll('-', ''), name: 'RenamedPlayer' };
+        f.provider.lookupName.mockResolvedValue(changed);
+        f.provider.lookupUuid.mockResolvedValue(changed);
+      } else if (problem === 'remote-drift') f.files.set(f.path, Buffer.from('[]'));
+      else if (problem === 'after-hash') text.afterSha256 = '0'.repeat(64);
+      else if (problem === 'path') text.path = 'whitelist.json';
+      else if (problem === 'privilege') {
+        const rows = JSON.parse(text.content);
+        rows[0].level = 4;
+        text.content = `${JSON.stringify(rows, null, 2)}\n`;
+        text.afterSha256 = createHash('sha256').update(text.content).digest('hex');
+        f.files.set(f.path, Buffer.from(text.content));
+      }
+      await f.context.update({
+        plan: {
+          ...f.operation.plan,
+          minecraftText: [text],
+          ...(problem === 'malformed-receipt' ? { minecraftPlayerChange: null } : {}),
+        },
+      });
+      await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow();
+      expect(f.writeFile).not.toHaveBeenCalled();
+      expect(f.event).not.toHaveBeenCalled();
+      expect(f.operation.plan.minecraftPlayerRecovery).toBeUndefined();
+    },
+  );
+
+  it('does not infer a removed player identity from a legacy REMOVE after-image', async () => {
+    const f = await playerChangeFixture('operators', 'remove');
+    await f.legacy();
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect(f.provider.lookupName).not.toHaveBeenCalled();
+    expect(f.writeFile).not.toHaveBeenCalled();
+    expect(f.event).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    null,
+    {
+      uuid: '11111111-1111-4111-8111-111111111111',
+      name: 'Player',
+      source: 'mojang',
+      verifiedAt: '2026-10-09T00:00:00Z',
+    },
+  ])(
+    'rejects malformed or privilege-incomplete existing authority before an unapplied text write (%j)',
+    async (receipt) => {
+      const f = await playerChangeFixture('operators');
+      await f.legacy();
+      f.files.set(f.path, Buffer.from('[]'));
+      await f.f.db.deleteFrom('job_steps').where('job_id', '=', f.operation.job_id).execute();
+      await f.context.update({
+        phase: 'planned',
+        effect_state: 'none',
+        plan: { ...f.operation.plan, minecraftPlayerChange: receipt },
+      });
+      await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(f.writeFile).not.toHaveBeenCalled();
+      expect(f.provider.lookupName).not.toHaveBeenCalled();
+      expect(f.files.get(f.path)?.toString()).toBe('[]');
+    },
+  );
 
   it('refuses changed provider versions and uploaded packs before acquisition or server file effects', async () => {
     const selected = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };

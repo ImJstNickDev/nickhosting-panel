@@ -40,6 +40,15 @@ without a recorded baseline fail closed except for the exact same-pack/no-wipe
 case, which still runs the normal verification path. None of these paths promises
 rollback of changes already applied to server files.
 
+Player text plans preserve the independently verified identity receipt when the
+builder publishes the file plan. A missing historical ADD receipt can be recovered
+only from the exact persisted after-image already present remotely, a freshly
+cross-verified name/UUID, matching explicit operator privileges and identical
+canonical list bytes. Recovery records an audit event before finalization and
+does not rewrite the file or replace its original preimage. Missing REMOVE
+identity evidence remains uncertain; it cannot be inferred from a list in which
+the player is absent. Malformed identity receipts fail before file effects.
+
 ## Download and filesystem boundaries
 
 HTTPS origins are explicitly configured by Core. Each DNS result must be public; the validated address is pinned into the TLS socket with the original hostname retained for certificate validation. Redirects, userinfo, IP-literal URLs, compressed HTTP responses and unapproved origins are refused. API keys are never attached to artifact requests. Metadata has a bounded JSON budget; files stream with backpressure and exact size/hash validation. Temporary transport/429/5xx failures have a bounded retry budget, while 404, authorization and integrity failures remain failures. No fallback bypasses provider distribution policy.

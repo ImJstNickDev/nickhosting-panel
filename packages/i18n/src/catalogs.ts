@@ -3,6 +3,7 @@ export const en = {
   'minecraft.installation.verified': 'Minecraft installation verified.',
   'minecraft.content.file_verified': 'File verified: {path}.',
   'minecraft.content.verified': 'Content installation verified.',
+  'minecraft.player.receipt_recovered': 'Player change verified and recovered.',
   'minecraft.world.verified': 'World verified: {world}.',
   'games.minecraft-java.name': 'Minecraft Java',
   'games.minecraft-java.runtimes.vanilla': 'Vanilla',
@@ -116,6 +117,7 @@ export const it: Record<MessageKey, string> = {
   'minecraft.installation.verified': 'Installazione Minecraft verificata.',
   'minecraft.content.file_verified': 'File verificato: {path}.',
   'minecraft.content.verified': 'Installazione dei contenuti verificata.',
+  'minecraft.player.receipt_recovered': 'Modifica del giocatore verificata e recuperata.',
   'minecraft.world.verified': 'Mondo verificato: {world}.',
 
   'games.minecraft-java.name': 'Minecraft Java',
