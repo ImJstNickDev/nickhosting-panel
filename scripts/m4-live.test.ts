@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import type { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { canonicalMinecraftJarSha256 } from '../games/minecraft/src/generated-launcher.js';
+import { defaultGatewayDataPolicy } from '../packages/core/src/gateway-config.js';
 import {
   type PterodactylAdapter,
   PterodactylError,
@@ -18,9 +19,53 @@ import {
   type MinecraftLiveBackupJob,
   type MinecraftLiveBackupPreparation,
   minecraftBootstrapManifest,
+  minecraftLiveGatewayDataPolicy,
+  minecraftLiveProviderFailure,
   minecraftLiveReadyRoute,
   promoteMinecraftInstallationEvidence,
 } from './m4-live-scenario.js';
+
+describe('live provider diagnostics', () => {
+  it('changes fixture cadence without extending any timeout or safety bound', () => {
+    const { pollIntervalMs, probeIntervalMs, ...bounds } = minecraftLiveGatewayDataPolicy;
+    const {
+      pollIntervalMs: _poll,
+      probeIntervalMs: _probe,
+      ...defaults
+    } = defaultGatewayDataPolicy;
+    expect(bounds).toEqual(defaults);
+    expect(pollIntervalMs).toBe(5000);
+    expect(probeIntervalMs).toBe(5000);
+  });
+  it('retains bounded status/retry information without URLs, credentials or provider bodies', async () => {
+    const response = new Response('private provider body', {
+      status: 429,
+      headers: { 'Retry-After': '60', 'Set-Cookie': 'private=value' },
+    });
+    expect(
+      minecraftLiveProviderFailure(
+        response,
+        'https://private.invalid/api/application/nodes?token=private',
+      ),
+    ).toEqual({
+      status: 429,
+      scope: 'application',
+      retryAfterSeconds: 60,
+    });
+    expect(await response.text()).toBe('private provider body');
+  });
+  it.each(['999999999999', 'private header value', '-1'])(
+    'omits unbounded retry headers: %s',
+    (retry) => {
+      expect(
+        minecraftLiveProviderFailure(
+          new Response(null, { status: 503, headers: { 'Retry-After': retry } }),
+          'https://private.invalid/transfer/private-token',
+        ),
+      ).toEqual({ status: 503, scope: 'transfer' });
+    },
+  );
+});
 
 const require = createRequire(new URL('../games/minecraft/package.json', import.meta.url));
 const { ZipFile } = require('yazl') as {

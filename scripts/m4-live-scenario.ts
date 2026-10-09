@@ -26,6 +26,7 @@ import {
   validateMinecraftRuntimeMapping,
 } from '../games/minecraft/src/runtime.js';
 import { inspectMinecraftLevelDat } from '../games/minecraft/src/world.js';
+import { defaultGatewayDataPolicy } from '../packages/core/src/gateway-config.js';
 import {
   type AuthContext,
   authSessionId,
@@ -109,6 +110,24 @@ interface Scenario {
   cleanedAt?: string;
 }
 type Ledger = MinecraftLiveLedger & { scenario?: Scenario };
+/** Fixture cadence respects the observed provider request budget without caching
+ * inventory or extending any timeout, evidence age or routing lease. */
+export const minecraftLiveGatewayDataPolicy = {
+  ...defaultGatewayDataPolicy,
+  pollIntervalMs: 5000,
+  probeIntervalMs: 5000,
+};
+export function minecraftLiveProviderFailure(response: Response, input: string) {
+  const scope = /\/api\/(application|client)\//.exec(new URL(input).pathname)?.[1];
+  const retry = response.headers.get('retry-after');
+  return {
+    status: response.status,
+    scope: scope ?? 'transfer',
+    ...(retry && /^\d{1,5}$/.test(retry) && Number(retry) <= 86400
+      ? { retryAfterSeconds: Number(retry) }
+      : {}),
+  };
+}
 /** This game exists only in the isolated validation schema. It does not claim M4 features. */
 export const minecraftBootstrapManifest = gameManifestSchema.parse({
   id: 'm4-bootstrap',
@@ -549,13 +568,27 @@ function forgeArgsPath(runtime: Prepared['runtime']): string {
 }
 
 /** Read-only adapter configuration discovers the exact Wings origin; never prints its token. */
-async function configuredAdapter(plan: MinecraftLivePlan) {
+async function configuredAdapter(
+  plan: MinecraftLivePlan,
+  failure?: (details: ReturnType<typeof minecraftLiveProviderFailure>) => Promise<void>,
+) {
   const secrets = parseEnv(await readFile(plan.credentialsFile, 'utf8'));
   const shared = {
     baseURL: defined(secrets.NH_PTERODACTYL_BASE_URL),
     applicationKey: defined(secrets.NH_PTERODACTYL_APPLICATION_KEY),
     clientKey: defined(secrets.NH_PTERODACTYL_CLIENT_KEY),
     containerObserver: createContainerObserver(plan.observer.dockerSocket),
+    fetcher: async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const response = await fetch(input, init);
+      if (!response.ok && failure)
+        await failure(
+          minecraftLiveProviderFailure(
+            response,
+            input instanceof Request ? input.url : String(input),
+          ),
+        );
+      return response;
+    },
   };
   const discovery = createPterodactylAdapter(shared),
     node = await discovery.getNode(plan.nodeId);
@@ -806,13 +839,14 @@ export async function runMinecraftLiveScenario(options: {
     NH_GATEWAY_ID: scenario.gatewayId,
     NH_GATEWAY_CORE_URL: 'http://127.0.0.1',
     NH_GATEWAY_CONTROL_TOKEN: randomBytes(32).toString('base64url'),
+    NH_GATEWAY_DATA_POLICY: JSON.stringify(minecraftLiveGatewayDataPolicy),
     NH_GATEWAY_NETWORK_POLICY: JSON.stringify(plan.networkPolicy),
     NH_GATEWAY_OBSERVER: JSON.stringify(plan.observer),
     NH_GATEWAY_NODE_PROBES: JSON.stringify({
       [plan.nodeId]: { port: plan.nodeProbe.port, transport: 'tcp' },
     }),
   };
-  const raw = await configuredAdapter(plan),
+  const raw = await configuredAdapter(plan, (details) => event('provider.http-failure', details)),
     adapter = guardMinecraftLiveAdapter(raw, plan, ledger, path);
   const observer = createContainerObserver(plan.observer.dockerSocket);
   const codec = new SecretCodec({

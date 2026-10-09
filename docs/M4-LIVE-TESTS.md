@@ -183,6 +183,17 @@ same real player connected for longer than that interval before testing empty
 sleep. Failure receipts contain only bounded client-failure categories/state and
 Gateway counters, never raw error bodies or credentials.
 
+The fixture explicitly sets `NH_GATEWAY_DATA_POLICY` poll and observation intervals
+to 5,000 ms. Read-only provider headers report an Application API budget of 240
+requests/minute, and the actual allocation inventory requires four pages per
+scan. This cadence reduces fixture traffic; every validation still collects fresh
+inventory. Request/probe timeouts, route leases and all evidence-age limits retain
+their existing defaults. A slower cadence is not evidence that a failed request
+was rate-limited. The runner records only failed provider HTTP status, API scope
+and bounded numeric retry delay; it never records request URLs, tokens or bodies.
+Production deployment must budget provider requests for its actual route/node
+count. This single-server fixture does not establish production-scale throughput.
+
 The resource-refusal case reduces only the isolated database's Owner-configured
 physical host allowance, then restores it. It does not consume real host RAM or
 change node limits. It requires an immediate blocked response, no queued start
