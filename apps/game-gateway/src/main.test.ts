@@ -36,13 +36,16 @@ const configuration = {
     probeIntervalMs: 100,
   },
 };
-const snapshot = () => ({
-  gatewayId: id,
-  revision: 1,
-  issuedAt: new Date().toISOString(),
-  expiresAt: new Date(Date.now() + 3000).toISOString(),
-  routes: [],
-});
+const snapshot = () => {
+  const issued = Date.now();
+  return {
+    gatewayId: id,
+    revision: 1,
+    issuedAt: new Date(issued).toISOString(),
+    expiresAt: new Date(issued + 3000).toISOString(),
+    routes: [],
+  };
+};
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanups.splice(0).reverse()) await close();

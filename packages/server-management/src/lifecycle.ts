@@ -22,8 +22,33 @@ import { assertNoPendingUpload } from './upload-admission.js';
 type Server = Selectable<Database['managed_servers']>;
 type Operation = Selectable<Database['server_operations']>;
 type Result = 'succeeded' | 'failed' | 'waiting' | 'deferred' | 'duplicate' | 'missing';
+export interface GameLifecycleContext {
+  db: Kysely<Database>;
+  server: Server;
+  adapter: PterodactylAdapter;
+  operation: () => Operation;
+  authorize: () => Promise<void>;
+  assertStopped: () => Promise<void>;
+  update: (patch: {
+    phase?: string;
+    effect_state?: Operation['effect_state'];
+    effect_started_at?: Date | null;
+    plan?: Record<string, unknown>;
+  }) => Promise<void>;
+  effect: <T>(
+    phase: string,
+    perform: () => Promise<T>,
+    patch?: (result: T) => Record<string, unknown>,
+  ) => Promise<boolean>;
+  event: (messageKey: string, data?: Record<string, unknown>) => Promise<void>;
+  backup: () => Promise<boolean>;
+}
 export interface LifecycleOptions {
   adapter: PterodactylAdapter;
+  /** Game hooks run under the same pinned server lock and durable effect journal. */
+  configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  processGameContent?: (context: GameLifecycleContext) => Promise<boolean>;
+  verifyGameRestore?: (context: GameLifecycleContext) => Promise<boolean>;
   env?: Environment;
   /** Rechecks current actor, subject, support lifetime and project access before new effects. */
   authorizeEffect: (jobId: string, serverId: string, connection: Kysely<Database>) => Promise<void>;
@@ -540,7 +565,11 @@ export async function processServerOperation(
         )
           throw new DomainError('operation_uncertain');
       });
-      if (['configure', 'reinstall', 'wipe', 'restore', 'delete'].includes(operation.action))
+      if (
+        ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
+          operation.action,
+        )
+      )
         await requireQuiescentReservation();
       const attempts = z
         .record(z.string(), z.number().int().nonnegative())
@@ -572,12 +601,20 @@ export async function processServerOperation(
         .execute();
       await event('servers.operation.effect_prepared', { phase });
       await options.checkpoint?.('prepared', operation);
-      if (operation.plan.gatewayAutomation !== undefined) {
+      const minecraftProvision =
+        operation.action === 'provision' &&
+        (await db
+          .selectFrom('minecraft_server_profiles')
+          .select('server_id')
+          .where('server_id', '=', server.id)
+          .executeTakeFirst()) !== undefined;
+      if (operation.plan.gatewayAutomation !== undefined || minecraftProvision) {
         // Preparing durable intent and provider identity checks can take time.
         // Do not carry an earlier automation grant across that interval. A
         // failure here proves perform() was never called, unlike a lost reply.
         try {
-          assertGatewaySleepFence(operation.plan, nowOf(options));
+          if (operation.plan.gatewayAutomation !== undefined)
+            assertGatewaySleepFence(operation.plan, nowOf(options));
           await options.authorizeEffect(jobId, server.id, db);
         } catch (error) {
           await update({
@@ -723,6 +760,22 @@ export async function processServerOperation(
       return true;
     };
 
+    const gameContext = (): GameLifecycleContext => ({
+      db,
+      server,
+      adapter: options.adapter,
+      operation: () => operation,
+      update,
+      effect,
+      event,
+      backup,
+      authorize: () => options.authorizeEffect(jobId, server.id, db),
+      assertStopped: async () => {
+        await requireQuiescentReservation();
+        if (!options.confirmAlreadyStopped || !(await options.confirmAlreadyStopped(server.id, db)))
+          throw new DomainError('operation_uncertain');
+      },
+    });
     try {
       const command = parseCommand(job.command);
       if (
@@ -832,6 +885,11 @@ export async function processServerOperation(
           return wait('power_confirmation');
         }
         if (current.current_state !== 'offline') return wait('unexpected_provision_power_state');
+        if (
+          options.configureGameProvision &&
+          !(await options.configureGameProvision(gameContext()))
+        )
+          return wait('game_configuration');
         if (operation.plan.autoStart === true) {
           if (!options.reserveStart) throw new DomainError('configuration_invalid');
           if (typeof operation.plan.reservationCreated !== 'boolean') {
@@ -1094,6 +1152,12 @@ export async function processServerOperation(
       }
       await requireQuiescentReservation();
       if (!(await offline())) return wait('offline_confirmation');
+      if (operation.action === 'minecraft-content') {
+        if (!options.processGameContent) throw new DomainError('configuration_invalid');
+        if (!(await options.processGameContent(gameContext())))
+          return wait('game_content_confirmation');
+        return finish(true);
+      }
       if (operation.plan.backupBefore === true && operation.plan.backupComplete !== true) {
         if (!(await backup())) return wait('backup_confirmation');
       }
@@ -1163,6 +1227,31 @@ export async function processServerOperation(
         );
         return wait('configuration_confirmation');
       }
+      if (
+        ['wipe', 'reinstall'].includes(operation.action) &&
+        operation.plan.minecraftConfigurationInvalidated !== true
+      ) {
+        const invalidated = await db
+          .updateTable('minecraft_server_profiles')
+          .set({
+            installed: false,
+            configuration_state: JSON.stringify({ status: 'pending', jobId: operation.job_id }),
+            updated_at: nowOf(options),
+          })
+          .where('server_id', '=', server.id)
+          .returning('server_id')
+          .executeTakeFirst();
+        if (invalidated)
+          await update({
+            plan: { ...operation.plan, minecraftConfigurationInvalidated: true },
+          });
+      }
+      if (['wipe', 'reinstall', 'restore'].includes(operation.action))
+        await db
+          .updateTable('minecraft_server_profiles')
+          .set({ installed: false, updated_at: nowOf(options) })
+          .where('server_id', '=', server.id)
+          .execute();
       if (operation.action === 'wipe' && operation.plan.wipeComplete !== true) {
         if (!Array.isArray(operation.plan.wipeFiles)) {
           const entries = await options.adapter.listFiles(server.pterodactyl_identifier ?? '');
@@ -1201,7 +1290,9 @@ export async function processServerOperation(
         await update({ phase: 'wipe_complete', plan: { ...operation.plan, wipeComplete: true } });
       }
       if (operation.action === 'reinstall' || operation.action === 'wipe') {
-        if (operation.phase !== 'reinstall') {
+        // Game configuration may add durable phases after the installer. Never
+        // interpret those phases as permission to run the installer again.
+        if (operation.plan.installationEffectPrepared !== true) {
           if (!options.reserveInstallation) throw new DomainError('configuration_invalid');
           await options.reserveInstallation(server.id, jobId, db);
           if (operation.plan.previousInstallationState === undefined)
@@ -1241,6 +1332,11 @@ export async function processServerOperation(
             .set({ installation_state: 'installed' })
             .where('id', '=', server.id)
             .execute();
+          if (
+            options.configureGameProvision &&
+            !(await options.configureGameProvision(gameContext()))
+          )
+            return wait('game_configuration');
           return finish(true, true);
         }
         return wait('installation');
@@ -1317,6 +1413,12 @@ export async function processServerOperation(
             },
           },
         });
+        if (
+          evidence.event === 'server:backup.restore-complete' &&
+          options.verifyGameRestore &&
+          !(await options.verifyGameRestore(gameContext()))
+        )
+          return wait('game_restore_verification');
         return finish(
           evidence.event === 'server:backup.restore-complete',
           true,

@@ -4,6 +4,7 @@ import { type Database, type GatewayServerState, recordAudit } from '@nickhostin
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
+import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, enqueueLockedServerOperation, parse } from './registry.js';
 
@@ -93,10 +94,12 @@ export function estimateGatewayStartup(
 async function rows(db: DB, serverId: string) {
   parse(z.uuid(), serverId);
   const server = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('id', '=', serverId)
-    .where('deleted_at', 'is', null)
+    .selectFrom('managed_servers as server')
+    .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+    .selectAll('server')
+    .select(['mapping.game_id', 'mapping.runtime_id'])
+    .where('server.id', '=', serverId)
+    .where('server.deleted_at', 'is', null)
     .executeTakeFirst();
   const state = await db
     .selectFrom('gateway_server_states')
@@ -172,6 +175,17 @@ export async function getGatewayState(
   options: GatewayOrchestrationOptions = {},
 ) {
   const { server, state } = await rows(db, serverId);
+  if (
+    state.enabled &&
+    (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
+  )
+    await requireMinecraftGatewayProtocol(
+      db,
+      serverId,
+      { handlerId: state.protocol_id, gameVersion: state.game_version },
+      options.env,
+      nowOf(options),
+    );
   return publicState(db, server, state, nowOf(options));
 }
 
@@ -192,6 +206,14 @@ export async function setGatewayPolicy(
     if (!server.pterodactyl_uuid || server.installation_state !== 'installed')
       throw new DomainError('conflict');
     const now = nowOf(options);
+    if (value.enabled)
+      await requireMinecraftGatewayProtocol(
+        tx,
+        serverId,
+        { handlerId: value.protocolId, gameVersion: value.gameVersion },
+        options.env,
+        now,
+      );
     const mode = !value.enabled && value.mode === 'auto' ? 'manually_stopped' : value.mode;
     const intent =
       mode === 'auto'
@@ -307,6 +329,17 @@ export async function requestGatewayWake(
     const now = nowOf(options);
     if (value.generation !== state.generation) throw new DomainError('conflict');
     if (
+      state.enabled &&
+      (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
+    )
+      await requireMinecraftGatewayProtocol(
+        tx,
+        serverId,
+        { handlerId: state.protocol_id, gameVersion: state.game_version },
+        options.env,
+        now,
+      );
+    if (
       value.intent === 'status' ||
       !state.enabled ||
       ['manually_stopped', 'maintenance'].includes(server.intent) ||
@@ -412,6 +445,17 @@ export async function reportGatewayObservation(
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options),
       observed = new Date(value.observedAt);
+    if (
+      state.enabled &&
+      (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
+    )
+      await requireMinecraftGatewayProtocol(
+        tx,
+        serverId,
+        { handlerId: state.protocol_id, gameVersion: state.game_version },
+        options.env,
+        now,
+      );
     if (value.quiescenceUntil) assertQuiescenceDeadline(value, now);
     if (value.generation !== state.generation || (value.wakeJobId ?? null) !== state.wake_job_id)
       throw new DomainError('conflict');

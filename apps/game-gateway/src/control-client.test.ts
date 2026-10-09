@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createGatewayControlClient } from './control-client.js';
+import { createGatewayControlClient, GatewayRouteRevisionStaleError } from './control-client.js';
 
 const gatewayId = randomUUID();
 const token = 'a'.repeat(43);
@@ -22,6 +22,92 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it.each(['context', 'proof-read', 'proof-write'])(
+    'recognizes only authenticated explicit revision preconditions for %s',
+    async (action) => {
+      const client = createGatewayControlClient({
+        ...settings,
+        fetcher: vi.fn(async () =>
+          Response.json(
+            {
+              error: {
+                code: 'conflict',
+                messageKey: 'errors.conflict',
+                status: 412,
+                message: 'The requested state has changed.',
+              },
+            },
+            { status: 412 },
+          ),
+        ),
+      });
+      await expect(
+        client.requestJson(action, {
+          routeId: randomUUID(),
+          routeRevision: 1,
+          ...(action === 'proof-write' ? { proof: {} } : {}),
+        }),
+      ).rejects.toBeInstanceOf(GatewayRouteRevisionStaleError);
+    },
+  );
+  it.each([
+    {
+      action: 'context',
+      status: 409,
+      body: '{"error":{"code":"conflict","messageKey":"errors.conflict"}}',
+    },
+    { action: 'context', status: 412, body: 'not JSON' },
+    { action: 'context', status: 412, body: '{}' },
+    {
+      action: 'context',
+      status: 412,
+      body: '{"error":{"code":"provenance_mismatch","messageKey":"errors.provenance_mismatch"}}',
+    },
+    {
+      action: 'snapshot',
+      status: 412,
+      body: '{"error":{"code":"conflict","messageKey":"errors.conflict"}}',
+    },
+    {
+      action: 'wake',
+      status: 412,
+      body: '{"error":{"code":"conflict","messageKey":"errors.conflict"}}',
+    },
+    {
+      action: 'inventory',
+      status: 412,
+      body: '{"error":{"code":"conflict","messageKey":"errors.conflict"}}',
+    },
+  ])(
+    'does not classify unrelated or malformed errors as stale: $action/$status/$body',
+    async ({ action, status, body }) => {
+      const client = createGatewayControlClient({
+        ...settings,
+        fetcher: vi.fn(async () => new Response(body, { status })),
+      });
+      await expect(
+        client.requestJson(action, { routeId: randomUUID(), routeRevision: 1 }),
+      ).rejects.toThrow(/^integration_unavailable$/);
+    },
+  );
+  it('requires an explicit revision and bounds even a valid 412 error body', async () => {
+    const error = { error: { code: 'conflict', messageKey: 'errors.conflict' } };
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: vi.fn(async () => Response.json(error, { status: 412 })),
+    });
+    await expect(client.requestJson('context', { routeId: randomUUID() })).rejects.toThrow(
+      /^integration_unavailable$/,
+    );
+    const bounded = createGatewayControlClient({
+      ...settings,
+      maxResponseBytes: 20,
+      fetcher: vi.fn(async () => Response.json(error, { status: 412 })),
+    });
+    await expect(
+      bounded.requestJson('context', { routeId: randomUUID(), routeRevision: 1 }),
+    ).rejects.toThrow(/^integration_unavailable$/);
+  });
   it('validates authenticated snapshot, wake and observation contracts with redirect refusal', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

@@ -44,7 +44,9 @@ export function registerGatewayRoutes(
   const route = async (input: unknown) => {
     const value = routeRequest.safeParse(input);
     if (!value.success) throw new DomainError('validation_failed');
-    return requireGatewayRoute(db, value.data.routeId, value.data.routeRevision, env);
+    return requireGatewayRoute(db, value.data.routeId, value.data.routeRevision, env, {
+      revisionPrecondition: true,
+    });
   };
   app.use('/internal/gateway/*', async (c, next) => {
     // Browser sessions/support tokens are never service authentication. Constant
@@ -275,7 +277,7 @@ export function registerGatewayRoutes(
   );
   app.get('/v1/servers/:id/gateway', async (c) => {
     await authorizeServer(db, await options.principal(c), c.req.param('id'), 'server:read');
-    return c.json(await getGatewayState(db, c.req.param('id')));
+    return c.json(await getGatewayState(db, c.req.param('id'), { env }));
   });
   app.put('/v1/servers/:id/gateway', async (c) =>
     c.json(

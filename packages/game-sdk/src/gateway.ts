@@ -26,6 +26,23 @@ export const gatewayEndpointSchema = z
   .strict();
 export type GatewayEndpoint = z.infer<typeof gatewayEndpointSchema>;
 
+/** Core-minted, service-only metadata. Registry availability alone cannot mint this proof. */
+export const gatewayMinecraftProtocolSchema = z
+  .object({
+    release: z.string().min(1).max(128),
+    protocolId: z.number().int().nonnegative().max(2147483647),
+    family: z.literal('netty'),
+    transfer: z.boolean(),
+    acceptsTransfers: z.literal(false),
+    choiceId: z.uuid(),
+    choiceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    evidenceRunId: z.uuid(),
+    evidenceExpiresAt: timestamp,
+  })
+  .strict()
+  .refine((value) => !value.transfer || (value.protocolId >= 766 && value.protocolId < 1073741824));
+export type GatewayMinecraftProtocol = z.infer<typeof gatewayMinecraftProtocolSchema>;
+
 export const gatewayRouteSchema = z
   .object({
     id: z.uuid(),
@@ -49,13 +66,25 @@ export const gatewayRouteSchema = z
         handlerId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
         gameVersion: z.string().min(1).max(128),
         role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+        minecraft: gatewayMinecraftProtocolSchema.optional(),
       })
       .strict()
       .optional(),
     mode: gatewayModeSchema,
     locale: z.enum(['en', 'it']),
   })
-  .strict();
+  .strict()
+  .refine((route) => {
+    const minecraft = route.protocol?.minecraft;
+    if (route.protocol?.handlerId === 'minecraft-java')
+      return (
+        !!minecraft &&
+        minecraft.release === route.protocol.gameVersion &&
+        route.protocol.role === 'game' &&
+        route.public.transport === 'tcp'
+      );
+    return minecraft === undefined;
+  });
 export type GatewayRoute = z.infer<typeof gatewayRouteSchema>;
 
 export const gatewaySnapshotSchema = z
@@ -138,6 +167,16 @@ export interface GatewayProtocolContext {
 }
 export type GatewayIntent = { kind: 'need-more' | 'status' | 'ignore' | 'join' | 'unsupported' };
 
+/** A bounded offline TCP conversation. State belongs to ONE connection. The
+ * data plane passes only unconsumed bytes and enforces lifetime/byte limits. */
+export interface GatewayProtocolSession {
+  classify(input: Uint8Array): {
+    kind: 'need-more' | 'continue' | 'status' | 'join' | 'reject' | 'unsupported';
+    consumedBytes: number;
+  };
+  response(state: GatewayMode): { bytes?: Uint8Array; close: boolean };
+}
+
 /** Trusted game code. Implementations must distinguish real protocol readiness
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayProtocolAdapter {
@@ -145,6 +184,9 @@ export interface GatewayProtocolAdapter {
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
   response(context: GatewayProtocolContext, state: GatewayMode): Uint8Array | undefined;
+  /** Optional stateful TCP status/ping dialogue; old datagram/fixture adapters
+   * retain the stateless classify/response contract. Never used when online. */
+  createSession?(context: GatewayProtocolContext): GatewayProtocolSession;
   probeReadiness(context: GatewayProtocolContext): Promise<{ ready: boolean }>;
   probeIdle?(context: GatewayProtocolContext): Promise<{ idle: boolean; playerCount?: number }>;
 }

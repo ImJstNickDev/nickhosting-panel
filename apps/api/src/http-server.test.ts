@@ -82,19 +82,22 @@ function client(
 }
 
 describe('Node HTTP request deadlines', () => {
-  it('lets an actively progressing binary upload exceed the ordinary total-body deadline', async () => {
-    const { server, port } = await listen(collect);
-    const { outgoing, result } = client(port, upload);
-    for (let i = 0; i < 6; i++) {
-      outgoing.write(Buffer.from([i]));
-      await delay(40);
-    }
-    outgoing.end();
-    expect(await result).toEqual({ status: 200, body: '6' });
-    expect(server.requestTimeout).toBe(0);
-    expect(server.headersTimeout).toBe(80);
-    expect(server.timeout).toBe(300);
-  });
+  it.each([upload, '/v1/minecraft/sources/a64e1f2c-99bb-4ab6-8812-382196f03eba/upload'])(
+    'lets an actively progressing binary upload exceed the ordinary deadline at %s',
+    async (path) => {
+      const { server, port } = await listen(collect);
+      const { outgoing, result } = client(port, path);
+      for (let i = 0; i < 6; i++) {
+        outgoing.write(Buffer.from([i]));
+        await delay(40);
+      }
+      outgoing.end();
+      expect(await result).toEqual({ status: 200, body: '6' });
+      expect(server.requestTimeout).toBe(0);
+      expect(server.headersTimeout).toBe(80);
+      expect(server.timeout).toBe(300);
+    },
+  );
 
   it('closes a stalled upload and aborts the backend request signal', async () => {
     let aborted = false;
@@ -125,6 +128,9 @@ describe('Node HTTP request deadlines', () => {
 
   it.each([
     ['POST', upload],
+    ['PUT', '/v1/minecraft/sources/not-a-uuid/upload'],
+    ['POST', '/v1/minecraft/sources/a64e1f2c-99bb-4ab6-8812-382196f03eba/upload'],
+    ['PUT', '/v1/minecraft/sources/a64e1f2c-99bb-4ab6-8812-382196f03eba/upload/extra'],
     ['PUT', '/v1/servers/a64e1f2c-99bb-4ab6-8812-382196f03eba/files'],
     ['PUT', '/v1/servers/not-a-uuid/files/upload'],
     ['PUT', '/v1/servers/a64e1f2c-99bb-4ab6-8812-382196f03eba/files/upload/extra'],

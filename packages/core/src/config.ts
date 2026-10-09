@@ -87,6 +87,28 @@ export const platformConfigSchema = z
     dnsBaseDomain: z.string().min(1).max(253).optional(),
     dnsTarget: z.string().min(1).max(253).optional(),
     staticGameHostname: z.string().min(1).max(253).optional(),
+    minecraftMetadataUserAgent: z
+      .string()
+      .min(10)
+      .max(256)
+      .refine((value) => !/[\r\n]/.test(value))
+      .optional(),
+    minecraftSourceRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    minecraftSourceGlobalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    minecraftSourceUserBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    minecraftSourceConcurrent: z.number().int().min(1).max(100),
+    minecraftSourceUserConcurrent: z.number().int().min(1).max(20),
+    minecraftSourceFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    minecraftSourceFreePercent: z.number().min(0).max(95),
+    minecraftContentRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    minecraftDownloadOrigins: z.array(origin(['https:'])).max(100),
+    minecraftProtocolSource: z
+      .object({
+        commit: z.string().regex(/^[a-f0-9]{40}$/),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
     gatewayDiagnosticsSocket: z
       .string()
       .startsWith('/')
@@ -135,6 +157,19 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   gatewayLeaseSeconds: 15,
   gatewayNodeProbes: {},
   gatewayDataPolicy: defaultGatewayDataPolicy,
+  minecraftContentRoot: './mountdata/minecraft-content',
+  minecraftSourceRoot: './mountdata/minecraft-sources',
+  minecraftSourceGlobalBytes: 20 * 1024 ** 3,
+  minecraftSourceUserBytes: 5 * 1024 ** 3,
+  minecraftSourceConcurrent: 4,
+  minecraftSourceUserConcurrent: 2,
+  minecraftSourceFreeBytes: 512 * 1024 ** 2,
+  minecraftSourceFreePercent: 10,
+  minecraftDownloadOrigins: [
+    'https://cdn.modrinth.com',
+    'https://edge.forgecdn.net',
+    'https://mediafilez.forgecdn.net',
+  ],
 });
 
 export const configEnvironmentKeys = {
@@ -174,6 +209,17 @@ export const configEnvironmentKeys = {
   dnsBaseDomain: 'NH_DNS_BASE_DOMAIN',
   dnsTarget: 'NH_DNS_TARGET',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
+  minecraftMetadataUserAgent: 'NH_MINECRAFT_METADATA_USER_AGENT',
+  minecraftContentRoot: 'NH_MINECRAFT_CONTENT_ROOT',
+  minecraftSourceRoot: 'NH_MINECRAFT_SOURCE_ROOT',
+  minecraftSourceGlobalBytes: 'NH_MINECRAFT_SOURCE_GLOBAL_BYTES',
+  minecraftSourceUserBytes: 'NH_MINECRAFT_SOURCE_USER_BYTES',
+  minecraftSourceConcurrent: 'NH_MINECRAFT_SOURCE_CONCURRENT',
+  minecraftSourceUserConcurrent: 'NH_MINECRAFT_SOURCE_USER_CONCURRENT',
+  minecraftSourceFreeBytes: 'NH_MINECRAFT_SOURCE_FREE_BYTES',
+  minecraftSourceFreePercent: 'NH_MINECRAFT_SOURCE_FREE_PERCENT',
+  minecraftDownloadOrigins: 'NH_MINECRAFT_DOWNLOAD_ORIGINS',
+  minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
   gatewayEnabled: 'NH_GATEWAY_ENABLED',
   gatewayId: 'NH_GATEWAY_ID',
@@ -200,6 +246,12 @@ const numericKeys = new Set<PlatformConfigKey>([
   'observationMaxAgeSeconds',
   'sftpCredentialTtlSeconds',
   'gatewayLeaseSeconds',
+  'minecraftSourceGlobalBytes',
+  'minecraftSourceUserBytes',
+  'minecraftSourceConcurrent',
+  'minecraftSourceUserConcurrent',
+  'minecraftSourceFreeBytes',
+  'minecraftSourceFreePercent',
 ]);
 
 function invalid(fields: string[]): never {
@@ -240,6 +292,8 @@ export function resolveConfig(
         'gatewayObserver',
         'gatewayNodeProbes',
         'gatewayDataPolicy',
+        'minecraftDownloadOrigins',
+        'minecraftProtocolSource',
       ].includes(key)
     ) {
       try {

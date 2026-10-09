@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M2 merged; M3 Gateway and sleep/wake acceptance passed; PR #19 awaits Owner/ChatGPT review. See [M3 validation](docs/M3-VALIDATION.md). No production deployment is authorized.
+**Status:** M3 merged with explicit Owner authorization; M4 Minecraft acceptance passed and PR #20 awaits Owner/ChatGPT review. See [M4 validation](docs/M4-VALIDATION.md). No production deployment is authorized.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
@@ -10,7 +10,7 @@
 
 **Public website:** `nickhost.ing` — separate existing repository, out of scope.
 
-M0 governance and M1 are merged. M1 adds executable Hono API/worker foundations, PostgreSQL migrations, durable jobs, configuration and identity contracts with isolated integration tests. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`docs/M1-API.md`](docs/M1-API.md). The complete graphical frontend remains M6 work. **No pre-existing server, DNS record or infrastructure configuration has been changed.** The separately approved, project-owned PostgreSQL/Redis/SFTPGo test services are isolated from production. See the M2 validation record for current controlled-test evidence.
+M0 governance and M1 are merged. M1 adds executable Hono API/worker foundations, PostgreSQL migrations, durable jobs, configuration and identity contracts with isolated integration tests. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`docs/M1-API.md`](docs/M1-API.md). The complete graphical frontend and common platform readiness belong to M5. **No pre-existing server, DNS record or infrastructure configuration has been changed.** The separately approved, project-owned PostgreSQL/Redis/SFTPGo test services are isolated from production. See the M2 validation record for current controlled-test evidence.
 
 ## Read in this order
 
@@ -38,8 +38,8 @@ or public production listener is included in this milestone.
 - Only **NickHosting-managed** game servers traverse that gateway; Owner-created Pterodactyl servers remain direct and untouched.
 - Invited users can create many stopped servers within persistent-storage policy; RAM/CPU are charged to *starting/running/stopping* servers.
 - Separate game integrations with runtime profiles, configurable Pterodactyl nest/egg mappings, protocol handlers, wizards, sleep/wake and management screens.
-- First-class Minecraft Java and Satisfactory support before first full user-facing release.
-- Complete frontend **only in M6**, implemented and reviewed using real screenshots, not a throwaway MVP.
+- Minecraft Vanilla is the first verified integration for the M5 WebPanel; Satisfactory and further game/runtime certifications belong to M6 and do not block M5.
+- Complete frontend and common platform readiness **in M5**, implemented and reviewed using real screenshots, not a throwaway MVP.
 - Every milestone M0–M6 concludes with an open GitHub PR; Owner/reviewer performs review before merge.
 
 ## Public hostnames
@@ -61,3 +61,13 @@ Project docs are the source of truth; update the relevant documents and ADRs whe
 The current M2 correction round is documented in [`docs/M2-REVIEW-REVISIONS.md`](docs/M2-REVIEW-REVISIONS.md).
 The final Wings loopback compatibility correction and M3 collision gate are
 documented in [`docs/M2-LOOPBACK-REVIEW.md`](docs/M2-LOOPBACK-REVIEW.md).
+
+M4 Minecraft backend work is tracked in [`docs/M4-VALIDATION.md`](docs/M4-VALIDATION.md).
+Its [API contracts](docs/M4-API.md), [Owner-only protocol evidence](docs/M4-PROTOCOL.md),
+[runtime resolution](docs/M4-RUNTIMES.md) and [content research/licensing](docs/M4-CONTENT-RESEARCH.md)
+separate implementation, fixtures and real-server verification. The graphical app
+belongs to M5; a listed upstream version is not by itself a compatibility claim.
+
+## Approved next milestones
+
+The Owner-approved 2026-10-09 [ADR 0008 amendment](docs/decisions/0008-complete-frontend.md) moves the complete WebPanel and common API integration to **M5**, followed by **M6 Satisfactory and game integration expansion**. [M5 common integration acceptance](docs/M5-COMMON-INTEGRATION.md) records actual backend gaps. Future branches are `milestone/m5-webpanel` and `milestone/m6-game-integrations`; neither is started by this M4 closing pass. Exactly M0–M6 remain. The [SFTPGo production-release gate #18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18) remains open independently of milestone implementation.

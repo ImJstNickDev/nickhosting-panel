@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
-import { type GatewayRoute, gatewaySnapshotSchema } from '@nickhosting/game-sdk';
+import {
+  type GatewayMinecraftProtocol,
+  type GatewayRoute,
+  gatewayMinecraftProtocolSchema,
+  gatewaySnapshotSchema,
+} from '@nickhosting/game-sdk';
+import { minecraftDigest } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
@@ -12,7 +18,96 @@ import {
 } from './allocation-pool.js';
 import { getGatewayState } from './gateway-orchestration.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { authorizeServer, parse } from './registry.js';
+
+/** Existing managed servers retain verified management when creation availability is disabled.
+ * Experimental testing is always checked against the actual server Owner, never the API caller. */
+export async function requireMinecraftGatewayProtocol(
+  db: DB,
+  serverId: string,
+  registration: { handlerId: string; gameVersion: string },
+  env: Environment = {},
+  now = new Date(),
+): Promise<GatewayMinecraftProtocol | undefined> {
+  const server = await db
+    .selectFrom('managed_servers as server')
+    .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+    .selectAll('server')
+    .select(['mapping.game_id', 'mapping.runtime_id'])
+    .where('server.id', '=', serverId)
+    .where('server.deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (!server) throw new DomainError('not_found');
+  if (server.game_id !== 'minecraft-java') {
+    if (registration.handlerId === 'minecraft-java') throw new DomainError('configuration_invalid');
+    return undefined;
+  }
+  const unavailable = () =>
+    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_evidence' });
+  const profile = await db
+    .selectFrom('minecraft_server_profiles')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  if (!profile?.installed || !server.pterodactyl_uuid || server.installation_state !== 'installed')
+    throw unavailable();
+  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
+  if (
+    choice.row.mapping_id !== server.mapping_id ||
+    choice.mapping.game_id !== server.game_id ||
+    choice.mapping.runtime_id !== server.runtime_id ||
+    choice.combination.profile !== server.runtime_id ||
+    registration.handlerId !== 'minecraft-java' ||
+    registration.gameVersion !== choice.combination.release ||
+    choice.combination.family !== 'netty' ||
+    choice.combination.protocolId === null
+  )
+    throw unavailable();
+  const rollout = await db
+    .selectFrom('game_rollouts')
+    .selectAll()
+    .where('integration_id', '=', 'minecraft-java')
+    .executeTakeFirst();
+  if (!rollout) throw unavailable();
+  if (choice.support !== 'verified') {
+    const owner = await db
+      .selectFrom('user')
+      .select(['id', 'role'])
+      .where('id', '=', server.owner_id)
+      .executeTakeFirst();
+    if (
+      choice.support !== 'experimental' ||
+      rollout.state !== 'private-testing' ||
+      !owner ||
+      (owner.role !== 'owner' && !rollout.allowlist.includes(owner.id))
+    )
+      throw unavailable();
+  }
+  const matching = choice.evidence
+    .filter(
+      (report) =>
+        report.combinationDigest === minecraftDigest(choice.combination) &&
+        report.choiceDigest === choice.row.identity_digest &&
+        report.mappingDigest === choice.mappingDigest &&
+        Date.parse(report.recordedAt) <= now.getTime() &&
+        now.getTime() - Date.parse(report.recordedAt) < 180 * 86400000,
+    )
+    .sort((a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt));
+  const report = matching[0];
+  if (!report || (matching[1] && matching[1].recordedAt === report.recordedAt)) throw unavailable();
+  return gatewayMinecraftProtocolSchema.parse({
+    release: choice.combination.release,
+    protocolId: choice.combination.protocolId,
+    family: 'netty',
+    transfer: 'transfer' in choice.combination && choice.combination.transfer === true,
+    acceptsTransfers: false,
+    choiceId: choice.row.id,
+    choiceDigest: choice.row.identity_digest,
+    evidenceRunId: report.runId,
+    evidenceExpiresAt: new Date(Date.parse(report.recordedAt) + 180 * 86400000).toISOString(),
+  });
+}
 
 const routeInput = z
   .object({
@@ -67,7 +162,15 @@ export async function setGatewayRoute(
       server.active_operation_id
     )
       throw new DomainError('conflict');
-    await getGatewayState(tx, server.id);
+    if (value.enabled) {
+      const state = await getGatewayState(tx, server.id, { env });
+      await requireMinecraftGatewayProtocol(
+        tx,
+        server.id,
+        { handlerId: state.protocolId, gameVersion: state.gameVersion },
+        env,
+      );
+    }
     const node = await tx
       .selectFrom('managed_nodes')
       .selectAll()
@@ -172,12 +275,16 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
     const rows = await tx
       .selectFrom('gateway_routes as route')
       .innerJoin('managed_servers as server', 'server.id', 'route.server_id')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+      .leftJoin('gateway_server_states as policy', 'policy.server_id', 'server.id')
       .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
       .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
       .innerJoin('user', 'user.id', 'server.owner_id')
       .selectAll('route')
       .select([
         'server.node_id',
+        'mapping.game_id',
+        'policy.protocol_id as stored_handler_id',
         'allocation.address',
         'allocation.backend_address',
         'allocation.port',
@@ -196,7 +303,28 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
     if (rows.length > 10000) throw new DomainError('configuration_invalid');
     const routes: GatewayRoute[] = [];
     for (const row of rows) {
-      const state = await getGatewayState(tx, row.server_id);
+      let state: Awaited<ReturnType<typeof getGatewayState>>;
+      let minecraft: GatewayMinecraftProtocol | undefined;
+      try {
+        state = await getGatewayState(tx, row.server_id, { env });
+        if (row.game_id === 'minecraft-java') {
+          minecraft = await requireMinecraftGatewayProtocol(
+            tx,
+            row.server_id,
+            { handlerId: state.protocolId, gameVersion: state.gameVersion },
+            env,
+            new Date(now),
+          );
+          if (row.transport !== 'tcp' || row.role !== 'game') continue;
+        }
+      } catch (error) {
+        if (
+          (row.game_id === 'minecraft-java' || row.stored_handler_id === 'minecraft-java') &&
+          (error instanceof DomainError || error instanceof z.ZodError)
+        )
+          continue;
+        throw error;
+      }
       const payload = {
         id: row.id,
         serverId: row.server_id,
@@ -207,7 +335,12 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         ...(state.wakeJobId ? { wakeJobId: state.wakeJobId } : {}),
         public: { address: row.public_address, port: row.public_port, transport: row.transport },
         backend: { allocationAddress: row.address, address: row.backend_address, port: row.port },
-        protocol: { handlerId: state.protocolId, gameVersion: state.gameVersion, role: row.role },
+        protocol: {
+          handlerId: state.protocolId,
+          gameVersion: state.gameVersion,
+          role: row.role,
+          ...(minecraft ? { minecraft } : {}),
+        },
         mode: state.state,
         locale: row.locale === 'it' ? ('it' as const) : ('en' as const),
       };
@@ -249,7 +382,16 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       gatewayId,
       revision,
       issuedAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + config.gatewayLeaseSeconds * 1000).toISOString(),
+      expiresAt: new Date(
+        Math.min(
+          now + config.gatewayLeaseSeconds * 1000,
+          ...routes.map((route) =>
+            route.protocol?.minecraft
+              ? Date.parse(route.protocol.minecraft.evidenceExpiresAt)
+              : Number.POSITIVE_INFINITY,
+          ),
+        ),
+      ).toISOString(),
       routes,
     });
   });
@@ -259,11 +401,16 @@ export async function requireGatewayRoute(
   routeId: string,
   revision: number | undefined,
   env: Environment = {},
+  options: { revisionPrecondition?: boolean } = {},
 ) {
   const snapshot = await getGatewaySnapshot(db, env),
     route = snapshot.routes.find((row) => row.id === routeId);
   if (!route) throw new DomainError('not_found');
-  if (revision !== undefined && route.revision !== revision) throw new DomainError('conflict');
+  // A supplied route revision is an authenticated HTTP precondition. Keep this
+  // distinguishable from unknown topology/ownership failures so Gateway can
+  // fetch and fully validate a fresh snapshot within its existing lease.
+  if (revision !== undefined && route.revision !== revision)
+    throw new DomainError('conflict', options.revisionPrecondition ? 412 : 409);
   return route;
 }
 export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {

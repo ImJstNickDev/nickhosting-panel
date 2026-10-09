@@ -48,32 +48,51 @@ const variableSchema = z.object({
   user_editable: z.boolean(),
   rules: z.string(),
 });
-export const eggSchema = z.object({
-  id,
-  uuid: z.string(),
-  name: z.string(),
-  nest: id,
-  description: z.string().nullable(),
-  docker_image: z.string(),
-  docker_images: z.record(z.string(), z.string()).optional(),
-  startup: z.string(),
-  config: z
-    .object({ stop: z.string().nullable(), extends: z.number().nullable().optional() })
-    .optional(),
-  relationships: z
-    .object({
-      config: z
-        .object({ attributes: z.object({ stop: z.string().nullable() }).nullable() })
-        .optional(),
-      variables: z
-        .object({
-          object: z.literal('list'),
-          data: z.array(z.object({ attributes: variableSchema })),
-        })
-        .optional(),
-    })
-    .optional(),
-});
+export const eggSchema = z
+  .object({
+    id,
+    uuid: z.string(),
+    name: z.string(),
+    nest: id,
+    description: z.string().nullable(),
+    docker_image: z.string(),
+    docker_images: z.record(z.string(), z.string()).optional(),
+    startup: z.string(),
+    /** Read-only installer inspection; hidden from browser serialization. An
+     * inherited script must be resolved explicitly before trusting this recipe. */
+    script: z
+      .object({
+        install: z
+          .string()
+          .max(256 * 1024)
+          .nullable(),
+        entry: z.string().max(4096).nullable(),
+        container: z.string().max(4096).nullable(),
+        privileged: z.boolean(),
+        extends: z.number().int().positive().nullable(),
+      })
+      .optional(),
+    config: z
+      .object({ stop: z.string().nullable(), extends: z.number().nullable().optional() })
+      .optional(),
+    relationships: z
+      .object({
+        config: z
+          .object({ attributes: z.object({ stop: z.string().nullable() }).nullable() })
+          .optional(),
+        variables: z
+          .object({
+            object: z.literal('list'),
+            data: z.array(z.object({ attributes: variableSchema })),
+          })
+          .optional(),
+      })
+      .optional(),
+  })
+  .transform((egg) => {
+    if (egg.script !== undefined) Object.defineProperty(egg, 'script', { enumerable: false });
+    return egg;
+  });
 export const allocationSchema = z.object({
   id,
   ip: z.string(),
@@ -97,11 +116,30 @@ export const applicationServerSchema = z.object({
   nest: id,
   egg: id,
   status: z.string().nullable().optional(),
-  container: z.object({
-    startup_command: z.string(),
-    image: z.string(),
-    installed: z.union([z.boolean(), z.number()]),
-  }),
+  container: z
+    .object({
+      startup_command: z.string(),
+      image: z.string(),
+      installed: z.union([z.boolean(), z.number()]),
+      /** Internal attestation only. Never return this provider environment to browsers/logs. */
+      environment: z
+        .record(
+          z
+            .string()
+            .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
+            .max(128),
+          z.union([z.string().max(16384), z.number().finite(), z.boolean(), z.null()]),
+        )
+        .refine((value) => Object.keys(value).length <= 256)
+        .optional(),
+    })
+    .transform((container) => {
+      // Available to explicit internal attestation, excluded from JSON, spreads,
+      // ordinary structured logging and durable provider-result serialization.
+      if (container.environment !== undefined)
+        Object.defineProperty(container, 'environment', { enumerable: false });
+      return container;
+    }),
   relationships: z
     .object({
       allocations: z

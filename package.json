@@ -27,9 +27,12 @@
     "@types/node": "24.19.1",
     "@types/nodemailer": "8.0.2",
     "@types/pg": "8.23.1",
+    "@types/yazl": "3.3.1",
+    "minecraft-protocol": "1.68.0",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "8.3.4",
-    "vitest": "5.0.3"
+    "vitest": "5.0.3",
+    "yazl": "3.3.1"
   }
 }

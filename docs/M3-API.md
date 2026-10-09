@@ -1,7 +1,7 @@
 # M3 Gateway and sleep/wake contracts
 
 M3 provides reusable backend contracts and synthetic protocol fixtures. Minecraft,
-Satisfactory and their protocol compatibility remain M4/M5. See
+Satisfactory and their protocol compatibility belong to M4/M6. See
 [Gateway design](GAME-GATEWAY.md), [ADR 0012](decisions/0012-gateway-leases-and-sleep.md)
 and [validation](M3-VALIDATION.md). M1 identity and M2 lifecycle/admission remain
 authoritative; no new user identity, provider key or resource scheduler is introduced.
@@ -60,6 +60,21 @@ and managed wake authority; keep its service and configuration protected.
 | `POST inventory` | `{operation:'nodes'}`, `{operation:'allocations',nodeId}` or `{operation:'server',routeId}`. Complete allocation inventory includes direct servers; server detail is restricted to verified managed identity. Responses strip names, startup/environment, aliases and secrets. |
 | `POST proof-read` | `{routeId,routeRevision?}`; persisted exact topology/reachability proof or null. |
 | `POST proof-write` | `{routeId,routeRevision,proof}`; exact route/server/allocation identity and a recent proof. |
+
+`context`, `proof-read` and `proof-write` return HTTP 412 with the ordinary
+`conflict` error only when an explicitly supplied route revision has changed.
+The authenticated Gateway retries this precondition failure once, fetching a new
+snapshot and repeating all topology, ownership and reachability checks. No stale
+candidate may open a listener or extend a committed or observation lease. Existing
+connections retain only their original lease during that bounded retry; route
+revocation, actual safety failures and lease expiry still close them. Other errors,
+including ordinary HTTP 409 conflicts, do not receive this special handling.
+
+Equivalent lease renewals do not discard an in-flight readiness/idle probe when
+Gateway identity, revision and complete route contents remain identical. The
+captured observation time, original lease expiry and original quiescence deadline
+still bound the report; changed authority or either lease expiring discards it.
+`observationsDiscarded` counts these invalidated probes separately from errors.
 
 A snapshot is `{gatewayId,revision,issuedAt,expiresAt,routes}`. Each strict route
 has managed UUIDs (`id`, `serverId`, `nodeId`, `allocationId`), monotonic revision,

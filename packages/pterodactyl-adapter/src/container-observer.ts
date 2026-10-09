@@ -23,6 +23,8 @@ export interface ContainerObserver {
   stopped(uuid: string, kind: 'server' | 'installer'): Promise<boolean>;
   /** Optional for injected observers; production exposes independently observed process identity. */
   processStartedAt?(uuid: string): Promise<string | null>;
+  /** Docker .Image configuration content hash, not a registry manifest digest or Java proof. */
+  imageIdentity?(uuid: string): Promise<string | null>;
 }
 
 const execute: ContainerObserverExec = (executable, args, options) =>
@@ -71,6 +73,7 @@ const startedAtSchema = z
 const processSchema = inspectedSchema.extend({
   state: inspectedSchema.shape.state.extend({ startedAt: startedAtSchema }),
 });
+const imageSchema = inspectedSchema.extend({ image: z.string().regex(/^sha256:[a-f0-9]{64}$/) });
 
 const listFormat = '{"id":{{json .ID}},"name":{{json .Names}}}';
 // Never request full inspect output: Config.Env, arbitrary labels and state errors may contain secrets.
@@ -84,6 +87,7 @@ const processFormat = inspectFormat.replace(
   '"status":{{json .State.Status}}',
   '"status":{{json .State.Status}},"startedAt":{{json .State.StartedAt}}',
 );
+const imageFormat = inspectFormat.replace('"state":{', '"image":{{json .Image}},"state":{');
 
 function containerName(uuid: string, kind: 'server' | 'installer'): string {
   if (
@@ -104,7 +108,10 @@ function containerName(uuid: string, kind: 'server' | 'installer'): string {
 export function createContainerObserver(
   socket: string,
   options: { exec?: ContainerObserverExec } = {},
-): ContainerObserver & { processStartedAt(uuid: string): Promise<string | null> } {
+): ContainerObserver & {
+  processStartedAt(uuid: string): Promise<string | null>;
+  imageIdentity(uuid: string): Promise<string | null>;
+} {
   if (
     typeof socket !== 'string' ||
     !posix.isAbsolute(socket) ||
@@ -224,6 +231,17 @@ export function createContainerObserver(
         const nanoseconds = BigInt(seconds) * 1_000_000n + BigInt(fraction.padEnd(9, '0'));
         if (nanoseconds <= 0n || nanoseconds > BigInt(Date.now()) * 1_000_000n) throw new Error();
         return state.startedAt;
+      } catch {
+        throw new DomainError('integration_unavailable');
+      }
+    },
+    async imageIdentity(uuid: string): Promise<string | null> {
+      const name = containerName(uuid, 'server');
+      try {
+        // Inspect the actual server container, never Config.Image (a mutable tag),
+        // an installer container or an image currently cached under the same tag.
+        const row = await inspect(name, 'server', imageSchema, imageFormat);
+        return row?.image ?? null;
       } catch {
         throw new DomainError('integration_unavailable');
       }

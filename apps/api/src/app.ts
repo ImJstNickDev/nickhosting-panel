@@ -22,13 +22,15 @@ import {
 } from '@nickhosting/database';
 import { localizeAuthError, localizeError, resolveLocale } from '@nickhosting/i18n';
 import { enqueueCommand, getJobStatus } from '@nickhosting/jobs';
-import type { ManagementRuntime } from '@nickhosting/server-management';
+import { type ManagementRuntime, minecraftCatalog } from '@nickhosting/server-management';
 import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
 import { registerGatewayRoutes } from './gateway.js';
+import { registerMinecraftRoutes } from './minecraft.js';
+import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
 import { registerServerRoutes } from './servers.js';
 
 type Store = ReturnType<typeof createDatabase>;
@@ -121,7 +123,10 @@ export function createApp(options: Options) {
   app.use('*', async (c, next) => {
     // Only this authenticated binary route streams its body. Its handler checks
     // exact declared size, server storage, live authorization and actual bytes.
-    if (c.req.method === 'PUT' && /^\/v1\/servers\/[^/]+\/files\/upload$/.test(c.req.path))
+    if (
+      c.req.method === 'PUT' &&
+      /^\/v1\/(?:servers\/[^/]+\/files|minecraft\/sources\/[^/]+)\/upload$/.test(c.req.path)
+    )
       return next();
     return jsonBodyLimit(c, next);
   });
@@ -333,7 +338,41 @@ export function createApp(options: Options) {
     await registerGame(db, await principal(c, true), input.manifest, input.rollout);
     return c.body(null, 204);
   });
-  app.get('/v1/games', async (c) => c.json(await gameCatalog(db, await principal(c))));
+  app.get('/v1/games', async (c) => {
+    const context = await principal(c);
+    const games = await gameCatalog(db, context);
+    const choices = games.some((game) => game.id === 'minecraft-java')
+      ? await minecraftCatalog(db, context, env)
+      : [];
+    return c.json(
+      games.map((game) => {
+        if (game.id !== 'minecraft-java') return game;
+        // Only eligible releases reach ordinary game discovery, even if an Owner
+        // registered a broader descriptive manifest. Technical evidence is separate.
+        const manifest = game.manifest as {
+          runtimes: Array<{ id: string; supportedGameVersions: string[] }>;
+        };
+        return {
+          ...game,
+          manifest: {
+            ...manifest,
+            runtimes: manifest.runtimes
+              .filter((runtime) => choices.some((choice) => choice.runtime === runtime.id))
+              .map((runtime) => ({
+                ...runtime,
+                supportedGameVersions: [
+                  ...new Set(
+                    choices
+                      .filter((choice) => choice.runtime === runtime.id)
+                      .map((choice) => choice.version),
+                  ),
+                ],
+              })),
+          },
+        };
+      }),
+    );
+  });
   app.post('/v1/jobs', async (c) => {
     const context = await principal(c);
     const input = validate(
@@ -348,28 +387,29 @@ export function createApp(options: Options) {
   app.get('/v1/jobs/:id', async (c) =>
     c.json(await getJobStatus(db, c.req.param('id'), await principal(c))),
   );
+  const acquireUploadSlot = () => {
+    let slots = uploadSlots.get(pool);
+    if (!slots) {
+      slots = { active: 0 };
+      uploadSlots.set(pool, slots);
+    }
+    const poolSize = pool.options.max ?? 10;
+    const capacity = Math.max(0, poolSize - (poolSize > 2 ? 2 : 1));
+    if (slots.active >= capacity) throw new DomainError('conflict');
+    slots.active++;
+    let released = false;
+    return () => {
+      if (!released) {
+        released = true;
+        slots.active--;
+      }
+    };
+  };
   registerServerRoutes(app, {
     db,
     env,
     principal,
-    acquireUploadSlot: () => {
-      let slots = uploadSlots.get(pool);
-      if (!slots) {
-        slots = { active: 0 };
-        uploadSlots.set(pool, slots);
-      }
-      const poolSize = pool.options.max ?? 10;
-      const capacity = Math.max(0, poolSize - (poolSize > 2 ? 2 : 1));
-      if (slots.active >= capacity) throw new DomainError('conflict');
-      slots.active++;
-      let released = false;
-      return () => {
-        if (!released) {
-          released = true;
-          slots.active--;
-        }
-      };
-    },
+    acquireUploadSlot,
     management:
       options.management ??
       (async () => {
@@ -380,6 +420,18 @@ export function createApp(options: Options) {
     db,
     env,
     codec: options.codec,
+    principal,
+    body,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerMinecraftSourceRoutes(app, { db, env, principal, acquireUploadSlot });
+  registerMinecraftRoutes(app, {
+    db,
+    env,
     principal,
     body,
     management:

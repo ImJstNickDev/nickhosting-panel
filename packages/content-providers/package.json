@@ -1,0 +1,16 @@
+{
+  "name": "@nickhosting/content-providers",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "zod": "4.6.5",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/yauzl": "3.4.0",
+    "yazl": "3.3.1",
+    "@types/yazl": "3.3.1"
+  }
+}

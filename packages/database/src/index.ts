@@ -6,6 +6,8 @@ import type { GatewayRouteTables } from './gateway-route-types.js';
 import type { GatewayTables } from './gateway-types.js';
 import type { AuthTables } from './identity-types.js';
 import type { JobTables } from './job-types.js';
+import type { MinecraftSourceTables } from './minecraft-source-types.js';
+import type { MinecraftTables } from './minecraft-types.js';
 import type { ServerTables } from './server-types.js';
 
 export interface Database
@@ -13,7 +15,9 @@ export interface Database
     JobTables,
     ServerTables,
     GatewayTables,
-    GatewayRouteTables {
+    GatewayRouteTables,
+    MinecraftTables,
+    MinecraftSourceTables {
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;

@@ -123,6 +123,7 @@ export const secretNames = [
   'sftpgoApiKey',
   'cloudflareApiToken',
   'gatewayControlToken',
+  'curseforgeApiKey',
 ] as const;
 export type SecretName = (typeof secretNames)[number];
 const secretEnv: Record<SecretName, string> = {
@@ -133,6 +134,7 @@ const secretEnv: Record<SecretName, string> = {
   sftpgoApiKey: 'NH_SFTPGO_API_KEY',
   cloudflareApiToken: 'NH_CLOUDFLARE_API_TOKEN',
   gatewayControlToken: 'NH_GATEWAY_CONTROL_TOKEN',
+  curseforgeApiKey: 'NH_CURSEFORGE_API_KEY',
 };
 
 export async function getSecret(

@@ -8,6 +8,7 @@ import { type Environment, lockResources } from './admission.js';
 import { resolveHostOverride } from './configuration.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { ownerOnly, parse } from './registry.js';
+import { unresolvedTransferBytes } from './transfer-capacity.js';
 import { effectiveUploadPolicy, uploadMultipartAllowanceBytes } from './upload-policy.js';
 
 export async function assertNoPendingUpload(db: Kysely<Database>, serverId: string) {
@@ -19,6 +20,8 @@ export async function assertNoPendingUpload(db: Kysely<Database>, serverId: stri
   if (claim) throw new DomainError('operation_uncertain');
 }
 export interface UploadAdmissionOptions {
+  /** Internal lifecycle only: exact active operation and attribution are revalidated in SQL. */
+  operationId?: string;
   /** Isolated tests only; production reads the Owner-selected local filesystem. */
   availableBytes?: (path: string) => Promise<bigint>;
 }
@@ -80,8 +83,29 @@ export async function reserveUploadIngestion(
         .where('id', '=', serverId)
         .where('deleted_at', 'is', null)
         .executeTakeFirst();
-      if (!server?.pterodactyl_id || !server.pterodactyl_uuid || server.active_operation_id)
-        throw new DomainError('conflict');
+      if (!server?.pterodactyl_id || !server.pterodactyl_uuid) throw new DomainError('conflict');
+      if (options.operationId !== undefined) {
+        if (
+          !z.uuid().safeParse(options.operationId).success ||
+          server.active_operation_id !== options.operationId
+        )
+          throw new DomainError('conflict');
+        const operation = await tx
+          .selectFrom('server_operations as operation')
+          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+          .select(['operation.action', 'job.actor_id', 'job.subject_id', 'job.state'])
+          .where('operation.job_id', '=', options.operationId)
+          .where('operation.server_id', '=', serverId)
+          .executeTakeFirst();
+        if (
+          !operation ||
+          !['provision', 'minecraft-content', 'reinstall', 'wipe'].includes(operation.action) ||
+          operation.state !== 'running' ||
+          operation.actor_id !== context.actorUserId ||
+          operation.subject_id !== context.subjectUserId
+        )
+          throw new DomainError('forbidden');
+      } else if (server.active_operation_id) throw new DomainError('conflict');
       const node = await tx
         .selectFrom('managed_nodes')
         .selectAll()
@@ -118,6 +142,7 @@ export async function reserveUploadIngestion(
         observe(policy.temporaryDiskPath),
         observe(host.local_disk_path),
       ]);
+      const outstanding = await unresolvedTransferBytes(tx);
       const stagingHeadroom = BigInt(policy.temporaryDiskHeadroomBytes);
       const configuredDestinationHeadroom = BigInt(host.disk_headroom_mib) * 1024n ** 2n;
       const destinationHeadroom =
@@ -125,8 +150,8 @@ export async function reserveUploadIngestion(
           ? stagingHeadroom
           : configuredDestinationHeadroom;
       if (
-        free < BigInt(reservedBytes) + stagingHeadroom ||
-        destinationFree < BigInt(reservedBytes) + destinationHeadroom
+        free < outstanding + BigInt(reservedBytes) + stagingHeadroom ||
+        destinationFree < outstanding + BigInt(reservedBytes) + destinationHeadroom
       )
         throw new DomainError('resources_unavailable');
       const scope = {

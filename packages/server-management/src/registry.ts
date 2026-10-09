@@ -9,6 +9,11 @@ import {
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import {
+  minecraftRuntimeMappingSchema,
+  type ResolvedMinecraftRuntime,
+  validateMinecraftRuntimeMapping,
+} from '@nickhosting/minecraft';
+import {
   type ProvisionPlan,
   type PterodactylAdapter,
   supportsStopConfirmation,
@@ -31,6 +36,13 @@ import {
   validatedBackendInventory,
 } from './allocation-pool.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import {
+  type MinecraftPreparedContent,
+  minecraftConfigurationSchema,
+  minecraftStoredConfigurationSchema,
+} from './minecraft-content-contracts.js';
+import { requireMinecraftChoice } from './minecraft-registry.js';
+import { bindMinecraftSource } from './minecraft-sources.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
@@ -53,9 +65,20 @@ export const createServerSchema = z
     projectId: id.optional(),
     limits: limitsSchema,
     autoStart: z.boolean().default(true),
+    minecraft: z
+      .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
+      .strict()
+      .optional(),
   })
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
+  z
+    .object({
+      action: z.literal('minecraft-content'),
+      idempotencyKey: keySchema,
+      command: z.unknown(),
+    })
+    .strict(),
   z
     .object({ action: z.enum(['start', 'stop', 'restart', 'backup']), idempotencyKey: keySchema })
     .strict(),
@@ -258,6 +281,7 @@ export async function createManagedServer(
   context: AuthContext,
   input: unknown,
   env: Environment = {},
+  options: { minecraftInitialContent?: MinecraftPreparedContent } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
   const value = parse(createServerSchema, input);
@@ -273,6 +297,35 @@ export async function createManagedServer(
       .where('id', '=', value.mappingId)
       .executeTakeFirst();
     if (!mapping?.enabled) throw new DomainError('not_found');
+    const minecraft =
+      mapping.game_id === 'minecraft-java'
+        ? await requireMinecraftChoice(
+            tx,
+            await currentInteractiveContext(tx, context, env),
+            value.minecraft?.choiceId ?? '',
+            env,
+          )
+        : undefined;
+    if (
+      (mapping.game_id === 'minecraft-java') !== (value.minecraft !== undefined) ||
+      (minecraft && minecraft.row.mapping_id !== mapping.id)
+    )
+      throw new DomainError('validation_failed');
+    if (value.minecraft?.configuration.modpack) {
+      const initial = options.minecraftInitialContent;
+      const selected = value.minecraft.configuration.modpack;
+      const expected =
+        'sourceId' in selected
+          ? { kind: 'modpack-upload', archiveRef: selected.sourceId }
+          : { kind: 'modpack', ...selected };
+      if (
+        !initial ||
+        initial.combinationId !== value.minecraft.choiceId ||
+        !isDeepStrictEqual(initial.command, expected) ||
+        !initial.archiveRef
+      )
+        throw new DomainError('validation_failed');
+    } else if (options.minecraftInitialContent) throw new DomainError('validation_failed');
     const node = await tx
       .selectFrom('managed_nodes')
       .selectAll()
@@ -434,6 +487,14 @@ export async function createManagedServer(
     const primary = allocationRows.find((r) => r.is_primary);
     if (!primary) throw new DomainError('configuration_invalid');
     const environment = { ...mapping.environment };
+    if (minecraft)
+      Object.assign(
+        environment,
+        validateMinecraftRuntimeMapping(
+          minecraft.row.resolved_runtime as ResolvedMinecraftRuntime,
+          parse(minecraftRuntimeMappingSchema, minecraft.row.binding),
+        ),
+      );
     for (const role of roles) {
       const variable = (role as typeof role & { environmentVariable?: string }).environmentVariable;
       if (variable)
@@ -458,6 +519,24 @@ export async function createManagedServer(
           .map((r) => r.pterodactyl_allocation_id),
       },
     };
+    if (minecraft && value.minecraft) {
+      await tx
+        .insertInto('minecraft_server_profiles')
+        .values({
+          server_id: serverId,
+          combination_id: minecraft.row.id,
+          configuration: JSON.stringify(value.minecraft.configuration),
+        })
+        .execute();
+    }
+    if (options.minecraftInitialContent?.archiveRef)
+      await bindMinecraftSource(
+        tx,
+        context,
+        options.minecraftInitialContent.archiveRef,
+        serverId,
+        env,
+      );
     return insertOperation(
       tx,
       context,
@@ -466,7 +545,13 @@ export async function createManagedServer(
       value.idempotencyKey,
       hash,
       'provision',
-      { provision, autoStart: value.autoStart },
+      {
+        provision,
+        autoStart: value.autoStart,
+        ...(options.minecraftInitialContent
+          ? { minecraftInitialContent: options.minecraftInitialContent }
+          : {}),
+      },
     );
   });
 }
@@ -545,6 +630,10 @@ export async function enqueueLockedServerOperation(
   input: unknown,
   env: Environment = {},
   automation?: GatewayAutomationOperation,
+  options: {
+    minecraftPlan?: MinecraftPreparedContent;
+    minecraftInitialContent?: MinecraftPreparedContent;
+  } = {},
 ) {
   const value = parse(operationSchema, input);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
@@ -557,6 +646,21 @@ export async function enqueueLockedServerOperation(
       : 'server:manage',
   );
   if (server.active_operation_id) throw new DomainError('conflict');
+  if (value.action === 'start' || value.action === 'restart') {
+    const mapping = await tx
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    if (mapping.game_id === 'minecraft-java') {
+      const profile = await tx
+        .selectFrom('minecraft_server_profiles')
+        .select('installed')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      if (!profile?.installed) throw new DomainError('conflict');
+    }
+  }
   await assertNoPendingUpload(tx, serverId);
   if (
     (!server.pterodactyl_id && value.action !== 'delete') ||
@@ -574,12 +678,67 @@ export async function enqueueLockedServerOperation(
     throw new DomainError('operation_uncertain');
   const jobId = randomUUID();
   const plan: Record<string, unknown> = automation ? { gatewayAutomation: automation } : {};
+  if (value.action === 'minecraft-content') {
+    if (
+      !options.minecraftPlan ||
+      automation ||
+      !isDeepStrictEqual(options.minecraftPlan.command, value.command)
+    )
+      throw new DomainError('forbidden');
+    const profile = await tx
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (
+      !profile ||
+      (!profile.installed &&
+        options.minecraftPlan.command.kind !== 'verify' &&
+        (!Array.isArray(profile.installed_manifest) || profile.installed_manifest.length === 0)) ||
+      profile.combination_id !== options.minecraftPlan.combinationId
+    )
+      throw new DomainError('conflict');
+    plan.minecraftContent = options.minecraftPlan;
+    plan.backupBefore = options.minecraftPlan.backupBefore;
+  }
+  if (value.action === 'reinstall' || value.action === 'wipe') {
+    const profile = await tx
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (profile) {
+      const configuration = parse(minecraftStoredConfigurationSchema, profile.configuration);
+      if (configuration.modpack) {
+        const selected = configuration.modpack;
+        const expected =
+          'sourceId' in selected
+            ? { kind: 'modpack-upload', archiveRef: selected.sourceId }
+            : { kind: 'modpack', ...selected };
+        const initial = options.minecraftInitialContent;
+        if (
+          !initial ||
+          initial.combinationId !== profile.combination_id ||
+          !initial.archiveRef ||
+          !isDeepStrictEqual(initial.command, expected)
+        )
+          throw new DomainError('conflict');
+        await bindMinecraftSource(tx, context, initial.archiveRef, serverId, env);
+        plan.minecraftInitialContent = initial;
+      }
+    }
+  }
   const reservation = await tx
     .selectFrom('resource_reservations')
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
-  if (['configure', 'reinstall', 'wipe', 'restore', 'delete'].includes(value.action) && reservation)
+  if (
+    ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
+      value.action,
+    ) &&
+    reservation
+  )
     throw new DomainError('operation_uncertain');
   if (value.action === 'start' || value.action === 'restart')
     plan.reservationCreated = !reservation;
@@ -598,7 +757,9 @@ export async function enqueueLockedServerOperation(
       .execute();
   }
   if (
-    ['wipe', 'reinstall', 'restore', 'configure', 'delete'].includes(value.action) &&
+    ['wipe', 'reinstall', 'restore', 'configure', 'delete', 'minecraft-content'].includes(
+      value.action,
+    ) &&
     !['offline', 'unknown'].includes(server.runtime_state)
   )
     throw new DomainError('conflict');
@@ -672,6 +833,10 @@ export async function enqueueServerOperation(
   serverId: string,
   input: unknown,
   env: Environment = {},
+  options: {
+    minecraftPlan?: MinecraftPreparedContent;
+    minecraftInitialContent?: MinecraftPreparedContent;
+  } = {},
 ) {
   const value = parse(operationSchema, input);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
@@ -732,8 +897,19 @@ export async function enqueueServerOperation(
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
-    const actor = policy ? await currentInteractiveContext(tx, context, env) : context;
-    const result = await enqueueLockedServerOperation(tx, actor, serverId, value, env);
+    const actor =
+      policy || value.action === 'minecraft-content'
+        ? await currentInteractiveContext(tx, context, env)
+        : context;
+    const result = await enqueueLockedServerOperation(
+      tx,
+      actor,
+      serverId,
+      value,
+      env,
+      undefined,
+      options,
+    );
     if (value.action === 'start' || value.action === 'restart') {
       if (policy) {
         const current = await tx

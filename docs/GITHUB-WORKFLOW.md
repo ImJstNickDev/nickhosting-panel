@@ -71,7 +71,7 @@ The checker validates indexed content, including after a commit; unstaged edits 
 ## Review routine
 
 1. Codex opens draft PR early enough for incremental review, then marks ready after tests and an independent reviewer subagent.
-2. Codex reports PR URL, milestone, branch, SHA, tests, screenshot evidence (M6), exact production interactions and provenance ledger state; document external permission blockers.
+2. Codex reports PR URL, milestone, branch, SHA, tests, screenshot evidence (M5 and subsequent UI changes), exact production interactions and provenance ledger state; document external permission blockers.
 3. Owner sends PR URL to ChatGPT for review; reviewer inspects repository diff, APIs, acceptance criteria, and independently flags regressions/unsafe operations.
 4. Codex responds to findings on same branch/PR and updates validation evidence.
 5. Owner decides when to merge and performs the merge. Codex **never merges**.
@@ -86,3 +86,9 @@ GitHub Actions is disabled in repository settings during M0. Issue forms and the
 ## Public repository considerations
 
 Public visibility does **not** force a license. Ask before adding an open-source license or copying any closed-source Blueprint code. Avoid exposing tokens in PR descriptions, logs, screenshots, commits, or issues. If real server data appears in a commit, stop and remediate safely rather than simply deleting it from the next commit.
+
+## Roadmap amendment — 2026-10-09
+
+Existing milestone IDs and issue histories are preserved: M5 now owns the complete WebPanel and common platform readiness (#14/#15); M6 owns Satisfactory and game/runtime expansion (#12/#13). M5 depends on the reviewed M1–M4 contracts, not Satisfactory. Future branches: `milestone/m5-webpanel`, then `milestone/m6-game-integrations`, each requiring separate Owner authorization. Do not create M7.
+
+Issue #18 is detached from the former frontend milestone and remains an open, high-priority production-release gate, not an M5 UI task or an optional M6 expansion. Passing milestone tests does not waive it or authorize production deployment. See [ADR 0008](decisions/0008-complete-frontend.md), [common API acceptance](M5-COMMON-INTEGRATION.md) and [UX standards](FRONTEND-I18N.md).
