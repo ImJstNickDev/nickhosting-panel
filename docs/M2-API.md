@@ -257,14 +257,59 @@ override refuses conflicting Owner overhead edits while allowing unrelated node
 fields to be changed.
 
 Provisioning requires an explicitly configured `backendAllocationPool` on the
-managed node. Its shape is `{allocations:[{allocationId,address,port}],
-gatewayBindAddresses:[address,...]}`. There is **no inferred/default pool**.
-Backend pins must be exact private RFC1918 IPv4 or IPv6 ULA addresses, not public,
-loopback, wildcard or mapped addresses. The declared gateway addresses must be
-exact, non-wildcard and disjoint from backend binds. IDs, addresses and ports are
-checked against fresh inventory on the selected provider node. Other managed
-nodes on the same host cannot claim overlapping backend/gateway namespaces.
-These declarations neither bind gateway listeners nor create/change allocations.
+managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port}],
+gatewayBindAddresses:[address,...],loopbackRemap?}`. There is **no inferred/default
+pool**. `address` identifies the exact canonical Pterodactyl allocation IP;
+`backendAddress` identifies the effective Wings/Docker binding for future Gateway
+routing. Direct private RFC1918 IPv4 and IPv6 ULA pins default `backendAddress` to
+`address`; an explicit value must equal it. Public, wildcard, mapped and scoped
+backend addresses are rejected. Aliases do not establish binding identity.
+
+Exact `127.0.0.1` is supported only with an explicit private IPv4 `backendAddress`
+equal to `loopbackRemap.interfaceAddress`. This models Wings 1.11.13 replacing
+that allocation IP with its configured Docker network interface, preserving the
+port. It does **not** route the Gateway to its own loopback address. The required
+declaration is:
+
+```text
+loopbackRemap: {
+  wingsVersion: '1.11.13',
+  networkMode: <verified Docker network name>,
+  networkDriver: 'bridge',
+  gatewayMode: 'nat',
+  interfaceAddress: <verified private IPv4 Wings interface>,
+  ispn: false,
+  verifiedEggs: [{nestId, eggId, forceOutgoingIp: false}]
+}
+```
+
+The Owner must verify the actual network driver/NAT behavior, configured Wings
+interface and selected egg's `force_outgoing_ip=false` before declaring them.
+The Application API does not expose that egg flag, so `verifiedEggs` is an Owner
+attestation, not an automatically discovered fact. The configured interface is
+not inferred from the Docker IPAM gateway. Host/container/shared, overlay/ISPN,
+routed and unknown network configurations, other `127/8` addresses and `::1`
+are unsupported for remapping. An unattested egg cannot use a loopback pin;
+an eligible direct private pin in a mixed pool remains usable.
+
+IDs, provider addresses and ports are checked against fresh inventory on the
+selected provider node, both at reservation and before new remote creation.
+Assigned inventory collisions are checked after effective binding translation;
+unknown same-port loopback semantics fail closed. Gateway declarations must be
+exact, non-wildcard and disjoint from effective backend bindings. Other managed
+nodes on the same physical host cannot overlap effective backend/gateway
+namespaces, including durable claims in disabled pools. Wings publishes both
+TCP and UDP for each allocation, so a different SDK transport is not collision
+protection. Migration 009 stores provider `address` and `backend_address`
+separately, backfills existing direct claims and prevents identity retargeting.
+Later provider identity checks compare its raw IP, port and assigned state to
+the provider claim, never to the remapped address.
+
+These declarations neither bind listeners nor create/change allocations, and
+do not prove reachability from the future Gateway container. M3 must verify that
+reachability and actual Docker bindings, and validate its public endpoints against
+all existing direct Pterodactyl allocations and host listeners before binding;
+see [ADR 0005](decisions/0005-permanent-gateway.md).
 
 `NH_BACKEND_ALLOCATION_POOLS` is an optional JSON object keyed by managed-node
 UUID; each value is the complete pool or `null` to disable new provisioning.

@@ -15,6 +15,7 @@ import {
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { BackendAllocationPool } from './allocation-pool.js';
 import {
   type LifecycleOptions,
   processServerOperation,
@@ -46,6 +47,11 @@ async function fixture(
     | 'restore'
     | 'configure',
   plan: Record<string, unknown> = {},
+  binding?: {
+    address: string;
+    backendAddress: string;
+    loopbackRemap: BackendAllocationPool['loopbackRemap'];
+  },
 ) {
   const db = database.db;
   const ownerId = randomUUID(),
@@ -55,6 +61,8 @@ async function fixture(
     serverId = randomUUID(),
     jobId = randomUUID();
   const providerId = ++providerSequence;
+  const allocationAddress = binding?.address ?? '10.0.0.2';
+  const backendAddress = binding?.backendAddress ?? allocationAddress;
   let clock = new Date();
   await sql`insert into "user"(id,name,email,role) values(${ownerId},'fixture',${`${ownerId}@example.com`},'user')`.execute(
     db,
@@ -86,7 +94,10 @@ async function fixture(
       pterodactyl_node_id: providerId,
       provision_user_id: 1,
       backend_allocation_pool: JSON.stringify({
-        allocations: [{ allocationId: providerId, address: '10.0.0.2', port: 25000 }],
+        allocations: [
+          { allocationId: providerId, address: allocationAddress, backendAddress, port: 25000 },
+        ],
+        ...(binding ? { loopbackRemap: binding.loopbackRemap } : {}),
         gatewayBindAddresses: ['203.0.113.2'],
       }),
     })
@@ -127,7 +138,9 @@ async function fixture(
     relationships: {
       allocations: {
         object: 'list',
-        data: [{ attributes: { id: providerId, ip: '10.0.0.2', port: 25000, assigned: true } }],
+        data: [
+          { attributes: { id: providerId, ip: allocationAddress, port: 25000, assigned: true } },
+        ],
       },
     },
     created_at: clock.toISOString(),
@@ -142,7 +155,7 @@ async function fixture(
   const adapter = {
     getNode: vi.fn(async () => ({ id: providerId })),
     listAllocations: vi.fn(async () => [
-      { id: providerId, ip: '10.0.0.2', port: 25000, assigned: exists },
+      { id: providerId, ip: allocationAddress, port: 25000, assigned: exists },
     ]),
     getApplicationServer: vi.fn(async () => {
       if (!exists) throw new PterodactylError('not_found', 'application', 'rejected', 404);
@@ -310,7 +323,8 @@ async function fixture(
       server_id: serverId,
       node_id: nodeId,
       pterodactyl_allocation_id: providerId,
-      address: '10.0.0.2',
+      address: allocationAddress,
+      backend_address: backendAddress,
       port: 25000,
       role: 'game',
       protocols: ['tcp'],
@@ -451,6 +465,57 @@ async function fixture(
 }
 
 describe('durable provider lifecycle with real PostgreSQL', () => {
+  const loopbackBinding = {
+    address: '127.0.0.1',
+    backendAddress: '10.0.0.254',
+    loopbackRemap: {
+      wingsVersion: '1.11.13' as const,
+      networkMode: 'isolated-fixture-bridge',
+      networkDriver: 'bridge' as const,
+      gatewayMode: 'nat' as const,
+      interfaceAddress: '10.0.0.254',
+      ispn: false as const,
+      verifiedEggs: [{ nestId: 1, eggId: 1, forceOutgoingIp: false as const }],
+    },
+  };
+  it('provisions a declared loopback allocation while preserving separate provider and backend identities', async () => {
+    const f = await fixture('provision', {}, loopbackBinding);
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.createServer).toHaveBeenCalledOnce();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(
+      await f.db
+        .selectFrom('server_allocations')
+        .select(['address', 'backend_address'])
+        .where('server_id', '=', f.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ address: '127.0.0.1', backend_address: '10.0.0.254' });
+    expect(f.remote.relationships?.allocations?.data[0]?.attributes.ip).toBe('127.0.0.1');
+  });
+  it('rejects a loopback provision if its egg no longer has explicit verified network evidence', async () => {
+    const f = await fixture(
+      'provision',
+      {},
+      {
+        ...loopbackBinding,
+        loopbackRemap: {
+          ...loopbackBinding.loopbackRemap,
+          verifiedEggs: [{ nestId: 1, eggId: 2, forceOutgoingIp: false }],
+        },
+      },
+    );
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.createServer).not.toHaveBeenCalled();
+    expect(await f.installationReservation()).toBeUndefined();
+  });
+  it('does not substitute the backend address for the provider identity before mutations', async () => {
+    const f = await fixture('delete', {}, loopbackBinding);
+    const allocation = f.remote.relationships?.allocations?.data[0]?.attributes;
+    if (!allocation) throw new Error('Missing fixture allocation');
+    allocation.ip = loopbackBinding.backendAddress;
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.deleteServer).not.toHaveBeenCalled();
+  });
   it('retains an ambiguous upload and refuses a queued provider effect after worker recovery', async () => {
     const f = await fixture('backup');
     const claimId = await pendingUploadFixture(f.db, f.serverId);
@@ -981,12 +1046,27 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
   });
   it('refuses every mutation when a pinned identity or allocation changes', async () => {
-    for (const mismatch of ['uuid', 'user', 'allocation', 'allocations'] as const) {
+    for (const mismatch of [
+      'uuid',
+      'user',
+      'allocation',
+      'allocations',
+      'address',
+      'port',
+      'assignment',
+    ] as const) {
       const f = await fixture('delete');
       if (mismatch === 'uuid') f.remote.uuid = randomUUID();
       else if (mismatch === 'user') f.remote.user = 99;
       else if (mismatch === 'allocation') f.remote.allocation += 1;
-      else f.remote.relationships = {};
+      else if (mismatch === 'allocations') f.remote.relationships = {};
+      else {
+        const allocation = f.remote.relationships?.allocations?.data[0]?.attributes;
+        if (!allocation) throw new Error('Missing fixture allocation');
+        if (mismatch === 'address') allocation.ip = '10.0.0.99';
+        else if (mismatch === 'port') allocation.port++;
+        else allocation.assigned = false;
+      }
       expect(await f.run()).toBe('failed');
       expect(f.adapter.deleteServer).not.toHaveBeenCalled();
       expect(

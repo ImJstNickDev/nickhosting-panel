@@ -32,6 +32,20 @@ Existing claims remain stable; an already-created owned server can still recover
 when a pool is later disabled. Pool configuration applies no network or provider
 allocation changes.
 
+Migration 009 separates immutable provider `address` from effective
+`backend_address`, backfilling existing direct claims without instance-specific
+values. Direct RFC1918/ULA pools retain their behavior. Exact `127.0.0.1` pins
+require the explicit verified Wings 1.11.13 bridge/NAT/interface declaration and
+per-egg `force_outgoing_ip=false` attestation defined in [M2 API](../M2-API.md).
+There is no inferred bridge address, arbitrary private-address rewriting or
+support claim for other loopbacks/network modes. Validate provider IP/port/assigned
+state for mutations; compare effective bindings for collisions across fresh
+assigned inventory, sibling pools and durable claims. Config changes cannot
+retarget existing identities. M3 must prove actual Gateway reachability and
+perform the complete direct-allocation/public-listener collision gate in
+[ADR 0005](0005-permanent-gateway.md) before binding. No gateway implementation or
+production networking changes are part of this correction.
+
 PostgreSQL is authoritative for registry, persistent storage/port claims,
 compute reservations, operation phases and external-effect intent. Redis/BullMQ
 only dispatches work. Persist intent before effects, use a server advisory lock

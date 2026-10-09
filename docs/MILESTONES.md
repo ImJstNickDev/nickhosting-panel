@@ -82,6 +82,7 @@ Check tool versions and `gh auth`, reconcile `.codex/config.toml` and project-sc
 
 - Fixture TCP+UDP/multiport routes, route isolation, restart/recovery, startup readiness and idempotent wake triggers; no unrelated Pterodactyl server is registered.
 - Demonstrate same-number port forwarding on distinct interfaces in a **non-conflicting test environment**. Host-specific production bind changes are documented as proposed, not applied.
+- Before binding any public Gateway listener, validate its address/port/transport against fresh inventory of **all existing direct Pterodactyl allocations**, including stopped assigned servers, and actual host listeners/Docker published ports. Resolve effective Wings bindings; check both TCP and UDP, wildcard, mapped and dual-stack overlaps. Unknown topology or ownership fails closed; never change unrelated allocations to resolve a conflict. Verify actual backend bindings and reachability from the Gateway network namespace; see [ADR 0005](decisions/0005-permanent-gateway.md).
 - Stress/concurrency tests: burst joins → one wake job, restart, API loss, RAM exhaustion. No unsupported claim about a real game's wake before its game integration milestone.
 
 ## M4 — Minecraft Java integration (PR)

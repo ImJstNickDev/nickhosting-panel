@@ -57,7 +57,7 @@ def main():
         INSERT INTO job_steps(job_id,step) VALUES ('{job}','fixture.checkpoint');'''])
 
     if M2:
-        host, node, mapping, server, claim = (str(uuid.uuid4()) for _ in range(5))
+        host, node, mapping, server, claim, allocation = (str(uuid.uuid4()) for _ in range(6))
         # Only this generated isolated schema is populated. No provider request
         # or real filesystem path is involved in the durable-claim restart test.
         run(psql + [f'''SET search_path="{schema}";
@@ -72,6 +72,10 @@ def main():
             VALUES ('{mapping}','{mapping}','fixture','{node}',1,1,'fixture','fixture','{{}}','[]','{{}}');
             INSERT INTO managed_servers(id,owner_id,mapping_id,node_id,name,external_id,limits)
             VALUES ('{server}','{actor}','{mapping}','{node}','Restart fixture','{server}','{{}}');
+            INSERT INTO server_allocations(id,server_id,node_id,pterodactyl_allocation_id,
+                address,backend_address,port,role,protocols,is_primary)
+            VALUES ('{allocation}','{server}','{node}',1,'127.0.0.1','10.0.0.254',25565,
+                'game',ARRAY['tcp','udp'],true);
             INSERT INTO upload_ingestion_claims(id,physical_host_id,server_id,actor_user_id,
                 declared_bytes,reserved_bytes,scope,scope_hash)
             VALUES ('{claim}','{host}','{server}','{actor}',1024,67584,
@@ -86,13 +90,29 @@ def main():
     assert run(psql + [f"SELECT step FROM \"{schema}\".job_steps WHERE job_id='{job}'"]) == "fixture.checkpoint"
     assert redis("GET", key) == marker
     if M2:
+        assert run(psql + [f'''SELECT address || ':' || backend_address || ':' || port::text
+            FROM "{schema}".server_allocations WHERE id='{allocation}'
+            AND server_id='{server}' AND node_id='{node}'
+            ''']) == '127.0.0.1:10.0.0.254:25565'
+        # The nested exception block rolls back only the deliberately attempted
+        # fixture retarget. If the trigger stops protecting identity, fail loudly.
+        run(psql + [f'''SET search_path="{schema}";
+            DO $test$ BEGIN
+                BEGIN
+                    UPDATE server_allocations SET backend_address='10.0.0.253'
+                    WHERE id='{allocation}';
+                    RAISE EXCEPTION 'identity retarget unexpectedly succeeded';
+                EXCEPTION WHEN raise_exception THEN
+                    IF SQLERRM <> 'allocation identity is immutable' THEN RAISE; END IF;
+                END;
+            END $test$;'''])
         assert run(psql + [f'''SELECT server_id::text || ':' || declared_bytes::text || ':' ||
             reserved_bytes::text || ':' || (scope->>'fixture')
             FROM "{schema}".upload_ingestion_claims WHERE id='{claim}' AND physical_host_id='{host}'
             ''']) == f"{server}:1024:67584:{marker}"
     run(psql + [f'DROP SCHEMA "{schema}" CASCADE'])
     assert redis("DEL", key) == "1"
-    claims = ", ambiguous upload claim" if M2 else ""
+    claims = ", immutable provider/effective allocation addresses, ambiguous upload claim" if M2 else ""
     print(f"PASS: PostgreSQL migrations, settings, queued job, outbox/checkpoint{claims} and Redis marker survived approved scoped restart; only generated fixtures cleaned.")
 
 

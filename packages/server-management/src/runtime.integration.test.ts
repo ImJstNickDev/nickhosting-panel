@@ -46,7 +46,14 @@ describe('management runtime execution-time authorization', () => {
       allocation: allocations.find((row) => row.is_primary)?.pterodactyl_allocation_id,
       relationships: {
         allocations: {
-          data: allocations.map((row) => ({ attributes: { id: row.pterodactyl_allocation_id } })),
+          data: allocations.map((row) => ({
+            attributes: {
+              id: row.pterodactyl_allocation_id,
+              ip: row.address,
+              port: row.port,
+              assigned: true,
+            },
+          })),
         },
       },
     } as ApplicationServer;
@@ -146,7 +153,14 @@ describe('management runtime execution-time authorization', () => {
       allocation: allocations.find((row) => row.is_primary)?.pterodactyl_allocation_id,
       relationships: {
         allocations: {
-          data: allocations.map((row) => ({ attributes: { id: row.pterodactyl_allocation_id } })),
+          data: allocations.map((row) => ({
+            attributes: {
+              id: row.pterodactyl_allocation_id,
+              ip: row.address,
+              port: row.port,
+              assigned: true,
+            },
+          })),
         },
       },
     } as ApplicationServer;
@@ -233,7 +247,14 @@ describe('management runtime execution-time authorization', () => {
       allocation: allocations.find((row) => row.is_primary)?.pterodactyl_allocation_id,
       relationships: {
         allocations: {
-          data: allocations.map((row) => ({ attributes: { id: row.pterodactyl_allocation_id } })),
+          data: allocations.map((row) => ({
+            attributes: {
+              id: row.pterodactyl_allocation_id,
+              ip: row.address,
+              port: row.port,
+              assigned: true,
+            },
+          })),
         },
       },
     } as ApplicationServer;
@@ -489,7 +510,14 @@ describe('management runtime execution-time authorization', () => {
       allocation: allocations.find((row) => row.is_primary)?.pterodactyl_allocation_id,
       relationships: {
         allocations: {
-          data: allocations.map((row) => ({ attributes: { id: row.pterodactyl_allocation_id } })),
+          data: allocations.map((row) => ({
+            attributes: {
+              id: row.pterodactyl_allocation_id,
+              ip: row.address,
+              port: row.port,
+              assigned: true,
+            },
+          })),
         },
       },
     } as ApplicationServer;

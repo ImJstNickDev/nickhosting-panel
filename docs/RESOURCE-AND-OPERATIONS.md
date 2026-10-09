@@ -24,8 +24,10 @@ Per-user budget is a limit; physical node admission separately verifies an Owner
 - Each game/runtime profile declares required `port roles`, protocol TCP/UDP and optional additional ports. Stable public endpoint(s) owned by gateway; separate private backend bind IP, usually **same numeric port** when IP differs.
 - Pterodactyl direct Owner-created servers use their normal public allocations, outside gateway namespace/routes.
 - Provision only from an explicit Owner-configured private backend allocation pool, validated against provider IDs, exact bind addresses/ports and disjoint declared gateway addresses; no fallback to unrelated public allocations. Configuration does not authorize any production allocation/network change.
+- Keep the provider allocation IP distinct from the effective backend IP. Direct RFC1918/ULA bindings use the same address; exact `127.0.0.1` needs the explicit verified Wings 1.11.13 bridge/NAT remap contract in [M2 API](M2-API.md). Collision checks use effective bindings, while ownership checks use provider identities. Never route the Gateway to its own loopback or infer a bridge address.
 - Allocations remain owned/reserved while a server is offline. Detect allocation exhaustion against verified inventory; historical host capacity observations belong only in local infrastructure notes.
 - For Gateway routing, require a verified public bind vs backend bind matrix; no accidental wildcard IP binds that conflict with existing Docker published ports.
+- M3 must check proposed public listeners against all existing direct allocations (including stopped assigned servers) and actual host/Docker bindings before binding. Wings allocates both TCP and UDP; unknown mapping and wildcard/dual-stack overlap fail closed. Validate reachability from the actual Gateway namespace without changing unrelated services.
 
 ## Lifecycle state dimensions
 

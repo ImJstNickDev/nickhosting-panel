@@ -14,7 +14,7 @@ import {
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
-import { assertServerBackendAllocations } from './allocation-pool.js';
+import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
 import { effectiveNodeOverhead } from './configuration.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
@@ -123,13 +123,23 @@ export async function verifyManagedIdentity(
     .where('server_id', '=', server.id)
     .execute();
   const primary = allocations.find((allocation) => allocation.is_primary);
-  const reported = remote.relationships?.allocations?.data.map((item) => item.attributes.id);
+  const reported = remote.relationships?.allocations?.data.map((item) => item.attributes);
   const expected = allocations.map((allocation) => allocation.pterodactyl_allocation_id);
   if (
     !primary ||
     !reported ||
     reported.length !== expected.length ||
-    expected.some((id) => !reported.includes(id)) ||
+    allocations.some(
+      (claim) =>
+        !reported.some(
+          (allocation) =>
+            allocation.id === claim.pterodactyl_allocation_id &&
+            allocation.assigned &&
+            canonicalAllocationAddress(allocation.ip) !== '' &&
+            canonicalAllocationAddress(allocation.ip) === claim.address &&
+            allocation.port === claim.port,
+        ),
+    ) ||
     remote.external_id !== server.external_id ||
     remote.node !== node.pterodactyl_node_id ||
     remote.user !== node.provision_user_id ||

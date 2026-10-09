@@ -2,7 +2,21 @@ import type { ColumnType, Generated } from 'kysely';
 
 type Json<T> = ColumnType<T, string, string>;
 export interface BackendAllocationPool {
-  allocations: Array<{ allocationId: number; address: string; port: number }>;
+  allocations: Array<{
+    allocationId: number;
+    address: string;
+    backendAddress?: string;
+    port: number;
+  }>;
+  loopbackRemap?: {
+    wingsVersion: '1.11.13';
+    networkMode: string;
+    networkDriver: 'bridge';
+    gatewayMode: 'nat';
+    interfaceAddress: string;
+    ispn: false;
+    verifiedEggs: Array<{ nestId: number; eggId: number; forceOutgoingIp: false }>;
+  };
   gatewayBindAddresses: string[];
 }
 export interface UploadPolicy {
@@ -131,6 +145,7 @@ export interface ServerTables {
     node_id: string;
     pterodactyl_allocation_id: number;
     address: string;
+    backend_address: string;
     port: number;
     role: string;
     protocols: ('tcp' | 'udp')[];

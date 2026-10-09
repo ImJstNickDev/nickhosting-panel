@@ -4,6 +4,8 @@ The results below describe the original delivery at `a6f693986fdfe1624b8e1b06fc4
 The subsequent Owner review corrections, current validation and cleanup are recorded
 in [M2 review revisions](M2-REVIEW-REVISIONS.md); its newer contracts supersede the
 original count limit, allocation selection and browser transfer restrictions.
+The latest [loopback compatibility review](M2-LOOPBACK-REVIEW.md) records the
+separate provider/effective address model, final validation and M3 collision gate.
 
 M2 is **complete for Owner/ChatGPT review** on `milestone/m2-server-management`,
 subject to the explicit temporary SFTPGo exception below.

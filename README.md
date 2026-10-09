@@ -55,3 +55,5 @@ Project docs are the source of truth; update the relevant documents and ADRs whe
 - [GitHub PR templates](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests)
 
 The current M2 correction round is documented in [`docs/M2-REVIEW-REVISIONS.md`](docs/M2-REVIEW-REVISIONS.md).
+The final Wings loopback compatibility correction and M3 collision gate are
+documented in [`docs/M2-LOOPBACK-REVIEW.md`](docs/M2-LOOPBACK-REVIEW.md).

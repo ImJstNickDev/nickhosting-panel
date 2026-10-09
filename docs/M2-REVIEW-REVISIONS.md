@@ -1,5 +1,10 @@
 # M2 Owner review corrections
 
+This record describes the four-finding correction delivered at
+`c63f750915e90174f7415686f8c41ff67986c9f4`. The subsequent
+[loopback compatibility review](M2-LOOPBACK-REVIEW.md) supersedes the direct-only
+allocation restriction and records the latest full validation and M3 bind gate.
+
 This revision addresses the four findings against PR #17 at
 `a6f693986fdfe1624b8e1b06fc4f4ff16b8eee79`. It stays on
 `milestone/m2-server-management`; no merge or M3 work is authorized.

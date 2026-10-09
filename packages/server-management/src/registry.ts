@@ -27,6 +27,7 @@ import {
   allocationAddressesOverlap,
   assertBackendPoolNamespace,
   canonicalAllocationAddress,
+  poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
 import { assertNoPendingUpload } from './upload-admission.js';
@@ -353,21 +354,26 @@ export async function createManagedServer(
       .select([
         'allocation.pterodactyl_allocation_id',
         'allocation.node_id',
-        'allocation.address',
+        'allocation.backend_address',
         'allocation.port',
       ])
       .where('ownerNode.physical_host_id', '=', node.physical_host_id)
       .execute();
     const free: typeof inventory = [];
     for (const allocation of inventory) {
-      if (allocation.assigned) continue;
+      if (
+        allocation.assigned ||
+        (canonicalAllocationAddress(allocation.ip) === '127.0.0.1' &&
+          !poolAllowsLoopbackEgg(pool, mapping))
+      )
+        continue;
       if (
         owned.some(
           (existing) =>
             (existing.node_id === node.id &&
               existing.pterodactyl_allocation_id === allocation.id) ||
             (existing.port === allocation.port &&
-              allocationAddressesOverlap(existing.address, allocation.ip)),
+              allocationAddressesOverlap(existing.backend_address, allocation.backendAddress)),
         )
       )
         continue;
@@ -376,7 +382,7 @@ export async function createManagedServer(
           (existing) =>
             existing.id === allocation.id ||
             (existing.port === allocation.port &&
-              allocationAddressesOverlap(existing.ip, allocation.ip)),
+              allocationAddressesOverlap(existing.backendAddress, allocation.backendAddress)),
         )
       )
         continue;
@@ -416,6 +422,7 @@ export async function createManagedServer(
         node_id: node.id,
         pterodactyl_allocation_id: allocation.id,
         address: canonicalAllocationAddress(allocation.ip),
+        backend_address: allocation.backendAddress,
         port: allocation.port,
         role: role.role,
         protocols: role.protocols,

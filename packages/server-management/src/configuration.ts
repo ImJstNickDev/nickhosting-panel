@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { type Environment, lockResources, reservedPhysicalCompute } from './admission.js';
 import {
   assertBackendPoolNamespace,
+  backendAllocationAddress,
   backendAllocationPoolOverrides,
   backendAllocationPoolSchema,
   effectiveBackendAllocationPool,
@@ -269,6 +270,7 @@ export async function setManagedNode(
             (pin) =>
               pin.allocationId === claim.pterodactyl_allocation_id &&
               pin.address === claim.address &&
+              backendAllocationAddress(pin) === claim.backend_address &&
               pin.port === claim.port,
           ),
       )

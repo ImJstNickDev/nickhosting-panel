@@ -165,6 +165,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       node_id: nodeId,
       pterodactyl_allocation_id: number,
       address: '192.0.2.10',
+      backend_address: '192.0.2.10',
       port: 25000 + number,
       role: 'game',
       protocols: ['tcp'],

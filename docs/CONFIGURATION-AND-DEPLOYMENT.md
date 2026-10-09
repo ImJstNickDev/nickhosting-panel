@@ -42,6 +42,19 @@ stored pools. The [M2 API contract](M2-API.md) defines validation and environmen
 locking. Do not create allocations or change host networking merely to satisfy
 this prerequisite without an operation-specific Owner approval.
 
+Allocation `address` is the exact provider IP; `backendAddress` is its effective
+private Docker binding. Direct RFC1918/ULA bindings retain their address. Exact
+`127.0.0.1` requires an explicit Wings 1.11.13 bridge/NAT declaration, configured
+private IPv4 interface, ISPN disabled and an Owner-verified egg allowlist with
+`force_outgoing_ip=false`. The Application API does not expose that flag: verify
+it read-only before attesting; never change an egg to satisfy the prerequisite.
+Do not infer the interface from IPAM's gateway or assume container loopback is
+reachable. Unsupported modes fail closed. Migration 009 backfills old direct
+claims and stores both immutable addresses. These declarations do not establish
+Gateway reachability: M3 must check the actual container bindings and its own
+network namespace, plus public-listener collisions against unrelated direct
+allocations, before any listener bind. No existing network is changed by M2.
+
 Browser uploads require a separate trusted Wings origin allowlist
 (`NH_PTERODACTYL_UPLOAD_ORIGINS`) and a verified per-host `uploadPolicy`.
 Migration 008 leaves uploads disabled until the Owner supplies the provider's
