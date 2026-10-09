@@ -58,6 +58,10 @@ const replacement = z
     backupBefore: z.boolean(),
   })
   .strict();
+// A selected empty pack may legitimately have no content/world paths to wipe.
+const modpackReplacement = replacement.extend({
+  expectedDeletePaths: z.array(z.string()).max(1000),
+});
 const sourceId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 export const minecraftContentCommandSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('verify') }).strict(),
@@ -115,14 +119,14 @@ export const minecraftContentCommandSchema = z.discriminatedUnion('kind', [
       provider: z.literal('modrinth'),
       projectId: sourceId,
       versionId: sourceId,
-      replace: replacement.optional(),
+      replace: modpackReplacement.optional(),
     })
     .strict(),
   z
     .object({
       kind: z.literal('modpack-upload'),
       archiveRef: z.uuid(),
-      replace: replacement.optional(),
+      replace: modpackReplacement.optional(),
     })
     .strict(),
 ]);
@@ -131,6 +135,11 @@ export interface MinecraftPreparedContent {
   combinationId: string;
   command: MinecraftContentCommand;
   backupBefore: boolean;
+  /** Exact persisted pack selection approved during preparation; null means none. */
+  previousModpack?: Exclude<
+    z.infer<typeof minecraftConfigurationSchema>['modpack'],
+    undefined
+  > | null;
   contentPlan?: ContentPlan;
   archivePath?: string;
   archiveRef?: string;

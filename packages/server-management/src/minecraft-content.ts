@@ -70,6 +70,7 @@ export {
 } from './minecraft-content-contracts.js';
 
 import {
+  type MinecraftContentCommand,
   type MinecraftPreparedContent,
   minecraftConfigurationSchema,
   minecraftContentCommandSchema,
@@ -113,6 +114,70 @@ function contentTarget(combination: unknown): ContentTarget {
     loader: value.profile,
     ...(value.loaderVersion ? { loaderVersion: value.loaderVersion } : {}),
   };
+}
+function modpackSelection(command: MinecraftContentCommand) {
+  if (command.kind === 'modpack')
+    return {
+      provider: command.provider,
+      projectId: command.projectId,
+      versionId: command.versionId,
+    };
+  if (command.kind === 'modpack-upload') return { sourceId: command.archiveRef };
+  return undefined;
+}
+function assertModpackConsent(
+  previous: MinecraftPreparedContent['previousModpack'],
+  command: MinecraftContentCommand,
+) {
+  const target = modpackSelection(command);
+  if (
+    target &&
+    previous &&
+    minecraftDigest(previous) !== minecraftDigest(target) &&
+    !('replace' in command && command.replace?.wipeConsent)
+  )
+    fail('minecraft_modpack_replacement_required');
+}
+/** Exact pack identity includes provider project/version or the immutable uploaded source. */
+export function assertMinecraftModpackTransition(
+  current: unknown,
+  prepared: MinecraftPreparedContent,
+  selectionCommitted = false,
+): void {
+  const command = minecraftContentCommandSchema.parse(prepared.command);
+  if (command.kind !== 'modpack' && command.kind !== 'modpack-upload') return;
+  const target = modpackSelection(command);
+  if (!target) throw new DomainError('configuration_invalid');
+  const selected = minecraftConfigurationSchema.shape.modpack.nullable().parse(current ?? null);
+  const hasBaseline = Object.hasOwn(prepared, 'previousModpack');
+  // Old jobs cannot acquire consent from a later selection. The narrow legacy
+  // same-pack case still executes all installation/configuration verification.
+  if (!hasBaseline) {
+    if (minecraftDigest(selected) !== minecraftDigest(target) || command.replace)
+      throw new DomainError('conflict');
+    return;
+  }
+  const previous = minecraftConfigurationSchema.shape.modpack
+    .unwrap()
+    .nullable()
+    .parse(prepared.previousModpack);
+  if (
+    minecraftDigest(selected) !== minecraftDigest(previous) &&
+    !(selectionCommitted && minecraftDigest(selected) === minecraftDigest(target))
+  )
+    throw new DomainError('conflict');
+  assertModpackConsent(previous, command);
+  if (command.replace) {
+    if (
+      !prepared.deletePaths ||
+      minecraftDigest([...prepared.deletePaths].sort()) !==
+        minecraftDigest([...command.replace.expectedDeletePaths].sort()) ||
+      prepared.backupBefore !== command.replace.backupBefore
+    )
+      throw new DomainError('conflict');
+  } else if (prepared.deletePaths?.length || prepared.backupBefore) {
+    throw new DomainError('conflict');
+  }
 }
 export function assertMinecraftContentTarget(target: ContentTarget, expected: ContentTarget): void {
   if (
@@ -253,6 +318,9 @@ export async function prepareMinecraftContentPlan(
             target,
           );
   } else if (command.kind === 'modpack' || command.kind === 'modpack-upload') {
+    result.previousModpack =
+      minecraftStoredConfigurationSchema.parse(profile.configuration).modpack ?? null;
+    assertModpackConsent(result.previousModpack, command);
     const scope = minecraftDigest({ serverId, command });
     if (command.kind === 'modpack') {
       const source = await options.acquireModpack?.(command.projectId, command.versionId, scope);
@@ -322,6 +390,7 @@ export async function prepareMinecraftCreationConfig(
         ? { kind: 'modpack-upload', archiveRef: selected.sourceId }
         : { kind: 'modpack', ...selected },
     backupBefore: false,
+    previousModpack: selected,
     archivePath: source.path,
     archiveRef: source.sourceId,
     archiveSha256: source.sha256,
@@ -1218,6 +1287,12 @@ async function applyPreparedContent(
   const command = minecraftContentCommandSchema.parse(prepared.command);
   await context.authorize();
   await context.assertStopped();
+  const selectionStep = stepId('modpack-selection', minecraftDigest(prepared));
+  assertMinecraftModpackTransition(
+    minecraftStoredConfigurationSchema.parse(profile.configuration).modpack,
+    prepared,
+    await completed(context, selectionStep),
+  );
   if (prepared.archivePath) {
     if (!prepared.archiveRef) throw new DomainError('configuration_invalid');
     const actor = await options.authorizeJob(
@@ -1448,7 +1523,11 @@ async function applyPreparedContent(
   assertMinecraftRuntimePathsPreserved(deletePaths, profile.installed_manifest);
   if (deletePaths.length && !('replace' in command && command.replace?.wipeConsent))
     throw new DomainError('forbidden');
-  if (deletePaths.length && context.operation().plan.minecraftWipeValidated !== true) {
+  if (
+    (command.kind === 'modpack' || command.kind === 'modpack-upload') &&
+    command.replace &&
+    context.operation().plan.minecraftWipeValidated !== true
+  ) {
     const preview = await minecraftContentWipePreview(
       context.adapter,
       context.server.pterodactyl_identifier ?? '',
@@ -1586,16 +1665,29 @@ async function applyPreparedContent(
     planDigest: staged.planDigest,
   });
   if (command.kind === 'modpack' || command.kind === 'modpack-upload') {
-    const configuration = minecraftStoredConfigurationSchema.parse(profile.configuration);
-    configuration.modpack =
-      command.kind === 'modpack'
-        ? { provider: 'modrinth', projectId: command.projectId, versionId: command.versionId }
-        : { sourceId: command.archiveRef };
-    await context.db
-      .updateTable('minecraft_server_profiles')
-      .set({ configuration: JSON.stringify(configuration), updated_at: new Date() })
-      .where('server_id', '=', context.server.id)
-      .execute();
+    await context.db.transaction().execute(async (tx) => {
+      const current = await tx
+        .selectFrom('minecraft_server_profiles')
+        .select('configuration')
+        .where('server_id', '=', context.server.id)
+        .forUpdate()
+        .executeTakeFirstOrThrow();
+      const configuration = minecraftStoredConfigurationSchema.parse(current.configuration);
+      assertMinecraftModpackTransition(
+        configuration.modpack,
+        prepared,
+        await completed({ ...context, db: tx }, selectionStep),
+      );
+      configuration.modpack = modpackSelection(command);
+      await tx
+        .updateTable('minecraft_server_profiles')
+        .set({ configuration: JSON.stringify(configuration), updated_at: new Date() })
+        .where('server_id', '=', context.server.id)
+        .execute();
+      // This exact prepared-plan receipt and selection publish atomically. A
+      // crash after commit may verify the same job again without renewed wipe.
+      await complete({ ...context, db: tx }, selectionStep);
+    });
   }
   return true;
 }

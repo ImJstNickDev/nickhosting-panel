@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { safeContentPath } from '@nickhosting/content-providers';
 import { DomainError } from '@nickhosting/core';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -10,8 +11,10 @@ import {
   applyMinecraftStoredPlayerChange,
   applyMinecraftTextChange,
   assertMinecraftContentTarget,
+  assertMinecraftModpackTransition,
   assertMinecraftRuntimePathsPreserved,
   hashMinecraftRemoteFile,
+  type MinecraftPreparedContent,
   minecraftConfigurationSchema,
   minecraftContentCommandSchema,
   minecraftContentWipePreview,
@@ -120,6 +123,119 @@ const change = (before = 'motd=Old\n', after = 'motd=New\n') => ({
 });
 
 describe('Minecraft durable content safety', () => {
+  it('keeps every permitted pack path inside the previewed content roots', () => {
+    for (const path of [
+      'kubejs/example.cfg',
+      'scripts/example.cfg',
+      'resourcepacks/pack.zip',
+      'root.cfg',
+    ])
+      expect(() => safeContentPath(path)).toThrow('validation_failed');
+    for (const path of [
+      'mods/example.jar',
+      'plugins/example.jar',
+      'config/example.cfg',
+      'defaultconfigs/example.cfg',
+    ])
+      expect(() => safeContentPath(path)).not.toThrow();
+  });
+  it('allows explicitly consented empty pack previews while keeping world replacement scoped', () => {
+    const replace = { wipeConsent: true as const, expectedDeletePaths: [], backupBefore: false };
+    expect(
+      minecraftContentCommandSchema.safeParse({
+        kind: 'modpack-upload',
+        archiveRef: randomUUID(),
+        replace,
+      }).success,
+    ).toBe(true);
+    expect(
+      minecraftContentCommandSchema.safeParse({
+        kind: 'world-import',
+        archiveRef: randomUUID(),
+        targetWorld: 'world',
+        replace,
+      }).success,
+    ).toBe(false);
+  });
+  it('requires replacement consent for changed pack project, version or uploaded identity', () => {
+    const current = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };
+    const changed = [
+      { kind: 'modpack' as const, ...current, projectId: 'packB' },
+      { kind: 'modpack' as const, ...current, versionId: 'versionB' },
+      { kind: 'modpack-upload' as const, archiveRef: randomUUID() },
+    ];
+    for (const command of changed) {
+      const prepared = {
+        combinationId: randomUUID(),
+        command,
+        previousModpack: current,
+        backupBefore: false,
+      };
+      expect(() => assertMinecraftModpackTransition(current, prepared)).toThrow(
+        'validation_failed',
+      );
+    }
+    const uploaded = { sourceId: randomUUID() };
+    expect(() =>
+      assertMinecraftModpackTransition(uploaded, {
+        combinationId: randomUUID(),
+        command: { kind: 'modpack-upload', archiveRef: randomUUID() },
+        previousModpack: uploaded,
+        backupBefore: false,
+      }),
+    ).toThrow('validation_failed');
+  });
+  it('pins queued replacement consent to its prior selection, paths and backup decision', () => {
+    const current = { sourceId: randomUUID() };
+    const target = randomUUID();
+    const prepared: MinecraftPreparedContent = {
+      combinationId: randomUUID(),
+      command: {
+        kind: 'modpack-upload',
+        archiveRef: target,
+        replace: { wipeConsent: true, expectedDeletePaths: ['mods'], backupBefore: true },
+      },
+      previousModpack: current,
+      backupBefore: true,
+      deletePaths: ['mods'],
+    };
+    expect(() => assertMinecraftModpackTransition(current, prepared)).not.toThrow();
+    expect(() => assertMinecraftModpackTransition({ sourceId: randomUUID() }, prepared)).toThrow(
+      'conflict',
+    );
+    // Another job may already have selected this target; equality is not a receipt.
+    expect(() => assertMinecraftModpackTransition({ sourceId: target }, prepared)).toThrow(
+      'conflict',
+    );
+    expect(() =>
+      assertMinecraftModpackTransition({ sourceId: target }, prepared, true),
+    ).not.toThrow();
+    expect(() =>
+      assertMinecraftModpackTransition(current, { ...prepared, deletePaths: ['config'] }),
+    ).toThrow('conflict');
+    expect(() =>
+      assertMinecraftModpackTransition(current, { ...prepared, backupBefore: false }),
+    ).toThrow('conflict');
+  });
+  it('permits initial installation and exact same-pack retries without inventing wipe consent', () => {
+    const current = { provider: 'modrinth' as const, projectId: 'pack', versionId: 'version' };
+    const prepared = {
+      combinationId: randomUUID(),
+      command: { kind: 'modpack' as const, ...current },
+      previousModpack: null,
+      backupBefore: false,
+    };
+    expect(() => assertMinecraftModpackTransition(undefined, prepared)).not.toThrow();
+    expect(() =>
+      assertMinecraftModpackTransition(current, { ...prepared, previousModpack: current }),
+    ).not.toThrow();
+    const { previousModpack: _baseline, ...legacy } = prepared;
+    expect(() => assertMinecraftModpackTransition(current, legacy)).not.toThrow();
+    expect(() => assertMinecraftModpackTransition(undefined, legacy)).toThrow('conflict');
+    expect(() =>
+      assertMinecraftModpackTransition({ ...current, versionId: 'different' }, legacy),
+    ).toThrow('conflict');
+  });
   it('persists independently verified UUIDs before replay and never grants a reclaimed username', async () => {
     const first = '11111111111111111111111111111111';
     const reclaimed = '22222222222222222222222222222222';

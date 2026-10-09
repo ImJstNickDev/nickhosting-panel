@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { installedContentChange } from '@nickhosting/content-providers';
@@ -13,11 +15,14 @@ import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
   configureMinecraftProvision,
   type MinecraftContentOptions,
+  type MinecraftPreparedContent,
+  prepareMinecraftContentPlan,
   processMinecraftContent,
   verifyMinecraftPendingContent,
   verifyMinecraftRestore,
 } from './minecraft-content.js';
 import { minecraftMappingDigest, signMinecraftEvidence } from './minecraft-registry.js';
+import { createMinecraftSourceStore } from './minecraft-sources.js';
 import { enqueueServerOperation } from './registry.js';
 import { managementFixture } from './test-fixtures.js';
 import { reserveUploadIngestion } from './upload-admission.js';
@@ -429,6 +434,266 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     };
     return { f, serverId, operation, combinationId, files, context, options };
   }
+
+  async function installedPackFixture(
+    selection:
+      | { provider: 'modrinth'; projectId: string; versionId: string }
+      | { sourceId: string },
+  ) {
+    const f = await minecraftFixture();
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration: JSON.stringify({ eula: true, modpack: selection }),
+        configuration_state: '{}',
+      })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await verifyMinecraftRestore(f.context, f.options);
+    f.options.acquireModpack = vi.fn();
+    f.options.archiveResolver = vi.fn();
+    f.context.adapter.deleteFiles = vi.fn();
+    f.context.adapter.uploadFile = vi.fn();
+    return f;
+  }
+
+  it('refuses changed provider versions and uploaded packs before acquisition or server file effects', async () => {
+    const selected = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };
+    const f = await installedPackFixture(selected);
+    const commands = [
+      { kind: 'modpack', ...selected, projectId: 'packB' },
+      { kind: 'modpack', ...selected, versionId: 'versionB' },
+      { kind: 'modpack-upload', archiveRef: randomUUID() },
+    ];
+    for (const command of commands)
+      await expect(
+        prepareMinecraftContentPlan(f.f.db, f.serverId, command, {
+          ...f.options,
+          adapter: f.context.adapter,
+        }),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ configuration: JSON.stringify({ eula: true, modpack: { sourceId: randomUUID() } }) })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    await expect(
+      prepareMinecraftContentPlan(
+        f.f.db,
+        f.serverId,
+        { kind: 'modpack-upload', archiveRef: randomUUID() },
+        { ...f.options, adapter: f.context.adapter },
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(f.options.acquireModpack).not.toHaveBeenCalled();
+    expect(f.options.archiveResolver).not.toHaveBeenCalled();
+    expect(f.context.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('rejects queued pack changes against fresh persisted selection, including target-equality races', async () => {
+    const selected = { sourceId: randomUUID() };
+    const target = randomUUID();
+    const f = await installedPackFixture(selected);
+    const prepared: MinecraftPreparedContent = {
+      combinationId: f.combinationId,
+      command: {
+        kind: 'modpack-upload',
+        archiveRef: target,
+        replace: { wipeConsent: true, expectedDeletePaths: ['mods'], backupBefore: false },
+      },
+      previousModpack: selected,
+      backupBefore: false,
+      deletePaths: ['mods'],
+    };
+    f.operation.plan.minecraftContent = JSON.parse(JSON.stringify(prepared));
+    for (const sourceId of [randomUUID(), target]) {
+      await f.f.db
+        .updateTable('minecraft_server_profiles')
+        .set({ configuration: JSON.stringify({ eula: true, modpack: { sourceId } }) })
+        .where('server_id', '=', f.serverId)
+        .execute();
+      await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+        code: 'conflict',
+      });
+    }
+    expect(f.context.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
+    expect(await f.f.db.selectFrom('minecraft_staging_claims').selectAll().execute()).toEqual([]);
+  });
+
+  it.each([true, false])(
+    'consented replacement (old files: %s) verifies removals and selection and safely retries the same job',
+    async (oldContent) => {
+      const selected = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };
+      const f = await installedPackFixture(selected);
+      const root = `./mountdata/test-assets/m4-replacement-${randomUUID()}`;
+      const target = { provider: 'modrinth' as const, projectId: 'packB', versionId: 'versionB' };
+      const env = {
+        ...f.options.env,
+        NH_MINECRAFT_SOURCE_ROOT: `${root}/sources`,
+        NH_MINECRAFT_CONTENT_ROOT: `${root}/expanded`,
+        NH_MINECRAFT_SOURCE_FREE_BYTES: '0',
+        NH_MINECRAFT_SOURCE_FREE_PERCENT: '0',
+      };
+      try {
+        const zip = new ZipFile();
+        zip.addBuffer(
+          Buffer.from(
+            JSON.stringify({
+              formatVersion: 1,
+              game: 'minecraft',
+              name: 'Isolated empty replacement pack',
+              versionId: 'versionB',
+              dependencies: { minecraft: '1.21.1' },
+              files: [],
+            }),
+          ),
+          'modrinth.index.json',
+        );
+        zip.end();
+        const chunks: Buffer[] = [];
+        for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+        const bytes = Buffer.concat(chunks);
+        const sources = createMinecraftSourceStore(f.f.db, f.f.context, env, {
+          authorize: async () => f.f.context,
+        });
+        const source = await sources.reserveUpload({
+          kind: 'modpack',
+          serverId: f.serverId,
+          idempotencyKey: randomUUID(),
+          bytes: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+        });
+        await sources.upload(
+          source.id,
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(bytes);
+              controller.close();
+            },
+          }),
+          bytes.length,
+        );
+        const acquired = await sources.resolveForServer(source.id, f.serverId);
+        f.options = {
+          ...f.options,
+          env,
+          mountdataRoot: resolve(env.NH_MINECRAFT_CONTENT_ROOT),
+          acquireModpack: vi.fn(async () => ({ ...acquired, sourceId: source.id })),
+        };
+        const oldFile = Buffer.from('old-only pack configuration');
+        if (oldContent) f.files.set('config/old-only.cfg', oldFile);
+        if (oldContent)
+          await f.f.db
+            .insertInto('minecraft_content_items')
+            .values({
+              server_id: f.serverId,
+              path: 'config/old-only.cfg',
+              installed_by: f.operation.job_id,
+              artifact: JSON.stringify({
+                path: 'config/old-only.cfg',
+                size: oldFile.length,
+                sha256: createHash('sha256').update(oldFile).digest('hex'),
+              }),
+            })
+            .execute();
+        const prepared = await prepareMinecraftContentPlan(
+          f.f.db,
+          f.serverId,
+          {
+            kind: 'modpack',
+            ...target,
+            replace: {
+              wipeConsent: true,
+              expectedDeletePaths: oldContent ? ['config'] : [],
+              backupBefore: false,
+            },
+          },
+          { ...f.options, adapter: f.context.adapter },
+        );
+        expect(prepared.previousModpack).toEqual(selected);
+        expect(prepared.deletePaths).toEqual(oldContent ? ['config'] : []);
+        f.operation.plan.minecraftContent = JSON.parse(JSON.stringify(prepared));
+        await f.f.db
+          .updateTable('server_operations')
+          .set({ action: 'minecraft-content', plan: JSON.stringify(f.operation.plan) })
+          .where('job_id', '=', f.operation.job_id)
+          .execute();
+        await f.f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'running', completed_at: null })
+          .where('id', '=', f.operation.job_id)
+          .execute();
+        await f.f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: f.operation.job_id })
+          .where('id', '=', f.serverId)
+          .execute();
+        f.context.adapter.getResources = vi.fn(async () => ({
+          current_state: 'offline' as const,
+          is_suspended: false,
+          resources: {
+            memory_bytes: 0,
+            cpu_absolute: 0,
+            disk_bytes: 100,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            uptime: 0,
+          },
+        }));
+        f.context.adapter.deleteFiles = vi.fn(async (_identifier, _root, paths) => {
+          const before = await f.f.db
+            .selectFrom('minecraft_server_profiles')
+            .select('configuration')
+            .where('server_id', '=', f.serverId)
+            .executeTakeFirstOrThrow();
+          expect(before.configuration).toMatchObject({ modpack: selected });
+          for (const path of paths)
+            for (const file of [...f.files.keys()])
+              if (file === path || file.startsWith(`${path}/`)) f.files.delete(file);
+        });
+        if (!oldContent) {
+          // An empty preview is still an exact preview; new files cannot be wiped
+          // using approval of an earlier empty directory inventory.
+          f.files.set('config/queued-change.cfg', Buffer.from('new unapproved content'));
+          await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+            code: 'conflict',
+          });
+          expect(f.context.adapter.deleteFiles).not.toHaveBeenCalled();
+          expect(f.files.has('config/queued-change.cfg')).toBe(true);
+          f.files.delete('config/queued-change.cfg');
+        }
+        expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+        expect(f.files.has('config/old-only.cfg')).toBe(false);
+        expect(f.files.has('server.jar')).toBe(true);
+        expect(await f.f.db.selectFrom('minecraft_content_items').selectAll().execute()).toEqual(
+          [],
+        );
+        const updated = await f.f.db
+          .selectFrom('minecraft_server_profiles')
+          .select(['configuration', 'installed', 'content_state'])
+          .where('server_id', '=', f.serverId)
+          .executeTakeFirstOrThrow();
+        expect(updated.configuration).toMatchObject({ modpack: target });
+        expect(updated.installed).toBe(true);
+        expect(updated.content_state).toEqual({});
+        // Retry after the atomic selection commit, before the enclosing job finishes.
+        expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+        expect(f.context.adapter.deleteFiles).toHaveBeenCalledTimes(oldContent ? 1 : 0);
+        f.operation.plan.minecraftContent = {
+          ...prepared,
+          command: { ...prepared.command, versionId: 'changed-after-commit' },
+        };
+        await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+          code: 'conflict',
+        });
+        expect(f.context.adapter.deleteFiles).toHaveBeenCalledTimes(oldContent ? 1 : 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('verifies timestamp-variable Fabric launchers using signed entry contents and stores the actual target receipt', async () => {
     const bootstrap = await launcherJar('2026-01-01T00:00:00Z');

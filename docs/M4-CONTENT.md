@@ -13,11 +13,32 @@
 - `stageContent` returns a job-owned files directory, plan digest and `{path,size,sha256,source}` manifest after every output verifies.
 - `installedContentChange` returns old-file removal paths and expected previous hashes. Core must compare each hash to the live file immediately before destructive operations. Shared dependency updates require dependent re-resolution; retained dependent relationships prevent removal.
 
-Default policy allows content under `mods/`, `plugins/`, `config/` and `defaultconfigs/`. Server properties, EULA, operators, whitelist, worlds, startup files and hidden files are controlled by separate authorized management APIs. Shell/JavaScript/Python/native executable override paths are refused. Overrides may not silently replace those protected files. Packs that require arbitrary startup scripts or extra executable behavior are unsupported rather than partially advertised as working.
+Default policy allows content under `mods/`, `plugins/`, `config/` and `defaultconfigs/`. Pack overrides in `kubejs/`, `scripts/`, `resourcepacks/` or the server root are unsupported. Server properties, EULA, operators, whitelist, worlds, startup files and hidden files are controlled by separate authorized management APIs. Shell/JavaScript/Python/native executable override paths are refused. Overrides may not silently replace those protected files. Packs that require arbitrary startup scripts or extra executable behavior are unsupported rather than partially advertised as working.
 
 Modrinth indexed files follow their server environment declarations; client files are skipped and optional server files are omitted with a warning. Embedded Fabric metadata contradicting a provider's server declaration is rejected. JAR overrides and CurseForge files lack sufficient provider-side evidence by default: a recognized embedded Fabric server/both-side environment is required. Unknown Forge/Quilt/Paper override execution side is refused. Merely finding Forge display-test fields or a JAR filename does not establish compatibility.
 
 Common overrides are applied after indexed downloads and server overrides replace common overrides, regardless of ZIP order. Case-alias collisions fail. Client overrides are never selected. A changed archive cannot satisfy a previously approved plan without matching its recorded file hashes.
+
+Replacing an already selected modpack requires explicit wipe consent, the exact
+current deletion preview and a backup decision. Changing a Modrinth project,
+version or uploaded source identity counts as replacement; it cannot silently
+overlay the previous pack and leave its files behind. Preparation records the
+existing selection before acquisition. The worker compares that exact selection
+again before staging or file effects, so consent prepared against pack A cannot
+be reused after another operation selects a different pack. The replacement
+deletes only the approved preview paths and publishes the new selection after
+the resulting files, removals and requested backup have been verified.
+An explicitly consented empty preview is valid for a selected empty pack; fresh
+worker validation still rejects any newly appearing paths before replacement.
+
+First installation and retries of the exact same selected pack do not need a new
+wipe. Initial provisioning still has to satisfy all configuration and content
+completion checks. Selection publication and a receipt for the exact job and
+prepared plan commit atomically; this permits recovery after that commit without
+treating target equality alone as installation evidence. Legacy queued requests
+without a recorded baseline fail closed except for the exact same-pack/no-wipe
+case, which still runs the normal verification path. None of these paths promises
+rollback of changes already applied to server files.
 
 ## Download and filesystem boundaries
 
