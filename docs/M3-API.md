@@ -70,6 +70,12 @@ connections retain only their original lease during that bounded retry; route
 revocation, actual safety failures and lease expiry still close them. Other errors,
 including ordinary HTTP 409 conflicts, do not receive this special handling.
 
+Equivalent lease renewals do not discard an in-flight readiness/idle probe when
+Gateway identity, revision and complete route contents remain identical. The
+captured observation time, original lease expiry and original quiescence deadline
+still bound the report; changed authority or either lease expiring discards it.
+`observationsDiscarded` counts these invalidated probes separately from errors.
+
 A snapshot is `{gatewayId,revision,issuedAt,expiresAt,routes}`. Each strict route
 has managed UUIDs (`id`, `serverId`, `nodeId`, `allocationId`), monotonic revision,
 consent `generation`, optional `wakeJobId`, `public:{address,port,transport}`,

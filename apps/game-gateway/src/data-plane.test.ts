@@ -732,6 +732,151 @@ describe('sleep protocol handling and observations', () => {
     await f.gateway.observe();
     expect(f.control.reportObservation).toHaveBeenCalledTimes(2);
   });
+  it.each(['waking', 'online'] as const)(
+    'completes a slow %s observation across repeated equivalent lease renewals with its original deadline',
+    async (mode) => {
+      const backend = await tcpFixture();
+      let clock = Date.now();
+      const initial = clock;
+      const entered = Promise.withResolvers<void>();
+      const readiness = Promise.withResolvers<{ ready: boolean }>();
+      const r = {
+        ...route(backend.port, 'tcp', mode),
+        sleepEligibleAt: mode === 'online' ? new Date(clock - 1000).toISOString() : undefined,
+      };
+      const f = plane([r], {
+        now: () => clock,
+        lease: 1000,
+        protocols: [
+          fixtureProtocol({
+            probeReadiness: async () => {
+              entered.resolve();
+              return readiness.promise;
+            },
+            probeIdle: async () => ({ idle: true, playerCount: 0 }),
+          }),
+        ],
+      });
+      await f.gateway.start();
+      const observing = f.gateway.observe();
+      await entered.promise;
+      for (let renewal = 1; renewal <= 5; renewal++) {
+        clock = initial + renewal * 50;
+        await f.gateway.applySnapshot(f.snapshot([r], 1, 10000));
+      }
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      readiness.resolve({ ready: true });
+      await observing;
+      expect(f.control.reportObservation).toHaveBeenCalledOnce();
+      expect(f.control.reportObservation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          routeId: r.id,
+          routeRevision: r.revision,
+          generation: r.generation,
+          ready: true,
+          idle: true,
+          observedAt: new Date(initial).toISOString(),
+          quiescenceUntil: mode === 'online' ? new Date(initial + 1000).toISOString() : undefined,
+        }),
+      );
+      expect(f.gateway.health().expiresAt).toBe(new Date(clock + 10000).toISOString());
+      expect(f.gateway.metrics().observationsDiscarded).toBe(0);
+    },
+  );
+  it.each([
+    'revision',
+    'generation',
+    'mode',
+    'protocol',
+    'backend',
+    'new-role',
+    'revoked',
+  ] as const)(
+    'discards a slow observation when %s authority changes during its probe',
+    async (change) => {
+      const backend = await tcpFixture();
+      const extra = await tcpFixture();
+      const entered = Promise.withResolvers<void>();
+      const readiness = Promise.withResolvers<{ ready: boolean }>();
+      const r = route(backend.port, 'tcp', 'waking');
+      const f = plane([r], {
+        protocols: [
+          fixtureProtocol({
+            probeReadiness: async () => {
+              entered.resolve();
+              return readiness.promise;
+            },
+            probeIdle: async () => ({ idle: true, playerCount: 0 }),
+          }),
+        ],
+      });
+      await f.gateway.start();
+      const observing = f.gateway.observe();
+      await entered.promise;
+      const updated = {
+        ...r,
+        revision: 2,
+        ...(change === 'generation' ? { generation: randomUUID() } : {}),
+        ...(change === 'mode' ? { mode: 'maintenance' as const } : {}),
+        ...(change === 'protocol'
+          ? { protocol: { handlerId: 'fixture', role: 'game', gameVersion: '2' } }
+          : {}),
+        ...(change === 'backend' ? { backend: { ...r.backend, port: extra.port } } : {}),
+      };
+      const next =
+        change === 'revoked'
+          ? []
+          : change === 'new-role'
+            ? [
+                updated,
+                {
+                  ...route(extra.port, 'tcp', 'waking'),
+                  serverId: r.serverId,
+                  generation: r.generation,
+                },
+              ]
+            : [updated];
+      await f.gateway.applySnapshot(f.snapshot(next, 2));
+      readiness.resolve({ ready: true });
+      await observing;
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      expect(f.gateway.health().quiescentServers).toBe(0);
+      expect(f.gateway.metrics()).toMatchObject({ observationsDiscarded: 1, observationErrors: 0 });
+    },
+  );
+  it.each(['original', 'renewed'] as const)(
+    'discards a slow observation when the %s lease expires despite equivalent routes',
+    async (expired) => {
+      const backend = await tcpFixture();
+      let clock = Date.now();
+      const initial = clock;
+      const entered = Promise.withResolvers<void>();
+      const readiness = Promise.withResolvers<{ ready: boolean }>();
+      const r = route(backend.port, 'tcp', 'waking');
+      const f = plane([r], {
+        now: () => clock,
+        lease: 100,
+        protocols: [
+          fixtureProtocol({
+            probeReadiness: async () => {
+              entered.resolve();
+              return readiness.promise;
+            },
+          }),
+        ],
+      });
+      await f.gateway.start();
+      const observing = f.gateway.observe();
+      await entered.promise;
+      clock = initial + 10;
+      await f.gateway.applySnapshot(f.snapshot([r], 1, expired === 'original' ? 1000 : 10));
+      clock = initial + (expired === 'original' ? 110 : 30);
+      readiness.resolve({ ready: true });
+      await observing;
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      expect(f.gateway.metrics()).toMatchObject({ observationsDiscarded: 1, observationErrors: 0 });
+    },
+  );
   it('probes and reports first-run readiness even while the listener remains unsafe to bind', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'waking');

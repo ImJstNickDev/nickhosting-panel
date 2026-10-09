@@ -98,6 +98,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     wakeRequests: 0,
     wakeErrors: 0,
     observationErrors: 0,
+    observationsDiscarded: 0,
     snapshotErrors: 0,
     leaseExpirations: 0,
   };
@@ -776,11 +777,20 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         }
         try {
           if (
-            candidateSnapshot !== candidates ||
+            !candidateSnapshot ||
+            candidateSnapshot.gatewayId !== candidates.gatewayId ||
+            candidateSnapshot.revision !== candidates.revision ||
+            !isDeepStrictEqual(candidateSnapshot.routes, candidates.routes) ||
+            Date.parse(candidateSnapshot.expiresAt) <= now() ||
             Date.parse(candidates.expiresAt) <= now() ||
             stopping
-          )
+          ) {
+            counters.observationsDiscarded++;
             continue;
+          }
+          // Equivalent lease renewals must not starve a slower protocol probe.
+          // Keep the captured lease/time for this observation and its idle fence;
+          // only exactly unchanged route authority may outlive object replacement.
           const activeSessions = [...listeners.values()]
             .filter((listener) => listener.route.serverId === anchor.serverId)
             .reduce((count, listener) => count + listener.clients.size + listener.sessions.size, 0);
