@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
 import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -57,6 +58,13 @@ export interface LifecycleOptions {
     operation: Operation,
   ) => Promise<void>;
 }
+
+const isGatewaySleep = (operation: Operation) => {
+  const marker = operation.plan.gatewayAutomation;
+  return (
+    typeof marker === 'object' && marker !== null && 'kind' in marker && marker.kind === 'sleep'
+  );
+};
 
 const isMissing = (error: unknown) =>
   error instanceof PterodactylError && error.reason === 'not_found';
@@ -166,7 +174,12 @@ async function observation(db: Kysely<Database>, server: Server, resources: Reso
       .updateTable('managed_servers')
       .set({
         runtime_state: resources.current_state,
-        readiness: resources.current_state === 'running' ? 'loading' : 'unknown',
+        readiness:
+          resources.current_state === 'running'
+            ? server.runtime_state === 'running' && server.readiness === 'ready'
+              ? 'ready'
+              : 'loading'
+            : 'unknown',
         last_observed_at: now,
         updated_at: now,
       })
@@ -356,11 +369,12 @@ export async function processServerOperation(
             .where('server_id', '=', server.id)
             .executeTakeFirst();
           if (compute || installation) return false;
-          await tx
-            .updateTable('managed_servers')
-            .set({ intent: 'manually_stopped' })
-            .where('id', '=', server.id)
-            .execute();
+          if (!isGatewaySleep(operation))
+            await tx
+              .updateTable('managed_servers')
+              .set({ intent: 'manually_stopped' })
+              .where('id', '=', server.id)
+              .execute();
         }
         if (
           !success &&
@@ -558,6 +572,26 @@ export async function processServerOperation(
         .execute();
       await event('servers.operation.effect_prepared', { phase });
       await options.checkpoint?.('prepared', operation);
+      if (operation.plan.gatewayAutomation !== undefined) {
+        // Preparing durable intent and provider identity checks can take time.
+        // Do not carry an earlier automation grant across that interval. A
+        // failure here proves perform() was never called, unlike a lost reply.
+        try {
+          assertGatewaySleepFence(operation.plan, nowOf(options));
+          await options.authorizeEffect(jobId, server.id, db);
+        } catch (error) {
+          await update({
+            effect_state: 'none',
+            plan: {
+              ...operation.plan,
+              rejected: true,
+              rejectionCode: safeError(error).code,
+              powerEffectPrepared: false,
+            },
+          });
+          throw error;
+        }
+      }
       let result: T;
       try {
         result = await perform();
@@ -698,6 +732,16 @@ export async function processServerOperation(
       )
         throw new DomainError('validation_failed');
       if (operation.plan.rejected === true) return finish(false, false, 'integration_unavailable');
+      if (operation.action === 'delete') {
+        const leasesExpired = await db.transaction().execute(async (tx) => {
+          await lockResources(tx);
+          return revokeGatewayRoutesForDeletion(tx, server.id, nowOf(options));
+        });
+        // Return to the durable outbox instead of sleeping with a connection or
+        // resource lock. This also fences old queued deletes and lost-response
+        // recovery before either a remote mutation or local allocation release.
+        if (!leasesExpired) return wait('gateway_lease_expiry');
+      }
       if (operation.action === 'provision') {
         const plan = provisionPlanSchema.parse(operation.plan.provision);
         if (plan.externalId !== server.external_id) throw new DomainError('conflict');
@@ -925,6 +969,27 @@ export async function processServerOperation(
                 server.pterodactyl_id ?? 0,
                 server.pterodactyl_identifier ?? '',
                 {
+                  beforePower: isGatewaySleep(operation)
+                    ? async () => {
+                        try {
+                          await options.authorizeEffect(jobId, server.id, db);
+                          assertGatewaySleepFence(operation.plan, nowOf(options));
+                          await update({
+                            plan: {
+                              ...operation.plan,
+                              gatewaySleepHandoffAt: nowOf(options).toISOString(),
+                            },
+                          });
+                          await options.authorizeEffect(jobId, server.id, db);
+                          // Persistence itself may wait; do not send a stale stop
+                          // merely because its handoff record reached PostgreSQL.
+                          assertGatewaySleepFence(operation.plan, nowOf(options));
+                        } catch (error) {
+                          if (!(error instanceof DomainError)) throw error;
+                          throw new PterodactylError('permission_denied', 'client', 'rejected');
+                        }
+                      }
+                    : undefined,
                   authorize: async () => {
                     try {
                       await options.verifyObservationHost?.(server.id, db);
@@ -963,11 +1028,12 @@ export async function processServerOperation(
           // with trusted, host-bound Docker non-running evidence before persisting proof.
           if (operation.plan.stopConfirmed !== true)
             return wait('stop_terminal_unproven', 'operation_uncertain');
-          await db
-            .updateTable('managed_servers')
-            .set({ intent: 'manually_stopped' })
-            .where('id', '=', server.id)
-            .execute();
+          if (!isGatewaySleep(operation))
+            await db
+              .updateTable('managed_servers')
+              .set({ intent: 'manually_stopped' })
+              .where('id', '=', server.id)
+              .execute();
           return finish(true, true);
         }
         if (action !== 'stop' && current.current_state === 'running') {

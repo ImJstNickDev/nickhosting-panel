@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AuthContext } from '@nickhosting/core';
+import { type AuthContext, authSessionId } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { GameManifest } from '@nickhosting/game-sdk';
 import type { Allocation, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
@@ -32,7 +32,10 @@ export async function pendingUploadFixture(db: Kysely<Database>, serverId: strin
     .execute();
   return claimId;
 }
-export async function managementFixture(db: Kysely<Database>) {
+export async function managementFixture(
+  db: Kysely<Database>,
+  options: { interactive?: boolean } = {},
+) {
   const ownerId = 'isolated-platform-owner';
   const userId = randomUUID();
   await sql`insert into "user" (id,name,email,role,"emailVerified") values (${ownerId},'Owner','owner@example.test','owner',true) on conflict(id) do nothing`.execute(
@@ -55,6 +58,17 @@ export async function managementFixture(db: Kysely<Database>) {
     sessionType: 'regular',
     ownerElevation: false,
   };
+  // Existing M2 tests deliberately exercise unbound contexts; M3 interactive
+  // services can explicitly request real isolated session bindings.
+  if (options.interactive) {
+    for (const current of [context, owner]) {
+      const sessionId = randomUUID();
+      await sql`insert into session(id,token,"userId","expiresAt") values (
+        ${sessionId},${randomUUID()},${current.actorUserId},now()+interval '1 hour'
+      )`.execute(db);
+      current[authSessionId] = sessionId;
+    }
+  }
   const hostId = randomUUID(),
     nodeId = randomUUID(),
     mappingId = randomUUID(),

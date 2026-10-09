@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M1 merged; M2 review corrections complete on PR #17; ready for Owner/ChatGPT review, unmerged.
+**Status:** M2 merged; M3 Gateway and sleep/wake acceptance passed; PR #19 awaits Owner/ChatGPT review. See [M3 validation](docs/M3-VALIDATION.md). No production deployment is authorized.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
@@ -25,6 +25,10 @@ M0 governance and M1 are merged. M1 adds executable Hono API/worker foundations,
 The remaining documents detail authentication, resource accounting, game SDK, gateway, deployment, and UX/i18n. The [`docs/decisions`](docs/decisions/) directory contains the architecture decision records (ADRs).
 
 M2's backend contracts are documented in [`docs/M2-API.md`](docs/M2-API.md), with lifecycle/resource/service decisions in [ADR 0011](docs/decisions/0011-server-lifecycle-and-service-boundaries.md). Validation results, accepted limitations and verified test cleanup are recorded in [`docs/M2-VALIDATION.md`](docs/M2-VALIDATION.md); this review delivery is not deployment approval. The temporarily accepted SFTPGo 2.7.6 existing-SSH-transport revocation limitation remains a production-release follow-up.
+
+M3 contracts and deployment prerequisites are in [`docs/M3-API.md`](docs/M3-API.md).
+The standalone Gateway is tested through synthetic protocols; no real game codec
+or public production listener is included in this milestone.
 
 ## Non-negotiable project shape
 

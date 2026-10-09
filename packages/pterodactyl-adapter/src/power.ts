@@ -14,6 +14,9 @@ export function supportsStopConfirmation(egg: Pick<Egg, 'config' | 'relationship
 }
 export interface StopConfirmationOptions {
   authorize(): Promise<boolean>;
+  /** Final permission fence immediately before a new power request. Ongoing
+   * console authorization must not confuse its expiry with proof invalidation. */
+  beforePower?(): Promise<void>;
   /** Durably persist the proof before this method can report confirmed. */
   onConfirmed(): Promise<void>;
 }
@@ -81,6 +84,7 @@ export async function stopWithConfirmation(
   try {
     if (ended || !(await options.authorize()))
       throw new PterodactylError('permission_denied', 'client', 'rejected');
+    await options.beforePower?.();
     armed = true;
     try {
       await adapter.power(identifier, 'stop');

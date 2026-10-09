@@ -1,0 +1,19 @@
+# Review and replace every placeholder before installation. Do not install as part of M3.
+# User service on the verified game host; no new Docker network or public bind implied.
+[Unit]
+Description=NickHosting permanent Game Gateway
+
+[Service]
+Type=simple
+WorkingDirectory=/REPLACE_WITH_APPROVED_WORKSPACE
+EnvironmentFile=/REPLACE_WITH_APPROVED_WORKSPACE/.env.gateway.local
+ExecStart=/REPLACE_WITH_USER_NODE24_BINARY --import tsx apps/game-gateway/src/main.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=75
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

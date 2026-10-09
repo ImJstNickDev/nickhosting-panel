@@ -14,4 +14,6 @@ Each ADR is a short record of an intentional project decision and the consequenc
 - [0010 M1 identity, configuration and durability](0010-foundation-identity-and-durability.md)
 - [0011 M2 lifecycle, admission and external services](0011-server-lifecycle-and-service-boundaries.md)
 
+- [0012 M3 Gateway leases and sleep authority](0012-gateway-leases-and-sleep.md)
+
 When a new decision supersedes an ADR, link a new ADR and mark old one `Superseded`, rather than deleting historical context.

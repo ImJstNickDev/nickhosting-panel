@@ -4,6 +4,7 @@ import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from 
 import { createDatabase } from '@nickhosting/database';
 import { processJob, startJobWorker } from '@nickhosting/jobs';
 import { createManagementRuntime } from '@nickhosting/server-management';
+import { reconcileServers } from './reconcile.js';
 
 export async function main(env: NodeJS.ProcessEnv = process.env) {
   const logger = createLogger((record) => {
@@ -44,23 +45,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     let reconciliation: Promise<void> | undefined;
     const poll = async () => {
       try {
-        const server = await db
-          .selectFrom('managed_servers')
-          .select('id')
-          .where('deleted_at', 'is', null)
-          .limit(1)
-          .executeTakeFirst();
-        if (server) {
-          const result = await (await management()).reconcile();
-          if (result.external.failed)
-            logger.log('warn', 'servers.external_recovery_failed', {
-              count: result.external.failed,
-            });
-          if (result.unavailable.length)
-            logger.log('warn', 'servers.reconciliation_unavailable', {
-              count: result.unavailable.length,
-            });
-        }
+        await reconcileServers(db, management, logger, env);
       } catch {
         logger.log('warn', 'servers.reconciliation_failed');
       } finally {

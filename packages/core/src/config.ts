@@ -1,6 +1,13 @@
 import { posix } from 'node:path';
 import { z } from 'zod';
 import { DomainError } from './errors.js';
+import {
+  defaultGatewayDataPolicy,
+  gatewayDataPolicySchema,
+  gatewayNetworkPolicySchema,
+  gatewayNodeProbesSchema,
+  gatewayObserverSchema,
+} from './gateway-config.js';
 
 const httpUrl = z
   .string()
@@ -80,6 +87,21 @@ export const platformConfigSchema = z
     dnsBaseDomain: z.string().min(1).max(253).optional(),
     dnsTarget: z.string().min(1).max(253).optional(),
     staticGameHostname: z.string().min(1).max(253).optional(),
+    gatewayDiagnosticsSocket: z
+      .string()
+      .startsWith('/')
+      .max(100)
+      .refine((v) => posix.normalize(v) === v && !/[\0-\x20?#]/.test(v))
+      .optional(),
+    gatewayEnabled: z.boolean(),
+    gatewayId: z.uuid().optional(),
+    gatewayPhysicalHostId: z.uuid().optional(),
+    gatewayCoreUrl: httpUrl.optional(),
+    gatewayLeaseSeconds: z.number().int().min(3).max(30),
+    gatewayNetworkPolicy: gatewayNetworkPolicySchema.optional(),
+    gatewayObserver: gatewayObserverSchema.optional(),
+    gatewayNodeProbes: gatewayNodeProbesSchema,
+    gatewayDataPolicy: gatewayDataPolicySchema,
   })
   .strict();
 
@@ -109,6 +131,10 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   maxConcurrentProvisionsPerUser: 4,
   observationMaxAgeSeconds: 15,
   sftpCredentialTtlSeconds: 3600,
+  gatewayEnabled: false,
+  gatewayLeaseSeconds: 15,
+  gatewayNodeProbes: {},
+  gatewayDataPolicy: defaultGatewayDataPolicy,
 });
 
 export const configEnvironmentKeys = {
@@ -148,6 +174,16 @@ export const configEnvironmentKeys = {
   dnsBaseDomain: 'NH_DNS_BASE_DOMAIN',
   dnsTarget: 'NH_DNS_TARGET',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
+  gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
+  gatewayEnabled: 'NH_GATEWAY_ENABLED',
+  gatewayId: 'NH_GATEWAY_ID',
+  gatewayPhysicalHostId: 'NH_GATEWAY_PHYSICAL_HOST_ID',
+  gatewayCoreUrl: 'NH_GATEWAY_CORE_URL',
+  gatewayLeaseSeconds: 'NH_GATEWAY_LEASE_SECONDS',
+  gatewayNetworkPolicy: 'NH_GATEWAY_NETWORK_POLICY',
+  gatewayObserver: 'NH_GATEWAY_OBSERVER',
+  gatewayNodeProbes: 'NH_GATEWAY_NODE_PROBES',
+  gatewayDataPolicy: 'NH_GATEWAY_DATA_POLICY',
 } as const satisfies Record<PlatformConfigKey, string>;
 
 const numericKeys = new Set<PlatformConfigKey>([
@@ -163,6 +199,7 @@ const numericKeys = new Set<PlatformConfigKey>([
   'maxConcurrentProvisionsPerUser',
   'observationMaxAgeSeconds',
   'sftpCredentialTtlSeconds',
+  'gatewayLeaseSeconds',
 ]);
 
 function invalid(fields: string[]): never {
@@ -197,7 +234,13 @@ export function resolveConfig(
     if (
       key === 'pterodactylWebSocketOrigins' ||
       key === 'pterodactylDownloadOrigins' ||
-      key === 'pterodactylUploadOrigins'
+      key === 'pterodactylUploadOrigins' ||
+      [
+        'gatewayNetworkPolicy',
+        'gatewayObserver',
+        'gatewayNodeProbes',
+        'gatewayDataPolicy',
+      ].includes(key)
     ) {
       try {
         merged[key] = JSON.parse(value);
@@ -209,7 +252,7 @@ export function resolveConfig(
     } else if (numericKeys.has(key)) {
       if (!/^(0|[1-9]\d*)$/.test(value)) invalid([key]);
       merged[key] = Number(value);
-    } else if (key === 'smtpSecure') {
+    } else if (key === 'smtpSecure' || key === 'gatewayEnabled') {
       if (!['true', 'false', '1', '0'].includes(value)) invalid([key]);
       merged[key] = value === 'true' || value === '1';
     } else {

@@ -89,3 +89,19 @@ Whenever new operational settings are necessary, Codex must produce:
 ## Public-repo hygiene
 
 The repo is public, but secrets, auth tokens, `.env` runtime files, screenshots with session cookies, private logs, Pterodactyl config secrets, real player data and closed-source Blueprint plugin source stay private. Sanitize PR evidence. A public GitHub repository does not by itself grant permission to redistribute closed-source extensions. Do not add a LICENSE unless the Owner chooses one.
+
+## M3 Gateway deployment prerequisite
+
+[M3 configuration](M3-API.md) defines the disabled-by-default standalone Gateway,
+its dedicated control secret, verified namespace/Docker observer, complete node
+policy, private node challenge and typed connection bounds. The initial supported
+placement shares the independently verified game-host network namespace;
+arbitrary Docker bridge ingress is not assumed reachable. The separate
+[user-service template](../deploy/game-gateway.service.example) is prepared only.
+No service installation, Docker socket permission/mount, network/resolver change,
+node-probe deployment or public listener is authorized by that file.
+
+The [isolated fixture proposal](M3-TEST-INFRASTRUCTURE.md) has its own narrowly
+approved resources and rollback. It does not establish production reachability
+or authorize changes to the existing external frontend network. The SFTPGo 2.7.6
+exception remains tracked by issue #18 before production release.

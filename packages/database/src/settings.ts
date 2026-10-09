@@ -122,6 +122,7 @@ export const secretNames = [
   'smtpPassword',
   'sftpgoApiKey',
   'cloudflareApiToken',
+  'gatewayControlToken',
 ] as const;
 export type SecretName = (typeof secretNames)[number];
 const secretEnv: Record<SecretName, string> = {
@@ -131,6 +132,7 @@ const secretEnv: Record<SecretName, string> = {
   smtpPassword: 'SMTP_PASSWORD',
   sftpgoApiKey: 'NH_SFTPGO_API_KEY',
   cloudflareApiToken: 'NH_CLOUDFLARE_API_TOKEN',
+  gatewayControlToken: 'NH_GATEWAY_CONTROL_TOKEN',
 };
 
 export async function getSecret(

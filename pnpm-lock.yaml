@@ -50,6 +50,9 @@ importers:
       '@nickhosting/game-sdk':
         specifier: workspace:*
         version: link:../../packages/game-sdk
+      '@nickhosting/gateway-safety':
+        specifier: workspace:*
+        version: link:../../packages/gateway-safety
       '@nickhosting/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
@@ -68,6 +71,24 @@ importers:
       nodemailer:
         specifier: 10.0.16
         version: 10.0.16
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
+
+  apps/game-gateway:
+    dependencies:
+      '@nickhosting/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@nickhosting/game-sdk':
+        specifier: workspace:*
+        version: link:../../packages/game-sdk
+      '@nickhosting/gateway-safety':
+        specifier: workspace:*
+        version: link:../../packages/gateway-safety
+      '@nickhosting/pterodactyl-adapter':
+        specifier: workspace:*
+        version: link:../../packages/pterodactyl-adapter
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -159,6 +180,21 @@ importers:
       '@nickhosting/core':
         specifier: workspace:*
         version: link:../core
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
+
+  packages/gateway-safety:
+    dependencies:
+      '@nickhosting/core':
+        specifier: workspace:*
+        version: link:../core
+      '@nickhosting/game-sdk':
+        specifier: workspace:*
+        version: link:../game-sdk
+      '@nickhosting/pterodactyl-adapter':
+        specifier: workspace:*
+        version: link:../pterodactyl-adapter
       zod:
         specifier: 4.6.5
         version: 4.6.5

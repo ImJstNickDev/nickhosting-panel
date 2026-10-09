@@ -109,3 +109,18 @@ Read [API contracts](M1-API.md) and [ADR0010](decisions/0010-foundation-identity
 No lint, type or integration check depends on GitHub Actions. The API and worker
 have no import-time network side effects. Production deployment packaging and
 all graphical flows remain outside this milestone.
+
+## M3 standalone Gateway
+
+Read [M3 API/configuration](M3-API.md) before supplying a protected, ignored
+`.env.gateway.local`. `scripts/dev.sh pnpm dev:gateway` runs the persistent process
+separately from API/worker. It has no default game/diagnostic TCP listener and
+waits 31 seconds before opening game routes after a cold start. Protocol modules
+are trusted local code; M3 includes synthetic fixtures only. Do not start a
+configured public deployment without the documented approval and topology proof.
+
+`pnpm test:m3` reuses the **already approved exact M2** isolated PostgreSQL/Redis/
+SFTPGo services, applying all migrations and running all integration suites.
+Three retained SFTPGo SSH-transport revocation assertions remain expected failures,
+not security passes. The separate real-network fixture and its explicit commands
+are documented in [M3 test infrastructure](M3-TEST-INFRASTRUCTURE.md).

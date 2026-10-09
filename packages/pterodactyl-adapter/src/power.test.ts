@@ -46,6 +46,46 @@ function fixture(stop = 'end') {
   };
 }
 describe('stop confirmation from verified stop semantics', () => {
+  it('runs the final handoff fence after setup and before any stop power', async () => {
+    const f = fixture();
+    const beforePower = vi.fn(async () => {
+      expect(f.adapter.relayConsole).toHaveBeenCalledTimes(1);
+      expect(f.options.authorize).toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    });
+    expect(
+      await stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        { ...f.options, beforePower },
+        20,
+        f.observer,
+      ),
+    ).toEqual({ confirmed: true });
+    expect(beforePower).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it('does not send power when the final handoff fence rejects after relay setup', async () => {
+    const f = fixture();
+    await expect(
+      stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        {
+          ...f.options,
+          beforePower: async () => {
+            throw new PterodactylError('permission_denied', 'client', 'rejected');
+          },
+        },
+        20,
+        f.observer,
+      ),
+    ).rejects.toMatchObject({ outcome: 'rejected' });
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.close).toHaveBeenCalledTimes(1);
+  });
   it('retains capacity when Wings reports offline but the actual container still runs', async () => {
     const f = fixture();
     f.observer.stopped.mockResolvedValue(false);

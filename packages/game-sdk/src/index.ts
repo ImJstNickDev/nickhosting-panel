@@ -1,6 +1,8 @@
 import { DomainError, type PlatformRole } from '@nickhosting/core';
 import { z } from 'zod';
 
+export * from './gateway.js';
+
 export const gameRolloutStates = [
   'development',
   'private-testing',

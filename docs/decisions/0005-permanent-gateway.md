@@ -30,3 +30,6 @@ changes still require operation-specific Owner approval. M2 creates no listener.
 ## Consequences
 
 Need safe binding and route ownership, live network verification, readiness and graceful fallback. Do not patch Wings/Pterodactyl; do not modify Docker network/ingress without specific approval. Distributed per-node gateways and a Minecraft interactive limbo are future ideas, not v1 deliverables.
+
+M3 implementation details and conservative deployment prerequisites are recorded
+in [ADR 0012](0012-gateway-leases-and-sleep.md) and [M3 API](../M3-API.md).

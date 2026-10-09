@@ -28,6 +28,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
+import { registerGatewayRoutes } from './gateway.js';
 import { registerServerRoutes } from './servers.js';
 
 type Store = ReturnType<typeof createDatabase>;
@@ -126,6 +127,9 @@ export function createApp(options: Options) {
   });
   app.use('*', async (c, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
+      // Dedicated machine endpoints authenticate their own scoped bearer secret.
+      // This exception grants no browser/session authority or generic CSRF bypass.
+      if (/^\/internal\/gateway\/[0-9a-f-]{36}\/[a-z-]+$/.test(c.req.path)) return next();
       const origin = c.req.header('origin');
       if (!origin || !(await origins()).includes(origin)) throw new DomainError('forbidden');
     }
@@ -366,6 +370,18 @@ export function createApp(options: Options) {
         }
       };
     },
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerGatewayRoutes(app, {
+    db,
+    env,
+    codec: options.codec,
+    principal,
+    body,
     management:
       options.management ??
       (async () => {
