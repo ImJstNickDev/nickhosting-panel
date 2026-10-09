@@ -359,3 +359,24 @@ access or system Java change is included.
 Preparation inspected current-user network namespace metadata only. Independent
 host namespace attestation remains a production-deployment prerequisite; the
 fixture does not claim production Gateway deployment approval or readiness.
+
+## Continuing a reviewed partial run
+
+Do not recreate a server or replay already completed protocol checks merely
+because an independent content check fails. Preserve the original ledger, source
+hashes, job and provider identity. A continuation needs coordinator review of the
+exact original effect and a successful recovery receipt; it must retain the same
+owned asset and execute remaining work through existing Core jobs and admission.
+
+For the M4 acceptance run, the original client/Gateway receipts came from commit
+`021ed4d09dc08e1da50d2f073d68f350def18b3f`. The player-plan correction and remaining
+content checks use `d1cb1aa3613991074b8030dafb926eea1ee868bd`. Protocol/Gateway source
+and the recorded runner hashes are unchanged between those stages. The private
+continuation refuses earlier jobs, new servers, replacement schemas or listeners;
+it records success separately rather than rewriting the original partial report.
+
+The separately reviewed finalizer requires every original protocol receipt and
+the completed content chain, rechecks actual installation/image/launch identity,
+and imports signed evidence only into the existing isolated test schema. Rollout
+remains `private-testing`. Signing is followed by normal provenance-checked Core
+cleanup; signing itself never deletes resources or claims milestone completion.

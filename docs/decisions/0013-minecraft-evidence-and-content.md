@@ -1,6 +1,6 @@
 # ADR 0013: Minecraft evidence and recoverable content
 
-Status: implemented for M4, pending milestone review and real-test acceptance.
+Status: implemented and validated for M4; pending Owner milestone review.
 
 ## Decision
 

@@ -89,7 +89,7 @@ Check tool versions and `gh auth`, reconcile `.codex/config.toml` and project-sc
 
 **Scope**
 
-- Minecraft Game SDK integration and Pterodactyl egg mappings via Owner config; initial supported runtime matrix Vanilla/Paper/Folia/Fabric/Forge, Pumpkin and old/future releases only if compatibility tested and clearly labeled.
+- Minecraft Game SDK integration and Owner-configured Pterodactyl mappings for Vanilla/Paper/Folia/Fabric/Forge; public runtime/version combinations require actual compatibility evidence. Pumpkin and old/future releases remain unavailable unless their compatibility is tested.
 - Four-step wizard with conditional configure screens/schema; modpack determines Minecraft/loader version, OP/whitelist remains; MCHeads avatars plus UUID validation.
 - Modrinth and, when API terms/credentials allow, CurseForge and approved plugin catalogs. Mod/modpack/plugin manager, version/dependency checks, world manager/import, properties editor, players/OP/whitelist.
 - Server wipe/reinstall workflow with verified optional backup, Minecraft protocol version codec families (legacy/modern), status vs join, idle/sleep/wake/readiness and custom subdomain SRV via Cloudflare adapter.
@@ -101,6 +101,14 @@ Check tool versions and `gh auth`, reconcile `.codex/config.toml` and project-sc
 - Modpack paths skip redundant loader/version screens and apply correct selected package. Existing-server wipe confirmed and backed up as chosen.
 - Mod/plugin/world install/remove tests, stale incompatible versions and failure behavior; protocol version support matrix with evidence, clear unsupported versions.
 - Wake works for tested Minecraft protocols; no fake limbo feature added by default; SRV/custom hostname configuration tested using mock Cloudflare unless Owner authorizes real DNS writes.
+
+**Owner clarification, 2026-10-09:** Vanilla alone is sufficient for M4 real-server
+acceptance. Other runtime profiles still require functional mapping, metadata and
+management contracts with isolated tests, but remain unverified and hidden from
+ordinary users until their eggs and real behavior are tested. Pterodactyl/Wings
+executes egg installation/reinstallation; integrations validate requirements and
+results and orchestrate game configuration/content without duplicating installers.
+See [M4 validation](M4-VALIDATION.md) for exact evidence and limitations.
 
 ## M5 — Satisfactory integration (PR)
 

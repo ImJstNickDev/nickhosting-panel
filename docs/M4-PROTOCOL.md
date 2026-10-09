@@ -147,3 +147,44 @@ with the real server and client. No encryption, secure-chat, configuration-state
 translation, reconnect or limbo behavior is synthesized.
 
 The deployed route module recognizes its attested release only. Unknown or mismatched wire IDs close safely; the broader multi-version factory can return localized mismatch messages only when that other family is independently known. Recognition fixtures do not broaden deployed compatibility.
+
+## Owner-facing acceptance matrix
+
+The Owner approved Vanilla as the real-server acceptance target for M4 on
+2026-10-09. Other runtime eggs will be improved and tested separately. These
+rows are technical administration evidence, not a normal creation-screen feature.
+The ordinary catalog exposes only eligible, Owner-enabled combinations with
+current required evidence; it never exposes this table or its wire identifiers.
+
+| Exact combination | Wire ID / family | Java requirement | Current real evidence | Internal state |
+| --- | --- | --- | --- | --- |
+| Vanilla 26.1 | 775 / Netty | 25 | Official artifact, actual Java/image, independent offline client PLAY, status/sleep/wake/readiness/idle, worlds and content; tested 2026-10-09 | Verified for the recorded combination |
+| Paper 1.21.4 build 232 | 769 / Netty | 21 | Metadata and isolated contracts; live egg validation deferred | Unverified |
+| Folia 1.21.4 build 6 | 769 / Netty | 21 | Metadata and isolated contracts; live egg validation deferred | Unverified |
+| Fabric 26.1, loader 0.19.5, installer 1.1.2 | 775 / Netty | 25 | Metadata, generated-launcher integrity and isolated contracts; live egg validation deferred | Unverified |
+| Forge 1.21.4, loader 54.1.16 | 769 / Netty | 21 | Metadata, authoritative output verification and isolated contracts; live egg validation deferred | Unverified |
+| Pre-1.7 legacy protocols | Legacy | Per release, unverified | Recognition/rejection fixtures only; no modern response or wake assumed | Unsupported |
+| Unregistered snapshots/future protocol IDs | Unknown until resolved | Per release, unverified | No inferred compatibility | Unverified / hidden |
+
+Metadata was checked against the pinned protocol registry on 2026-10-09.
+Shared wire IDs do not transfer runtime, loader, installation or client evidence
+between rows. Modern transfer intent is recognized only where declared, remains
+disabled by default, and has no real transfer acceptance claim here. A successful
+fixture does not turn an unverified row into a verified one. The current signed
+Owner registry is authoritative for enabled combinations and evidence expiry.
+
+[Validation](M4-VALIDATION.md) records exact real-server identities, commands,
+failures and cleanup. Live client tests use an independent protocol client with
+explicitly isolated offline authentication; they do not claim testing of
+Microsoft authentication, encryption or secure chat. Those bytes remain the
+backend's responsibility during transparent forwarding.
+
+The final signed real-server report is `0b210736-b977-46f3-a931-1b1286bcbb95`,
+recorded at 2026-10-09T19:04:41Z for UUID
+`714fd53c-c06d-4e9c-afd8-bc7c52dde966`. It combines the unchanged original
+protocol receipts with the successful reviewed content continuation and fresh
+artifact/image/startup/environment verification. All twelve required checks passed;
+rollout remained `private-testing` in the isolated database. This is not a production
+availability change. Actual client coverage is `minecraft-protocol` 1.68.0 offline
+PLAY with observed outbound protocol 775, not Microsoft online authentication,
+encryption or secure-chat acceptance. See [full evidence and limitations](M4-VALIDATION.md).
