@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { createServer, type Socket } from 'node:net';
 import type { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { canonicalMinecraftJarSha256 } from '../games/minecraft/src/generated-launcher.js';
+import { readMinecraftFrame } from '../games/minecraft/src/protocol.js';
 import { defaultGatewayDataPolicy } from '../packages/core/src/gateway-config.js';
 import {
   type PterodactylAdapter,
@@ -15,6 +17,7 @@ import {
 } from './m4-live.js';
 import {
   cleanupMinecraftLiveBackups,
+  createMinecraftLiveProtocolClient,
   finalizeMinecraftLiveCleanup,
   type MinecraftLiveBackupJob,
   type MinecraftLiveBackupPreparation,
@@ -24,6 +27,112 @@ import {
   minecraftLiveReadyRoute,
   promoteMinecraftInstallationEvidence,
 } from './m4-live-scenario.js';
+
+describe('independent live-client handshake evidence', () => {
+  it.each([
+    ['26.1', 775],
+    ['1.21.4', 769],
+  ] as const)(
+    'observes the installed library sending %s protocol %i on loopback',
+    async (release, expectedProtocol) => {
+      const sockets = new Set<Socket>();
+      let received!: (frame: Buffer) => void;
+      let failed!: (error: Error) => void;
+      const wire = new Promise<Buffer>((resolveWire, rejectWire) => {
+        received = resolveWire;
+        failed = rejectWire;
+      });
+      const server = createServer((socket) => {
+        sockets.add(socket);
+        socket.on('error', failed);
+        let pending = Buffer.alloc(0);
+        socket.on('data', (chunk) => {
+          try {
+            pending = Buffer.concat([pending, chunk]);
+            if (pending.length > 4096) throw new Error('Fixture handshake exceeds its bound');
+            const frame = readMinecraftFrame(pending, 4096);
+            if (frame) {
+              socket.removeAllListeners('data');
+              received(frame.body);
+            }
+          } catch (error) {
+            failed(error as Error);
+          }
+        });
+      });
+      const timeout = setTimeout(() => failed(new Error('Loopback handshake timeout')), 5000);
+      let observed: ReturnType<typeof createMinecraftLiveProtocolClient> | undefined;
+      try {
+        await new Promise<void>((listening, rejectListen) => {
+          server.once('error', rejectListen);
+          server.listen(0, '127.0.0.1', listening);
+        });
+        const address = server.address();
+        if (!address || typeof address === 'string') throw new Error('Missing fixture address');
+        expect(address.address).toBe('127.0.0.1');
+        observed = createMinecraftLiveProtocolClient(
+          '127.0.0.1',
+          address.port,
+          release,
+          'M4Fixture',
+        );
+        observed.client.on('error', failed);
+        expect(() => observed?.protocolEvidence()).toThrow('No unique valid emitted');
+        const frame = await wire;
+        let offset = 0;
+        const integer = () => {
+          let value = 0;
+          for (let index = 0; index < 5; index++) {
+            const byte = frame[offset++];
+            if (byte === undefined) throw new Error('Truncated fixture integer');
+            value += (byte & 0x7f) * 2 ** (7 * index);
+            if (!(byte & 0x80)) return value;
+          }
+          throw new Error('Oversized fixture integer');
+        };
+        expect(integer()).toBe(0);
+        const protocolId = integer();
+        const hostnameLength = integer();
+        expect(frame.subarray(offset, offset + hostnameLength).toString('utf8')).toBe('127.0.0.1');
+        offset += hostnameLength;
+        expect(frame.readUInt16BE(offset)).toBe(address.port);
+        offset += 2;
+        const nextState = integer();
+        expect(offset).toBe(frame.length);
+        expect(protocolId).toBe(expectedProtocol);
+        expect(nextState).toBe(2);
+        expect(observed.protocolEvidence()).toEqual({
+          release,
+          protocolId,
+          nextState,
+          source: 'outbound-set_protocol',
+        });
+        expect(Object.isFrozen(observed.protocolEvidence())).toBe(true);
+        // 1.68.0's type declaration incorrectly advertises this absent property.
+        expect(observed.client.protocolVersion).toBeUndefined();
+        // A later duplicate cannot inherit the first observed handshake, even if
+        // the library also rejects it because it has already entered LOGIN.
+        try {
+          observed.client.write('set_protocol', {
+            protocolVersion: expectedProtocol,
+            serverHost: '127.0.0.1',
+            serverPort: address.port,
+            nextState: 2,
+          });
+        } catch (error) {
+          expect(error).toBeInstanceOf(Error);
+        }
+        expect(() => observed?.protocolEvidence()).toThrow('No unique valid emitted');
+      } finally {
+        clearTimeout(timeout);
+        observed?.client.end();
+        observed?.client.socket.destroy();
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((closed) => server.close(() => closed()));
+      }
+    },
+  );
+});
 
 describe('live provider diagnostics', () => {
   it('changes fixture cadence without extending any timeout or safety bound', () => {

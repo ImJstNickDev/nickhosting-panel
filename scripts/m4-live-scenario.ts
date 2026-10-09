@@ -419,7 +419,8 @@ class MinecraftLiveClientFailure extends Error {
       | 'ended_after_play'
       | 'unexpected_play'
       | 'unexpected_disconnect'
-      | 'oversized_disconnect',
+      | 'oversized_disconnect'
+      | 'invalid_protocol_evidence',
     readonly expected: 'play' | 'disconnect',
     readonly clientState: string,
   ) {
@@ -643,6 +644,74 @@ async function newScenarioDatabase() {
   return openPreviousDatabase(schema);
 }
 
+export interface MinecraftLiveClientProtocolEvidence {
+  readonly release: string;
+  readonly protocolId: number;
+  readonly nextState: 2;
+  readonly source: 'outbound-set_protocol';
+}
+/** 1.68.0 resolves options.protocolVersion, but does not set Client.protocolVersion.
+ * Observe the library's actual handshake instead of copying our registry value.
+ * https://github.com/PrismarineJS/node-minecraft-protocol/blob/1.68.0/src/client/setProtocol.js
+ */
+export function createMinecraftLiveProtocolClient(
+  address: string,
+  port: number,
+  release: string,
+  username: string,
+) {
+  const client = createClient({
+    host: address,
+    port,
+    version: release,
+    username,
+    auth: 'offline',
+    profilesFolder: false,
+    hideErrors: true,
+  });
+  let captured: MinecraftLiveClientProtocolEvidence | undefined;
+  let handshakes = 0;
+  const originalWrite = client.write.bind(client);
+  // This factory deliberately uses ordinary asynchronous TCP connection, not
+  // options.stream/connect hooks. The wrapper is installed before connect fires.
+  client.write = (name: string, parameters: unknown) => {
+    if (name !== 'set_protocol') {
+      originalWrite(name, parameters);
+      return;
+    }
+    handshakes++;
+    captured = undefined;
+    const packet = parameters as { protocolVersion?: unknown; nextState?: unknown } | null;
+    const valid =
+      handshakes === 1 &&
+      client.state === 'handshaking' &&
+      client.serializer.writable &&
+      packet !== null &&
+      typeof packet === 'object' &&
+      typeof packet.protocolVersion === 'number' &&
+      Number.isSafeInteger(packet.protocolVersion) &&
+      packet.protocolVersion >= 0 &&
+      packet.protocolVersion <= 0x7fffffff &&
+      packet.nextState === 2;
+    // Do not rewrite any packet or replace the library's serializer/authentication.
+    originalWrite(name, parameters);
+    if (valid)
+      captured = Object.freeze({
+        release: client.version,
+        protocolId: packet.protocolVersion as number,
+        nextState: 2,
+        source: 'outbound-set_protocol',
+      });
+  };
+  return {
+    client,
+    protocolEvidence(): MinecraftLiveClientProtocolEvidence {
+      assert(handshakes === 1 && captured, 'No unique valid emitted login handshake');
+      return captured;
+    },
+  };
+}
+
 /** Independent open-source protocol client. Offline authentication is configured
  * explicitly on the owned fixture, never emulated by Gateway or enabled in product settings. */
 async function independentClient(
@@ -652,16 +721,13 @@ async function independentClient(
   username: string,
   expected: 'play' | 'disconnect',
 ) {
-  return new Promise<{ client: Client; disconnect?: string }>((resolveClient, reject) => {
-    const client = createClient({
-      host: address,
-      port,
-      version: release,
-      username,
-      auth: 'offline',
-      profilesFolder: false,
-      hideErrors: true,
-    });
+  return new Promise<{
+    client: Client;
+    protocol: MinecraftLiveClientProtocolEvidence;
+    disconnect?: string;
+  }>((resolveClient, reject) => {
+    const observed = createMinecraftLiveProtocolClient(address, port, release, username);
+    const { client } = observed;
     let settled = false;
     const timer = setTimeout(() => fail('timeout'), 60000);
     function fail(category: MinecraftLiveClientFailure['category']) {
@@ -676,6 +742,19 @@ async function independentClient(
         : 'unknown';
       reject(new MinecraftLiveClientFailure(category, expected, state));
     }
+    function finish(disconnect?: string) {
+      let protocol: MinecraftLiveClientProtocolEvidence;
+      try {
+        protocol = observed.protocolEvidence();
+      } catch {
+        fail('invalid_protocol_evidence');
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (disconnect !== undefined) client.end();
+      resolveClient({ client, protocol, ...(disconnect !== undefined ? { disconnect } : {}) });
+    }
     client.on('error', () => fail('transport_error'));
     client.on('end', () => {
       if (!settled) fail('ended_before_expected_state');
@@ -686,9 +765,7 @@ async function independentClient(
         fail('unexpected_play');
         return;
       }
-      settled = true;
-      clearTimeout(timer);
-      resolveClient({ client });
+      finish();
     });
     client.on('packet', (data: unknown, metadata) => {
       if (settled || !['kick_disconnect', 'disconnect'].includes(metadata.name)) return;
@@ -701,10 +778,7 @@ async function independentClient(
         fail('oversized_disconnect');
         return;
       }
-      settled = true;
-      clearTimeout(timer);
-      client.end();
-      resolveClient({ client, disconnect });
+      finish(disconnect);
     });
   });
 }
@@ -863,6 +937,8 @@ export async function runMinecraftLiveScenario(options: {
   let gateway: Awaited<ReturnType<typeof createGatewayRuntime>> | undefined;
   let consoleRelay: Awaited<ReturnType<PterodactylAdapter['relayConsole']>> | undefined;
   let joinedClient: Client | undefined;
+  let joinedProtocol: MinecraftLiveClientProtocolEvidence | undefined;
+  let postWakeProtocol: MinecraftLiveClientProtocolEvidence | undefined;
   const limits = {
     memory: plan.limits.memoryMiB,
     cpu: plan.limits.cpuPercent,
@@ -1506,16 +1582,17 @@ export async function runMinecraftLiveScenario(options: {
         idleTimeoutSeconds,
       });
       await stage('minecraft.client.join');
-      joinedClient = (
-        await independentClient(
-          plan.gatewayAddress,
-          pin.port,
-          prepared.runtime.release,
-          fixtureName,
-          'play',
-        )
-      ).client;
-      assert.equal(joinedClient.protocolVersion, prepared.protocol.protocolId);
+      const initialJoin = await independentClient(
+        plan.gatewayAddress,
+        pin.port,
+        prepared.runtime.release,
+        fixtureName,
+        'play',
+      );
+      joinedClient = initialJoin.client;
+      joinedProtocol = initialJoin.protocol;
+      assert.equal(joinedProtocol.release, prepared.runtime.release);
+      assert.equal(joinedProtocol.protocolId, prepared.protocol.protocolId);
       const actualOnlineRoute = defined(
         (await getGatewaySnapshot(db, env)).routes.find(
           (route) => route.serverId === asset.managedServerId,
@@ -1558,8 +1635,9 @@ export async function runMinecraftLiveScenario(options: {
         implementation: 'minecraft-protocol 1.68.0 offline fixture',
         idleTimeoutSeconds,
         positiveClientDurationMs: performance.now() - presenceStarted,
-        release: prepared.runtime.release,
-        protocolId: joinedClient.protocolVersion,
+        release: joinedProtocol.release,
+        protocolId: joinedProtocol.protocolId,
+        protocolEvidenceSource: joinedProtocol.source,
         onlineAuthenticationVerified: false,
       });
       joinedClient.end();
@@ -1632,22 +1710,24 @@ export async function runMinecraftLiveScenario(options: {
       await pump(defined(state.wakeJobId));
       await waitCurrentRoute(state.generation, 'wake actual readiness snapshot');
       await stage('minecraft.client.post-wake-join');
-      joinedClient = (
-        await independentClient(
-          plan.gatewayAddress,
-          pin.port,
-          prepared.runtime.release,
-          fixtureName,
-          'play',
-        )
-      ).client;
-      assert.equal(joinedClient.protocolVersion, prepared.protocol.protocolId);
+      const postWakeJoin = await independentClient(
+        plan.gatewayAddress,
+        pin.port,
+        prepared.runtime.release,
+        fixtureName,
+        'play',
+      );
+      joinedClient = postWakeJoin.client;
+      postWakeProtocol = postWakeJoin.protocol;
+      assert.equal(postWakeProtocol.protocolId, prepared.protocol.protocolId);
+      assert.deepEqual(postWakeProtocol, joinedProtocol);
       joinedClient.end();
       joinedClient = undefined;
       await event('minecraft.burst-joins-single-wake', {
         attempts: joins.length,
         wakeJobId: state.wakeJobId,
         independentPostWakePlayVerified: true,
+        protocol: postWakeProtocol,
       });
       const startupSamples = await db
         .selectFrom('gateway_startup_samples')
@@ -1869,6 +1949,10 @@ export async function runMinecraftLiveScenario(options: {
           savedWorld,
           bootstrapRunId: bootstrap.runId,
           installed,
+          clientHandshakes: {
+            initial: defined(joinedProtocol),
+            postWake: defined(postWakeProtocol),
+          },
           eventReceipt: minecraftDigest(ledger.events),
         };
         const report = minecraftEvidenceSchema.parse({
@@ -1891,7 +1975,7 @@ export async function runMinecraftLiveScenario(options: {
           client: {
             implementation: 'minecraft-protocol-offline-fixture',
             version: '1.68.0',
-            protocolId: prepared.protocol.protocolId,
+            protocolId: defined(joinedProtocol).protocolId,
           },
           checks: Object.fromEntries(minecraftVerificationChecks.map((name) => [name, true])),
           evidenceSha256: minecraftDigest(evidence),
