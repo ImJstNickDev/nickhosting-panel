@@ -1,0 +1,17 @@
+{
+  "name": "@nickhosting/auth",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@nickhosting/database": "workspace:*",
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/i18n": "workspace:*",
+    "better-auth": "1.7.7",
+    "@better-auth/passkey": "1.7.7",
+    "@better-auth/core": "1.7.7",
+    "kysely": "0.29.6",
+    "pg": "8.23.1",
+    "zod": "4.6.5"
+  }
+}

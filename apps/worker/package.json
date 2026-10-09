@@ -1,0 +1,10 @@
+{
+  "name": "@nickhosting/worker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@nickhosting/core": "workspace:*",
+    "@nickhosting/database": "workspace:*",
+    "@nickhosting/jobs": "workspace:*"
+  }
+}
