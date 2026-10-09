@@ -1,6 +1,6 @@
 # NickHosting Panel — Codex project specification
 
-**Status:** M1 backend foundation, configuration and invite-only identity; awaiting milestone review.
+**Status:** M1 merged; M2 server management, resource admission and external services ready for review in PR #17; unmerged.
 
 **Repository:** [ImJstNickDev/nickhosting-panel](https://github.com/ImJstNickDev/nickhosting-panel) (public, independently versioned).
 
@@ -10,7 +10,7 @@
 
 **Public website:** `nickhost.ing` — separate existing repository, out of scope.
 
-M0 governance is merged. M1 adds executable Hono API/worker foundations, PostgreSQL migrations, durable jobs, configuration and identity contracts with isolated integration tests. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`docs/M1-API.md`](docs/M1-API.md). The complete graphical frontend remains M6 work. **No production server, DNS record or infrastructure configuration has been changed.** Only the separately approved, project-owned PostgreSQL/Redis test services were created.
+M0 governance and M1 are merged. M1 adds executable Hono API/worker foundations, PostgreSQL migrations, durable jobs, configuration and identity contracts with isolated integration tests. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) and [`docs/M1-API.md`](docs/M1-API.md). The complete graphical frontend remains M6 work. **No pre-existing server, DNS record or infrastructure configuration has been changed.** The separately approved, project-owned PostgreSQL/Redis/SFTPGo test services are isolated from production. See the M2 validation record for current controlled-test evidence.
 
 ## Read in this order
 
@@ -23,6 +23,8 @@ M0 governance is merged. M1 adds executable Hono API/worker foundations, Postgre
 7. [`docs/CODEX-PROMPTS.md`](docs/CODEX-PROMPTS.md) — reusable milestone launch prompts.
 
 The remaining documents detail authentication, resource accounting, game SDK, gateway, deployment, and UX/i18n. The [`docs/decisions`](docs/decisions/) directory contains the architecture decision records (ADRs).
+
+M2's backend contracts are documented in [`docs/M2-API.md`](docs/M2-API.md), with lifecycle/resource/service decisions in [ADR 0011](docs/decisions/0011-server-lifecycle-and-service-boundaries.md). Validation results, accepted limitations and verified test cleanup are recorded in [`docs/M2-VALIDATION.md`](docs/M2-VALIDATION.md); this review delivery is not deployment approval. The temporarily accepted SFTPGo 2.7.6 existing-SSH-transport revocation limitation remains a production-release follow-up.
 
 ## Non-negotiable project shape
 
