@@ -12,6 +12,7 @@ import {
 import {
   finalizeMinecraftLiveCleanup,
   minecraftBootstrapManifest,
+  minecraftLiveReadyRoute,
   promoteMinecraftInstallationEvidence,
 } from './m4-live-scenario.js';
 
@@ -142,6 +143,92 @@ function fixture() {
 }
 
 describe('reviewed M4 live resource envelope', () => {
+  it('waits for the current generation and committed snapshot before a real client can join', () => {
+    const now = Date.parse('2026-10-09T12:00:00Z');
+    const generation = randomUUID();
+    const serverId = randomUUID();
+    const route = {
+      id: randomUUID(),
+      serverId,
+      nodeId: randomUUID(),
+      allocationId: randomUUID(),
+      generation,
+      revision: 7,
+      mode: 'online' as const,
+      locale: 'en' as const,
+      sleepEligibleAt: new Date(now + 30000).toISOString(),
+      public: { address: '127.0.0.1', port: 29991, transport: 'tcp' as const },
+      backend: { allocationAddress: '10.99.0.5', address: '10.99.0.5', port: 29991 },
+    };
+    const snapshot = {
+      gatewayId: randomUUID(),
+      revision: 7,
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 15000).toISOString(),
+      routes: [route],
+    };
+    const state = {
+      state: 'online' as const,
+      generation,
+      sleepJobId: null,
+      sleepEligibleAt: route.sleepEligibleAt,
+    };
+    const health = {
+      ready: true,
+      controlAvailable: true,
+      stopping: false,
+      revision: 6,
+      expiresAt: snapshot.expiresAt,
+      routes: 1,
+      tcpConnections: 0,
+      udpSessions: 0,
+      quiescentServers: 0,
+    };
+    const check = (status = health, routes = snapshot, core = state) =>
+      minecraftLiveReadyRoute(core, routes, status, serverId, generation, now);
+    // Core is already online while the data plane still serves the old policy.
+    expect(check()).toBeUndefined();
+    health.revision = snapshot.revision;
+    expect(check()).toBe(route);
+    expect(
+      check(health, { ...snapshot, routes: [{ ...route, generation: randomUUID() }] }),
+    ).toBeUndefined();
+    expect(check(health, snapshot, { ...state, generation: randomUUID() })).toBeUndefined();
+    expect(check({ ...health, routes: 0 }, { ...snapshot, routes: [] })).toBeUndefined();
+    expect(check({ ...health, controlAvailable: false })).toBeUndefined();
+    expect(check({ ...health, quiescentServers: 1 })).toBeUndefined();
+    expect(check({ ...health, expiresAt: new Date(now + 4000).toISOString() })).toBeUndefined();
+    const imminent = new Date(now + 4000).toISOString();
+    expect(
+      check(
+        health,
+        { ...snapshot, routes: [{ ...route, sleepEligibleAt: imminent }] },
+        { ...state, sleepEligibleAt: imminent },
+      ),
+    ).toBeUndefined();
+    for (const mode of ['sleeping', 'blocked', 'manually_stopped'] as const) {
+      const { sleepEligibleAt: _idleDeadline, ...baseRoute } = route;
+      const offline = { ...snapshot, routes: [{ ...baseRoute, mode }] };
+      const current = { ...state, state: mode, sleepEligibleAt: null };
+      expect(
+        minecraftLiveReadyRoute(current, offline, health, serverId, generation, now, mode),
+      ).toBe(offline.routes[0]);
+      expect(
+        minecraftLiveReadyRoute(
+          current,
+          offline,
+          { ...health, revision: 6 },
+          serverId,
+          generation,
+          now,
+          mode,
+        ),
+      ).toBeUndefined();
+      expect(
+        minecraftLiveReadyRoute(current, snapshot, health, serverId, generation, now, mode),
+      ).toBeUndefined();
+    }
+  });
   it('retains failed-run schema, bootstrap evidence and failure history after explicit asset cleanup', async () => {
     const scenario = {
       schema: `nh_test_${'a'.repeat(32)}`,
@@ -195,6 +282,29 @@ describe('reviewed M4 live resource envelope', () => {
       expect(callbacks.dropSchema).not.toHaveBeenCalled();
       expect(callbacks.save).not.toHaveBeenCalled();
     }
+  });
+  it('drops only a fully cleaned schema when retention was not requested', async () => {
+    const scenario = {
+      schema: `nh_test_${'b'.repeat(32)}`,
+      activePhase: 'cleanup:vanilla',
+      failedAt: '2026-10-09T12:00:00Z',
+      cleanedAt: undefined,
+    };
+    const callbacks = {
+      retainSchema: false,
+      event: vi.fn(async () => {}),
+      dropSchema: vi.fn(async () => {}),
+      save: vi.fn(async () => {}),
+    };
+    await finalizeMinecraftLiveCleanup(
+      scenario,
+      [{ deletedAt: '2026-10-09T12:01:00Z' }],
+      callbacks,
+    );
+    expect(callbacks.dropSchema).toHaveBeenCalledOnce();
+    expect(scenario.cleanedAt).toEqual(expect.any(String));
+    expect(scenario.failedAt).toBe('2026-10-09T12:00:00Z');
+    expect(scenario.activePhase).toBeUndefined();
   });
   it('preserves Fabric semantic proof from bootstrap through real evidence and a third installation', async () => {
     const bootstrap = await generatedLauncher(2020),

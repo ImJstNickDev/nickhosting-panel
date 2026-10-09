@@ -175,6 +175,13 @@ transparent Gateway, but does not prove Microsoft authentication, encrypted
 online sessions or signed chat. It also tests real player-count non-idleness,
 empty-player sleep, passive status without wake, twelve simultaneous intentional
 joins producing one durable wake, readiness and manual-stop suppression.
+Before each connection/status phase, the harness requires the actual data plane's
+committed snapshot revision to match Core's current mode and generation, with a
+usable lease, available control plane and no quiescence fence. A fixed delay is
+not readiness evidence. The fixture uses a 30-second idle timeout and holds the
+same real player connected for longer than that interval before testing empty
+sleep. Failure receipts contain only bounded client-failure categories/state and
+Gateway counters, never raw error bodies or credentials.
 
 The resource-refusal case reduces only the isolated database's Owner-configured
 physical host allowance, then restores it. It does not consume real host RAM or

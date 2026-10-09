@@ -33,7 +33,11 @@ import {
   SecretCodec,
 } from '../packages/core/src/index.js';
 import { createDatabase, migrate } from '../packages/database/src/index.js';
-import { type GatewayRoute, gameManifestSchema } from '../packages/game-sdk/src/index.js';
+import {
+  type GatewayRoute,
+  type GatewaySnapshot,
+  gameManifestSchema,
+} from '../packages/game-sdk/src/index.js';
 import {
   createContainerObserver,
   createPterodactylAdapter,
@@ -155,6 +159,66 @@ const defined = <T>(value: T | undefined | null): T => {
   assert(value !== undefined && value !== null, 'Required trusted state missing');
   return value;
 };
+type GatewayHealth = ReturnType<
+  Awaited<ReturnType<typeof createGatewayRuntime>>['gateway']['health']
+>;
+/** Core readiness alone is insufficient after a policy generation changes. */
+export function minecraftLiveReadyRoute(
+  state: Pick<
+    Awaited<ReturnType<typeof getGatewayState>>,
+    'state' | 'generation' | 'sleepJobId' | 'sleepEligibleAt'
+  >,
+  snapshot: GatewaySnapshot,
+  health: GatewayHealth,
+  serverId: string,
+  generation: string,
+  now = Date.now(),
+  mode: GatewayRoute['mode'] = 'online',
+): GatewayRoute | undefined {
+  if (
+    state.state !== mode ||
+    state.generation !== generation ||
+    state.sleepJobId !== null ||
+    !health.ready ||
+    !health.controlAvailable ||
+    health.stopping ||
+    health.quiescentServers !== 0 ||
+    health.revision !== snapshot.revision ||
+    health.routes !== snapshot.routes.length ||
+    !health.expiresAt ||
+    Date.parse(health.expiresAt) <= now + 5000 ||
+    Date.parse(snapshot.expiresAt) <= now + 5000
+  )
+    return undefined;
+  const matches = snapshot.routes.filter((route) => route.serverId === serverId);
+  const route = matches[0];
+  if (
+    matches.length !== 1 ||
+    !route ||
+    route.mode !== mode ||
+    route.generation !== generation ||
+    (route.sleepEligibleAt ?? null) !== state.sleepEligibleAt ||
+    (mode === 'online' && route.sleepEligibleAt && Date.parse(route.sleepEligibleAt) <= now + 5000)
+  )
+    return undefined;
+  return route;
+}
+class MinecraftLiveClientFailure extends Error {
+  constructor(
+    readonly category:
+      | 'timeout'
+      | 'transport_error'
+      | 'ended_before_expected_state'
+      | 'ended_after_play'
+      | 'unexpected_play'
+      | 'unexpected_disconnect'
+      | 'oversized_disconnect',
+    readonly expected: 'play' | 'disconnect',
+    readonly clientState: string,
+  ) {
+    super('Independent Minecraft client did not reach the expected state');
+  }
+}
 /** Called only after Core has conclusively removed each ledger-owned asset. */
 export async function finalizeMinecraftLiveCleanup(
   scenario: Pick<Scenario, 'schema' | 'activePhase' | 'failedAt' | 'assetCleanupAt' | 'cleanedAt'>,
@@ -378,22 +442,27 @@ async function independentClient(
       hideErrors: true,
     });
     let settled = false;
-    const timer = setTimeout(() => fail(), 60000);
-    function fail() {
+    const timer = setTimeout(() => fail('timeout'), 60000);
+    function fail(category: MinecraftLiveClientFailure['category']) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       client.end();
-      reject(new Error('Independent Minecraft client did not reach the expected state'));
+      const state = ['handshaking', 'status', 'login', 'configuration', 'play'].includes(
+        client.state,
+      )
+        ? client.state
+        : 'unknown';
+      reject(new MinecraftLiveClientFailure(category, expected, state));
     }
-    client.on('error', fail);
+    client.on('error', () => fail('transport_error'));
     client.on('end', () => {
-      if (!settled) fail();
+      if (!settled) fail('ended_before_expected_state');
     });
     client.on('playerJoin', () => {
       if (settled) return;
       if (expected !== 'play') {
-        fail();
+        fail('unexpected_play');
         return;
       }
       settled = true;
@@ -403,12 +472,12 @@ async function independentClient(
     client.on('packet', (data: unknown, metadata) => {
       if (settled || !['kick_disconnect', 'disconnect'].includes(metadata.name)) return;
       if (expected !== 'disconnect') {
-        fail();
+        fail('unexpected_disconnect');
         return;
       }
       const disconnect = JSON.stringify(data);
       if (disconnect.length > 65536) {
-        fail();
+        fail('oversized_disconnect');
         return;
       }
       settled = true;
@@ -1062,7 +1131,9 @@ export async function runMinecraftLiveScenario(options: {
         wakeRetrySeconds: 5,
         mode: 'auto',
       };
-      await setGatewayPolicy(db, context, asset.managedServerId, policy, { env });
+      const initialPolicy = await setGatewayPolicy(db, context, asset.managedServerId, policy, {
+        env,
+      });
       const allocation = await db
         .selectFrom('server_allocations')
         .selectAll()
@@ -1109,33 +1180,54 @@ export async function runMinecraftLiveScenario(options: {
         }
         throw new Error(`Live scenario deadline: ${label}`);
       };
-      await until(
-        async () =>
-          (await getGatewayState(db, asset.managedServerId, { env })).state === 'online' &&
-          gateway?.gateway.health().ready === true,
-        'initial actual readiness',
-      );
-      asset.route = defined(
-        (await getGatewaySnapshot(db, env)).routes.find(
-          (route) => route.serverId === asset.managedServerId,
-        ),
-      );
+      const waitCurrentRoute = async (
+        generation: string,
+        label: string,
+        mode: GatewayRoute['mode'] = 'online',
+      ) => {
+        let matched: GatewayRoute | undefined;
+        await until(async () => {
+          const state = await getGatewayState(db, asset.managedServerId, { env });
+          const snapshot = await getGatewaySnapshot(db, env);
+          matched = minecraftLiveReadyRoute(
+            state,
+            snapshot,
+            defined(gateway).gateway.health(),
+            asset.managedServerId,
+            generation,
+            Date.now(),
+            mode,
+          );
+          return matched !== undefined;
+        }, label);
+        return defined(matched);
+      };
+      await stage('minecraft.gateway.initial-ready');
+      asset.route = await waitCurrentRoute(initialPolicy.generation, 'initial actual readiness');
       await save();
       await event('minecraft.core-created-and-real-ready', { uuid: asset.uuid });
-      // Enable genuine empty-server idle detection. The worker still consumes actual durable jobs.
-      await setGatewayPolicy(
+      // Leave enough real time for inventory validation and a protocol login. This
+      // changes only the fixture's idle policy; Gateway lease/safety fences are unchanged.
+      const idleTimeoutSeconds = 30;
+      const idlePolicy = await setGatewayPolicy(
         db,
         context,
         asset.managedServerId,
-        { ...policy, idleTimeoutSeconds: 5 },
+        { ...policy, idleTimeoutSeconds },
         { env },
       );
-      await until(
-        async () => (await getGatewayState(db, asset.managedServerId, { env })).state === 'online',
-        'online after idle policy',
+      await stage('minecraft.client.wait-current-route');
+      asset.route = await waitCurrentRoute(
+        idlePolicy.generation,
+        'current generation before client',
       );
-      // Changing the policy advances a route generation; let the authenticated snapshot settle.
-      await delay(2500);
+      await event('minecraft.client-current-generation-ready', {
+        generation: asset.route.generation,
+        routeRevision: asset.route.revision,
+        gatewayHealth: defined(gateway).gateway.health(),
+        idleTimeoutSeconds,
+      });
+      await stage('minecraft.client.join');
       joinedClient = (
         await independentClient(
           plan.gatewayAddress,
@@ -1161,11 +1253,33 @@ export async function runMinecraftLiveScenario(options: {
           ).playerCount === 1,
         'independent real player count',
       );
-      await delay(8000);
-      assert.equal((await getGatewayState(db, asset.managedServerId, { env })).state, 'online');
-      assert.equal((await getGatewayState(db, asset.managedServerId, { env })).sleepJobId, null);
+      await stage('minecraft.client.nonidle-hold');
+      const presenceStarted = performance.now();
+      const requiredPresenceMs = idleTimeoutSeconds * 1000 + 5000;
+      while (performance.now() - presenceStarted < requiredPresenceMs) {
+        if (joinedClient.ended)
+          throw new MinecraftLiveClientFailure('ended_after_play', 'play', 'play');
+        const state = await getGatewayState(db, asset.managedServerId, { env });
+        assert.equal(state.state, 'online');
+        assert.equal(state.sleepJobId, null);
+        await delay(1000);
+      }
+      if (joinedClient.ended)
+        throw new MinecraftLiveClientFailure('ended_after_play', 'play', 'play');
+      assert.equal(
+        (
+          await probeMinecraftStatus(
+            { route: actualOnlineRoute, signal: AbortSignal.timeout(5000) },
+            prepared.protocol,
+          )
+        ).playerCount,
+        1,
+      );
+
       await event('minecraft.independent-client-transparent-play-and-nonidle', {
         implementation: 'minecraft-protocol 1.68.0 offline fixture',
+        idleTimeoutSeconds,
+        positiveClientDurationMs: performance.now() - presenceStarted,
         release: prepared.runtime.release,
         protocolId: joinedClient.protocolVersion,
         onlineAuthenticationVerified: false,
@@ -1178,11 +1292,8 @@ export async function runMinecraftLiveScenario(options: {
       );
       let state = await getGatewayState(db, asset.managedServerId, { env });
       await pump(defined(state.sleepJobId));
-      await until(
-        async () =>
-          (await getGatewayState(db, asset.managedServerId, { env })).state === 'sleeping',
-        'confirmed sleep',
-      );
+      await stage('minecraft.gateway.sleeping');
+      await waitCurrentRoute(state.generation, 'confirmed sleep snapshot', 'sleeping');
       const startsBefore = await db
         .selectFrom('server_operations')
         .select('job_id')
@@ -1190,6 +1301,7 @@ export async function runMinecraftLiveScenario(options: {
         .where('action', '=', 'start')
         .execute();
       for (let i = 0; i < 3; i++) {
+        await waitCurrentRoute(state.generation, 'sleeping before passive status', 'sleeping');
         const status = await ping({
           host: plan.gatewayAddress,
           port: pin.port,
@@ -1216,6 +1328,8 @@ export async function runMinecraftLiveScenario(options: {
         startsBefore.length,
       );
       await event('minecraft.passive-status-never-wakes');
+      await waitCurrentRoute(state.generation, 'sleeping before burst joins', 'sleeping');
+      await stage('minecraft.client.wake-burst');
       const joins = await Promise.all(
         Array.from({ length: 12 }, () =>
           independentClient(
@@ -1238,13 +1352,24 @@ export async function runMinecraftLiveScenario(options: {
         .execute();
       assert.equal(startsAfter.length, startsBefore.length + 1);
       await pump(defined(state.wakeJobId));
-      await until(
-        async () => (await getGatewayState(db, asset.managedServerId, { env })).state === 'online',
-        'wake actual readiness',
-      );
+      await waitCurrentRoute(state.generation, 'wake actual readiness snapshot');
+      await stage('minecraft.client.post-wake-join');
+      joinedClient = (
+        await independentClient(
+          plan.gatewayAddress,
+          pin.port,
+          prepared.runtime.release,
+          fixtureName,
+          'play',
+        )
+      ).client;
+      assert.equal(joinedClient.protocolVersion, prepared.protocol.protocolId);
+      joinedClient.end();
+      joinedClient = undefined;
       await event('minecraft.burst-joins-single-wake', {
         attempts: joins.length,
         wakeJobId: state.wakeJobId,
+        independentPostWakePlayVerified: true,
       });
       const startupSamples = await db
         .selectFrom('gateway_startup_samples')
@@ -1265,7 +1390,10 @@ export async function runMinecraftLiveScenario(options: {
         samples: startupSamples,
         estimate: (await getGatewayState(db, asset.managedServerId, { env })).startupEstimate,
       });
-      await setGatewayPolicy(db, context, asset.managedServerId, policy, { env });
+      const manualPolicy = await setGatewayPolicy(db, context, asset.managedServerId, policy, {
+        env,
+      });
+      await waitCurrentRoute(manualPolicy.generation, 'current snapshot before manual save');
       const actualImageDigest = defined(await observer.imageIdentity?.(defined(asset.uuid)));
       let saveOutput = '';
       consoleRelay = await adapter.relayConsole(defined(asset.identifier), {
@@ -1297,12 +1425,8 @@ export async function runMinecraftLiveScenario(options: {
         world: savedWorld,
         consoleSha256: digest(saveOutput),
       });
-      await until(
-        async () =>
-          (await getGatewayState(db, asset.managedServerId, { env })).state === 'manually_stopped',
-        'manual stop',
-      );
-      await delay(2500);
+      await stage('minecraft.client.manual-stop');
+      await waitCurrentRoute(manualPolicy.generation, 'manual stop snapshot', 'manually_stopped');
       const manualReply = await independentClient(
         plan.gatewayAddress,
         pin.port,
@@ -1340,8 +1464,15 @@ export async function runMinecraftLiveScenario(options: {
         ...hostPolicy,
         memoryHeadroomMiB: host.memory_limit_mib - 256,
       });
-      await setGatewayPolicy(db, context, asset.managedServerId, policy, { env });
-      await delay(2500);
+      const denialPolicy = await setGatewayPolicy(db, context, asset.managedServerId, policy, {
+        env,
+      });
+      await stage('minecraft.client.resource-denial');
+      await waitCurrentRoute(
+        denialPolicy.generation,
+        'sleeping before resource refusal',
+        'sleeping',
+      );
       const beforeDenied = await db
         .selectFrom('server_operations')
         .select('job_id')
@@ -1362,6 +1493,15 @@ export async function runMinecraftLiveScenario(options: {
       assert.equal(blocked.state, 'blocked');
       assert.equal(blocked.errorCode, 'resources_unavailable');
       assert(denialMs < 5000, 'Admission refusal must be immediate, without a waiting queue');
+      await waitCurrentRoute(denialPolicy.generation, 'blocked before repeat join', 'blocked');
+      const blockedReply = await independentClient(
+        plan.gatewayAddress,
+        pin.port,
+        prepared.runtime.release,
+        fixtureName,
+        'disconnect',
+      );
+      assert(blockedReply.disconnect?.includes('cannot start'));
       assert.equal(
         (
           await db
@@ -1511,6 +1651,18 @@ export async function runMinecraftLiveScenario(options: {
       phase: scenario.activePhase,
       stage: scenario.stage,
       errorCode: error instanceof DomainError ? error.code : 'validation_failed',
+      ...(error instanceof MinecraftLiveClientFailure
+        ? {
+            clientFailure: {
+              category: error.category,
+              expected: error.expected,
+              state: error.clientState,
+            },
+          }
+        : {}),
+      ...(gateway
+        ? { gatewayHealth: gateway.gateway.health(), gatewayMetrics: gateway.gateway.metrics() }
+        : {}),
       // Frames only: never serialize raw upstream error bodies, URLs, tokens or assertion values.
       stack:
         error instanceof Error
