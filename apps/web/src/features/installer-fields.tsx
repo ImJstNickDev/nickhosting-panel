@@ -153,6 +153,12 @@ export function VersionList({
                 checked={value === o.value}
                 disabled={o.disabled}
                 onChange={() => onChange(o.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    if (!e.repeat) e.currentTarget.form?.requestSubmit();
+                  }
+                }}
                 onFocus={(e) => {
                   if (presentation === 'list')
                     e.currentTarget.closest('label')?.scrollIntoView({ block: 'nearest' });

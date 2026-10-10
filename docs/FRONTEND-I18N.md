@@ -90,7 +90,8 @@ action records EULA acceptance. No project or content-source picker is shown.
 The step counter, heading region, error slot, content pane and actions have stable
 positions. Errors occupy a reserved slot above the actions, clear of animated
 content. Bounded scrolling accommodates long choices/player lists without moving
-navigation. Entering versions focuses the selected or first enabled native radio
+navigation. Enter on a selected game or runtime advances through the usual
+validation; entering the Name step focuses its textbox. Entering versions focuses the selected or first enabled native radio
 without selecting it; Up/Down changes selection. Entering operators focuses its
 input; enabling whitelist focuses its player input. Late catalog responses do not
 steal focus after the user moves elsewhere. Empty player-input Enter advances,

@@ -275,8 +275,14 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.goto(`${fixture.origin}/servers`);
     await preload;
     await user.locator('a[href="/servers/new"]').first().click();
-    await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
-    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    const game = user.getByRole('button', { name: 'Minecraft Java', exact: true });
+    await game.focus();
+    await game.press('Enter');
+    await browserExpect(game).toHaveAttribute('aria-pressed', 'true');
+    await browserExpect(
+      user.getByRole('heading', { name: 'Choose a game', exact: true }),
+    ).toBeVisible();
+    await game.press('Enter');
     await browserExpect(
       user.getByRole('heading', { name: 'Choose a runtime', exact: true }),
     ).toBeVisible();
@@ -358,7 +364,10 @@ describe('Owner automatic Vanilla discovery', () => {
           .analyze()
       ).violations,
     ).toEqual([]);
-    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await vanilla.focus();
+    await vanilla.press('Enter');
+    await browserExpect(user.getByLabel('Server name', { exact: true })).toBeFocused();
+    await fixture.screenshot(user, 'wizard-name-keyboard-desktop-en');
     expect((await positions(user)).counter).toBe(stableRuntime.counter);
     await passwordManagerIgnored(user.getByLabel('Server name', { exact: true }));
     await user.getByLabel('Server name', { exact: true }).fill('Direct Vanilla');

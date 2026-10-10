@@ -50,6 +50,7 @@ export function CreateServerPage() {
   const [whitelistMotion, setWhitelistMotion] = useState(false);
   const [preparedSummary, setPreparedSummary] = useState<{ labelKey: string; value: string }[]>([]);
   const heading = useRef<HTMLHeadingElement>(null),
+    serverName = useRef<HTMLInputElement>(null),
     key = useRef(idempotencyKey()),
     seeded = useRef(new Set<string>()),
     initializedDisk = useRef(false);
@@ -95,7 +96,7 @@ export function CreateServerPage() {
   const shared = quota.data?.creationStorage.mode === 'shared';
   const agreement = module?.descriptor.creation.agreement;
   useLayoutEffect(() => {
-    heading.current?.focus({ preventScroll: step === 0 });
+    (serverName.current ?? heading.current)?.focus({ preventScroll: step === 0 });
   }, [step]);
   useEffect(() => {
     if (quota.data && !initializedDisk.current) {
@@ -296,6 +297,12 @@ export function CreateServerPage() {
                       className="game-card secondary"
                       aria-pressed={gameId === game.id}
                       onClick={() => selectGame(game.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && gameId === game.id && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          if (!e.repeat) e.currentTarget.form?.requestSubmit();
+                        }
+                      }}
                     >
                       {art && <img src={art} alt="" width={480} height={240} />}
                       <span>{t(extension.descriptor.nameKey)}</span>
@@ -307,6 +314,7 @@ export function CreateServerPage() {
           {step === nameStep && (
             <Input
               label={t('gameUi.serverName')}
+              ref={serverName}
               autoComplete="off"
               data-1p-ignore="true"
               data-lpignore="true"

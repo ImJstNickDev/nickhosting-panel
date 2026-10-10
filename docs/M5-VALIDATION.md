@@ -1307,3 +1307,23 @@ services and external-provider fixtures. No infrastructure restart/mutation,
 production provider operation, migration or live test assets. Existing dev HMR
 applies source edits. Rollback is source-only; release gates #18/#22 are unchanged.
 Independent source and rendered UX/accessibility review: no remaining must-fix findings.
+
+
+### 2026-10-10 — Game/runtime Enter and name focus
+
+Enter on a selected game advances through ordinary form validation; Enter on an
+unselected game still selects it first. Runtime Enter explicitly submits the same
+form. Custom handlers exclude repeated/composing Enter. Entering Name focuses its
+textbox once per step transition, without stealing focus during edits. No CSS,
+backend/API, provider or infrastructure change; existing dev HMR applies source.
+
+`pnpm --filter @nickhosting/web typecheck` through `scripts/dev.sh`: passed.
+Scoped Biome for create-server, installer-fields and vanilla-catalog browser test:
+passed. The prior browser prefix with
+`apps/web/tests/vanilla-catalog.browser.test.ts -t "discovers declared|offers a direct-only"`:
+**2 passed, 4 filtered, 14.14 s**, first run. Tests exercise actual Chromium/handlers
+with approved isolated services and provider fixtures: first/second game Enter,
+runtime Enter, immediate name focus and existing later-step keyboard regressions.
+[Actual focus screenshot](screenshots/m5/wizard-name-keyboard-desktop-en.png) reviewed;
+independent source review found no must-fix. No historical suite rerun or live assets.
+Rollback is source-only; PR #21 remains open/unmerged and release gates unchanged.
