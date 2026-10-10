@@ -13,6 +13,7 @@ import type {
   GatewaySnapshot,
 } from '@nickhosting/game-sdk';
 import { GatewaySafetyError } from '@nickhosting/gateway-safety';
+import { NetworkObservationError } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createMinecraftProtocolAdapter,
@@ -1815,6 +1816,26 @@ describe('transition-only Gateway diagnostics', () => {
       expect(f.gateway.health().routes).toBe(0);
     },
   );
+
+  it('records a safe observer reason and still withdraws an unproven listener', async () => {
+    const backend = await tcpFixture();
+    const log = vi.fn();
+    const r = route(backend.port, 'tcp', 'waking');
+    const f = plane([r], { logger: { log } });
+    await f.gateway.start();
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'gateway.safety_failure',
+      expect.objectContaining({
+        routeId: r.id,
+        reason: 'observer_container_churn',
+        routeMode: 'waking',
+      }),
+    );
+    expect(f.gateway.health().routes).toBe(0);
+  });
 
   it('deduplicates identical snapshot renewals and records readiness and lease expiry without endpoint data', async () => {
     const backend = await tcpFixture();

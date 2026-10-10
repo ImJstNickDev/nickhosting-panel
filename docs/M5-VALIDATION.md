@@ -2600,3 +2600,91 @@ performed. The Gateway needs a separately approved scoped restart to load these
 changes; it is still running the earlier executable. SFTPGo#18 is unchanged.
 Rollback uses a new revert commit and, after activation, another explicitly
 approved Gateway restart; no schema migration or data reset is required.
+
+### 2026-10-11 — Follow-up cycle and coherent Docker observation
+
+Read-only evidence from the Owner's next cycle (UTC, 2026-10-10) after the approved
+Gateway restart at 22:40:58 confirms improvements and a remaining interruption:
+
+| Measurement | Previous cycle | This cycle |
+|---|---:|---:|
+| Join to Docker process start | 7.252 s | 5.197 s |
+| Initial start-worker execution | 5.430 s | 3.472 s |
+| Minecraft Done to Gateway forwarding | 5.477 s | 4.423 s |
+| Waiting-listener interruption during start | 4.405 s | 5.173 s |
+| Stopping response to physical container exit | 11.713 s | 4.910 s |
+| Physical exit to sleeping response | 7.371 s | 8.742 s |
+
+The join arrived at 22:44:13.421, worker delivery at 14.067 (14 ms delivery age),
+and Docker started at 18.618. The single final runtime-image check took 1.168 s;
+no JAR/hash or Mojang download occurred in this power path. Minecraft Main began
+at 20.300, Done at 22:45:10.721, and forwarding resumed at 15.144. The game startup
+itself must be distinguished from the 4.423 s observation/commit/route delay.
+
+At 22:44:19.123 the Gateway emitted generic `validation_failed`, then withdrew the
+listener until 24.297. Docker recreated the container at 18.484. This is neither
+a logged aggregate timeout nor a validator-specific collision failure. Inspection
+identified two earlier observer failure paths: a listed container disappearing
+before inspect, or a changed final container ID set. Both were flattened to the
+same error. The historical log cannot prove which inner predicate failed; container
+recreation is corroborated, and both paths require regression coverage.
+
+The stopping response began at 22:46:13.876, before the power request at 17.814.
+That response marks refusal of new logins before automatic stop, not a claim that
+Minecraft already received stop. Minecraft stopped at 18.350 and the container
+exited at 18.786. Stop-console setup took 389 ms, final handoff 592 ms, power HTTP
+503 ms and terminal confirmation 1.318 s; these spans are nested in the 3.261 s
+adapter effect. Redis delivery took 6 ms. The stopping promise expired at 25.899;
+a successful fresh snapshot released it at 27.528. The remaining post-exit MOTD
+delay is this original fence plus observation time, not slow Minecraft shutdown.
+This pass does not shorten that fence or silently permit an early wake.
+
+No players joined this cycle. Final read-only state was sleeping/offline, with no
+active operation, failed sleep reference or last error. No manual game commands,
+resource cleanup or provider mutations were performed for this investigation.
+
+The observer now discards the failed inventory and retries once only for proven
+container churn. Exact Docker missing-container stderr must match requested IDs,
+partial stdout must contain exactly the valid surviving rows, and fresh lists
+must confirm disappearance with unchanged networks. Complete changed-ID snapshots
+also qualify. Sibling failures settle first and take precedence over churn. All
+namespace/daemon/inventory/socket reads are repeated within the original 15-second
+budget; persistent churn, malformed data, permissions and network changes remain
+fail-closed. Fixed observer reason codes now reach Gateway diagnostics. A read-only
+inspect of a nonexistent synthetic ID verified the installed Docker CLI's error
+form; no real container was changed.
+
+Independent review found no remaining must-fix in the retry/freshness/collision
+boundary. This fixes two reproducible observer races, not a proven reconstruction
+of the old flattened exception. The original successful suites remain historical
+evidence; real startup continuity still requires activation and another Owner cycle.
+
+Focused checks (no historical full-suite rerun):
+
+- The two new container-recreation fixtures failed against the original observer,
+  then passed after the fix. An intermediate full observer run passed 46 tests.
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/network-observer.test.ts packages/gateway-safety/src/validator.test.ts apps/game-gateway/src/data-plane.test.ts`
+  — **232 passed, 1 timed out** at the existing 20-second limit. The timeout was
+  the pre-existing binary TCP/half-close/concurrent-client case. It also timed out
+  on the first isolated rerun. The exact HEAD baseline, copied to an ignored
+  local harness without changing watched source, passed near the 20-second limit.
+  Initial baseline harness attempts failed module resolution before running tests;
+  the local harness resolution was corrected, not product dependencies.
+- Final isolated current-code rerun:
+  `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts -t 'streams binary TCP with half-close and concurrent clients' --reporter=json --outputFile=.codex/local/gateway-observer-baseline/current-tcp-result.json`
+  — **1 passed, 89 filtered**, measured 16.307 s. No timeout or forwarding-code
+  change was made. This is a passing targeted rerun, not a clean combined-suite
+  result; the threshold-sensitive test remains a validation limitation.
+- Two additional observer cases for complete surviving partial-batch accounting,
+  fresh wildcard bindings and the hard wall deadline passed in a focused run.
+- `scripts/dev.sh pnpm exec tsc --noEmit` passed. Biome checks on the four changed
+  TypeScript files passed. `git diff --check` passed.
+- `python3 scripts/check-governance.py` passed: 501 indexed text files, 106 review
+  PNGs, 431 relative links, 4 TOML files and 44 ignore cases.
+
+No database tests, live game tests, additional infrastructure or game resources
+were needed for this observer change. Gateway activation is pending a new scoped
+restart approval; the previous approved restart activated the preceding commit.
+Rollback is a new revert commit and an explicitly approved Gateway restart. No
+migration, persistent data change or provider configuration change is required.
+SFTPGo #18 and the production-release boundary remain unchanged.

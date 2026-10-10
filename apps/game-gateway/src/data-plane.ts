@@ -16,6 +16,7 @@ import {
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
 import { GatewaySafetyError } from '@nickhosting/gateway-safety';
+import { NetworkObservationError } from '@nickhosting/pterodactyl-adapter';
 import { z } from 'zod';
 import { GatewayRouteRevisionStaleError } from './control-client.js';
 
@@ -734,10 +735,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           reason:
             error instanceof GatewaySafetyError
               ? error.reason
-              : error instanceof DomainError &&
-                  error.details?.gatewaySafetyReason === 'validation_timeout'
-                ? 'validation_timeout'
-                : 'validation_failed',
+              : error instanceof NetworkObservationError
+                ? `observer_${error.reason}`
+                : error instanceof DomainError &&
+                    error.details?.gatewaySafetyReason === 'validation_timeout'
+                  ? 'validation_timeout'
+                  : 'validation_failed',
           routeMode: route.mode,
         });
         const unsafe = listeners.get(route.id);

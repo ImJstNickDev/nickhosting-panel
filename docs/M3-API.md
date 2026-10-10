@@ -364,3 +364,15 @@ survive verified backend recreation under the narrow renewal rules in
 [ADR 0012](decisions/0012-gateway-leases-and-sleep.md); unknown safety/timeout still
 withdraws the listener. This does not promise uninterrupted responses under all
 provider/control-plane failures.
+
+The Docker observer may discard an observation and retry it once when a complete
+container inventory demonstrably changes during inspection. An inspect command
+may qualify only if its failure exclusively identifies requested container IDs
+that a fresh list confirms disappeared; malformed output, network changes,
+permissions and other command failures do not qualify. All sibling inspection
+results must settle before classifying the failure. The retry rereads the complete
+namespace, daemon, container/network inventories and socket tables within the
+original 15-second observation budget. Partial results never authorize a listener,
+and this retry does not extend a route lease or change aggregate timeout closure.
+Observer diagnostic reasons distinguish command, parse, namespace, socket,
+inventory and deadline failures without exposing Docker stderr.
