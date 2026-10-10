@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
+import { listenForJobOutbox, notifyJobOutbox } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -288,6 +289,44 @@ describe('PostgreSQL authoritative jobs', () => {
     ).toMatchObject({ job_id: job.id, generation: 0, last_dispatched_at: null });
     expect((await getJobStatus(fixture.db, job.id, member)).state).toBe('queued');
   });
+
+  it.each(['succeeded', 'failed', 'deferred'] as const)(
+    'continues the same dispatch batch past a %s row',
+    async (state) => {
+      const skipped = await submit();
+      const ready = await submit();
+      await fixture.db
+        .updateTable('job_outbox')
+        .set({ next_dispatch_at: new Date(0) })
+        .where('job_id', '=', skipped.id)
+        .execute();
+      const nextAttempt = new Date(Date.now() + 60_000);
+      await fixture.db
+        .updateTable('operation_jobs')
+        .set(
+          state === 'deferred'
+            ? { next_attempt_at: nextAttempt }
+            : { state, completed_at: new Date() },
+        )
+        .where('id', '=', skipped.id)
+        .execute();
+      const add = vi.fn();
+      expect(await dispatchOutbox(fixture.db, { add })).toBe(1);
+      expect(add).toHaveBeenCalledExactlyOnceWith(
+        'deliver',
+        { jobId: ready.id },
+        { jobId: `${ready.id}-1` },
+      );
+      const remaining = await fixture.db
+        .selectFrom('job_outbox')
+        .selectAll()
+        .where('job_id', '=', skipped.id)
+        .executeTakeFirst();
+      if (state === 'deferred')
+        expect(remaining).toMatchObject({ generation: 0, next_dispatch_at: nextAttempt });
+      else expect(remaining).toBeUndefined();
+    },
+  );
 
   it('stores the digest of the exact validated command and identities', async () => {
     const job = await submit();
@@ -655,6 +694,142 @@ describe('isolated Redis/BullMQ delivery', () => {
       expect(await fixture.db.selectFrom('activity_events').selectAll().execute()).toHaveLength(1);
     } finally {
       await runtime.close();
+      const cleanup = createJobTransport(options);
+      try {
+        await cleanup.queue.waitUntilReady();
+        await cleanup.queue.obliterate({ force: true });
+      } finally {
+        await cleanup.close();
+      }
+    }
+  });
+});
+
+describe('commit-triggered outbox delivery', () => {
+  it('delivers schema-scoped hints only after commit and never after rollback', async () => {
+    const wake = vi.fn();
+    const listener = await listenForJobOutbox(fixture.pool, wake, vi.fn());
+    const foreign = await createTestDatabase();
+    try {
+      let unblock!: () => void;
+      let reached!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+      const pending = fixture.db.transaction().execute(async (tx) => {
+        await notifyJobOutbox(tx);
+        reached();
+        await gate;
+      });
+      await entered;
+      await delay(30);
+      expect(wake).not.toHaveBeenCalled();
+      unblock();
+      await pending;
+      await eventually(async () => wake.mock.calls.length === 1);
+      await expect(
+        fixture.db.transaction().execute(async (tx) => {
+          await notifyJobOutbox(tx);
+          throw new Error('rollback fixture');
+        }),
+      ).rejects.toThrow('rollback fixture');
+      await notifyJobOutbox(foreign.db);
+      await delay(50);
+      expect(wake).toHaveBeenCalledTimes(1);
+    } finally {
+      listener.close();
+      await foreign.destroy();
+    }
+  });
+
+  it('dispatches a newly committed job without waiting for the fallback poll', async () => {
+    const options = redisOptions();
+    const runtime = await startJobWorker({
+      db: fixture.db,
+      notificationPool: fixture.pool,
+      ...options,
+      pollIntervalMs: 60000,
+    });
+    try {
+      // Startup's initial empty poll has completed before this enqueue.
+      const start = Date.now();
+      const job = await submit();
+      await eventually(
+        async () => (await getJobStatus(fixture.db, job.id, member)).state === 'succeeded',
+      );
+      expect(Date.now() - start).toBeLessThan(5000);
+      expect(await fixture.db.selectFrom('activity_events').selectAll().execute()).toHaveLength(1);
+    } finally {
+      await runtime.close();
+      const cleanup = createJobTransport(options);
+      try {
+        await cleanup.queue.waitUntilReady();
+        await cleanup.queue.obliterate({ force: true });
+      } finally {
+        await cleanup.close();
+      }
+    }
+  });
+
+  it('keeps durable delivery working and reconnects after the notification connection is lost', async () => {
+    const options = redisOptions();
+    let client: import('pg').PoolClient | undefined;
+    let connections = 0;
+    const notificationPool = {
+      connect: async () => {
+        connections++;
+        const connected = await fixture.pool.connect();
+        client = connected;
+        return connected;
+      },
+    };
+    const runtime = await startJobWorker({
+      db: fixture.db,
+      notificationPool,
+      ...options,
+      pollIntervalMs: 50,
+    });
+    try {
+      await eventually(async () => client !== undefined);
+      client?.emit('error', new Error('isolated listener loss'));
+      const job = await submit();
+      await eventually(
+        async () => (await getJobStatus(fixture.db, job.id, member)).state === 'succeeded',
+      );
+      expect(connections).toBeGreaterThanOrEqual(2);
+      expect(await fixture.db.selectFrom('activity_events').selectAll().execute()).toHaveLength(1);
+    } finally {
+      await runtime.close();
+      const cleanup = createJobTransport(options);
+      try {
+        await cleanup.queue.waitUntilReady();
+        await cleanup.queue.obliterate({ force: true });
+      } finally {
+        await cleanup.close();
+      }
+    }
+  });
+  it('keeps startup, fallback dispatch and shutdown bounded when notification acquisition hangs', async () => {
+    const options = redisOptions();
+    const runtime = await startJobWorker({
+      db: fixture.db,
+      notificationPool: { connect: () => new Promise(() => {}) },
+      ...options,
+      pollIntervalMs: 50,
+    });
+    try {
+      const job = await submit();
+      await eventually(
+        async () => (await getJobStatus(fixture.db, job.id, member)).state === 'succeeded',
+      );
+      expect(await fixture.db.selectFrom('activity_events').selectAll().execute()).toHaveLength(1);
+    } finally {
+      const start = Date.now();
+      await runtime.close();
+      expect(Date.now() - start).toBeLessThan(4000);
       const cleanup = createJobTransport(options);
       try {
         await cleanup.queue.waitUntilReady();

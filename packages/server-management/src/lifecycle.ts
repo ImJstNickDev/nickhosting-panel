@@ -97,7 +97,12 @@ export interface LifecycleOptions {
   verifyGameRestore?: (context: GameLifecycleContext) => Promise<boolean>;
   env?: Environment;
   /** Rechecks current actor, subject, support lifetime and project access before new effects. */
-  authorizeEffect: (jobId: string, serverId: string, connection: Kysely<Database>) => Promise<void>;
+  authorizeEffect: (
+    jobId: string,
+    serverId: string,
+    connection: Kysely<Database>,
+    context?: { providerServer?: ApplicationServer | Promise<ApplicationServer> },
+  ) => Promise<void>;
   /** Current DB permission/policy only. External effects still require authorizeEffect
    * at the final handoff; internal stop-console checks may use this scoped guard. */
   authorizeIntent?: (
@@ -698,6 +703,7 @@ export async function processServerOperation(
       phase: string,
       perform: (verifiedServer?: ApplicationServer) => Promise<T>,
       patch?: (result: T) => Record<string, unknown>,
+      preparationServer?: ApplicationServer,
     ): Promise<boolean> => {
       await timed('authorization', () =>
         (['power', 'initial_start'].includes(phase)
@@ -728,11 +734,18 @@ export async function processServerOperation(
         .parse(operation.plan.effectAttempts ?? {});
       const attempt = (attempts[phase] ?? 0) + 1;
       if (attempt > job.max_attempts) throw new DomainError('operation_uncertain');
-      // Corroborate immediately before the effect, not only when the job was authorized.
-      const verifiedServer =
-        operation.action !== 'provision' || server.pterodactyl_id !== null
-          ? await timed('provider_identity', () => ownedRemote(db, server, options))
-          : undefined;
+      const finalPowerIdentity =
+        phase === 'initial_start' ||
+        (phase === 'power' && ['start', 'restart'].includes(operation.action));
+      // Stop preparation may share this attempt's initial identity for its internal
+      // status relay. beforePower always rechecks identity after the socket handshake.
+      // Start identity belongs after durable preparation, not before that await.
+      let verifiedServer = finalPowerIdentity
+        ? undefined
+        : (preparationServer ??
+          (operation.action !== 'provision' || server.pterodactyl_id !== null
+            ? await timed('provider_identity', () => ownedRemote(db, server, options))
+            : undefined));
       await update({
         phase,
         effect_state: 'prepared',
@@ -763,11 +776,11 @@ export async function processServerOperation(
           .where('server_id', '=', server.id)
           .executeTakeFirst()) !== undefined;
       if (
-        phase === 'initial_start' ||
-        (phase === 'power' && ['start', 'restart'].includes(operation.action)) ||
-        operation.plan.gatewayAutomation !== undefined ||
-        operation.plan.scheduleAutomation !== undefined ||
-        minecraftProvision
+        finalPowerIdentity ||
+        ((operation.plan.gatewayAutomation !== undefined ||
+          operation.plan.scheduleAutomation !== undefined ||
+          minecraftProvision) &&
+          !(phase === 'power' && operation.action === 'stop' && options.authorizeIntent))
       ) {
         // Preparing durable intent and provider identity checks can take time.
         // Do not carry an earlier automation grant across that interval. A
@@ -775,7 +788,41 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
-          await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
+          if (finalPowerIdentity) {
+            // Launch one fresh identity read and let independent runtime metadata
+            // checks overlap it. Both proofs settle before any effect, including
+            // for generic authorizers that do not consume the shared promise.
+            const identity = timed('provider_identity', async () => {
+              const value = await ownedRemote(db, server, options);
+              // Preparation may wait: match the limits admission reserved using
+              // this exact fresh snapshot, without another provider request.
+              for (const key of ['memory', 'cpu', 'disk', 'swap', 'io'] as const)
+                if (value.limits[key] !== server.limits[key])
+                  throw new DomainError('provenance_mismatch');
+              if (!installed(value) || value.suspended)
+                throw new DomainError('configuration_invalid');
+              return value;
+            });
+            const [ownership, authorization] = await Promise.allSettled([
+              identity,
+              timed('authorization', () =>
+                options.authorizeEffect(jobId, server.id, db, { providerServer: identity }),
+              ),
+            ]);
+            if (ownership.status === 'rejected') throw ownership.reason;
+            if (authorization.status === 'rejected') throw authorization.reason;
+            verifiedServer = ownership.value;
+            // Generic authorizers may finish before the shared identity read.
+            // Recheck current local authority after both await boundaries; callers
+            // without a local guard retain a full fresh authorization fallback.
+            await timed('authorization', () =>
+              options.authorizeIntent
+                ? options.authorizeIntent(jobId, server.id, db)
+                : options.authorizeEffect(jobId, server.id, db, { providerServer: verifiedServer }),
+            );
+          } else {
+            await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
+          }
           if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
         } catch (error) {
           await update({
@@ -1289,8 +1336,28 @@ export async function processServerOperation(
         return finish(true, true);
       }
       let remote: ApplicationServer;
+      let initialResources: Resources | undefined;
       try {
-        remote = await timed('provider_identity', () => ownedRemote(db, server, options));
+        if (
+          operation.phase === 'planned' &&
+          ['start', 'stop', 'restart'].includes(operation.action)
+        ) {
+          // Independent reads overlap, but foreign identity must never publish telemetry.
+          // Settle both promises even on failure so no rejection escapes the operation.
+          const [identity, status] = await Promise.allSettled([
+            timed('provider_identity', () => ownedRemote(db, server, options)),
+            timed('provider_resources', () =>
+              options.adapter.getResources(server.pterodactyl_identifier ?? ''),
+            ),
+          ]);
+          if (identity.status === 'rejected') throw identity.reason;
+          if (status.status === 'rejected') throw status.reason;
+          remote = identity.value;
+          initialResources = status.value;
+          await observation(db, server, initialResources, nowOf(options));
+        } else {
+          remote = await timed('provider_identity', () => ownedRemote(db, server, options));
+        }
       } catch (error) {
         if (
           operation.action === 'delete' &&
@@ -1311,7 +1378,7 @@ export async function processServerOperation(
         if (externalStop) return externalStop;
         const observedStart = await completeObservedStart();
         if (observedStart) return observedStart;
-        const current = await resources();
+        const current = initialResources ?? (await resources());
         if (operation.phase === 'planned') {
           if (
             action === 'stop' &&
@@ -1377,32 +1444,56 @@ export async function processServerOperation(
             },
           });
           if (action === 'stop') {
-            await effect('power', async (verifiedServer) => {
-              const result = await options.adapter.stopWithConfirmation(
-                server.pterodactyl_id ?? 0,
-                server.pterodactyl_identifier ?? '',
-                {
-                  ...(verifiedServer ? { verifiedServer } : {}),
-                  onStage: (stage, durationMs, outcome) =>
-                    log('servers.stop_stage', { stage, durationMs, outcome }),
-                  beforePower: async () => {
-                    try {
-                      // The socket/token handshake can wait. Recheck ownership and
-                      // full effect authority once after it, immediately before power.
-                      if (!options.effectAuthorizationVerifiesHost)
-                        await options.verifyObservationHost?.(server.id, db);
-                      await timed('provider_identity', () => ownedRemote(db, server, options));
-                      await timed('authorization', () =>
-                        options.authorizeEffect(jobId, server.id, db),
-                      );
-                      if (isGatewaySleep(operation)) {
-                        assertGatewaySleepFence(operation.plan, nowOf(options));
-                        await update({
-                          plan: {
-                            ...operation.plan,
-                            gatewaySleepHandoffAt: nowOf(options).toISOString(),
-                          },
-                        });
+            await effect(
+              'power',
+              async (verifiedServer) => {
+                const result = await options.adapter.stopWithConfirmation(
+                  server.pterodactyl_id ?? 0,
+                  server.pterodactyl_identifier ?? '',
+                  {
+                    ...(verifiedServer ? { verifiedServer } : {}),
+                    onStage: (stage, durationMs, outcome) =>
+                      log('servers.stop_stage', { stage, durationMs, outcome }),
+                    beforePower: async () => {
+                      try {
+                        // The socket/token handshake can wait. Recheck ownership and
+                        // full effect authority once after it, immediately before power.
+                        if (!options.effectAuthorizationVerifiesHost)
+                          await options.verifyObservationHost?.(server.id, db);
+                        const providerServer = await timed('provider_identity', () =>
+                          ownedRemote(db, server, options),
+                        );
+                        await timed('authorization', () =>
+                          options.authorizeEffect(jobId, server.id, db, { providerServer }),
+                        );
+                        if (isGatewaySleep(operation)) {
+                          assertGatewaySleepFence(operation.plan, nowOf(options));
+                          await update({
+                            plan: {
+                              ...operation.plan,
+                              gatewaySleepHandoffAt: nowOf(options).toISOString(),
+                            },
+                          });
+                          await timed('authorization', () =>
+                            (options.authorizeIntent ?? options.authorizeEffect)(
+                              jobId,
+                              server.id,
+                              db,
+                            ),
+                          );
+                          await assertIdleSleepAllowed(db, server.id, options.env);
+                          // A durable write can wait; never outlive the original fence.
+                          assertGatewaySleepFence(operation.plan, nowOf(options));
+                        }
+                      } catch (error) {
+                        if (!(error instanceof DomainError)) throw error;
+                        throw new PterodactylError('permission_denied', 'client', 'rejected');
+                      }
+                    },
+                    authorize: async () => {
+                      try {
+                        // This internal status-only relay exposes nothing to a browser.
+                        // Recheck current DB permissions without repeating provider reads.
                         await timed('authorization', () =>
                           (options.authorizeIntent ?? options.authorizeEffect)(
                             jobId,
@@ -1410,43 +1501,30 @@ export async function processServerOperation(
                             db,
                           ),
                         );
-                        await assertIdleSleepAllowed(db, server.id, options.env);
-                        // A durable write can wait; never outlive the original fence.
-                        assertGatewaySleepFence(operation.plan, nowOf(options));
+                        return true;
+                      } catch {
+                        return false;
                       }
-                    } catch (error) {
-                      if (!(error instanceof DomainError)) throw error;
-                      throw new PterodactylError('permission_denied', 'client', 'rejected');
-                    }
+                    },
+                    onConfirmed: async () => {
+                      await update({
+                        plan: {
+                          ...operation.plan,
+                          stopConfirmed: true,
+                          stopConfirmedAt: nowOf(options).toISOString(),
+                        },
+                      });
+                      await event('servers.operation.stop_confirmed');
+                    },
                   },
-                  authorize: async () => {
-                    try {
-                      // This internal status-only relay exposes nothing to a browser.
-                      // Recheck current DB permissions without repeating provider reads.
-                      await timed('authorization', () =>
-                        (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db),
-                      );
-                      return true;
-                    } catch {
-                      return false;
-                    }
-                  },
-                  onConfirmed: async () => {
-                    await update({
-                      plan: {
-                        ...operation.plan,
-                        stopConfirmed: true,
-                        stopConfirmedAt: nowOf(options).toISOString(),
-                      },
-                    });
-                    await event('servers.operation.stop_confirmed');
-                  },
-                },
-              );
-              // The persisted callback is the proof. A bare helper return cannot replace it.
-              if (!result.confirmed || operation.plan.stopConfirmed !== true)
-                throw new PterodactylError('unavailable', 'client', 'unknown');
-            });
+                );
+                // The persisted callback is the proof. A bare helper return cannot replace it.
+                if (!result.confirmed || operation.plan.stopConfirmed !== true)
+                  throw new PterodactylError('unavailable', 'client', 'unknown');
+              },
+              undefined,
+              remote,
+            );
           } else
             await effect('power', () =>
               options.adapter.power(server.pterodactyl_identifier ?? '', action),

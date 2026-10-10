@@ -7,7 +7,7 @@ import {
   DomainError,
   type Permission,
 } from '@nickhosting/core';
-import { type Database, getSettings, recordAudit } from '@nickhosting/database';
+import { type Database, getSettings, notifyJobOutbox, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import {
   minecraftRuntimeMappingSchema,
@@ -257,6 +257,7 @@ async function insertOperation(
     })
     .execute();
   await tx.insertInto('job_outbox').values({ job_id: jobId, last_dispatched_at: null }).execute();
+  await notifyJobOutbox(tx);
   await tx
     .updateTable('managed_servers')
     .set({ active_operation_id: jobId, updated_at: new Date() })

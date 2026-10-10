@@ -197,6 +197,7 @@ export interface MinecraftModuleOptions {
     connection: Kysely<Database>,
     serverId: string,
     remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    observerPreflight?: Promise<void>,
   ) => Promise<string | null>;
   authorizeJob: (
     connection: Kysely<Database>,
@@ -212,7 +213,10 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     serverId: string,
     connection: Kysely<Database> = db,
     requireObserved = true,
-    snapshot?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    snapshot?:
+      | Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>
+      | ReturnType<PterodactylAdapter['getApplicationServer']>,
+    observerPreflight?: Promise<void>,
   ) {
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
@@ -235,12 +239,17 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       .selectAll()
       .where('id', '=', serverId)
       .executeTakeFirstOrThrow();
-    const remote = snapshot ?? (await adapter.getApplicationServer(server.pterodactyl_id ?? 0));
-    // Independent read-only Docker and launch metadata checks share this snapshot.
-    const [observed] = await Promise.all([
-      observedImageDigest(connection, serverId, remote),
+    const remote = Promise.resolve(
+      snapshot ?? adapter.getApplicationServer(server.pterodactyl_id ?? 0),
+    );
+    // Begin independent egg and provider lookups together; settle both branches
+    // before returning a failed proof to the job lock's connection owner.
+    const proofs = await Promise.allSettled([
+      remote.then((value) => observedImageDigest(connection, serverId, value, observerPreflight)),
       assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter),
     ]);
+    for (const result of proofs) if (result.status === 'rejected') throw result.reason;
+    const observed = proofs[0].status === 'fulfilled' ? proofs[0].value : null;
     const evidence = await requireMinecraftRuntimeImageEvidence(
       connection,
       serverId,
@@ -331,7 +340,14 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
   const hooks: GameRuntimeHooks = {
     verifyInitialInstallation: (context) =>
       verifyMinecraftInitialInstallation(context, { env, observedImageDigest }),
-    assertRuntimeImage: assertMinecraftRuntimeImage,
+    assertRuntimeImage: (serverId, connection, requireObserved, context) =>
+      assertMinecraftRuntimeImage(
+        serverId,
+        connection,
+        requireObserved,
+        context?.providerServer,
+        context?.observerPreflight,
+      ),
     assertFileMutation,
     async configureProvision(context: GameLifecycleContext) {
       const profile = await context.db

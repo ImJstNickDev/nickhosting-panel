@@ -58,7 +58,7 @@ Use stable NickHosting UUIDs in APIs and store separate external Pterodactyl IDs
 ## API/application boundaries
 
 - **Web ↔ API**: authenticated typed HTTP routes; SSE/WebSocket or equivalent subscription for job and telemetry updates; streaming console through a controlled gateway, never a privileged Pterodactyl token leaked to browser.
-- **API ↔ worker**: durable job command + `jobId`, idempotency key, actor, target, policy snapshot and progress events. Commit changes to PostgreSQL atomically where needed; Redis transport can redeliver.
+- **API ↔ worker**: durable job command + `jobId`, idempotency key, actor, target, policy snapshot and progress events. Commit changes to PostgreSQL atomically where needed; Redis transport can redeliver. New outbox records send transaction-scoped PostgreSQL notifications to wake the dispatcher after commit; schema-scoped hints accelerate delivery while durable polling/recovery remains authoritative. The listener uses one dedicated pooled connection and cannot block dispatch when unavailable.
 - **Core ↔ game SDK**: declared capabilities and typed commands; a plugin requests infrastructure actions only through core services, never bypasses authorization or quota admission.
 - **Gateway ↔ Core**: authenticated control messages for server route/mode and wake request. Hot path packet forwarding must not require a PostgreSQL/API round-trip per packet.
 - **SFTPGo ↔ NickHosting**: provision ephemeral/revocable per-server credentials and enforce access to an explicitly mapped single server directory; normal user identity remains NickHosting-only.

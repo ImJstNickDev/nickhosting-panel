@@ -127,7 +127,7 @@ export function registerGatewayRoutes(
       );
       metadata.serverId = selected.serverId;
       const management = await stage('management_configuration', options.management);
-      await stage('host_sampling', () => management.refreshObservations());
+      await stage('host_sampling', () => management.refreshObservations(db, selected.serverId));
       const state = await stage('admission_and_enqueue', () =>
         requestGatewayWake(
           db,

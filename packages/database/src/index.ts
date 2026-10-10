@@ -69,6 +69,7 @@ export function createDatabase(
 }
 
 export type { GatewayServerState, GatewayTables } from './gateway-types.js';
+export * from './job-notifications.js';
 export { migrate } from './migrate.js';
 export type { ScheduleAction, ScheduleTiming } from './schedule-types.js';
 export type { HostSnapshot, ServerLimits } from './server-types.js';

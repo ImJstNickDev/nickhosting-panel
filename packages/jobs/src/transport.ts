@@ -1,5 +1,5 @@
 import { type createLogger, DomainError } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type Database, type JobNotificationPool, listenForJobOutbox } from '@nickhosting/database';
 import { Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { type Kysely, sql } from 'kysely';
@@ -87,7 +87,7 @@ export async function dispatchOutbox(
         .skipLocked()
         .limit(1)
         .executeTakeFirst();
-      if (!row) return false;
+      if (!row) return 'empty';
       const job = await tx
         .selectFrom('operation_jobs')
         .select(['state', 'next_attempt_at'])
@@ -95,7 +95,7 @@ export async function dispatchOutbox(
         .executeTakeFirstOrThrow();
       if (job.state === 'succeeded' || job.state === 'failed') {
         await tx.deleteFrom('job_outbox').where('job_id', '=', row.job_id).execute();
-        return false;
+        return 'skipped';
       }
       const { now } = await tx
         .selectNoFrom(sql<Date>`clock_timestamp()`.as('now'))
@@ -106,7 +106,7 @@ export async function dispatchOutbox(
           .set({ next_dispatch_at: job.next_attempt_at })
           .where('job_id', '=', row.job_id)
           .execute();
-        return false;
+        return 'skipped';
       }
       const generation = row.generation + 1;
       await queue.add('deliver', { jobId: row.job_id }, { jobId: `${row.job_id}-${generation}` });
@@ -119,10 +119,10 @@ export async function dispatchOutbox(
         })
         .where('job_id', '=', row.job_id)
         .execute();
-      return true;
+      return 'published';
     });
-    if (!dispatched) break;
-    count++;
+    if (dispatched === 'empty') break;
+    if (dispatched === 'published') count++;
   }
   return count;
 }
@@ -167,6 +167,8 @@ export async function rearmDeferredDelivery(
 /** No connections or timers exist until this explicitly called factory runs. */
 export async function startJobWorker(options: {
   db: Kysely<Database>;
+  /** Same database/schema as db; notification loss never disables durable polling. */
+  notificationPool?: JobNotificationPool;
   redisUrl: string;
   prefix: string;
   logger: Logger;
@@ -236,24 +238,65 @@ export async function startJobWorker(options: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let polling: Promise<void> | undefined;
   let stopping = false;
-  const poll = async () => {
-    try {
-      await dispatchOutbox(options.db, transport.queue, {
-        recoveryIntervalMs,
+  let wakePending = false;
+  let notifications: Awaited<ReturnType<typeof listenForJobOutbox>> | undefined;
+  let connectingNotifications: Promise<void> | undefined;
+  const ensureNotifications = () => {
+    if (!options.notificationPool || notifications || connectingNotifications || stopping) return;
+    connectingNotifications = listenForJobOutbox(options.notificationPool, wake, () => {
+      notifications = undefined;
+      options.logger.log('warn', 'jobs.notifications_unavailable');
+    })
+      .then((listener) => {
+        if (stopping) listener.close();
+        else {
+          notifications = listener;
+          wake();
+        }
+      })
+      .catch(() => {
+        options.logger.log('warn', 'jobs.notifications_unavailable');
+      })
+      .finally(() => {
+        connectingNotifications = undefined;
       });
+  };
+  const poll = async () => {
+    // Optional hint transport must never suspend the authoritative outbox poll.
+    ensureNotifications();
+    if (stopping) return;
+    try {
+      await dispatchOutbox(options.db, transport.queue, { recoveryIntervalMs });
     } catch {
       options.logger.log('error', 'jobs.outbox_dispatch_failed');
-    } finally {
-      if (!stopping)
-        timer = setTimeout(() => {
-          polling = poll();
-        }, pollIntervalMs);
     }
   };
+  // One dispatcher at a time. A commit arriving during dispatch requests another
+  // pass rather than being lost between the query and the fallback timer.
+  function wake() {
+    if (stopping) return;
+    if (polling) {
+      wakePending = true;
+      return;
+    }
+    if (timer) clearTimeout(timer);
+    wakePending = false;
+    polling = poll().finally(() => {
+      polling = undefined;
+      if (stopping) return;
+      if (wakePending) wake();
+      else timer = setTimeout(wake, pollIntervalMs);
+    });
+  }
   try {
     await Promise.all([worker.waitUntilReady(), transport.queue.waitUntilReady()]);
-    polling = poll();
+    wake();
+    await polling;
   } catch (error) {
+    stopping = true;
+    if (timer) clearTimeout(timer);
+    notifications?.close();
+    await connectingNotifications;
     await worker.close(true);
     connection.disconnect();
     await transport.close();
@@ -268,6 +311,8 @@ export async function startJobWorker(options: {
         stopping = true;
         if (timer) clearTimeout(timer);
         await polling;
+        notifications?.close();
+        await connectingNotifications;
         try {
           await worker.close();
         } finally {

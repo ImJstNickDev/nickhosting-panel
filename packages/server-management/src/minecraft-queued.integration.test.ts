@@ -700,6 +700,105 @@ describe('host-bound Minecraft runtime image evidence', () => {
     expect(listFiles).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
   });
+  it('shares the final provider and observer proofs without another fetch or preflight', async () => {
+    const value = await installed();
+    const remote = await value.external.adapter.getApplicationServer(17);
+    const getServer = vi.spyOn(value.external.adapter, 'getApplicationServer').mockClear();
+    value.observer.preflight.mockClear();
+    const job = await enqueueServerOperation(
+      f.db,
+      f.context,
+      value.serverId,
+      { action: 'start', idempotencyKey: randomUUID() },
+      env,
+    );
+    await value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db, {
+      providerServer: remote,
+    });
+    expect(getServer).not.toHaveBeenCalled();
+    expect(value.observer.preflight).toHaveBeenCalledOnce();
+    expect(value.observer.imageIdentity).toHaveBeenCalledOnce();
+    await expect(
+      value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db, {
+        providerServer: { ...remote, uuid: randomUUID() },
+      }),
+    ).rejects.toThrow('provenance_mismatch');
+  });
+  it('starts final-handoff egg validation while the lifecycle identity response is pending', async () => {
+    const value = await installed();
+    const remote = await value.external.adapter.getApplicationServer(17);
+    const provider = Promise.withResolvers<typeof remote>();
+    const eggEntered = Promise.withResolvers<void>();
+    const originalEgg = vi.mocked(value.external.adapter.getEgg).getMockImplementation();
+    if (!originalEgg) throw new Error('Missing fixture egg implementation');
+    vi.spyOn(value.external.adapter, 'getEgg').mockImplementation(async (...args) => {
+      eggEntered.resolve();
+      return originalEgg(...args);
+    });
+    const getServer = vi.spyOn(value.external.adapter, 'getApplicationServer').mockClear();
+    const job = await enqueueServerOperation(
+      f.db,
+      f.context,
+      value.serverId,
+      { action: 'start', idempotencyKey: randomUUID() },
+      env,
+    );
+    let finished = false;
+    const authorizing = value.management.lifecycle
+      .authorizeEffect(job.jobId, value.serverId, f.db, { providerServer: provider.promise })
+      .then(() => {
+        finished = true;
+      });
+    try {
+      await eggEntered.promise;
+      expect(finished).toBe(false);
+      expect(value.observer.imageIdentity).not.toHaveBeenCalled();
+    } finally {
+      provider.resolve(remote);
+      await authorizing;
+    }
+    expect(getServer).not.toHaveBeenCalled();
+    expect(value.observer.preflight).toHaveBeenCalledOnce();
+    expect(value.observer.imageIdentity).toHaveBeenCalledOnce();
+  });
+  it('starts egg validation before a standalone provider response and settles both on failure', async () => {
+    const value = await installed();
+    const remote = await value.external.adapter.getApplicationServer(17);
+    const serverRelease = Promise.withResolvers<typeof remote>();
+    const eggEntered = Promise.withResolvers<void>();
+    const eggRelease = Promise.withResolvers<void>();
+    vi.spyOn(value.external.adapter, 'getApplicationServer').mockImplementation(
+      () => serverRelease.promise,
+    );
+    const originalEgg = vi.mocked(value.external.adapter.getEgg).getMockImplementation();
+    if (!originalEgg) throw new Error('Missing fixture egg implementation');
+    vi.spyOn(value.external.adapter, 'getEgg').mockImplementation(async (...args) => {
+      eggEntered.resolve();
+      await eggRelease.promise;
+      return originalEgg(...args);
+    });
+    let settled = false;
+    const proof = value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false);
+    const result = proof.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    try {
+      await eggEntered.promise;
+      serverRelease.reject(new Error('isolated provider failure'));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(settled).toBe(false);
+    } finally {
+      serverRelease.resolve(remote);
+      eggRelease.resolve();
+      await result;
+    }
+    await expect(proof).rejects.toThrow('isolated provider failure');
+  });
   it.each([false, true])(
     'times an ordinary start without artifact transfers even when logging fails=%s',
     async (throwSink) => {
@@ -742,15 +841,19 @@ describe('host-bound Minecraft runtime image evidence', () => {
         ).toEqual({ server_id: value.serverId });
         expect(listFiles).not.toHaveBeenCalled();
         expect(download).not.toHaveBeenCalled();
-        expect(records.map((record) => (record.data as Record<string, unknown>).stage)).toEqual([
-          'reserve_start.observer_preflight',
-          'reserve_start.host_sampling',
-          'reserve_start.atomic_admission',
-          'authorize_effect.observer_preflight',
-          'authorize_effect.authorization',
-          'authorize_effect.runtime_image',
-          'authorize_effect.final_authorization',
-        ]);
+        expect(
+          records.map((record) => (record.data as Record<string, unknown>).stage).sort(),
+        ).toEqual(
+          [
+            'reserve_start.observer_preflight',
+            'reserve_start.host_sampling',
+            'reserve_start.atomic_admission',
+            'authorize_effect.observer_preflight',
+            'authorize_effect.authorization',
+            'authorize_effect.runtime_image',
+            'authorize_effect.final_authorization',
+          ].sort(),
+        );
         for (const record of records) {
           expect(record.event).toBe('server.runtime_stage');
           expect(record.data).toEqual({
@@ -813,6 +916,67 @@ describe('host-bound Minecraft runtime image evidence', () => {
       }
     },
   );
+  it('overlaps physical sampling and observer preflight but admits only after both complete', async () => {
+    const value = await installed();
+    const observerEntered = Promise.withResolvers<void>();
+    const sampleEntered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    value.observer.preflight.mockImplementation(async () => {
+      observerEntered.resolve();
+      await release.promise;
+    });
+    const sample = vi.spyOn(hostResources, 'sampleLocalResources').mockImplementation(async () => {
+      sampleEntered.resolve();
+      await release.promise;
+      return {
+        totalMemoryMiB: 8192,
+        availableMemoryMiB: 8192,
+        cpuCapacityPercent: 800,
+        cpuBusyPercent: 0,
+        availableDiskMiB: 1000000,
+        observedAt: new Date().toISOString(),
+      };
+    });
+    const job = await enqueueServerOperation(
+      f.db,
+      f.context,
+      value.serverId,
+      { action: 'start', idempotencyKey: randomUUID() },
+      env,
+    );
+    const before = await f.db
+      .selectFrom('resource_reservations')
+      .selectAll()
+      .where('server_id', '=', value.serverId)
+      .executeTakeFirst();
+    const reserving = value.management.lifecycle.reserveStart(
+      value.serverId,
+      job.jobId,
+      'start',
+      f.db,
+    );
+    try {
+      await Promise.all([observerEntered.promise, sampleEntered.promise]);
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .selectAll()
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirst(),
+      ).toEqual(before);
+    } finally {
+      release.resolve();
+      await reserving;
+      sample.mockRestore();
+    }
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', value.serverId)
+        .executeTakeFirst(),
+    ).toEqual({ server_id: value.serverId });
+  });
   it('records a failed preflight without logging the raw error or changing rejection', async () => {
     const records: LogRecord[] = [];
     const value = await installed(createLogger((record) => records.push(record)));
@@ -821,8 +985,12 @@ describe('host-bound Minecraft runtime image evidence', () => {
     await expect(
       value.management.lifecycle.reserveStart(value.serverId, randomUUID(), 'start', f.db),
     ).rejects.toBe(error);
-    expect(records).toHaveLength(1);
-    expect(records[0]?.data).toMatchObject({
+    expect(records).toHaveLength(2);
+    expect(
+      records.find(
+        (record) => (record.data as { stage: string }).stage === 'reserve_start.observer_preflight',
+      )?.data,
+    ).toMatchObject({
       stage: 'reserve_start.observer_preflight',
       outcome: 'failed',
     });

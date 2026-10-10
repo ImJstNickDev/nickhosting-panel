@@ -1,7 +1,7 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
 import { type GameManifest, gameManifestSchema } from '@nickhosting/game-sdk';
-import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely, Selectable } from 'kysely';
 import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
@@ -48,6 +48,11 @@ export interface TrustedGameModule {
     env: Environment,
   ): Promise<GameCatalogEntry>;
 }
+/** Proofs are scoped to one final handoff, never cached across jobs. */
+export interface RuntimeImageContext {
+  providerServer?: ApplicationServer | Promise<ApplicationServer>;
+  observerPreflight?: Promise<void>;
+}
 export interface GameRuntimeHooks {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   verifyInitialInstallation?(
@@ -59,6 +64,7 @@ export interface GameRuntimeHooks {
     serverId: string,
     connection: Kysely<Database>,
     requireObserved: boolean,
+    context?: RuntimeImageContext,
   ): Promise<unknown>;
   assertFileMutation(
     serverId: string,

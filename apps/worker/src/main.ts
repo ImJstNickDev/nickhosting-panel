@@ -15,7 +15,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
   });
   if (!env.DATABASE_URL || !env.REDIS_URL || !env.NH_JOB_PREFIX)
     throw new DomainError('configuration_invalid');
-  const { db } = createDatabase(env.DATABASE_URL);
+  const { db, pool } = createDatabase(env.DATABASE_URL);
   try {
     const management = async () => {
       if (!env.NH_SECRETS_MASTER_KEY) throw new DomainError('configuration_invalid');
@@ -32,6 +32,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     };
     const runtime = await startJobWorker({
       db,
+      notificationPool: pool,
       redisUrl: env.REDIS_URL,
       prefix: env.NH_JOB_PREFIX,
       logger,

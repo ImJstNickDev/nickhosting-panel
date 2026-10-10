@@ -376,3 +376,39 @@ original 15-second observation budget. Partial results never authorize a listene
 and this retry does not extend a route lease or change aggregate timeout closure.
 Observer diagnostic reasons distinguish command, parse, namespace, socket,
 inventory and deadline failures without exposing Docker stderr.
+
+### 2026-10-11 — Start/stop critical-path consolidation
+
+Planned power operations fetch provider identity and resource telemetry concurrently,
+settling both before persisting telemetry or advancing admission. A failed managed
+identity cannot publish telemetry. Start/restart/initial-start obtain their final
+provider identity after durable preparation, then share that same fresh proof with
+runtime checks. Independent egg metadata and observer work may overlap the provider
+read; every branch settles before power. Current provider limits, installation and
+suspension are revalidated against the admitted local server. Current permissions
+are rechecked after the parallel barrier, including generic lifecycle callers.
+
+The final runtime proof shares only its own observer preflight. There is no
+cross-operation identity/image cache, and standalone runtime checks retain their
+full host/provider proof. Worker admission samples only the server's physical host
+and overlaps sampling with host preflight, retaining the 250 ms CPU window and
+atomic reservation rules. Revocable local policy is still rechecked after slow
+provider/image checks. Installation and restore artifact verification is unchanged;
+ordinary power operations do not download the JAR.
+
+Stop may reuse the current attempt's initial verified metadata to prepare the
+internal console. It still checks fresh provider identity and full authority after
+the console handshake, immediately before power. Intermediate local permission
+checks remain; duplicate full pre-handshake checks are removed where the final
+handoff supplies them. Terminal process proof, original sleep fence, reservation
+release and uncertain-effect recovery remain unchanged. This optimization does
+not shorten the Gateway's post-stop quiescence deadline or its readiness pipeline.
+
+New durable outbox records emit a schema-scoped PostgreSQL notification inside
+their transaction; PostgreSQL delivers it only after commit. The worker immediately
+runs its existing dispatcher on receipt, coalescing hints while dispatch is active.
+The 500 ms fallback poll and repeated durable recovery still work without hints.
+LISTEN uses one dedicated database connection, bounded setup and reconnection;
+a stalled hint connection never blocks authoritative polling. No migration or new
+service is required. Notifications contain no job or user payload, do not grant
+permission, and never substitute for a committed job.

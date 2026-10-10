@@ -175,7 +175,7 @@ export function assertMinecraftVerifiedLaunch(
 export async function assertMinecraftRemoteLaunch(
   db: DB,
   serverId: string,
-  remote: ApplicationServer,
+  remoteInput: ApplicationServer | Promise<ApplicationServer>,
   env: Environment,
   adapter: Pick<PterodactylAdapter, 'getEgg'>,
 ): Promise<void> {
@@ -187,7 +187,14 @@ export async function assertMinecraftRemoteLaunch(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
   const expected = await minecraftProvisionEnvironment(db, serverId, choice);
-  await assertMinecraftEggEnvironment(adapter, choice, expected);
+  const checks = await Promise.allSettled([
+    remoteInput,
+    assertMinecraftEggEnvironment(adapter, choice, expected),
+  ]);
+  for (const result of checks) if (result.status === 'rejected') throw result.reason;
+  const serverProof = checks[0];
+  if (serverProof.status !== 'fulfilled') throw new DomainError('integration_unavailable');
+  const remote = serverProof.value;
   const actual = remote.container.environment;
   if (
     choice.mappingDigest !== choice.row.mapping_digest ||

@@ -2688,3 +2688,104 @@ restart approval; the previous approved restart activated the preceding commit.
 Rollback is a new revert commit and an explicitly approved Gateway restart. No
 migration, persistent data change or provider configuration change is required.
 SFTPGo #18 and the production-release boundary remain unchanged.
+
+### 2026-10-11 — Consolidate start/stop checks and notify committed jobs
+
+The Owner requested a complete critical-path pass after the next cycle showed
+5.627 s join-to-process time, 5.820 s Done-to-forwarding and 11.781 s physical
+exit-to-sleeping response. That cycle had coherent route transitions with no
+recorded listener withdrawal, snapshot error or lease expiration; both jobs
+succeeded. This change targets pre-power work and delivery, not the separate
+readiness pipeline or original Gateway quiescence deadline.
+
+Read-only investigation identified two intentional 250 ms CPU sampling windows,
+a 500 ms outbox polling interval, three Application server GETs during start,
+repeated final Docker preflight, and a sequential server/egg lookup. The prior
+runtime-image stage measured 957/613 ms in two isolated read-only probes; its
+name included remote metadata as well as Docker/local validation.
+
+Implemented:
+
+- Planned power identity and telemetry GETs run concurrently and settle before
+  admission or telemetry publication; invalid identity cannot publish telemetry.
+- Start/restart/initial-start final provider proof is acquired after durable
+  preparation. Runtime validation shares that promise and independently starts
+  egg lookup. Both settle before effects. This removes the discarded intermediate
+  provider GET and uses two Application server reads on a normal initial start
+  attempt. The same fresh snapshot checks limits, installation and suspension.
+- Final runtime authorization shares its own successful observer preflight with
+  image inspection. Worker host sampling is scoped to the relevant physical host
+  and overlaps preflight, retaining the 250 ms CPU window, fresh observations,
+  current permissions and atomic admission. Inexpensive local compatibility reads
+  remain fresh after external waits instead of introducing a broad proof cache.
+- After all parallel final proofs, current local permissions are checked again;
+  generic callers without that guard receive full reauthorization. Runtime hooks
+  also await provider proof when no game-specific image hook consumes it.
+- Stop uses the initial verified snapshot for internal console preparation and
+  retains fresh identity/full authority after the handshake. Intermediate local
+  guards remain. Repeated pre-handshake full checks are removed where final
+  handoff supplies them. Terminal confirmation and reservation/fence rules remain.
+- Both durable enqueue paths issue PostgreSQL NOTIFY inside their transaction.
+  The schema-scoped signal arrives only on commit and immediately wakes the
+  existing outbox dispatcher. One dedicated pooled connection listens; reconnect,
+  2-second setup timeout and late-acquisition cleanup are bounded. A failed or
+  hanging listener cannot suspend the unchanged authoritative polling/recovery.
+  No schema migration, new dependency or new service is needed.
+
+Independent review caught two issues before delivery: listener setup initially
+blocked fallback dispatch; and parallel identity/auth allowed a generic authorizer
+to finish before a later permission revocation. Both were corrected, with hung
+listener/late-client cleanup and post-barrier revocation regressions. Final code
+review has no remaining must-fix.
+
+Intermediate test results are preserved: lifecycle initially passed 155/155,
+then focused changed-branch batches passed 9, 13 and 15 cases as proof sharing
+and final local guards were added. Runtime tests initially exposed a recursive
+fixture mock and early parallel rejection; both were corrected with saved mock
+implementation and settled branches. The first complete Minecraft/runtime run
+passed 79/80: the new host-overlap test incorrectly expected no reservation,
+although enqueue already creates one. It now asserts that the existing reservation
+is unchanged until both probes complete; that case passed, as did the seven
+Promise/drift/revocation cases and the generic-game revocation regression.
+
+Read-only post-change runtime probes measured 946 ms and 441 ms, with server/egg
+requests starting at 6/142 ms and 3/15 ms respectively. Remote request durations
+varied: server 545/273 ms, egg 458/280 ms. These are not a controlled end-to-end
+benchmark or a claim of meeting the 1.5–2 s goal. Calls were protected by a
+GET-only fetch guard and a PostgreSQL read-only session against an already pinned
+installation; no power, configuration or artifact transfer was performed.
+
+Final validation on the integrated source:
+
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/minecraft-queued.integration.test.ts packages/server-management/src/runtime.integration.test.ts`: **245/245 passed**, 113.28 s.
+- `scripts/dev.sh pnpm test:m3 packages/jobs/src/jobs.integration.test.ts`: **31/31 passed**, 14.52 s, before the final batch-continuation regression below.
+- `scripts/dev.sh pnpm exec vitest run packages/database/src/job-notifications.test.ts`: **2/2 passed**, including bounded setup and late acquisition cleanup.
+- `scripts/dev.sh pnpm test:m3 apps/api/src/gateway.integration.test.ts -t 'correlates safe wake phases'`: **2 passed, 18 filtered**. Authenticated wake samples only its selected physical host.
+- `scripts/dev.sh pnpm exec tsc --noEmit`: passed after API integration. Biome checks on changed TypeScript files passed.
+
+The final queue inspection also found that a terminal/deferred outbox row ended
+the batch despite other due work. Dispatch now distinguishes no row from a skipped
+row, retaining the iteration bound and publication count. Its three targeted
+regressions initially passed the deferred case but failed two terminal fixtures
+because they omitted the database-required completion timestamp. The fixtures
+were corrected without changing the database constraint.
+
+Development API/worker source watchers loaded the changes. Read-only checks found
+API, worker and Gateway healthy, the relevant nine worker source files identical
+to workspace source, and one dedicated active LISTEN connection. No Gateway code
+changed in this pass and no Gateway restart was performed. Existing approved
+isolated database/Redis tests used private disposable schemas/queues; no new
+containers, game servers, migrations or development data resets were performed.
+No commands were sent to the Owner's server. No UI or production infrastructure
+was changed. Independent technical review found no outstanding must-fix after
+the corrections above.
+
+The next Owner-operated start/sleep cycle is still needed to measure end-to-end
+improvement; 1.5–2 s join-to-process is a target, not a verified result. Readiness
+confirmation and the original post-stop Gateway quiescence deadline remain
+separate sources of latency and were not weakened. Rollback uses a new revert
+commit loaded by the development watchers; no schema rollback or provider change
+is required. SFTPGo issue #18 remains an independent production-release gate.
+
+- Final batch-continuation rerun: `scripts/dev.sh pnpm test:m3 packages/jobs/src/jobs.integration.test.ts -t 'continues the same dispatch batch'`: **3 passed, 31 filtered**, 3.10 s. This is targeted evidence after the 31-test queue run, not a claim of a repeated full suite.
+- Final indexed governance: `python3 scripts/check-governance.py` passed (503 text files, 106 PNGs, 431 relative links, 4 TOML files, 44 ignore cases); heuristic secret scan passed. Biome passed on all 18 changed TypeScript files; `git diff --cached --check` passed.

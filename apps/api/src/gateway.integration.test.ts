@@ -27,6 +27,7 @@ const policy = {
 };
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let f: Awaited<ReturnType<typeof managementFixture>>;
+let refreshHost: ReturnType<typeof vi.fn>;
 let app: ReturnType<typeof createApp>,
   env: Record<string, string>,
   serverId: string,
@@ -75,6 +76,7 @@ beforeEach(async () => {
   timingLogs.length = 0;
   throwTimingSink = false;
   f = await managementFixture(database.db, { interactive: true });
+  refreshHost = vi.fn(() => f.observe());
   serverId = await f.server();
   const server = await f.db
     .selectFrom('managed_servers')
@@ -181,7 +183,7 @@ beforeEach(async () => {
     management: async () =>
       ({
         adapter: f.adapter,
-        refreshObservations: () => f.observe(),
+        refreshObservations: refreshHost,
         lifecycle: { observeProcessStart: processStart },
       }) as unknown as ManagementRuntime,
   });
@@ -368,6 +370,7 @@ describe('M3 Core service authentication and managed control plane', () => {
       });
       expect(response.status).toBe(200);
       const result = (await response.json()) as { operationId: string };
+      expect(refreshHost).toHaveBeenCalledWith(database.db, serverId);
       const phases = timingLogs.filter((record) => record.event === 'gateway.wake_stage');
       expect(phases.map((record) => (record.data as Record<string, unknown>).stage)).toEqual([
         'route_validation',

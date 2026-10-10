@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type AuthContext, authSessionId, SecretCodec } from '@nickhosting/core';
+import { type AuthContext, authSessionId, createLogger, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
@@ -377,6 +377,57 @@ describe('management runtime execution-time authorization', () => {
     expect(observer.stopped).not.toHaveBeenCalled();
   });
 
+  it('awaits a generic game provider proof before the final revocable authority check', async () => {
+    const server = await f.server();
+    const job = await enqueueServerOperation(f.db, f.owner, server, {
+      action: 'start',
+      idempotencyKey: randomUUID(),
+    });
+    const remote = await providerIdentity(server);
+    const provider = Promise.withResolvers<ApplicationServer>();
+    const authorized = Promise.withResolvers<void>();
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: { preflight: async () => {}, stopped: async () => true },
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+      logger: createLogger((record) => {
+        if (
+          record.event === 'server.runtime_stage' &&
+          (record.data as { stage?: string } | undefined)?.stage ===
+            'authorize_effect.authorization'
+        )
+          authorized.resolve();
+      }),
+    });
+    let completed = false;
+    const proof = runtime.lifecycle.authorizeEffect(job.jobId, server, f.db, {
+      providerServer: provider.promise,
+    });
+    const outcome = proof.then(
+      () => {
+        completed = true;
+      },
+      () => {
+        completed = true;
+      },
+    );
+    try {
+      await authorized.promise;
+      await delay(10);
+      expect(completed).toBe(false);
+      await f.db
+        .updateTable('user')
+        .set({ role: 'user' })
+        .where('id', '=', f.owner.actorUserId)
+        .execute();
+    } finally {
+      provider.resolve(remote);
+      await outcome;
+    }
+    await expect(proof).rejects.toThrow('forbidden');
+  });
   it('reloads the current role instead of trusting a queued Owner snapshot', async () => {
     const queued = await stop(f.owner);
     expect((await authorizeQueuedEffect(f.db, queued.job, queued.server)).role).toBe('owner');

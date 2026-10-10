@@ -658,9 +658,168 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       f.options.authorizeIntent = intent;
       f.options.authorizeEffect = effect;
       expect(await f.run()).toBe('waiting');
-      expect(intent).toHaveBeenCalledTimes(1);
+      expect(intent).toHaveBeenCalledTimes(2);
       expect(effect).toHaveBeenCalledTimes(1);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
       expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['start', 'restart'] as const)(
+    'shares exactly the fresh post-preparation provider identity with final %s authorization',
+    async (action) => {
+      const f = await fixture(action);
+      f.options.authorizeIntent = async () => {};
+      f.options.checkpoint = async (point) => {
+        if (point === 'prepared') {
+          expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+          f.remote.container.image = 'fixture/changed:2';
+        }
+      };
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+        expect((await context?.providerServer)?.container.image).toBe('fixture/changed:2');
+        throw new DomainError('configuration_invalid');
+      };
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.operation()).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, powerEffectPrepared: false },
+      });
+    },
+  );
+  it.each(['none', 'identity', 'authorization'] as const)(
+    'overlaps final identity and authorization but awaits both proofs before power: rejection=%s',
+    async (rejection) => {
+      const f = await fixture('start');
+      f.options.authorizeIntent = async () => {};
+      let identityStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        identityStarted = resolve;
+      });
+      let releaseIdentity!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseIdentity = resolve;
+      });
+      f.options.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+          identityStarted();
+          await released;
+          return rejection === 'identity' ? { ...f.remote, uuid: randomUUID() } : f.remote;
+        });
+      };
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        await started;
+        expect(context?.providerServer).toBeInstanceOf(Promise);
+        expect(f.adapter.power).not.toHaveBeenCalled();
+        releaseIdentity();
+        if (rejection === 'authorization') throw new DomainError('forbidden');
+        // Generic consumers may ignore context. Lifecycle must still await identity.
+      };
+      expect(await f.run()).toBe(rejection === 'none' ? 'waiting' : 'failed');
+      expect(f.adapter.power).toHaveBeenCalledTimes(rejection === 'none' ? 1 : 0);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      if (rejection !== 'none')
+        expect(await f.operation()).toMatchObject({
+          effect_state: 'none',
+          plan: { rejected: true, powerEffectPrepared: false },
+        });
+    },
+  );
+  it.each([false, true])(
+    'rejects authority revoked during final identity after early authorization: local guard=%s',
+    async (localGuard) => {
+      const f = await fixture('start');
+      let revoked = false;
+      let releaseIdentity!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseIdentity = resolve;
+      });
+      let prepared = false;
+      f.options.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        prepared = true;
+        f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+          await released;
+          revoked = true;
+          return f.remote;
+        });
+      };
+      const guard = async () => {
+        if (revoked) throw new DomainError('forbidden');
+      };
+      if (localGuard) f.options.authorizeIntent = guard;
+      f.options.authorizeEffect = async () => {
+        await guard();
+        if (prepared) releaseIdentity();
+        // Intentionally does not await the supplied provider promise.
+      };
+      expect(await f.run()).toBe('failed');
+      expect(revoked).toBe(true);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.operation()).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, rejectionCode: 'forbidden' },
+      });
+    },
+  );
+  it.each(['limits', 'suspended', 'installation'] as const)(
+    'rejects %s drift after durable preparation against the same final snapshot',
+    async (change) => {
+      const f = await fixture('start');
+      f.options.authorizeIntent = async () => {};
+      f.options.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        if (change === 'limits') f.remote.limits.memory = 4096;
+        if (change === 'suspended') f.remote.suspended = true;
+        if (change === 'installation') f.remote.status = 'installing';
+      };
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.operation()).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, powerEffectPrepared: false },
+      });
+    },
+  );
+  it('rejects provider identity drift after durable power preparation without uncertain effects', async () => {
+    const f = await fixture('start');
+    f.options.authorizeIntent = async () => {};
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') f.remote.uuid = randomUUID();
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.operation()).toMatchObject({
+      effect_state: 'none',
+      plan: { rejected: true, rejectionCode: 'provenance_mismatch' },
+    });
+  });
+  it.each(['start', 'stop', 'restart'] as const)(
+    'overlaps initial identity and resource reads for planned %s without publishing unverified telemetry',
+    async (action) => {
+      const f = await fixture(action);
+      let startedResources!: () => void;
+      const resourceRead = new Promise<void>((resolve) => {
+        startedResources = resolve;
+      });
+      f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+        await resourceRead;
+        return { ...f.remote, uuid: randomUUID() };
+      });
+      const original = f.adapter.getResources.getMockImplementation();
+      f.adapter.getResources.mockImplementationOnce(async () => {
+        startedResources();
+        if (!original) throw new Error('Missing fixture resource reader');
+        return original();
+      });
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getResources).toHaveBeenCalledTimes(1);
+      expect((await f.server()).last_observed_at).toBeNull();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
     },
   );
   it('rejects ordinary power if full authority changes after preparation', async () => {
@@ -702,7 +861,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.run()).toBe('waiting');
     expect(intent).toHaveBeenCalledTimes(4);
     expect(effect).toHaveBeenCalledTimes(1);
-    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(3);
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
   });
   it.each(['identity', 'permission'] as const)(
     'rejects stop when %s changes during console setup',

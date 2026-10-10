@@ -8,6 +8,7 @@ import {
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
+  type ApplicationServer,
   type ContainerObserver,
   createContainerObserver,
   createPterodactylAdapter,
@@ -26,7 +27,11 @@ import {
   type ExternalServiceOptions,
   reconcileExternalServices,
 } from './external.js';
-import { createGameRuntimeDispatcher, trustedGameModules } from './game-modules.js';
+import {
+  createGameRuntimeDispatcher,
+  type RuntimeImageContext,
+  trustedGameModules,
+} from './game-modules.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   createLifecycleProcessor,
@@ -301,8 +306,16 @@ export async function createManagementRuntime(options: ManagementOptions) {
     },
   };
 
-  async function refreshObservations(connection: Kysely<Database> = db) {
-    const hosts = await connection.selectFrom('physical_hosts').selectAll().execute();
+  async function refreshObservations(connection: Kysely<Database> = db, serverId?: string) {
+    const hosts = serverId
+      ? await connection
+          .selectFrom('physical_hosts as host')
+          .innerJoin('managed_nodes as node', 'node.physical_host_id', 'host.id')
+          .innerJoin('managed_servers as server', 'server.node_id', 'node.id')
+          .selectAll('host')
+          .where('server.id', '=', serverId)
+          .execute()
+      : await connection.selectFrom('physical_hosts').selectAll().execute();
     for (const stored of hosts) {
       const host = resolveHostOverride(stored, env);
       if (host.enabled && env.NH_OBSERVER_ID === host.observer_id) {
@@ -334,8 +347,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     connection: Kysely<Database>,
     serverId: string,
     remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    observerPreflight?: Promise<void>,
   ) {
-    await verifyObservationHost(serverId, connection);
+    await (observerPreflight ?? verifyObservationHost(serverId, connection));
     const server = await connection
       .selectFrom('managed_servers')
       .selectAll()
@@ -374,11 +388,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     connection: Kysely<Database>,
     requireObserved = true,
+    context?: RuntimeImageContext,
   ) {
     return (await gameRuntime(connection, serverId))?.assertRuntimeImage(
       serverId,
       connection,
       requireObserved,
+      context,
     );
   }
   async function assertFileMutation(
@@ -567,10 +583,19 @@ export async function createManagementRuntime(options: ManagementOptions) {
       authorizeQueuedEffect(connection, jobId, serverId, env, adapter).then(() => undefined),
     // authorizeEffect below binds each final handoff to this server's host.
     effectAuthorizationVerifiesHost: true,
-    authorizeEffect: async (jobId: string, serverId: string, connection: Kysely<Database>) => {
+    authorizeEffect: async (
+      jobId: string,
+      serverId: string,
+      connection: Kysely<Database>,
+      context?: { providerServer?: ApplicationServer | Promise<ApplicationServer> },
+    ) => {
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `authorize_effect.${name}`, work);
-      await stage('observer_preflight', () => verifyObservationHost(serverId, connection));
+      const observerPreflight = stage('observer_preflight', () =>
+        verifyObservationHost(serverId, connection),
+      );
+      // Even stop must re-read revocable authority after the external preflight.
+      await observerPreflight;
       await stage('authorization', () =>
         authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
       );
@@ -583,7 +608,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
         ['start', 'restart'].includes(operation.action) ||
         (operation.action === 'provision' && operation.phase === 'initial_start')
       ) {
-        await stage('runtime_image', () => assertRuntimeImage(serverId, connection, false));
+        await stage('runtime_image', () =>
+          assertRuntimeImage(serverId, connection, false, { ...context, observerPreflight }),
+        );
+        // A compiled game may have no image hook. Its provider proof must still
+        // settle before reading final revocable authority.
+        await context?.providerServer;
         // Observer/provider proofs can outlive an automation grant. Re-read the
         // current actor, schedule revision, consent and Gateway generation only
         // after those slow proofs, at the final handoff to a new remote effect.
@@ -593,8 +623,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
       }
     },
     reserveInstallation: async (serverId: string, jobId: string, connection: Kysely<Database>) => {
-      await verifyObservationHost(serverId, connection);
-      await refreshObservations(connection);
+      const checks = await Promise.allSettled([
+        verifyObservationHost(serverId, connection),
+        refreshObservations(connection, serverId),
+      ]);
+      for (const result of checks) if (result.status === 'rejected') throw result.reason;
       await reserveInstallation(connection, serverId, jobId, env);
     },
     reserveStart: async (
@@ -605,10 +638,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
     ) => {
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `reserve_start.${name}`, work);
-      await stage('observer_preflight', () => verifyObservationHost(serverId, connection));
       // Image/launch identity is checked once immediately before power, after
       // durable preparation. Admission still requires a fresh physical sample.
-      await stage('host_sampling', () => refreshObservations(connection));
+      const checks = await Promise.allSettled([
+        stage('observer_preflight', () => verifyObservationHost(serverId, connection)),
+        stage('host_sampling', () => refreshObservations(connection, serverId)),
+      ]);
+      for (const result of checks) if (result.status === 'rejected') throw result.reason;
       await stage('atomic_admission', () => reserveStart(connection, serverId, jobId, action, env));
     },
     beforeDelete:
