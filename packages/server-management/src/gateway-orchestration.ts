@@ -673,7 +673,17 @@ export async function reportGatewayObservation(
         !operation.effect_started_at ||
         processNanos <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
         operation.server_id !== serverId ||
-        !['start', 'restart'].includes(operation.action)
+        !(
+          ['start', 'restart'].includes(operation.action) ||
+          (operation.action === 'provision' &&
+            operation.plan.autoStart === true &&
+            operation.plan.gatewayRoutesActivated === true &&
+            operation.plan.powerEffectPrepared === true &&
+            typeof operation.plan.effectAttempts === 'object' &&
+            operation.plan.effectAttempts !== null &&
+            'initial_start' in operation.plan.effectAttempts &&
+            Number(operation.plan.effectAttempts.initial_start) >= 1)
+        )
       )
         throw new DomainError('operation_uncertain');
     }

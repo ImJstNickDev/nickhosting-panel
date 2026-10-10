@@ -846,3 +846,27 @@ read-only pre-change check the Owner had saved a 2,000-pin pool; no managed serv
 route or Gateway server state existed. A real pilot still needs an installed
 Gateway-mode server with declared support, an explicitly configured route and the
 existing collision/reachability/approval checks before a public bind.
+
+## M5 follow-up — Automatic Gateway registration for new servers
+
+This supersedes the manual-route prerequisite for **new eligible creations** in
+prior activation notes; those historical zero-route observations remain unchanged.
+A trusted integration's Gateway-mode creation now reserves immutable public routes
+from the Owner-configured node pool and completes registration as part of the
+existing durable provisioning job. The current deployment's one-address pool can
+use this path without another per-server Owner route form. Multiple bind addresses
+are deliberately rejected as ambiguous; there is no inferred interface or hostname.
+
+The Owner creates the server in the WebPanel. Installation and any requested initial
+start continue through Pterodactyl and M2 admission. The protocol policy is initialized
+without granting automatic-start consent. Sleep/wake controls and consent remain in
+Server → Automation; inherited timeout/access settings remain under Owner settings
+and integration administration. Direct servers receive no Gateway routes.
+
+Implementation validation uses disposable test schemas and provider fixtures only.
+It does not authorize this agent to create a live test server, configure a real route
+or open a public listener. The existing Gateway continues applying fresh collision,
+identity, topology, reachability and game-readiness checks to registrations. A stored
+route or delivered snapshot is reported as configured, not proof of external reachability.
+No migrations, container recreation, network edits, DNS writes or Owner setting
+changes are needed for this source update in the existing watched dev API/worker.

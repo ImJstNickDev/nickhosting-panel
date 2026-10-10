@@ -22,6 +22,11 @@ import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
 import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import {
+  activateProvisionGateway,
+  assertProvisionGatewayStart,
+  prepareProvisionGatewayStart,
+} from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
@@ -617,6 +622,7 @@ export async function processServerOperation(
           .where('server_id', '=', server.id)
           .executeTakeFirst()) !== undefined;
       if (
+        phase === 'initial_start' ||
         operation.plan.gatewayAutomation !== undefined ||
         operation.plan.scheduleAutomation !== undefined ||
         minecraftProvision
@@ -628,6 +634,7 @@ export async function processServerOperation(
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
           await options.authorizeEffect(jobId, server.id, db);
+          if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
         } catch (error) {
           await update({
             effect_state: 'none',
@@ -880,6 +887,8 @@ export async function processServerOperation(
           .where('id', '=', server.id)
           .execute();
         if (operation.phase === 'initial_start') {
+          await activateProvisionGateway(db, server.id, jobId, options.env);
+          await update({});
           if (!settled()) return wait('resource_cache_expiry');
           if (current.current_state === 'running') {
             await db.transaction().execute(async (tx) => {
@@ -902,6 +911,9 @@ export async function processServerOperation(
           !(await options.configureGameProvision(gameContext()))
         )
           return wait('game_configuration');
+        await options.authorizeEffect(jobId, server.id, db);
+        await activateProvisionGateway(db, server.id, jobId, options.env);
+        await update({});
         if (operation.plan.autoStart === true) {
           if (!options.reserveStart) throw new DomainError('configuration_invalid');
           if (typeof operation.plan.reservationCreated !== 'boolean') {
@@ -926,6 +938,8 @@ export async function processServerOperation(
             .where('server_id', '=', server.id)
             .executeTakeFirst();
           if (!reservation) throw new DomainError('conflict');
+          await prepareProvisionGatewayStart(db, server.id, jobId, nowOf(options));
+          await update({});
           await effect('initial_start', () =>
             options.adapter.power(server.pterodactyl_identifier ?? '', 'start'),
           );

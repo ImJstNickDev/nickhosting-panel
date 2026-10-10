@@ -36,6 +36,7 @@ import {
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
+import { planProvisionGateway } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   type MinecraftPreparedContent,
@@ -517,6 +518,12 @@ export async function createManagedServer(
       };
     });
     await tx.insertInto('server_allocations').values(allocationRows).execute();
+    const plannedServer = await tx
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const gatewayProvision = await planProvisionGateway(tx, plannedServer, mapping.game_id, env);
     const primary = allocationRows.find((r) => r.is_primary);
     if (!primary) throw new DomainError('configuration_invalid');
     const environment = { ...mapping.environment };
@@ -581,6 +588,7 @@ export async function createManagedServer(
       {
         provision,
         autoStart: value.autoStart,
+        ...(gatewayProvision ? { gatewayProvision } : {}),
         ...(options.minecraftInitialContent
           ? { minecraftInitialContent: options.minecraftInitialContent }
           : {}),

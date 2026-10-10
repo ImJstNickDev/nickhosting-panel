@@ -896,7 +896,9 @@ export async function getPlatformConnections(
               ? ('disabled' as const)
               : !route.lease_expires_at || route.lease_expires_at <= new Date()
                 ? ('unavailable' as const)
-                : ('available' as const),
+                : // A snapshot lease is issued before the Gateway's live bind checks.
+                  // It proves configuration delivery, not a listening/reachable endpoint.
+                  ('configured' as const),
         };
       }),
     ),

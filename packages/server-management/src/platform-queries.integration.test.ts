@@ -651,7 +651,7 @@ describe('M5 platform browser queries and metadata', () => {
       .execute();
     expect((await getPlatformJob(f.db, f.owner, queued.jobId)).ownerRecovery).toBeNull();
   });
-  it('never exposes private backend addresses as public endpoints and represents multiport routes/lease expiry', async () => {
+  it('exposes configured multiport routes without mistaking a snapshot lease for listener readiness', async () => {
     const id = await f.server();
     const before = await getPlatformConnections(f.db, f.context, id);
     expect(
@@ -689,7 +689,7 @@ describe('M5 platform browser queries and metadata', () => {
           transport: 'tcp',
           port: 22222,
           hostname: 'play.example.test',
-          status: 'available',
+          status: 'configured',
         },
         {
           role: 'game',

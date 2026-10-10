@@ -71,7 +71,7 @@ Never store raw game console output, auth secrets, Cloudflare tokens or SFTP pas
 
 ## Key workflows
 
-**First creation:** parse plugin manifest → wizard plan → validate runtime/egg mapping → check disk/ports/nodes → reserve durable resources/allocations → idempotent Pterodactyl create → register server/endpoint/credentials → configure game → attempt first start via admission → complete/persist failure with meaningful status. If first start has no RAM, server remains created/offline.
+**First creation:** parse plugin manifest → wizard plan → validate runtime/egg mapping → check disk/ports/nodes → reserve durable resources/allocations and automatic Gateway route intent for supported modules → idempotent Pterodactyl create → verify identity/installation → configure game → activate pinned routes and initialize protocol policy → attempt first start via admission → complete/persist failure with meaningful status. If first start has no RAM, server remains created/offline.
 
 **Start/wake:** inspect desired vs actual state → atomic budget + capacity admission → reserve RAM/CPU → BullMQ job → Pterodactyl power API → game-specific readiness probe → mark online/route gateway → release on confirmed final stop or failed startup. Restart retains reservation.
 

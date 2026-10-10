@@ -6,6 +6,18 @@ Satisfactory and their protocol compatibility belong to M4/M6. See
 and [validation](M3-VALIDATION.md). M1 identity and M2 lifecycle/admission remain
 authoritative; no new user identity, provider key or resource scheduler is introduced.
 
+## M5 automatic provisioning integration
+
+The existing server creation API now records automatic route intent for eligible
+trusted-module Gateway servers. It requires a single Owner-configured Gateway bind
+address on the mapped node, reserves same-number public ports atomically with
+backend claims, and activates registrations after verified game installation.
+The worker uses shared internal route validation, not an impersonated Owner API
+session. No new public provisioning endpoint or database migration is required.
+See [automatic registration](GAME-GATEWAY.md#automatic-registration-during-creation).
+The Owner route API below remains available for explicit administration and legacy
+servers; new eligible creations no longer need a separate manual route request.
+
 ## Interactive Core APIs
 
 Normal Better Auth sessions, existing resource authorization and mutation-origin

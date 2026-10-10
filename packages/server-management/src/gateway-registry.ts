@@ -145,28 +145,6 @@ export async function setGatewayRoute(
         env,
       );
     }
-    const node = await tx
-      .selectFrom('managed_nodes')
-      .selectAll()
-      .where('id', '=', server.node_id)
-      .executeTakeFirstOrThrow();
-    const claim = await tx
-      .selectFrom('server_allocations')
-      .selectAll()
-      .where('id', '=', value.allocationId)
-      .where('server_id', '=', server.id)
-      .where('node_id', '=', node.id)
-      .executeTakeFirst();
-    const pool = effectiveBackendAllocationPool(node, env);
-    if (
-      !node.enabled ||
-      node.physical_host_id !== config.gatewayPhysicalHostId ||
-      !claim ||
-      !claim.protocols.includes(value.transport) ||
-      !pool?.gatewayBindAddresses.includes(address) ||
-      allocationAddressesOverlap(address, claim.backend_address)
-    )
-      throw new DomainError('allocation_unavailable');
     const existing = await tx
       .selectFrom('gateway_routes')
       .selectAll()
@@ -178,69 +156,20 @@ export async function setGatewayRoute(
     if (
       old &&
       (old.server_id !== server.id ||
-        old.allocation_id !== claim.id ||
+        old.allocation_id !== value.allocationId ||
         old.public_address !== address ||
         old.public_port !== value.publicPort ||
         old.transport !== value.transport)
     )
       throw new DomainError('conflict');
-    if (
-      existing.some(
-        (row) =>
-          row.id !== id &&
-          row.public_port === value.publicPort &&
-          row.transport === value.transport &&
-          allocationAddressesOverlap(address, row.public_address),
-      )
-    )
-      throw new DomainError('allocation_unavailable');
-    if (value.enabled || !old) {
-      // Direct allocations can share the Gateway's IP, but never its listener port.
-      // Include disabled pools and retained claims: removing an editable pin does
-      // not release the corresponding provider binding. Wings publishes both
-      // transports, independently of the game's declared transport roles.
-      const hostNodes = await tx
-        .selectFrom('managed_nodes')
-        .selectAll()
-        .where('physical_host_id', '=', node.physical_host_id)
-        .execute();
-      for (const hostNode of hostNodes) {
-        const hostPool = effectiveBackendAllocationPool(hostNode, env);
-        if (
-          hostPool?.allocations.some(
-            (pin) =>
-              pin.port === value.publicPort &&
-              allocationAddressesOverlap(address, backendAllocationAddress(pin)),
-          )
-        )
-          throw new DomainError('allocation_unavailable');
-      }
-      const hostClaims = await tx
-        .selectFrom('server_allocations as allocation')
-        .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
-        .select('allocation.backend_address')
-        .where('ownerNode.physical_host_id', '=', node.physical_host_id)
-        .where('allocation.port', '=', value.publicPort)
-        .execute();
-      if (hostClaims.some((entry) => allocationAddressesOverlap(address, entry.backend_address)))
-        throw new DomainError('allocation_unavailable');
-      const hostRoutes = await tx
-        .selectFrom('gateway_routes as route')
-        .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
-        .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
-        .select(['route.id', 'route.public_address'])
-        .where('ownerNode.physical_host_id', '=', node.physical_host_id)
-        .where('route.public_port', '=', value.publicPort)
-        .where('route.transport', '=', value.transport)
-        .execute();
-      if (
-        hostRoutes.some(
-          (entry) =>
-            entry.id !== value.id && allocationAddressesOverlap(address, entry.public_address),
-        )
-      )
-        throw new DomainError('allocation_unavailable');
-    }
+    const claim = await validateGatewayRouteEndpoint(
+      tx,
+      server.node_id,
+      { ...value, id },
+      config,
+      env,
+      !old,
+    );
     await tx
       .insertInto('gateway_routes')
       .values({
@@ -265,6 +194,111 @@ export async function setGatewayRoute(
     });
     return { id };
   });
+}
+/** Shared namespace validation. Caller holds the global resource lock. No auth
+ * bypass: interactive authorization and trusted durable provision ownership are
+ * checked independently by their entry points. */
+export async function validateGatewayRouteEndpoint(
+  tx: DB,
+  serverNodeId: string,
+  value: z.infer<typeof routeInput> & { id: string },
+  config: { gatewayId: string; gatewayPhysicalHostId: string },
+  env: Environment = {},
+  checkDisabled = true,
+) {
+  const address = canonicalAllocationAddress(value.publicAddress);
+  if (
+    !address ||
+    address !== value.publicAddress ||
+    ['0.0.0.0', '::'].includes(address) ||
+    address.startsWith('::ffff:')
+  )
+    throw new DomainError('validation_failed');
+  const node = await tx
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', serverNodeId)
+    .executeTakeFirstOrThrow();
+  const claim = await tx
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('id', '=', value.allocationId)
+    .where('server_id', '=', value.serverId)
+    .where('node_id', '=', node.id)
+    .executeTakeFirst();
+  const pool = effectiveBackendAllocationPool(node, env);
+  if (
+    !node.enabled ||
+    node.physical_host_id !== config.gatewayPhysicalHostId ||
+    !claim ||
+    !claim.protocols.includes(value.transport) ||
+    !pool?.gatewayBindAddresses.includes(address) ||
+    allocationAddressesOverlap(address, claim.backend_address)
+  )
+    throw new DomainError('allocation_unavailable');
+  const existing = await tx
+    .selectFrom('gateway_routes')
+    .selectAll()
+    .where('gateway_id', '=', config.gatewayId)
+    .execute();
+  if (
+    existing.some(
+      (row) =>
+        row.id !== value.id &&
+        row.public_port === value.publicPort &&
+        row.transport === value.transport &&
+        allocationAddressesOverlap(address, row.public_address),
+    )
+  )
+    throw new DomainError('allocation_unavailable');
+  if (value.enabled || checkDisabled) {
+    // Direct allocations can share the Gateway's IP, but never its listener port.
+    // Include disabled pools and retained claims: removing an editable pin does
+    // not release the corresponding provider binding. Wings publishes both
+    // transports, independently of the game's declared transport roles.
+    const hostNodes = await tx
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('physical_host_id', '=', node.physical_host_id)
+      .execute();
+    for (const hostNode of hostNodes) {
+      const hostPool = effectiveBackendAllocationPool(hostNode, env);
+      if (
+        hostPool?.allocations.some(
+          (pin) =>
+            pin.port === value.publicPort &&
+            allocationAddressesOverlap(address, backendAllocationAddress(pin)),
+        )
+      )
+        throw new DomainError('allocation_unavailable');
+    }
+    const hostClaims = await tx
+      .selectFrom('server_allocations as allocation')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select('allocation.backend_address')
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+      .where('allocation.port', '=', value.publicPort)
+      .execute();
+    if (hostClaims.some((entry) => allocationAddressesOverlap(address, entry.backend_address)))
+      throw new DomainError('allocation_unavailable');
+    const hostRoutes = await tx
+      .selectFrom('gateway_routes as route')
+      .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select(['route.id', 'route.public_address'])
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+      .where('route.public_port', '=', value.publicPort)
+      .where('route.transport', '=', value.transport)
+      .execute();
+    if (
+      hostRoutes.some(
+        (entry) =>
+          entry.id !== value.id && allocationAddressesOverlap(address, entry.public_address),
+      )
+    )
+      throw new DomainError('allocation_unavailable');
+  }
+  return claim;
 }
 export async function listGatewayRoutes(db: DB, context: AuthContext) {
   assertPermission(context, 'settings:write');

@@ -1698,3 +1698,73 @@ records are present. These are untouched defaults for the Owner to configure.
 Staged `python3 scripts/check-governance.py`: **passed**, 499 indexed text files,
 103 reviewed PNGs, 424 relative links, four TOML files and 44 ignore cases. Secret
 scanning remains heuristic; all staged paths and screenshots were inspected.
+
+## M5 follow-up — Automatic Gateway route provisioning
+
+Baseline `fc2787f0771c75d243a08886a1818a417ba5fa21`; PR #21 remains open and
+unmerged. The Owner requested automatic Gateway connection setup when creating a
+supported server and explicitly retained responsibility for creating the real server.
+
+New eligible Gateway-mode creations atomically reserve disabled routes with their
+backend claims and durable provisioning job. The single Owner-configured bind
+address and same-number port/transport identities are frozen in the job. After
+verified provider identity, egg installation and game configuration, the worker
+activates routes and initializes the trusted protocol policy with inherited idle
+timing. It does not grant wake consent. Direct/legacy servers are not imported or
+backfilled. Ambiguous/missing configuration and collisions fail closed; recovery
+cannot retarget or re-enable an Owner-disabled route. Public connection DTOs now
+report a delivered route as `configured`, not `available`: snapshot issuance is
+not evidence that the Gateway accepted/bound it. Existing live safety checks remain.
+
+Validation (isolated PostgreSQL schemas; mocked provider effects, no real games):
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/gateway-provision.integration.test.ts`
+  — **13 passed**. Atomic TCP/UDP multiport reservation, idempotency, missing/
+  ambiguous config, collisions, immutable identities, direct exclusion, lost start
+  reply/recovery, initial-start readiness, no wake grant and manual-stop races.
+- Same harness, `packages/server-management/src/gateway-minecraft.integration.test.ts`
+  — **7 passed**, including automatic registration through the actual compiled
+  Vanilla 26.1 binding with installed-profile fixtures. This is not a new live
+  Minecraft compatibility test.
+- Same harness, `packages/server-management/src/gateway-registry.integration.test.ts`
+  — **24 passed**, retaining interactive Owner and endpoint namespace restrictions.
+- Same harness with `packages/server-management/src/{lifecycle,registry,allocation-pool,gateway-orchestration,gateway-deletion,gateway-delivery}.integration.test.ts`
+  plus `apps/api/src/{gateway,minecraft}.integration.test.ts` — **251 passed across
+  eight files**. The final added initial-start handoff fence was validated by the
+  focused 13-test suite above; the broad run was not repeated for that narrow fix.
+- Same harness, `packages/server-management/src/platform-queries.integration.test.ts`
+  — **22 passed**, including honest configured/expired endpoint reporting.
+- `scripts/dev.sh pnpm typecheck` — passed (root, WebPanel and browser-test types).
+  `scripts/dev.sh pnpm exec tsc --noEmit` passed again after the final backend edits.
+- Focused `scripts/dev.sh pnpm exec biome check` on all nine changed/new TypeScript
+  files — passed, no warnings. `git diff --cached --check` — passed.
+  `python3 scripts/check-governance.py` — passed: 501 indexed text files, 103 existing
+  review PNGs, 425 relative links, 4 TOML files and 44 ignore cases. The credential
+  scan is heuristic; staged content was also inspected. No layout or translation
+  changes required another browser screenshot pass; no historical full milestone
+  suite was repeated.
+
+Development failures were retained in the work record: initial new fixtures attempted
+spying on a frozen registry, reused a provider ID, and advanced the fixture clock
+beyond a snapshot lease. These fixtures were corrected without weakening production
+fences. A missing import in the final handoff check was caught by TypeScript and
+fixed. Biome caught comment indentation in the connection DTO; formatting corrected it.
+All final affected checks above passed.
+
+Independent review found and resolved two related races: an explicit manual policy
+change before initial-start preparation, and another between preparation and the
+final provider power handoff. Persisted policy generations and final intent checks
+now protect both, with a regression that confirms zero power calls on revocation.
+Activated retries validate immutable route identity without replaying activation or
+letting later configuration drift corrupt confirmation of an already-issued start.
+No remaining must-fix was reported.
+
+Read-only dev checks found all nine existing services healthy and zero managed
+servers, routes and protocol-policy rows. No Owner settings, provider resources,
+containers, networks, DNS or public listeners were created/modified. No new migration
+or container rebuild/restart is required; existing API/worker source watching applies
+the change. Isolated test schemas were cleaned by their harness. Real end-to-end
+forwarding/sleep/wake remains to be exercised on the server the Owner will create.
+Issue #18 and the existing production-release/infrastructure boundaries are unchanged.
+Rollback is a reviewed code revert with retained data; automatic routes already
+reserved/activated must be inspected explicitly, never broadly deleted or retargeted.
