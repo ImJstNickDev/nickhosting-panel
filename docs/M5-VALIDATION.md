@@ -1166,3 +1166,74 @@ source watchers apply the UI change. No live test assets created or cleaned;
 no container recreation or database migration. Rollback reverts only this source
 and documentation change. SFTPGo #18 and Docker-socket #22 remain independent
 release decisions; PR #21 stays open and unmerged.
+
+
+### 2026-10-10 — Wizard density, selection and stable layout
+
+Refines the previous runtime-card checkpoint from Owner feedback. Runtime cards
+are now 8.5 rem wide with centered labels and centered wrapping. Runtime and version
+radios remain native/keyboard-accessible but visually hidden; contained selection
+strokes and decorative checks replace the radio circles. Game selection no longer
+has an external blue ring. Global keyboard focus now uses a restrained 2 px
+outline rather than the yellow/black treatment, remains enabled, and is not shown
+on programmatically focused headings. Error-summary focus remains visible.
+
+The installer reserves positions for its counter, heading, errors, bounded content
+pane and actions. Required-field errors and player additions do not shift these
+positions. Player lists scroll inside reserved space. Whitelist headings mount in
+their initial state; animation occurs on toggling. Player lookup uses read-only,
+not disabled inputs, retaining Enter focus without imperative focus stealing.
+Name/player fields include field-scoped autocomplete/vendor-ignore hints, including
+[1Password's documented attribute](https://www.1password.dev/web/compatible-website-design#ignore-offers-to-save-or-fill-specific-fields).
+Actual password-manager extensions were not installed in the fixture browser;
+the Owner should confirm their own extension behavior. Authentication inputs are
+unchanged. Resource suggestion prose and the shared-storage reminder are removed;
+limited storage keeps its input and selected CPU/RAM limits remain visible.
+
+Focused checks (no historical full suites):
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed on final code.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/app/style.css apps/web/src/features/create-server.tsx apps/web/src/features/installer-fields.tsx apps/web/src/features/installer.css apps/web/tests/vanilla-catalog.browser.test.ts apps/web/tests/platform.browser.test.ts`:
+  passed six files; three pre-existing `!important` warnings in reduced-motion
+  overrides remain, no lint errors. `git diff --check` passed.
+- Browser command prefix: `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/vanilla-catalog.browser.test.ts -t "discovers declared|offers a direct-only|completes later|renders runtime"`:
+  initial **3 passed, 1 failed, 2 filtered**, 18.78 s. The mobile chronology assertion
+  read all text including the new decorative check; it now reads only the label
+  span. Desktop error/list/counter/footer stability, Enter focus, bounded card size,
+  keyboard selection, Axe and ten-card wrapping passed. The ten-card exercise is
+  explicitly DOM-only layout replication, removed before screenshots; it does not
+  offer or enable unsupported runtime choices.
+- Prefix + `apps/web/tests/vanilla-catalog.browser.test.ts -t "discovers declared|completes later|renders runtime"`:
+  affected mobile check plus setup dependencies **3 passed, 3 filtered**, 13.94 s.
+- Prefix + `apps/web/tests/platform.browser.test.ts -t "creates a verified-choice|renders the installer"`:
+  **2 passed, 9 filtered**, 16.09 s. Actual creation/first-start admission reporting,
+  operator/whitelist lookup and pending guards, removal/seeding, custom resources,
+  EULA submission, mobile Back navigation, reduced motion and Axe. Existing pointer
+  tests now click visible labels rather than clipped native radio inputs.
+
+These are actual Chromium + application/auth/database handlers against the existing
+approved isolated test services. Mojang identity/metadata and game providers are
+fixtures; MCHeads is substituted or falls back to bundled art. No real game-server
+creation is claimed. Screenshots sanitize text inputs and use fixture identities.
+Reviewed [game](screenshots/m5/wizard-refined-game-desktop-en.png),
+[runtime desktop](screenshots/m5/wizard-refined-runtime-desktop-en.png),
+[runtime mobile](screenshots/m5/wizard-refined-runtime-mobile-it.png),
+[versions](screenshots/m5/wizard-refined-versions-desktop-en.png),
+[populated operators](screenshots/m5/wizard-refined-players-desktop-en.png),
+[mobile operators](screenshots/m5/wizard-refined-players-mobile-it.png),
+[mobile whitelist](screenshots/m5/wizard-refined-whitelist-mobile-it.png),
+and [mobile resources](screenshots/m5/wizard-refined-resources-mobile-it.png).
+
+Independent source/rendered UX/accessibility review found and resolved two issues:
+CSS-generated checks polluted radio accessible names (now aria-hidden elements),
+and selected game cards lost selection in forced-colors mode (now an inset Highlight
+outline, verified independently in Chromium using actual CSS). No remaining
+must-fix findings. Programmatic heading focus suppression was also narrowed so
+error-summary focus remains visible.
+
+Read-only dev HTTPS smoke returned **200** for `/` and the updated installer CSS/TSX
+served by Vite. No rebuild/restart, infrastructure mutation, provider access, database
+migration or live test asset creation/cleanup occurred. Existing source HMR applies
+these changes. Rollback is a source revert, with no data operation. SFTPGo #18 and
+Docker-socket #22 remain independent release decisions; PR #21 stays open/unmerged.

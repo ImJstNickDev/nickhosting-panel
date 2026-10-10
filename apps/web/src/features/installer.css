@@ -1,10 +1,9 @@
 .installer-shell {
-  width: min(100%, 42rem);
-  margin: clamp(1rem, 7vh, 5rem) auto 2rem;
+  width: min(100%, 54rem);
+  margin: 2rem auto;
   min-height: 65vh;
   display: flex;
   flex-direction: column;
-  justify-content: center;
 }
 .installer-position {
   font-size: 0.8rem;
@@ -14,7 +13,24 @@
 }
 .installer-form {
   display: grid;
-  gap: 1.25rem;
+  grid-template-rows: 6rem 3rem 26rem auto;
+  gap: 0.75rem;
+}
+.installer-error-slot {
+  overflow: auto;
+  text-align: center;
+}
+.installer-form .installer-content {
+  align-content: start;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.4rem;
+}
+.installer-content > .field,
+.installer-players,
+.installer-custom {
+  width: min(100%, 32rem);
+  margin-inline: auto;
 }
 .installer-heading {
   text-align: center;
@@ -57,7 +73,7 @@
   display: grid;
   gap: 0.7rem;
   padding: 1rem;
-  text-align: left;
+  text-align: center;
 }
 .installer-games img {
   display: block;
@@ -68,24 +84,28 @@
   border-radius: 4px;
 }
 .installer-games button[aria-pressed="true"] {
-  outline: 2px solid var(--accent, #174f91);
-  outline-offset: 2px;
+  border-color: #36556a;
+  background: #e5ecf0;
+  box-shadow: inset 0 0 0 1px #36556a;
 }
 .installer-choice-cards {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 1.25rem;
-  padding: 0.5rem;
+  gap: 0.85rem;
+  padding: 0.4rem;
 }
 .installer-choice-card {
   position: relative;
   isolation: isolate;
   display: flex;
   align-items: flex-end;
-  width: min(100%, 14rem);
+  flex: 0 0 min(100%, 8.5rem);
+  width: min(100%, 8.5rem);
   aspect-ratio: 3 / 4;
-  padding: 1.25rem;
+  justify-content: center;
+  padding: 0.85rem 0.45rem;
+  text-align: center;
   overflow: hidden;
   border: 2px solid #30424a;
   border-radius: 0.6rem;
@@ -103,23 +123,20 @@
   pointer-events: none;
   mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
 }
-.installer-choice-card input {
+.installer-choice-input {
   position: absolute;
-  top: 0.9rem;
-  right: 0.9rem;
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 1px;
+  height: 1px;
   min-height: 0;
   padding: 0;
-  margin: 0;
-  accent-color: var(--blue, #164cb1);
-}
-.installer-choice-card input:focus-visible {
-  outline: none;
-  box-shadow: none;
+  border: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .installer-choice-title {
-  font-size: 1.3rem;
+  font-size: 1rem;
   font-weight: 650;
   line-height: 1.3;
   overflow-wrap: anywhere;
@@ -128,13 +145,28 @@
   border-color: var(--blue, #164cb1);
 }
 .installer-choice-card:has(input:checked) {
-  outline: 2px solid var(--blue, #164cb1);
-  outline-offset: 3px;
+  border-color: #36556a;
+  box-shadow: inset 0 0 0 2px #fff;
+}
+.installer-choice-check {
+  display: none;
+}
+.installer-choice-card:has(input:checked) .installer-choice-check {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  display: grid;
+  place-items: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 3px;
+  background: #fff;
+  color: #20323e;
+  font-weight: 700;
 }
 .installer-choice-card:has(input:focus-visible) {
-  outline: 3px solid #e8ac12;
-  outline-offset: 4px;
-  box-shadow: 0 0 0 2px #172c4b;
+  outline: 2px solid #36556a;
+  outline-offset: 2px;
 }
 .installer-choice-card:has(input:disabled) {
   opacity: 0.55;
@@ -155,31 +187,48 @@
   }
 }
 .installer-versions {
-  max-height: 20rem;
+  max-height: 23rem;
   overflow: auto;
   border: 1px solid #c9cdd2;
   border-radius: 6px;
   padding: 0.35rem;
 }
 .installer-version {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.8rem;
-  padding: 0.75rem;
+  min-height: 2rem;
+  padding: 0.2rem 0.65rem;
+  border: 1px solid transparent;
   cursor: pointer;
   border-radius: 3px;
 }
-.installer-version:hover,
-.installer-version:has(input:checked) {
+.installer-version:hover {
   background: #edf3fa;
 }
-.installer-version input {
-  width: auto;
+.installer-version:has(input:checked) {
+  background: #e5ecf0;
+  border-color: #36556a;
+  font-weight: 650;
+}
+.installer-version:has(input:checked) .installer-choice-check {
+  display: block;
+  order: 1;
+  margin-left: auto;
+}
+.installer-version:has(input:focus-visible) {
+  outline: 2px solid #36556a;
+  outline-offset: -2px;
 }
 .installer-players {
   display: grid;
   gap: 0.55rem;
   min-width: 0;
+}
+.player-error-slot {
+  height: 3rem;
+  overflow: auto;
 }
 .player-entry {
   display: flex;
@@ -199,7 +248,7 @@
   list-style: none;
   padding: 0;
   margin: 0;
-  max-height: 17rem;
+  height: 12rem;
   overflow: auto;
 }
 .player-list li {

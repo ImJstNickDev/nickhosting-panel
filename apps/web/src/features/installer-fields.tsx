@@ -116,6 +116,7 @@ export function VersionList({
                 />
               )}
               <input
+                className="installer-choice-input"
                 type="radio"
                 name={`server-${fieldId}`}
                 value={o.value}
@@ -123,6 +124,9 @@ export function VersionList({
                 disabled={o.disabled}
                 onChange={() => onChange(o.value)}
               />
+              <span className="installer-choice-check" aria-hidden="true">
+                ✓
+              </span>
               <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
                 {o.label ?? t(o.labelKey ?? '')}
               </span>
@@ -217,16 +221,25 @@ export function PlayerList({
     );
   return (
     <div className="installer-players">
-      {error !== undefined && <ErrorNotice error={error} />}
+      <div className="player-error-slot">
+        {error !== undefined && <ErrorNotice error={error} />}
+      </div>
       <label htmlFor={id}>{t('gameUi.playerName')}</label>
       <div className="player-entry">
         {avatar(preview)}
         <input
           id={id}
+          type="text"
           value={draft}
           autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-bwignore="true"
           maxLength={16}
-          disabled={busy}
+          readOnly={busy}
+          aria-busy={busy}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {

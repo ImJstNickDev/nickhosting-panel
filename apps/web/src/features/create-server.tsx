@@ -239,15 +239,17 @@ export function CreateServerPage() {
         {t('gameUi.stepOf', { current: step + 1, total: finalStep + 1 })}
       </div>
       <form className="installer-form" onSubmit={(e) => void next(e)} aria-busy={busy}>
-        <header className="installer-heading">
+        <header key={step} className="installer-heading">
           <h1 ref={heading} tabIndex={-1}>
             {t(title)}
           </h1>
           {step === nameStep && <p>{t('gameUi.nameHint')}</p>}
         </header>
-        {failure !== undefined && <ErrorNotice error={failure} />}
-        {Object.values(errors).some(Boolean) && <div role="alert">{t('gameUi.required')}</div>}
-        <fieldset disabled={busy}>
+        <div className="installer-error-slot">
+          {failure !== undefined && <ErrorNotice error={failure} />}
+          {Object.values(errors).some(Boolean) && <div role="alert">{t('gameUi.required')}</div>}
+        </div>
+        <fieldset className="installer-content" disabled={busy}>
           {step === 0 &&
             (games.isPending ? (
               <Loading />
@@ -284,6 +286,10 @@ export function CreateServerPage() {
           {step === nameStep && (
             <Input
               label={t('gameUi.serverName')}
+              autoComplete="off"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-bwignore="true"
               required
               maxLength={100}
               value={name}
@@ -399,15 +405,12 @@ export function CreateServerPage() {
                   </button>
                 </fieldset>
                 {preset !== 'custom' && (
-                  <>
-                    <p className="muted">{t('gameUi.resourceSuggestion')}</p>
-                    <Details
-                      values={[
-                        [t('gameUi.memory'), format.number(memory)],
-                        [t('gameUi.cpu'), format.number(cpu)],
-                      ]}
-                    />
-                  </>
+                  <Details
+                    values={[
+                      [t('gameUi.memory'), format.number(memory)],
+                      [t('gameUi.cpu'), format.number(cpu)],
+                    ]}
+                  />
                 )}
                 {preset === 'custom' && (
                   <div className="installer-custom">
@@ -437,9 +440,7 @@ export function CreateServerPage() {
                     />
                   </div>
                 )}
-                {shared ? (
-                  <p className="muted">{t('gameUi.sharedStorage')}</p>
-                ) : (
+                {!shared && (
                   <Input
                     label={t('gameUi.disk')}
                     type="number"

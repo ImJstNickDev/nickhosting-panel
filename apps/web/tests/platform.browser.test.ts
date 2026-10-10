@@ -127,12 +127,18 @@ describe('M5 real browser platform and Owner journeys', () => {
     await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
     await fixture.screenshot(user, 'wizard-game-desktop-en');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
-    await user.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    await user
+      .locator('.installer-choice-card')
+      .filter({ has: user.getByRole('radio', { name: 'Vanilla', exact: true }) })
+      .click();
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await user.getByLabel('Server name', { exact: true }).fill('Creative');
     await fixture.screenshot(user, 'installer-name-desktop-en');
     await user.getByLabel('Server name', { exact: true }).press('Enter');
-    await user.getByRole('radio', { name: '26.1', exact: true }).check();
+    await user
+      .locator('.installer-version')
+      .filter({ has: user.getByRole('radio', { name: '26.1', exact: true }) })
+      .click();
     expect(await user.locator('main').innerText()).not.toMatch(
       /protocol ID|experimental|Paper|Forge|Folia|Fabric/i,
     );
@@ -218,12 +224,18 @@ describe('M5 real browser platform and Owner journeys', () => {
     await peer.goto(`${fixture.origin}/servers/new`);
     await peer.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
     await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
-    await peer.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    await peer
+      .locator('.installer-choice-card')
+      .filter({ has: peer.getByRole('radio', { name: 'Vanilla', exact: true }) })
+      .click();
     await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
     await peer.getByLabel('Nome del server', { exact: true }).fill('Mondo condiviso');
     await fixture.screenshot(peer, 'installer-name-mobile-it');
     await peer.getByLabel('Nome del server', { exact: true }).press('Enter');
-    await peer.getByRole('radio', { name: '26.1', exact: true }).check();
+    await peer
+      .locator('.installer-version')
+      .filter({ has: peer.getByRole('radio', { name: '26.1', exact: true }) })
+      .click();
     await peer.getByLabel('Mostra tutte le versioni', { exact: true }).check();
     await fixture.screenshot(peer, 'installer-version-mobile-it');
     await peer.getByRole('button', { name: 'Avanti', exact: true }).click();

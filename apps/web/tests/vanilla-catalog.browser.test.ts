@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { AxeBuilder } from '@axe-core/playwright';
 import { createRuntimeMetadataClient, minecraftManifestUrl } from '@nickhosting/minecraft';
 import { refreshMinecraftMetadata } from '@nickhosting/server-management';
-import { expect as browserExpect, type Page } from '@playwright/test';
+import { expect as browserExpect, type Locator, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
@@ -61,6 +61,17 @@ describe('Owner automatic Vanilla discovery', () => {
       },
     ];
     const documents = new Map<string, Buffer>();
+    // Keep identity verification in the real authenticated API; only Mojang's
+    // two-way identity provider responses and decorative avatars are isolated.
+    for (const [name, id] of [
+      ['FixtureAlex', '123456781234423482341234567890ab'],
+      ['FixtureSteve', '123456781234423482341234567890ac'],
+    ]) {
+      const bytes = Buffer.from(JSON.stringify({ name, id }));
+      documents.set(`https://api.mojang.com/users/profiles/minecraft/${name}`, bytes);
+      documents.set(`https://sessionserver.mojang.com/session/minecraft/profile/${id}`, bytes);
+    }
+    await identities.user.route('https://api.mcheads.org/**', (route) => route.abort());
     const versionIds = [
       '26.3',
       '26.1',
@@ -270,13 +281,28 @@ describe('Owner automatic Vanilla discovery', () => {
       user.getByRole('heading', { name: 'Choose a runtime', exact: true }),
     ).toBeVisible();
     await browserExpect(user.getByRole('radio', { name: 'Paper', exact: true })).toHaveCount(0);
+    const runtimeCard = user.locator('.installer-choice-card');
+    const stableRuntime = await positions(user);
+    const initialCard = await runtimeCard.boundingBox();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(user.getByRole('alert')).toHaveText('Complete the required fields.');
+    expect(await positions(user)).toEqual(stableRuntime);
+    expect(await runtimeCard.boundingBox()).toEqual(initialCard);
     const vanilla = user.getByRole('radio', { name: 'Vanilla', exact: true });
     await vanilla.focus();
     await vanilla.press('Space');
     await browserExpect(vanilla).toBeChecked();
-    const runtimeCard = user.locator('.installer-choice-card').filter({ has: vanilla });
     const desktopCard = await runtimeCard.boundingBox();
     expect(desktopCard?.height).toBeGreaterThan(desktopCard?.width ?? 0);
+    expect(desktopCard?.width).toBeLessThanOrEqual(144);
+    await browserExpect(vanilla).toHaveCSS('width', '1px');
+    await browserExpect(runtimeCard.locator('.installer-choice-title')).toHaveCSS(
+      'text-align',
+      'center',
+    );
+    expect(await runtimeCard.evaluate((card) => getComputedStyle(card).boxShadow)).toMatch(
+      /^(?:none|.*inset.*)$/,
+    );
     await browserExpect(runtimeCard.locator('img')).toHaveAttribute('alt', '');
     await browserExpect
       .poll(() =>
@@ -284,6 +310,30 @@ describe('Owner automatic Vanilla discovery', () => {
       )
       .toBeGreaterThan(0);
     expect(await runtimeCard.evaluate((card) => getComputedStyle(card).outlineStyle)).toBe('solid');
+    // Layout-only stress fixture: these clones are not selectable runtime
+    // declarations and are removed before screenshots or continuing the journey.
+    const wrappedCards = await user.locator('.installer-choice-cards').evaluate((group) => {
+      const template = group.firstElementChild;
+      if (!template) throw new Error('Missing runtime card');
+      const clones = Array.from({ length: 9 }, () => {
+        const card = template.cloneNode(true) as HTMLElement;
+        card.querySelector('input')?.remove();
+        group.append(card);
+        return card;
+      });
+      try {
+        const cards = [template, ...clones].map((card) => card.getBoundingClientRect());
+        const parent = group.getBoundingClientRect();
+        return {
+          rows: new Set(cards.map((card) => Math.round(card.top))).size,
+          fits: cards.every((card) => card.left >= parent.left && card.right <= parent.right),
+        };
+      } finally {
+        for (const card of clones) card.remove();
+      }
+    });
+    expect(wrappedCards.rows).toBeGreaterThan(1);
+    expect(wrappedCards.fits).toBe(true);
     await fixture.screenshot(user, 'runtime-step-desktop-en');
     expect(
       (
@@ -293,10 +343,21 @@ describe('Owner automatic Vanilla discovery', () => {
       ).violations,
     ).toEqual([]);
     await user.getByRole('button', { name: 'Next', exact: true }).click();
+    expect((await positions(user)).counter).toBe(stableRuntime.counter);
+    await passwordManagerIgnored(user.getByLabel('Server name', { exact: true }));
     await user.getByLabel('Server name', { exact: true }).fill('Direct Vanilla');
     await user.getByLabel('Server name', { exact: true }).press('Enter');
-    await user.getByRole('radio', { name: '1.21.11', exact: true }).check();
+    await user
+      .locator('.installer-version')
+      .filter({ has: user.getByRole('radio', { name: '1.21.11', exact: true }) })
+      .click();
     await browserExpect(user.getByRole('radio', { name: /vanilla/i })).toHaveCount(0);
+    const selectedVersion = user
+      .locator('.installer-version')
+      .filter({ has: user.getByRole('radio', { name: '1.21.11', exact: true }) });
+    expect((await selectedVersion.boundingBox())?.height).toBeLessThanOrEqual(44);
+    await browserExpect(selectedVersion.locator('input')).toHaveCSS('width', '1px');
+    expect((await positions(user)).counter).toBe(stableRuntime.counter);
     await fixture.screenshot(user, 'runtime-versions-desktop-en');
     await user.getByRole('checkbox', { name: 'Show all versions', exact: true }).check();
     await user.getByRole('checkbox', { name: 'Show all versions', exact: true }).uncheck();
@@ -310,12 +371,53 @@ describe('Owner automatic Vanilla discovery', () => {
     await browserExpect(
       user.getByRole('heading', { name: 'Who should be an operator?', exact: true }),
     ).toBeVisible();
+    const player = user.getByLabel('Player name', { exact: true });
+    await passwordManagerIgnored(player);
+    const beforePlayers = await positions(user);
+    expect(beforePlayers.counter).toBe(stableRuntime.counter);
+    for (const name of ['FixtureAlex', 'FixtureSteve']) {
+      await player.fill(name);
+      await player.press('Enter');
+      await browserExpect(
+        user.getByRole('button', { name: `Remove ${name}`, exact: true }),
+      ).toBeAttached();
+      await browserExpect(player).toHaveValue('');
+      await browserExpect(player).toBeFocused();
+      expect(await positions(user)).toEqual(beforePlayers);
+    }
+    await fixture.screenshot(user, 'wizard-players-desktop-en');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect(
       user.getByRole('heading', { name: 'Do you want to turn whitelist on?', exact: true }),
     ).toBeVisible();
+    expect(
+      await user
+        .locator('.installer-heading')
+        .evaluate((el) => el.getAnimations({ subtree: true }).length),
+    ).toBe(0);
+    const beforeWhitelist = await positions(user);
+    expect(beforeWhitelist.counter).toBe(stableRuntime.counter);
+    await user.getByRole('button', { name: 'Yes', exact: true }).click();
+    await browserExpect(player).toBeVisible();
+    await browserExpect(
+      user.getByRole('button', { name: 'Remove FixtureAlex', exact: true }),
+    ).toBeAttached();
+    await user.locator('.installer-heading').evaluate(async (el) => {
+      await Promise.all(el.getAnimations({ subtree: true }).map((animation) => animation.finished));
+    });
+    expect((await positions(user)).counter).toBe(beforeWhitelist.counter);
+    expect((await positions(user)).footer).toBe(beforeWhitelist.footer);
+    await fixture.screenshot(user, 'wizard-whitelist-desktop-en');
+    await user.getByRole('button', { name: 'No', exact: true }).click();
+    await browserExpect(player).toBeHidden();
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect(user.getByRole('button', { name: '6+', exact: true })).toBeVisible();
+    await browserExpect(user.getByText('Suggested limits.', { exact: false })).toHaveCount(0);
+    await browserExpect(
+      user.getByText('Storage uses the shared platform pool.', { exact: true }),
+    ).toHaveCount(0);
+    await browserExpect(user.getByLabel('Disk (MiB)', { exact: true })).toHaveCount(0);
+    await fixture.screenshot(user, 'wizard-resources-desktop-en');
     expect(provider.remoteCount()).toBe(1);
     expect(requests.filter((url) => url === minecraftManifestUrl)).toHaveLength(1);
     expect(pageErrors).toEqual([]);
@@ -450,7 +552,7 @@ describe('Owner automatic Vanilla discovery', () => {
     await browserExpect(
       user.getByRole('heading', { name: 'Scegli un runtime', exact: true }),
     ).toBeVisible();
-    await user.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    await user.locator('.installer-choice-card').click();
     const mobileCard = await user.locator('.installer-choice-card').boundingBox();
     expect(mobileCard?.height).toBeGreaterThan(mobileCard?.width ?? 0);
     expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
@@ -467,10 +569,15 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.getByRole('button', { name: 'Avanti', exact: true }).click();
     await user.getByLabel('Nome del server', { exact: true }).fill('Mondo Vanilla');
     await user.getByLabel('Nome del server', { exact: true }).press('Enter');
-    await user.getByRole('radio', { name: '1.21.11', exact: true }).check();
+    await user
+      .locator('.installer-version')
+      .filter({ has: user.getByRole('radio', { name: '1.21.11', exact: true }) })
+      .click();
     await browserExpect(user.getByRole('radio', { name: '25w01a', exact: true })).toHaveCount(0);
     await user.getByLabel('Mostra tutte le versioni', { exact: true }).check();
-    const allNames = await user.locator('.installer-version').allTextContents();
+    const allNames = await user
+      .locator('.installer-version > span:not([aria-hidden])')
+      .allTextContents();
     expect(allNames[0]?.trim()).toBe('25w41a');
     expect(allNames.findIndex((name) => name.trim() === '1.21.11')).toBeLessThan(
       allNames.findIndex((name) => name.trim() === '25w01a'),
@@ -492,6 +599,40 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.getByRole('button', { name: 'Indietro', exact: true }).click();
     await user.getByRole('button', { name: 'Indietro', exact: true }).click();
     await browserExpect(user.getByRole('radio', { name: 'Vanilla', exact: true })).toBeChecked();
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    const player = user.getByLabel('Nome giocatore', { exact: true });
+    const beforePlayers = await positions(user);
+    await player.fill('FixtureAlex');
+    await player.press('Enter');
+    await browserExpect(
+      user.getByRole('button', { name: 'Rimuovi FixtureAlex', exact: true }),
+    ).toBeAttached();
+    await browserExpect(player).toBeFocused();
+    expect(await positions(user)).toEqual(beforePlayers);
+    await fixture.screenshot(user, 'wizard-players-mobile-it');
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await user.getByRole('button', { name: 'Sì', exact: true }).click();
+    await browserExpect(player).toBeVisible();
+    await fixture.screenshot(user, 'wizard-whitelist-mobile-it');
+    expect(
+      (
+        await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await browserExpect(user.getByRole('button', { name: '6+', exact: true })).toBeVisible();
+    await browserExpect(user.getByText('Limiti consigliati.', { exact: false })).toHaveCount(0);
+    await browserExpect(
+      user.getByText('L’archiviazione usa lo spazio condiviso della piattaforma.', { exact: true }),
+    ).toHaveCount(0);
+    await fixture.screenshot(user, 'wizard-resources-mobile-it');
+    expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
     expect(pageErrors).toEqual([]);
   });
   it('shows a recognized-contract error without mutating provider resources or prior registrations', async () => {
@@ -514,3 +655,23 @@ describe('Owner automatic Vanilla discovery', () => {
     expect(provider.remoteCount()).toBe(1);
   });
 });
+
+async function passwordManagerIgnored(input: Locator) {
+  await browserExpect(input).toHaveAttribute('autocomplete', 'off');
+  await browserExpect(input).toHaveAttribute('data-1p-ignore', 'true');
+  await browserExpect(input).toHaveAttribute('data-lpignore', 'true');
+}
+async function positions(page: Page) {
+  return page.evaluate(() => {
+    const top = (selector: string) => {
+      const element = document.querySelector(selector);
+      if (!element) throw new Error(`Missing installer element ${selector}`);
+      return Math.round(element.getBoundingClientRect().top + scrollY);
+    };
+    return {
+      counter: top('.installer-position'),
+      heading: top('.installer-heading'),
+      footer: top('.installer-actions'),
+    };
+  });
+}

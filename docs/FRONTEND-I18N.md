@@ -59,9 +59,13 @@ honest text fallback. Source/provenance belongs with the game integration. The
 art does not become a hero panel or substitute for real state. Runtime selection
 uses centered portrait cards: the integration-owned background art fades from
 fully opaque at the top to transparent at the bottom over a solid dark base,
-with the runtime label below. Native radios retain keyboard selection, visible
-focus and checked states; decorative images do not duplicate accessible labels.
-Version selection remains a compact scrollable list.
+with a centered runtime label below. Compact cards wrap from the center; they do
+not stretch to fill the row. Native radios remain keyboard-accessible but are
+visually hidden: a contained border and decorative check communicate selection.
+Version rows use the same selection convention in a compact scrollable list.
+Decorative art/checks do not duplicate accessible labels. Keyboard focus uses a
+restrained high-contrast outline, always available without an opt-in; programmatic
+heading focus has no decorative ring. Forced-colors mode retains selection cues.
 Configured CPU/RAM/disk on cards are labeled as limits, not current usage.
 
 ### Visual and behavior conventions
@@ -81,6 +85,15 @@ Whitelist → Resources → Create. Runtime selection is explicit even when only
 Vanilla is eligible; version rows show only the release identifier. It has separate
 player-count/resource controls; the final Create
 action records EULA acceptance. No project or content-source picker is shown.
+The step counter, heading region, error slot, content pane and actions have stable
+positions. Bounded scrolling accommodates long choices/player lists without
+moving navigation. Whitelist animation starts on a toggle, not on entry. Player
+lookup temporarily makes its input read-only instead of disabling it, preserving
+Enter focus without stealing focus after the user moves away. Server/player name
+fields discourage password-manager autofill with field-scoped vendor hints;
+authentication fields keep normal password-manager support. Shared storage has
+no wizard field or reminder; limited storage retains its explicit input. Resource
+preset limits remain visible without explanatory filler.
 Future preset/modpack creation is tracked separately in issue #24. All submitted jobs link to
 Activity; accepted, running, blocked, uncertain, failed and completed remain
 distinct. A created/offline capacity-denied server is not presented as a failed
