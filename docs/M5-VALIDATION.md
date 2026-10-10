@@ -2214,3 +2214,15 @@ estimate across eleven cycles. Targeted rerun with
 Final root/WebPanel typecheck and changed-source Biome checks passed. Independent
 review found no remaining must-fix. The Owner-reported UI fallback remains an
 uninvestigated observation, not a resolved issue or a claimed watcher-only defect.
+
+Owner-approved activation: `docker restart --time 20 nickhosting-dev-gateway-1`
+restarted only the label-verified `nickhosting-dev` / `gateway` container at
+20:53:52.636 UTC. Docker warned that `--time` is deprecated in favor of `--timeout`;
+the approved command succeeded. The existing 31-second startup lease-drain safety
+window initially returned readiness503, then readiness200 with `ready:true`,
+`controlAvailable:true`, one route, zero active connections/sessions, zero snapshot
+errors and zero wake requests. Four failed backend observations were counted while
+the database reported sleeping; this is not a claim of a ready Minecraft backend.
+Container health is healthy, and source hashes for data plane, safety validator and
+SDK match committed source. No game command was sent; live corrected start/sleep
+latencies await the Owner's next interactive test.
