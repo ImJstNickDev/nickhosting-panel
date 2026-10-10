@@ -12,6 +12,7 @@ import type {
   GameRuntimeHooks,
   TrustedGameModule,
 } from './game-modules.js';
+import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { type GameLifecycleContext, verifyManagedIdentity } from './lifecycle.js';
 import {
   assertMinecraftLaunchInputs,
@@ -23,7 +24,11 @@ import {
   verifyMinecraftRestore,
 } from './minecraft-content.js';
 import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
-import { minecraftCatalog, requireMinecraftChoice } from './minecraft-registry.js';
+import {
+  inspectMinecraftCombination,
+  minecraftCatalog,
+  requireMinecraftChoice,
+} from './minecraft-registry.js';
 import {
   assertMinecraftEggEnvironment,
   assertMinecraftRemoteLaunch,
@@ -117,6 +122,32 @@ export const minecraftModule: TrustedGameModule = {
   id: 'minecraft-java',
   manifest: minecraftManifest,
   provisionAsResourceOwner: true,
+  async gatewayPolicyBinding(db, server, env) {
+    const profile = await db
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', server.id)
+      .executeTakeFirst();
+    if (!profile?.installed) return null;
+    try {
+      const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
+      const binding = { protocolId: 'minecraft-java', gameVersion: choice.combination.release };
+      await requireMinecraftGatewayProtocol(
+        db,
+        server.id,
+        { handlerId: binding.protocolId, gameVersion: binding.gameVersion },
+        env,
+      );
+      return binding;
+    } catch (error) {
+      if (
+        error instanceof DomainError &&
+        ['integration_unavailable', 'configuration_invalid'].includes(error.code)
+      )
+        return null;
+      throw error;
+    }
+  },
   resolveProvisionImage(mapping, binding) {
     const selected = minecraftRuntimeMappingSchema.parse(binding);
     if (selected.profile !== mapping.runtime_id) throw new DomainError('configuration_invalid');

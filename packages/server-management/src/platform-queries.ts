@@ -10,7 +10,12 @@ import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
-import { getGatewayState } from './gateway-orchestration.js';
+import { trustedGameModules } from './game-modules.js';
+import {
+  type GatewayPolicy,
+  gatewayPolicySchema,
+  getGatewayState,
+} from './gateway-orchestration.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   authorizeServer,
@@ -976,14 +981,49 @@ export async function getPlatformTransfers(
   };
 }
 
-export async function getPlatformSleepPolicy(db: DB, context: AuthContext, serverId: string) {
+export async function getPlatformSleepPolicy(
+  db: DB,
+  context: AuthContext,
+  serverId: string,
+  env: Environment = {},
+) {
   const server = await scopedServer(db, context, serverId),
     state = await db
       .selectFrom('gateway_server_states')
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
-  if (!state || server.connection_mode === 'direct') return { policy: null, state: null };
+  const unavailable = { policy: null, state: null, proposedPolicy: null };
+  if (server.connection_mode === 'direct') return unavailable;
+  if (!state) {
+    if (
+      !server.pterodactyl_uuid ||
+      !server.pterodactyl_id ||
+      server.installation_state !== 'installed' ||
+      server.active_operation_id
+    )
+      return unavailable;
+    const mapping = await db
+      .selectFrom('runtime_egg_mappings')
+      .select(['game_id'])
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    const module = trustedGameModules.get(mapping.game_id);
+    if (!module?.manifest.capabilities.readiness) return unavailable;
+    const binding = await module.gatewayPolicyBinding?.(db, server, env);
+    if (!binding) return unavailable;
+    const proposedPolicy: GatewayPolicy = gatewayPolicySchema.parse({
+      ...binding,
+      enabled: false,
+      idleTimeoutSeconds: null,
+      readinessTimeoutSeconds: 600,
+      readinessMaxAgeSeconds: 30,
+      estimateMaxAgeSeconds: 604800,
+      wakeRetrySeconds: 10,
+      mode: server.intent === 'maintenance' ? 'maintenance' : 'manually_stopped',
+    });
+    return { ...unavailable, proposedPolicy };
+  }
   return {
     policy: {
       enabled: state.enabled,
@@ -1001,7 +1041,8 @@ export async function getPlatformSleepPolicy(db: DB, context: AuthContext, serve
             ? 'manually_stopped'
             : 'auto',
     },
-    state: await getGatewayState(db, serverId),
+    state: await getGatewayState(db, serverId, { env }),
+    proposedPolicy: null,
   };
 }
 export async function listPlatformMetrics(

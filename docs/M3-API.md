@@ -174,3 +174,15 @@ uncertain operation/reservation records; do not drop migrations with active jobs
 reverse a provider effect blindly or delete production data. Revert the milestone
 only after the existing M2 worker can safely recover pending operations. The
 isolated fixture has separate approved, provenance-verified `down` cleanup.
+
+### Explicit development responder launcher (M5)
+
+`apps/game-gateway/src/node-probe-main.ts` runs the existing bounded TCP nonce
+protocol as a separately approved service. It requires `NH_NODE_PROBE_ADDRESS`
+(exact RFC1918/ULA private backend IP, no wildcard/loopback/hostname/scoped address)
+and `NH_NODE_PROBE_PORT` (1024–65535). `--health` performs a nonce round trip without
+opening a second listener; SIGTERM/SIGINT close current sockets and the listener.
+No provider/database credentials are required. This proves endpoint reachability,
+not game readiness, player idleness or external connectivity. The development
+Compose live overlay is unapplied until its specific approval; see
+[M5 environments](M5-ENVIRONMENTS.md#mixed-directgateway-allocation-pools-and-next-activation-proposal).

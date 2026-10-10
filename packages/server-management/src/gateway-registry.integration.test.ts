@@ -60,6 +60,114 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  const directPin = (port: number) => ({
+    allocationId: 987654,
+    address: input().publicAddress,
+    port,
+    delivery: 'direct',
+    directEndpoint: { hostname: 'direct.example.test', port },
+  });
+  async function withDirectPin(port: number) {
+    await f.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          ...f.backendAllocationPool,
+          allocations: [...f.backendAllocationPool.allocations, directPin(port)],
+        }),
+      })
+      .where('id', '=', f.nodeId)
+      .execute();
+  }
+  it('allows direct and Gateway on one IP at different ports, including same-number backend ports', async () => {
+    await withDirectPin(27000);
+    const row = await setGatewayRoute(f.db, f.owner, { ...input(), publicPort: 20000 }, env);
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes[0]).toMatchObject({ id: row.id, backend: { port: 20000 } });
+  });
+  it.each(['tcp', 'udp'] as const)(
+    'rejects configured direct pin collision on %s',
+    async (transport) => {
+      await withDirectPin(input().publicPort);
+      await expect(setGatewayRoute(f.db, f.owner, { ...input(), transport }, env)).rejects.toThrow(
+        'allocation_unavailable',
+      );
+    },
+  );
+  it('includes environment-overridden pools when reserving public listeners', async () => {
+    const overrides = {
+      [f.nodeId]: {
+        ...f.backendAllocationPool,
+        allocations: [...f.backendAllocationPool.allocations, directPin(input().publicPort)],
+      },
+    };
+    await expect(
+      setGatewayRoute(f.db, f.owner, input(), {
+        ...env,
+        NH_BACKEND_ALLOCATION_POOLS: JSON.stringify(overrides),
+      }),
+    ).rejects.toThrow('allocation_unavailable');
+  });
+  it('permits revoking an existing route after an environment pool override introduces a collision', async () => {
+    const route = await setGatewayRoute(f.db, f.owner, input(), env);
+    const changedEnv = {
+      ...env,
+      NH_BACKEND_ALLOCATION_POOLS: JSON.stringify({
+        [f.nodeId]: {
+          ...f.backendAllocationPool,
+          allocations: [...f.backendAllocationPool.allocations, directPin(input().publicPort)],
+        },
+      }),
+    };
+    await expect(
+      setGatewayRoute(f.db, f.owner, { ...input(), id: route.id, enabled: false }, changedEnv),
+    ).resolves.toEqual(route);
+    expect((await getGatewaySnapshot(f.db, changedEnv)).routes).toEqual([]);
+    await expect(
+      setGatewayRoute(f.db, f.owner, { ...input(), id: route.id }, changedEnv),
+    ).rejects.toThrow('allocation_unavailable');
+  });
+  it.each(['192.0.2.10', '0.0.0.0', '::', '::ffff:c000:20a'])(
+    'retains collision protection for disabled-node claims removed from editable pools (%s)',
+    async (address) => {
+      const other = await managementFixture(f.db);
+      const directId = await other.server();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ connection_mode: 'direct' })
+        .where('id', '=', directId)
+        .execute();
+      await f.db
+        .updateTable('managed_nodes')
+        .set({ physical_host_id: f.hostId, enabled: false, backend_allocation_pool: null })
+        .where('id', '=', other.nodeId)
+        .execute();
+      await f.db
+        .insertInto('server_allocations')
+        .values({
+          id: randomUUID(),
+          server_id: directId,
+          node_id: other.nodeId,
+          pterodactyl_allocation_id: 987655,
+          address,
+          backend_address: address,
+          port: input().publicPort,
+          role: 'retained-direct',
+          protocols: ['tcp'],
+          is_primary: false,
+        })
+        .execute();
+      await expect(setGatewayRoute(f.db, f.owner, input(), env)).rejects.toThrow(
+        'allocation_unavailable',
+      );
+    },
+  );
+  it('reserves disabled routes across Gateway identities on the same host', async () => {
+    await setGatewayRoute(f.db, f.owner, { ...input(), enabled: false }, env);
+    await expect(
+      setGatewayRoute(f.db, f.owner, input(), { ...env, NH_GATEWAY_ID: randomUUID() }),
+    ).rejects.toThrow('allocation_unavailable');
+  });
   it('refuses direct servers in route, policy, wake, reconciliation and snapshot paths', async () => {
     await setGatewayRoute(f.db, f.owner, input(), env);
     const state = await getGatewayState(f.db, serverId);

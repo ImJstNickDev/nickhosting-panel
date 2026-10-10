@@ -1410,3 +1410,78 @@ applied. Source and previous tests unchanged; no full suite repeated for this
 infrastructure diagnostic. Governance and staged whitespace checks passed.
 Gateway remains inactive pending a separately reviewed confinement decision and
 required Owner configuration. Production release gates #18/#22 unchanged.
+
+## Mixed direct/Gateway pools and explicit initial automation — 2026-10-10
+
+Corrected NickHosting's address-wide rejection of explicit direct pins on a
+Gateway ingress IP. Mixed delivery on one provider node is now allowed at distinct
+ports. Actual endpoint collisions remain rejected in both configuration orders;
+checks include durable claims, sibling/disabled nodes, environment overrides,
+disabled routes and both Wings transports. Public ports are checked independently
+of backend ports. Existing route revocation remains possible after a conflicting
+environment override. No provider identity, readiness, collision-observer or
+resource-admission guard was removed.
+
+Focused evidence (existing approved M2 isolated stack only):
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/allocation-pool.integration.test.ts`: **52 passed**.
+- The same runner with `packages/server-management/src/loopback-allocation.integration.test.ts`: **41 passed**.
+- The same runner with `packages/server-management/src/gateway-registry.integration.test.ts packages/server-management/src/gateway-deletion.integration.test.ts apps/api/src/gateway.integration.test.ts`: **42 passed** before the final revoke-under-conflict regression. Final targeted registry rerun: **24 passed**; deletion/API tests were not unnecessarily repeated.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts apps/game-gateway/src/node-probe.test.ts apps/game-gateway/src/node-probe-main.test.ts scripts/gateway-deployment.test.ts`: **100 passed**, including read-only Compose parsing for the separate unapplied live overlay and bounded nonce protocol tests.
+- Pure schema preflight with 1,000 synthetic direct pins and 2,000 private backend pins on one node: **3,000 accepted**. Addresses and IDs were fixtures; no provider allocations were created.
+- Root `scripts/dev.sh pnpm exec tsc --noEmit`, focused Biome and `git diff --check`: passed for the pool/route/probe implementation.
+
+Initial new retained-claim fixtures attempted an identity update and were correctly
+rejected by the existing database immutability trigger. Tests were corrected to
+insert distinct fixture claims; no trigger was relaxed. Independent review found
+that the new collision guard could prevent disabling an existing route after an
+environment pool override. Fixed by checking existing immutable identity first
+and applying the new guards to creation/enabling; the final 24-test registry run
+includes this regression. No remaining must-fix pool/route findings were reported.
+
+Read-only real-environment recheck: provider inventory still contained 400 direct
+range allocations, with none in the proposed 2,000-port Gateway interval. Neither
+configured Docker bindings (including stopped containers) nor host TCP/UDP
+listeners occupied that interval or the proposed private nonce port. Candidate
+Gateway/probe container names were absent. This is a point-in-time preflight,
+not a reachability or router-forwarding test.
+
+No Pterodactyl server, allocation, node, egg, Wings configuration, Docker network,
+NPM, DNS or firewall was modified. No new container was started. Prepared live
+Gateway/probe configuration remains unapplied, with exact pending approval and
+rollback documented in [M5 environments](M5-ENVIRONMENTS.md). The Gateway remains
+disabled in the running dev environment pending activation; no live forwarding or
+sleep/wake success is claimed. SFTPGo #18 and Docker socket #22 are unchanged.
+
+A second concrete usability gap was fixed: an eligible installed Gateway server
+without a policy now offers an explicit first-configuration action. A trusted
+integration derives the protocol/version; no policy is seeded by reads. Initial
+settings disable automatic wake and idle sleep. The create-only request is checked
+under the shared resource lock and cannot overwrite a concurrent configuration,
+ignore an active operation, or downgrade a changed maintenance intent. Independent
+review identified that race before delivery; it is covered by regression tests.
+
+Additional targeted final-source evidence:
+
+- Isolated integration runner with `packages/server-management/src/platform-queries.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts`: **68 passed** (22 platform + 46 orchestration). A coordinator orchestration run also passed 46; overlapping delegated execution was unnecessary and was not repeated further.
+- `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/sleep-policy.browser.test.ts`: **1 passed**, actual API/database handlers with isolated provider fixtures. Verified no GET-side policy creation, explicit conditional PUT, disabled wake/idle defaults, English desktop and Italian mobile rendering, no horizontal viewport overflow and **zero axe violations** for the tested screen.
+- `scripts/dev.sh pnpm i18n:check`: **1,044 keys passed**.
+
+Sanitized real-browser evidence:
+[initial desktop EN](screenshots/m5/automation-initial-desktop-en.png),
+[initial mobile IT](screenshots/m5/automation-initial-mobile-it.png),
+[configured desktop EN](screenshots/m5/automation-configured-desktop-en.png).
+These fixture screenshots demonstrate the first-policy workflow, not a deployed
+Gateway, live Minecraft readiness, or sleep/wake operation. No complete historical
+M1–M5 suite or nine-server live scenario was rerun for this focused correction.
+
+Final coordinator checks: `scripts/dev.sh pnpm typecheck` passed (root and WebPanel
+source/tests). Focused Biome check passed with two pre-existing non-null assertion
+warnings in unchanged Automation form/pagination lines. Indexed governance passed:
+488 text files, 95 reviewed PNGs, 414 relative links, four TOML files and 44 ignore
+cases. The private exact deployment plan is ignored. HTTPS returned 200 and all
+seven existing dev services remained healthy. Independent final source and actual
+screenshot review reported no remaining must-fix findings. Real process-signal,
+restart and nonce round-trip checks for the proposed permanent services remain
+pending their exact activation approval; browser/axe evidence is not a claim of
+complete WCAG conformance.

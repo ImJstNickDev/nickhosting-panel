@@ -195,7 +195,7 @@ export async function setGatewayPolicy(
   context: AuthContext,
   serverId: string,
   input: unknown,
-  options: GatewayOrchestrationOptions = {},
+  options: GatewayOrchestrationOptions & { initializeOnly?: boolean } = {},
 ) {
   const value = parse(gatewayPolicySchema, input);
   // A temporary support session cannot leave a permanent automation grant behind.
@@ -207,8 +207,24 @@ export async function setGatewayPolicy(
     if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     if (!server.pterodactyl_uuid || server.installation_state !== 'installed')
       throw new DomainError('conflict');
+    if (options.initializeOnly) {
+      if (value.enabled || value.idleTimeoutSeconds !== null || value.mode === 'auto')
+        throw new DomainError('validation_failed');
+      const existing = await tx
+        .selectFrom('gateway_server_states')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      if (
+        existing ||
+        server.active_operation_id ||
+        !server.pterodactyl_id ||
+        value.mode !== (server.intent === 'maintenance' ? 'maintenance' : 'manually_stopped')
+      )
+        throw new DomainError('conflict');
+    }
     const now = nowOf(options);
-    if (value.enabled)
+    if (value.enabled || options.initializeOnly)
       await requireMinecraftGatewayProtocol(
         tx,
         serverId,

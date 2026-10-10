@@ -292,7 +292,7 @@ export function registerGatewayRoutes(
         await options.principal(c, true),
         c.req.param('id'),
         await options.body(c),
-        { env },
+        { env, initializeOnly: c.req.header('if-none-match') === '*' },
       ),
     ),
   );

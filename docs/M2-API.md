@@ -257,7 +257,7 @@ override refuses conflicting Owner overhead edits while allowing unrelated node
 fields to be changed.
 
 Provisioning requires an explicitly configured `backendAllocationPool` on the
-managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port}],
+managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port,delivery?,directEndpoint?}],
 gatewayBindAddresses:[address,...],loopbackRemap?}`. There is **no inferred/default
 pool**. `address` identifies the exact canonical Pterodactyl allocation IP;
 `backendAddress` identifies the effective Wings/Docker binding for future Gateway
@@ -296,9 +296,17 @@ IDs, provider addresses and ports are checked against fresh inventory on the
 selected provider node, both at reservation and before new remote creation.
 Assigned inventory collisions are checked after effective binding translation;
 unknown same-port loopback semantics fail closed. Gateway declarations must be
-exact, non-wildcard and disjoint from effective backend bindings. Other managed
-nodes on the same physical host cannot overlap effective backend/gateway
-namespaces, including durable claims in disabled pools. Wings publishes both
+exact, non-wildcard and disjoint from effective **Gateway backend** bindings.
+Explicit `delivery:'direct'` pins with a `directEndpoint:{hostname,port}` may share
+a Gateway ingress IP on different ports. This allows one provider node to serve
+both delivery modes; an IP alone does not reserve every port. Backend-only pins
+still require a different IP, and existing claims retain their immutable connection
+mode. On the same physical host, pool edits and route registration reject actual
+overlapping address/port endpoints, including sibling nodes, environment overrides,
+disabled routes/pools and retained allocation claims. Public route ports need not
+equal backend ports, so collision checks use the actual registered public port.
+Existing routes can still be disabled after a conflicting environment override;
+creating or enabling a conflicting route remains blocked. Wings publishes both
 TCP and UDP for each allocation, so a different SDK transport is not collision
 protection. Migration 009 stores provider `address` and `backend_address`
 separately, backfills existing direct claims and prevents identity retargeting.

@@ -90,7 +90,7 @@ routes and their audit rules.
 | `/transfers` | `files`, bounded text-editor capacity, upload availability/reason/provider byte ceiling/server disk allowance, streaming download support, public SFTP endpoint/configuration/issuance hints and backup permissions. Download total-size limit is `null`; real provider/storage limits still apply. |
 | `/connections` | Domain `mode` plus frozen `connectionMode: gateway/direct`, configured hostname/SRV metadata, DNS states and every allocation role/transport. Gateway ports retain `unconfigured`, `disabled`, `unavailable` or `available` route status. Direct ports use only frozen `direct_endpoint` and report `configured`/`unconfigured`, with `reachability: unverified`. Configuration never claims an externally tested connection. |
 | `/metrics` | `limit` 1–500 (default 100), `from`, `to`, `before` ISO timestamps; `{items,nextBefore}` in descending observation order. Missing intervals remain gaps. |
-| `/sleep-policy` | `{policy,state}`; nulls when unconfigured or direct. Complete editable enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; state reuses M3 readiness and startup estimates. |
+| `/sleep-policy` | `{policy,state,proposedPolicy}`; policy/state remain null when unconfigured or direct. A trusted installed integration may supply a validated initial proposal for Gateway-mode servers. GET never saves it. Complete editable enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; state reuses M3 readiness and startup estimates. |
 
 SFTP connection details require explicit `sftpPublicHostname` and `sftpPublicPort`;
 the private SFTPGo API URL is never used as a public fallback. These settings follow
@@ -396,3 +396,23 @@ refresh according to query freshness; cached options never authorize creation.
 First access without cached data may still show loading. Owner paging keeps prior
 rows during a refresh with `aria-busy`; filters/order remain controlled by the
 request after errors/retry rather than resetting to misleading defaults.
+
+### Initial sleep/wake configuration
+
+The trusted first-party module's optional `gatewayPolicyBinding` resolves protocol
+and game version from the installed server. Minecraft validates its installed
+combination through the same capability/identity contract used by route registration;
+the shared UI has no game-specific branching. Direct, uninstalled, unsupported or
+actively changing servers receive no proposal. Suggested defaults have wake off,
+idle sleep disabled, 600-second readiness timeout, 30-second readiness freshness,
+seven-day estimate freshness and 10-second wake retry; these are editable policy
+defaults, not readiness evidence. Manual-stop/maintenance intent is preserved.
+
+The explicit initial Configure action sends the proposal to the existing
+`PUT /v1/servers/:id/gateway` with `If-None-Match: *`. Under the resource lock,
+initialization rejects an existing policy, an active operation, changed maintenance
+intent, automatic-mode/wake/idle grants, or invalid installed protocol binding.
+A stale initialization cannot overwrite another manager's policy or reset its
+observations. Ordinary policy editing retains its existing contract. Regular-session
+`server:manage` authorization, CSRF and resource safety remain mandatory. Merely
+configuring a disabled policy does not register a listener or start a server.

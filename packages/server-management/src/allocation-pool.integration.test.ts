@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { updateSettings } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  assertBackendPoolNamespace,
   assertServerBackendAllocations,
   backendAllocationPoolSchema,
   effectiveBackendAllocationPool,
@@ -414,6 +416,211 @@ describe('explicit Owner backend allocation pools', () => {
       'allocation_unavailable',
     );
     await expectNoClaims();
+  });
+});
+
+describe('mixed direct and Gateway allocation namespaces', () => {
+  const ingress = '192.0.2.10';
+  function directPin(allocationId = 90001, port = 27000) {
+    return {
+      allocationId,
+      address: ingress,
+      port,
+      delivery: 'direct' as const,
+      directEndpoint: { hostname: 'game.example.test', port },
+    };
+  }
+  function mixedPool() {
+    return backendAllocationPoolSchema.parse({
+      allocations: [f.backendAllocationPool.allocations[0], directPin()],
+      gatewayBindAddresses: [ingress],
+    });
+  }
+  function namespace(pool = mixedPool(), env = {}) {
+    return assertBackendPoolNamespace(
+      f.db,
+      { id: f.nodeId, physical_host_id: f.hostId },
+      pool,
+      env,
+    );
+  }
+  async function addRetainedIngressClaim(serverId: string) {
+    await f.db
+      .insertInto('server_allocations')
+      .values({
+        id: randomUUID(),
+        server_id: serverId,
+        node_id: f.nodeId,
+        pterodactyl_allocation_id: 90002,
+        address: ingress,
+        backend_address: ingress,
+        direct_endpoint: JSON.stringify({ hostname: `${f.nodeId}.example.test`, port: 27000 }),
+        port: 27000,
+        role: 'additional',
+        protocols: ['tcp'],
+        is_primary: false,
+      })
+      .execute();
+  }
+  async function persistRoute(enabled: boolean, transport: 'tcp' | 'udp', port: number) {
+    const serverId = await f.server();
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('gateway_routes')
+      .values({
+        id: randomUUID(),
+        gateway_id: randomUUID(),
+        server_id: serverId,
+        allocation_id: allocation.id,
+        public_address: ingress,
+        public_port: port,
+        transport,
+        enabled,
+        payload_hash: null,
+        lease_expires_at: null,
+      })
+      .execute();
+  }
+  it('allows explicit direct pins on ingress IPs while preserving backend-only separation', async () => {
+    const pool = mixedPool();
+    const pin = directPin();
+    f.inventory.push({ id: pin.allocationId, ip: pin.address, port: pin.port, assigned: false });
+    await expect(setManagedNode(f.db, f.adapter, f.owner, input(pool))).resolves.toEqual({
+      id: f.nodeId,
+    });
+    // A direct label is essential: backend-capable pins must remain on a separate IP.
+    expect(
+      backendAllocationPoolSchema.safeParse({
+        ...pool,
+        allocations: pool.allocations.map((entry) => ({ ...entry, delivery: 'backend' })),
+      }).success,
+    ).toBe(false);
+    expect(
+      backendAllocationPoolSchema.safeParse({
+        ...pool,
+        allocations: [...pool.allocations, { ...pin, allocationId: 90002 }],
+      }).success,
+    ).toBe(false);
+    await expect(namespace(pool)).resolves.toBeUndefined();
+    const serverId = await f.server();
+    const claims = await f.db
+      .selectFrom('server_allocations')
+      .select('address')
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(claims.map((claim) => claim.address)).toEqual(['10.0.0.2']);
+  });
+  it('uses immutable server connection mode for retained claims even with a disabled pool', async () => {
+    const serverId = await f.server();
+    await addRetainedIngressClaim(serverId);
+    await f.db
+      .updateTable('managed_nodes')
+      .set({ backend_allocation_pool: null })
+      .where('id', '=', f.nodeId)
+      .execute();
+    const pool = backendAllocationPoolSchema.parse({
+      allocations: [f.backendAllocationPool.allocations[1]],
+      gatewayBindAddresses: [ingress],
+    });
+    await expect(namespace(pool)).rejects.toThrow('allocation_unavailable');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(namespace(pool)).resolves.toBeUndefined();
+    // Relabeling a retained direct endpoint under another allocation ID cannot steal it.
+    await expect(namespace(mixedPool())).rejects.toThrow('allocation_unavailable');
+  });
+  it('cannot relabel a claimed Gateway pin via an environment override', async () => {
+    const pool = await pinFirst();
+    await f.server();
+    const override = backendAllocationPoolSchema.parse({
+      ...pool,
+      allocations: pool.allocations.map((pin) => ({
+        ...pin,
+        delivery: 'direct',
+        directEndpoint: { hostname: 'game.example.test', port: pin.port },
+      })),
+    });
+    await expect(namespace(override)).rejects.toThrow('allocation_unavailable');
+  });
+  it.each([true, false])(
+    'rejects direct allocation additions colliding with enabled=%s durable routes',
+    async (enabled) => {
+      await persistRoute(enabled, 'udp', 27000);
+      const pin = directPin();
+      f.inventory.push({ id: pin.allocationId, ip: pin.address, port: pin.port, assigned: false });
+      await expect(setManagedNode(f.db, f.adapter, f.owner, input(mixedPool()))).rejects.toThrow(
+        'allocation_unavailable',
+      );
+      await expect(namespace(mixedPool())).rejects.toThrow('allocation_unavailable');
+      await expect(
+        namespace(
+          backendAllocationPoolSchema.parse({
+            ...mixedPool(),
+            allocations: [f.backendAllocationPool.allocations[0], directPin(90001, 27001)],
+          }),
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+  it('checks retained direct claims against routes even when the pin was removed from an override', async () => {
+    const directServer = await f.server();
+    await persistRoute(false, 'tcp', 27000);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', directServer)
+      .execute();
+    await addRetainedIngressClaim(directServer);
+    await expect(
+      namespace(
+        backendAllocationPoolSchema.parse({
+          allocations: [f.backendAllocationPool.allocations[2]],
+          gatewayBindAddresses: [ingress],
+        }),
+      ),
+    ).rejects.toThrow('allocation_unavailable');
+  });
+  it('allows same-host sibling direct ingress sharing but rejects actual endpoint overlap and backend inversion', async () => {
+    const sibling = await managementFixture(f.db);
+    await f.db
+      .updateTable('managed_nodes')
+      .set({
+        physical_host_id: f.hostId,
+        backend_allocation_pool: JSON.stringify({
+          allocations: [directPin(90002, 27001)],
+          gatewayBindAddresses: [],
+        }),
+      })
+      .where('id', '=', sibling.nodeId)
+      .execute();
+    await expect(namespace()).resolves.toBeUndefined();
+    const env = {
+      NH_BACKEND_ALLOCATION_POOLS: JSON.stringify({
+        [sibling.nodeId]: {
+          allocations: [directPin(90002, 27000)],
+          gatewayBindAddresses: [],
+        },
+      }),
+    };
+    await expect(namespace(mixedPool(), env)).rejects.toThrow('allocation_unavailable');
+    await f.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          allocations: [{ allocationId: 90002, address: '10.0.0.3', port: 29000 }],
+          gatewayBindAddresses: ['10.0.0.2'],
+        }),
+      })
+      .where('id', '=', sibling.nodeId)
+      .execute();
+    await expect(namespace()).rejects.toThrow('allocation_unavailable');
   });
 });
 

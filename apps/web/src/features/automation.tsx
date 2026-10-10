@@ -91,6 +91,20 @@ export function AutomationPage({ serverId }: { serverId: string }) {
           <Loading />
         ) : policy.error ? (
           <ErrorNotice error={policy.error} />
+        ) : !policy.data.policy && policy.data.proposedPolicy && editable ? (
+          <ActionForm
+            submitLabel={t('service.configureSleep')}
+            onSubmit={async () => {
+              await api(`${serverPath(serverId)}/gateway`, {
+                method: 'PUT',
+                body: policy.data.proposedPolicy,
+                headers: { 'If-None-Match': '*' },
+              });
+              await Promise.all([policy.refetch(), consent.refetch(), server.refetch()]);
+            }}
+          >
+            <p>{t('service.configureSleepDescription')}</p>
+          </ActionForm>
         ) : !policy.data.policy ? (
           <Notice>
             {t(

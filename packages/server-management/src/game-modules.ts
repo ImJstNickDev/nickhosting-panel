@@ -3,7 +3,7 @@ import type { Database, gameCatalog } from '@nickhosting/database';
 import { type GameManifest, gameManifestSchema } from '@nickhosting/game-sdk';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely, Selectable } from 'kysely';
-import type { Environment } from './admission.js';
+import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { minecraftModule } from './minecraft-module.js';
 
@@ -26,6 +26,12 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Read-only binding for initial automation configuration; compiled modules only. */
+  gatewayPolicyBinding?(
+    db: DB,
+    server: ManagedGameServer,
+    env: Environment,
+  ): Promise<{ protocolId: string; gameVersion: string } | null>;
   /** Parse a previously validated immutable combination binding; never resolve
    * current policy again for a queued operation or an existing server. */
   resolveProvisionImage?(mapping: GameMapping, binding: unknown): string;

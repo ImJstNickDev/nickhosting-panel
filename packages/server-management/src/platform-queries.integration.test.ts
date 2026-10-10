@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId } from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { minecraftDigest, minecraftManifest } from '@nickhosting/minecraft';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setUserLimits } from './admission.js';
+import { setGatewayPolicy } from './gateway-orchestration.js';
+import { minecraftMappingDigest } from './minecraft-registry.js';
 import {
   deletePlatformProject,
   getPlatformConnections,
@@ -44,6 +47,207 @@ afterAll(async () => {
 async function peer() {
   return managementFixture(f.db, { interactive: true });
 }
+
+async function installedMinecraft() {
+  const id = await f.server();
+  await f.db
+    .insertInto('game_integrations')
+    .values({
+      id: 'minecraft-java',
+      version: minecraftManifest.version,
+      manifest: minecraftManifest,
+    })
+    .onConflict((c) => c.column('id').doNothing())
+    .execute();
+  await f.db
+    .updateTable('runtime_egg_mappings')
+    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+    .where('id', '=', f.mappingId)
+    .execute();
+  const mapping = await f.db
+    .selectFrom('runtime_egg_mappings')
+    .selectAll()
+    .where('id', '=', f.mappingId)
+    .executeTakeFirstOrThrow();
+  const combination = {
+    release: '26.1',
+    releaseType: 'release',
+    protocolId: 775,
+    family: 'netty',
+    transfer: true,
+    profile: 'vanilla',
+    javaMajor: 25,
+    runtimeDigest: 'a'.repeat(64),
+    protocolSource: { url: 'https://example.test/fixture', sha256: 'b'.repeat(64) },
+  };
+  const choiceId = randomUUID();
+  await f.db
+    .insertInto('minecraft_combinations')
+    .values({
+      id: choiceId,
+      mapping_id: f.mappingId,
+      combination: JSON.stringify(combination),
+      resolved_runtime: '{}',
+      binding: '{}',
+      mapping_digest: minecraftMappingDigest(mapping),
+      identity_digest: minecraftDigest(combination),
+      enabled: false,
+    })
+    .execute();
+  await f.db
+    .insertInto('minecraft_server_profiles')
+    .values({ server_id: id, combination_id: choiceId, configuration: '{}', installed: true })
+    .execute();
+  return { id, choiceId, combination };
+}
+
+describe('initial sleep policy proposal', () => {
+  it('reads a compiled installed binding without writes and saves only through the explicit policy action', async () => {
+    const { id } = await installedMinecraft();
+    const before = await f.db
+      .selectFrom('managed_servers')
+      .select(['intent', 'readiness'])
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const proposal = await getPlatformSleepPolicy(f.db, f.context, id);
+    expect(proposal).toMatchObject({
+      policy: null,
+      state: null,
+      proposedPolicy: {
+        protocolId: 'minecraft-java',
+        gameVersion: '26.1',
+        enabled: false,
+        idleTimeoutSeconds: null,
+        mode: 'manually_stopped',
+      },
+    });
+    expect(
+      await f.db
+        .selectFrom('gateway_server_states')
+        .select('server_id')
+        .where('server_id', '=', id)
+        .execute(),
+    ).toEqual([]);
+    expect(
+      await f.db
+        .selectFrom('managed_servers')
+        .select(['intent', 'readiness'])
+        .where('id', '=', id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(before);
+    await setGatewayPolicy(f.db, f.context, id, proposal.proposedPolicy, { initializeOnly: true });
+    const saved = await getPlatformSleepPolicy(f.db, f.context, id);
+    expect(saved.proposedPolicy).toBeNull();
+    expect(saved.policy).toEqual(proposal.proposedPolicy);
+    expect(saved.state).toMatchObject({ enabled: false, state: 'manually_stopped' });
+    await expect(getPlatformSleepPolicy(f.db, (await peer()).context, id)).rejects.toThrow();
+  });
+  it('initializes once under concurrent requests and cannot overwrite an existing policy', async () => {
+    const { id } = await installedMinecraft();
+    const proposal = (await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy;
+    const results = await Promise.allSettled(
+      [1, 2].map(() => setGatewayPolicy(f.db, f.context, id, proposal, { initializeOnly: true })),
+    );
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const before = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', id)
+      .executeTakeFirstOrThrow();
+    await expect(
+      setGatewayPolicy(f.db, f.context, id, proposal, { initializeOnly: true }),
+    ).rejects.toThrow('conflict');
+    expect(
+      await f.db
+        .selectFrom('gateway_server_states')
+        .selectAll()
+        .where('server_id', '=', id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(before);
+  });
+  it('rechecks maintenance, active operations and disabled defaults at initialization', async () => {
+    const { id } = await installedMinecraft();
+    const proposal = (await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy;
+    await f.db
+      .updateTable('managed_servers')
+      .set({ intent: 'maintenance' })
+      .where('id', '=', id)
+      .execute();
+    await expect(
+      setGatewayPolicy(f.db, f.context, id, proposal, { initializeOnly: true }),
+    ).rejects.toThrow('conflict');
+    const fresh = (await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy;
+    expect(fresh?.mode).toBe('maintenance');
+    for (const patch of [{ enabled: true }, { idleTimeoutSeconds: 60 }, { mode: 'auto' }])
+      await expect(
+        setGatewayPolicy(f.db, f.context, id, { ...fresh, ...patch }, { initializeOnly: true }),
+      ).rejects.toThrow('validation_failed');
+    const job = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', id)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: job.job_id })
+      .where('id', '=', id)
+      .execute();
+    await expect(
+      setGatewayPolicy(f.db, f.context, id, fresh, { initializeOnly: true }),
+    ).rejects.toThrow('conflict');
+    expect(
+      await f.db
+        .selectFrom('gateway_server_states')
+        .select('server_id')
+        .where('server_id', '=', id)
+        .execute(),
+    ).toEqual([]);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', id)
+      .execute();
+    await setGatewayPolicy(f.db, f.context, id, fresh, { initializeOnly: true });
+    expect((await getPlatformSleepPolicy(f.db, f.context, id)).state?.state).toBe('maintenance');
+  });
+  it('does not propose automation for uninstalled, direct, stale or undeclared combinations', async () => {
+    const { id, choiceId, combination } = await installedMinecraft();
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: false })
+      .where('server_id', '=', id)
+      .execute();
+    expect((await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy).toBeNull();
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: true })
+      .where('server_id', '=', id)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', id)
+      .execute();
+    expect((await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy).toBeNull();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'gateway' })
+      .where('id', '=', id)
+      .execute();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ combination: JSON.stringify({ ...combination, release: '1.20.4', protocolId: 765 }) })
+      .where('id', '=', choiceId)
+      .execute();
+    expect((await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy).toBeNull();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ combination: JSON.stringify(combination), mapping_digest: '0'.repeat(64) })
+      .where('id', '=', choiceId)
+      .execute();
+    expect((await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy).toBeNull();
+  });
+});
 
 describe('M5 platform browser queries and metadata', () => {
   it('exposes the authoritative creation storage policy and Owner default', async () => {
@@ -538,6 +742,7 @@ describe('M5 platform browser queries and metadata', () => {
     expect(await getPlatformSleepPolicy(f.db, f.context, id)).toEqual({
       policy: null,
       state: null,
+      proposedPolicy: null,
     });
     await f.db
       .updateTable('managed_servers')
@@ -597,6 +802,7 @@ describe('M5 platform browser queries and metadata', () => {
     expect(await getPlatformSleepPolicy(f.db, f.context, id)).toEqual({
       policy: null,
       state: null,
+      proposedPolicy: null,
     });
     await f.db
       .insertInto('gateway_server_states')

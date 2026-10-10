@@ -156,6 +156,11 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Replace the current SFTP password',
     'Sostituisci la password SFTP attuale',
   ],
+  'service.configureSleep': ['Configure sleep and wake', 'Configura sospensione e riattivazione'],
+  'service.configureSleepDescription': [
+    'Automatic wake and idle sleep will remain off until you enable them.',
+    'La riattivazione automatica e la sospensione per inattività resteranno disattivate finché non le abiliti.',
+  ],
   'service.sleepUnavailable': [
     'Sleep and wake are not configured for this server.',
     'Sospensione e riattivazione non sono configurate per questo server.',

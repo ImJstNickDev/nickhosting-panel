@@ -105,7 +105,7 @@ type Service = {
     bind?: { create_host_path?: boolean };
   }[];
 };
-function compose(gateway: boolean) {
+function compose(gateway: boolean, live = false) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) =>
@@ -127,6 +127,7 @@ function compose(gateway: boolean) {
       '-f',
       'compose.dev.observer.yaml',
       ...(gateway ? ['-f', 'compose.dev.gateway.yaml'] : []),
+      ...(live ? ['-f', 'compose.dev.gateway-live.yaml'] : []),
       'config',
       '--format',
       'json',
@@ -143,6 +144,8 @@ function compose(gateway: boolean) {
         NH_DEV_GATEWAY_HOST_PROC: '/proc/12345',
         NH_DEV_DOCKER_GID: '987',
         NH_DEV_PHYSICAL_HOST_ID: 'test-host',
+        NH_DEV_NODE_PROBE_ADDRESS: '10.42.0.1',
+        NH_DEV_NODE_PROBE_PORT: '31000',
       },
     },
   );
@@ -156,6 +159,37 @@ function compose(gateway: boolean) {
 }
 
 describe('opt-in development Gateway Compose', () => {
+  it('keeps permanent confinement opt-in and the private responder free of privileged mounts and secrets', () => {
+    const baseline = compose(true);
+    const live = compose(true, true);
+    expect(live.networks).toEqual(baseline.networks);
+    for (const name of Object.keys(baseline.services)) {
+      if (name !== 'gateway') expect(live.services[name]).toEqual(baseline.services[name]);
+    }
+    expect(live.services.gateway?.security_opt).toEqual([
+      'no-new-privileges:true',
+      'apparmor:unconfined',
+    ]);
+    const probe = live.services['node-probe'];
+    expect(probe?.environment).toEqual({
+      NH_NODE_PROBE_ADDRESS: '10.42.0.1',
+      NH_NODE_PROBE_PORT: '31000',
+    });
+    expect(probe?.env_file).toBeUndefined();
+    expect(probe?.network_mode).toBe('host');
+    expect(probe?.user).toBe('1000:1000');
+    expect(probe?.cap_drop).toEqual(['ALL']);
+    expect(probe?.security_opt).toEqual(['no-new-privileges:true']);
+    expect(probe?.privileged).not.toBe(true);
+    expect(probe?.read_only).toBe(true);
+    expect(probe?.ports ?? []).toEqual([]);
+    expect(probe?.volumes).toHaveLength(1);
+    expect(probe?.volumes?.[0]).toMatchObject({
+      target: '/app/apps/game-gateway/src',
+      read_only: true,
+      bind: { create_host_path: false },
+    });
+  });
   it('adds only the host-network service and explicit Core enablement without new networks', () => {
     const baseline = compose(false);
     const enabled = compose(true);

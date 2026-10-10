@@ -691,3 +691,67 @@ A permanent confinement change is **not authorized** by this diagnostic approval
 Keep the default Gateway profile unchanged pending a separately reviewed choice
 of confinement. Owner Gateway settings, pool/route selection and actual endpoint
 approval remain necessary for operational routing.
+
+### Mixed direct/Gateway allocation pools and next activation proposal
+
+One managed provider node can now retain explicit direct allocations on the
+Gateway ingress IP at different ports, alongside private Gateway backend
+allocations. This removes a NickHosting address-wide restriction; it does not
+change Wings, allocate provider ports, open listeners, or authorize such actions.
+The exact current private endpoint proposal is recorded in
+`.codex/local/gateway-live-plan.json` (gitignored). Both pin-to-route and
+route-to-pin collision checks cover durable claims, disabled entries and both
+Wings transports. Live allocation/listener/namespace checks remain mandatory.
+
+`compose.dev.gateway-live.yaml` is a **prepared, unapplied** overlay for the next
+separately approved step. It changes AppArmor only for the permanent development
+Gateway, preserving nonroot execution, dropped capabilities, seccomp and
+`no-new-privileges`. It also defines `nickhosting-dev-node-probe-1`, a 128 MiB,
+0.25 CPU, unprivileged TCP nonce responder on an explicitly configured private
+backend address. The responder has no credentials, Docker socket, host-proc or
+persistent mounts, retains default AppArmor, and refuses wildcard, loopback,
+public, ambiguous or privileged-port configuration. It reuses the M3 bounded
+nonce protocol and has a round-trip health check and signal-driven shutdown.
+Neither overlay is selected automatically; the previous diagnostic overlay must
+not be used with `up`.
+
+This proposed responder is necessary to prove that the exact backend address is
+reachable while a game server sleeps. It is not a replacement proxy or provider.
+The first backend still requires actual game readiness and binding evidence.
+The permanent AppArmor exception removes one confinement layer and needs explicit
+Owner approval; the successful one-off diagnostic did not grant it. Existing
+Docker socket issue #22 and SFTPGo release gate #18 remain open.
+
+After approval of the private exact plan, recheck process-anchor identity,
+container-name availability, free RAM/disk and fresh provider/Docker/host port
+inventories. Preserve the existing private environment and append the normal
+Gateway and live overlays, with approved `NH_DEV_NODE_PROBE_ADDRESS` and
+`NH_DEV_NODE_PROBE_PORT`. Configure only the existing development Gateway settings
+using the protected Owner API; preserve hosts, nodes, runtime mappings, accounts
+and data. The Owner still selects the pool and subsequent server/route settings.
+
+```sh
+# Only after the new operation-specific approval and private setting preparation.
+docker compose --env-file .env.dev.local --profile gateway config --quiet
+docker compose --env-file .env.dev.local build api web
+docker compose --env-file .env.dev.local --profile gateway run --rm --no-deps \
+  --entrypoint node gateway -e 'const f=require("node:fs");if(f.readlinkSync("/proc/self/ns/net")!==f.readlinkSync("/run/nickhosting-host-proc/ns/net"))process.exit(1);for(const n of ["tcp","tcp6","udp","udp6"])f.readFileSync("/run/nickhosting-host-proc/net/"+n);'
+docker compose --env-file .env.dev.local up -d --no-deps --wait api worker web
+docker compose --env-file .env.dev.local --profile gateway up -d --no-deps --wait node-probe
+docker compose --env-file .env.dev.local --profile gateway up -d --no-deps --wait gateway
+```
+
+Start with zero routes; verify the authenticated control plane and private nonce
+round trip. This establishes service readiness only, **not game forwarding or
+sleep/wake acceptance**. A later explicitly selected pilot route needs its exact
+public bind approval, a ledger-proven new managed server, resource admission,
+real installation/readiness, retained-listener/status-without-wake and intentional
+join tests. No unrelated/direct server may be imported or changed. Do not add a
+whole range of listeners: each listener belongs to a registered managed route.
+
+Rollback stops only `gateway` and `node-probe`, removes the two Gateway overlays
+from the private Compose chain, and recreates only dev API/worker with the previous
+settings. Wait at least 31 seconds for leases to expire. Restore changed Owner
+Gateway settings from their private pre-change record. Preserve all data, tokens,
+allocation inventory and other containers. No prune, volume deletion, database
+reset, or change to Pterodactyl/Wings/network/firewall/NPM is part of this proposal.

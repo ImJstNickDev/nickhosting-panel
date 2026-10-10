@@ -59,7 +59,7 @@ export function registerPlatformRoutes(
     c.json(await getPlatformTransfers(db, await principal(c), c.req.param('id'), env)),
   );
   app.get('/v1/platform/servers/:id/sleep-policy', async (c) =>
-    c.json(await getPlatformSleepPolicy(db, await principal(c), c.req.param('id'))),
+    c.json(await getPlatformSleepPolicy(db, await principal(c), c.req.param('id'), env)),
   );
   app.get('/v1/platform/servers/:id/metrics', async (c) =>
     c.json(await listPlatformMetrics(db, await principal(c), c.req.param('id'), c.req.query())),

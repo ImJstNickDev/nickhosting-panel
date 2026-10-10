@@ -142,9 +142,10 @@ export const backendAllocationPoolSchema = z
             ? pool.loopbackRemap !== undefined &&
               pin.backendAddress === pool.loopbackRemap.interfaceAddress
             : pin.backendAddress === undefined || pin.backendAddress === pin.address) &&
-          pool.gatewayBindAddresses.every(
-            (gateway) => !allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
-          ),
+          (pin.delivery === 'direct' ||
+            pool.gatewayBindAddresses.every(
+              (gateway) => !allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
+            )),
       ),
   );
 export type BackendAllocationPool = z.infer<typeof backendAllocationPoolSchema>;
@@ -306,7 +307,9 @@ export async function assertServerBackendAllocations(
   });
 }
 
-/** Owner/environment pool edits cannot overlap another node's backend or gateway namespace. */
+/** Direct bindings may share ingress IPs, but never an actual Gateway listener endpoint.
+ * Backend-only IP separation and immutable claims still apply across the physical host.
+ */
 export async function assertBackendPoolNamespace(
   db: DB,
   node: { id: string; physical_host_id: string },
@@ -316,12 +319,14 @@ export async function assertBackendPoolNamespace(
   const claims = await db
     .selectFrom('server_allocations as allocation')
     .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+    .innerJoin('managed_servers as ownerServer', 'ownerServer.id', 'allocation.server_id')
     .select([
       'allocation.node_id',
       'allocation.pterodactyl_allocation_id',
       'allocation.address',
       'allocation.backend_address',
       'allocation.port',
+      'ownerServer.connection_mode',
     ])
     .where('ownerNode.physical_host_id', '=', node.physical_host_id)
     .execute();
@@ -334,6 +339,7 @@ export async function assertBackendPoolNamespace(
     )
       throw new DomainError('allocation_unavailable');
     if (
+      claim.connection_mode !== 'direct' &&
       pool.gatewayBindAddresses.some((gateway) =>
         allocationAddressesOverlap(gateway, claim.backend_address),
       )
@@ -346,7 +352,8 @@ export async function assertBackendPoolNamespace(
         sameClaim &&
         (claim.address !== pin.address ||
           claim.backend_address !== backendAllocationAddress(pin) ||
-          claim.port !== pin.port)
+          claim.port !== pin.port ||
+          (claim.connection_mode === 'gateway' && pin.delivery === 'direct'))
       )
         throw new DomainError('allocation_unavailable');
       if (
@@ -357,6 +364,31 @@ export async function assertBackendPoolNamespace(
         throw new DomainError('allocation_unavailable');
     }
   }
+  // Disabled routes retain their endpoint for safe re-enabling; Pterodactyl
+  // allocations reserve both transports, independently of the advertised role.
+  const routes = await db
+    .selectFrom('gateway_routes as route')
+    .innerJoin('managed_servers as server', 'server.id', 'route.server_id')
+    .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'server.node_id')
+    .select(['route.public_address', 'route.public_port'])
+    .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+    .execute();
+  if (
+    routes.some(
+      (route) =>
+        pool.allocations.some(
+          (pin) =>
+            pin.port === route.public_port &&
+            allocationAddressesOverlap(backendAllocationAddress(pin), route.public_address),
+        ) ||
+        claims.some(
+          (claim) =>
+            claim.port === route.public_port &&
+            allocationAddressesOverlap(claim.backend_address, route.public_address),
+        ),
+    )
+  )
+    throw new DomainError('allocation_unavailable');
   const siblings = await db
     .selectFrom('managed_nodes')
     .selectAll()
@@ -377,15 +409,19 @@ export async function assertBackendPoolNamespace(
             ),
         ),
       ) ||
-        pool.allocations.some((pin) =>
-          other.gatewayBindAddresses.some((gateway) =>
-            allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
-          ),
+        pool.allocations.some(
+          (pin) =>
+            pin.delivery !== 'direct' &&
+            other.gatewayBindAddresses.some((gateway) =>
+              allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
+            ),
         ) ||
-        other.allocations.some((pin) =>
-          pool.gatewayBindAddresses.some((gateway) =>
-            allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
-          ),
+        other.allocations.some(
+          (pin) =>
+            pin.delivery !== 'direct' &&
+            pool.gatewayBindAddresses.some((gateway) =>
+              allocationAddressesOverlap(backendAllocationAddress(pin), gateway),
+            ),
         ))
     )
       throw new DomainError('allocation_unavailable');
