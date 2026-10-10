@@ -222,7 +222,12 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     const row = (await minecraftCatalog(f.db, f.context, env)).find(
       (entry) => entry.id === choiceId,
     );
-    expect(row).toEqual({ id: choiceId, version: '1.21.1', runtime: 'vanilla' });
+    expect(row).toEqual({
+      id: choiceId,
+      version: '1.21.1',
+      releaseType: 'release',
+      runtime: 'vanilla',
+    });
     expect((await inspectMinecraftCombination(f.db, choiceId, env)).support).toBe('verified');
     await f.db
       .updateTable('runtime_egg_mappings')

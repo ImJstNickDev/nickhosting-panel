@@ -70,9 +70,11 @@ The initial overly wide single-server artwork card was constrained during actual
 screenshot review; preserve that density as content grows.
 
 Forms preserve entered data on request failure. Destructive dialogs state actual
-loss and require the supported confirmation; no fabricated undo. The four-step
-wizard keeps relevant choices/drafts across Back, uses server-filtered runtime
-choices and derives compatible modpack runtime fields. All submitted jobs link to
+loss and require the supported confirmation; no fabricated undo. The creation installer keeps relevant choices/drafts across Back and uses
+server-filtered runtime choices. Its current Vanilla path has separate name,
+version, operators, whitelist and player-count/resource pages; the final Create
+action records EULA acceptance. No project or content-source picker is shown.
+Future preset/modpack creation is tracked separately in issue #24. All submitted jobs link to
 Activity; accepted, running, blocked, uncertain, failed and completed remain
 distinct. A created/offline capacity-denied server is not presented as a failed
 creation or automatically started again.
@@ -127,7 +129,7 @@ separate consolidation step; targeted development runs are preserved honestly.
 ## Routes and surfaces
 
 - Public invite registration, sign-in, password reset/recovery, Discord redirect/linking, optional passkeys/TOTP, email verification, and protected one-time Owner setup.
-- User Home, Servers with search/filters, four-step Create Server wizard, Activity/jobs, Settings: profile, locale, password, linked Discord, passkeys, TOTP and active sessions.
+- User Home, Servers with search/filters, centered Create Server installer, Activity/jobs, Settings: profile, locale, password, linked Discord, passkeys, TOTP and active sessions.
 - Per-server Overview; Console with live CPU/RAM/network charts and commands; Files with binary uploads, editing and streamed downloads; SFTP credential management; Backups/Restore; Network/connection details; Automation/Sleep; Settings; project grouping, sharing and permissions. SDK-defined management sections appear only for supported capabilities.
 - Minecraft management for eligible combinations: properties, independent player identity/OP/whitelist, worlds and applicable content workflows, including explicit replacement consent and verified backup choice. Unsupported mod/plugin operations are not shown as available for Vanilla.
 - Owner Overview/health; Users/invites/quotas/support; all NickHosting servers; Infrastructure/nodes/Gateway; Game Integrations/allowlists/egg and runtime mappings/compatibility evidence; Operations/failures/audit; platform settings and protected credentials.

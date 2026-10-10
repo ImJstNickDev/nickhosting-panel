@@ -26,6 +26,7 @@ export const uiOptionSchema = z
     labelKey: key.optional(),
     disabled: z.boolean().default(false),
     reasonKey: key.optional(),
+    releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
   })
   .strict()
   .refine((v) => Boolean(v.label) !== Boolean(v.labelKey));
@@ -156,6 +157,44 @@ export const gameUiDescriptorSchema = z
     creation: z
       .object({
         fields: z.array(uiFieldSchema).max(64),
+        pages: z
+          .array(
+            z
+              .object({
+                id,
+                titleKey: key,
+                field: fieldId,
+                kind: z.enum(['version-list', 'players', 'toggle-players']),
+                lookupHandler: id.optional(),
+                toggleField: fieldId.optional(),
+                seedField: fieldId.optional(),
+              })
+              .strict(),
+          )
+          .max(16)
+          .default([]),
+        agreement: z
+          .object({
+            field: fieldId,
+            textKey: key,
+            linkKey: key,
+            url: z.url().refine((v) => v.startsWith('https://')),
+          })
+          .strict()
+          .optional(),
+        resourcePresets: z
+          .array(
+            z
+              .object({
+                id,
+                labelKey: key,
+                memoryMiB: z.number().int().min(32),
+                cpuPercent: z.number().int().min(1),
+              })
+              .strict(),
+          )
+          .max(8)
+          .default([]),
         choicesHandler: id,
         createHandler: id,
         prepareHandler: id.optional(),
@@ -251,6 +290,41 @@ export const gameUiDescriptorSchema = z
     );
     for (const [index, p] of d.ports.entries())
       unique(p.transports, ['ports', index, 'transports']);
+    const creationFields = new Set(d.creation.fields.map((f) => f.id));
+    unique(
+      d.creation.pages.map((p) => p.id),
+      ['creation', 'pages'],
+    );
+    unique(
+      d.creation.resourcePresets.map((p) => p.id),
+      ['creation', 'resourcePresets'],
+    );
+    for (const page of d.creation.pages) {
+      const field = d.creation.fields.find((f) => f.id === page.field);
+      const toggle = d.creation.fields.find((f) => f.id === page.toggleField);
+      const seed = d.creation.fields.find((f) => f.id === page.seedField);
+      if (
+        (page.kind === 'version-list' && field?.type !== 'choice') ||
+        (page.kind !== 'version-list' &&
+          (field?.type !== 'multi-text' || field.format !== 'player-name')) ||
+        (page.kind === 'toggle-players' && toggle?.type !== 'boolean') ||
+        (page.seedField && (seed?.type !== 'multi-text' || seed.format !== 'player-name'))
+      )
+        context.addIssue({ code: 'custom', message: 'invalid_page_field_type' });
+      if (
+        ![page.field, ...[page.toggleField, page.seedField].filter((v): v is string => !!v)].every(
+          (f) => creationFields.has(f),
+        )
+      )
+        context.addIssue({ code: 'custom', message: 'invalid_page_field' });
+      if (
+        (page.kind !== 'version-list' && !page.lookupHandler) ||
+        (page.kind === 'toggle-players' && !page.toggleField)
+      )
+        context.addIssue({ code: 'custom', message: 'invalid_page_contract' });
+    }
+    if (d.creation.agreement && !creationFields.has(d.creation.agreement.field))
+      context.addIssue({ code: 'custom', message: 'invalid_agreement_field' });
     const forms = [d.creation, ...d.sections.flatMap((s) => s.forms)];
     for (const [index, form] of forms.entries()) {
       unique(
@@ -446,6 +520,8 @@ export interface TrustedGameUiModule {
   handlers: Readonly<Record<string, GameUiHandler>>;
   /** Bundled first-party assets only; never supplied by the API descriptor. */
   assets?: Readonly<Record<string, string>>;
+  /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
+  playerAppearance?: { fallback: string; avatarUrl(name: string): string };
 }
 /** Call only with imports compiled into the application. API JSON cannot register executable modules. */
 export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedGameUiModule {
@@ -453,6 +529,7 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
   if (descriptor.artwork && !module.assets?.[descriptor.artwork.assetId])
     throw new Error('game_ui_asset_missing');
   const handlerIds = [
+    ...descriptor.creation.pages.flatMap((p) => (p.lookupHandler ? [p.lookupHandler] : [])),
     ...[descriptor.creation, ...descriptor.sections.flatMap((s) => s.forms)].flatMap((f) =>
       f.fields.flatMap((v) =>
         v.type === 'archive'
@@ -502,6 +579,9 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     catalogs: deepFreeze({ en: { ...module.catalogs.en }, it: { ...module.catalogs.it } }),
     handlers: Object.freeze({ ...module.handlers }),
     assets: Object.freeze({ ...module.assets }),
+    ...(module.playerAppearance
+      ? { playerAppearance: Object.freeze({ ...module.playerAppearance }) }
+      : {}),
   });
 }
 function deepFreeze<T>(value: T): T {

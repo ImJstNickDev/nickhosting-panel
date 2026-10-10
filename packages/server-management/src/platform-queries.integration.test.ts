@@ -46,6 +46,16 @@ async function peer() {
 }
 
 describe('M5 platform browser queries and metadata', () => {
+  it('exposes the authoritative creation storage policy and Owner default', async () => {
+    const shared = await getPlatformQuota(f.db, f.context, f.context.subjectUserId, {
+      NH_DEFAULT_SERVER_STORAGE_MIB: '8192',
+    });
+    expect(shared.creationStorage).toEqual({ mode: 'shared', defaultDiskMiB: 8192 });
+    const personal = await getPlatformQuota(f.db, f.context, f.context.subjectUserId, {
+      NH_STORAGE_POLICY: 'PER_USER_BUDGET',
+    });
+    expect(personal.creationStorage).toEqual({ mode: 'limited', defaultDiskMiB: 4096 });
+  });
   it('paginates scoped servers without duplicates or timestamp precision omissions, validates filters, treats wildcard search literally', async () => {
     const ids = await Promise.all([
       f.server({ name: 'A_100%' }),

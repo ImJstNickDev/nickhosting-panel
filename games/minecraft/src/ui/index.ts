@@ -19,6 +19,17 @@ const namespace = 'games.minecraft-java';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   name: ['Minecraft Java', 'Minecraft Java'],
+  'installer.version': ['Choose a version', 'Scegli una versione'],
+  'installer.operators': ['Who should be an operator?', 'Chi sarà operatore?'],
+  'installer.whitelist': ['Do you want to turn whitelist on?', 'Vuoi attivare la whitelist?'],
+  'installer.eula': [
+    'By clicking Create Server I accept the',
+    'Facendo clic su Crea server accetto la',
+  ],
+  'installer.eulaLink': ['Minecraft EULA', 'EULA di Minecraft'],
+  'installer.small': ['1–2', '1–2'],
+  'installer.medium': ['3–5', '3–5'],
+  'installer.large': ['6+', '6+'],
   'fields.choiceId': ['Version and runtime', 'Versione e runtime'],
   'fields.sourceMode': ['Server content', 'Contenuti del server'],
   'fields.empty': ['New world', 'Nuovo mondo'],
@@ -212,29 +223,41 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       whitelistEnabled: false,
       eula: false,
     },
+    pages: [
+      { id: 'version', titleKey: k('installer.version'), field: 'choiceId', kind: 'version-list' },
+      {
+        id: 'operators',
+        titleKey: k('installer.operators'),
+        field: 'operators',
+        kind: 'players',
+        lookupHandler: 'lookup-player',
+      },
+      {
+        id: 'whitelist',
+        titleKey: k('installer.whitelist'),
+        field: 'whitelist',
+        kind: 'toggle-players',
+        lookupHandler: 'lookup-player',
+        toggleField: 'whitelistEnabled',
+        seedField: 'operators',
+      },
+    ],
+    resourcePresets: [
+      { id: 'small', labelKey: k('installer.small'), memoryMiB: 2048, cpuPercent: 100 },
+      { id: 'medium', labelKey: k('installer.medium'), memoryMiB: 4096, cpuPercent: 150 },
+      { id: 'large', labelKey: k('installer.large'), memoryMiB: 6144, cpuPercent: 200 },
+    ],
+    agreement: {
+      field: 'eula',
+      textKey: k('installer.eula'),
+      linkKey: k('installer.eulaLink'),
+      url: 'https://www.minecraft.net/en-us/eula',
+    },
     choicesHandler: 'choices',
     createHandler: 'create',
     prepareHandler: 'prepare-create',
     fields: [
-      choice('sourceMode', ['empty', 'modpack']),
-      field('sourceId', {
-        type: 'archive',
-        accept: ['.mrpack', '.zip'],
-        handler: 'upload-modpack',
-        catalog: {
-          searchHandler: 'modpack-search',
-          versionsHandler: 'modpack-versions',
-          acquireHandler: 'modpack-acquire',
-        },
-        required: true,
-        when: [{ field: 'sourceMode', operator: 'equals', values: ['modpack'] }],
-      }),
-      field('choiceId', {
-        type: 'choice',
-        required: true,
-        source: { handler: 'choices', dependsOn: ['sourceMode', 'sourceId'] },
-        when: [{ field: 'sourceMode', operator: 'equals', values: ['empty'] }],
-      }),
+      field('choiceId', { type: 'choice', required: true, source: { handler: 'choices' } }),
       field('operators', {
         type: 'multi-text',
         maxItems: 1000,
@@ -492,6 +515,10 @@ export const minecraftUiModule = defineTrustedGameUiModule({
   descriptor: minecraftUiDescriptor,
   catalogs: minecraftUiCatalogs,
   assets: { landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href },
+  playerAppearance: {
+    fallback: new URL('./assets/player-placeholder.svg', import.meta.url).href,
+    avatarUrl: (name) => `https://api.mcheads.org/head/${encodeURIComponent(name)}/64`,
+  },
   handlers: {
     'prepare-create': async (client, context) => {
       const controller = createMinecraftUiController(client);
@@ -589,7 +616,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
               eula: v.eula,
               properties: { 'white-list': v.whitelistEnabled ?? false },
               operators: v.operators ?? [],
-              whitelist: v.whitelist ?? [],
+              whitelist: v.whitelistEnabled ? (v.whitelist ?? []) : [],
               ...(v.sourceMode === 'modpack' ? { modpack: { sourceId: v.sourceId } } : {}),
             },
           },

@@ -248,3 +248,21 @@ separate from normal creation. The browser fixture's signed synthetic reports,
 server artifacts and provider adapters exercise integration only and cannot
 certify another runtime, protocol or egg. Egg installation remains Pterodactyl/
 Wings responsibility.
+
+## 2026-10-10 — Creation discovery and resource defaults
+
+- Owner-only `POST /v1/owner/minecraft/catalog/sync` accepts `{mappingId, all?, cursor?, limit?}`
+  (limit at most 20), returns per-version registration/unavailability and next cursor.
+  It writes only local immutable combination records; no remote installation,
+  verification claim or automatic enablement occurs. Recognized Vanilla bindings
+  are also optional input to the existing single-combination registration API.
+- Minecraft public choices add `releaseType` for stable versus snapshot/historical
+  presentation; evidence, rollout and availability checks are unchanged.
+- Quota responses add `creationStorage: {mode: 'shared'|'limited', defaultDiskMiB}`.
+  Create requests may omit `limits.disk` only with `GLOBAL_POOL`. Core resolves
+  the Owner default under the existing resource transaction and freezes it with
+  the request. Retrying the same omitted-disk request after a setting change returns
+  the original operation. Configure/resize requests still require explicit limits.
+- `defaultServerStorageMiB` defaults to the former wizard value, 4096 MiB; normal
+  defaults < Owner DB < environment precedence applies. This is a finite allowance,
+  not unlimited disk. No actual Owner settings are seeded or changed by the update.

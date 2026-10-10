@@ -1,3 +1,4 @@
+export * from './catalog.js';
 export * from './compatibility.js';
 export * from './image-policy.js';
 export * from './management.js';
@@ -5,5 +6,7 @@ export * from './manifest.js';
 export * from './protocol.js';
 export * from './releases.js';
 export * from './runtime.js';
+export * from './vanilla-egg.js';
+export * from './vanilla-policy.js';
 export * from './wizard.js';
 export * from './world.js';

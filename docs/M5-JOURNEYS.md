@@ -92,3 +92,36 @@ test wrapper's provenance/network/endpoint checks. No container operation was
 performed. Reuse isolated schemas/key prefixes and external provider fixtures.
 New resources require exact approval. No live Minecraft rerun, production server
 mutation, Gateway deployment, public bind or real DNS write is planned.
+
+### 2026-10-10 — Owner-approved centered creation flow
+
+Replace the dense configuration page with focused installer pages:
+Game → Name → Version → Operators → Whitelist → Resources → EULA/Create.
+The shared application owns navigation, draft preservation, quota/admission and
+job outcomes; trusted integration descriptors own conditional game pages and
+resource suggestions. Enter advances forms, except in player inputs where it adds
+the validated identity. Back preserves edits. The Owner explicitly requested the
+name prompt “Choose a name for your server” and short “Make it cool” subtitle.
+
+Vanilla omits the misleading “Server content / New world” field. Stable versions
+are the normal list; “Show all versions” includes eligible snapshots and historical
+versions with dedicated-server artifacts. Metadata discovery and Java requirements
+never establish protocol/game compatibility. Ordinary creation retains evidence
+and rollout filtering; Owner discovery explains missing verification separately.
+
+Operators use verified name/UUID identities with optional avatar previews.
+Whitelist defaults off; its first activation copies operators, later off/on toggles
+preserve edits. Off submits no whitelist. Remove controls work with hover, focus
+and touch. Layout transitions honor reduced motion and avoid disrupting focus.
+Resources offer 1–2, 3–5, 6+ player recommendations or custom CPU/RAM. They are
+recommendations, not a player-capacity guarantee. Shared storage omits disk input
+and uses an Owner-configured server disk allowance while retaining storage
+reservations; per-user budget mode retains disk selection. Final creation records
+explicit Minecraft EULA acceptance only on the Create action.
+
+Project selection is absent. Future contextual project creation is tracked in
+[issue #23](https://github.com/ImJstNickDev/nickhosting-panel/issues/23).
+Future “Presets” versus “Create your Own”, Owner resource/property/version overrides,
+and evidence-backed modpack/custom-map installation are tracked separately in
+[issue #24](https://github.com/ImJstNickDev/nickhosting-panel/issues/24).
+Neither future feature is implemented by this wizard revision.

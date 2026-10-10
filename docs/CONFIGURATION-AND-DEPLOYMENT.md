@@ -180,3 +180,21 @@ configuration examples were explicitly supplied for this task; other private
 infrastructure notes remain unpublished. Read the exact activation proposal and
 rollback before any Docker operation. The prepared configuration does not grant
 activation, NPM/DNS mutation or production deployment approval.
+
+### Creation storage defaults
+
+`defaultServerStorageMiB` / `NH_DEFAULT_SERVER_STORAGE_MIB` controls the finite
+server disk allowance assigned when creation omits disk under `GLOBAL_POOL`.
+Default: 4096 MiB, preserving the previous wizard default. It follows normal
+configuration precedence and does not change existing server limits. Shared-pool
+creation hides the disk picker; allocation and backup reservations still count
+against physical pool/free-space safety. `PER_USER_BUDGET` creation requires an
+explicit disk value. This setting is not an unlimited-storage or auto-expansion
+implementation.
+
+Minecraft metadata requests default to the public NickHosting application identity
+and project repository contact; Owner `minecraftMetadataUserAgent` or
+`NH_MINECRAFT_METADATA_USER_AGENT` can override it. Catalog discovery needs no
+private provider key for Mojang metadata. Compatibility report verification still
+requires the existing private `NH_MINECRAFT_EVIDENCE_KEY` and legitimately produced
+identity-matching evidence; metadata discovery does not create or replace that key.

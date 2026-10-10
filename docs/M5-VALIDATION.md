@@ -718,3 +718,119 @@ Rollback requires a reviewed forward fix or data-aware migration: do not blindly
 remove the mode column or revert to a binary that hashes it differently after
 integration mappings exist. Preserve signed evidence and frozen provisioning
 images; never silently substitute another image to recover a failed operation.
+
+### 2026-10-10 — Vanilla catalog and centered creation installer
+
+The Owner-approved flow is now Game → Name → Version → Operators → Whitelist →
+Resources → EULA/Create. Vanilla no longer asks for Project or Server content.
+SDK descriptors own the game pages, avatar presentation and 1–2 / 3–5 / 6+
+resource recommendations. Custom CPU/RAM remain available. Shared storage hides
+disk input and resolves an Owner default transactionally; it does not grant
+unlimited disk or bypass pool/backup reservations. First activation copies OPs to
+whitelist; later edits survive off/on toggles, and disabled lists are not submitted.
+
+Owner Vanilla discovery derives recognized egg bindings and Java images from
+integration policy plus official metadata, registering multiple versions in one
+bounded request. It reports missing server downloads/unsupported egg contracts.
+No per-version technical form is required for recognized Vanilla eggs. Advanced
+registration remains collapsed for exceptional contracts. Java boundaries were
+read against real official Mojang metadata (8/16/17/21/25 at the documented range
+boundaries). No new game version or runtime was live-certified in this change.
+
+Actual focused verification:
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/core.test.ts`: **45 passed**.
+  An initial command referenced nonexistent `config.test.ts` and ran zero tests;
+  the actual core suite above was then run.
+- Runtime, Vanilla Java-range/egg contract, compatibility and catalog ordering
+  unit files: **30 passed** (22 runtime/policy/egg + 6 compatibility + 2 catalog).
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/ui.test.ts games/minecraft/src/ui/ui.test.ts`:
+  **18 passed**, including final additive page/field contract validation.
+- Through `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts`:
+  `registry.integration.test.ts` + `platform-queries.integration.test.ts` **37 passed**;
+  `minecraft-catalog.integration.test.ts` + `runtime-images.integration.test.ts`
+  **8 passed**. API Minecraft + Minecraft registry initially **16 passed, 2 failed**
+  because expected public projections lacked additive `releaseType`; corrected
+  expectations, both affected cases passed on targeted rerun (16 filtered).
+- Browser command prefix:
+  `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+  `apps/web/tests/platform.browser.test.ts -t installer`: **2 passed, 9 filtered**.
+  Real handlers prove accepted creation, actual isolated job execution and truthful
+  first-start capacity denial, Enter-to-add, pending-identity navigation lock,
+  whitelist removal/toggle preservation, hidden shared disk, EULA link, Back,
+  desktop EN/mobile IT and reduced motion. Axe: **zero violations** on tested states.
+- `apps/web/tests/vanilla-catalog.browser.test.ts`: unsupported-contract case passed;
+  discovery case passed behavior but found an actual Axe target-spacing violation.
+  Added normal control spacing; `-t 'discovers multiple versions'` then passed,
+  **zero Axe violations** and page errors. This is one initial pass plus one
+  affected rerun, not a claim that every browser suite ran again.
+- Final aggregate `scripts/dev.sh pnpm typecheck`: passed. WebPanel production
+  build passed; existing >500 kB chunk warning remains. Targeted formatting/lint,
+  i18n completeness and index governance are recorded with this revision.
+
+During UI test development, a collapsed whitelist remained visually measurable;
+fixed visibility/inert behavior. A subsequent CSS edit accidentally hid headings
+under reduced motion; corrected before the final two-case browser pass. These
+failures were not suppressed. Independent review found and resolved a pending
+player lookup race (stale edits/navigation); lookup now freezes conflicting
+controls, aborts on unmount and checks the list bound for Enter. Final review found
+**zero remaining must-fix source or UX findings**. Seven desktop/mobile captures
+were independently inspected; coordinator also inspected name and whitelist views.
+
+Sanitized actual-browser captures (all use isolated, explicitly synthetic game
+metadata/provider/evidence and do not certify these displayed releases):
+
+- [Desktop name](screenshots/m5/installer-name-desktop-en.png),
+  [version](screenshots/m5/installer-version-desktop-en.png),
+  [operators](screenshots/m5/installer-operators-desktop-en.png),
+  [whitelist](screenshots/m5/installer-whitelist-desktop-en.png),
+  [resources](screenshots/m5/installer-resources-desktop-en.png).
+- [Italian mobile name](screenshots/m5/installer-name-mobile-it.png),
+  [version](screenshots/m5/installer-version-mobile-it.png),
+  [operators](screenshots/m5/installer-operators-mobile-it.png),
+  [whitelist](screenshots/m5/installer-whitelist-mobile-it.png),
+  [resources](screenshots/m5/installer-resources-mobile-it.png),
+  [confirmation](screenshots/m5/installer-review-mobile-it.png).
+- [Owner discovery](screenshots/m5/vanilla-catalog-owner-desktop-en.png).
+  Player-input gray masks are screenshot sanitization, not application styling.
+  Displayed verification records and avatars belong to the fixture only.
+
+Development changes are source/catalog updates consumed by the existing watchers.
+No dependency/image rebuild, SQL migration, new network, container, Owner mapping,
+host/node seed or setting mutation is needed. Read-only regular-adapter discovery
+confirmed the Owner's Vanilla egg exposes the recognized version/JAR variables.
+The first inspection script used an incorrect database cleanup method after its
+successful read; corrected to `db.destroy()` and repeated successfully. No secrets
+were printed and no remote mutation occurred. Historical M4 live tests were not
+repeated. Browser schemas are disposable; development review data is preserved.
+
+**Remaining operational prerequisite:** fresh catalog entries stay disabled and
+unverified. Existing M4 signatures bind exact local mapping/image/artifact identity;
+they cannot certify the Owner's new mapping automatically. Ordinary creation still
+requires legitimate current combination evidence and Owner enablement. The new
+catalog removes repetitive manual configuration, not the evidence gate. This
+handoff does not claim that fresh dev choices are ready to create real servers.
+SFTPGo #18 and accepted Docker-socket #22 remain separate release risks.
+
+Rollback: revert the UI/catalog change if required; existing server and mapping
+identities are unchanged. Already discovered local combinations are durable records,
+not remote assets; do not delete their evidence or historical audits as cleanup.
+The new default setting is additive and does not resize existing servers.
+
+Final dev smoke: actual Chromium HTTPS navigation returned **200** and received
+Vite's **connected** frame over **WSS** with normal certificate validation. No
+login/account mutation was performed. Read-only database counts remain **1 host,
+1 node, 1 mapping, 1 user, 0 managed servers, 0 combinations**; catalog discovery
+was exercised only in disposable test schemas, leaving the Owner's real dev
+configuration for their control. All seven dev services remained healthy with no
+published host ports; no restart/recreate was necessary for this source-only change.
+
+A final read-only prerequisite check found the development metadata User-Agent and
+Minecraft evidence verifier key unset. Added a non-secret public application
+User-Agent default (project GitHub contact), preserving Owner/environment overrides;
+its targeted core regression **1 passed, 45 filtered**, independently reviewed.
+Actual Mojang discovery from the dev API container then succeeded: **103 stable
+metadata entries** (not 103 verified/server-installable versions). No catalog rows
+were inserted. The evidence verifier key remains absent: a legitimate runner/verifier
+key and identity-matching reports are required before enabling creation. No signing
+key was fabricated or copied from another environment.

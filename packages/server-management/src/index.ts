@@ -7,6 +7,7 @@ export * from './gateway-orchestration.js';
 export * from './gateway-registry.js';
 export * from './health.js';
 export * from './lifecycle.js';
+export * from './minecraft-catalog.js';
 export * from './minecraft-content.js';
 export * from './minecraft-registry.js';
 export * from './minecraft-sources.js';

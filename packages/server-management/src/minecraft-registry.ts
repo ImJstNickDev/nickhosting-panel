@@ -4,6 +4,7 @@ import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
   assertMinecraftChoice,
+  compareMinecraftChoices,
   fetchMinecraftProtocols,
   minecraftCombinationSchema,
   minecraftDigest,
@@ -11,6 +12,7 @@ import {
   minecraftSupport,
   publicMinecraftChoice,
   resolveMinecraftImage,
+  vanillaEggBinding,
 } from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely, Selectable } from 'kysely';
@@ -94,10 +96,12 @@ export async function registerMinecraftCombination(
       .object({
         mappingId: z.uuid(),
         runtime: minecraftRuntimeRequestSchema,
-        binding: minecraftRuntimeMappingSchema.extend({
-          image: minecraftRuntimeMappingSchema.shape.image.optional(),
-          imageJavaMajor: minecraftRuntimeMappingSchema.shape.imageJavaMajor.optional(),
-        }),
+        binding: minecraftRuntimeMappingSchema
+          .extend({
+            image: minecraftRuntimeMappingSchema.shape.image.optional(),
+            imageJavaMajor: minecraftRuntimeMappingSchema.shape.imageJavaMajor.optional(),
+          })
+          .optional(),
       })
       .strict(),
     input,
@@ -114,26 +118,34 @@ export async function registerMinecraftCombination(
     options.metadata ??
     createRuntimeMetadataClient({ userAgent: values.minecraftMetadataUserAgent ?? '' });
   const runtime = await resolveMinecraftRuntime(value.runtime, metadata);
+  const egg = await adapter.getEgg(mapping.nest_id, mapping.egg_id);
+  const suppliedBinding =
+    value.binding ??
+    vanillaEggBinding({
+      runtime,
+      variables: egg.relationships?.variables?.data.map((entry) => entry.attributes) ?? [],
+      environment: mapping.environment,
+      ...(mapping.image_mode === 'static' ? { staticImage: mapping.docker_image } : {}),
+    });
   let binding: z.infer<typeof minecraftRuntimeMappingSchema>;
   if (mapping.image_mode === 'integration') {
     const selected = resolveMinecraftImage(runtime);
     if (
-      (value.binding.image !== undefined && value.binding.image !== selected.image) ||
-      (value.binding.imageJavaMajor !== undefined &&
-        value.binding.imageJavaMajor !== runtime.javaMajor)
+      (suppliedBinding.image !== undefined && suppliedBinding.image !== selected.image) ||
+      (suppliedBinding.imageJavaMajor !== undefined &&
+        suppliedBinding.imageJavaMajor !== runtime.javaMajor)
     )
       throw new DomainError('configuration_invalid');
     binding = parse(minecraftRuntimeMappingSchema, {
-      ...value.binding,
+      ...suppliedBinding,
       image: selected.image,
       imageJavaMajor: runtime.javaMajor,
     });
-  } else binding = parse(minecraftRuntimeMappingSchema, value.binding);
+  } else binding = parse(minecraftRuntimeMappingSchema, suppliedBinding);
   const protocols = await (options.protocols ?? fetchMinecraftProtocols)(
     values.minecraftProtocolSource,
   );
   const protocol = protocols.releases.get(runtime.release);
-  const egg = await adapter.getEgg(mapping.nest_id, mapping.egg_id);
   const declared =
     egg.relationships?.variables?.data.map((entry) => entry.attributes.env_variable) ?? [];
   if (
@@ -299,7 +311,7 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
         throw error;
     }
   }
-  return choices;
+  return choices.sort(compareMinecraftChoices);
 }
 
 export async function setMinecraftAvailability(

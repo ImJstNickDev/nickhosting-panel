@@ -1,7 +1,7 @@
 import { AxeBuilder } from '@axe-core/playwright';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -29,6 +29,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     fixture.setManagement(provider.management);
   });
   afterAll(async () => {
+    vi.unstubAllGlobals();
     provider?.dispose();
     await fixture?.close();
   });
@@ -94,10 +95,32 @@ describe('M5 real browser platform and Owner journeys', () => {
     await browserExpect(peer.getByRole('link', { name: 'Survival', exact: true })).toHaveCount(0);
   });
 
-  it('creates a verified-choice Vanilla server through all four wizard steps and reports admission-denied first start', async () => {
+  it('creates a verified-choice Vanilla server through the installer pages and reports admission-denied first start', async () => {
+    let finishLookup: (() => void) | undefined;
+    const lookupGate = new Promise<void>((resolve) => {
+      finishLookup = resolve;
+    });
+    const player = { name: 'WizardAlex', id: '12345678123442348234123456789abc' };
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === 'api.mojang.com' || url.hostname === 'sessionserver.mojang.com') {
+        await lookupGate;
+        return Response.json(player);
+      }
+      throw new Error('Unexpected external installer request');
+    });
+    await user.route('https://api.mcheads.org/**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><path fill="#806040" d="M0 0h40v40H0z"/></svg>',
+      }),
+    );
     await user.goto(`${fixture.origin}/servers`);
     await user.getByRole('link', { name: 'Create server', exact: true }).click();
     await browserExpect(user).toHaveURL(`${fixture.origin}/servers/new`);
+    await browserExpect.poll(() => pageErrors).toEqual([]);
+    await fixture.screenshot(user, 'installer-diagnostic');
     await browserExpect(
       user.getByRole('heading', { name: 'Choose a game', exact: true }),
     ).toBeVisible();
@@ -105,23 +128,52 @@ describe('M5 real browser platform and Owner journeys', () => {
     await fixture.screenshot(user, 'wizard-game-desktop-en');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await user.getByLabel('Server name', { exact: true }).fill('Creative');
-    await browserExpect(
-      user.getByLabel('Version and runtime', { exact: true }).locator('option'),
-    ).toContainText(['Select…', '26.1 · vanilla']);
-    await user
-      .getByLabel('Version and runtime', { exact: true })
-      .selectOption(provider.ids.choiceId);
-    await user.getByLabel('I accept the Minecraft EULA', { exact: true }).check();
+    await fixture.screenshot(user, 'installer-name-desktop-en');
+    await user.getByLabel('Server name', { exact: true }).press('Enter');
+    await user.getByRole('radio', { name: '26.1 · vanilla', exact: true }).check();
     expect(await user.locator('main').innerText()).not.toMatch(
       /protocol ID|experimental|Paper|Forge|Folia|Fabric/i,
     );
-    await fixture.screenshot(user, 'wizard-configure-desktop-en');
+    await fixture.screenshot(user, 'installer-version-desktop-en');
     await accessible(user);
     await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Who should be an operator?' }),
+    ).toBeVisible();
+    await user.getByLabel('Player name', { exact: true }).fill(player.name);
+    await user.getByLabel('Player name', { exact: true }).press('Enter');
+    await browserExpect(user.getByRole('button', { name: 'Next', exact: true })).toBeDisabled();
+    await browserExpect(user.getByRole('button', { name: 'Back', exact: true })).toBeDisabled();
+    finishLookup?.();
+    await browserExpect(
+      user.getByRole('button', { name: `Remove ${player.name}`, exact: true }),
+    ).toBeAttached();
+    await fixture.screenshot(user, 'installer-operators-desktop-en');
+    await accessible(user);
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Do you want to turn whitelist on?' }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Yes', exact: true }).click();
+    await browserExpect(user.getByLabel('Player name', { exact: true })).toBeVisible();
+    await browserExpect(user.getByText(player.name, { exact: true })).toBeVisible();
+    await user.getByRole('button', { name: `Remove ${player.name}`, exact: true }).focus();
+    await user.getByRole('button', { name: `Remove ${player.name}`, exact: true }).press('Enter');
+    await user.getByRole('button', { name: 'No', exact: true }).click();
+    await browserExpect(user.getByLabel('Player name', { exact: true })).not.toBeVisible();
+    await user.getByRole('button', { name: 'Yes', exact: true }).click();
+    await browserExpect(user.getByText(player.name, { exact: true })).toHaveCount(0);
+    await fixture.screenshot(user, 'installer-whitelist-desktop-en');
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await user.getByRole('button', { name: 'Custom', exact: true }).click();
     await user.getByLabel('Memory (MiB)', { exact: true }).fill('128');
     await user.getByLabel('CPU limit (%)', { exact: true }).fill('10');
-    await user.getByLabel('Disk (MiB)', { exact: true }).fill('64');
+    await browserExpect(user.getByLabel('Disk (MiB)', { exact: true })).toHaveCount(0);
+    await fixture.screenshot(user, 'installer-resources-desktop-en');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
+      user.getByRole('link', { name: 'Minecraft EULA', exact: true }),
+    ).toHaveAttribute('target', '_blank');
     await fixture.screenshot(user, 'wizard-review-desktop-en');
     const accepted = user.waitForResponse(
       (response) =>
@@ -153,6 +205,45 @@ describe('M5 real browser platform and Owner journeys', () => {
       ),
     ).toBeVisible();
     await fixture.screenshot(user, 'first-start-capacity-desktop-en');
+  });
+
+  it('renders the installer in Italian on mobile with preserved back navigation and reduced motion', async () => {
+    await journeyRequest(fixture, peer, '/api/auth/update-user', {
+      name: 'Italian reviewer',
+      locale: 'it',
+    });
+    await peer.setViewportSize({ width: 390, height: 844 });
+    await peer.goto(`${fixture.origin}/servers/new`);
+    await peer.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
+    await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await peer.getByLabel('Nome del server', { exact: true }).fill('Mondo condiviso');
+    await fixture.screenshot(peer, 'installer-name-mobile-it');
+    await peer.getByLabel('Nome del server', { exact: true }).press('Enter');
+    await peer.getByRole('radio', { name: '26.1 · vanilla', exact: true }).check();
+    await peer.getByLabel('Mostra tutte le versioni', { exact: true }).check();
+    await fixture.screenshot(peer, 'installer-version-mobile-it');
+    await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await fixture.screenshot(peer, 'installer-operators-mobile-it');
+    await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await peer.getByRole('button', { name: 'Sì', exact: true }).click();
+    await fixture.screenshot(peer, 'installer-whitelist-mobile-it');
+    await accessible(peer);
+    await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await peer.getByRole('button', { name: '6+', exact: true }).click();
+    await browserExpect(peer.getByLabel('Disco (MiB)', { exact: true })).toHaveCount(0);
+    await fixture.screenshot(peer, 'installer-resources-mobile-it');
+    await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await fixture.screenshot(peer, 'installer-review-mobile-it');
+    await accessible(peer);
+    expect(await peer.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await peer.getByRole('button', { name: 'Indietro', exact: true }).click();
+    await browserExpect(peer.getByRole('button', { name: '6+', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(pageErrors).toEqual([]);
   });
 
   it('rejects insufficient physical capacity then reports genuinely completed lifecycle jobs and Activity', async () => {

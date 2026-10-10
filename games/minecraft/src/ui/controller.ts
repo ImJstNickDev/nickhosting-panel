@@ -88,6 +88,7 @@ export const minecraftChoiceSchema = z
     id: uuid,
     version: z.string().min(1).max(80),
     runtime: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge']),
+    releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
   })
   .strip();
 export type MinecraftUiChoice = z.infer<typeof minecraftChoiceSchema>;
@@ -206,6 +207,7 @@ export function createMinecraftUiController(client: GameUiClient) {
         value: choice.id,
         label: `${choice.version} · ${choice.runtime}`,
         disabled: false,
+        releaseType: choice.releaseType ?? 'release',
       }));
     },
     profile,
@@ -247,7 +249,7 @@ export function createMinecraftUiController(client: GameUiClient) {
             .object({
               memory: z.number().int().min(32).max(1048576),
               cpu: z.number().int().min(1).max(100000),
-              disk: z.number().int().min(16).max(1073741824),
+              disk: z.number().int().min(16).max(1073741824).optional(),
               swap: z.literal(0).default(0),
               io: z.number().int().min(10).max(1000).default(500),
             })

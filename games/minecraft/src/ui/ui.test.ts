@@ -52,7 +52,7 @@ describe('Minecraft browser module and exact API contracts', () => {
       { id: choiceId, version: '26.1', runtime: 'vanilla' },
     ]);
     expect(await controller.choiceOptions()).toEqual([
-      { value: choiceId, label: '26.1 · vanilla', disabled: false },
+      { value: choiceId, label: '26.1 · vanilla', disabled: false, releaseType: 'release' },
     ]);
   });
   it('preserves exact creation API, explicit EULA, no Owner mapping ID and accepted job semantics', async () => {

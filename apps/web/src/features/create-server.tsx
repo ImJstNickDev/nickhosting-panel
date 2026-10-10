@@ -1,10 +1,11 @@
 import { type UiOption, validateUiValues } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { z } from 'zod';
 import { api, idempotencyKey } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
+import { useSession } from '../app/session.js';
 import {
   Check,
   Details,
@@ -13,84 +14,134 @@ import {
   Input,
   JobNotice,
   Loading,
-  Notice,
   Page,
   Section,
-  Select,
 } from '../components/ui.js';
 import { GameFields } from './game-sections.js';
+import { PlayerList, VersionList } from './installer-fields.js';
 import { gameUiClient, gameUiRegistry, getGameArtwork } from './integrations.js';
+import './installer.css';
 
 type GameEntry = { id: string; access: { canCreate: boolean }; manifest: { runtimes?: unknown[] } };
 type Quota = {
   remaining: { memoryMiB: number; cpuPercent: number; storageMiB: number | null };
-  limits: { memoryMiB: number; cpuPercent: number; storageMiB: number | null };
+  storagePolicy: 'GLOBAL_POOL' | 'PER_USER_BUDGET';
+  creationStorage: { mode: 'shared' | 'limited'; defaultDiskMiB: number };
 };
 export function CreateServerPage() {
   const t = useT(),
-    format = useFormat();
+    format = useFormat(),
+    session = useSession();
   const [step, setStep] = useState(0),
     [gameId, setGameId] = useState(''),
     [values, setValues] = useState<Record<string, unknown>>({});
   const [name, setName] = useState(''),
-    [projectId, setProjectId] = useState(''),
-    [memory, setMemory] = useState(1024),
+    [memory, setMemory] = useState(2048),
     [cpu, setCpu] = useState(100),
     [disk, setDisk] = useState(4096),
+    [preset, setPreset] = useState('small'),
     [autoStart, setAutoStart] = useState(true);
   const [choices, setChoices] = useState<Record<string, UiOption[]>>({}),
     [errors, setErrors] = useState<Record<string, string>>({}),
     [failure, setFailure] = useState<unknown>(),
     [busy, setBusy] = useState(false),
     [result, setResult] = useState<{ jobId: string; serverId: string }>();
+  const [playerPending, setPlayerPending] = useState(false);
   const [preparedSummary, setPreparedSummary] = useState<{ labelKey: string; value: string }[]>([]);
   const heading = useRef<HTMLHeadingElement>(null),
-    errorSummary = useRef<HTMLDivElement>(null),
-    key = useRef(idempotencyKey());
+    key = useRef(idempotencyKey()),
+    seeded = useRef(new Set<string>()),
+    initializedDisk = useRef(false);
   const games = useQuery({
     queryKey: ['creation-games'],
     queryFn: ({ signal }) => api<GameEntry[]>('/v1/games', { signal }),
-  });
-  const projects = useQuery({
-    queryKey: ['creation-projects'],
-    queryFn: ({ signal }) =>
-      api<{ items: { id: string; name: string }[] }>('/v1/platform/projects?limit=100', { signal }),
   });
   const quota = useQuery({
     queryKey: ['creation-quota'],
     queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
   });
   const module = gameUiRegistry.get(gameId);
+  const pages = module?.descriptor.creation.pages ?? [];
+  const gameSteps = pages.length || 1,
+    resourcesStep = 2 + gameSteps,
+    finalStep = resourcesStep + 1;
+  const page = pages[step - 2];
+  const title =
+    step === 0
+      ? 'gameUi.chooseGame'
+      : step === 1
+        ? 'gameUi.nameQuestion'
+        : step === resourcesStep
+          ? 'gameUi.playersQuestion'
+          : step === finalStep
+            ? 'gameUi.review'
+            : (page?.titleKey ?? 'gameUi.configure');
   const available =
     games.data?.filter(
-      (game) =>
-        game.access.canCreate &&
-        gameUiRegistry.get(game.id) &&
-        Boolean(game.manifest.runtimes?.length),
+      (g) => g.access.canCreate && gameUiRegistry.get(g.id) && Boolean(g.manifest.runtimes?.length),
     ) ?? [];
-  const steps = ['gameUi.chooseGame', 'gameUi.configure', 'gameUi.resources', 'gameUi.create'];
+  const shared = quota.data?.creationStorage.mode === 'shared';
+  const agreement = module?.descriptor.creation.agreement;
   useEffect(() => {
     heading.current?.focus({ preventScroll: step === 0 });
   }, [step]);
+  useEffect(() => {
+    if (quota.data && !initializedDisk.current) {
+      setDisk(quota.data.creationStorage.defaultDiskMiB);
+      initializedDisk.current = true;
+    }
+  }, [quota.data]);
   const update = (id: string, value: unknown) => {
-    setValues((previous) => ({ ...previous, [id]: value }));
-    setErrors((previous) => ({ ...previous, [id]: '' }));
+    setValues((v) => ({ ...v, [id]: value }));
+    setErrors((e) => ({ ...e, [id]: '' }));
     key.current = idempotencyKey();
   };
+  const receiveVersions = useCallback(
+    (options: UiOption[]) => {
+      setChoices((previous) => ({ ...previous, [pages[0]?.field ?? 'choiceId']: options }));
+    },
+    [pages],
+  );
+  function selectGame(id: string) {
+    const extension = gameUiRegistry.get(id);
+    if (!extension) return;
+    setGameId(id);
+    setValues({ ...extension.descriptor.creation.defaults });
+    setChoices({});
+    seeded.current.clear();
+    const initial = extension.descriptor.creation.resourcePresets[0];
+    setPreset(initial?.id ?? 'custom');
+    if (initial) {
+      setMemory(initial.memoryMiB);
+      setCpu(initial.cpuPercent);
+    }
+    key.current = idempotencyKey();
+  }
   async function next(event: FormEvent) {
     event.preventDefault();
-    if (busy || result) return;
+    if (busy || playerPending || result || !module) return;
     setFailure(undefined);
-    if (step === 0) {
-      if (!module) return;
-      setStep(1);
+    setErrors({});
+    if (step === 1 && !name.trim()) {
+      setErrors({ name: 'required' });
       return;
     }
-    if (step === 1 && module) {
-      const invalid = validateUiValues(module.descriptor.creation.fields, values, choices);
-      setErrors(Object.fromEntries(invalid.map((e) => [e.field, e.code])));
-      if (invalid.length || !name.trim()) {
-        setTimeout(() => errorSummary.current?.focus(), 0);
+    if (page?.kind === 'version-list') {
+      const selected = choices[page.field]?.some(
+        (o) => o.value === values[page.field] && !o.disabled,
+      );
+      if (!selected) {
+        setErrors({ [page.field]: 'unavailable' });
+        return;
+      }
+    }
+    if (step === resourcesStep && !quota.data) return;
+    let submitValues = values;
+    if (step === resourcesStep - 1 || step === finalStep) {
+      const effective = agreement ? { ...values, [agreement.field]: true } : values;
+      const invalid = validateUiValues(module.descriptor.creation.fields, effective, choices);
+      if (invalid.length) {
+        setErrors(Object.fromEntries(invalid.map((e) => [e.field, e.code])));
         return;
       }
       if (module.descriptor.creation.prepareHandler) {
@@ -103,33 +154,31 @@ export function CreateServerPage() {
             })
             .parse(
               await module.handlers[module.descriptor.creation.prepareHandler]?.(gameUiClient, {
-                values,
+                values: effective,
               }),
             );
           setValues(prepared.values);
+          submitValues = prepared.values;
           setPreparedSummary(prepared.summary);
-        } catch (error) {
-          setFailure(error);
+        } catch (e) {
+          setFailure(e);
           return;
         } finally {
           setBusy(false);
         }
       }
-      setStep(2);
+    }
+    if (step < finalStep) {
+      setStep((s) => s + 1);
       return;
     }
-    if (step === 2) {
-      setStep(3);
-      return;
-    }
-    if (!module) return;
     setBusy(true);
     try {
       const submitted = {
-        ...values,
+        ...submitValues,
+        ...(agreement ? { [agreement.field]: true } : {}),
         name,
-        projectId: projectId || undefined,
-        limits: { memory, cpu, disk },
+        limits: { memory, cpu, ...(!shared ? { disk } : {}) },
         autoStart,
       };
       const response = await module.handlers[module.descriptor.creation.createHandler]?.(
@@ -137,261 +186,301 @@ export function CreateServerPage() {
         { values: submitted, idempotencyKey: key.current },
       );
       setResult(z.object({ serverId: z.uuid(), jobId: z.uuid() }).parse(response));
-    } catch (error) {
-      setFailure(error);
+    } catch (e) {
+      setFailure(e);
     } finally {
       setBusy(false);
     }
   }
-  return (
-    <Page title={t('web.createServer')}>
-      <nav aria-label={t('gameUi.steps')}>
-        <ol className="toolbar">
-          {steps.map((label, index) => (
-            <li key={label} aria-current={step === index ? 'step' : undefined}>
-              {t(label)}
-            </li>
-          ))}
-        </ol>
-      </nav>
-      {result ? (
+  if (result)
+    return (
+      <Page title={t('web.createServer')}>
         <Section>
           <JobNotice jobId={result.jobId} />
           <Link to={`/servers/${result.serverId}`}>{t('web.overview')}</Link>
         </Section>
-      ) : (
-        <Section>
-          <h2 ref={heading} tabIndex={-1}>
-            {t(steps[step] ?? 'gameUi.create')}
-          </h2>
-          {failure !== undefined && <ErrorNotice error={failure} />}
-          <form className="form" onSubmit={(event) => void next(event)} aria-busy={busy}>
-            <fieldset disabled={busy}>
-              {step === 0 &&
-                (games.isPending ? (
-                  <Loading />
-                ) : games.error ? (
-                  <ErrorNotice error={games.error} retry={() => void games.refetch()} />
-                ) : !available.length ? (
-                  <Empty text={t('gameUi.noGames')} />
-                ) : (
-                  <div className="columns">
-                    {available.map((game) => {
-                      const extension = gameUiRegistry.get(game.id);
-                      if (!extension) return null;
-                      const art = getGameArtwork(game.id);
-                      return (
-                        <button
-                          key={game.id}
-                          type="button"
-                          className="game-card secondary"
-                          aria-pressed={gameId === game.id}
-                          onClick={() => {
-                            setGameId(game.id);
-                            setValues({ ...extension.descriptor.creation.defaults });
-                            setChoices({});
-                            key.current = idempotencyKey();
-                          }}
-                        >
-                          <span
-                            style={{
-                              display: 'grid',
-                              gap: '.7rem',
-                              textAlign: 'left',
-                              width: '100%',
-                            }}
-                          >
-                            {art && (
-                              <img
-                                src={art}
-                                alt=""
-                                width={480}
-                                height={240}
-                                style={{
-                                  width: '100%',
-                                  height: 'auto',
-                                  aspectRatio: '2 / 1',
-                                  objectFit: 'cover',
-                                  borderRadius: 3,
-                                }}
-                                onError={(event) => {
-                                  event.currentTarget.hidden = true;
-                                }}
-                              />
-                            )}
-                            <span>{t(extension.descriptor.nameKey)}</span>
-                            {gameId === game.id && <small>{t('gameUi.selected')}</small>}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ))}
-              {step === 1 && module && (
-                <>
-                  {Object.values(errors).some(Boolean) && (
-                    <div role="alert" tabIndex={-1} ref={errorSummary}>
-                      {t('gameUi.required')}
-                    </div>
-                  )}
-                  <Input
-                    label={t('gameUi.serverName')}
-                    required
-                    maxLength={100}
-                    value={name}
-                    onChange={(event) => {
-                      setName(event.target.value);
-                      key.current = idempotencyKey();
-                    }}
-                  />
-                  {projects.error ? (
-                    <ErrorNotice error={projects.error} />
-                  ) : (
-                    <Select
-                      label={t('gameUi.project')}
-                      value={projectId}
-                      disabled={projects.isPending}
-                      onChange={(event) => setProjectId(event.target.value)}
+      </Page>
+    );
+  const names = (id: string) => (Array.isArray(values[id]) ? (values[id] as string[]) : []);
+  const enabled = page?.toggleField ? values[page.toggleField] === true : false;
+  return (
+    <div
+      className={`installer-shell ${page?.kind === 'toggle-players' ? 'installer-whitelist' : ''} ${enabled ? 'is-enabled' : ''}`}
+    >
+      <div className="installer-position">
+        {t('gameUi.stepOf', { current: step + 1, total: finalStep + 1 })}
+      </div>
+      <form className="installer-form" onSubmit={(e) => void next(e)} aria-busy={busy}>
+        <header className="installer-heading">
+          <h1 ref={heading} tabIndex={-1}>
+            {t(title)}
+          </h1>
+          {step === 1 && <p>{t('gameUi.nameHint')}</p>}
+        </header>
+        {failure !== undefined && <ErrorNotice error={failure} />}
+        {Object.values(errors).some(Boolean) && <div role="alert">{t('gameUi.required')}</div>}
+        <fieldset disabled={busy}>
+          {step === 0 &&
+            (games.isPending ? (
+              <Loading />
+            ) : games.error ? (
+              <ErrorNotice error={games.error} retry={() => void games.refetch()} />
+            ) : !available.length ? (
+              <>
+                <Empty text={t('gameUi.noGames')} />
+                {session.data?.context.role === 'owner' && (
+                  <Link to="/owner/integrations">{t('gameUi.noGamesOwner')}</Link>
+                )}
+              </>
+            ) : (
+              <div className="installer-games">
+                {available.map((game) => {
+                  const extension = gameUiRegistry.get(game.id);
+                  if (!extension) return null;
+                  const art = getGameArtwork(game.id);
+                  return (
+                    <button
+                      type="button"
+                      key={game.id}
+                      className="game-card secondary"
+                      aria-pressed={gameId === game.id}
+                      onClick={() => selectGame(game.id)}
                     >
-                      <option value="">{t('gameUi.noProject')}</option>
-                      {projects.data?.items.map((project) => (
-                        <option key={project.id} value={project.id}>
-                          {project.name}
-                        </option>
-                      ))}
-                    </Select>
-                  )}
-                  <GameFields
-                    module={module}
-                    fields={module.descriptor.creation.fields}
-                    values={values}
-                    onChange={update}
-                    errors={errors}
-                    onChoices={(field, options) =>
-                      setChoices((previous) => ({ ...previous, [field]: options }))
-                    }
-                  />
+                      {art && <img src={art} alt="" width={480} height={240} />}
+                      <span>{t(extension.descriptor.nameKey)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          {step === 1 && (
+            <Input
+              label={t('gameUi.serverName')}
+              required
+              maxLength={100}
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                key.current = idempotencyKey();
+              }}
+            />
+          )}
+          {page && module && (
+            <>
+              {page.kind === 'version-list' && (
+                <VersionList
+                  module={module}
+                  values={values}
+                  value={values[page.field]}
+                  onChange={(v) => update(page.field, v)}
+                  onChoices={receiveVersions}
+                />
+              )}
+              {page.kind === 'players' && page.lookupHandler && (
+                <PlayerList
+                  module={module}
+                  handler={page.lookupHandler}
+                  onPendingChange={setPlayerPending}
+                  names={names(page.field)}
+                  onChange={(v) => update(page.field, v)}
+                />
+              )}
+              {page.kind === 'toggle-players' && page.toggleField && (
+                <>
+                  <fieldset className="installer-toggle" aria-label={t(page.titleKey)}>
+                    {[true, false].map((on) => (
+                      <button
+                        key={String(on)}
+                        type="button"
+                        className={enabled === on ? '' : 'secondary'}
+                        aria-pressed={enabled === on}
+                        disabled={playerPending}
+                        onClick={() => {
+                          if (on && !seeded.current.has(page.id)) {
+                            update(page.field, page.seedField ? [...names(page.seedField)] : []);
+                            seeded.current.add(page.id);
+                          }
+                          update(page.toggleField as string, on);
+                        }}
+                      >
+                        {t(on ? 'gameUi.yes' : 'gameUi.no')}
+                      </button>
+                    ))}
+                  </fieldset>
+                  <div className="installer-reveal" inert={!enabled} aria-hidden={!enabled}>
+                    <div>
+                      {page.lookupHandler && (
+                        <PlayerList
+                          module={module}
+                          handler={page.lookupHandler}
+                          onPendingChange={setPlayerPending}
+                          names={names(page.field)}
+                          onChange={(v) => update(page.field, v)}
+                        />
+                      )}
+                    </div>
+                  </div>
                 </>
               )}
-              {step === 2 && (
-                <>
-                  {quota.isPending ? (
-                    <Loading />
-                  ) : quota.error ? (
-                    <ErrorNotice error={quota.error} retry={() => void quota.refetch()} />
-                  ) : (
-                    quota.data && (
-                      <div className="stack">
-                        <p>
-                          {t('gameUi.remainingMemory', {
-                            value: format.number(quota.data.remaining.memoryMiB),
-                          })}
-                        </p>
-                        <p>
-                          {t('gameUi.remainingCpu', {
-                            value: format.number(quota.data.remaining.cpuPercent),
-                          })}
-                        </p>
-                        <p>
-                          {quota.data.remaining.storageMiB === null
-                            ? t('gameUi.sharedStorage')
-                            : t('gameUi.remainingDisk', {
-                                value: format.number(quota.data.remaining.storageMiB),
-                              })}
-                        </p>
-                      </div>
-                    )
-                  )}
-                  <Input
-                    label={t('gameUi.memory')}
-                    type="number"
-                    min={32}
-                    max={1048576}
-                    step={1}
-                    required
-                    value={memory}
-                    onChange={(event) => {
-                      setMemory(Number(event.target.value));
-                      key.current = idempotencyKey();
-                    }}
-                  />
-                  <Input
-                    label={t('gameUi.cpu')}
-                    type="number"
-                    min={1}
-                    max={100000}
-                    step={1}
-                    required
-                    value={cpu}
-                    onChange={(event) => {
-                      setCpu(Number(event.target.value));
-                      key.current = idempotencyKey();
-                    }}
-                  />
+            </>
+          )}
+          {step === 2 && !pages.length && module && (
+            <GameFields
+              module={module}
+              fields={module.descriptor.creation.fields}
+              values={values}
+              onChange={update}
+              errors={errors}
+              onChoices={(field, options) => setChoices((v) => ({ ...v, [field]: options }))}
+            />
+          )}
+          {step === resourcesStep &&
+            (quota.isPending ? (
+              <Loading />
+            ) : quota.error ? (
+              <ErrorNotice error={quota.error} retry={() => void quota.refetch()} />
+            ) : (
+              <>
+                <fieldset className="installer-presets" aria-label={t('gameUi.resources')}>
+                  {module?.descriptor.creation.resourcePresets.map((p) => (
+                    <button
+                      type="button"
+                      key={p.id}
+                      className={preset === p.id ? '' : 'secondary'}
+                      aria-pressed={preset === p.id}
+                      onClick={() => {
+                        setPreset(p.id);
+                        setMemory(p.memoryMiB);
+                        setCpu(p.cpuPercent);
+                        key.current = idempotencyKey();
+                      }}
+                    >
+                      {t(p.labelKey)}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className={preset === 'custom' ? '' : 'secondary'}
+                    aria-pressed={preset === 'custom'}
+                    onClick={() => setPreset('custom')}
+                  >
+                    {t('gameUi.customResources')}
+                  </button>
+                </fieldset>
+                {preset !== 'custom' && (
+                  <>
+                    <p className="muted">{t('gameUi.resourceSuggestion')}</p>
+                    <Details
+                      values={[
+                        [t('gameUi.memory'), format.number(memory)],
+                        [t('gameUi.cpu'), format.number(cpu)],
+                      ]}
+                    />
+                  </>
+                )}
+                {preset === 'custom' && (
+                  <div className="installer-custom">
+                    <Input
+                      label={t('gameUi.memory')}
+                      type="number"
+                      min={32}
+                      max={1048576}
+                      required
+                      value={memory}
+                      onChange={(e) => {
+                        setMemory(Number(e.target.value));
+                        key.current = idempotencyKey();
+                      }}
+                    />
+                    <Input
+                      label={t('gameUi.cpu')}
+                      type="number"
+                      min={1}
+                      max={100000}
+                      required
+                      value={cpu}
+                      onChange={(e) => {
+                        setCpu(Number(e.target.value));
+                        key.current = idempotencyKey();
+                      }}
+                    />
+                  </div>
+                )}
+                {shared ? (
+                  <p className="muted">{t('gameUi.sharedStorage')}</p>
+                ) : (
                   <Input
                     label={t('gameUi.disk')}
                     type="number"
                     min={16}
                     max={1073741824}
-                    step={1}
                     required
                     value={disk}
-                    onChange={(event) => {
-                      setDisk(Number(event.target.value));
+                    onChange={(e) => {
+                      setDisk(Number(e.target.value));
                       key.current = idempotencyKey();
                     }}
                   />
-                  <Check
-                    label={t('gameUi.startAfter')}
-                    checked={autoStart}
-                    onChange={(event) => {
-                      setAutoStart(event.target.checked);
-                      key.current = idempotencyKey();
-                    }}
-                  />
-                  {autoStart && <Notice>{t('gameUi.startCapacity')}</Notice>}
-                </>
-              )}
-              {step === 3 && module && (
-                <Details
-                  values={[
-                    [t('gameUi.serverName'), name],
-                    [t('gameUi.chooseGame'), t(module.descriptor.nameKey)],
-                    ...preparedSummary.map(({ labelKey, value }): [string, string] => [
-                      t(labelKey),
-                      value,
-                    ]),
-                    [
-                      t('gameUi.project'),
-                      projects.data?.items.find((p) => p.id === projectId)?.name ??
-                        t('gameUi.noProject'),
-                    ],
-                    [t('gameUi.memory'), format.number(memory)],
-                    [t('gameUi.cpu'), format.number(cpu)],
-                    [t('gameUi.disk'), format.number(disk)],
-                    [t('gameUi.startAfter'), t(autoStart ? 'gameUi.yes' : 'gameUi.no')],
-                  ]}
+                )}
+                <Check
+                  label={t('gameUi.startAfter')}
+                  checked={autoStart}
+                  onChange={(e) => {
+                    setAutoStart(e.target.checked);
+                    key.current = idempotencyKey();
+                  }}
                 />
+                {autoStart && <p className="muted">{t('gameUi.startCapacity')}</p>}
+              </>
+            ))}
+          {step === finalStep && (
+            <>
+              <Details
+                values={[
+                  [t('gameUi.serverName'), name],
+                  ...preparedSummary.map(({ labelKey, value }): [string, string] => [
+                    t(labelKey),
+                    value,
+                  ]),
+                  [t('gameUi.memory'), format.number(memory)],
+                  [t('gameUi.cpu'), format.number(cpu)],
+                ]}
+              />
+              {agreement && (
+                <p className="installer-agreement">
+                  {t(agreement.textKey)}{' '}
+                  <a href={agreement.url} target="_blank" rel="noopener noreferrer">
+                    {t(agreement.linkKey)}
+                  </a>
+                  .
+                </p>
               )}
-            </fieldset>
-            <div className="actions">
-              {step > 0 && (
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={busy}
-                  onClick={() => setStep((previous) => previous - 1)}
-                >
-                  {t('web.back')}
-                </button>
-              )}
-              <button type="submit" disabled={busy || (step === 0 && !module)}>
-                {t(step === 3 ? 'web.createServer' : 'web.next')}
-              </button>
-            </div>
-          </form>
-        </Section>
-      )}
-    </Page>
+            </>
+          )}
+        </fieldset>
+        <footer className="installer-actions">
+          {step > 0 && (
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || playerPending}
+              onClick={() => {
+                setErrors({});
+                setFailure(undefined);
+                setStep((s) => s - 1);
+              }}
+            >
+              {t('web.back')}
+            </button>
+          )}
+          <button
+            type="submit"
+            disabled={busy || playerPending || !module || (step === resourcesStep && !quota.data)}
+          >
+            {t(step === finalStep ? 'web.createServer' : 'web.next')}
+          </button>
+        </footer>
+      </form>
+    </div>
   );
 }

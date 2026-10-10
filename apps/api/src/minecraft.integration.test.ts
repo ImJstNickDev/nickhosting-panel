@@ -199,6 +199,7 @@ describe('Minecraft backend API authorization and user projection', () => {
       ['GET', '/v1/owner/minecraft/manifest'],
       ['GET', '/v1/owner/minecraft/compatibility'],
       ['POST', '/v1/owner/minecraft/compatibility'],
+      ['POST', '/v1/owner/minecraft/catalog/sync'],
       ['POST', `/v1/owner/minecraft/compatibility/${id}/evidence`],
       ['PUT', `/v1/owner/minecraft/compatibility/${id}/availability`],
     ] as const) {
@@ -272,7 +273,12 @@ describe('Minecraft backend API authorization and user projection', () => {
     expect((await app.request('/v1/owner/runtime-mappings')).status).toBe(403);
     const catalog = await (await app.request('/v1/minecraft/choices')).json();
     const choice = catalog.find((entry: { id: string }) => entry.id === choiceId);
-    expect(choice).toEqual({ id: choiceId, version: '1.21.1', runtime: 'vanilla' });
+    expect(choice).toEqual({
+      id: choiceId,
+      version: '1.21.1',
+      releaseType: 'release',
+      runtime: 'vanilla',
+    });
     const wizard = await (await app.request('/v1/minecraft/wizard')).json();
     expect(wizard.choices.some((entry: { id: string }) => entry.id === choiceId)).toBe(true);
     const input = createInput(choice.id);

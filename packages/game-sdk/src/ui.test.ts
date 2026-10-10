@@ -278,3 +278,54 @@ it('accepts only registered artwork identifiers and fails safely without artwork
     createTrustedGameUiRegistry([module]).get('fixture-arena')?.descriptor.artwork,
   ).toBeUndefined();
 });
+
+describe('installer page contracts', () => {
+  it('requires existing correctly typed fields and unique resource presets', () => {
+    const descriptor = fixture();
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: {
+          ...descriptor.creation,
+          pages: [
+            {
+              id: 'version',
+              titleKey: 'games.fixture-arena.name',
+              field: 'missing',
+              kind: 'version-list',
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: {
+          ...descriptor.creation,
+          pages: [
+            {
+              id: 'players',
+              titleKey: 'games.fixture-arena.name',
+              field: 'mode',
+              kind: 'players',
+              lookupHandler: 'lookup',
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    const preset = {
+      id: 'small',
+      labelKey: 'games.fixture-arena.name',
+      memoryMiB: 2048,
+      cpuPercent: 100,
+    };
+    expect(
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: { ...descriptor.creation, resourcePresets: [preset, preset] },
+      }).success,
+    ).toBe(false);
+  });
+});

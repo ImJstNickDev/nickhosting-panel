@@ -30,6 +30,7 @@ import {
   registerMinecraftCombination,
   requireMinecraftChoice,
   setMinecraftAvailability,
+  syncMinecraftCatalog,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
@@ -76,6 +77,12 @@ export function registerMinecraftRoutes(
     );
     await registerGame(db, context, minecraftManifest, { gameId: 'minecraft-java', ...rollout });
     return c.body(null, 204);
+  });
+  app.post('/v1/owner/minecraft/catalog/sync', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await syncMinecraftCatalog(db, (await management()).adapter, context, await body(c), env),
+    );
   });
   app.get('/v1/owner/minecraft/compatibility', async (c) => {
     await owner(c);

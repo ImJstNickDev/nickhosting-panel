@@ -471,6 +471,10 @@ export async function getPlatformQuota(
   return {
     userId,
     storagePolicy: values.storagePolicy,
+    creationStorage: {
+      mode: values.storagePolicy === 'GLOBAL_POOL' ? 'shared' : 'limited',
+      defaultDiskMiB: values.defaultServerStorageMiB,
+    },
     limits,
     committed,
     remaining: {

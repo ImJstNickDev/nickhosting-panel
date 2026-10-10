@@ -165,3 +165,46 @@ A protocol adapter for Minecraft Java can explore `node-minecraft-protocol` as a
 - Idle detection with players joining/leaving, manual-stop suppression and wake after sleep.
 - Client protocol compatibility matrix, status-ping vs join behavior, unavailable resources replies.
 - First-party UI sections register translations and accessibility metadata.
+
+### Integration-owned Vanilla discovery — 2026-10-10
+
+The Owner no longer needs to author each Vanilla version's binding. The integration
+owns its Java ranges (8 through 1.16.5, 16 for 1.17–1.17.1, 17 for 1.18–1.20.4,
+21 for 1.20.5–1.21.11, 25 from 26.1), checked against hash-verified official
+metadata. Snapshot Java requirements come from metadata, not lexical ordering.
+Other loaders retain their own requirements. Download availability, Java suitability
+and protocol/game evidence remain distinct facts.
+
+Owner `POST /v1/owner/minecraft/catalog/sync` accepts a mapping, optional historical
+versions and a bounded cursor/limit. It reads the official catalog, validates an
+actual server download and registers combinations using the integration's known
+Vanilla egg variable/JAR contract. Repeated pages are idempotent. Unknown eggs
+report their unsupported contract; advanced explicit registration remains available.
+It does not run an installer, create a remote server or enable a version.
+
+A metadata candidate is not a certification. Existing exact mapping/binding signed
+evidence cannot be rebound to another local mapping, image or artifact. Newly
+registered choices remain disabled/unverified until their legitimate evidence and
+Owner availability prerequisites are satisfied. A Java range does not establish
+old-protocol, snapshot or future-release Gateway compatibility. In particular,
+ordinary users still cannot create from an empty verified catalog.
+
+Creation uses trusted SDK installer-page descriptors for a centered sequence,
+with no Vanilla content-source or project picker. Runtime choice lists use
+release types to reveal snapshots/historical candidates only on request, while
+server-side eligibility remains authoritative. MCHeads images are optional
+presentation; independent Mojang name/UUID validation authorizes no action and
+remains required when recording players. Preset player counts are resource
+suggestions, not performance guarantees. Shared storage is Owner-managed through
+`defaultServerStorageMiB` (environment `NH_DEFAULT_SERVER_STORAGE_MIB`); omitted
+disk is resolved server-side only in global-pool mode, then frozen in the durable
+request. Pool/headroom/backup accounting and optional personal budgets remain.
+
+Future project-context creation and game presets are tracked in issues
+[#23](https://github.com/ImJstNickDev/nickhosting-panel/issues/23) and
+[#24](https://github.com/ImJstNickDev/nickhosting-panel/issues/24), not implemented here.
+
+Discovery references: [Mojang's hash-bearing version manifest](https://piston-meta.mojang.com/mc/game/version_manifest_v2.json)
+and the [upstream Vanilla egg contract](https://raw.githubusercontent.com/pterodactyl/panel/develop/database/Seeders/eggs/minecraft/egg-vanilla-minecraft.json).
+The manifest is the v2 counterpart of the requested launcher catalog and supplies
+hashes for individual version metadata. No Pterodactyl installer code is copied.

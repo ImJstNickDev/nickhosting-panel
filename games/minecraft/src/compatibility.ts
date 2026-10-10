@@ -202,6 +202,7 @@ export function publicMinecraftChoice(id: string, combination: MinecraftCombinat
   return {
     id,
     version: combination.release,
+    releaseType: combination.releaseType,
     runtime: combination.profile,
     ...(combination.buildId ? { build: combination.buildId } : {}),
     ...(combination.loaderVersion ? { loaderVersion: combination.loaderVersion } : {}),

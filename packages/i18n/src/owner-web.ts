@@ -155,6 +155,7 @@ const settingNames: Record<string, readonly [string, string]> = {
   defaultUserMemoryMiB: ['Default active memory (MiB)', 'Memoria attiva predefinita (MiB)'],
   defaultUserCpuPercent: ['Default active CPU (%)', 'CPU attiva predefinita (%)'],
   defaultUserStorageMiB: ['Default storage (MiB)', 'Spazio predefinito (MiB)'],
+  defaultServerStorageMiB: ['Default server disk (MiB)', 'Disco predefinito per server (MiB)'],
   maxServersPerUser: ['Servers per user', 'Server per utente'],
   maxConcurrentProvisionsPerUser: [
     'Concurrent installations per user',

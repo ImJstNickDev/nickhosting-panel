@@ -65,7 +65,7 @@ export const createServerSchema = z
     mappingId: id,
     name,
     projectId: id.optional(),
-    limits: limitsSchema,
+    limits: limitsSchema.extend({ disk: limitsSchema.shape.disk.optional() }),
     autoStart: z.boolean().default(true),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
@@ -286,13 +286,23 @@ export async function createManagedServer(
   options: { minecraftInitialContent?: MinecraftPreparedContent } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
-  const value = parse(createServerSchema, input);
-  const hash = digest({ kind: 'create', subject: context.subjectUserId, value });
+  const request = parse(createServerSchema, input);
+  const hash = digest({ kind: 'create', subject: context.subjectUserId, value: request });
   return db.transaction().execute(async (tx) => {
-    await requestLock(tx, context, value.idempotencyKey);
-    const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
+    await requestLock(tx, context, request.idempotencyKey);
+    const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
     if (previous) return previous;
     await lockResources(tx);
+    const { values: config } = await getSettings(tx, env);
+    if (request.limits.disk === undefined && config.storagePolicy !== 'GLOBAL_POOL')
+      throw new DomainError('validation_failed');
+    const value = {
+      ...request,
+      limits: parse(limitsSchema, {
+        ...request.limits,
+        disk: request.limits.disk ?? config.defaultServerStorageMiB,
+      }),
+    };
     const mapping = await tx
       .selectFrom('runtime_egg_mappings')
       .selectAll()
@@ -355,7 +365,6 @@ export async function createManagedServer(
       if (!project || project.owner_id !== context.subjectUserId)
         throw new DomainError('forbidden');
     }
-    const { values: config } = await getSettings(tx, env);
     const count = await tx
       .selectFrom('managed_servers')
       .select(tx.fn.countAll<string>().as('n'))

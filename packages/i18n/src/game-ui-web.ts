@@ -1,4 +1,22 @@
 export const gameUiWebMessages: Record<string, [string, string]> = {
+  'gameUi.nameQuestion': ['Choose a name for your server', 'Scegli un nome per il tuo server'],
+  'gameUi.nameHint': ['Make it cool', 'Scegline uno bello'],
+  'gameUi.showAllVersions': ['Show all versions', 'Mostra tutte le versioni'],
+  'gameUi.version': ['Version', 'Versione'],
+  'gameUi.playerName': ['Player name', 'Nome giocatore'],
+  'gameUi.addPlayer': ['Add', 'Aggiungi'],
+  'gameUi.removePlayer': ['Remove {name}', 'Rimuovi {name}'],
+  'gameUi.playersQuestion': ['How many players will join?', 'Quanti giocatori giocheranno?'],
+  'gameUi.customResources': ['Custom', 'Personalizzato'],
+  'gameUi.resourceSuggestion': [
+    'Suggested limits. Performance depends on the world and server settings.',
+    'Limiti consigliati. Le prestazioni dipendono dal mondo e dalle impostazioni del server.',
+  ],
+  'gameUi.stepOf': ['Step {current} of {total}', 'Passaggio {current} di {total}'],
+  'gameUi.noGamesOwner': [
+    'Check runtime mappings and integration availability in Owner settings.',
+    'Controlla le associazioni runtime e la disponibilità delle integrazioni nelle impostazioni Owner.',
+  ],
   'gameUi.yes': ['Yes', 'Sì'],
   'gameUi.no': ['No', 'No'],
   'gameUi.chooseGame': ['Choose a game', 'Scegli un gioco'],
@@ -102,6 +120,73 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
   'gameUi.packVersion': ['Modpack version', 'Versione del modpack'],
   'gameUi.lookup': ['Find player', 'Cerca giocatore'],
   'gameUi.verifiedIdentity': ['Player identity verified', 'Identità del giocatore verificata'],
+  'gameAdmin.catalogReason.minecraft_catalog_mapping': [
+    'Select an enabled Vanilla mapping.',
+    'Seleziona un mapping Vanilla abilitato.',
+  ],
+  'gameAdmin.catalogReason.minecraft_egg_contract_unsupported': [
+    'The egg does not expose a recognized Vanilla version and JAR contract.',
+    'L’egg non espone un contratto riconosciuto per versione Vanilla e file JAR.',
+  ],
+  'gameAdmin.catalogReason.minecraft_server_download_unavailable': [
+    'No dedicated-server download is available.',
+    'Nessun download del server dedicato disponibile.',
+  ],
+  'gameAdmin.catalogReason.minecraft_java_unknown': [
+    'The Java requirement is not known.',
+    'Il requisito Java non è noto.',
+  ],
+  'gameAdmin.catalogReason.minecraft_java_policy_mismatch': [
+    'Official Java metadata disagrees with the integration policy.',
+    'I metadata Java ufficiali non corrispondono alle regole dell’integrazione.',
+  ],
+  'gameAdmin.catalogReason.minecraft_metadata_invalid': [
+    'Official version metadata is invalid.',
+    'I metadata ufficiali della versione non sono validi.',
+  ],
+  'gameAdmin.catalogReason.minecraft_metadata_unavailable': [
+    'Version metadata could not be retrieved. Try again.',
+    'Impossibile recuperare i metadata della versione. Riprova.',
+  ],
+  'gameAdmin.catalogReason.minecraft_metadata_oversized': [
+    'Version metadata exceeds the allowed size.',
+    'I metadata della versione superano la dimensione consentita.',
+  ],
+  'gameAdmin.catalogReason.minecraft_metadata_integrity': [
+    'Version metadata failed the integrity check.',
+    'Il controllo di integrità dei metadata non è riuscito.',
+  ],
+  'gameAdmin.catalogReason.minecraft_release_unavailable': [
+    'This version is not in the official catalog.',
+    'Questa versione non è nel catalogo ufficiale.',
+  ],
+  'gameAdmin.catalogReason.configuration_invalid': [
+    'Check the egg image and runtime mapping configuration.',
+    'Controlla l’immagine dell’egg e la configurazione del mapping runtime.',
+  ],
+  'gameAdmin.catalogReason.validation_failed': [
+    'The runtime configuration could not be validated.',
+    'Impossibile convalidare la configurazione del runtime.',
+  ],
+  'gameAdmin.syncCatalog': ['Discover Vanilla versions', 'Scopri versioni Vanilla'],
+  'gameAdmin.syncMore': ['Discover more versions', 'Scopri altre versioni'],
+  'gameAdmin.syncHelp': [
+    'The integration reads official versions and configures recognized eggs. No game servers are created.',
+    'L’integrazione legge le versioni ufficiali e configura gli egg riconosciuti. Non vengono creati server di gioco.',
+  ],
+  'gameAdmin.syncEvidence': [
+    'Discovery does not certify compatibility. Registered versions still need valid test evidence and availability.',
+    'La ricerca non certifica la compatibilità. Le versioni registrate richiedono ancora prove valide e abilitazione.',
+  ],
+  'gameAdmin.includeHistorical': [
+    'Include snapshots and historical versions',
+    'Includi snapshot e versioni storiche',
+  ],
+  'gameAdmin.registered': ['Registered', 'Registrata'],
+  'gameAdmin.advancedRegistration': [
+    'Advanced runtime registration',
+    'Registrazione runtime avanzata',
+  ],
   'gameAdmin.minecraft': ['Minecraft compatibility', 'Compatibilità Minecraft'],
   'gameAdmin.evidenceBoundary': [
     'Only recorded test evidence establishes compatibility. Runtime availability does not certify a version.',

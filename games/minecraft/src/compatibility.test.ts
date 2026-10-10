@@ -202,6 +202,7 @@ describe('Minecraft compatibility evidence', () => {
       id: 'choice',
       runtime: 'vanilla',
       version: '26.3',
+      releaseType: 'release',
     });
   });
   it('never guesses unknown or pre-Netty compatibility', () => {

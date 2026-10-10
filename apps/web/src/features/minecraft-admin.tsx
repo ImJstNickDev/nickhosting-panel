@@ -150,7 +150,11 @@ export function OwnerMinecraftPage() {
             refresh={() => void combinations.refetch()}
           />
         ))}
-      <RegisterCombination refresh={() => void combinations.refetch()} />
+      <SyncVanillaCatalog refresh={() => void combinations.refetch()} />
+      <details>
+        <summary>{t('gameAdmin.advancedRegistration')}</summary>
+        <RegisterCombination refresh={() => void combinations.refetch()} />
+      </details>
     </Page>
   );
 }
@@ -270,6 +274,107 @@ function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: 
         </ActionForm>
       </Section>
     </>
+  );
+}
+type CatalogBatch = {
+  items: { version: string; releaseType: string; id?: string; status: string; reason?: string }[];
+  nextCursor: number | null;
+  total: number;
+};
+function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
+  const t = useT();
+  const mappings = useQuery({
+    queryKey: ['runtime-mappings'],
+    queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
+  });
+  const eligible =
+    mappings.data?.filter((m) => m.game_id === 'minecraft-java' && m.runtime_id === 'vanilla') ??
+    [];
+  const [mappingId, setMappingId] = useState('');
+  const [all, setAll] = useState(false);
+  const [batch, setBatch] = useState<CatalogBatch>();
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<unknown>();
+  const selected = mappingId || (eligible.length === 1 ? eligible[0]?.id : '');
+  async function sync() {
+    if (!selected || busy) return;
+    setBusy(true);
+    setFailure(undefined);
+    try {
+      const response = await api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
+        body: { mappingId: selected, all, cursor: batch?.nextCursor ?? 0, limit: 20 },
+      });
+      setBatch(response);
+      refresh();
+    } catch (error) {
+      setFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Section title={t('gameAdmin.syncCatalog')}>
+      <Notice>{t('gameAdmin.syncHelp')}</Notice>
+      {mappings.isPending ? (
+        <Loading />
+      ) : mappings.error ? (
+        <ErrorNotice error={mappings.error} />
+      ) : !eligible.length ? (
+        <Empty text={t('gameAdmin.noMapping')} />
+      ) : (
+        <div className="stack">
+          <Select
+            label={t('gameAdmin.mapping')}
+            value={selected}
+            disabled={busy}
+            onChange={(event) => {
+              setMappingId(event.target.value);
+              setBatch(undefined);
+            }}
+          >
+            <option value="">{t('gameAdmin.mapping')}</option>
+            {eligible.map((mapping) => (
+              <option key={mapping.id} value={mapping.id}>
+                {mapping.runtime_id} · {mapping.id}
+              </option>
+            ))}
+          </Select>
+          <Check
+            label={t('gameAdmin.includeHistorical')}
+            checked={all}
+            disabled={busy}
+            onChange={(event) => {
+              setAll(event.target.checked);
+              setBatch(undefined);
+            }}
+          />
+          {failure !== undefined && <ErrorNotice error={failure} />}
+          <button type="button" disabled={busy || !selected} onClick={() => void sync()}>
+            {t(
+              busy
+                ? 'web.loading'
+                : batch?.nextCursor
+                  ? 'gameAdmin.syncMore'
+                  : 'gameAdmin.syncCatalog',
+            )}
+          </button>
+          {batch && (
+            <div aria-live="polite">
+              <p>{t('gameAdmin.syncEvidence')}</p>
+              <ul>
+                {batch.items.map((item) => (
+                  <li key={item.version}>
+                    {item.version}:{' '}
+                    {t(item.status === 'registered' ? 'gameAdmin.registered' : 'web.unavailable')}
+                    {item.reason && <> — {t(`gameAdmin.catalogReason.${item.reason}`)}</>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </Section>
   );
 }
 function RegisterCombination({ refresh }: { refresh: () => void }) {
