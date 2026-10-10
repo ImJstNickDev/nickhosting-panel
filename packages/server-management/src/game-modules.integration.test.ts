@@ -42,9 +42,7 @@ function fixtureHooks(): GameRuntimeHooks {
     processContent: vi.fn(async () => true),
     verifyRestore: vi.fn(async () => true),
     assertRuntimeImage: vi.fn(async () => ({ fixture: true })),
-    assertLaunchFiles: vi.fn(async () => {}),
     assertFileMutation: vi.fn(async () => {}),
-    invalidateLaunchEpoch: vi.fn(),
     verifyProcessEpoch: vi.fn(async (_id, _db, before, readAgain) => {
       if (before !== (await readAgain())) throw new DomainError('operation_uncertain');
       return before;

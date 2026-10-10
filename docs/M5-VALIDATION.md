@@ -2226,3 +2226,68 @@ the database reported sleeping; this is not a claim of a ready Minecraft backend
 Container health is healthy, and source hashes for data plane, safety validator and
 SDK match committed source. No game command was sent; live corrected start/sleep
 latencies await the Owner's next interactive test.
+
+### 2026-10-10 — Remaining transition latency and ordinary-start artifact policy
+
+The Owner's next interactive cycle still exposed delayed readiness and idle handling.
+Read-only correlation showed the second wake job took about 4.6 seconds from job
+creation to recorded external-effect intent (not proof that Redis dispatch itself
+consumed that time). Minecraft reported Done at 21:03:46.739 UTC; the first positive
+Gateway observation was timestamped 21:04:03.037. That timestamp denotes the start
+of its observation pass, not completion of the Core report. A later disconnect at
+21:04:13.325 was followed by the idle-stop job at 21:05:18.852 and stop handoff at
+21:05:21.508. These are pre-fix measurements, not post-fix performance claims.
+
+An isolated regression reproduced the key stale-state path: ordinary reconciliation
+could overwrite a freshly confirmed running process with Panel's cached `offline`
+or `starting` state, preventing Core from accepting readiness. Reconciliation now
+corroborates the exact successful power receipt against fresh host-bound process
+identity and a retained reservation. Changed/missing processes, failed jobs, later
+stops, manual suppression and unverified provenance cannot inherit that receipt.
+
+The Owner explicitly approved removing ordinary JAR downloads/hash checks. Previous
+checks streamed the installed artifact from Wings; the expected hash already came
+from persisted metadata, **not a Mojang lookup at each start**. Ordinary start/stop
+and process observations now perform no artifact download or file listing. Obsolete
+process artifact-cache/invalidation hooks were removed. Installation/content/restore
+verification remains. Out-of-band JAR edits are no longer detected by a startup hash.
+Provider ownership, immutable launch configuration, actual image, installed-state,
+process replacement and atomic resource checks remain mandatory. One fresh provider
+snapshot is reused within observation; independent image and launch-metadata reads
+run concurrently. Final effect authorization still rechecks current grants.
+
+Minecraft now supplies one coherent status/nonce sample for readiness and idle,
+instead of separate sequential exchanges. Unknown player counts remain unknown.
+Successful polling subtracts work duration from the period, yields at least 100 ms
+and never overlaps; failures retain their cooldown. Accepted positive waking
+observations trigger a fresh fully checked snapshot immediately. Quiescence returns
+“Server stopping” in EN/IT while denying wake/forwarding, without inventing an ETA.
+Aggregate diagnostics expose probe, report, total observation and snapshot timings.
+Polling, provider calls and real protocol readiness still take time; this does not
+claim millisecond detection or a measured post-fix end-to-end latency.
+
+Focused checks (existing isolated M2 test services, no infrastructure changes):
+
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/lifecycle.integration.test.ts` — **139 passed**, including 18 reconciliation regressions.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts packages/gateway-safety/src/validator.test.ts games/minecraft/src/protocol.test.ts games/minecraft/src/gateway-module.test.ts apps/game-gateway/src/main.test.ts` — agent's five-file run: **200 passed**. A new immediate-refresh test initially needed its fixture lease expectations corrected; targeted cadence/deployed-module follow-up: **4 passed, 103 filtered**. Follow-up command: `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts games/minecraft/src/protocol.test.ts -t 'elapsed Gateway polling cadence|deployed trusted module'`.
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/minecraft-queued.integration.test.ts` — **33 passed** at that revision; added stop/absent-container no-artifact regression **1 passed** targeted. Final added unconfirmed-installation regression first failed, exposing an installed-state guard lost with the old hash hook; the explicit guard was restored. Targeted `--testNamePattern 'refuses playable process evidence'` — **1 passed, 34 filtered**. These are incremental results, not a claimed full 35-case final rerun.
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/game-modules.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts --testNamePattern 'first-party|module|attests initial|declaration-backed Vanilla installation|partial-install|restor'` — **8 passed, 35 filtered**; installation artifact verification and partial-install fences retained.
+- `scripts/dev.sh pnpm typecheck` — root and WebPanel passed.
+- Changed-source `biome check` — **18 files passed**. No historical full-suite rerun.
+
+Independent review found one must-fix: running-process evidence must still require
+confirmed installation after removing the hash hook. The guard and regression above
+resolve it; follow-up review found no remaining must-fix. Historical failures above
+are preserved. SFTPGo #18 and the previously reported console fallback remain unchanged.
+
+No game server was created, powered, modified or deleted during this pass. No live
+Pterodactyl/Wings configuration, credentials, networks or persistent data were changed.
+API/worker use their existing source watchers. Gateway activation requires a new
+scoped restart approval; the earlier restart approval was already consumed. New
+live timing measurements require the Owner's interactive cycle after activation.
+
+Final staged governance: `python3 scripts/check-governance.py` passed (501 indexed
+text files, 106 reviewed PNGs, 430 relative links, four TOML files, 44 ignore cases);
+`git diff --cached --check` passed. No private infrastructure notes or credentials
+were staged. Rollback is a new revert commit of this patch, followed by a separately
+approved Gateway restart; there is no schema/data migration to reverse.

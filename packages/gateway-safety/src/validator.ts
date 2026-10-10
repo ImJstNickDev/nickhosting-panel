@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
 import {
   type GatewayEndpoint,
+  type GatewayProtocolObservation,
   type GatewayRoute,
   type GatewaySafety,
   gatewayRouteSchema,
@@ -160,7 +161,7 @@ export interface GatewaySafetyOptions {
   loadProof(route: GatewayRoute): Promise<GatewayReachabilityProof | null>;
   saveProof(route: GatewayRoute, proof: GatewayReachabilityProof): Promise<void>;
   /** Actual game-protocol challenge/readiness response from the Gateway process namespace. */
-  probeBackend(route: GatewayRoute): Promise<boolean>;
+  probeBackend(route: GatewayRoute): Promise<boolean | GatewayProtocolObservation>;
   /** Fresh nonce challenge response from a configured persistent probe at EXACT backend.address. */
   probeNode(route: GatewayRoute): Promise<boolean>;
   now?: () => number;
@@ -484,7 +485,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     };
   }
   async function proveBackend(state: Awaited<ReturnType<typeof inspect>>) {
-    if (!state.container.running || !(await options.probeBackend(state.route))) unavailable();
+    if (!state.container.running) unavailable();
+    const result = await options.probeBackend(state.route);
+    if (!(typeof result === 'boolean' ? result : result.ready === true)) unavailable();
     if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
     const proof: GatewayReachabilityProof = {
       version: 2,
@@ -498,6 +501,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     };
     await options.saveProof(state.route, proof);
     if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
+    // Return only the exact sample whose fresh binding/protocol proof was saved.
+    // Boolean-only adapters retain the legacy data-plane fallback.
+    return typeof result === 'boolean' ? undefined : result;
   }
   return {
     async validate(route, ownedBindings) {
@@ -522,7 +528,8 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       } else if (route.mode === 'online' && state.container.running) {
         // A failed game probe revokes forwarding, not an independently proven
         // public binding. Ownership/collision/topology failures above still throw.
-        const backendReady = await options.probeBackend(route).catch(() => false);
+        const result = await options.probeBackend(route).catch(() => false);
+        const backendReady = typeof result === 'boolean' ? result : result.ready === true;
         if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
         if (backendReady) return { backendReady: true };
       }

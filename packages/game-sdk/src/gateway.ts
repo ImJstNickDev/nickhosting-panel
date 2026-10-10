@@ -16,6 +16,13 @@ export const gatewayModeSchema = z.enum([
   'manually_stopped',
 ]);
 export type GatewayMode = z.infer<typeof gatewayModeSchema>;
+/** Ephemeral listener response; stopping is not persisted routing authority. */
+export type GatewayResponseMode = GatewayMode | 'stopping';
+export interface GatewayProtocolObservation {
+  ready: boolean;
+  idle?: boolean;
+  playerCount?: number;
+}
 
 export const gatewayEndpointSchema = z
   .object({
@@ -188,7 +195,7 @@ export interface GatewayProtocolSession {
     kind: 'need-more' | 'continue' | 'status' | 'join' | 'reject' | 'unsupported';
     consumedBytes: number;
   };
-  response(state: GatewayMode): { bytes?: Uint8Array; close: boolean };
+  response(state: GatewayResponseMode): { bytes?: Uint8Array; close: boolean };
 }
 
 /** Trusted game code. Implementations must distinguish real protocol readiness
@@ -197,10 +204,12 @@ export interface GatewayProtocolAdapter {
   readonly id: string;
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
-  response(context: GatewayProtocolContext, state: GatewayMode): Uint8Array | undefined;
+  response(context: GatewayProtocolContext, state: GatewayResponseMode): Uint8Array | undefined;
   /** Optional stateful TCP status/ping dialogue; old datagram/fixture adapters
    * retain the stateless classify/response contract. Used only while forwarding is fenced. */
   createSession?(context: GatewayProtocolContext): GatewayProtocolSession;
+  /** One fresh protocol exchange may establish readiness and explicit player idleness. */
+  observe?(context: GatewayProtocolContext): Promise<GatewayProtocolObservation>;
   probeReadiness(context: GatewayProtocolContext): Promise<{ ready: boolean }>;
   probeIdle?(context: GatewayProtocolContext): Promise<{ idle: boolean; playerCount?: number }>;
 }
@@ -218,5 +227,6 @@ export interface GatewaySafety {
     // biome-ignore lint/suspicious/noConfusingVoidType: Preserve existing strict validator implementations returning Promise<void>.
   ): Promise<void | { backendReady: boolean }>;
   /** Independent exact Docker binding identity and namespace reachability proof. */
-  validateBackend(route: GatewayRoute): Promise<void>;
+  // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
+  validateBackend(route: GatewayRoute): Promise<void | GatewayProtocolObservation>;
 }

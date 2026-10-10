@@ -159,6 +159,27 @@ describe('Gateway address collision semantics', () => {
 });
 
 describe('Gateway pre-bind and forwarding safety', () => {
+  it('returns the exact coherent sample after one fresh inventory, protocol challenge and saved proof', async () => {
+    const f = fixture();
+    const sample = { ready: true, idle: true, playerCount: 0 };
+    const probeBackend = vi.fn(async () => sample);
+    const validator = createGatewaySafetyValidator({ ...f.options, probeBackend });
+    expect(await validator.validateBackend(f.route)).toBe(sample);
+    expect(probeBackend).toHaveBeenCalledExactlyOnceWith(f.route);
+    expect(f.options.observer.observe).toHaveBeenCalledOnce();
+    expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+    expect(f.proof()).toMatchObject({ version: 2, routeId: f.route.id });
+  });
+  it('never turns a structured not-ready sample into binding proof', async () => {
+    const f = fixture();
+    const validator = createGatewaySafetyValidator({
+      ...f.options,
+      probeBackend: async () => ({ ready: false, idle: true, playerCount: 0 }),
+    });
+    await expect(validator.validateBackend(f.route)).rejects.toThrow();
+    expect(f.proof()).toBeNull();
+  });
+
   it('proves loopback provider remap, both real Docker bindings and readiness from current namespace', async () => {
     const f = fixture();
     await f.validator().validate(f.route, []);

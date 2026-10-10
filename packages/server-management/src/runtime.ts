@@ -476,7 +476,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
         action: latest.event === 'server:power.kill' ? 'kill' : 'stop',
       };
     },
-    observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
+    observeReconciliationProcessStart: async (
+      serverId: string,
+      connection: Kysely<Database>,
+      remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    ) => {
       await verifyObservationHost(serverId, connection);
       const server = await connection
         .selectFrom('managed_servers')
@@ -493,14 +497,38 @@ export async function createManagementRuntime(options: ManagementOptions) {
       await verifyManagedIdentity(
         connection,
         server,
-        await adapter.getApplicationServer(server.pterodactyl_id),
+        remote ?? (await adapter.getApplicationServer(server.pterodactyl_id)),
       );
+      return containerObserver.processStartedAt(server.pterodactyl_uuid);
+    },
+    observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
+      await verifyObservationHost(serverId, connection);
+      const server = await connection
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+      if (
+        !server?.pterodactyl_uuid ||
+        !server.pterodactyl_id ||
+        !containerObserver?.processStartedAt
+      )
+        throw new DomainError('configuration_invalid');
+      const remote = await adapter.getApplicationServer(server.pterodactyl_id);
+      await verifyManagedIdentity(connection, server, remote);
       const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
       const uuid = server.pterodactyl_uuid;
       const before = await processStartedAt(uuid);
       const module = await gameRuntime(connection, serverId);
       return module
-        ? module.verifyProcessEpoch(serverId, connection, before, () => processStartedAt(uuid))
+        ? module.verifyProcessEpoch(
+            serverId,
+            connection,
+            before,
+            () => processStartedAt(uuid),
+            remote,
+          )
         : before;
     },
     adapter,
@@ -536,9 +564,6 @@ export async function createManagementRuntime(options: ManagementOptions) {
     ) => {
       await verifyObservationHost(serverId, connection);
       await assertRuntimeImage(serverId, connection, false);
-      const module = await gameRuntime(connection, serverId);
-      module?.invalidateLaunchEpoch(serverId);
-      await module?.assertLaunchFiles(serverId, connection);
       await refreshObservations(connection);
       await reserveStart(connection, serverId, jobId, action, env);
     },

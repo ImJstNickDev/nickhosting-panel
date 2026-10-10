@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
@@ -14,9 +13,8 @@ import type {
   TrustedGameModule,
 } from './game-modules.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
-import { type GameLifecycleContext, verifyManagedIdentity } from './lifecycle.js';
+import type { GameLifecycleContext } from './lifecycle.js';
 import {
-  assertMinecraftLaunchInputs,
   assertMinecraftPlayerConfiguration,
   assertMinecraftRuntimePathsPreserved,
   configureMinecraftProvision,
@@ -190,14 +188,6 @@ export const minecraftModule: TrustedGameModule = {
     };
   },
 };
-interface LaunchAttestation {
-  proof: string;
-  complete: Promise<void>;
-}
-// Management runtimes are request/job scoped. Only successful artifact proofs
-// and their in-flight work may survive them; provider/auth checks never do.
-const launchAttestations = new WeakMap<Kysely<Database>, Map<string, LaunchAttestation>>();
-const maxLaunchAttestations = 1024;
 export interface MinecraftModuleOptions {
   db: Kysely<Database>;
   codec: SecretCodec;
@@ -222,10 +212,11 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     serverId: string,
     connection: Kysely<Database> = db,
     requireObserved = true,
+    snapshot?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
   ) {
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
-      .select('server_id')
+      .select(['server_id', 'installed'])
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!profile) {
@@ -238,14 +229,18 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       if (mapping?.game_id === 'minecraft-java') throw new DomainError('integration_unavailable');
       return;
     }
+    if (requireObserved && !profile.installed) throw new DomainError('integration_unavailable');
     const server = await connection
       .selectFrom('managed_servers')
       .selectAll()
       .where('id', '=', serverId)
       .executeTakeFirstOrThrow();
-    const remote = await adapter.getApplicationServer(server.pterodactyl_id ?? 0);
-    const observed = await observedImageDigest(connection, serverId, remote);
-    await assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter);
+    const remote = snapshot ?? (await adapter.getApplicationServer(server.pterodactyl_id ?? 0));
+    // Independent read-only Docker and launch metadata checks share this snapshot.
+    const [observed] = await Promise.all([
+      observedImageDigest(connection, serverId, remote),
+      assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter),
+    ]);
     const evidence = await requireMinecraftRuntimeImageEvidence(
       connection,
       serverId,
@@ -254,69 +249,6 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     );
     if (requireObserved && !evidence.verified) throw new DomainError('integration_unavailable');
     return evidence;
-  }
-  let launchEpochs = launchAttestations.get(db);
-  if (!launchEpochs) {
-    launchEpochs = new Map<string, LaunchAttestation>();
-    launchAttestations.set(db, launchEpochs);
-  }
-  const attestations = launchEpochs;
-  async function launchProof(
-    serverId: string,
-    connection: Kysely<Database>,
-    epoch: string,
-    image: Awaited<ReturnType<typeof assertMinecraftRuntimeImage>>,
-  ) {
-    const profile = await connection
-      .selectFrom('minecraft_server_profiles')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    const choice = await inspectMinecraftCombination(connection, profile.combination_id, env);
-    // Profile revision/manifest also invalidate proofs across API and worker
-    // processes after content changes or restoration. Current evidence and
-    // immutable artifact/binding metadata must agree even for the same process.
-    return createHash('sha256')
-      .update(
-        JSON.stringify({
-          epoch,
-          image,
-          profile,
-          choice: choice.row,
-          mapping: choice.mapping,
-          // SQL row order is not evidence identity.
-          evidence: choice.evidence.map((report) => JSON.stringify(report)).sort(),
-        }),
-      )
-      .digest('hex');
-  }
-  async function assertLaunchFiles(serverId: string, connection: Kysely<Database>) {
-    const profile = await connection
-      .selectFrom('minecraft_server_profiles')
-      .select('server_id')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    if (!profile) return;
-    const server = await connection
-      .selectFrom('managed_servers')
-      .selectAll()
-      .where('id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    await assertMinecraftLaunchInputs(
-      {
-        db: connection,
-        server,
-        adapter,
-        authorize: async () => {
-          // One fresh provider snapshot serves both checks within this authorization.
-          // Each later transfer boundary still obtains its own fresh snapshot.
-          const remote = await adapter.getApplicationServer(server.pterodactyl_id ?? 0);
-          await verifyManagedIdentity(connection, server, remote);
-          await assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter);
-        },
-      },
-      { env, observedImageDigest },
-    );
   }
   async function assertFileMutation(
     serverId: string,
@@ -368,7 +300,6 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         directory = [directory, component].filter(Boolean).join('/');
       }
     }
-    attestations.delete(serverId);
   }
   /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
   async function minecraftOptions(): Promise<MinecraftContentOptions> {
@@ -401,11 +332,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     verifyInitialInstallation: (context) =>
       verifyMinecraftInitialInstallation(context, { env, observedImageDigest }),
     assertRuntimeImage: assertMinecraftRuntimeImage,
-    assertLaunchFiles,
     assertFileMutation,
-    invalidateLaunchEpoch: (serverId) => {
-      attestations.delete(serverId);
-    },
     async configureProvision(context: GameLifecycleContext) {
       const profile = await context.db
         .selectFrom('minecraft_server_profiles')
@@ -425,49 +352,13 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         .executeTakeFirst();
       return profile ? verifyMinecraftRestore(context, await minecraftOptions()) : true;
     },
-    async verifyProcessEpoch(serverId, connection, before, readAgain) {
-      // Fresh on every caller, including cache hits: current provider identity,
-      // launch configuration, Docker image and support/evidence authorization.
-      const image = await assertMinecraftRuntimeImage(serverId, connection);
-      if (!image) return before;
-      if (before === null) {
-        attestations.delete(serverId);
-        if ((await readAgain()) !== null) throw new DomainError('operation_uncertain');
-        return null;
-      }
-      const proof = await launchProof(serverId, connection, before, image);
-      let entry = attestations.get(serverId);
-      if (entry?.proof !== proof) {
-        entry = { proof, complete: Promise.resolve() };
-        const pending = entry;
-        if (attestations.size >= maxLaunchAttestations)
-          attestations.delete(attestations.keys().next().value as string);
-        attestations.set(serverId, pending);
-        pending.complete = (async () => {
-          await assertLaunchFiles(serverId, connection);
-          // Never retain a proof acquired across a restart, profile change or
-          // explicit invalidation while the potentially large file streamed.
-          if (
-            (await readAgain()) !== before ||
-            (await launchProof(serverId, connection, before, image)) !== proof ||
-            attestations.get(serverId) !== pending
-          )
-            throw new DomainError('operation_uncertain');
-        })().catch((error: unknown) => {
-          if (attestations.get(serverId) === pending) attestations.delete(serverId);
-          throw error;
-        });
-      }
-      await entry.complete;
-      // Every singleflight waiter independently checks its process epoch and
-      // current DB inputs; a successful peer cannot bless a replacement process.
+    async verifyProcessEpoch(serverId, connection, before, readAgain, remote) {
+      // Ordinary power/readiness trusts the installed artifact. Bytes are verified
+      // by installation/content/restore workflows, not downloaded on every boot.
+      // Current provider configuration, image and exact process identity stay fresh.
+      await assertMinecraftRuntimeImage(serverId, connection, before !== null, remote);
       const after = await readAgain();
-      if (
-        before !== after ||
-        (await launchProof(serverId, connection, before, image)) !== proof ||
-        attestations.get(serverId) !== entry
-      )
-        throw new DomainError('operation_uncertain');
+      if (before !== after) throw new DomainError('operation_uncertain');
       return after;
     },
   };

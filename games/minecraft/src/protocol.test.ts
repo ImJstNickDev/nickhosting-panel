@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { createServer, type Socket } from 'node:net';
 import type { GatewayProtocolContext, GatewayProtocolSession } from '@nickhosting/game-sdk';
 import { afterEach, describe, expect, it } from 'vitest';
+import { createMinecraftGatewayModuleAdapter } from './gateway-module.js';
 import {
   createMinecraftProtocolAdapter,
   encodeMinecraftVarInt,
@@ -250,10 +251,23 @@ describe('Minecraft exact-registry offline protocol sessions (fixtures, not real
       expect(current.classify(input).kind).toBe('unsupported');
     }
   });
+  it.each(['en', 'it'] as const)(
+    'reports stopping without a fabricated countdown in %s',
+    (locale) => {
+      const current = session(context('1.20.5', locale));
+      current.classify(handshake(766, 2));
+      expect(decodeJson(current.response('stopping').bytes).text).toBe(
+        locale === 'en'
+          ? 'Server stopping. Please try again shortly.'
+          : 'Server in spegnimento. Riprova tra poco.',
+      );
+    },
+  );
   it('generates all offline state messages without protocol IDs in the user message', () => {
     for (const mode of [
       'sleeping',
       'waking',
+      'stopping',
       'blocked',
       'maintenance',
       'manually_stopped',
@@ -273,10 +287,16 @@ afterEach(async () => {
 });
 async function statusFixture(
   status: unknown,
-  options: { badPing?: boolean; silent?: boolean; partial?: boolean } = {},
+  options: {
+    badPing?: boolean;
+    silent?: boolean;
+    partial?: boolean;
+    onConnection?: () => void;
+  } = {},
 ) {
   const clients = new Set<Socket>();
   const server = createServer((socket) => {
+    options.onConnection?.();
     clients.add(socket);
     socket.once('close', () => clients.delete(socket));
     socket.on('error', () => {});
@@ -317,6 +337,60 @@ async function statusFixture(
   return ctx;
 }
 describe('actual socket Minecraft status probes against isolated protocol fixtures', () => {
+  it('the deployed trusted module exposes a single coherent observation with its evidence gate', async () => {
+    let connections = 0;
+    const ctx = await statusFixture(
+      { version: { protocol: 766 }, players: { online: 0 } },
+      {
+        onConnection: () => {
+          connections++;
+        },
+      },
+    );
+    if (!ctx.route.protocol) throw new Error('fixture');
+    ctx.route.protocol.minecraft = {
+      release: '1.20.5',
+      protocolId: 766,
+      family: 'netty',
+      transfer: true,
+      acceptsTransfers: false,
+      choiceId: randomUUID(),
+      choiceDigest: 'a'.repeat(64),
+      evidenceRunId: randomUUID(),
+      evidenceExpiresAt: new Date(Date.now() + 60000).toISOString(),
+    };
+    expect(await createMinecraftGatewayModuleAdapter().observe?.(ctx)).toEqual({
+      ready: true,
+      idle: true,
+      playerCount: 0,
+    });
+    expect(connections).toBe(1);
+  });
+
+  it.each([0, 4, undefined])(
+    'collects readiness and explicit player count=%s in one status/ping exchange',
+    async (count) => {
+      let connections = 0;
+      const ctx = await statusFixture(
+        {
+          version: { protocol: 766 },
+          ...(count === undefined ? {} : { players: { online: count } }),
+        },
+        {
+          onConnection: () => {
+            connections++;
+          },
+        },
+      );
+      expect(await adapter.observe?.(ctx)).toEqual({
+        ready: true,
+        idle: count === 0,
+        ...(count === undefined ? {} : { playerCount: count }),
+      });
+      expect(connections).toBe(1);
+    },
+  );
+
   it('requires matching protocol status plus nonce echo and reports explicit zero player count', async () => {
     const ctx = await statusFixture(
       { version: { protocol: 766 }, players: { online: 0 } },

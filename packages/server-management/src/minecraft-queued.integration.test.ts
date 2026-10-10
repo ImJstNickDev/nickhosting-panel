@@ -9,6 +9,7 @@ import type {
 } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reserveStart } from './admission.js';
+import * as hostResources from './host-resources.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
   inspectMinecraftCombination,
@@ -518,7 +519,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     const observer = {
       preflight: vi.fn(async () => {}),
       stopped: vi.fn(async () => true),
-      processStartedAt: vi.fn(async () => '2026-10-09T10:00:00.000000001Z'),
+      processStartedAt: vi.fn(async (): Promise<string | null> => '2026-10-09T10:00:00.000000001Z'),
       imageIdentity: vi.fn(async (): Promise<string | null> => imageDigest),
     };
     const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
@@ -683,31 +684,28 @@ describe('host-bound Minecraft runtime image evidence', () => {
     );
     expect(power).not.toHaveBeenCalled();
   });
-  it('shares fresh provider snapshots within image and launch authorization checks', async () => {
+  it('uses one fresh provider snapshot for image authorization without inspecting runtime files', async () => {
     const value = await installed();
     const getServer = vi.spyOn(value.external.adapter, 'getApplicationServer').mockClear();
+    const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
+    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
     await value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false);
     expect(getServer).toHaveBeenCalledTimes(1);
-    getServer.mockClear();
-    const getEgg = vi.spyOn(value.external.adapter, 'getEgg').mockClear();
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    // Identity-only observation + image authorization, then one server snapshot
-    // per launch-config authorization (including each transfer boundary).
-    expect(getServer.mock.calls.length).toBe(getEgg.mock.calls.length + 2);
+    expect(listFiles).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
   });
-  it('rehashes launch inputs for each process epoch and rejects an out-of-band file change', async () => {
+  it('reserves and authorizes an ordinary start without listing or downloading the runtime JAR', async () => {
     const value = await installed();
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(1);
-    value.observer.processStartedAt.mockResolvedValue('2026-10-09T11:00:00.000000001Z');
-    vi.mocked(value.external.adapter.downloadFile).mockResolvedValue({
-      body: new Response(Buffer.alloc(serverJar.length, 0x65)).body,
-    } as Awaited<ReturnType<PterodactylAdapter['downloadFile']>>);
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('conflict');
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
+    const sample = vi.spyOn(hostResources, 'sampleLocalResources').mockImplementation(async () => ({
+      totalMemoryMiB: 8192,
+      availableMemoryMiB: 8192,
+      cpuCapacityPercent: 800,
+      cpuBusyPercent: 0,
+      availableDiskMiB: 1000000,
+      observedAt: new Date().toISOString(),
+    }));
+    const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
+    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
     const job = await enqueueServerOperation(
       f.db,
       f.context,
@@ -715,16 +713,74 @@ describe('host-bound Minecraft runtime image evidence', () => {
       { action: 'start', idempotencyKey: randomUUID() },
       env,
     );
-    const power = vi.fn(async () => {});
-    Object.assign(value.external.adapter, { power });
-    expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
-      'failed',
-    );
-    expect(power).not.toHaveBeenCalled();
+    try {
+      await value.management.lifecycle.reserveStart(value.serverId, job.jobId, 'start', f.db);
+      await value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db);
+      expect(sample).toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ server_id: value.serverId });
+      expect(listFiles).not.toHaveBeenCalled();
+      expect(download).not.toHaveBeenCalled();
+    } finally {
+      sample.mockRestore();
+    }
   });
-  it('shares one launch hash across request runtimes and concurrent observations', async () => {
+  it('authorizes stop and observes an absent stopped container without artifact I/O', async () => {
     const value = await installed();
-    await value.management.assertMinecraftRuntimeImage(value.serverId);
+    const job = await enqueueServerOperation(
+      f.db,
+      f.context,
+      value.serverId,
+      { action: 'stop', idempotencyKey: randomUUID() },
+      env,
+    );
+    const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
+    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
+    value.observer.imageIdentity.mockResolvedValue(null);
+    value.observer.processStartedAt.mockResolvedValue(null);
+    await value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db);
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).resolves.toBeNull();
+    expect(listFiles).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+  });
+  it('refuses playable process evidence before installation is confirmed', async () => {
+    const value = await installed();
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: false })
+      .where('server_id', '=', value.serverId)
+      .execute();
+    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).rejects.toThrow('integration_unavailable');
+    expect(download).not.toHaveBeenCalled();
+  });
+  it('observes repeated and replacement process epochs without reading runtime files', async () => {
+    const value = await installed();
+    const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
+    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
+    const first = await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).resolves.toBe(first);
+    const replacement = '2026-10-09T11:00:00.000000001Z';
+    value.observer.processStartedAt.mockResolvedValue(replacement);
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).resolves.toBe(replacement);
+    expect(listFiles).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+  });
+  it('checks current launch configuration across concurrent request runtimes without artifact transfers', async () => {
+    const value = await installed();
     const other = await createManagementRuntime({
       db: f.db,
       codec: value.codec,
@@ -732,51 +788,21 @@ describe('host-bound Minecraft runtime image evidence', () => {
       containerObserver: value.observer,
       env,
     });
+    const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
+    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
     await Promise.all([
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
       other.lifecycle.observeProcessStart(value.serverId, f.db),
     ]);
-    await other.lifecycle.observeProcessStart(value.serverId, f.db);
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(1);
-    // A reused artifact proof must not bypass fresh provider launch checks.
     const remote = await value.external.adapter.getApplicationServer(1);
     remote.container.startup_command = 'java -jar foreign.jar';
     await expect(other.lifecycle.observeProcessStart(value.serverId, f.db)).rejects.toThrow(
       'provenance_mismatch',
     );
+    expect(listFiles).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
   });
-  it('does not share artifact proofs between different database handles', async () => {
-    const value = await installed();
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    const otherDb = f.db.withPlugin({
-      transformQuery: ({ node }) => node,
-      transformResult: async ({ result }) => result,
-    });
-    const other = await createManagementRuntime({
-      db: otherDb,
-      codec: value.codec,
-      adapter: value.external.adapter,
-      containerObserver: value.observer,
-      env,
-    });
-    await other.lifecycle.observeProcessStart(value.serverId, otherDb);
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
-  });
-  it('rejects explicit invalidation while the launch hash is in flight', async () => {
-    const value = await installed();
-    vi.mocked(value.external.adapter.downloadFile).mockImplementationOnce(async () => {
-      await value.management.assertFileMutation(value.serverId, ['world/level.dat']);
-      return { body: new Response(serverJar).body } as Awaited<
-        ReturnType<PterodactylAdapter['downloadFile']>
-      >;
-    });
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('operation_uncertain');
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
-  });
-  it('rechecks mapping drift before using a cached artifact proof', async () => {
+  it('rejects mapping drift on a later process observation', async () => {
     const value = await installed();
     await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
     await f.db
@@ -787,60 +813,6 @@ describe('host-bound Minecraft runtime image evidence', () => {
     await expect(
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).rejects.toThrow('provenance_mismatch');
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(1);
-  });
-  it('invalidates a shared proof after profile restoration in another process', async () => {
-    const value = await installed();
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    await f.db
-      .updateTable('minecraft_server_profiles')
-      .set({ updated_at: new Date(Date.now() + 1000) })
-      .where('server_id', '=', value.serverId)
-      .execute();
-    vi.mocked(value.external.adapter.downloadFile).mockResolvedValue({
-      body: new Response(Buffer.alloc(serverJar.length, 0x65)).body,
-    } as Awaited<ReturnType<PterodactylAdapter['downloadFile']>>);
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('conflict');
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
-    // Failures are not memoized as a successful process attestation.
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('conflict');
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(3);
-  });
-  it('rejects a process replaced while its shared artifact hash is in flight', async () => {
-    const value = await installed();
-    vi.mocked(value.external.adapter.downloadFile).mockImplementation(async () => {
-      value.observer.processStartedAt.mockResolvedValue('2026-10-09T11:00:00.000000001Z');
-      return { body: new Response(serverJar).body } as Awaited<
-        ReturnType<PterodactylAdapter['downloadFile']>
-      >;
-    });
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('operation_uncertain');
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
-  });
-  it('invalidates a same-process proof when trusted artifact metadata changes', async () => {
-    const value = await installed();
-    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
-    await f.db
-      .updateTable('minecraft_combinations')
-      .set({
-        resolved_runtime: JSON.stringify({
-          ...runtime,
-          artifacts: [{ ...runtime.artifacts[0], sha256: '0'.repeat(64) }],
-        }),
-      })
-      .where('id', '=', choiceId)
-      .execute();
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('conflict');
-    expect(value.external.adapter.downloadFile).toHaveBeenCalledTimes(2);
   });
   it('accepts the standard derived allocation-limit metadata only when both provider fields match the immutable mapping', async () => {
     const value = await installed();
@@ -891,8 +863,8 @@ describe('host-bound Minecraft runtime image evidence', () => {
     await expect(
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).resolves.toEqual(expect.any(String));
-    // Initial epoch, shared hash completion, then this caller's final fence.
-    expect(value.observer.processStartedAt).toHaveBeenCalledTimes(3);
+    // Initial epoch plus the final replacement fence, without artifact I/O.
+    expect(value.observer.processStartedAt).toHaveBeenCalledTimes(2);
   });
   it('rejects container replacement between image and process observations', async () => {
     const value = await installed();

@@ -604,6 +604,57 @@ describe('persistent Gateway fixture forwarding', () => {
 });
 
 describe('sleep protocol handling and observations', () => {
+  it.each([0, 2, undefined])(
+    'reuses one fresh safety-validated protocol sample (players=%s)',
+    async (playerCount) => {
+      const backend = await tcpFixture();
+      const r = route(backend.port, 'tcp', 'waking');
+      const handler = fixtureProtocol({
+        observe: vi.fn(async () => ({ ready: true, idle: true, playerCount: 0 })),
+        probeReadiness: vi.fn(async () => ({ ready: true })),
+        probeIdle: vi.fn(async () => ({ idle: true, playerCount: 0 })),
+      });
+      const validateBackend = vi.fn(async () => ({
+        ready: true,
+        idle: playerCount === 0,
+        playerCount,
+      }));
+      const f = plane([r], { protocols: [handler], safety: { validateBackend } });
+      await f.gateway.start();
+      await f.gateway.observe();
+      expect(validateBackend).toHaveBeenCalledExactlyOnceWith(r);
+      expect(handler.observe).not.toHaveBeenCalled();
+      expect(handler.probeReadiness).not.toHaveBeenCalled();
+      expect(handler.probeIdle).not.toHaveBeenCalled();
+      expect(f.control.reportObservation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ready: true,
+          idle: playerCount === 0,
+          playerCount,
+        }),
+      );
+      // Start and immediate post-readiness reconciliation, both through full bind validation.
+      expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
+    },
+  );
+  it('uses a coherent adapter sample once with a legacy safety validator', async () => {
+    const backend = await tcpFixture();
+    const handler = fixtureProtocol({
+      observe: vi.fn(async () => ({ ready: true, idle: false, playerCount: 3 })),
+      probeReadiness: vi.fn(async () => ({ ready: true })),
+      probeIdle: vi.fn(async () => ({ idle: true, playerCount: 0 })),
+    });
+    const f = plane([route(backend.port)], { protocols: [handler] });
+    await f.gateway.start();
+    await f.gateway.observe();
+    expect(handler.observe).toHaveBeenCalledOnce();
+    expect(handler.probeReadiness).not.toHaveBeenCalled();
+    expect(handler.probeIdle).not.toHaveBeenCalled();
+    expect(f.control.reportObservation).toHaveBeenCalledWith(
+      expect.objectContaining({ ready: true, idle: false, playerCount: 3 }),
+    );
+  });
+
   it('answers fragmented passive status without waking and coalesces burst intentional joins', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'sleeping');
@@ -848,6 +899,7 @@ describe('sleep protocol handling and observations', () => {
         await f.gateway.applySnapshot(f.snapshot([r], 1, 10000));
       }
       expect(f.control.reportObservation).not.toHaveBeenCalled();
+      vi.mocked(f.control.fetchSnapshot).mockImplementation(async () => f.snapshot([r], 1, 10000));
       readiness.resolve({ ready: true });
       await observing;
       expect(f.control.reportObservation).toHaveBeenCalledOnce();
@@ -1153,8 +1205,8 @@ describe('sleep protocol handling and observations', () => {
     await vi.waitFor(() => expect(reportObservation).toHaveBeenCalledOnce());
     expect(f.gateway.health().quiescentServers).toBe(1);
     for (const request of ['STATUS\n', 'JOIN\n']) {
-      expect((await exchange(tcp.port, request)).toString()).toBe('blocked\n');
-      expect((await datagram(udp.port, request)).toString()).toBe('blocked\n');
+      expect((await exchange(tcp.port, request)).toString()).toBe('stopping\n');
+      expect((await datagram(udp.port, request)).toString()).toBe('stopping\n');
     }
     expect((await exchange(tcp.port, 'late-player').catch(() => Buffer.alloc(0))).length).toBe(0);
     const client = createSocket('udp4');
@@ -1186,8 +1238,8 @@ describe('sleep protocol handling and observations', () => {
     const stopped = [a, b].map((r) => ({ ...r, revision: 4, mode: 'sleeping' as const }));
     await f.gateway.applySnapshot(f.snapshot(stopped, 4));
     // Core confirming stop does not cancel an idle-report fence early.
-    expect((await exchange(tcp.port, 'JOIN\n')).toString()).toBe('blocked\n');
-    expect((await datagram(udp.port, 'STATUS\n')).toString()).toBe('blocked\n');
+    expect((await exchange(tcp.port, 'JOIN\n')).toString()).toBe('stopping\n');
+    expect((await datagram(udp.port, 'STATUS\n')).toString()).toBe('stopping\n');
     expect(f.control.requestWake).not.toHaveBeenCalled();
     expect(f.gateway.metrics()).toMatchObject({ tcpBytesToBackend: 0, udpBytesToBackend: 0 });
   });
@@ -1223,6 +1275,7 @@ describe('sleep protocol handling and observations', () => {
       protocols: [
         {
           ...minecraft,
+          observe: async () => ({ ready: true, idle: true, playerCount: 0 }),
           probeReadiness: async () => ({ ready: true }),
           probeIdle: async () => ({ idle: true, playerCount: 0 }),
         },
@@ -1248,11 +1301,9 @@ describe('sleep protocol handling and observations', () => {
       true,
     );
     const status = readMinecraftFrame(reply, 1024);
-    expect(status?.body.toString()).toContain('cannot start right now');
+    expect(status?.body.toString()).toContain('Server stopping');
     expect(reply.subarray(status?.bytes)).toEqual(frameMinecraftPacket(1, nonce));
-    expect((await exchange(backend.port, handshake(2))).toString()).toContain(
-      'cannot start right now',
-    );
+    expect((await exchange(backend.port, handshake(2))).toString()).toContain('Server stopping');
     expect(f.control.requestWake).not.toHaveBeenCalled();
     expect(f.gateway.metrics().tcpBytesToBackend).toBe(0);
     clock += 60001;
@@ -1635,4 +1686,40 @@ describe('lease, reconciliation and shutdown safety', () => {
     expect(f.gateway.health().udpSessions).toBe(1);
     expect(f.gateway.metrics().udpDropped).toBeGreaterThanOrEqual(1);
   });
+});
+
+describe('elapsed Gateway polling cadence', () => {
+  it.each([
+    { duration: 1200, fail: false, nextStart: 4000 },
+    { duration: 3000, fail: false, nextStart: 5100 },
+    { duration: 1200, fail: true, nextStart: 5200 },
+  ])(
+    'bounds cadence without overlap or a failure hot loop: $duration ms work, failed=$fail',
+    async ({ duration, fail, nextStart }) => {
+      vi.useFakeTimers();
+      const f = plane([], { policy: { pollIntervalMs: 2000, observationIntervalMs: 60000 } });
+      let active = 0,
+        maximum = 0;
+      try {
+        await f.gateway.start();
+        vi.mocked(f.control.fetchSnapshot).mockImplementation(async () => {
+          active++;
+          maximum = Math.max(maximum, active);
+          await new Promise<void>((resolve) => setTimeout(resolve, duration));
+          active--;
+          if (fail) throw new Error('isolated control unavailable');
+          return f.snapshot();
+        });
+        await vi.advanceTimersByTimeAsync(nextStart - 1);
+        expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(3);
+        expect(maximum).toBe(1);
+        await vi.advanceTimersByTimeAsync(duration);
+      } finally {
+        await f.gateway.stop();
+        vi.useRealTimers();
+      }
+    },
+  );
 });

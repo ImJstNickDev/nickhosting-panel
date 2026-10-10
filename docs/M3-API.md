@@ -161,14 +161,22 @@ A client cannot supply the Docker process timestamp. Ordinary idle reports measu
 the window; only a bounded, validated forwarding fence can authorize automatic
 stop after the window expires. See ADR 0012 for timeout/restart behavior.
 
-Successful Minecraft launch-file attestations are bounded and shared across runtime
-factories within the same API/worker database instance. Concurrent identical checks
-share one stream. This does not cache provider keys, permissions or the management
-runtime: current provider/image checks and Docker process identity remain fresh.
-The proof fingerprint includes the exact process epoch, installed profile/content
-metadata, runtime binding and evidence; mutation invalidation and changed metadata
-invalidate the proof. Each new process still needs its initial artifact check.
-API and worker processes do not share an unverified cross-process cache.
+The Owner-approved M5 policy (2026-10-10) removes runtime artifact transfers from
+ordinary start/stop and Gateway process observation. Installed-state, current
+provider identity/configuration, image and exact process epoch remain verified;
+installation/content/restore workflows retain their artifact verification. There is
+no process-epoch JAR cache or cold-start hash download. Manual out-of-band JAR edits
+are not detected by an ordinary startup hash. See [M4 contracts](M4-API.md).
+
+A protocol adapter may return a coherent `observe()` sample containing readiness,
+idle and player count. The safety validator returns that same authenticated backend
+sample to the data plane, avoiding separate readiness/idle exchanges. Unknown
+player count never establishes idle. Successful poll cycles subtract elapsed work
+from the configured period, with a 100 ms minimum yield and no overlap; failed
+cycles retain their full cooldown. A positive waking observation requests a fresh,
+fully validated snapshot immediately. Aggregate diagnostics expose last/maximum
+observation duration, probe/report duration and last snapshot duration. They do not
+claim that polling detects transitions instantaneously.
 
 ## Configuration and deployment prerequisites
 

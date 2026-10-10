@@ -60,18 +60,17 @@ export interface GameRuntimeHooks {
     connection: Kysely<Database>,
     requireObserved: boolean,
   ): Promise<unknown>;
-  assertLaunchFiles(serverId: string, connection: Kysely<Database>): Promise<void>;
   assertFileMutation(
     serverId: string,
     paths: readonly string[],
     connection: Kysely<Database>,
   ): Promise<void>;
-  invalidateLaunchEpoch(serverId: string): void;
   verifyProcessEpoch(
     serverId: string,
     connection: Kysely<Database>,
     before: string | null,
     readAgain: () => Promise<string | null>,
+    remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
   ): Promise<string | null>;
 }
 /** Composition API for compiled modules and isolated fixtures. No HTTP/config

@@ -151,5 +151,6 @@ describe('production Minecraft Gateway module', () => {
     expect(session?.response('sleeping')).toEqual({ close: true });
     expect(await adapter.probeReadiness(context)).toEqual({ ready: false });
     expect(await adapter.probeIdle?.(context)).toEqual({ idle: false });
+    expect(await adapter.observe?.(context)).toEqual({ ready: false, idle: false });
   });
 });

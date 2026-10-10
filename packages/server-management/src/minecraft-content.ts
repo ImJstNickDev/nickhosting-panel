@@ -849,8 +849,8 @@ export async function verifyMinecraftInitialInstallation(
     files: verified.verified,
   };
 }
-/** Read-only launch attestation. Re-run before power and for a new process epoch:
- * SFTP/provider writes do not pass through browser mutation authorization. */
+/** Explicit read-only artifact audit. Ordinary power and process observations
+ * do not invoke this: installation/content/restore workflows verify their outputs. */
 export async function assertMinecraftLaunchInputs(
   context: MinecraftReadContext,
   options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,

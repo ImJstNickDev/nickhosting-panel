@@ -94,6 +94,13 @@ export interface LifecycleOptions {
   /** Trusted host-bound running process start. Null proves non-running/absent;
    * unavailability must throw. Production always supplies this observer. */
   observeProcessStart?: (serverId: string, connection: Kysely<Database>) => Promise<string | null>;
+  /** Fresh host/registry-bound process epoch only, without re-attesting game files.
+   * Reconciliation may use it only to corroborate a durable successful power receipt. */
+  observeReconciliationProcessStart?: (
+    serverId: string,
+    connection: Kysely<Database>,
+    remote?: ApplicationServer,
+  ) => Promise<string | null>;
   /** Successful interactive provider stop/kill plus matching exact terminal process evidence. */
   observeExternalStop?: (
     serverId: string,
@@ -1763,6 +1770,83 @@ export async function reconcileManagedServer(
           current_state: 'offline',
           resources: { ...current.resources, memory_bytes: 0, cpu_absolute: 0 },
         };
+    }
+    if (
+      !externalStop &&
+      !server.active_operation_id &&
+      server.intent !== 'manually_stopped' &&
+      server.intent !== 'maintenance' &&
+      installed(remote) &&
+      ['offline', 'starting'].includes(current.current_state) &&
+      options.observeReconciliationProcessStart
+    ) {
+      const latestPower = await db
+        .selectFrom('server_operations as operation')
+        .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+        .select([
+          'operation.action',
+          'operation.phase',
+          'operation.plan',
+          'operation.effect_state',
+          'operation.effect_started_at',
+          'job.state as job_state',
+        ])
+        .where('operation.server_id', '=', server.id)
+        .where('operation.action', 'in', [
+          'start',
+          'restart',
+          'stop',
+          'provision',
+          'reinstall',
+          'wipe',
+          'delete',
+          'restore',
+        ])
+        .orderBy('operation.updated_at', 'desc')
+        .orderBy('operation.job_id', 'desc')
+        .executeTakeFirst();
+      const restart = latestPower?.action === 'restart';
+      const epoch = processStartTime(
+        restart
+          ? latestPower?.plan.restartProcessStartedAt
+          : latestPower?.plan.startProcessStartedAt,
+      );
+      const confirmed = processStartTime(
+        restart ? latestPower?.plan.restartConfirmedAt : latestPower?.plan.startConfirmedAt,
+      );
+      const reservation = await db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', server.id)
+        .executeTakeFirst();
+      if (
+        reservation &&
+        latestPower &&
+        ['start', 'restart', 'provision'].includes(latestPower.action) &&
+        latestPower.phase === 'complete' &&
+        latestPower.job_state === 'succeeded' &&
+        latestPower.effect_state === 'confirmed' &&
+        latestPower.effect_started_at &&
+        (restart ? latestPower.plan.restartConfirmed : latestPower.plan.startConfirmed) === true &&
+        epoch !== null &&
+        confirmed !== null &&
+        epoch > BigInt(latestPower.effect_started_at.getTime()) * 1_000_000n &&
+        confirmed >= epoch &&
+        confirmed <= BigInt(now.getTime()) * 1_000_000n
+      ) {
+        try {
+          const observed = processStartTime(
+            await options.observeReconciliationProcessStart(server.id, db, remote),
+          );
+          // Panel caches resources across power transitions. Only a fresh proof
+          // of the exact durably confirmed epoch supersedes that stale sample;
+          // another process, unavailable observer or stop never inherits it.
+          if (observed === epoch) current = { ...current, current_state: 'running' };
+        } catch (error) {
+          if (error instanceof DomainError && error.code === 'provenance_mismatch') throw error;
+          // Preserve conservative cached-state accounting; never release capacity.
+        }
+      }
     }
     if (
       current.current_state !== 'offline' &&

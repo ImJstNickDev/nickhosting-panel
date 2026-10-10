@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import type {
-  GatewayMode,
   GatewayProtocolAdapter,
   GatewayProtocolContext,
   GatewayProtocolSession,
+  GatewayResponseMode,
   GatewayRoute,
 } from '@nickhosting/game-sdk';
 
@@ -32,6 +32,7 @@ const messages = {
   en: {
     sleeping: 'Server sleeping. Join to start it.',
     waking: 'Server starting. Please reconnect shortly.',
+    stopping: 'Server stopping. Please try again shortly.',
     blocked: 'Server cannot start right now. Please try again later.',
     maintenance: 'Server under maintenance. Please try again later.',
     manually_stopped: 'Server stopped. Start it from the panel.',
@@ -42,6 +43,7 @@ const messages = {
   it: {
     sleeping: 'Server in sospensione. Connettiti per avviarlo.',
     waking: 'Server in avvio. Riconnettiti tra poco.',
+    stopping: 'Server in spegnimento. Riprova tra poco.',
     blocked: 'Impossibile avviare il server ora. Riprova più tardi.',
     maintenance: 'Server in manutenzione. Riprova più tardi.',
     manually_stopped: 'Server arrestato. Avvialo dal pannello.',
@@ -376,7 +378,7 @@ export function createMinecraftProtocolAdapter(
           return { kind: 'unsupported', consumedBytes: input.length };
         }
       },
-      response(mode: GatewayMode) {
+      response(mode: GatewayResponseMode) {
         if (context.signal.aborted) return { close: true };
         const action = reply;
         reply = undefined;
@@ -418,6 +420,10 @@ export function createMinecraftProtocolAdapter(
     // Fail closed if invoked by an older stateless data plane.
     classify: () => ({ kind: 'unsupported' }),
     response: () => undefined,
+    async observe(context) {
+      const result = await probe(context);
+      return { ...result, idle: result.ready && result.playerCount === 0 };
+    },
     probeReadiness: probe,
     async probeIdle(context) {
       const result = await probe(context);

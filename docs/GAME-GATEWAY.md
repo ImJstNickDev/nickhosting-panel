@@ -116,3 +116,16 @@ backend stops: matching binding proof and fresh ownership/topology/node checks a
 still mandatory. Backend readiness loss immediately suppresses forwarding; identity,
 collision or lease failure still closes the listener. Passive responder connections
 are excluded from active gameplay session counts.
+
+A confirmed start/restart cannot be downgraded by a cached Panel `offline`/`starting`
+resource sample when fresh host evidence proves the exact successful operation's
+process epoch and its reservation is retained. Missing, changed or unavailable
+process evidence stays conservative; external stops and manual suppression still
+win. This reconciliation proof does not grant game readiness.
+
+Minecraft supplies one coherent protocol sample for readiness and idle per probe.
+The response-only `stopping` mode keeps status/login-disconnect replies available
+through quiescence without allowing gameplay or wake. It is not a persisted state
+and does not promise a fabricated fixed shutdown duration. Ordinary power and
+Gateway observations do not download the JAR (Owner amendment, 2026-10-10);
+installation/content/restore integrity checks remain. See [API details](M3-API.md).

@@ -8,6 +8,8 @@ import {
   type GatewayEndpoint,
   type GatewayMode,
   type GatewayProtocolAdapter,
+  type GatewayProtocolObservation,
+  type GatewayResponseMode,
   type GatewayRoute,
   type GatewaySafety,
   type GatewaySnapshot,
@@ -101,6 +103,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     wakeErrors: 0,
     observationErrors: 0,
     observationsDiscarded: 0,
+    observationCycles: 0,
+    lastObservationDurationMs: 0,
+    maximumObservationDurationMs: 0,
+    lastObservationProbeDurationMs: 0,
+    lastObservationReportDurationMs: 0,
+    lastSnapshotDurationMs: 0,
     snapshotErrors: 0,
     leaseExpirations: 0,
   };
@@ -183,7 +191,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       listener.tcp.close(() => resolve());
     });
   };
-  const response = (route: GatewayRoute, mode: GatewayMode) => {
+  const response = (route: GatewayRoute, mode: GatewayResponseMode) => {
     try {
       const bytes = protocol(route)?.response(
         { route, signal: AbortSignal.timeout(policy.classificationTimeoutMs) },
@@ -196,11 +204,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   };
   // Quiescence only fences gameplay: bounded protocol status/disconnect replies
   // remain available on the already authorized listener while an idle stop settles.
-  const responseMode = (listener: Listener, mode = listener.route.mode): GatewayMode =>
-    (!listener.backendReady && listener.route.mode === 'online') ||
+  const responseMode = (listener: Listener, mode = listener.route.mode): GatewayResponseMode =>
     quiescence.has(listener.route.serverId)
-      ? 'blocked'
-      : mode;
+      ? 'stopping'
+      : !listener.backendReady && listener.route.mode === 'online'
+        ? 'blocked'
+        : mode;
   const wake = (route: GatewayRoute): Promise<GatewayMode> => {
     if (!leased() || quiescence.has(route.serverId)) return Promise.resolve('blocked');
     const previous = wakeRequests.get(route.serverId);
@@ -706,6 +715,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   };
   const refresh = () => {
     if (refreshing) return refreshing;
+    const refreshStarted = performance.now();
     refreshing = (async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const fetchStartedAt = now();
@@ -725,12 +735,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         throw error;
       })
       .finally(() => {
+        counters.lastSnapshotDurationMs = Math.round(performance.now() - refreshStarted);
         refreshing = undefined;
       });
     return refreshing;
   };
   const observe = () => {
     if (observing) return observing;
+    const cycleStarted = performance.now();
+    let probeDuration = 0;
+    let reportDuration = 0;
     observing = (async () => {
       const candidates = candidateSnapshot;
       if (!candidates || Date.parse(candidates.expiresAt) <= now() || stopping) return;
@@ -740,6 +754,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         routes.push(route);
         servers.set(route.serverId, routes);
       }
+      let refreshAfterReadiness = false;
       for (const routes of servers.values()) {
         routes.sort((a, b) => a.id.localeCompare(b.id));
         const anchor = routes[0];
@@ -771,20 +786,30 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             continue;
           }
           let readinessConfirmed = false;
+          const probeStarted = performance.now();
           try {
-            const readiness = await bounded(async (signal) => {
-              await options.safety.validateBackend(route);
-              return handler.probeReadiness({ route, signal });
-            });
-            readinessConfirmed = readiness.ready === true;
+            const validated: GatewayProtocolObservation & { coherent: boolean } = await bounded(
+              async (signal) => {
+                const sample = await options.safety.validateBackend(route);
+                if (sample) return { ...sample, coherent: true };
+                if (handler.observe)
+                  return { ...(await handler.observe({ route, signal })), coherent: true };
+                return { ...(await handler.probeReadiness({ route, signal })), coherent: false };
+              },
+            );
+            readinessConfirmed = validated.ready === true;
             ready = ready && readinessConfirmed;
-            if (readiness.ready !== true || !handler.probeIdle) {
+            const probeIdle = handler.probeIdle;
+            if (!readinessConfirmed || (!validated.coherent && !probeIdle)) {
               idle = false;
               players.push(undefined);
               continue;
             }
-            const probeIdle = handler.probeIdle;
-            const observation = await bounded((signal) => probeIdle({ route, signal }));
+            const observation = validated.coherent
+              ? validated
+              : probeIdle
+                ? await bounded((signal) => probeIdle({ route, signal }))
+                : { idle: false, playerCount: undefined };
             const playerCount =
               Number.isSafeInteger(observation.playerCount) &&
               observation.playerCount !== undefined &&
@@ -802,6 +827,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             players.push(undefined);
             counters.observationErrors++;
             options.logger?.log('warn', 'gateway.observation_unavailable', { routeId: route.id });
+          } finally {
+            probeDuration += performance.now() - probeStarted;
           }
         }
         try {
@@ -842,22 +869,28 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           // A lost report must not perpetually extend a fence. Only a new
           // post-deadline Core fetch can reconcile this promise and re-arm it.
           if (quiescenceUntil !== undefined && quiescenceUntil <= now()) continue;
-          await options.control.reportObservation({
-            routeId: anchor.id,
-            routeRevision: anchor.revision,
-            routes: routes.map((route) => ({ routeId: route.id, routeRevision: route.revision })),
-            generation: anchor.generation,
-            wakeJobId: anchor.wakeJobId,
-            observedAt,
-            ready,
-            idle: ready && idle && activeSessions === 0,
-            quiescenceUntil:
-              quiescenceUntil === undefined ? undefined : new Date(quiescenceUntil).toISOString(),
-            playerCount: players.every((count) => count !== undefined)
-              ? Math.max(...(players as number[]))
-              : undefined,
-            activeSessions,
-          });
+          const reportStarted = performance.now();
+          await options.control
+            .reportObservation({
+              routeId: anchor.id,
+              routeRevision: anchor.revision,
+              routes: routes.map((route) => ({ routeId: route.id, routeRevision: route.revision })),
+              generation: anchor.generation,
+              wakeJobId: anchor.wakeJobId,
+              observedAt,
+              ready,
+              idle: ready && idle && activeSessions === 0,
+              quiescenceUntil:
+                quiescenceUntil === undefined ? undefined : new Date(quiescenceUntil).toISOString(),
+              playerCount: players.every((count) => count !== undefined)
+                ? Math.max(...(players as number[]))
+                : undefined,
+              activeSessions,
+            })
+            .finally(() => {
+              reportDuration += performance.now() - reportStarted;
+            });
+          if (ready && anchor.mode === 'waking') refreshAfterReadiness = true;
         } catch {
           counters.observationErrors++;
           options.logger?.log('warn', 'gateway.observation_unavailable', {
@@ -865,7 +898,18 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           });
         }
       }
+      // A committed positive wake observation can change route authority. Refresh
+      // through the usual full safety path instead of waiting an extra poll period.
+      if (refreshAfterReadiness && !stopping) await refresh().catch(() => {});
     })().finally(() => {
+      counters.observationCycles++;
+      counters.lastObservationDurationMs = Math.round(performance.now() - cycleStarted);
+      counters.maximumObservationDurationMs = Math.max(
+        counters.maximumObservationDurationMs,
+        counters.lastObservationDurationMs,
+      );
+      counters.lastObservationProbeDurationMs = Math.round(probeDuration);
+      counters.lastObservationReportDurationMs = Math.round(reportDuration);
       observing = undefined;
     });
     return observing;
@@ -877,21 +921,37 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (stopping) return;
     const poll = async () => {
       if (stopping) return;
-      await refresh().catch(() => {});
+      const cycleStarted = performance.now();
+      let failed = false;
+      await refresh().catch(() => {
+        failed = true;
+      });
       if (!stopping) {
-        pollTimer = setTimeout(() => {
-          void poll();
-        }, policy.pollIntervalMs);
+        pollTimer = setTimeout(
+          () => {
+            void poll();
+          },
+          failed
+            ? policy.pollIntervalMs
+            : Math.max(100, policy.pollIntervalMs - (performance.now() - cycleStarted)),
+        );
         pollTimer.unref();
       }
     };
     const observations = async () => {
       if (stopping) return;
+      const cycleStarted = performance.now();
+      const previousErrors = counters.observationErrors;
       await observe();
       if (!stopping) {
-        observationTimer = setTimeout(() => {
-          void observations();
-        }, policy.observationIntervalMs);
+        observationTimer = setTimeout(
+          () => {
+            void observations();
+          },
+          counters.observationErrors > previousErrors
+            ? policy.observationIntervalMs
+            : Math.max(100, policy.observationIntervalMs - (performance.now() - cycleStarted)),
+        );
         observationTimer.unref();
       }
     };

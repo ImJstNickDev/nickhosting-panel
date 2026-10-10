@@ -49,7 +49,8 @@ async function loadProtocols(env: Environment): Promise<GatewayProtocolAdapter[]
         !['supports', 'classify', 'response', 'probeReadiness'].every(
           (key) => typeof protocol[key] === 'function',
         ) ||
-        (protocol.probeIdle !== undefined && typeof protocol.probeIdle !== 'function')
+        (protocol.probeIdle !== undefined && typeof protocol.probeIdle !== 'function') ||
+        (protocol.observe !== undefined && typeof protocol.observe !== 'function')
       )
         throw new DomainError('configuration_invalid');
       protocols.push(protocol);
@@ -113,9 +114,11 @@ export async function createGatewayRuntime(
       const timeout = setTimeout(() => controller.abort(), policy.probeTimeoutMs);
       try {
         return await Promise.race([
-          handler
-            .probeReadiness({ route, signal: controller.signal })
-            .then((r) => r.ready === true),
+          handler.observe
+            ? handler.observe({ route, signal: controller.signal })
+            : handler
+                .probeReadiness({ route, signal: controller.signal })
+                .then((r) => r.ready === true),
           new Promise<false>((resolve) =>
             controller.signal.addEventListener('abort', () => resolve(false), { once: true }),
           ),

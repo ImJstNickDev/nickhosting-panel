@@ -883,6 +883,143 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       expect(f.adapter.getResources).not.toHaveBeenCalled();
     },
   );
+  it.each([
+    ['start', 'offline'],
+    ['start', 'starting'],
+    ['restart', 'offline'],
+    ['restart', 'starting'],
+    ['provision', 'offline'],
+    ['provision', 'starting'],
+  ] as const)(
+    'preserves freshly confirmed %s through a cached %s reconciliation sample',
+    async (action, cached) => {
+      const f = await fixture(action, { autoStart: true });
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'auto_wake_enabled' })
+        .where('id', '=', f.serverId)
+        .execute();
+      let epoch: string | null = null;
+      f.options.observeProcessStart = vi.fn(async () => epoch);
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing power effect');
+      epoch = new Date(effect.getTime() + 500).toISOString();
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      f.options.observeReconciliationProcessStart = vi.fn(async () => epoch);
+      vi.mocked(f.options.observeProcessStart).mockClear();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ readiness: 'ready' })
+        .where('id', '=', f.serverId)
+        .execute();
+      f.setState(cached);
+      expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+      expect(await f.server()).toMatchObject({ runtime_state: 'running', readiness: 'ready' });
+      expect(await f.reservation()).toMatchObject({ state: 'running' });
+      expect(f.options.observeProcessStart).not.toHaveBeenCalled();
+      expect(f.options.observeReconciliationProcessStart).toHaveBeenCalledTimes(1);
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    'null',
+    'unavailable',
+    'different_epoch',
+    'malformed',
+    'missing_receipt',
+    'future_receipt',
+    'pre_effect_receipt',
+    'failed_job',
+    'manual_stop',
+    'missing_reservation',
+    'external_stop',
+    'identity_mismatch',
+  ] as const)(
+    'does not promote a cached offline reconciliation sample with %s',
+    async (condition) => {
+      const f = await fixture('start');
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'auto_wake_enabled' })
+        .where('id', '=', f.serverId)
+        .execute();
+      let epoch: string | null = null;
+      f.options.observeProcessStart = async () => epoch;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing power effect');
+      epoch = new Date(effect.getTime() + 500).toISOString();
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      f.options.observeReconciliationProcessStart = vi.fn(async () => {
+        if (condition === 'null') return null;
+        if (condition === 'unavailable') throw new Error('isolated unavailable observer');
+        if (condition === 'different_epoch') return new Date(effect.getTime() + 1000).toISOString();
+        if (condition === 'malformed') return 'invalid';
+        if (condition === 'identity_mismatch') throw new DomainError('provenance_mismatch');
+        return epoch;
+      });
+      if (['missing_receipt', 'future_receipt', 'pre_effect_receipt'].includes(condition)) {
+        const plan = (await f.operation()).plan;
+        await f.db
+          .updateTable('server_operations')
+          .set({
+            plan: JSON.stringify({
+              ...plan,
+              startProcessStartedAt:
+                condition === 'missing_receipt'
+                  ? null
+                  : condition === 'pre_effect_receipt'
+                    ? effect.toISOString()
+                    : new Date(f.now().getTime() + 1000).toISOString(),
+            }),
+          })
+          .where('job_id', '=', f.jobId)
+          .execute();
+      }
+      if (condition === 'failed_job')
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'failed' })
+          .where('id', '=', f.jobId)
+          .execute();
+      if (condition === 'manual_stop')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ intent: 'manually_stopped' })
+          .where('id', '=', f.serverId)
+          .execute();
+      if (condition === 'missing_reservation')
+        await f.db
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', f.serverId)
+          .execute();
+      if (condition === 'external_stop')
+        f.options.observeExternalStop = async () => ({
+          containerId: 'a'.repeat(64),
+          startedAt: epoch ?? '',
+          finishedAt: new Date(effect.getTime() + 2000).toISOString(),
+          activityId: 'owner-kill',
+          activityAt: new Date(effect.getTime() + 1500).toISOString(),
+          action: 'kill',
+        });
+      f.setState('offline');
+      if (condition === 'identity_mismatch') {
+        await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toMatchObject({
+          code: 'provenance_mismatch',
+        });
+      } else {
+        expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+        expect((await f.server()).runtime_state).toBe('offline');
+        if (condition === 'missing_reservation' || condition === 'external_stop')
+          expect(await f.reservation()).toBeUndefined();
+        else expect(await f.reservation()).toMatchObject({ state: 'uncertain' });
+      }
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
   it.each(['null', 'unavailable', 'before_intent', 'equal_intent', 'future', 'malformed'] as const)(
     'does not complete start using cached running state when physical proof is %s',
     async (kind) => {

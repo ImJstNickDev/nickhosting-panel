@@ -75,6 +75,12 @@ export function createMinecraftGatewayModuleAdapter(
           select(context.route) === adapter ? session.response(state) : { close: true },
       };
     },
+    async observe(context: GatewayProtocolContext) {
+      const adapter = select(context.route);
+      if (!adapter?.observe) return { ready: false, idle: false };
+      const result = await adapter.observe(context);
+      return select(context.route) === adapter ? result : { ready: false, idle: false };
+    },
     async probeReadiness(context: GatewayProtocolContext) {
       const adapter = select(context.route);
       if (!adapter) return { ready: false };
