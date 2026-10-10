@@ -30,6 +30,26 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   fixture = await managementFixture(database.db, { interactive: true });
+  const node = await fixture.db
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', fixture.nodeId)
+    .executeTakeFirstOrThrow();
+  if (!node.backend_allocation_pool) throw new Error('Missing isolated allocation pool');
+  const directHost = `fixture-${randomUUID()}.example.test`;
+  await fixture.db
+    .updateTable('managed_nodes')
+    .set({
+      backend_allocation_pool: JSON.stringify({
+        ...node.backend_allocation_pool,
+        allocations: node.backend_allocation_pool.allocations.map((pin) => ({
+          ...pin,
+          directEndpoint: { hostname: directHost, port: pin.port },
+        })),
+      }),
+    })
+    .where('id', '=', fixture.nodeId)
+    .execute();
   actor = fixture.context;
   management.mockReset().mockRejectedValue(new DomainError('integration_unavailable'));
   app = new Hono<{ Variables: Variables }>();
@@ -41,14 +61,14 @@ beforeEach(async () => {
   );
   registerMinecraftRoutes(app, {
     db: fixture.db,
-    env,
+    env: {},
     principal: async () => actor,
     body: async (c) => c.req.json(),
     management,
   });
   registerServerRoutes(app, {
     db: fixture.db,
-    env,
+    env: {},
     principal: async () => actor,
     management,
     acquireUploadSlot: () => () => {},
@@ -56,7 +76,7 @@ beforeEach(async () => {
 });
 // Signed synthetic compatibility records are confined to this isolated database;
 // no provider server is provisioned and no public compatibility is asserted.
-async function eligibleChoice() {
+async function eligibleChoice(attest = true) {
   await fixture.db
     .insertInto('game_integrations')
     .values({
@@ -153,16 +173,17 @@ async function eligibleChoice() {
     },
     client: { implementation: 'isolated-fixture-client', version: '1', protocolId: 767 },
   };
-  await importMinecraftEvidence(
-    fixture.db,
-    fixture.owner,
-    id,
-    {
-      report,
-      signature: signMinecraftEvidence(report, env),
-    },
-    env,
-  );
+  if (attest)
+    await importMinecraftEvidence(
+      fixture.db,
+      fixture.owner,
+      id,
+      {
+        report,
+        signature: signMinecraftEvidence(report, env),
+      },
+      env,
+    );
   management.mockResolvedValue({
     adapter: fixture.adapter,
     refreshObservations: fixture.observe,
@@ -274,6 +295,15 @@ describe('Minecraft backend API authorization and user projection', () => {
     const catalog = await (await app.request('/v1/minecraft/choices')).json();
     const choice = catalog.find((entry: { id: string }) => entry.id === choiceId);
     expect(choice).toEqual({
+      capabilities: {
+        installation: true,
+        directConnection: true,
+        playerManagement: true,
+        gateway: false,
+        readiness: false,
+        playerIdle: false,
+        sleepWake: false,
+      },
       id: choiceId,
       version: '1.21.1',
       releaseType: 'release',
@@ -304,6 +334,69 @@ describe('Minecraft backend API authorization and user projection', () => {
         .executeTakeFirstOrThrow(),
     ).toEqual({ combination_id: choiceId });
   });
+  it('creates Vanilla without an evidence key/report and exposes accurate Owner feature diagnostics', async () => {
+    const choiceId = await eligibleChoice(false);
+    const response = await post('/v1/minecraft/servers', createInput(choiceId));
+    expect(response.status).toBe(202);
+    const result = await response.json();
+    const server = await fixture.db
+      .selectFrom('managed_servers')
+      .select('connection_mode')
+      .where('id', '=', result.serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.connection_mode).toBe('direct');
+    actor = fixture.owner;
+    const diagnostics = await (await app.request('/v1/owner/minecraft/compatibility')).json();
+    expect(diagnostics.find((row: { id: string }) => row.id === choiceId)).toMatchObject({
+      supportAuthority: 'integration',
+      support: 'unverified',
+      evidence: [],
+      capabilities: {
+        installation: true,
+        directConnection: true,
+        gateway: false,
+        sleepWake: false,
+      },
+    });
+  });
+  it('refuses direct creation without an Owner-configured connection endpoint and queues no effects', async () => {
+    const choiceId = await eligibleChoice(false);
+    const node = await fixture.db
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', fixture.nodeId)
+      .executeTakeFirstOrThrow();
+    if (!node.backend_allocation_pool) throw new Error('Missing fixture allocation pool');
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({
+        backend_allocation_pool: JSON.stringify({
+          ...node.backend_allocation_pool,
+          allocations: node.backend_allocation_pool.allocations.map(
+            ({ directEndpoint: _endpoint, ...pin }) => pin,
+          ),
+        }),
+      })
+      .where('id', '=', node.id)
+      .execute();
+    const response = await post('/v1/minecraft/servers', createInput(choiceId));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'allocation_unavailable' });
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('owner_id', '=', actor.subjectUserId)
+        .execute(),
+    ).toEqual([]);
+    expect(
+      await fixture.db
+        .selectFrom('operation_jobs')
+        .select('id')
+        .where('actor_id', '=', actor.subjectUserId)
+        .execute(),
+    ).toEqual([]);
+  });
   it('rejects caller-supplied matching or conflicting mapping IDs on dedicated creation', async () => {
     const choiceId = await eligibleChoice();
     management.mockClear();
@@ -313,7 +406,7 @@ describe('Minecraft backend API authorization and user projection', () => {
       ).toBe(400);
     expect(management).not.toHaveBeenCalled();
   });
-  it.each(['disabled', 'unallowlisted', 'unverified', 'unknown'] as const)(
+  it.each(['disabled', 'unallowlisted', 'unknown'] as const)(
     'rechecks %s choices before acquiring provider access',
     async (reason) => {
       let choiceId: string = await eligibleChoice();
@@ -328,11 +421,6 @@ describe('Minecraft backend API authorization and user projection', () => {
           .updateTable('game_rollouts')
           .set({ state: 'private-testing', allowlist: [] })
           .where('integration_id', '=', 'minecraft-java')
-          .execute();
-      if (reason === 'unverified')
-        await fixture.db
-          .deleteFrom('minecraft_verification_evidence')
-          .where('combination_id', '=', choiceId)
           .execute();
       if (reason === 'unknown') choiceId = randomUUID();
       management.mockClear();

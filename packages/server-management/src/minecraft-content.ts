@@ -360,6 +360,20 @@ export async function prepareMinecraftContentPlan(
     );
   return result;
 }
+export function assertMinecraftPlayerConfiguration(
+  choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
+  configuration: z.infer<typeof minecraftConfigurationSchema>,
+): void {
+  if (
+    choice.supportAuthority === 'integration' &&
+    !choice.capabilities.playerManagement &&
+    (configuration.operators.length > 0 ||
+      configuration.whitelist.length > 0 ||
+      configuration.properties['white-list'] === true ||
+      configuration.properties['white-list'] === 'true')
+  )
+    throw new DomainError('integration_unavailable');
+}
 export async function prepareMinecraftCreationConfig(
   db: Kysely<Database>,
   choiceId: string,
@@ -367,8 +381,9 @@ export async function prepareMinecraftCreationConfig(
   options: MinecraftContentOptions,
 ) {
   const configuration = minecraftConfigurationSchema.parse(input);
-  if (!configuration.modpack) return { configuration };
   const choice = await inspectMinecraftCombination(db, choiceId, options.env);
+  assertMinecraftPlayerConfiguration(choice, configuration);
+  if (!configuration.modpack) return { configuration };
   const selected = configuration.modpack;
   const source =
     'sourceId' in selected
@@ -996,6 +1011,7 @@ export async function configureMinecraftProvision(
   const identities =
     options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent });
   const configuration = await resolveMinecraftStoredPlayers(profile.configuration, identities);
+  assertMinecraftPlayerConfiguration(verified.choice, configuration);
   if (!minecraftStoredConfigurationSchema.parse(profile.configuration).playerIdentities) {
     // Persist UUID authority before any file effect; retries and reinstalls must
     // never resolve a reclaimed username into a different account.
@@ -1032,7 +1048,8 @@ export async function configureMinecraftProvision(
           release: verified.choice.combination.release,
           supportedKeys: source
             ? Object.keys(parseMinecraftProperties(source))
-            : (verified.imageEvidence.report.server?.supportedProperties ?? []),
+            : (verified.imageEvidence.report?.server?.supportedProperties ??
+              (verified.choice.capabilities.playerManagement ? ['white-list'] : [])),
         });
         changes.push(
           await plannedText(context, 'server.properties', edited.content, snapshot.hash),
@@ -1453,6 +1470,12 @@ async function applyPreparedContent(
     command.kind === 'world-remove'
   )
     return applyWorldContent(context, options, prepared, choice);
+  if (
+    command.kind === 'player' &&
+    choice.supportAuthority === 'integration' &&
+    !choice.capabilities.playerManagement
+  )
+    throw new DomainError('integration_unavailable');
   if (command.kind === 'properties' || command.kind === 'player') {
     let configuration = minecraftStoredConfigurationSchema.parse(profile.configuration);
     if (

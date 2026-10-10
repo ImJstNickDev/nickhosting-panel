@@ -30,12 +30,22 @@ describe('Owner automatic Vanilla discovery', () => {
     );
     fixture.setManagement(provider.management);
     // Disable only this disposable schema's pre-existing signed synthetic choice.
-    // It must not mask whether new discovery incorrectly grants public availability.
+    // It must not mask whether new declarations work without per-instance evidence.
     await fixture.database.db
       .updateTable('minecraft_combinations')
       .set({ enabled: false })
       .execute();
+    delete fixture.env.NH_MINECRAFT_EVIDENCE_KEY;
+    await fixture.database.db
+      .updateTable('runtime_egg_mappings')
+      .set({ image_mode: 'integration', docker_image: '' })
+      .where('id', '=', provider.ids.mappingId)
+      .execute();
     const egg = await provider.adapter.getEgg(1, 1);
+    egg.docker_images = {
+      Java21: 'ghcr.io/pterodactyl/yolks:java_21',
+      Java25: 'ghcr.io/pterodactyl/yolks:java_25',
+    };
     const variable = egg.relationships?.variables?.data[0]?.attributes;
     if (!variable || !egg.relationships?.variables) throw new Error('Missing isolated egg fixture');
     egg.relationships.variables.data = [
@@ -50,12 +60,12 @@ describe('Owner automatic Vanilla discovery', () => {
       },
     ];
     const documents = new Map<string, Buffer>();
-    const versions = ['26.3', '26.2', '26.1'].map((id) => {
+    const versions = ['26.3', '26.1', '1.21.11'].map((id) => {
       const url = `https://piston-meta.mojang.com/v1/packages/fixture/${id}.json`;
       const bytes = Buffer.from(
         JSON.stringify({
           id,
-          javaVersion: { majorVersion: 25 },
+          javaVersion: { majorVersion: id.startsWith('26.') ? 25 : 21 },
           downloads:
             id === '26.3'
               ? {}
@@ -74,9 +84,9 @@ describe('Owner automatic Vanilla discovery', () => {
     documents.set(minecraftManifestUrl, Buffer.from(JSON.stringify({ versions })));
     const protocols = Buffer.from(
       JSON.stringify(
-        ['26.1', '26.2'].map((minecraftVersion) => ({
+        ['26.1', '1.21.11'].map((minecraftVersion) => ({
           minecraftVersion,
-          version: 775,
+          version: minecraftVersion === '26.1' ? 775 : 774,
           usesNetty: true,
           releaseType: 'release',
         })),
@@ -121,7 +131,7 @@ describe('Owner automatic Vanilla discovery', () => {
       items: { id?: string; status: string; version: string; reason?: string }[];
     }>;
   }
-  it('discovers multiple versions without manual fields and keeps unsigned candidates unavailable', async () => {
+  it('discovers declared versions without local evidence and exposes honest capabilities', async () => {
     await owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
     await browserExpect(
       owner.getByRole('heading', { name: 'Minecraft compatibility', exact: true }),
@@ -138,12 +148,6 @@ describe('Owner automatic Vanilla discovery', () => {
     await browserExpect(
       owner.getByText('No dedicated-server download is available.', { exact: false }),
     ).toBeVisible();
-    await browserExpect(
-      owner.getByText(
-        'Discovery does not certify compatibility. Registered versions still need valid test evidence and availability.',
-        { exact: true },
-      ),
-    ).toBeVisible();
     const rows = await fixture.database.db
       .selectFrom('minecraft_combinations')
       .selectAll()
@@ -154,15 +158,54 @@ describe('Owner automatic Vanilla discovery', () => {
       )
       .execute();
     expect(rows).toHaveLength(2);
-    expect(rows.every((row) => row.enabled === false)).toBe(true);
-    await browserExpect(owner.getByRole('cell', { name: 'Unverified', exact: true })).toHaveCount(
-      2,
-    );
-    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toEqual([]);
+    expect(rows.every((row) => row.enabled === true)).toBe(true);
+    expect(
+      await fixture.database.db
+        .selectFrom('minecraft_verification_evidence')
+        .select('id')
+        .where(
+          'combination_id',
+          'in',
+          rows.map((row) => row.id),
+        )
+        .execute(),
+    ).toEqual([]);
+    const directRow = owner
+      .getByRole('row')
+      .filter({ has: owner.getByRole('cell', { name: '1.21.11', exact: true }) });
+    await browserExpect(
+      directRow.getByRole('cell', { name: 'Supported by integration', exact: true }),
+    ).toBeVisible();
+    await directRow.getByRole('button', { name: 'View details', exact: true }).click();
+    await browserExpect(owner.getByText('Trusted integration', { exact: true })).toBeVisible();
+    await browserExpect(owner.getByText('Gateway connection', { exact: true })).toBeVisible();
+    await browserExpect(owner.getByText('Automatic sleep/wake', { exact: true })).toBeVisible();
+    const choices = (await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')) as {
+      version: string;
+      capabilities: { installation: boolean; gateway: boolean; sleepWake: boolean };
+    }[];
+    expect(choices).toHaveLength(2);
+    expect(choices.find((choice) => choice.version === '1.21.11')).toMatchObject({
+      capabilities: { installation: true, gateway: false, sleepWake: false },
+    });
     const again = await discover();
     expect(again.items).toEqual(result.items);
+    await fixture.database.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: false })
+      .where(
+        'id',
+        'in',
+        rows.map((row) => row.id),
+      )
+      .execute();
+    await owner
+      .getByRole('checkbox', { name: 'Enable supported versions in this batch', exact: true })
+      .check();
+    await discover();
+    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(2);
     expect(provider.remoteCount()).toBe(1);
-    await fixture.screenshot(owner, 'vanilla-catalog-owner-desktop-en');
+    await fixture.screenshot(owner, 'vanilla-declarations-owner-desktop-en');
     const accessibility = await new AxeBuilder({ page: owner })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
       .analyze();
@@ -176,7 +219,29 @@ describe('Owner automatic Vanilla discovery', () => {
       ),
     ).toBe(true);
   });
-  it('shows a recognized-contract error without changing provider resources or public eligibility', async () => {
+  it('offers a direct-only declared version through the ordinary operator and whitelist installer pages', async () => {
+    const user = identities.user;
+    user.on('pageerror', (error) => pageErrors.push(error.message));
+    await user.goto(`${fixture.origin}/servers/new`);
+    await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await user.getByLabel('Server name', { exact: true }).fill('Direct Vanilla');
+    await user.getByLabel('Server name', { exact: true }).press('Enter');
+    await user.getByRole('radio', { name: '1.21.11 · vanilla', exact: true }).check();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Who should be an operator?', exact: true }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Do you want to turn whitelist on?', exact: true }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(user.getByRole('button', { name: '6+', exact: true })).toBeVisible();
+    expect(provider.remoteCount()).toBe(1);
+    expect(pageErrors).toEqual([]);
+  });
+  it('shows a recognized-contract error without mutating provider resources or prior registrations', async () => {
     const egg = await provider.adapter.getEgg(1, 1);
     const variable = egg.relationships?.variables?.data[0]?.attributes;
     if (!variable) throw new Error('Missing isolated egg variable');
@@ -190,7 +255,7 @@ describe('Owner automatic Vanilla discovery', () => {
         exact: false,
       }),
     ).toHaveCount(2);
-    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toEqual([]);
+    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(2);
     expect(provider.remoteCount()).toBe(1);
   });
 });

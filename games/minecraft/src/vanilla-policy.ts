@@ -1,7 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 
 /** Vanilla's supported Java baseline. Loader profiles resolve their own requirements.
- * A server artifact and protocol/installation evidence remain separate prerequisites. */
+ * A server artifact and local egg support remain separate installation prerequisites. */
 export const vanillaJavaRanges = [
   { min: '1.0', max: '1.16.5', javaMajor: 8 },
   { min: '1.17', max: '1.17.1', javaMajor: 16 },

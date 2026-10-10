@@ -737,3 +737,14 @@
     border-color: var(--blue);
   }
 }
+
+@layer components {
+  .direct-allocation-fields {
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+  }
+  .direct-allocation-fields legend {
+    padding: 0 0.5rem 0.5rem 0;
+    font-weight: 600;
+  }
+}

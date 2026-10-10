@@ -35,7 +35,6 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
-import { requireMinecraftRuntimeImageEvidence } from '../../../packages/server-management/src/minecraft-runtime-evidence.js';
 import type { Variables } from './app.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -105,6 +104,8 @@ export function registerMinecraftRoutes(
         identityDigest: choice.row.identity_digest,
         mappingDigest: choice.mappingDigest,
         support: choice.support,
+        supportAuthority: choice.supportAuthority,
+        capabilities: choice.capabilities,
         evidence: choice.evidence,
       });
     }
@@ -476,9 +477,6 @@ export function registerMinecraftRoutes(
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
     const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-    const imageEvidence = await requireMinecraftRuntimeImageEvidence(db, serverId, null, env).catch(
-      () => null,
-    );
     const service = await management();
     const effectiveProperties = await service.access(
       context,
@@ -504,9 +502,7 @@ export function registerMinecraftRoutes(
       choiceId: profile.combination_id,
       version: choice.combination.release,
       runtime: choice.combination.profile,
-      supportedProperties: (imageEvidence?.report.server?.supportedProperties ?? []).filter((key) =>
-        minecraftEditablePropertyKeys.includes(key),
-      ),
+      supportedProperties: Object.keys(effectiveProperties),
       effectiveProperties,
       installed: profile.installed,
       configuration: profile.configuration,

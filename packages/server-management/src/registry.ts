@@ -413,6 +413,16 @@ export async function createManagedServer(
     );
     const { pool, allocations: inventory } = await validatedBackendInventory(adapter, node, env);
     await assertBackendPoolNamespace(tx, node, pool, env);
+    const connectionMode =
+      minecraft && (!minecraft.capabilities.gateway || !config.gatewayEnabled)
+        ? 'direct'
+        : 'gateway';
+    const directClaims = await tx
+      .selectFrom('server_allocations')
+      .select('direct_endpoint')
+      .where('direct_endpoint', 'is not', null)
+      .execute();
+
     const owned = await tx
       .selectFrom('server_allocations as allocation')
       .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
@@ -426,6 +436,15 @@ export async function createManagedServer(
       .execute();
     const free: typeof inventory = [];
     for (const allocation of inventory) {
+      if (connectionMode === 'direct') {
+        if (
+          !allocation.directEndpoint ||
+          directClaims.some((claim) =>
+            isDeepStrictEqual(claim.direct_endpoint, allocation.directEndpoint),
+          )
+        )
+          continue;
+      } else if (allocation.delivery === 'direct' || !pool.gatewayBindAddresses.length) continue;
       if (
         allocation.assigned ||
         (canonicalAllocationAddress(allocation.ip) === '127.0.0.1' &&
@@ -473,6 +492,7 @@ export async function createManagedServer(
         pterodactyl_uuid: null,
         pterodactyl_identifier: null,
         limits: JSON.stringify(value.limits),
+        connection_mode: connectionMode,
         active_operation_id: jobId,
         last_observed_at: null,
         deleted_at: null,
@@ -488,6 +508,8 @@ export async function createManagedServer(
         pterodactyl_allocation_id: allocation.id,
         address: canonicalAllocationAddress(allocation.ip),
         backend_address: allocation.backendAddress,
+        direct_endpoint:
+          connectionMode === 'direct' ? JSON.stringify(allocation.directEndpoint) : null,
         port: allocation.port,
         role: role.role,
         protocols: role.protocols,

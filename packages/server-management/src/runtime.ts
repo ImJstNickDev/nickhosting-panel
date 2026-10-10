@@ -121,6 +121,7 @@ export async function authorizeQueuedEffect(
   const game = await trustedGameModules.resolve(db, serverId);
 
   if (operation.plan.gatewayAutomation !== undefined) {
+    if (server.connection_mode === 'direct') throw new DomainError('forbidden');
     const marker = operation.plan.gatewayAutomation;
     if (
       typeof marker !== 'object' ||

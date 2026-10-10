@@ -461,7 +461,15 @@ export function ServerOverview({ serverId }: { serverId: string }) {
             ],
             [
               t('platform.readiness'),
-              <Badge key="readiness" value={data.readiness} label={t(statusKey(data.readiness))} />,
+              data.capabilities?.readiness === false ? (
+                t('web.unavailable')
+              ) : (
+                <Badge
+                  key="readiness"
+                  value={data.readiness}
+                  label={t(statusKey(data.readiness))}
+                />
+              ),
             ],
             [t('platform.installation'), t(statusKey(data.installationState))],
             [

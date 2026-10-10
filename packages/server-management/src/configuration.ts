@@ -260,8 +260,10 @@ export async function setManagedNode(
     );
     const claims = await tx
       .selectFrom('server_allocations')
-      .selectAll()
-      .where('node_id', '=', nodeId)
+      .innerJoin('managed_servers', 'managed_servers.id', 'server_allocations.server_id')
+      .selectAll('server_allocations')
+      .select('managed_servers.connection_mode')
+      .where('server_allocations.node_id', '=', nodeId)
       .execute();
     if (
       claims.some(
@@ -270,6 +272,9 @@ export async function setManagedNode(
             (pin) =>
               pin.allocationId === claim.pterodactyl_allocation_id &&
               pin.address === claim.address &&
+              (claim.connection_mode !== 'gateway' || pin.delivery !== 'direct') &&
+              (claim.direct_endpoint === null ||
+                isDeepStrictEqual(pin.directEndpoint ?? null, claim.direct_endpoint)) &&
               backendAllocationAddress(pin) === claim.backend_address &&
               pin.port === claim.port,
           ),

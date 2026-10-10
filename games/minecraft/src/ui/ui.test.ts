@@ -29,7 +29,15 @@ const profile = {
 function clientFixture() {
   const request = vi.fn<GameUiClient['request']>(async (path) => {
     if (path === '/v1/minecraft/choices')
-      return [{ id: choiceId, version: '26.1', runtime: 'vanilla', protocol: 775 }];
+      return [
+        {
+          id: choiceId,
+          version: '26.1',
+          runtime: 'vanilla',
+          protocol: 775,
+          capabilities: { playerManagement: true, gateway: true, sleepWake: true },
+        },
+      ];
     if (path === `/v1/servers/${serverId}/minecraft`) return profile;
     return { serverId, jobId };
   });
@@ -49,11 +57,55 @@ describe('Minecraft browser module and exact API contracts', () => {
     const client = clientFixture(),
       controller = createMinecraftUiController(client);
     expect(await controller.choices()).toEqual([
-      { id: choiceId, version: '26.1', runtime: 'vanilla' },
+      {
+        id: choiceId,
+        version: '26.1',
+        runtime: 'vanilla',
+        capabilities: { playerManagement: true, gateway: true, sleepWake: true },
+      },
     ]);
     expect(await controller.choiceOptions()).toEqual([
-      { value: choiceId, label: '26.1 · vanilla', disabled: false, releaseType: 'release' },
+      {
+        value: choiceId,
+        label: '26.1 · vanilla',
+        disabled: false,
+        releaseType: 'release',
+        capabilities: { playerManagement: true, gateway: true, sleepWake: true },
+      },
     ]);
+  });
+  it('retains legacy direct capability flags and clears unsupported player fields in preparation', async () => {
+    const client = clientFixture();
+    client.request.mockResolvedValue([
+      {
+        id: choiceId,
+        version: '1.6.4',
+        runtime: 'vanilla',
+        capabilities: { playerManagement: false, gateway: false, sleepWake: false },
+      },
+    ]);
+    const controller = createMinecraftUiController(client);
+    expect(await controller.choiceOptions()).toEqual([
+      {
+        value: choiceId,
+        label: '1.6.4 · vanilla',
+        disabled: false,
+        releaseType: 'release',
+        capabilities: { playerManagement: false, gateway: false, sleepWake: false },
+      },
+    ]);
+    expect(
+      await minecraftUiModule.handlers['prepare-create']?.(client, {
+        values: { choiceId, operators: ['Notch'], whitelist: ['Notch'], whitelistEnabled: true },
+      }),
+    ).toMatchObject({
+      values: { playerManagement: false, operators: [], whitelist: [], whitelistEnabled: false },
+    });
+    expect(
+      minecraftUiModule.descriptor.creation.pages
+        ?.filter((page) => page.id === 'operators' || page.id === 'whitelist')
+        .every((page) => page.requiredCapability === 'playerManagement'),
+    ).toBe(true);
   });
   it('preserves exact creation API, explicit EULA, no Owner mapping ID and accepted job semantics', async () => {
     const client = clientFixture(),

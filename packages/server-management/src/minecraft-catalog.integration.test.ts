@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { minecraftManifest, minecraftManifestUrl } from '@nickhosting/minecraft';
+import {
+  minecraftDeclaredCapabilities,
+  minecraftManifest,
+  minecraftManifestUrl,
+} from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { syncMinecraftCatalog } from './minecraft-catalog.js';
@@ -23,6 +27,11 @@ beforeEach(async () => {
     .insertInto('game_integrations')
     .values({ id: 'minecraft-java', version: '1.0.0', manifest: JSON.stringify(minecraftManifest) })
     .onConflict((c) => c.column('id').doNothing())
+    .execute();
+  await f.db
+    .insertInto('game_rollouts')
+    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
     .execute();
   await setRuntimeMapping(f.db, adapter(), f.owner, {
     id: f.mappingId,
@@ -143,12 +152,46 @@ describe('Owner Vanilla catalog synchronization', () => {
       .selectAll()
       .where('id', '=', result.items[0]?.id ?? '')
       .executeTakeFirstOrThrow();
-    expect(row.enabled).toBe(false);
+    expect(row.enabled).toBe(true);
     expect(row.binding).toMatchObject({
       bindings: { release: 'VANILLA_VERSION' },
       artifactPaths: { server: 'server.jar' },
     });
+    expect(await minecraftCatalog(f.db, f.owner)).toContainEqual({
+      id: row.id,
+      version: '1.21.11',
+      releaseType: 'release',
+      runtime: 'vanilla',
+      capabilities: minecraftDeclaredCapabilities(
+        row.combination as Parameters<typeof minecraftDeclaredCapabilities>[0],
+      ),
+    });
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: false })
+      .where('id', '=', row.id)
+      .execute();
+    await syncMinecraftCatalog(
+      f.db,
+      adapter(),
+      f.owner,
+      { mappingId: f.mappingId },
+      {},
+      upstream(),
+    );
     expect(await minecraftCatalog(f.db, f.owner)).toEqual([]);
+    await syncMinecraftCatalog(
+      f.db,
+      adapter(),
+      f.owner,
+      { mappingId: f.mappingId, enableSupported: true },
+      {},
+      upstream(),
+    );
+    expect((await minecraftCatalog(f.db, f.owner)).some((choice) => choice.id === row.id)).toBe(
+      true,
+    );
+
     expect(
       await f.db
         .selectFrom('minecraft_verification_evidence')

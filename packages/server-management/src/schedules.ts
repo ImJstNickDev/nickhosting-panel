@@ -91,7 +91,11 @@ async function consentState(db: Kysely<Database>, context: AuthContext, serverId
             : reservation && reservation.state !== 'running'
               ? ('reservation_uncertain' as const)
               : null;
-  return { server, policy, grantBlockedReason };
+  return {
+    server,
+    policy: server.connection_mode === 'gateway' ? policy : undefined,
+    grantBlockedReason,
+  };
 }
 
 /** Shared automatic-start consent, not a second protocol or scheduling policy.

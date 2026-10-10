@@ -154,11 +154,11 @@ export function assertMinecraftVerifiedLaunch(
   environment: Record<string, string>,
   profile: string,
   launcher: string | undefined,
-  report: MinecraftEvidence,
+  report: MinecraftEvidence | null,
 ): void {
   if (profile === 'forge') {
     const paths =
-      report.server?.installedFiles
+      report?.server?.installedFiles
         ?.map((file) => file.path)
         .filter((path) =>
           /^libraries\/net\/minecraftforge\/forge\/[^/]+\/unix_args\.txt$/.test(path),
@@ -268,17 +268,18 @@ export async function assertMinecraftRemoteLaunch(
  * An absent server container is explicitly unobserved: verified artifact/config
  * installation may precede an admitted first start, but playable readiness cannot.
  * The hash alone proves neither the Java version nor protocol support; the signed
- * exact-combination real-server report provides that separate test evidence. */
+ * exact-combination report remains required for experimental non-Vanilla loaders.
+ * Declared Vanilla records the first installed container identity independently. */
 export async function requireMinecraftRuntimeImageEvidence(
   db: DB,
   serverId: string,
   observed: string | null,
   env: Environment = {},
 ): Promise<{
-  expected: string;
+  expected: string | null;
   observed: string | null;
   verified: boolean;
-  report: MinecraftEvidence;
+  report: MinecraftEvidence | null;
 }> {
   const server = await db
     .selectFrom('managed_servers')
@@ -300,6 +301,31 @@ export async function requireMinecraftRuntimeImageEvidence(
     choice.row.mapping_digest !== choice.mappingDigest
   )
     throw new DomainError('provenance_mismatch');
+  if (choice.supportAuthority === 'integration' && choice.capabilities.installation) {
+    // Compiled Vanilla support is not a per-instance test certificate. Image
+    // identity is observed locally and pinned once, after actual installation;
+    // future container replacement must preserve that identity.
+    if (observed !== null && !/^sha256:[a-f0-9]{64}$/.test(observed))
+      throw new DomainError('provenance_mismatch');
+    let expected = profile.runtime_image_digest;
+    if (observed !== null && profile.installed && expected === null) {
+      await db
+        .updateTable('minecraft_server_profiles')
+        .set({ runtime_image_digest: observed })
+        .where('server_id', '=', serverId)
+        .where('runtime_image_digest', 'is', null)
+        .execute();
+      const pinned = await db
+        .selectFrom('minecraft_server_profiles')
+        .select('runtime_image_digest')
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expected = pinned.runtime_image_digest;
+    }
+    if (observed !== null && expected !== null && observed !== expected)
+      throw new DomainError('provenance_mismatch');
+    return { expected, observed, verified: observed !== null, report: null };
+  }
   if (choice.support !== 'verified') {
     const rollout = await db
       .selectFrom('game_rollouts')

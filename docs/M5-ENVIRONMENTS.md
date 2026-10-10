@@ -249,35 +249,39 @@ return to sandbox; real mode never uses them.
    runtime/egg mapping, including the actual image, startup and egg variables.
    Configure the required metadata user-agent and exact trusted Wings WebSocket,
    upload and download origins through Owner settings where applicable.
-4. In `/owner/integrations`, register/enable the trusted `minecraft-java` module
-   and choose its rollout. In `/owner/integrations/minecraft-java`, register the
-   exact Vanilla release/runtime/binding, import valid signed real-server evidence,
-   and enable availability. `/servers/new` shows only permitted, enabled, verified
-   combinations. A checkbox cannot manufacture compatibility; other runtimes and
-   Satisfactory remain unavailable unless their own requirements are satisfied.
+4. In `/owner/integrations`, enable the trusted `minecraft-java` module and choose
+   its rollout. In `/owner/integrations/minecraft-java`, select the Vanilla mapping
+   and synchronize the official version catalog. New supported Vanilla entries are
+   enabled by default. Existing disabled entries stay disabled unless the Owner
+   explicitly enables them (individually or with the sync batch option).
+   Integration declarations establish installation/direct-connect support; a local
+   signed test report or verifier key is **not** required for declared Vanilla.
+   The Owner capability view distinguishes installation, direct connection,
+   Gateway, readiness, sleep/wake and player management from historical test evidence.
+   Other runtimes and Satisfactory are not automatically enabled.
+5. With Gateway disabled or unsupported for the chosen version, creation uses direct
+   connections. In the managed node's allocation pool, explicitly declare the player
+   hostname and port for each usable allocation. They must already reach that
+   allocation through the Owner's network. Public provider bindings require the
+   direct-only option. Saving does not create forwarding, DNS or listeners, or claim
+   verified external reachability. Backend-only allocations stay reserved for Gateway
+   use. Missing direct endpoints refuse creation before any remote effect.
 
-Evidence verification uses the existing server-only key contract. Real mode accepts
-optional **`NH_DEV_MINECRAFT_EVIDENCE_KEY`**, exactly 64 lowercase hex characters,
-and maps it to that verifier. It must be the trusted runner's original key, stored
-only in the private environment; this task does not generate a key, re-sign a
-report or claim new evidence. Sandbox rejects this option. Setting it requires a
-scoped API/worker recreation to load the environment, not a database reset.
-
-Historical M4 Vanilla 26.1 / Java 25 evidence is **not automatically portable** to
-a newly created mapping. Reuse requires the intact report/signature and key plus
-exact matching mapping, runtime and binding digests. Mapping identity includes its
-UUID and managed-node UUID; runtime metadata receipts include checksums, including
-the global Mojang manifest. Equivalent-looking settings or a changed metadata
-manifest may therefore fail verification legitimately. The shortest valid path
-is to check the original evidence context against the configured mapping; if it
-cannot match, a separately authorized real test must certify that exact mapping.
-Never edit the evidence or bypass validation to expose an ordinary-user choice.
+**Policy amendment, 2026-10-10:** the Owner replaced the original per-mapping
+certification prerequisite with trusted integration declarations. The compiled
+Vanilla declaration offers protocol-aware Gateway support for the real-tested
+26.1/protocol 775 pair; other installable Vanilla combinations use direct access.
+Existing M4 reports remain truthful, identity-bound historical diagnostics; no
+report is copied, re-signed or represented as a new live test. Optional
+`NH_DEV_MINECRAFT_EVIDENCE_KEY` remains available for importing authentic reports,
+not as a prerequisite for ordinary declared Vanilla creation. Existing Owner
+mappings, disabled choices and rollout settings are preserved.
 
 **Provider connectivity is not execution readiness.** Current provisioning/start
 also requires approved host/container observer access, a matching observer ID and
 fresh resource/image evidence. The original provider switch did not include observer access. The later
 Owner-approved direct-socket overlay supplies it; see the operational readiness
-follow-up below. Configuration and runtime evidence checks still apply. Gateway deployment/listeners, SFTPGo, DNS writes and other
+follow-up below. Configuration, actual installation integrity and resource checks still apply. Gateway deployment/listeners, SFTPGo, DNS writes and other
 production-release prerequisites remain separate. No real test server is created
 to prove this configuration change.
 

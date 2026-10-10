@@ -161,6 +161,45 @@ async function lifecycleFixture() {
 }
 
 describe('durable generic schedules', () => {
+  it('keeps direct scheduled starts independent of stale Gateway policy', async () => {
+    await allowStarts();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', serverId)
+      .execute();
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({
+      allowed: true,
+      gatewayConfigured: false,
+      gatewayEnabled: false,
+    });
+    const before = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const consent = await getAutomationConsent(f.db, f.context, serverId);
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: false,
+      expectedIntent: consent.expectedIntent,
+    });
+    expect(
+      await f.db
+        .selectFrom('gateway_server_states')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(before);
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: true,
+      expectedIntent: 'manually_stopped',
+    });
+    const schedule = await create({ action: 'start' });
+    expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+    await expect(
+      authorizeQueuedEffect(f.db, await jobOf(schedule.id), serverId),
+    ).resolves.toMatchObject({ subjectUserId: f.context.subjectUserId });
+  });
   it('requires explicit automatic-start consent without inventing Gateway policy', async () => {
     expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({
       allowed: false,

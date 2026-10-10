@@ -92,7 +92,13 @@ export function AutomationPage({ serverId }: { serverId: string }) {
         ) : policy.error ? (
           <ErrorNotice error={policy.error} />
         ) : !policy.data.policy ? (
-          <Notice>{t('service.sleepUnavailable')}</Notice>
+          <Notice>
+            {t(
+              server.data?.connectionMode === 'direct'
+                ? 'service.directSleepUnavailable'
+                : 'service.sleepUnavailable',
+            )}
+          </Notice>
         ) : (
           <>
             {policy.data.state && (

@@ -173,7 +173,14 @@ async function describeServer(
   const idle = !row.active_operation_id && !upload;
   const configured = row.pterodactyl_id !== null && row.pterodactyl_identifier !== null;
   const installed = row.installation_state === 'installed';
-  const capabilities = manifest.success ? manifest.data.capabilities : null;
+  const capabilities = manifest.success
+    ? {
+        ...manifest.data.capabilities,
+        ...(row.connection_mode === 'direct'
+          ? { idleDetection: false, readiness: false, wake: 'unsupported' as const }
+          : {}),
+      }
+    : null;
   // Permission is separate from transient availability. These hints never replace
   // the live handler's locks, provider identity, admission or runtime proof.
   return {
@@ -181,7 +188,9 @@ async function describeServer(
     gameId: mapping.game_id,
     runtimeId: mapping.runtime_id,
     gameNameKey: manifest.success ? manifest.data.nameKey : null,
-    sleepState: policy?.state ?? null,
+    connectionMode: row.connection_mode,
+    readiness: capabilities?.readiness === false ? ('unknown' as const) : row.readiness,
+    sleepState: row.connection_mode === 'direct' ? null : (policy?.state ?? null),
     capabilities,
     permissions: {
       read: true,
@@ -815,7 +824,7 @@ export async function getPlatformConnections(
       .executeTakeFirstOrThrow(),
     db
       .selectFrom('server_allocations')
-      .select(['id', 'role', 'port', 'protocols', 'is_primary'])
+      .select(['id', 'role', 'port', 'protocols', 'is_primary', 'direct_endpoint'])
       .where('server_id', '=', serverId)
       .orderBy('role')
       .execute(),
@@ -841,16 +850,31 @@ export async function getPlatformConnections(
   const manifest = gameManifestSchema.safeParse(mapping.manifest),
     connection = manifest.success ? manifest.data.connection : null;
   const hostname =
-    connection?.mode === 'static-host-port'
-      ? settings.values.staticGameHostname
-      : assignments.find((a) => a.state === 'active')?.hostname;
+    server.connection_mode === 'direct'
+      ? allocations.find((entry) => entry.is_primary)?.direct_endpoint?.hostname
+      : connection?.mode === 'static-host-port'
+        ? settings.values.staticGameHostname
+        : assignments.find((a) => a.state === 'active')?.hostname;
   return {
     mode: connection?.mode ?? null,
+    connectionMode: server.connection_mode,
+    reachability: server.connection_mode === 'direct' ? ('unverified' as const) : null,
     hostname: hostname ?? null,
     srv: connection?.mode === 'custom-subdomain' ? (connection.srv ?? null) : null,
     dns: assignments,
     ports: allocations.flatMap((allocation) =>
       allocation.protocols.map((transport) => {
+        if (server.connection_mode === 'direct') {
+          const endpoint = allocation.direct_endpoint;
+          return {
+            role: allocation.role,
+            primary: allocation.is_primary,
+            transport,
+            port: endpoint?.port ?? null,
+            hostname: endpoint?.hostname ?? null,
+            status: endpoint ? ('configured' as const) : ('unconfigured' as const),
+          };
+        }
         const route = routes.find(
           (r) => r.allocation_id === allocation.id && r.transport === transport,
         );
@@ -959,7 +983,7 @@ export async function getPlatformSleepPolicy(db: DB, context: AuthContext, serve
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
-  if (!state) return { policy: null, state: null };
+  if (!state || server.connection_mode === 'direct') return { policy: null, state: null };
   return {
     policy: {
       enabled: state.enabled,

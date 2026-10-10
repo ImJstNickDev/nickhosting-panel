@@ -10,11 +10,13 @@ import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
 import type { Environment } from './admission.js';
-import { registerMinecraftCombination } from './minecraft-registry.js';
+import { registerMinecraftCombination, setMinecraftAvailability } from './minecraft-registry.js';
 import { ownerOnly, parse } from './registry.js';
 
 /** Explicit Owner discovery only. Batch size bounds provider/upstream work; repeat pages
- * are idempotent. No remote mutation, implicit enablement or certification is performed. */
+ * are idempotent. No remote mutation or certification is performed. Compiled Vanilla installation
+ * declarations enable newly discovered choices under the Owner-enabled mapping;
+ * repeated discovery preserves any subsequent explicit Owner disablement. */
 export async function syncMinecraftCatalog(
   db: Kysely<Database>,
   adapter: PterodactylAdapter,
@@ -29,6 +31,7 @@ export async function syncMinecraftCatalog(
       .object({
         mappingId: z.uuid(),
         all: z.boolean().default(false),
+        enableSupported: z.boolean().default(false),
         cursor: z.number().int().min(0).max(20000).default(0),
         limit: z.number().int().min(1).max(20).default(10),
       })
@@ -83,6 +86,15 @@ export async function syncMinecraftCatalog(
         env,
         { metadata, protocols },
       );
+      if (value.enableSupported) {
+        const current = await db
+          .selectFrom('minecraft_combinations')
+          .select('enabled')
+          .where('id', '=', registered.id)
+          .executeTakeFirstOrThrow();
+        if (!current.enabled)
+          await setMinecraftAvailability(db, context, registered.id, { enabled: true }, env);
+      }
       items.push({
         version: release.id,
         releaseType: release.type,

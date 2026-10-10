@@ -3,6 +3,7 @@ import {
   assertMinecraftChoice,
   type MinecraftCombination,
   type MinecraftEvidence,
+  minecraftDeclaredCapabilities,
   minecraftDigest,
   minecraftSupport,
   minecraftVerificationChecks,
@@ -14,7 +15,7 @@ const combination: MinecraftCombination = {
   releaseType: 'release',
   protocolId: 777,
   family: 'netty',
-  profile: 'vanilla',
+  profile: 'paper',
   javaMajor: 25,
   runtimeDigest: 'a'.repeat(64),
   protocolSource: { url: 'https://example.com/metadata', sha256: 'b'.repeat(64) },
@@ -200,7 +201,8 @@ describe('Minecraft compatibility evidence', () => {
     expect(() => assertMinecraftChoice({ ...input, privateTester: true }, now)).not.toThrow();
     expect(publicMinecraftChoice('choice', combination)).toEqual({
       id: 'choice',
-      runtime: 'vanilla',
+      runtime: 'paper',
+      capabilities: minecraftDeclaredCapabilities(combination),
       version: '26.3',
       releaseType: 'release',
     });
@@ -224,5 +226,69 @@ describe('Minecraft compatibility evidence', () => {
         now,
       ),
     ).toBe('unsupported');
+  });
+});
+
+describe('compiled Vanilla capabilities', () => {
+  it('allows installable Vanilla independently of signed reports while preserving Owner availability', () => {
+    for (const version of [
+      { release: '1.6.4', family: 'legacy', protocolId: 78, releaseType: 'release' },
+      { release: '26.3', family: 'unknown', protocolId: null, releaseType: 'release' },
+      { release: '25w03a', family: 'netty', protocolId: 1073742084, releaseType: 'snapshot' },
+    ] as const) {
+      const selected = { ...combination, ...version, profile: 'vanilla' as const };
+      expect(minecraftDeclaredCapabilities(selected)).toEqual({
+        installation: true,
+        directConnection: true,
+        playerManagement: version.release === '26.3',
+        gateway: false,
+        readiness: false,
+        playerIdle: false,
+        sleepWake: false,
+      });
+      const input = {
+        combination: selected,
+        enabled: true,
+        mappingDigest: 'a'.repeat(64),
+        choiceDigest: 'b'.repeat(64),
+        evidence: [],
+        privateTester: false,
+      };
+      expect(() => assertMinecraftChoice(input, now)).not.toThrow();
+      expect(() => assertMinecraftChoice({ ...input, enabled: false }, now)).toThrow();
+    }
+  });
+  it('separates modern player-file management from direct installation', () => {
+    for (const [release, expected] of [
+      ['1.7.5', false],
+      ['1.7.6', true],
+      ['1.20.4', true],
+    ] as const) {
+      expect(
+        minecraftDeclaredCapabilities({ ...combination, profile: 'vanilla', release })
+          .playerManagement,
+      ).toBe(expected);
+    }
+  });
+  it('declares Gateway only for exact real-server-covered Vanilla pairs', () => {
+    expect(
+      minecraftDeclaredCapabilities({
+        ...combination,
+        profile: 'vanilla',
+        release: '1.21.4',
+        protocolId: 769,
+      }).gateway,
+    ).toBe(false);
+    for (const [release, protocolId] of [['26.1', 775]] as const) {
+      const selected = { ...combination, profile: 'vanilla' as const, release, protocolId };
+      expect(minecraftDeclaredCapabilities(selected).sleepWake).toBe(true);
+      expect(minecraftDeclaredCapabilities({ ...selected, protocolId: 999 }).gateway).toBe(false);
+      expect(minecraftDeclaredCapabilities({ ...selected, releaseType: 'snapshot' }).gateway).toBe(
+        false,
+      );
+      expect(minecraftDeclaredCapabilities({ ...selected, profile: 'paper' }).installation).toBe(
+        false,
+      );
+    }
   });
 });

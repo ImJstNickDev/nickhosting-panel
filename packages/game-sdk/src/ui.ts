@@ -27,6 +27,7 @@ export const uiOptionSchema = z
     disabled: z.boolean().default(false),
     reasonKey: key.optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
+    capabilities: z.record(fieldId, z.boolean()).optional(),
   })
   .strict()
   .refine((v) => Boolean(v.label) !== Boolean(v.labelKey));
@@ -168,6 +169,7 @@ export const gameUiDescriptorSchema = z
                 lookupHandler: id.optional(),
                 toggleField: fieldId.optional(),
                 seedField: fieldId.optional(),
+                requiredCapability: fieldId.optional(),
               })
               .strict(),
           )

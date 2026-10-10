@@ -7,7 +7,7 @@ import {
   gatewayMinecraftProtocolSchema,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
-import { minecraftDigest } from '@nickhosting/minecraft';
+import { minecraftCapabilityDeclaration } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
@@ -21,14 +21,14 @@ import { currentInteractiveContext } from './interactive-context.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { authorizeServer, parse } from './registry.js';
 
-/** Existing managed servers retain verified management when creation availability is disabled.
- * Experimental testing is always checked against the actual server Owner, never the API caller. */
+/** Existing managed servers retain declared routing when creation availability is disabled.
+ * Compiled support declarations are independent of local diagnostic test reports. */
 export async function requireMinecraftGatewayProtocol(
   db: DB,
   serverId: string,
   registration: { handlerId: string; gameVersion: string },
   env: Environment = {},
-  now = new Date(),
+  _now = new Date(),
 ): Promise<GatewayMinecraftProtocol | undefined> {
   const server = await db
     .selectFrom('managed_servers as server')
@@ -39,12 +39,13 @@ export async function requireMinecraftGatewayProtocol(
     .where('server.deleted_at', 'is', null)
     .executeTakeFirst();
   if (!server) throw new DomainError('not_found');
+  if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
   if (server.game_id !== 'minecraft-java') {
     if (registration.handlerId === 'minecraft-java') throw new DomainError('configuration_invalid');
     return undefined;
   }
   const unavailable = () =>
-    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_evidence' });
+    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_unsupported' });
   const profile = await db
     .selectFrom('minecraft_server_profiles')
     .selectAll()
@@ -55,6 +56,7 @@ export async function requireMinecraftGatewayProtocol(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   if (
     choice.row.mapping_id !== server.mapping_id ||
+    choice.row.mapping_digest !== choice.mappingDigest ||
     choice.mapping.game_id !== server.game_id ||
     choice.mapping.runtime_id !== server.runtime_id ||
     choice.combination.profile !== server.runtime_id ||
@@ -64,38 +66,7 @@ export async function requireMinecraftGatewayProtocol(
     choice.combination.protocolId === null
   )
     throw unavailable();
-  const rollout = await db
-    .selectFrom('game_rollouts')
-    .selectAll()
-    .where('integration_id', '=', 'minecraft-java')
-    .executeTakeFirst();
-  if (!rollout) throw unavailable();
-  if (choice.support !== 'verified') {
-    const owner = await db
-      .selectFrom('user')
-      .select(['id', 'role'])
-      .where('id', '=', server.owner_id)
-      .executeTakeFirst();
-    if (
-      choice.support !== 'experimental' ||
-      rollout.state !== 'private-testing' ||
-      !owner ||
-      (owner.role !== 'owner' && !rollout.allowlist.includes(owner.id))
-    )
-      throw unavailable();
-  }
-  const matching = choice.evidence
-    .filter(
-      (report) =>
-        report.combinationDigest === minecraftDigest(choice.combination) &&
-        report.choiceDigest === choice.row.identity_digest &&
-        report.mappingDigest === choice.mappingDigest &&
-        Date.parse(report.recordedAt) <= now.getTime() &&
-        now.getTime() - Date.parse(report.recordedAt) < 180 * 86400000,
-    )
-    .sort((a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt));
-  const report = matching[0];
-  if (!report || (matching[1] && matching[1].recordedAt === report.recordedAt)) throw unavailable();
+  if (!choice.capabilities.gateway) throw unavailable();
   return gatewayMinecraftProtocolSchema.parse({
     release: choice.combination.release,
     protocolId: choice.combination.protocolId,
@@ -104,8 +75,9 @@ export async function requireMinecraftGatewayProtocol(
     acceptsTransfers: false,
     choiceId: choice.row.id,
     choiceDigest: choice.row.identity_digest,
-    evidenceRunId: report.runId,
-    evidenceExpiresAt: new Date(Date.parse(report.recordedAt) + 180 * 86400000).toISOString(),
+    supportSource: 'integration',
+    declarationId: minecraftCapabilityDeclaration.id,
+    declarationVersion: minecraftCapabilityDeclaration.version,
   });
 }
 
@@ -155,6 +127,7 @@ export async function setGatewayRoute(
     if (current.sessionType !== 'regular') throw new DomainError('forbidden');
     const config = await gatewayConfiguration(tx, env);
     const server = await authorizeServer(tx, current, value.serverId, 'server:manage');
+    if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     if (
       !server.pterodactyl_uuid ||
       !server.pterodactyl_id ||
@@ -294,6 +267,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .where('route.gateway_id', '=', gatewayId)
       .where('route.enabled', '=', true)
       .where('server.deleted_at', 'is', null)
+      .where('server.connection_mode', '=', 'gateway')
       .where('server.pterodactyl_uuid', 'is not', null)
       .where('node.enabled', '=', true)
       .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
@@ -386,7 +360,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         Math.min(
           now + config.gatewayLeaseSeconds * 1000,
           ...routes.map((route) =>
-            route.protocol?.minecraft
+            route.protocol?.minecraft && route.protocol.minecraft.supportSource !== 'integration'
               ? Date.parse(route.protocol.minecraft.evidenceExpiresAt)
               : Number.POSITIVE_INFINITY,
           ),
@@ -431,6 +405,7 @@ export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {
     ])
     .where('s.id', '=', route.serverId)
     .where('s.deleted_at', 'is', null)
+    .where('s.connection_mode', '=', 'gateway')
     .where('a.id', '=', route.allocationId)
     .executeTakeFirst();
   if (!row?.pterodactyl_id || !row.pterodactyl_uuid) throw new DomainError('not_found');

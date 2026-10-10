@@ -230,6 +230,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
         titleKey: k('installer.operators'),
         field: 'operators',
         kind: 'players',
+        requiredCapability: 'playerManagement',
         lookupHandler: 'lookup-player',
       },
       {
@@ -237,6 +238,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
         titleKey: k('installer.whitelist'),
         field: 'whitelist',
         kind: 'toggle-players',
+        requiredCapability: 'playerManagement',
         lookupHandler: 'lookup-player',
         toggleField: 'whitelistEnabled',
         seedField: 'operators',
@@ -543,7 +545,13 @@ export const minecraftUiModule = defineTrustedGameUiModule({
       );
       if (!choice) throw new MinecraftUiError('integration_unavailable');
       return {
-        values: context.values,
+        values: {
+          ...context.values,
+          playerManagement: choice.capabilities?.playerManagement !== false,
+          ...(choice.capabilities?.playerManagement === false
+            ? { operators: [], whitelist: [], whitelistEnabled: false }
+            : {}),
+        },
         summary: [
           { labelKey: k('fields.choiceId'), value: `${choice.version} · ${choice.runtime}` },
         ],
@@ -614,7 +622,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
             choiceId,
             configuration: {
               eula: v.eula,
-              properties: { 'white-list': v.whitelistEnabled ?? false },
+              properties:
+                v.playerManagement === false ? {} : { 'white-list': v.whitelistEnabled ?? false },
               operators: v.operators ?? [],
               whitelist: v.whitelistEnabled ? (v.whitelist ?? []) : [],
               ...(v.sourceMode === 'modpack' ? { modpack: { sourceId: v.sourceId } } : {}),

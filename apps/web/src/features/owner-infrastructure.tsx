@@ -589,6 +589,15 @@ function NodeForm({
             allocationId: allocation.id,
             address: allocation.ip,
             port: allocation.port,
+            ...(data.has(`directOnly-${allocation.id}`) ? { delivery: 'direct' as const } : {}),
+            ...(text(data, `directHost-${allocation.id}`)
+              ? {
+                  directEndpoint: {
+                    hostname: text(data, `directHost-${allocation.id}`),
+                    port: number(data, `directPort-${allocation.id}`),
+                  },
+                }
+              : {}),
             ...(allocation.ip === '127.0.0.1'
               ? { backendAddress: text(data, 'bridgeAddress') }
               : {}),
@@ -733,54 +742,101 @@ function NodeForm({
                 label={t('infra.gatewayBinds')}
                 name="gatewayBinds"
                 defaultValue={initial?.backend_allocation_pool?.gatewayBindAddresses.join('\n')}
-                required
               />
+              <Notice>{t('infra.directHelp')}</Notice>
               {providerNode && (
                 <QueryContent query={allocations}>
                   {(rows) => (
-                    <TableRegion label={t('infra.pool')}>
-                      <table>
-                        <thead>
-                          <tr>
-                            <th scope="col">{t('web.actions')}</th>
-                            <th scope="col">{t('infra.address')}</th>
-                            <th scope="col">{t('infra.port')}</th>
-                            <th scope="col">{t('web.status')}</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {rows.map((allocation) => (
-                            <tr key={allocation.id}>
-                              <td>
-                                <Check
-                                  label={t('infra.selectAllocation', { id: allocation.id })}
-                                  checked={selected.has(allocation.id)}
-                                  disabled={
-                                    allocation.assigned &&
-                                    !initial?.backend_allocation_pool?.allocations.some(
-                                      (pin) => pin.allocationId === allocation.id,
-                                    )
-                                  }
-                                  onChange={(event) =>
-                                    setSelected((previous) => {
-                                      const copy = new Set(previous);
-                                      if (event.target.checked) copy.add(allocation.id);
-                                      else copy.delete(allocation.id);
-                                      return copy;
-                                    })
-                                  }
-                                />
-                              </td>
-                              <td>{allocation.ip}</td>
-                              <td>{allocation.port}</td>
-                              <td>
-                                {t(allocation.assigned ? 'infra.assigned' : 'infra.available')}
-                              </td>
+                    <>
+                      <TableRegion label={t('infra.pool')}>
+                        <table>
+                          <thead>
+                            <tr>
+                              <th scope="col">{t('web.actions')}</th>
+                              <th scope="col">{t('infra.address')}</th>
+                              <th scope="col">{t('infra.port')}</th>
+                              <th scope="col">{t('web.status')}</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </TableRegion>
+                          </thead>
+                          <tbody>
+                            {rows.map((allocation) => (
+                              <tr key={allocation.id}>
+                                <td>
+                                  <Check
+                                    label={t('infra.selectAllocation', { id: allocation.id })}
+                                    checked={selected.has(allocation.id)}
+                                    disabled={
+                                      allocation.assigned &&
+                                      !initial?.backend_allocation_pool?.allocations.some(
+                                        (pin) => pin.allocationId === allocation.id,
+                                      )
+                                    }
+                                    onChange={(event) =>
+                                      setSelected((previous) => {
+                                        const copy = new Set(previous);
+                                        if (event.target.checked) copy.add(allocation.id);
+                                        else copy.delete(allocation.id);
+                                        return copy;
+                                      })
+                                    }
+                                  />
+                                </td>
+                                <td>{allocation.ip}</td>
+                                <td>{allocation.port}</td>
+                                <td>
+                                  {t(allocation.assigned ? 'infra.assigned' : 'infra.available')}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </TableRegion>
+
+                      {rows
+                        .filter((allocation) => selected.has(allocation.id))
+                        .map((allocation) => (
+                          <fieldset key={allocation.id} className="direct-allocation-fields">
+                            <legend>
+                              {t('infra.directEndpoint')} ·{' '}
+                              <code>
+                                {allocation.ip}:{allocation.port}
+                              </code>
+                            </legend>
+                            <div className="columns">
+                              <Input
+                                label={t('infra.directHost', { id: allocation.id })}
+                                name={`directHost-${allocation.id}`}
+                                defaultValue={
+                                  initial?.backend_allocation_pool?.allocations.find(
+                                    (pin) => pin.allocationId === allocation.id,
+                                  )?.directEndpoint?.hostname ?? ''
+                                }
+                              />
+                              <Input
+                                label={t('infra.directPort', { id: allocation.id })}
+                                name={`directPort-${allocation.id}`}
+                                type="number"
+                                min={1}
+                                max={65535}
+                                defaultValue={
+                                  initial?.backend_allocation_pool?.allocations.find(
+                                    (pin) => pin.allocationId === allocation.id,
+                                  )?.directEndpoint?.port ?? allocation.port
+                                }
+                              />
+                            </div>
+                            <Check
+                              label={t('infra.directOnly', { id: allocation.id })}
+                              name={`directOnly-${allocation.id}`}
+                              defaultChecked={
+                                initial?.backend_allocation_pool?.allocations.find(
+                                  (pin) => pin.allocationId === allocation.id,
+                                )?.delivery === 'direct'
+                              }
+                            />
+                          </fieldset>
+                        ))}
+                    </>
                   )}
                 </QueryContent>
               )}

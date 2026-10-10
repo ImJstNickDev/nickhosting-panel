@@ -217,6 +217,28 @@ async function report(
 }
 
 describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
+  it('rejects an already queued Gateway wake if the server is direct, without releasing its reservation', async () => {
+    await configure();
+    const state = await wake();
+    expect(state.wakeJobId).toBeTruthy();
+    const jobId = state.wakeJobId ?? '';
+    await expect(authorizeQueuedEffect(f.db, jobId, serverId)).resolves.toMatchObject({
+      subjectUserId: f.context.subjectUserId,
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(authorizeQueuedEffect(f.db, jobId, serverId)).rejects.toThrow('forbidden');
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst(),
+    ).toBeDefined();
+  });
   it.each([
     ['resources', 'logout'],
     ['resources', 'demotion'],

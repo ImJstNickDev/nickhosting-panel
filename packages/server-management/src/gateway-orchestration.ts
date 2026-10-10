@@ -106,6 +106,7 @@ async function rows(db: DB, serverId: string) {
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
+  if (server?.connection_mode === 'direct') throw new DomainError('integration_unavailable');
   if (!server?.pterodactyl_uuid || !state) throw new DomainError('not_found');
   return { server, state };
 }
@@ -203,6 +204,7 @@ export async function setGatewayPolicy(
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, options.env ?? {});
     const server = await authorizeServer(tx, current, serverId, 'server:manage');
+    if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     if (!server.pterodactyl_uuid || server.installation_state !== 'installed')
       throw new DomainError('conflict');
     const now = nowOf(options);

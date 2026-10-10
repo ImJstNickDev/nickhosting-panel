@@ -114,7 +114,12 @@ export async function installBrowserFixtures(
       pterodactyl_node_id: 1,
       provision_user_id: 1,
       backend_allocation_pool: JSON.stringify({
-        allocations: allocations.map((a) => ({ allocationId: a.id, address: a.ip, port: a.port })),
+        allocations: allocations.map((a) => ({
+          allocationId: a.id,
+          address: a.ip,
+          port: a.port,
+          directEndpoint: { hostname: `${nodeId}.example.test`, port: a.port },
+        })),
         gatewayBindAddresses: ['192.0.2.10'],
       }),
     })

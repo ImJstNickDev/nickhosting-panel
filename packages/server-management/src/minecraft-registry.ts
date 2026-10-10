@@ -7,6 +7,7 @@ import {
   compareMinecraftChoices,
   fetchMinecraftProtocols,
   minecraftCombinationSchema,
+  minecraftDeclaredCapabilities,
   minecraftDigest,
   minecraftEvidenceSchema,
   minecraftSupport,
@@ -215,6 +216,7 @@ export async function registerMinecraftCombination(
         resolved_runtime: JSON.stringify(runtime),
         binding: JSON.stringify(binding),
         mapping_digest: mappingDigest,
+        enabled: latest.enabled && minecraftDeclaredCapabilities(combination).installation,
       })
       .execute();
     await recordAudit(tx, current, 'minecraft.combination.registered', {
@@ -254,6 +256,9 @@ export async function inspectMinecraftCombination(db: DB, id: string, env: Envir
     combination,
     evidence,
     mappingDigest,
+    capabilities: minecraftDeclaredCapabilities(combination),
+    supportAuthority:
+      combination.profile === 'vanilla' ? ('integration' as const) : ('signed-evidence' as const),
     support: minecraftSupport(combination, mappingDigest, row.identity_digest, evidence),
   };
 }
@@ -278,6 +283,9 @@ export async function requireMinecraftChoice(
     ).canCreate
   )
     throw new DomainError('forbidden');
+  // A declaration does not authorize changing the frozen provider/runtime identity.
+  if (choice.row.mapping_digest !== choice.mappingDigest)
+    throw new DomainError('integration_unavailable');
   assertMinecraftChoice({
     combination: choice.combination,
     enabled: choice.row.enabled && choice.mapping.enabled,

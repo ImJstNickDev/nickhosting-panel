@@ -507,6 +507,54 @@ describe('M5 platform browser queries and metadata', () => {
       'unavailable',
     );
   });
+  it('uses frozen direct endpoints without claiming reachability or falling back to private addresses', async () => {
+    const id = await f.server();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', id)
+      .execute();
+    let result = await getPlatformConnections(f.db, f.context, id);
+    expect(result.connectionMode).toBe('direct');
+    expect(result.reachability).toBe('unverified');
+    expect(result.ports.every((p) => p.hostname === null && p.status === 'unconfigured')).toBe(
+      true,
+    );
+    await f.db
+      .updateTable('server_allocations')
+      .set({ direct_endpoint: JSON.stringify({ hostname: 'direct.example.test', port: 27090 }) })
+      .where('server_id', '=', id)
+      .execute();
+    result = await getPlatformConnections(f.db, f.context, id, {
+      NH_STATIC_GAME_HOSTNAME: 'ignored.example.test',
+    });
+    expect(
+      result.ports.every(
+        (p) =>
+          p.hostname === 'direct.example.test' && p.port === 27090 && p.status === 'configured',
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(result.ports)).not.toContain('10.0.0.2');
+    expect(await getPlatformSleepPolicy(f.db, f.context, id)).toEqual({
+      policy: null,
+      state: null,
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running', readiness: 'loading' })
+      .where('id', '=', id)
+      .execute();
+    const details = await getPlatformServer(f.db, f.context, id);
+    expect(details.connectionMode).toBe('direct');
+    expect(details.capabilities).toMatchObject({
+      wake: 'unsupported',
+      idleDetection: false,
+      readiness: false,
+    });
+    expect(details.readiness).toBe('unknown');
+    expect(details.runtimeState).toBe('running');
+    expect(details.availableActions.restart).toBe(true);
+  });
   it('reports transfer limits and unconfigured policies without secrets or filesystem paths', async () => {
     const id = await f.server(),
       env = {

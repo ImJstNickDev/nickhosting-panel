@@ -5,6 +5,18 @@ by its journeys. Satisfactory is M6 and is not a prerequisite. This document is
 the mandatory traceability checklist, not an authorization to deploy or merge.
 The original M4 audit is preserved below as a historical baseline.
 
+## Owner policy amendment — 2026-10-10
+
+Trusted integration declarations now determine supported Vanilla installation and
+optional features; local per-mapping signed reports are diagnostic, not an ordinary
+creation prerequisite. Direct-only versions remain usable without Gateway or
+sleep/wake. The Owner configures explicit player endpoints; no network changes or
+external reachability are implied. See the [ADR 0013 amendment](decisions/0013-minecraft-evidence-and-content.md)
+and [current API contracts](M5-API-CONTRACTS.md). Earlier evidence-gate requirements
+below describe the historical audit, not an additional current Vanilla gate.
+Other runtimes are not automatically promoted. Identity, installation integrity,
+admission, permissions and truthful evidence remain required.
+
 ## Implementation checkpoint — 2026-10-09
 
 The current source implements the former gaps through additive contracts; the

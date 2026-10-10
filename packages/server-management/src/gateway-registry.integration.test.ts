@@ -5,7 +5,12 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { lockResources } from './admission.js';
-import { setGatewayPolicy } from './gateway-orchestration.js';
+import {
+  getGatewayState,
+  reconcileGatewayState,
+  requestGatewayWake,
+  setGatewayPolicy,
+} from './gateway-orchestration.js';
 import { getGatewaySnapshot, requireGatewayRoute, setGatewayRoute } from './gateway-registry.js';
 import { managementFixture } from './test-fixtures.js';
 
@@ -55,6 +60,26 @@ const input = () => ({
   transport: 'tcp' as const,
 });
 describe('durable explicit Gateway route registry', () => {
+  it('refuses direct servers in route, policy, wake, reconciliation and snapshot paths', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    const state = await getGatewayState(f.db, serverId);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(setGatewayPolicy(f.db, f.context, serverId, policy)).rejects.toThrow(
+      'integration_unavailable',
+    );
+    await expect(setGatewayRoute(f.db, f.owner, input(), env)).rejects.toThrow(
+      'integration_unavailable',
+    );
+    await expect(
+      requestGatewayWake(f.db, serverId, { generation: state.generation, intent: 'join' }),
+    ).rejects.toThrow('integration_unavailable');
+    await expect(reconcileGatewayState(f.db, serverId)).rejects.toThrow('integration_unavailable');
+    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
+  });
   it('registers only an Owner-selected managed claim and returns immutable raw/effective endpoints', async () => {
     const row = await setGatewayRoute(f.db, f.owner, input(), env),
       first = await getGatewaySnapshot(f.db, env),

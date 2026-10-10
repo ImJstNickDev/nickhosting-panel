@@ -159,6 +159,99 @@ describe('explicit Owner backend allocation pools', () => {
       ).rejects.toThrow('validation_failed');
     },
   );
+  it('requires explicit direct delivery for public bindings and canonicalizes endpoint aliases', () => {
+    const pin = {
+      allocationId: 1,
+      address: '203.0.113.9',
+      port: 25565,
+      directEndpoint: { hostname: 'GAME.Example.Test.', port: 25565 },
+    };
+    expect(
+      backendAllocationPoolSchema.safeParse({ allocations: [pin], gatewayBindAddresses: [] })
+        .success,
+    ).toBe(false);
+    const direct = backendAllocationPoolSchema.parse({
+      allocations: [{ ...pin, delivery: 'direct' }],
+      gatewayBindAddresses: [],
+    });
+    expect(direct.allocations[0]?.directEndpoint?.hostname).toBe('game.example.test');
+    expect(
+      backendAllocationPoolSchema.safeParse({
+        allocations: [
+          {
+            ...pin,
+            delivery: 'direct',
+            directEndpoint: { hostname: '2001:0DB8:0000::1', port: 25565 },
+          },
+          {
+            ...pin,
+            allocationId: 2,
+            port: 25566,
+            delivery: 'direct',
+            directEndpoint: { hostname: '2001:db8::1', port: 25565 },
+          },
+        ],
+        gatewayBindAddresses: [],
+      }).success,
+    ).toBe(false);
+  });
+  it('cannot convert a claimed Gateway allocation to direct-only delivery', async () => {
+    const pool = await pinFirst();
+    await f.server();
+    await expect(
+      setManagedNode(
+        f.db,
+        f.adapter,
+        f.owner,
+        input({
+          ...pool,
+          allocations: pool.allocations.map((pin) => ({
+            ...pin,
+            delivery: 'direct',
+            directEndpoint: { hostname: 'game.example.test', port: pin.port },
+          })),
+        }),
+      ),
+    ).rejects.toThrow('conflict');
+  });
+  it('preserves a frozen direct endpoint during Owner pool edits and worker revalidation', async () => {
+    const pool = await pinFirst();
+    const serverId = await f.server();
+    const endpoint = { hostname: `${f.nodeId}.example.test`, port: 25565 };
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('server_allocations')
+      .set({ direct_endpoint: JSON.stringify(endpoint) })
+      .where('server_id', '=', serverId)
+      .execute();
+    const directPool = {
+      ...pool,
+      allocations: pool.allocations.map((pin) => ({ ...pin, directEndpoint: endpoint })),
+    };
+    await setManagedNode(f.db, f.adapter, f.owner, input(directPool));
+    await expect(assertServerBackendAllocations(f.db, f.adapter, serverId)).resolves.toHaveLength(
+      1,
+    );
+    await expect(setManagedNode(f.db, f.adapter, f.owner, input(pool))).rejects.toThrow('conflict');
+    await expect(
+      setManagedNode(
+        f.db,
+        f.adapter,
+        f.owner,
+        input({
+          ...directPool,
+          allocations: directPool.allocations.map((pin) => ({
+            ...pin,
+            directEndpoint: { ...endpoint, port: 25566 },
+          })),
+        }),
+      ),
+    ).rejects.toThrow('conflict');
+  });
   it('rejects foreign node identity and missing or duplicate inventory IDs', async () => {
     const pool = await pinFirst();
     vi.mocked(f.adapter.getNode).mockResolvedValue({ id: f.providerNodeId + 1 } as Awaited<

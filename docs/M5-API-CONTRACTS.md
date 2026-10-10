@@ -69,7 +69,7 @@ Revocation applies on subsequent requests and existing live-authority checks.
 Server `permissions` separates `read`, `operate`, `manage` and `sharing`.
 `availableActions` additionally considers installation, process state, pending
 operation/upload, provider identity and resource reservations. It is advisory:
-lifecycle handlers recheck permissions, configuration, evidence and admission.
+lifecycle handlers recheck permissions, configuration, declared capabilities, immutable runtime identity and admission; undeclared runtime profiles retain their evidence gates.
 Readiness, process state and sleep state must not be collapsed into one badge.
 `firstStart` reports the historical durable `denied` event/message/timestamp when
 creation succeeded but initial compute admission failed. It is not a new start
@@ -88,9 +88,9 @@ routes and their audit rules.
 | Path suffix under `/v1/platform/servers/:id` | Contract |
 | --- | --- |
 | `/transfers` | `files`, bounded text-editor capacity, upload availability/reason/provider byte ceiling/server disk allowance, streaming download support, public SFTP endpoint/configuration/issuance hints and backup permissions. Download total-size limit is `null`; real provider/storage limits still apply. |
-| `/connections` | Connection mode, configured public hostname/SRV metadata, DNS assignment states and every allocation role/transport. Each port has public hostname/port and `unconfigured`, `disabled`, `unavailable` or `available` route status. No guessed backend-to-public mapping. |
+| `/connections` | Domain `mode` plus frozen `connectionMode: gateway/direct`, configured hostname/SRV metadata, DNS states and every allocation role/transport. Gateway ports retain `unconfigured`, `disabled`, `unavailable` or `available` route status. Direct ports use only frozen `direct_endpoint` and report `configured`/`unconfigured`, with `reachability: unverified`. Configuration never claims an externally tested connection. |
 | `/metrics` | `limit` 1–500 (default 100), `from`, `to`, `before` ISO timestamps; `{items,nextBefore}` in descending observation order. Missing intervals remain gaps. |
-| `/sleep-policy` | `{policy,state}`; nulls when unconfigured. Complete editable enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; state reuses M3 readiness and startup estimates. |
+| `/sleep-policy` | `{policy,state}`; nulls when unconfigured or direct. Complete editable enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; state reuses M3 readiness and startup estimates. |
 
 SFTP connection details require explicit `sftpPublicHostname` and `sftpPublicPort`;
 the private SFTPGo API URL is never used as a public fallback. These settings follow
@@ -212,9 +212,11 @@ write-only and respects environment precedence; raw secrets never enter read DTO
 Existing `PUT /v1/owner/games` persists manifests/rollout/tester policy; public
 `GET /v1/games` dispatches filtering through the trusted backend registry.
 Database JSON cannot import executable code. Dispatch requires managed identity
-and matching runtime/profile integrity. M4 Minecraft hooks still enforce signed
-runtime, image, launch, protected files, process epoch and compatibility evidence.
-Existing Minecraft registration/runtime aliases remain compatible.
+and matching runtime/profile integrity. Minecraft hooks preserve image, launch,
+protected-file and process-epoch checks. Compiled Vanilla capability declarations
+supply installation authority without a per-mapping signed report/key. Exact runtime
+observations and diagnostic reports remain distinguishable; other profiles retain
+existing evidence policy. Existing registration/runtime aliases remain compatible.
 
 ## Trusted browser SDK and Minecraft management
 
@@ -228,16 +230,17 @@ code or arbitrary asset URLs.
 The shared shell owns identity, resources, projects, lifecycle, Activity, services,
 network and automation. Generic wizard/section renderers consume typed field
 constraints, conditional visibility, asynchronous choices, commands and capability
-requirements. Every availability decision combines actual permissions, verified
-runtime, rollout/provider configuration and current state; declarations alone do
+requirements. Every availability decision combines actual permissions, declared
+capabilities, locally validated runtime, rollout/provider configuration and current state; declarations alone do
 not authorize an action. Isolated multiport/conditional-form fixtures prove the
 extension mechanism without offering Satisfactory or unsupported runtimes.
 
 `GET /v1/servers/:id/minecraft` retains its M4 fields and adds
 `effectiveProperties`, parsed from the actual provider `server.properties` with a
 1 MiB read bound under current managed-server access. Only safe editable keys are
-returned. `supportedProperties` is also intersected with those keys and comes from
-signed server evidence. The form initializes from effective file values, not the
+returned. `supportedProperties` is intersected with those keys; declared Vanilla
+uses properties actually present in the installed server file, while existing
+report-backed runtime paths retain their diagnostic property evidence. The form initializes from effective file values, not the
 old provisioning configuration; writes still use existing durable verification.
 Unavailable/malformed provider files produce real errors, not invented defaults.
 
@@ -251,13 +254,16 @@ Wings responsibility.
 
 ## 2026-10-10 — Creation discovery and resource defaults
 
-- Owner-only `POST /v1/owner/minecraft/catalog/sync` accepts `{mappingId, all?, cursor?, limit?}`
+- Owner-only `POST /v1/owner/minecraft/catalog/sync` accepts `{mappingId, all?, cursor?, limit?, enableSupported?}`
   (limit at most 20), returns per-version registration/unavailability and next cursor.
   It writes only local immutable combination records; no remote installation,
-  verification claim or automatic enablement occurs. Recognized Vanilla bindings
-  are also optional input to the existing single-combination registration API.
+  verification claim occurs. `enableSupported: true` explicitly requests Owner
+  availability for declared candidates; rollout policy still applies. No local
+  signed report is required for Vanilla installation/direct support. Recognized
+  Vanilla bindings are optional input to the existing registration API.
 - Minecraft public choices add `releaseType` for stable versus snapshot/historical
-  presentation; evidence, rollout and availability checks are unchanged.
+  presentation. Compiled Vanilla installation capability is separate from diagnostic
+  evidence; Owner rollout/availability and local provider validation still apply.
 - Quota responses add `creationStorage: {mode: 'shared'|'limited', defaultDiskMiB}`.
   Create requests may omit `limits.disk` only with `GLOBAL_POOL`. Core resolves
   the Owner default under the existing resource transaction and freezes it with
@@ -266,3 +272,32 @@ Wings responsibility.
 - `defaultServerStorageMiB` defaults to the former wizard value, 4096 MiB; normal
   defaults < Owner DB < environment precedence applies. This is a finite allowance,
   not unlimited disk. No actual Owner settings are seeded or changed by the update.
+
+## 2026-10-10 — Declared capabilities and optional Gateway
+
+Minecraft choice DTOs include declared per-combination capabilities and their
+support authority; Owner diagnostics retain actual evidence separately. Vanilla
+installation/direct connection is not contingent on `minecraftEvidenceKey` or a
+new report for each Owner mapping. A declaration does not promote undeclared
+profiles or manufacture a tested client/server result.
+
+Managed server descriptions expose frozen `connectionMode`. Direct descriptions
+set protocol readiness/idle/wake capabilities unavailable; process `running` is
+reported separately from unknown/unavailable game readiness. `/sleep-policy`
+returns nulls for direct servers. Network UI identifies configured direct addresses
+and their unverified external reachability. Automatic scheduled starts remain a
+separate explicit consent; stale Gateway policies cannot grant direct wake behavior.
+
+Owner allocation pools may specify `directEndpoint: {hostname, port}`. An explicitly
+`delivery: direct` allocation may use a validated unicast provider binding rather
+than a private Gateway backend. Provisioning freezes the endpoint and delivery mode;
+no hostname is guessed from a private backend or provider alias. All claimed ports,
+provider identities and allocation ownership are still checked. DNS planning for
+direct servers uses the frozen hostname/port; this task performs no real DNS writes.
+
+Gateway service metadata has an explicit authority union: compiled integration
+`supportSource: integration`, `declarationId`, `declarationVersion`, or the legacy
+signed-report fields. The integration currently declares Vanilla 26.1/protocol 775
+Gateway behavior. Compiled declaration validation, bounded route leases and all M3
+safety fences remain mandatory. Direct servers are rejected by route/policy/wake
+handlers and queued Gateway-effect authorization.

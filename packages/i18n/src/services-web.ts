@@ -1,4 +1,13 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'service.directConfigured': ['Configured', 'Configurato'],
+  'service.directReachability': [
+    'Direct connection. This address is configured by the Owner; external reachability has not been verified.',
+    'Connessione diretta. L’indirizzo è configurato dall’Owner; la raggiungibilità esterna non è stata verificata.',
+  ],
+  'service.directSleepUnavailable': [
+    'This server uses a direct connection. Start and stop it from Overview; automatic sleep and wake are unavailable.',
+    'Questo server usa una connessione diretta. Avvialo e arrestalo dalla Panoramica; sospensione e risveglio automatici non sono disponibili.',
+  ],
   'service.startConsent': ['Automatic start permission', 'Consenso agli avvii automatici'],
   'service.allowAutomaticStarts': ['Allow automatic starts', 'Consenti avvii automatici'],
   'service.consentDescription': [

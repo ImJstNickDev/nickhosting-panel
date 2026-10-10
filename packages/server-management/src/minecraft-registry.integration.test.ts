@@ -196,15 +196,14 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       registerMinecraftCombination(f.db, adapter, f.owner, input, env, { metadata, protocols }),
     ).resolves.toEqual({ id: expect.any(String) });
   });
-  it('an Owner checkbox cannot manufacture compatibility', async () => {
+  it('compiled Vanilla installation works without local evidence while diagnostics remain truthful', async () => {
     await setMinecraftAvailability(f.db, f.owner, choiceId, { enabled: true }, env);
     expect((await inspectMinecraftCombination(f.db, choiceId, env)).support).toBe('unverified');
-    await expect(requireMinecraftChoice(f.db, f.context, choiceId, env)).rejects.toThrow(
-      'integration_unavailable',
-    );
-    expect((await minecraftCatalog(f.db, f.context, env)).some((row) => row.id === choiceId)).toBe(
-      false,
-    );
+    await expect(requireMinecraftChoice(f.db, f.context, choiceId)).resolves.toMatchObject({
+      supportAuthority: 'integration',
+      capabilities: { installation: true, gateway: false, sleepWake: false },
+    });
+    expect((await minecraftCatalog(f.db, f.context)).some((row) => row.id === choiceId)).toBe(true);
     const value = await report();
     await expect(
       importMinecraftEvidence(
@@ -222,7 +221,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     const row = (await minecraftCatalog(f.db, f.context, env)).find(
       (entry) => entry.id === choiceId,
     );
-    expect(row).toEqual({
+    expect(row).toMatchObject({
       id: choiceId,
       version: '1.21.1',
       releaseType: 'release',
@@ -277,10 +276,12 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       ),
     ).resolves.toBeUndefined();
   });
-  it('fixtures stay hidden except explicit private-testing allowlists', async () => {
+  it('diagnostic fixture evidence does not gate Vanilla but rollout and allowlists remain authoritative', async () => {
     await attest('protocol-fixture');
     await setMinecraftAvailability(f.db, f.owner, choiceId, { enabled: true }, env);
-    await expect(requireMinecraftChoice(f.db, f.owner, choiceId, env)).rejects.toThrow();
+    await expect(requireMinecraftChoice(f.db, f.owner, choiceId, env)).resolves.toMatchObject({
+      supportAuthority: 'integration',
+    });
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })

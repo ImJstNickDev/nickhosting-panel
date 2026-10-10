@@ -89,6 +89,7 @@ export const minecraftChoiceSchema = z
     version: z.string().min(1).max(80),
     runtime: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge']),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
+    capabilities: z.record(z.string(), z.boolean()).optional(),
   })
   .strip();
 export type MinecraftUiChoice = z.infer<typeof minecraftChoiceSchema>;
@@ -208,6 +209,7 @@ export function createMinecraftUiController(client: GameUiClient) {
         label: `${choice.version} · ${choice.runtime}`,
         disabled: false,
         releaseType: choice.releaseType ?? 'release',
+        ...(choice.capabilities ? { capabilities: choice.capabilities } : {}),
       }));
     },
     profile,

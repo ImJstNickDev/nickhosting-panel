@@ -72,6 +72,16 @@ interface Combination {
   mappingId: string;
   enabled: boolean;
   support: string;
+  supportAuthority?: 'integration' | 'evidence';
+  capabilities?: {
+    installation: boolean;
+    directConnection: boolean;
+    gateway: boolean;
+    readiness: boolean;
+    playerIdle: boolean;
+    sleepWake: boolean;
+    playerManagement: boolean;
+  };
   combination: {
     release: string;
     profile: string;
@@ -111,6 +121,7 @@ export function OwnerMinecraftPage() {
                   <th>{t('gameAdmin.runtime')}</th>
                   <th>{t('gameAdmin.java')}</th>
                   <th>{t('gameAdmin.protocol')}</th>
+                  <th>{t('gameAdmin.installationSupport')}</th>
                   <th>{t('gameAdmin.support')}</th>
                   <th>{t('gameAdmin.availability')}</th>
                   <th>{t('web.actions')}</th>
@@ -123,6 +134,13 @@ export function OwnerMinecraftPage() {
                     <td>{choice.combination.profile}</td>
                     <td>{choice.combination.javaMajor}</td>
                     <td>{choice.combination.protocolId ?? t('web.unknown')}</td>
+                    <td>
+                      {t(
+                        choice.capabilities?.installation
+                          ? 'gameAdmin.declaredSupported'
+                          : 'web.unavailable',
+                      )}
+                    </td>
                     <td>{t(`gameAdmin.${choice.support}`)}</td>
                     <td>{t(choice.enabled ? 'web.enabled' : 'web.disabled')}</td>
                     <td>
@@ -172,6 +190,34 @@ function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: 
             [t('gameAdmin.loader'), choice.combination.loaderVersion ?? '—'],
           ]}
         />
+        {choice.capabilities && (
+          <Details
+            values={[
+              [
+                t('gameAdmin.authority'),
+                t(
+                  choice.supportAuthority === 'integration'
+                    ? 'gameAdmin.integrationAuthority'
+                    : 'gameAdmin.evidence',
+                ),
+              ],
+              ...(
+                [
+                  'installation',
+                  'directConnection',
+                  'gateway',
+                  'readiness',
+                  'playerIdle',
+                  'sleepWake',
+                  'playerManagement',
+                ] as const
+              ).map((capability): [string, string] => [
+                t(`gameAdmin.capability.${capability}`),
+                t(choice.capabilities?.[capability] ? 'gameUi.yes' : 'gameUi.no'),
+              ]),
+            ]}
+          />
+        )}
         <ActionForm
           onSubmit={async (data) => {
             await api(`/v1/owner/minecraft/compatibility/${choice.id}/availability`, {
@@ -292,6 +338,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
     [];
   const [mappingId, setMappingId] = useState('');
   const [all, setAll] = useState(false);
+  const [enableSupported, setEnableSupported] = useState(false);
   const [batch, setBatch] = useState<CatalogBatch>();
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<unknown>();
@@ -302,7 +349,13 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
     setFailure(undefined);
     try {
       const response = await api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
-        body: { mappingId: selected, all, cursor: batch?.nextCursor ?? 0, limit: 20 },
+        body: {
+          mappingId: selected,
+          all,
+          enableSupported,
+          cursor: batch?.nextCursor ?? 0,
+          limit: 20,
+        },
       });
       setBatch(response);
       refresh();
@@ -345,6 +398,15 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
             disabled={busy}
             onChange={(event) => {
               setAll(event.target.checked);
+              setBatch(undefined);
+            }}
+          />
+          <Check
+            label={t('gameAdmin.enableSupportedBatch')}
+            checked={enableSupported}
+            disabled={busy}
+            onChange={(event) => {
+              setEnableSupported(event.target.checked);
               setBatch(undefined);
             }}
           />

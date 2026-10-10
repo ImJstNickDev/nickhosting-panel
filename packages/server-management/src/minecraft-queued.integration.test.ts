@@ -77,6 +77,19 @@ afterAll(async () => {
 beforeEach(async () => {
   f = await managementFixture(database.db, { interactive: true });
   await f.db
+    .updateTable('managed_nodes')
+    .set({
+      backend_allocation_pool: JSON.stringify({
+        ...f.backendAllocationPool,
+        allocations: f.backendAllocationPool.allocations.map((pin) => ({
+          ...pin,
+          directEndpoint: { hostname: `${f.nodeId}.example.test`, port: pin.port },
+        })),
+      }),
+    })
+    .where('id', '=', f.nodeId)
+    .execute();
+  await f.db
     .insertInto('game_integrations')
     .values({ id: 'minecraft-java', version: '1.0.0', manifest: {} })
     .onConflict((c) => c.column('id').doNothing())
@@ -329,7 +342,6 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
 
   it.each([
     'revoked',
-    'failed-report',
     'tampered-plan',
     'tampered-startup',
     'extra-environment',
@@ -343,7 +355,6 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
         .set({ enabled: false })
         .where('id', '=', choiceId)
         .execute();
-    if (change === 'failed-report') await evidence(true);
     if (change === 'mapping-change')
       await f.db
         .updateTable('runtime_egg_mappings')
@@ -626,7 +637,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     value.observer.imageIdentity.mockResolvedValue(null);
     await expect(
       value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
-    ).resolves.toMatchObject({ expected: imageDigest, observed: null, verified: false });
+    ).resolves.toMatchObject({ expected: null, observed: null, verified: false, report: null });
     await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
       'integration_unavailable',
     );
@@ -720,6 +731,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
   });
   it('rejects changed actual image contents under an unchanged mutable image tag', async () => {
     const value = await installed();
+    await value.management.assertMinecraftRuntimeImage(value.serverId);
     value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
     await expect(
       value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
@@ -758,28 +770,48 @@ describe('host-bound Minecraft runtime image evidence', () => {
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).rejects.toThrow('operation_uncertain');
   });
-  it('restricts signed installation bootstrap evidence to the actual private tester', async () => {
+  it('uses compiled Vanilla support without local signatures or historical reports', async () => {
     const value = await installed();
-    await evidence(false, new Date(), 'installation-bootstrap');
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
-      'integration_unavailable',
-    );
     await f.db
-      .updateTable('game_rollouts')
-      .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
+      .deleteFrom('minecraft_verification_evidence')
+      .where('combination_id', '=', choiceId)
       .execute();
-    await expect(
-      value.management.assertMinecraftRuntimeImage(value.serverId),
-    ).resolves.toMatchObject({ verified: true, report: { kind: 'installation-bootstrap' } });
-    await f.db
-      .updateTable('game_rollouts')
-      .set({ allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
-      .execute();
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
-      'integration_unavailable',
+    const noKey = { ...env, NH_MINECRAFT_EVIDENCE_KEY: undefined };
+    const management = await createManagementRuntime({
+      db: f.db,
+      codec: value.codec,
+      adapter: value.external.adapter,
+      containerObserver: value.observer,
+      env: noKey,
+    });
+    await expect(management.assertMinecraftRuntimeImage(value.serverId)).resolves.toMatchObject({
+      expected: imageDigest,
+      observed: imageDigest,
+      verified: true,
+      report: null,
+    });
+    await expect(management.lifecycle.observeProcessStart(value.serverId, f.db)).resolves.toEqual(
+      expect.any(String),
     );
+    expect(
+      await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select('runtime_image_digest')
+        .where('server_id', '=', value.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ runtime_image_digest: imageDigest });
+  });
+  it('pins exactly one competing first-observed image and refuses the other', async () => {
+    const value = await installed();
+    const { requireMinecraftRuntimeImageEvidence } = await import(
+      './minecraft-runtime-evidence.js'
+    );
+    const results = await Promise.allSettled([
+      requireMinecraftRuntimeImageEvidence(f.db, value.serverId, imageDigest, env),
+      requireMinecraftRuntimeImageEvidence(f.db, value.serverId, `sha256:${'c'.repeat(64)}`, env),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
   });
   it('rejects a queued start before its power effect if actual image content changed', async () => {
     const value = await installed();
@@ -790,6 +822,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       { action: 'start', idempotencyKey: randomUUID() },
       env,
     );
+    await value.management.assertMinecraftRuntimeImage(value.serverId);
     value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
     const power = vi.fn(async () => {});
     Object.assign(value.external.adapter, { power });
@@ -808,12 +841,15 @@ describe('host-bound Minecraft runtime image evidence', () => {
       value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
     ).rejects.toThrow('integration_unavailable');
   });
-  it('does not retain an older successful image report after a newer failed run', async () => {
+  it('does not treat a failed historical report as authority over declared Vanilla installation', async () => {
     const value = await installed();
     await evidence(true);
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
-      'integration_unavailable',
-    );
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId),
+    ).resolves.toMatchObject({
+      verified: true,
+      report: null,
+    });
   });
   it('binds observation to the right host and live managed provider identity first', async () => {
     const value = await installed();

@@ -61,7 +61,15 @@ export function CreateServerPage() {
     queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
   });
   const module = gameUiRegistry.get(gameId);
-  const pages = module?.descriptor.creation.pages ?? [];
+  const declaredPages = module?.descriptor.creation.pages ?? [];
+  const versionField = declaredPages.find((entry) => entry.kind === 'version-list')?.field;
+  const chosenCapabilities = versionField
+    ? choices[versionField]?.find((entry) => entry.value === values[versionField])?.capabilities
+    : undefined;
+  const pages = declaredPages.filter(
+    (entry) =>
+      !entry.requiredCapability || chosenCapabilities?.[entry.requiredCapability] !== false,
+  );
   const gameSteps = pages.length || 1,
     resourcesStep = 2 + gameSteps,
     finalStep = resourcesStep + 1;
@@ -98,9 +106,9 @@ export function CreateServerPage() {
   };
   const receiveVersions = useCallback(
     (options: UiOption[]) => {
-      setChoices((previous) => ({ ...previous, [pages[0]?.field ?? 'choiceId']: options }));
+      setChoices((previous) => ({ ...previous, [versionField ?? 'choiceId']: options }));
     },
-    [pages],
+    [versionField],
   );
   function selectGame(id: string) {
     const extension = gameUiRegistry.get(id);

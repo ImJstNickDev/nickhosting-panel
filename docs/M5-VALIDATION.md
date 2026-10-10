@@ -834,3 +834,92 @@ metadata entries** (not 103 verified/server-installable versions). No catalog ro
 were inserted. The evidence verifier key remains absent: a legitimate runner/verifier
 key and identity-matching reports are required before enabling creation. No signing
 key was fabricated or copied from another environment.
+
+## 2026-10-10 — trusted declarations and optional Gateway
+
+This Owner-approved amendment **supersedes the per-mapping signed-evidence creation
+prerequisite in the previous checkpoint**. Earlier failures and live M4 evidence
+above remain historical records, not new compatibility claims.
+
+The trusted Vanilla integration declares installation/direct access independently
+from Gateway, readiness, idleness, sleep/wake and player-list support. The compiled
+Gateway pair remains Vanilla 26.1/protocol 775, supported by existing M4 coverage;
+other installable Vanilla combinations use direct access. No new real-client or
+live-server certification is claimed. Paper/Folia/Fabric/Forge are not promoted.
+Actual egg/image/startup identity, artifact integrity, immutable mapping, ownership,
+resource admission, permissions and rollout still apply. The first observed installed
+image digest is pinned atomically; drift is refused. Legacy/snapshot combinations
+without declared player-list support hide those wizard pages and reject incompatible
+player commands.
+
+New catalog rows are enabled from the trusted declaration. Ordinary resync preserves
+existing disabled choices. The explicit Owner batch-enable option enables supported
+versions in the processed batch without requiring individual report uploads or a
+local signing key. Owner screens separate declared capabilities from historical
+reports; no signature or test evidence is fabricated.
+
+Direct mode freezes an explicit Owner-configured player hostname/port, independently
+of the provider and effective backend addresses. Public provider bindings require
+explicit direct-only delivery. Canonical endpoint uniqueness, live allocation/node
+identity and existing claim immutability remain enforced. Direct servers do not
+register Gateway routes or execute sleep/wake jobs. Scheduled manual operations
+retain consent/admission. Readiness is unavailable, not indefinitely loading.
+No listener, forwarding or DNS change occurs; external reachability is unverified.
+
+Focused executable evidence (not a historical full-suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/compatibility.test.ts games/minecraft/src/gateway-module.test.ts games/minecraft/src/ui/ui.test.ts packages/game-sdk/src/gateway.test.ts`: **31 passed**.
+- Integration runner prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts`.
+- `packages/server-management/src/allocation-pool.integration.test.ts`: **45 passed**, including canonical aliases, direct public binding opt-in, claimed delivery/endpoint immutability.
+- `packages/server-management/src/minecraft-queued.integration.test.ts`: final **29 passed**. After removing the disabled-Gateway fallback, the initial rerun's 29 cases failed during common fixture setup because its allocation pool lacked explicit direct endpoints. Fixed only that isolated fixture; no product fallback restored.
+- Minecraft registry/catalog: initial **9 passed**; after adding explicit batch enablement, catalog file **3 passed**.
+- API Minecraft: **12 passed**, plus targeted missing-direct-endpoint refusal **1 passed / 12 filtered**; no server/job is persisted for that refusal.
+- Gateway/operation/external/platform integration files: initial **60 passed, 2 failed**. Corrected one duplicate-endpoint fixture and restored an actual mapping-digest guard; affected **2 passed / 28 filtered**. Additional scheduling/queued-direct guards **2 passed / 61 filtered** after correcting return-value test assertions. Direct readiness presentation **1 passed / 17 filtered**.
+- Runtime/queued initial focused checks **70 passed**. Content initial **28 passed / 2 failed** due to the host's 9% free disk versus the fixture's default 10% margin. Fixture-specific margin is 1% with 512 MiB absolute headroom retained; production defaults unchanged. Affected two passed; three added report-free installation/hash/legacy regressions also passed.
+- Browser command prefix: `LD_LIBRARY_PATH=$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- `apps/web/tests/vanilla-catalog.browser.test.ts`: **3 passed**, zero Axe violations/page errors. Initial bootstrap exposed strict public-schema parsing of persisted `playerIdentities`; corrected to the existing stored schema. A later selector-only failure was corrected before the successful run.
+- `apps/web/tests/direct-endpoints.browser.test.ts`: **2 passed**, zero Axe violations/page errors/viewport overflow. Real protected handler saves an unclaimed endpoint (200), rejects claimed endpoint changes (409). Initial screenshots exposed cramped fields; moved controls below inventory and reran these two cases successfully.
+- Final aggregate `scripts/dev.sh pnpm typecheck`: passed. Production WebPanel build passed with the existing >500 kB chunk warning. Targeted Biome passed with existing non-null/reduced-motion warnings. EN/IT/pseudolocale compile includes **1007 keys**.
+
+Tests use real handlers and disposable schemas on the already-approved isolated
+test database, with simulated external providers/metadata. No real game server is
+created. Sanitized actual-browser captures, independently reviewed:
+[Owner declarations](screenshots/m5/vanilla-declarations-owner-desktop-en.png),
+[direct endpoint desktop](screenshots/m5/direct-endpoints-desktop-en.png),
+[direct endpoint Italian mobile](screenshots/m5/direct-endpoints-mobile-it.png).
+
+Independent review found and resolved four issues: equivalent endpoint aliases,
+claimed Gateway-to-direct delivery changes, missing direct endpoint fallback and
+misleading readiness. Final source and screenshot review reports no remaining
+must-fix. Configuration and validation history above is preserved.
+
+Development delivery used only the existing authorized `nickhosting-dev` project:
+`docker compose --env-file .env.dev.local build api`, then
+`docker compose --env-file .env.dev.local up -d --no-deps --wait api worker`.
+The standard `migrate(pool)` runner executed inside the recreated dev API container
+applied **017_direct_connections.sql** and **018_runtime_image_digest.sql**. Existing
+servers default to their previous Gateway mode; image pins are nullable/additive.
+No Owner configuration was seeded or enabled. Before/after counts: **1 host, 1 node,
+1 mapping, 1 user, 0 managed servers, 20 combinations**. All seven services healthy,
+no published host ports, dev ingress attachment unchanged. Actual Chromium HTTPS
+returned **200** and received a Vite **connected** frame over **WSS** with normal
+certificate verification. No account/browser mutation in this smoke check.
+
+The Owner must explicitly provide already-working direct player endpoints in their
+allocation pool and enable desired existing choices (the batch option is available).
+No production Pterodactyl resource, networking, NPM, DNS or credentials changed.
+SFTPGo #18 and accepted Docker-socket #22 remain separate release concerns.
+Rollback is a scoped application revert coordinated with these additive schema
+migrations; never delete migration history, review data or newly created server
+identities. No claim of automatic database downgrade or provider rollback.
+
+Final affected content-file run using the integration prefix above:
+`packages/server-management/src/minecraft-content.integration.test.ts` —
+**33 passed** on the final module/schema and direct-mode source (44.58 seconds).
+This includes the earlier affected cases; it is not an additional full M1–M5 run.
+
+Index governance initially flagged an absolute private home path in this command
+record; replaced it with `$HOME`. No credential was present.
+Final index governance: **461 text files, 66 reviewed PNGs, 378 relative links,
+4 TOML files, 44 ignored-path cases — passed**. Staged whitespace passed; private
+files remain ignored. The scanner is heuristic, not a guarantee against every secret.

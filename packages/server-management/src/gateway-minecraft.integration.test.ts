@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { getGatewayState, requestGatewayWake, setGatewayPolicy } from './gateway-orchestration.js';
+import { getGatewayState, setGatewayPolicy } from './gateway-orchestration.js';
 import {
   getGatewaySnapshot,
   requireMinecraftGatewayProtocol,
@@ -22,20 +22,20 @@ let choiceId: string;
 let allocationId: string;
 let env: Record<string, string>;
 const combination = {
-  release: '1.21.1',
+  release: '26.1',
   releaseType: 'release',
-  protocolId: 767,
+  protocolId: 775,
   family: 'netty',
   transfer: true,
   profile: 'vanilla',
-  javaMajor: 21,
+  javaMajor: 25,
   runtimeDigest: 'a'.repeat(64),
   protocolSource: { url: 'https://example.test/protocols', sha256: 'b'.repeat(64) },
 };
 const policy = {
   enabled: true,
   protocolId: 'minecraft-java',
-  gameVersion: '1.21.1',
+  gameVersion: '26.1',
   idleTimeoutSeconds: 10,
   readinessTimeoutSeconds: 60,
   readinessMaxAgeSeconds: 15,
@@ -133,9 +133,9 @@ async function evidence(
       externalId: 'isolated-nbt-test',
       artifactSha256: 'e'.repeat(64),
       imageDigest: `sha256:${'f'.repeat(64)}`,
-      javaMajor: 21,
+      javaMajor: 25,
     },
-    client: { implementation: 'test-fixture', version: '1', protocolId: 767 },
+    client: { implementation: 'test-fixture', version: '1', protocolId: 775 },
   };
   await f.db
     .insertInto('minecraft_verification_evidence')
@@ -164,9 +164,8 @@ async function register() {
     env,
   );
 }
-describe('Minecraft evidence-backed Gateway registration', () => {
-  it('mints exact service-only metadata after installed profile and signed evidence, even when new creations are disabled', async () => {
-    const report = await evidence();
+describe('Minecraft declared-capability Gateway registration', () => {
+  it('mints declared service-only metadata for installed profiles without requiring signed evidence', async () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'disabled-for-new-servers' })
@@ -180,11 +179,13 @@ describe('Minecraft evidence-backed Gateway registration', () => {
     await register();
     const snapshot = await getGatewaySnapshot(f.db, env);
     expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({
-      release: '1.21.1',
-      protocolId: 767,
+      release: '26.1',
+      protocolId: 775,
       family: 'netty',
       choiceId,
-      evidenceRunId: report.runId,
+      supportSource: 'integration',
+      declarationId: 'minecraft-java/vanilla',
+      declarationVersion: 1,
       acceptsTransfers: false,
     });
     expect(await getGatewayState(f.db, serverId, { env })).toMatchObject({
@@ -192,24 +193,17 @@ describe('Minecraft evidence-backed Gateway registration', () => {
       state: 'sleeping',
     });
   });
-  it('rejects absent/tampered/expired evidence, wrong policy versions and uninstalled profiles', async () => {
-    await expect(setGatewayPolicy(f.db, f.context, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
+  it('keeps test reports diagnostic and rejects wrong policy versions or uninstalled profiles', async () => {
     await evidence({ validSignature: false });
-    await expect(setGatewayPolicy(f.db, f.context, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
     await evidence({ recordedAt: new Date(Date.now() - 181 * 86400000) });
-    await expect(setGatewayPolicy(f.db, f.context, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
-    await evidence();
+    await expect(
+      setGatewayPolicy(f.db, f.context, serverId, policy, { env: {} }),
+    ).resolves.toMatchObject({ enabled: true });
     await expect(
       setGatewayPolicy(f.db, f.context, serverId, { ...policy, protocolId: 'generic' }, { env }),
     ).rejects.toThrow('integration_unavailable');
     await expect(
-      setGatewayPolicy(f.db, f.context, serverId, { ...policy, gameVersion: '26.1' }, { env }),
+      setGatewayPolicy(f.db, f.context, serverId, { ...policy, gameVersion: '1.21.1' }, { env }),
     ).rejects.toThrow('integration_unavailable');
     await f.db
       .updateTable('minecraft_server_profiles')
@@ -283,31 +277,20 @@ describe('Minecraft evidence-backed Gateway registration', () => {
       setGatewayPolicy(f.db, f.context, serverId, { ...policy, enabled: false }, { env }),
     ).resolves.toMatchObject({ enabled: false });
   });
-  it('checks experimental eligibility against the server owner, not the platform Owner making the request', async () => {
-    await evidence({ kind: 'protocol-fixture' });
+  it('does not promote an undeclared protocol through signed reports or Owner allowlisting', async () => {
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ combination: JSON.stringify({ ...combination, release: '1.21.1', protocolId: 767 }) })
+      .where('id', '=', choiceId)
+      .execute();
+    await evidence();
     await f.db
       .updateTable('game_rollouts')
-      .set({ state: 'private-testing', allowlist: [] })
+      .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
       .where('integration_id', '=', 'minecraft-java')
       .execute();
-    await expect(setGatewayPolicy(f.db, f.owner, serverId, policy, { env })).rejects.toThrow(
-      'integration_unavailable',
-    );
-    await f.db
-      .updateTable('game_rollouts')
-      .set({ allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
-      .execute();
-    await register();
-    const state = await getGatewayState(f.db, serverId, { env });
-    await f.db
-      .updateTable('game_rollouts')
-      .set({ allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
-      .execute();
-    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([]);
     await expect(
-      requestGatewayWake(f.db, serverId, { generation: state.generation, intent: 'join' }, { env }),
+      setGatewayPolicy(f.db, f.owner, serverId, { ...policy, gameVersion: '1.21.1' }, { env }),
     ).rejects.toThrow('integration_unavailable');
     expect(
       await f.db
@@ -338,17 +321,19 @@ describe('Minecraft evidence-backed Gateway registration', () => {
       requireMinecraftGatewayProtocol(
         f.db,
         otherServer,
-        { handlerId: 'minecraft-java', gameVersion: '1.21.1' },
+        { handlerId: 'minecraft-java', gameVersion: '26.1' },
         env,
       ),
     ).rejects.toThrow('configuration_invalid');
   });
-  it('caps the route snapshot lease at attestation expiry', async () => {
-    const report = await evidence({ recordedAt: new Date(Date.now() - 180 * 86400000 + 10_000) });
+  it('keeps bounded route leases independent of diagnostic report expiry', async () => {
+    await evidence({ recordedAt: new Date(Date.now() - 180 * 86400000 + 10_000) });
     await register();
     const snapshot = await getGatewaySnapshot(f.db, env);
-    expect(Date.parse(snapshot.expiresAt)).toBeLessThanOrEqual(
-      Date.parse(report.recordedAt) + 180 * 86400000,
+    expect(Date.parse(snapshot.expiresAt) - Date.parse(snapshot.issuedAt)).toBeLessThanOrEqual(
+      120_000,
     );
+    expect(snapshot.routes[0]?.protocol?.minecraft).toMatchObject({ supportSource: 'integration' });
+    expect(snapshot.routes[0]?.protocol?.minecraft).not.toHaveProperty('evidenceRunId');
   });
 });

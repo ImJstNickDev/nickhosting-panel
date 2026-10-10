@@ -1,4 +1,18 @@
 export const ownerInfraWebMessages: Record<string, readonly [string, string]> = {
+  'infra.directEndpoint': ['Direct connection', 'Connessione diretta'],
+  'infra.directHost': [
+    'Player hostname for allocation {id}',
+    'Hostname giocatori per allocazione {id}',
+  ],
+  'infra.directPort': ['Player port for allocation {id}', 'Porta giocatori per allocazione {id}'],
+  'infra.directOnly': [
+    'Use allocation {id} only for direct connections',
+    'Usa allocazione {id} solo per connessioni dirette',
+  ],
+  'infra.directHelp': [
+    'Optional direct endpoints must already reach their allocations. Saving does not open ports, change DNS or verify external reachability. Public allocation bindings require direct-only selection.',
+    'Gli endpoint diretti opzionali devono già raggiungere le allocazioni. Il salvataggio non apre porte, non cambia il DNS e non verifica la raggiungibilità esterna. Le allocazioni su indirizzi pubblici richiedono la scelta solo diretta.',
+  ],
   'infra.health': ['Platform health', 'Stato della piattaforma'],
   'infra.refresh': ['Refresh', 'Aggiorna'],
   'infra.component': ['Component', 'Componente'],

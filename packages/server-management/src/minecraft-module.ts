@@ -15,12 +15,14 @@ import type {
 import { type GameLifecycleContext, verifyManagedIdentity } from './lifecycle.js';
 import {
   assertMinecraftLaunchInputs,
+  assertMinecraftPlayerConfiguration,
   assertMinecraftRuntimePathsPreserved,
   configureMinecraftProvision,
   type MinecraftContentOptions,
   processMinecraftContent,
   verifyMinecraftRestore,
 } from './minecraft-content.js';
+import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
 import { minecraftCatalog, requireMinecraftChoice } from './minecraft-registry.js';
 import {
   assertMinecraftEggEnvironment,
@@ -63,6 +65,12 @@ async function authorizeOperation(input: GameOperationAuthorization) {
         },
         profile.combination_id,
         env,
+      );
+      // Provisioning persists validated player identities before subsequent effects;
+      // reauthorization must validate that internal shape, not the public request shape.
+      assertMinecraftPlayerConfiguration(
+        choice,
+        minecraftStoredConfigurationSchema.parse(profile.configuration),
       );
       const binding = minecraftRuntimeMappingSchema.parse(choice.row.binding);
       const plan = provisionPlanSchema.parse(operation.plan.provision);
@@ -352,7 +360,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       const image = await assertMinecraftRuntimeImage(serverId, connection);
       if (!image) return before;
       if (before !== null) {
-        const proof = `${before}:${image.report.runId}`;
+        const proof = `${before}:${image.report?.runId ?? image.expected}`;
         if (launchEpochs.get(serverId) !== proof) {
           await assertLaunchFiles(serverId, connection);
           // Store only after the second epoch read confirms the same process.
@@ -362,7 +370,8 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       // between them must not attach an old image proof to a new process epoch.
       const after = await readAgain();
       if (before !== after) throw new DomainError('operation_uncertain');
-      if (after !== null) launchEpochs.set(serverId, `${after}:${image.report.runId}`);
+      if (after !== null)
+        launchEpochs.set(serverId, `${after}:${image.report?.runId ?? image.expected}`);
       else launchEpochs.delete(serverId);
       return after;
     },

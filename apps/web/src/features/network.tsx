@@ -89,7 +89,12 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                       </td>
                       <td>{port.transport.toUpperCase()}</td>
                       <td>
-                        <Badge value={port.status} />
+                        <Badge
+                          value={port.status}
+                          label={
+                            port.status === 'configured' ? t('service.directConfigured') : undefined
+                          }
+                        />
                       </td>
                       <td>
                         {address && (
@@ -116,6 +121,9 @@ export function NetworkPage({ serverId }: { serverId: string }) {
               </tbody>
             </table>
           </div>
+        )}
+        {connection.data?.connectionMode === 'direct' && (
+          <Notice>{t('service.directReachability')}</Notice>
         )}
         {Boolean(copyError) && <ErrorNotice error={copyError} />}
         {connection.data?.srv && <p className="muted">{t('service.srvInfo')}</p>}
