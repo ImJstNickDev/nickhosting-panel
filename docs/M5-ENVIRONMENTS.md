@@ -663,3 +663,31 @@ the running dev project and private Compose selection are unchanged. Stop and
 report either result. A successful diagnostic does not approve relaxing permanent
 Gateway confinement or prove routing, full observer access, or sleep/wake.
 Missing Owner Gateway policy and backend pool remain separate prerequisites.
+
+
+### Approved AppArmor diagnostic — passed (2026-10-10)
+
+The Owner approved the exact one-off command above on condition that the existing
+Pterodactyl stack remain unchanged. Reviewed starting HEAD:
+`bef135d764885b49b21d9cf847470fd55d82b1aa`. Host-process identity, namespace, daemon,
+clean worktree and unchanged private Compose selection were reverified.
+
+The documented command completed with exit **0** and
+`Independent namespace preflight passed`. Only the temporary diagnostic used
+`apparmor:unconfined`; nonroot UID, dropped capabilities, seccomp and other
+controls were retained. This supports AppArmor confinement as the cause of the
+previous namespace-read denial under the same anchor and service configuration.
+It does not establish full observer readiness, routing or sleep/wake.
+
+The temporary container was automatically removed. Panel and Wings container
+IDs/images/start times/restart counters/network attachments matched the read-only
+baseline. No Pterodactyl API request, server operation, existing-container restart,
+network configuration or production file change was performed. Existing dev
+services remained healthy; HTTPS returned 200. No permanent Gateway was started,
+no game/nonce listener opened and the diagnostic overlay was not added to the
+private Compose selection.
+
+A permanent confinement change is **not authorized** by this diagnostic approval.
+Keep the default Gateway profile unchanged pending a separately reviewed choice
+of confinement. Owner Gateway settings, pool/route selection and actual endpoint
+approval remain necessary for operational routing.

@@ -1389,3 +1389,24 @@ diagnostic approval in [M5 environments](M5-ENVIRONMENTS.md#next-diagnostic-prop
 AppArmor is a hypothesis, not yet a confirmed cause. Independent review also
 confirmed missing Owner Gateway host/network/observer settings prevent health;
 zero-route readiness would not validate actual forwarding or Docker observer access.
+
+
+## 2026-10-10 — Authorized one-off AppArmor diagnostic succeeded
+
+Owner approval was conditional on leaving the existing Pterodactyl stack untouched.
+At starting HEAD `bef135d764885b49b21d9cf847470fd55d82b1aa`, reverified the exact
+recorded host process UID/executable/parent/starttime/namespace and daemon, clean
+worktree and original private Compose selection. No credentials printed.
+
+- Executed exactly the [documented one-off command](M5-ENVIRONMENTS.md#next-diagnostic-proposal--not-approved-or-executed), with explicit five-file Compose chain, `run --rm --no-deps --entrypoint node` and only namespace/socket-table reads. **Exit 0**, `Independent namespace preflight passed`.
+- Temporary `nickhosting-dev-gateway-run-b83eab3f18dc` was automatically removed. No permanent Gateway or listener created. No dependency service started/recreated and no private Compose setting changed.
+- Before/after inventory retained the same 102 existing container IDs. Panel and Wings metadata (images, start times, restart counters and network attachments) unchanged. A blanket equality check correctly flagged unrelated containers whose pre-existing restart counts exceeded 21,000 and advanced during observation; no restart or change was issued against them. This is not claimed as a globally static host snapshot.
+- All seven existing dev services healthy; HTTPS `GET /` returned **200**. No Pterodactyl API calls, production mutation, new network or persistent application-data change.
+- Independent reviewer confirmed the exact command avoids Gateway main, listener binding and dependency recreation. No must-fix finding in the diagnostic scope.
+
+Result isolates AppArmor involvement in the namespace access failure; it does not
+prove complete observer/Gateway readiness. No permanent unconfined profile was
+applied. Source and previous tests unchanged; no full suite repeated for this
+infrastructure diagnostic. Governance and staged whitespace checks passed.
+Gateway remains inactive pending a separately reviewed confinement decision and
+required Owner configuration. Production release gates #18/#22 unchanged.
