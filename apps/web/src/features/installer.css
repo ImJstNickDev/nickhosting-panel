@@ -13,7 +13,7 @@
 }
 .installer-form {
   display: grid;
-  grid-template-rows: 6rem 3rem 26rem auto;
+  grid-template-rows: 8rem 26rem 3rem auto;
   gap: 0.75rem;
 }
 .installer-error-slot {
@@ -34,13 +34,11 @@
 }
 .installer-heading {
   text-align: center;
-  transition: padding 0.25s ease;
 }
 .installer-heading h1 {
   font-size: clamp(1.5rem, 3vw, 2rem);
   line-height: 1.25;
   margin: 0;
-  transition: font-size 0.25s ease;
 }
 .installer-heading p {
   margin: 0.6rem 0 0;
@@ -278,14 +276,23 @@
   flex-wrap: wrap;
   gap: 0.6rem;
 }
+.installer-heading .installer-toggle {
+  margin-top: 0.8rem;
+}
 .installer-toggle button {
   min-width: 6rem;
 }
+.has-toggle-motion .installer-heading {
+  transition: transform 0.25s ease;
+}
+.has-toggle-motion .installer-heading h1 {
+  transition: font-size 0.25s ease;
+}
 .installer-whitelist .installer-heading {
-  padding-top: 3rem;
+  transform: translateY(6rem);
 }
 .installer-whitelist.is-enabled .installer-heading {
-  padding-top: 0;
+  transform: translateY(0);
 }
 .installer-whitelist.is-enabled .installer-heading h1 {
   font-size: 1.4rem;
@@ -342,8 +349,8 @@
     transform: none;
   }
   .installer-choice-card,
-  .installer-heading,
-  .installer-heading h1,
+  .has-toggle-motion .installer-heading,
+  .has-toggle-motion .installer-heading h1,
   .installer-reveal {
     transition: none;
   }

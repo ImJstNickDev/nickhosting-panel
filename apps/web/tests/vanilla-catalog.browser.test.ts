@@ -363,6 +363,15 @@ describe('Owner automatic Vanilla discovery', () => {
     await passwordManagerIgnored(user.getByLabel('Server name', { exact: true }));
     await user.getByLabel('Server name', { exact: true }).fill('Direct Vanilla');
     await user.getByLabel('Server name', { exact: true }).press('Enter');
+    const versionRadios = user.locator('.installer-versions').getByRole('radio');
+    await browserExpect(versionRadios.first()).toBeFocused();
+    await versionRadios.first().press('ArrowDown');
+    await browserExpect(versionRadios.nth(1)).toBeFocused();
+    await browserExpect(versionRadios.nth(1)).toBeChecked();
+    await versionRadios.nth(1).press('ArrowUp');
+    await browserExpect(versionRadios.first()).toBeFocused();
+    await browserExpect(versionRadios.first()).toBeChecked();
+
     await user
       .locator('.installer-version')
       .filter({ has: user.getByRole('radio', { name: '1.21.11', exact: true }) })
@@ -383,11 +392,13 @@ describe('Owner automatic Vanilla discovery', () => {
     expect(catalogCalls.filter((path) => path === '/v1/games')).toHaveLength(1);
     expect(catalogCalls.filter((path) => path === '/v1/minecraft/choices')).toHaveLength(1);
     user.off('request', capture);
-    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(user.getByRole('radio', { name: '1.21.11', exact: true })).toBeFocused();
+    await user.keyboard.press('Enter');
     await browserExpect(
       user.getByRole('heading', { name: 'Who should be an operator?', exact: true }),
     ).toBeVisible();
     const player = user.getByLabel('Player name', { exact: true });
+    await browserExpect(player).toBeFocused();
     await passwordManagerIgnored(player);
     const beforePlayers = await positions(user);
     expect(beforePlayers.counter).toBe(stableRuntime.counter);
@@ -402,7 +413,7 @@ describe('Owner automatic Vanilla discovery', () => {
       expect(await positions(user)).toEqual(beforePlayers);
     }
     await fixture.screenshot(user, 'wizard-players-desktop-en');
-    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await player.press('Enter');
     await browserExpect(
       user.getByRole('heading', { name: 'Do you want to turn whitelist on?', exact: true }),
     ).toBeVisible();
@@ -411,9 +422,12 @@ describe('Owner automatic Vanilla discovery', () => {
         .locator('.installer-heading')
         .evaluate((el) => el.getAnimations({ subtree: true }).length),
     ).toBe(0);
+    await fixture.screenshot(user, 'wizard-whitelist-closed-desktop-en');
+    const closedToggle = await user.locator('.installer-toggle').boundingBox();
     const beforeWhitelist = await positions(user);
     expect(beforeWhitelist.counter).toBe(stableRuntime.counter);
     await user.getByRole('button', { name: 'Yes', exact: true }).click();
+    await browserExpect(player).toBeFocused();
     await browserExpect(player).toBeVisible();
     await browserExpect(
       user.getByRole('button', { name: 'Remove FixtureAlex', exact: true }),
@@ -423,9 +437,31 @@ describe('Owner automatic Vanilla discovery', () => {
     });
     expect((await positions(user)).counter).toBe(beforeWhitelist.counter);
     expect((await positions(user)).footer).toBe(beforeWhitelist.footer);
+    expect((await user.locator('.installer-toggle').boundingBox())?.y).toBeLessThan(
+      closedToggle?.y ?? 0,
+    );
     await fixture.screenshot(user, 'wizard-whitelist-desktop-en');
+    await player.press('Enter');
+    await browserExpect(user.getByRole('button', { name: '6+', exact: true })).toBeVisible();
+    await user.getByRole('button', { name: 'Back', exact: true }).click();
+    await browserExpect(player).toBeFocused();
     await user.getByRole('button', { name: 'No', exact: true }).click();
     await browserExpect(player).toBeHidden();
+    // Expire only this isolated browser's cached request so prepare reaches
+    // the deliberate HTTP failure instead of reusing the valid local catalog.
+    await user.evaluate(
+      "import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['creation', 'request'], refetchType: 'none' }))",
+    );
+    await user.route('**/v1/minecraft/choices', (route) =>
+      route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }),
+    );
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(user.getByRole('alert')).toBeVisible();
+    const failureBox = await user.locator('.installer-error-slot').boundingBox();
+    const toggleBox = await user.locator('.installer-toggle').boundingBox();
+    expect(failureBox?.y).toBeGreaterThan((toggleBox?.y ?? 0) + (toggleBox?.height ?? 0));
+    await fixture.screenshot(user, 'wizard-whitelist-error-desktop-en');
+    await user.unroute('**/v1/minecraft/choices');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect(user.getByRole('button', { name: '6+', exact: true })).toBeVisible();
     await browserExpect(user.getByText('Suggested limits.', { exact: false })).toHaveCount(0);

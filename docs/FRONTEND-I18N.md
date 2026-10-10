@@ -88,8 +88,15 @@ Vanilla is eligible; version rows show only the release identifier. It has separ
 player-count/resource controls; the final Create
 action records EULA acceptance. No project or content-source picker is shown.
 The step counter, heading region, error slot, content pane and actions have stable
-positions. Bounded scrolling accommodates long choices/player lists without
-moving navigation. Whitelist animation starts on a toggle, not on entry. Player
+positions. Errors occupy a reserved slot above the actions, clear of animated
+content. Bounded scrolling accommodates long choices/player lists without moving
+navigation. Entering versions focuses the selected or first enabled native radio
+without selecting it; Up/Down changes selection. Entering operators focuses its
+input; enabling whitelist focuses its player input. Late catalog responses do not
+steal focus after the user moves elsewhere. Empty player-input Enter advances,
+while nonempty Enter performs lookup and pending/composing input cannot advance.
+Whitelist question and Yes/No controls move as one group; animation starts only
+on a toggle, not on entry. Player
 lookup temporarily makes its input read-only instead of disabling it, preserving
 Enter focus without stealing focus after the user moves away. Server/player name
 fields discourage password-manager autofill with field-scoped vendor hints;

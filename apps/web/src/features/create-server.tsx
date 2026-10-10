@@ -1,6 +1,6 @@
 import { type UiOption, validateUiValues } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { z } from 'zod';
 import { api, idempotencyKey } from '../api/client.js';
@@ -47,6 +47,7 @@ export function CreateServerPage() {
     [busy, setBusy] = useState(false),
     [result, setResult] = useState<{ jobId: string; serverId: string }>();
   const [playerPending, setPlayerPending] = useState(false);
+  const [whitelistMotion, setWhitelistMotion] = useState(false);
   const [preparedSummary, setPreparedSummary] = useState<{ labelKey: string; value: string }[]>([]);
   const heading = useRef<HTMLHeadingElement>(null),
     key = useRef(idempotencyKey()),
@@ -93,7 +94,7 @@ export function CreateServerPage() {
     ) ?? [];
   const shared = quota.data?.creationStorage.mode === 'shared';
   const agreement = module?.descriptor.creation.agreement;
-  useEffect(() => {
+  useLayoutEffect(() => {
     heading.current?.focus({ preventScroll: step === 0 });
   }, [step]);
   useEffect(() => {
@@ -197,6 +198,7 @@ export function CreateServerPage() {
       }
     }
     if (step < finalStep) {
+      setWhitelistMotion(false);
       setStep((s) => s + 1);
       return;
     }
@@ -233,7 +235,7 @@ export function CreateServerPage() {
   const enabled = page?.toggleField ? values[page.toggleField] === true : false;
   return (
     <div
-      className={`installer-shell ${page?.kind === 'toggle-players' ? 'installer-whitelist' : ''} ${enabled ? 'is-enabled' : ''}`}
+      className={`installer-shell ${page?.kind === 'toggle-players' ? 'installer-whitelist' : ''} ${enabled ? 'is-enabled' : ''} ${whitelistMotion ? 'has-toggle-motion' : ''}`}
     >
       <div className="installer-position">
         {t('gameUi.stepOf', { current: step + 1, total: finalStep + 1 })}
@@ -244,11 +246,30 @@ export function CreateServerPage() {
             {t(title)}
           </h1>
           {step === nameStep && <p>{t('gameUi.nameHint')}</p>}
+          {page?.kind === 'toggle-players' && page.toggleField && (
+            <fieldset className="installer-toggle" aria-label={t(page.titleKey)}>
+              {[true, false].map((on) => (
+                <button
+                  key={String(on)}
+                  type="button"
+                  className={enabled === on ? '' : 'secondary'}
+                  aria-pressed={enabled === on}
+                  disabled={busy || playerPending}
+                  onClick={() => {
+                    setWhitelistMotion(true);
+                    if (on && !seeded.current.has(page.id)) {
+                      update(page.field, page.seedField ? [...names(page.seedField)] : []);
+                      seeded.current.add(page.id);
+                    }
+                    update(page.toggleField as string, on);
+                  }}
+                >
+                  {t(on ? 'gameUi.yes' : 'gameUi.no')}
+                </button>
+              ))}
+            </fieldset>
+          )}
         </header>
-        <div className="installer-error-slot">
-          {failure !== undefined && <ErrorNotice error={failure} />}
-          {Object.values(errors).some(Boolean) && <div role="alert">{t('gameUi.required')}</div>}
-        </div>
         <fieldset className="installer-content" disabled={busy}>
           {step === 0 &&
             (games.isPending ? (
@@ -304,6 +325,7 @@ export function CreateServerPage() {
               {(page.kind === 'version-list' || page.kind === 'choice-list') && (
                 <VersionList
                   module={module}
+                  focusOnEntry={page.kind === 'version-list'}
                   fieldId={page.field}
                   versionFilter={page.kind === 'version-list'}
                   presentation={page.kind === 'choice-list' ? 'cards' : 'list'}
@@ -315,6 +337,7 @@ export function CreateServerPage() {
               )}
               {page.kind === 'players' && page.lookupHandler && (
                 <PlayerList
+                  focusOnEntry
                   module={module}
                   handler={page.lookupHandler}
                   onPendingChange={setPlayerPending}
@@ -323,41 +346,20 @@ export function CreateServerPage() {
                 />
               )}
               {page.kind === 'toggle-players' && page.toggleField && (
-                <>
-                  <fieldset className="installer-toggle" aria-label={t(page.titleKey)}>
-                    {[true, false].map((on) => (
-                      <button
-                        key={String(on)}
-                        type="button"
-                        className={enabled === on ? '' : 'secondary'}
-                        aria-pressed={enabled === on}
-                        disabled={playerPending}
-                        onClick={() => {
-                          if (on && !seeded.current.has(page.id)) {
-                            update(page.field, page.seedField ? [...names(page.seedField)] : []);
-                            seeded.current.add(page.id);
-                          }
-                          update(page.toggleField as string, on);
-                        }}
-                      >
-                        {t(on ? 'gameUi.yes' : 'gameUi.no')}
-                      </button>
-                    ))}
-                  </fieldset>
-                  <div className="installer-reveal" inert={!enabled} aria-hidden={!enabled}>
-                    <div>
-                      {page.lookupHandler && (
-                        <PlayerList
-                          module={module}
-                          handler={page.lookupHandler}
-                          onPendingChange={setPlayerPending}
-                          names={names(page.field)}
-                          onChange={(v) => update(page.field, v)}
-                        />
-                      )}
-                    </div>
+                <div className="installer-reveal" inert={!enabled} aria-hidden={!enabled}>
+                  <div>
+                    {page.lookupHandler && (
+                      <PlayerList
+                        focusOnEntry={enabled}
+                        module={module}
+                        handler={page.lookupHandler}
+                        onPendingChange={setPlayerPending}
+                        names={names(page.field)}
+                        onChange={(v) => update(page.field, v)}
+                      />
+                    )}
                   </div>
-                </>
+                </div>
               )}
             </>
           )}
@@ -490,6 +492,10 @@ export function CreateServerPage() {
             </>
           )}
         </fieldset>
+        <div className="installer-error-slot">
+          {failure !== undefined && <ErrorNotice error={failure} />}
+          {Object.values(errors).some(Boolean) && <div role="alert">{t('gameUi.required')}</div>}
+        </div>
         <footer className="installer-actions">
           {step > 0 && (
             <button
@@ -499,6 +505,7 @@ export function CreateServerPage() {
               onClick={() => {
                 setErrors({});
                 setFailure(undefined);
+                setWhitelistMotion(false);
                 setStep((s) => s - 1);
               }}
             >

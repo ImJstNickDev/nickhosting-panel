@@ -7,11 +7,24 @@ import { Check, Empty, ErrorNotice, Loading } from '../components/ui.js';
 import { creationCatalogQuery } from './creation-catalog.js';
 import { gameUiClient } from './integrations.js';
 
+function canFocusOnEntry(input: HTMLInputElement, allowToggle = false) {
+  if (input.matches(':disabled') || input.closest('[inert], [hidden], [aria-hidden="true"]'))
+    return false;
+  const active = document.activeElement;
+  const form = input.closest('.installer-form');
+  return (
+    active === document.body ||
+    active === form?.querySelector('.installer-heading h1') ||
+    (allowToggle && Boolean(active && form?.querySelector('.installer-toggle')?.contains(active)))
+  );
+}
+
 export function VersionList({
   module,
   fieldId,
   versionFilter = true,
   presentation = 'list',
+  focusOnEntry = false,
   values,
   value,
   onChange,
@@ -21,6 +34,7 @@ export function VersionList({
   fieldId: string;
   versionFilter?: boolean;
   presentation?: 'list' | 'cards';
+  focusOnEntry?: boolean;
   values: Record<string, unknown>;
   value: unknown;
   onChange(value: string): void;
@@ -28,6 +42,8 @@ export function VersionList({
 }) {
   const t = useT();
   const [all, setAll] = useState(false);
+  const choicesElement = useRef<HTMLDivElement>(null);
+  const entryFocusAttempted = useRef(false);
   const field = module.descriptor.creation.fields.find((entry) => entry.id === fieldId);
   const artwork = module.descriptor.artwork
     ? module.assets?.[module.descriptor.artwork.assetId]
@@ -74,6 +90,19 @@ export function VersionList({
     options.data?.filter(
       (o) => !versionFilter || all || !o.releaseType || o.releaseType === 'release',
     ) ?? [];
+  useEffect(() => {
+    if (!focusOnEntry) {
+      entryFocusAttempted.current = false;
+      return;
+    }
+    if (entryFocusAttempted.current) return;
+    const input =
+      choicesElement.current?.querySelector<HTMLInputElement>('input:checked:not(:disabled)') ??
+      choicesElement.current?.querySelector<HTMLInputElement>('input:not(:disabled)');
+    if (!input) return;
+    entryFocusAttempted.current = true;
+    if (canFocusOnEntry(input)) input.focus({ preventScroll: true });
+  });
   return (
     <>
       {versionFilter && (
@@ -97,6 +126,7 @@ export function VersionList({
         />
       ) : (
         <div
+          ref={choicesElement}
           className={presentation === 'cards' ? 'installer-choice-cards' : 'installer-versions'}
           role="radiogroup"
           aria-label={t(field?.labelKey ?? 'gameUi.version')}
@@ -123,6 +153,10 @@ export function VersionList({
                 checked={value === o.value}
                 disabled={o.disabled}
                 onChange={() => onChange(o.value)}
+                onFocus={(e) => {
+                  if (presentation === 'list')
+                    e.currentTarget.closest('label')?.scrollIntoView({ block: 'nearest' });
+                }}
               />
               {presentation === 'list' && (
                 <span className="installer-choice-check" aria-hidden="true">
@@ -146,12 +180,14 @@ export function PlayerList({
   names,
   onChange,
   onPendingChange,
+  focusOnEntry = false,
 }: {
   module: TrustedGameUiModule;
   handler: string;
   names: string[];
   onChange(names: string[]): void;
   onPendingChange(pending: boolean): void;
+  focusOnEntry?: boolean;
 }) {
   const t = useT(),
     id = useId();
@@ -159,6 +195,11 @@ export function PlayerList({
     [preview, setPreview] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState<unknown>();
+  const inputElement = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const input = inputElement.current;
+    if (focusOnEntry && input && canFocusOnEntry(input, true)) input.focus({ preventScroll: true });
+  }, [focusOnEntry]);
   useEffect(() => {
     const timer = setTimeout(
       () => setPreview(/^[A-Za-z0-9_]{3,16}$/.test(draft) ? draft : ''),
@@ -230,6 +271,7 @@ export function PlayerList({
       <div className="player-entry">
         {avatar(preview)}
         <input
+          ref={inputElement}
           id={id}
           type="text"
           value={draft}
@@ -245,8 +287,11 @@ export function PlayerList({
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
+              if (e.nativeEvent.isComposing) return;
               e.preventDefault();
-              void add();
+              if (busy || request.current) return;
+              if (!draft.trim()) e.currentTarget.form?.requestSubmit();
+              else void add();
             }
           }}
         />

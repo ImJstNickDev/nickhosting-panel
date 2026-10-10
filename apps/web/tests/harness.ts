@@ -150,8 +150,8 @@ export async function browserHarness(
           fullPage: true,
           maskColor: '#c8d2d9',
           mask: [
-            page.locator('input[type="password"]:not(:placeholder-shown)'),
-            page.locator('input[autocomplete="off"]'),
+            page.locator('input[type="password"]:not(:placeholder-shown):visible'),
+            page.locator('input[autocomplete="off"]:visible'),
           ],
         });
       },

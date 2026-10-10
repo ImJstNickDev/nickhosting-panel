@@ -1263,3 +1263,47 @@ No production/provider operation, container restart, migration or live test asse
 Rollback is source-only; existing development HMR applies the change.
 Independent source and desktop/mobile visual review: no must-fix findings.
 Index governance passed (479 text files, 87 PNGs, 401 links, 4 TOML files, 44 ignore cases).
+
+
+### 2026-10-10 — Keyboard continuation and grouped whitelist animation
+
+Name → Versions focuses the selected or first enabled native radio without changing
+selection; Up/Down selects and scrolls the corresponding row into view. Versions →
+Operators focuses the player input. Whitelist activation/return focuses its input
+only when enabled. Entry focus is attempted once and respects focus moved elsewhere
+while options load. Empty/whitespace player Enter uses the existing form submission;
+nonempty Enter retains lookup. Busy requests and IME composition cannot advance.
+
+Whitelist question and Yes/No controls now share one animated header. Motion is
+explicitly armed only by a toggle and reset on Next/Back; initial entry stays still.
+Moved toggle controls preserve busy/pending disable guards. Errors have a reserved
+slot above navigation, avoiding overlap with the translated closed-state header.
+Reduced motion and stable counter/footer positions remain supported.
+
+Focused commands and evidence:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/features/create-server.tsx apps/web/src/features/installer-fields.tsx apps/web/src/features/installer.css apps/web/tests/vanilla-catalog.browser.test.ts apps/web/tests/harness.ts`: passed; existing harness non-null assertion warning remains.
+- Browser prefix remains `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/vanilla-catalog.browser.test.ts -t "discovers declared|offers a direct-only"`: final **2 passed, 4 filtered**, **13.94 s**. Tests keyboard focus, native Up/Down, selected-version focus on Back, empty Enter through operators/whitelist, player lookup retention, grouped movement, no entry animation, stable navigation and preparation-failure geometry. The error is an isolated HTTP 503 after explicitly invalidating this fixture browser's cached request, not a real provider failure.
+- Prefix + `apps/web/tests/platform.browser.test.ts -t "creates a verified-choice|renders the installer"`: **2 passed, 9 filtered**, **15.49 s**. Creation/admission reporting, pending-player guards, whitelist seed/remove behavior, resources, EULA and mobile/reduced-motion/Axe journey remain passing.
+
+Failure history is preserved: the first four-case catalog run had **3 passed/1 failed**
+(17.92 s), detecting an entry transition despite the keyed header; explicit toggle-only
+motion fixed it. Two affected reruns (**1 passed/1 failed** each, 18.78 s and 13.85 s)
+exposed test-injection issues: a valid cached catalog bypassed the intended 503, then
+Vitest rewrote a browser dynamic import. Browser-local invalidation/evaluation fixed
+the fixture; **2 passed** (14.87 s). Final 13.94 s rerun captured corrected screenshots
+after masks were limited to visible inputs: hidden inputs previously produced a
+phantom gray mask in the closed state. All visible sensitive fields remain masked.
+No full historical suite was repeated.
+
+Actual reviewed screenshots: [closed](screenshots/m5/wizard-keyboard-whitelist-closed-en.png),
+[open](screenshots/m5/wizard-keyboard-whitelist-open-en.png),
+[preparation error](screenshots/m5/wizard-keyboard-whitelist-error-en.png),
+[mobile IT](screenshots/m5/wizard-keyboard-whitelist-mobile-it.png).
+Tests use actual application/auth/database handlers with existing approved isolated
+services and external-provider fixtures. No infrastructure restart/mutation,
+production provider operation, migration or live test assets. Existing dev HMR
+applies source edits. Rollback is source-only; release gates #18/#22 are unchanged.
+Independent source and rendered UX/accessibility review: no remaining must-fix findings.
