@@ -113,7 +113,8 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
     const app = createApp({
       database,
       codec,
-      management: () => createManagementRuntime({ db: database.db, codec, env }),
+      management: () => createManagementRuntime({ db: database.db, codec, env, logger }),
+      logger,
       defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
       identity,
       env,

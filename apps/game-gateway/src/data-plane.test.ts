@@ -117,6 +117,7 @@ function plane(
     policy?: Partial<GatewayDataPlanePolicy>;
     lease?: number;
     now?: () => number;
+    logger?: Parameters<typeof createGatewayDataPlane>[0]['logger'];
   } = {},
 ) {
   const gatewayId = randomUUID();
@@ -152,6 +153,7 @@ function plane(
     protocols: options.protocols ?? [fixtureProtocol()],
     policy: { ...policy, ...options.policy },
     now: options.now,
+    logger: options.logger,
   });
   cleanups.push(() => gateway.stop());
   return { gateway, snapshot, control, safety };
@@ -658,11 +660,14 @@ describe('sleep protocol handling and observations', () => {
   it('answers fragmented passive status without waking and coalesces burst intentional joins', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'sleeping');
+    const log = vi.fn();
+    const operationId = randomUUID();
     const f = plane([r], {
+      logger: { log },
       control: {
         requestWake: vi.fn(async () => {
           await delay(30);
-          return { mode: 'waking' as const };
+          return { mode: 'waking' as const, operationId };
         }),
       },
     });
@@ -674,6 +679,29 @@ describe('sleep protocol handling and observations', () => {
     );
     expect(result.every((value) => value.toString() === 'waking\n')).toBe(true);
     expect(f.control.requestWake).toHaveBeenCalledOnce();
+    const calls = (event: string) => log.mock.calls.filter((entry) => entry[1] === event);
+    expect(calls('gateway.wake_requested')).toHaveLength(1);
+    expect(calls('gateway.wake_coalesced')).toHaveLength(1);
+    expect(calls('gateway.wake_completed')).toHaveLength(1);
+    const request = vi.mocked(f.control.requestWake).mock.calls[0]?.[0];
+    expect(calls('gateway.wake_requested')[0]?.[2]).toMatchObject({
+      requestId: request?.requestId,
+      source: 'intentional_join',
+      routeId: r.id,
+      serverId: r.serverId,
+      generation: r.generation,
+    });
+    expect(calls('gateway.wake_completed')[0]?.[2]).toMatchObject({
+      requestId: request?.requestId,
+      operationId,
+      resultMode: 'waking',
+      durationMs: expect.any(Number),
+      coalescedJoins: expect.any(Number),
+    });
+    expect(calls('gateway.wake_completed')[0]?.[2].coalescedJoins).toBeGreaterThan(0);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(
+      /127\.0\.0|STATUS|"public"|"backend"|"token"/,
+    );
   });
   it('coalesces an in-flight wake even when the retry cooldown has elapsed', async () => {
     const backend = await tcpFixture();
@@ -1349,7 +1377,9 @@ describe('sleep protocol handling and observations', () => {
     let clock = Date.now();
     const initial = clock;
     const r = { ...route(backend.port), sleepEligibleAt: new Date(clock - 1000).toISOString() };
+    const log = vi.fn();
     const f = plane([r], {
+      logger: { log },
       now: () => clock,
       lease: 200,
       policy: { maxClockSkewMs: 10 },
@@ -1393,6 +1423,30 @@ describe('sleep protocol handling and observations', () => {
     await f.gateway.refresh();
     expect(f.gateway.health().quiescentServers).toBe(0);
     expect((await exchange(backend.port, 'fresh-online')).toString()).toBe('fresh-online');
+    const events = (event: string) =>
+      log.mock.calls.filter((entry) => entry[1] === event).map((entry) => entry[2]);
+    expect(events('gateway.quiescence_started')).toEqual([
+      expect.objectContaining({
+        serverId: r.serverId,
+        deadline: new Date(initial + 200).toISOString(),
+        remainingMs: 200,
+      }),
+    ]);
+    expect(events('gateway.quiescence_released')).toEqual([
+      expect.objectContaining({
+        serverId: r.serverId,
+        deadline: new Date(initial + 200).toISOString(),
+        afterDeadlineMs: 20,
+        maxClockSkewMs: 10,
+      }),
+    ]);
+    expect(
+      events('gateway.route_transition').map((event) => [event.responseMode, event.forwardable]),
+    ).toEqual([
+      ['online', true],
+      ['stopping', false],
+      ['online', true],
+    ]);
   });
   it.each(['generation', 'wakeJobId', 'mode'] as const)(
     'does not combine server routes with inconsistent %s',
@@ -1722,4 +1776,54 @@ describe('elapsed Gateway polling cadence', () => {
       }
     },
   );
+});
+
+describe('transition-only Gateway diagnostics', () => {
+  it('deduplicates identical snapshot renewals and records readiness and lease expiry without endpoint data', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'waking');
+    const log = vi.fn();
+    const f = plane([r], { logger: { log }, lease: 100 });
+    await f.gateway.start();
+    await f.gateway.refresh();
+    await f.gateway.refresh();
+    const online = { ...r, revision: 2, mode: 'online' as const };
+    await f.gateway.applySnapshot(f.snapshot([online], 2));
+    const events = () =>
+      log.mock.calls
+        .filter((entry) => entry[1] === 'gateway.route_transition')
+        .map((entry) => entry[2]);
+    expect(events().map((event) => [event.responseMode, event.forwardable])).toEqual([
+      ['waking', false],
+      ['online', true],
+    ]);
+    expect(events()[1]).toMatchObject({
+      routeRevision: 2,
+      snapshotRevision: 2,
+      snapshotApplyDurationMs: expect.any(Number),
+    });
+    await vi.waitFor(() => expect(f.gateway.health().routes).toBe(0));
+    expect(events().at(-1)).toMatchObject({
+      reason: 'lease_expired',
+      responseMode: 'unavailable',
+      forwardable: false,
+    });
+    expect(events()).toHaveLength(3);
+    await refuses(backend.port);
+    expect(JSON.stringify(events())).not.toContain('127.0.0.');
+  });
+  it('never lets a timing log sink failure alter a wake or snapshot transition', async () => {
+    const backend = await tcpFixture();
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      logger: {
+        log: () => {
+          throw new Error('diagnostics unavailable');
+        },
+      },
+    });
+    await f.gateway.start();
+    expect((await exchange(backend.port, 'JOIN\n')).toString()).toBe('waking\n');
+    expect(f.control.requestWake).toHaveBeenCalledOnce();
+    expect(f.gateway.metrics().wakeErrors).toBe(0);
+  });
 });

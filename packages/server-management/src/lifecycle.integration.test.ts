@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { authSessionId, DomainError } from '@nickhosting/core';
+import { authSessionId, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createDatabase, type Database } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { commandDigest, enqueueCommand } from '@nickhosting/jobs';
@@ -647,6 +647,55 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
     expect((await f.server()).readiness).toBe('loading');
   });
+  it.each([false, true])(
+    'records bounded operation timings without changing effects when the logger throws=%s',
+    async (throws) => {
+      const f = await fixture('start');
+      const logs: LogRecord[] = [];
+      f.options.logger = createLogger((record) => {
+        logs.push(record);
+        if (throws) throw new Error('isolated logging failure');
+      });
+      const results = await Promise.all(Array.from({ length: 3 }, () => f.run()));
+      expect(results).toContain('waiting');
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      const stages = logs.filter((r) => r.event === 'servers.operation_stage');
+      expect(stages.map((r) => (r.data as Record<string, unknown>).stage)).toEqual(
+        expect.arrayContaining([
+          'server_lock',
+          'provider_identity',
+          'provider_resources',
+          'authorization',
+          'provider_effect',
+        ]),
+      );
+      for (const record of stages) {
+        expect(record.data).toMatchObject({
+          jobId: f.jobId,
+          serverId: f.serverId,
+          action: 'start',
+          durationMs: expect.any(Number),
+        });
+        expect(Object.keys(record.data as object).sort()).toEqual([
+          'action',
+          'durationMs',
+          'jobId',
+          'outcome',
+          'serverId',
+          'stage',
+        ]);
+      }
+      expect(
+        logs.some(
+          (r) =>
+            r.event === 'servers.operation_deferred' &&
+            (r.data as Record<string, unknown>).reason === 'server_lock_busy',
+        ),
+      ).toBe(true);
+    },
+  );
   it('serializes duplicate deliveries around an external power call', async () => {
     const f = await fixture('start');
     const results = await Promise.all(Array.from({ length: 10 }, () => f.run()));

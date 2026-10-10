@@ -88,7 +88,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const protocols = new Map(options.protocols.map((adapter) => [adapter.id, adapter]));
   const wakeRequests = new Map<
     string,
-    { at: number; promise: Promise<GatewayMode>; inFlight: boolean }
+    {
+      at: number;
+      promise: Promise<GatewayMode>;
+      inFlight: boolean;
+      requestId: string;
+      coalesced: number;
+    }
   >();
   const counters = {
     tcpAccepted: 0,
@@ -130,6 +136,21 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   let pendingUdpIntents = 0;
   let pendingUdpResponseBytes = 0;
   const quiescence = new Map<string, number>();
+  const loggedRouteStates = new Map<string, string>();
+  const logTiming = (event: string, data: Readonly<Record<string, unknown>>) => {
+    try {
+      options.logger?.log('info', event, data);
+    } catch {
+      // Diagnostic sink failures must not change admission, leases or forwarding.
+    }
+  };
+  const routeIdentity = (route: GatewayRoute) => ({
+    routeId: route.id,
+    serverId: route.serverId,
+    generation: route.generation,
+    routeRevision: route.revision,
+    wakeJobId: route.wakeJobId,
+  });
   const bounded = async <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -210,24 +231,94 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       : !listener.backendReady && listener.route.mode === 'online'
         ? 'blocked'
         : mode;
+  const logRouteTransition = (
+    listener: Listener,
+    reason: string,
+    available = active(listener),
+    snapshotApplyDurationMs?: number,
+  ) => {
+    if (!options.logger) return;
+    const effectiveMode = available ? responseMode(listener) : 'unavailable';
+    const forwardable =
+      available &&
+      listener.route.mode === 'online' &&
+      listener.backendReady &&
+      !quiescence.has(listener.route.serverId);
+    // Revisions and lease timestamps change on routine renewal, but do not
+    // constitute a player-visible transition. Generation changes do.
+    const signature = JSON.stringify([listener.route.generation, effectiveMode, forwardable]);
+    if (loggedRouteStates.get(listener.route.id) === signature) return;
+    loggedRouteStates.set(listener.route.id, signature);
+    logTiming('gateway.route_transition', {
+      ...routeIdentity(listener.route),
+      reason,
+      responseMode: effectiveMode,
+      forwardable,
+      snapshotRevision: snapshot?.revision,
+      leaseExpiresAt: snapshot?.expiresAt,
+      snapshotApplyDurationMs,
+    });
+    if (!available) loggedRouteStates.delete(listener.route.id);
+  };
   const wake = (route: GatewayRoute): Promise<GatewayMode> => {
     if (!leased() || quiescence.has(route.serverId)) return Promise.resolve('blocked');
     const previous = wakeRequests.get(route.serverId);
-    if (previous && (previous.inFlight || now() - previous.at < policy.wakeRetryMs))
+    if (previous && (previous.inFlight || now() - previous.at < policy.wakeRetryMs)) {
+      previous.coalesced++;
+      if (previous.coalesced === 1)
+        logTiming('gateway.wake_coalesced', {
+          ...routeIdentity(route),
+          requestId: previous.requestId,
+          inFlight: previous.inFlight,
+        });
       return previous.promise;
+    }
     counters.wakeRequests++;
+    const requestId = randomUUID();
+    const issuedAt = performance.now();
+    logTiming('gateway.wake_requested', {
+      ...routeIdentity(route),
+      requestId,
+      source: 'intentional_join',
+    });
     const promise: Promise<GatewayMode> = options.control
-      .requestWake({ routeId: route.id, routeRevision: route.revision, requestId: randomUUID() })
-      .then((result) => result.mode)
+      .requestWake({ routeId: route.id, routeRevision: route.revision, requestId })
+      .then((result) => {
+        logTiming('gateway.wake_completed', {
+          ...routeIdentity(route),
+          requestId,
+          operationId: result.operationId,
+          resultMode: result.mode,
+          durationMs: Math.round(performance.now() - issuedAt),
+          coalescedJoins:
+            wakeRequests.get(route.serverId)?.requestId === requestId
+              ? wakeRequests.get(route.serverId)?.coalesced
+              : undefined,
+        });
+        return result.mode;
+      })
       .catch(() => {
         counters.wakeErrors++;
+        logTiming('gateway.wake_completed', {
+          ...routeIdentity(route),
+          requestId,
+          resultMode: 'blocked',
+          outcome: 'control_unavailable',
+          durationMs: Math.round(performance.now() - issuedAt),
+        });
         return 'blocked' as const;
       })
       .finally(() => {
         const current = wakeRequests.get(route.serverId);
         if (current?.promise === promise) current.inFlight = false;
       });
-    wakeRequests.set(route.serverId, { at: now(), promise, inFlight: true });
+    wakeRequests.set(route.serverId, {
+      at: now(),
+      promise,
+      inFlight: true,
+      requestId,
+      coalesced: 0,
+    });
     return promise;
   };
   const processIntent = async (
@@ -532,6 +623,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           );
         });
         listener.tcp.on('error', () => {
+          logRouteTransition(listener, 'socket_error', false);
           void closeListener(listener);
           listeners.delete(route.id);
         });
@@ -553,6 +645,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           );
         });
         listener.udp.on('error', () => {
+          logRouteTransition(listener, 'socket_error', false);
           void closeListener(listener);
           listeners.delete(route.id);
         });
@@ -566,12 +659,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const expire = async () => {
     if (snapshot && Date.parse(snapshot.expiresAt) > now()) return;
     const expired = [...listeners.values()];
+    for (const listener of expired) logRouteTransition(listener, 'lease_expired', false);
     listeners.clear();
     wakeRequests.clear();
     if (expired.length) counters.leaseExpirations++;
     await Promise.all(expired.map((listener) => closeListener(listener)));
   };
   const apply = async (input: unknown, fetchStartedAt: number) => {
+    const applyStarted = performance.now();
     const parsed = gatewaySnapshotSchema.safeParse(input);
     if (!parsed.success || stopping) throw new DomainError('validation_failed');
     const next = parsed.data;
@@ -618,6 +713,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           if (verdict?.backendReady === false && current?.backendReady) {
             current.backendReady = false;
             clearSessions(current);
+            logRouteTransition(current, 'backend_not_ready');
           }
         });
       } catch (error) {
@@ -630,6 +726,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         }
         const unsafe = listeners.get(route.id);
         if (unsafe) {
+          logRouteTransition(unsafe, 'safety_rejected', false);
           listeners.delete(route.id);
           await closeListener(unsafe);
         }
@@ -642,6 +739,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       for (const listener of [...listeners.values()]) {
         const route = next.routes.find((candidate) => candidate.id === listener.route.id);
         if (!route || !isDeepStrictEqual(route.public, listener.route.public)) {
+          logRouteTransition(listener, 'route_withdrawn', false);
           listeners.delete(listener.route.id);
           await closeListener(listener);
         }
@@ -681,10 +779,26 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       for (const [serverId, deadline] of quiescence) {
         // Route withdrawal does not cancel an in-flight idle report. Retain
         // the fence across disable/re-enable until a post-deadline fetch.
-        if (fetchStartedAt >= deadline + policy.maxClockSkewMs && issued >= deadline)
+        if (fetchStartedAt >= deadline + policy.maxClockSkewMs && issued >= deadline) {
           quiescence.delete(serverId);
+          logTiming('gateway.quiescence_released', {
+            serverId,
+            deadline: new Date(deadline).toISOString(),
+            fetchStartedAt: new Date(fetchStartedAt).toISOString(),
+            issuedAt: next.issuedAt,
+            afterDeadlineMs: Math.max(0, now() - deadline),
+            maxClockSkewMs: policy.maxClockSkewMs,
+          });
+        }
       }
       controlAvailable = true;
+      for (const listener of listeners.values())
+        logRouteTransition(
+          listener,
+          'snapshot_applied',
+          active(listener),
+          Math.round(performance.now() - applyStarted),
+        );
       if (leaseTimer) clearTimeout(leaseTimer);
       leaseTimer = setTimeout(
         () => {
@@ -861,8 +975,19 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             anchor.sleepEligibleAt !== undefined &&
             routes.every((route) => route.sleepEligibleAt === anchor.sleepEligibleAt) &&
             Date.parse(observedAt) >= Date.parse(anchor.sleepEligibleAt);
-          if (canQuiesce && !quiescence.has(anchor.serverId))
+          if (canQuiesce && !quiescence.has(anchor.serverId)) {
             quiescence.set(anchor.serverId, Date.parse(candidates.expiresAt));
+            logTiming('gateway.quiescence_started', {
+              ...routeIdentity(anchor),
+              observedAt,
+              deadline: candidates.expiresAt,
+              remainingMs: Math.max(0, Date.parse(candidates.expiresAt) - now()),
+              maxClockSkewMs: policy.maxClockSkewMs,
+            });
+            for (const listener of listeners.values())
+              if (listener.route.serverId === anchor.serverId)
+                logRouteTransition(listener, 'idle_quiescence');
+          }
           const quiescenceUntil = canQuiesce
             ? Math.min(quiescence.get(anchor.serverId) ?? 0, Date.parse(candidates.expiresAt))
             : undefined;
@@ -983,6 +1108,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (sweepTimer) clearInterval(sweepTimer);
     shutdown = (async () => {
       const current = [...listeners.values()];
+      for (const listener of current) logRouteTransition(listener, 'shutdown', false);
       const closing = Promise.all(current.map((listener) => closeListener(listener, false)));
       const timer = setTimeout(() => {
         for (const listener of current) clearSessions(listener);

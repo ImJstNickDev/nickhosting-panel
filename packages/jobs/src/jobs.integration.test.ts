@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type AuthContext, createLogger, DomainError } from '@nickhosting/core';
+import { type AuthContext, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -559,6 +559,8 @@ describe('isolated Redis/BullMQ delivery', () => {
 
   it('performs a real round-trip and safely handles redelivery', async () => {
     const options = redisOptions();
+    const logs: LogRecord[] = [];
+    options.logger = createLogger((record) => logs.push(record));
     const job = await submit();
     const runtime = await startJobWorker({
       db: fixture.db,
@@ -570,6 +572,12 @@ describe('isolated Redis/BullMQ delivery', () => {
       await eventually(
         async () => (await getJobStatus(fixture.db, job.id, member)).state === 'succeeded',
       );
+      await eventually(async () => logs.some((r) => r.event === 'jobs.delivery_processed'));
+      expect(logs.find((r) => r.event === 'jobs.delivery_started')?.data).toMatchObject({
+        jobId: job.id,
+        publishedAt: expect.any(String),
+        deliveryAgeMs: expect.any(Number),
+      });
       await runtime.queue.add('duplicate', { jobId: job.id });
       await eventually(
         async () =>

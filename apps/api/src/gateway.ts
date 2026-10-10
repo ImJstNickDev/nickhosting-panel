@@ -1,5 +1,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import {
+  type AuthContext,
+  type createLogger,
+  DomainError,
+  type SecretCodec,
+} from '@nickhosting/core';
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
 import { gatewayObservationSchema, gatewayWakeRequestSchema } from '@nickhosting/game-sdk';
 import { gatewayReachabilityProofSchema } from '@nickhosting/gateway-safety';
@@ -30,6 +35,7 @@ const hash = (text: string) => createHash('sha256').update(text).digest();
 export function registerGatewayRoutes(
   app: Hono<{ Variables: Variables }>,
   options: {
+    logger?: ReturnType<typeof createLogger>;
     db: ReturnType<typeof createDatabase>['db'];
     env: Readonly<Record<string, string | undefined>>;
     codec: SecretCodec;
@@ -42,6 +48,13 @@ export function registerGatewayRoutes(
   },
 ) {
   const { db, env, codec } = options;
+  const log = (event: string, data: Record<string, unknown>) => {
+    try {
+      options.logger?.log('info', event, data);
+    } catch {
+      // A diagnostic sink cannot change the control-plane result.
+    }
+  };
   const route = async (input: unknown) => {
     const value = routeRequest.safeParse(input);
     if (!value.success) throw new DomainError('validation_failed');
@@ -83,29 +96,64 @@ export function registerGatewayRoutes(
   });
   app.get(`${prefix}/snapshot`, async (c) => c.json(await getGatewaySnapshot(db, env)));
   app.post(`${prefix}/wake`, async (c) => {
-    const value = gatewayWakeRequestSchema.safeParse(await options.body(c));
-    if (!value.success) throw new DomainError('validation_failed');
-    const selected = await requireGatewayRoute(
-      db,
-      value.data.routeId,
-      value.data.routeRevision,
-      env,
-    );
-    const management = await options.management();
-    await management.refreshObservations();
-    const state = await requestGatewayWake(
-      db,
-      selected.serverId,
-      { generation: selected.generation, intent: 'join' },
-      { env },
-    );
-    return c.json({
-      mode: state.state,
-      ...(state.wakeJobId ? { operationId: state.wakeJobId } : {}),
-      ...(state.errorCode ? { reasonKey: `errors.${state.errorCode}` } : {}),
-    });
+    // Timing begins after service authentication; requestId connects the early
+    // phases to the operation ID that exists only after the durable enqueue.
+    const started = performance.now();
+    const metadata: Record<string, unknown> = { requestId: c.get('requestId') };
+    const stage = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+      const phaseStarted = performance.now();
+      let outcome = 'failed';
+      try {
+        const result = await work();
+        outcome = 'succeeded';
+        return result;
+      } finally {
+        log('gateway.wake_stage', {
+          ...metadata,
+          stage: name,
+          durationMs: Math.round((performance.now() - phaseStarted) * 1000) / 1000,
+          outcome,
+        });
+      }
+    };
+    let outcome = 'failed';
+    try {
+      const value = gatewayWakeRequestSchema.safeParse(await options.body(c));
+      if (!value.success) throw new DomainError('validation_failed');
+      metadata.routeId = value.data.routeId;
+      metadata.wakeRequestId = value.data.requestId;
+      const selected = await stage('route_validation', () =>
+        requireGatewayRoute(db, value.data.routeId, value.data.routeRevision, env),
+      );
+      metadata.serverId = selected.serverId;
+      const management = await stage('management_configuration', options.management);
+      await stage('host_sampling', () => management.refreshObservations());
+      const state = await stage('admission_and_enqueue', () =>
+        requestGatewayWake(
+          db,
+          selected.serverId,
+          { generation: selected.generation, intent: 'join' },
+          { env },
+        ),
+      );
+      if (state.wakeJobId) metadata.jobId = state.wakeJobId;
+      metadata.mode = state.state;
+      outcome = 'succeeded';
+      return c.json({
+        mode: state.state,
+        ...(state.wakeJobId ? { operationId: state.wakeJobId } : {}),
+        ...(state.errorCode ? { reasonKey: `errors.${state.errorCode}` } : {}),
+      });
+    } finally {
+      log('gateway.wake_completed', {
+        ...metadata,
+        durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+        outcome,
+      });
+    }
   });
   app.post(`${prefix}/observations`, async (c) => {
+    const requestStarted = performance.now();
     const parsed = gatewayObservationSchema.safeParse(await options.body(c));
     if (!parsed.success) throw new DomainError('validation_failed');
     const value = parsed.data;
@@ -128,9 +176,12 @@ export function registerGatewayRoutes(
         ),
       );
     if (!matches(expected)) throw new DomainError('conflict');
+    const validationCompleted = performance.now();
     const management = await options.management();
+    const configured = performance.now();
     const started = await management.lifecycle.observeProcessStart(selected.serverId, db);
-    await reportGatewayObservation(
+    const processVerified = performance.now();
+    const result = await reportGatewayObservation(
       db,
       selected.serverId,
       {
@@ -172,6 +223,27 @@ export function registerGatewayRoutes(
         },
       },
     );
+    // A snapshot-to-result change is diagnostic, not a second state authority.
+    // Regular identical idle/readiness samples deliberately emit no log records.
+    if (result.state !== selected.mode) {
+      const completed = performance.now();
+      const ms = (duration: number) => Math.round(duration * 1000) / 1000;
+      log('gateway.observation_state_changed', {
+        requestId: c.get('requestId'),
+        serverId: selected.serverId,
+        routeId: selected.id,
+        jobId: result.wakeJobId,
+        from: selected.mode,
+        to: result.state,
+        observedAt: value.observedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: ms(completed - requestStarted),
+        validationMs: ms(validationCompleted - requestStarted),
+        managementConfigurationMs: ms(configured - validationCompleted),
+        processVerificationMs: ms(processVerified - configured),
+        observationCommitMs: ms(completed - processVerified),
+      });
+    }
     return c.body(null, 204);
   });
   app.post(`${prefix}/context`, async (c) =>

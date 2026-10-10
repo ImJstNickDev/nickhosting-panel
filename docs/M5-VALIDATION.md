@@ -2351,3 +2351,69 @@ was needed. No Pterodactyl/Wings, networking, persistent review data or game-ser
 mutation was performed. Existing approved isolated services were reused; temporary
 schemas/unique test Redis queues were cleaned by their fixtures. SFTPGo #18 remains
 unchanged. Rollback requires a new revert commit; no migration or data reset.
+
+### 2026-10-11 — Correlated phase diagnostics for Owner wake/sleep retest
+
+Read-only correlation of the next Owner cycle (UTC+2): wake job created
+00:01:00.387, prepared effect00:01:03.640, physical process00:01:05.709,
+confirmation00:01:09.641. Thus job creation→physical start is5.322 seconds, while
+worker logs show its initial processing took3.967 seconds; this does not assign
+all five seconds to Redis. Minecraft Done was00:01:38.853, but persisted ready_at
+was00:01:38.826 because that timestamp precedes the successful protocol probe.
+It cannot measure the player-visible three-second readiness delay.
+
+Minecraft's own “empty for60seconds, pausing” log was00:02:39.079; the stop job
+was created00:02:42.095, final handoff00:02:45.021, Minecraft stopping00:02:45.392,
+and stop confirmed00:02:46.327. The persisted quiescence deadline was00:02:53.842:
+**7.515seconds after confirmation**. Existing rules require a fresh validated
+post-deadline snapshot before releasing that promise, consistent with the Owner's
+reported MOTD lag. Exact MOTD application/display timing was not recorded by the
+old logs. No server command or provider modification was performed for this audit.
+
+Added structured, correlated phase timings from Gateway intentional wake through
+API preflight/enqueue, BullMQ delivery, worker authorization/provider calls, API
+readiness commit and Gateway effective response/forwarding changes. Quiescence
+start/release logs include original deadline and release delay. Routine identical
+snapshots/idle observations do not emit transition logs; no packet/player/credential
+or provider-payload logging. See the event table and interpretation in M3-API.
+Logging failures cannot change measured actions. This pass instruments existing
+behavior; it does not weaken readiness, resource/identity checks, lease fences or
+quiescence. Nested/inclusive durations must not be added together.
+
+Focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts`
+  — **86 passed**. An initial targeted privacy assertion falsely matched `join`
+  inside the fixed `intentional_join` label; corrected assertion before this full
+  affected-file run. Covers transition deduplication, wake correlation/coalescing,
+  quiescence deadline logs and throwing log sinks without altered forwarding.
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/lifecycle.integration.test.ts packages/jobs/src/jobs.integration.test.ts --testNamePattern 'bounded operation timings|real round-trip'`
+  — **3 passed, 167 filtered**; scoped stage fields, duplicate-effect barrier,
+  throwing lifecycle sinks and actual isolated Redis delivery timing fields.
+- Root/WebPanel `scripts/dev.sh pnpm typecheck` passed; changed-source Biome
+  **13 files passed**. No full historical suite or new live game scenario.
+
+An intermediate edit briefly had a duplicate closing brace detected by Biome;
+corrected before tests/typecheck. Existing development watchers may reload API and
+worker while sources change. No manual container restart has been executed in this
+pass; the Gateway needs a new scoped restart approval to load its new diagnostics.
+SFTPGo#18 remains unchanged. No new infrastructure/test assets or persistent review
+data changes. Rollback is a new revert commit and, if diagnostics were activated,
+a separately approved Gateway restart; no schema migration or data reset.
+
+Runtime/API targeted evidence:
+
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/minecraft-queued.integration.test.ts apps/api/src/gateway.integration.test.ts -t 'times an ordinary start|records a failed preflight|correlates safe wake phases'`
+  — **5 passed, 51 filtered**.
+- `scripts/dev.sh pnpm test:m3 apps/api/src/gateway.integration.test.ts -t 'logs accepted readiness|fresh resource observation is insufficient'`
+  — **2 passed, 18 filtered** (transition-only readiness output and rejected admission).
+- After adding the validated cross-process `wakeRequestId`,
+  `scripts/dev.sh pnpm test:m3 apps/api/src/gateway.integration.test.ts -t 'correlates safe wake phases'`
+  — **2 passed, 18 filtered**. Throwing sinks preserve success/failure behavior;
+  failure records exclude raw errors and credentials.
+
+Independent review found no remaining must-fix; it checked bounded metadata,
+transition deduplication, sink isolation and unchanged authorization/fences. Current
+API, worker and Gateway containers are healthy. API/worker use existing source
+watchers; the Gateway process has not yet loaded this instrumentation. No new
+post-instrumentation live timing result is claimed.

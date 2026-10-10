@@ -288,3 +288,36 @@ immediately before binding remain. Allocation inventory is restricted to the Own
 configured node policy without repeating the remote node-list call; the validator
 still obtains a fresh node inventory and checks node UUIDs. No TTL inventory cache
 or relaxation of ownership/collision checks is introduced.
+
+### Phase timing diagnostics (M5)
+
+Structured logs correlate an intentional join with the durable operation and the
+listener's effective state. They contain identifiers/timestamps/durations, not
+player data, packets, request bodies, provider URLs or credentials:
+
+| Event | Meaning |
+|---|---|
+| Gateway `gateway.wake_requested` / `gateway.wake_completed` | Actual issued control request, its request ID and returned operation ID; duration includes the Core request. Coalesced joins emit at most one additional event per shared request. |
+| API `gateway.wake_stage` / `gateway.wake_completed` | Route validation, management configuration, host sampling, admission/enqueue. `wakeRequestId` matches the Gateway request ID; `requestId` is the independent HTTP request ID. `jobId` links worker records. Timing starts after service authentication. |
+| Worker `jobs.delivery_started` / `jobs.delivery_processed` | BullMQ publication timestamp, delivery age and processor duration. Age includes transport/waiting time and depends on wall clocks; it is not the whole API-to-power duration. |
+| `servers.operation_stage` / `servers.operation_deferred` | Server-lock acquisition, provider identity/resources, authorization, process observation and external-effect duration; explicit busy-lock/not-due/inactive reason. |
+| `server.runtime_stage` | Job-scoped host-observer preflight, runtime-image checks, host sampling, atomic admission and final authorization. |
+| API `gateway.observation_state_changed` | Snapshot mode versus resulting state, probe-start `observedAt`, post-commit `completedAt`, and validation/configuration/process/commit durations. This comparison is diagnostic, not another state authority. |
+| `gateway.route_transition` | Effective response mode and forwarding changes after validated application or lease/safety failure. Ordinary lease renewals are deduplicated. |
+| `gateway.quiescence_started` / `gateway.quiescence_released` | Original deadline, remaining interval, clock skew and successful fresh-fetch/release timing. |
+
+Phase durations are monotonic; event timestamps use UTC wall time. Nested spans
+are inclusive: for example `provider_effect` can contain stop confirmation and
+runtime authorization subphases. **Do not sum overlapping spans.** Persisted
+`ready_at` is the observation-pass start, not the Core commit or forwarding time.
+A route-transition log records listener state, not proof of when a Minecraft client
+refreshes or displays its MOTD. Logs are transition/job scoped, not one record per
+packet or unchanged idle probe. Diagnostic sink failures do not alter the measured
+operation or relax its authorization.
+
+Confirmed stop does not cancel an outstanding quiescence promise. The Gateway
+retains it until a successful snapshot fetch starts after the original deadline
+plus clock-skew allowance and has an issue timestamp at/after the deadline. This
+may leave a stopped backend answering “Server stopping” for the remaining lease
+interval plus polling/validation time. These diagnostics expose that interval;
+this instrumentation does not shorten it or permit an early wake.

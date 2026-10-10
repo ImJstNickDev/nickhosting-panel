@@ -3,6 +3,7 @@ import {
   type AuthContext,
   assertPermission,
   authSessionId,
+  type createLogger,
   DomainError,
   safeError,
 } from '@nickhosting/core';
@@ -79,6 +80,7 @@ export interface ExternalStopReceipt {
   action: 'stop' | 'kill';
 }
 export interface LifecycleOptions {
+  logger?: ReturnType<typeof createLogger>;
   adapter: PterodactylAdapter;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
@@ -301,7 +303,50 @@ export async function processServerOperation(
     .where('job_id', '=', jobId)
     .executeTakeFirst();
   if (!initial) return 'missing';
+  const log = (event: string, data: Record<string, unknown>) => {
+    try {
+      options.logger?.log('info', event, {
+        jobId,
+        serverId: initial.server_id,
+        action: initial.action,
+        ...data,
+      });
+    } catch {
+      /* Diagnostics must never affect authorization or provider operations. */
+    }
+  };
+  const timed = async <T>(
+    stage:
+      | 'authorization'
+      | 'provider_identity'
+      | 'provider_resources'
+      | 'process_observation'
+      | 'provider_effect',
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    const began = performance.now();
+    let outcome = 'error';
+    try {
+      const value = await work();
+      outcome = 'ok';
+      return value;
+    } finally {
+      log('servers.operation_stage', {
+        stage,
+        outcome,
+        durationMs: Math.round(performance.now() - began),
+      });
+    }
+  };
+  const lockStarted = performance.now();
+  let acquired = false;
   return withServerLock(db, initial.server_id, async (db) => {
+    acquired = true;
+    log('servers.operation_stage', {
+      stage: 'server_lock',
+      outcome: 'acquired',
+      durationMs: Math.round(performance.now() - lockStarted),
+    });
     let operation = await db
       .selectFrom('server_operations')
       .selectAll()
@@ -313,14 +358,23 @@ export async function processServerOperation(
       .where('id', '=', jobId)
       .executeTakeFirstOrThrow();
     if (job.state === 'succeeded' || job.state === 'failed') return 'duplicate';
-    if (job.next_attempt_at > nowOf(options)) return 'deferred';
+    if (job.next_attempt_at > nowOf(options)) {
+      log('servers.operation_deferred', {
+        reason: 'not_due',
+        nextAttemptAt: job.next_attempt_at.toISOString(),
+      });
+      return 'deferred';
+    }
     let server = await db
       .selectFrom('managed_servers')
       .selectAll()
       .where('id', '=', operation.server_id)
       .executeTakeFirstOrThrow();
     // Obsolete operations must not enter the transport's short contention retry.
-    if (server.active_operation_id !== jobId || server.deleted_at) return 'inactive';
+    if (server.active_operation_id !== jobId || server.deleted_at) {
+      log('servers.operation_deferred', { reason: 'inactive' });
+      return 'inactive';
+    }
     const token = randomUUID();
     const at = nowOf(options);
     await db
@@ -429,7 +483,7 @@ export async function processServerOperation(
         if (previous.success) {
           let remote: ApplicationServer;
           try {
-            remote = await ownedRemote(db, server, options);
+            remote = await timed('provider_identity', () => ownedRemote(db, server, options));
           } catch {
             return wait('configuration_rollback_verification', 'integration_unavailable');
           }
@@ -636,7 +690,7 @@ export async function processServerOperation(
       perform: () => Promise<T>,
       patch?: (result: T) => Record<string, unknown>,
     ): Promise<boolean> => {
-      await options.authorizeEffect(jobId, server.id, db);
+      await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
       await db.transaction().execute(async (tx) => {
         await lockResources(tx);
         await assertNoPendingUpload(tx, server.id);
@@ -663,7 +717,7 @@ export async function processServerOperation(
       if (attempt > job.max_attempts) throw new DomainError('operation_uncertain');
       // Corroborate immediately before the effect, not only when the job was authorized.
       if (operation.action !== 'provision' || server.pterodactyl_id !== null)
-        await ownedRemote(db, server, options);
+        await timed('provider_identity', () => ownedRemote(db, server, options));
       await update({
         phase,
         effect_state: 'prepared',
@@ -705,7 +759,7 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
-          await options.authorizeEffect(jobId, server.id, db);
+          await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
           if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
         } catch (error) {
           await update({
@@ -722,7 +776,7 @@ export async function processServerOperation(
       }
       let result: T;
       try {
-        result = await perform();
+        result = await timed('provider_effect', perform);
       } catch (error) {
         if (error instanceof PterodactylError && error.outcome === 'rejected') {
           await update({
@@ -746,8 +800,9 @@ export async function processServerOperation(
       authorize: async () => {
         try {
           await options.verifyObservationHost?.(server.id, db);
-          if (mutating) await options.authorizeEffect(jobId, server.id, db);
-          await ownedRemote(db, server, options);
+          if (mutating)
+            await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
+          await timed('provider_identity', () => ownedRemote(db, server, options));
           return true;
         } catch {
           return false;
@@ -806,7 +861,9 @@ export async function processServerOperation(
       operation.effect_started_at !== null &&
       nowOf(options).getTime() - operation.effect_started_at.getTime() >= settleOf(options);
     const resources = async () => {
-      const value = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
+      const value = await timed('provider_resources', () =>
+        options.adapter.getResources(server.pterodactyl_identifier ?? ''),
+      );
       await observation(db, server, value, nowOf(options));
       return value;
     };
@@ -890,9 +947,9 @@ export async function processServerOperation(
         return false;
       const plan = provisionPlanSchema.parse(operation.plan.provision);
       const assertOutcome = async () => {
-        await options.authorizeEffect(jobId, server.id, db);
+        await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
         await options.verifyObservationHost?.(server.id, db);
-        const remote = await ownedRemote(db, server, options);
+        const remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (
           !installed(remote) ||
           remote.egg !== plan.eggId ||
@@ -960,7 +1017,10 @@ export async function processServerOperation(
         operation.action === 'restart' ? 'restart_terminal_unproven' : 'start_terminal_unproven';
       let startedAt: string | null;
       try {
-        startedAt = await options.observeProcessStart(server.id, db);
+        startedAt = await timed(
+          'process_observation',
+          async () => (await options.observeProcessStart?.(server.id, db)) ?? null,
+        );
       } catch {
         return wait(reason, 'operation_uncertain');
       }
@@ -1024,7 +1084,7 @@ export async function processServerOperation(
       // The persisted terminal proof belongs to this operation. Recheck the
       // exact host/process before releasing capacity: Panel resources can still
       // report running for 20 seconds. This never grants another power effect.
-      await ownedRemote(db, server, options);
+      await timed('provider_identity', () => ownedRemote(db, server, options));
       await options.verifyObservationHost?.(server.id, db);
       if (!(await options.confirmAlreadyStopped(server.id, db)))
         return wait('stop_terminal_unproven', 'operation_uncertain');
@@ -1102,7 +1162,7 @@ export async function processServerOperation(
             .executeTakeFirstOrThrow();
           await update({ phase: 'installation', effect_state: 'confirmed' });
         }
-        remote = await ownedRemote(db, server, options);
+        remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (['install_failed', 'reinstall_failed'].includes(remote.status ?? '')) {
           await db
             .updateTable('managed_servers')
@@ -1117,7 +1177,7 @@ export async function processServerOperation(
           !(await observeInstallation())
         )
           return wait('installation_terminal_unproven', 'operation_uncertain');
-        remote = await ownedRemote(db, server, options);
+        remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (!installed(remote)) return wait('installation');
         await db
           .updateTable('managed_servers')
@@ -1155,7 +1215,7 @@ export async function processServerOperation(
           !(await options.configureGameProvision(gameContext()))
         )
           return wait('game_configuration');
-        await options.authorizeEffect(jobId, server.id, db);
+        await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
         await activateProvisionGateway(db, server.id, jobId, options.env);
         await update({});
         if (operation.plan.autoStart === true) {
@@ -1193,7 +1253,7 @@ export async function processServerOperation(
       }
 
       if (operation.action === 'delete' && server.pterodactyl_id === null) {
-        await options.authorizeEffect(jobId, server.id, db);
+        await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
         const rejected = await db
           .selectFrom('server_operations as operation')
           .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
@@ -1214,7 +1274,7 @@ export async function processServerOperation(
       }
       let remote: ApplicationServer;
       try {
-        remote = await ownedRemote(db, server, options);
+        remote = await timed('provider_identity', () => ownedRemote(db, server, options));
       } catch (error) {
         if (
           operation.action === 'delete' &&
@@ -1254,7 +1314,7 @@ export async function processServerOperation(
               } catch {
                 return wait('already_stopped_unproven', 'operation_uncertain');
               }
-              await options.authorizeEffect(jobId, server.id, db);
+              await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
               return finish(true, false, null, true);
             }
           }
@@ -1276,7 +1336,10 @@ export async function processServerOperation(
           let previousProcessStartedAt: string | null | undefined;
           if (action === 'restart' && options.observeProcessStart) {
             try {
-              previousProcessStartedAt = await options.observeProcessStart(server.id, db);
+              previousProcessStartedAt = await timed(
+                'process_observation',
+                async () => (await options.observeProcessStart?.(server.id, db)) ?? null,
+              );
               const previousTime = processStartTime(previousProcessStartedAt);
               if (
                 previousProcessStartedAt !== null &&
@@ -1306,7 +1369,9 @@ export async function processServerOperation(
                   beforePower: isGatewaySleep(operation)
                     ? async () => {
                         try {
-                          await options.authorizeEffect(jobId, server.id, db);
+                          await timed('authorization', () =>
+                            options.authorizeEffect(jobId, server.id, db),
+                          );
                           assertGatewaySleepFence(operation.plan, nowOf(options));
                           await update({
                             plan: {
@@ -1314,7 +1379,9 @@ export async function processServerOperation(
                               gatewaySleepHandoffAt: nowOf(options).toISOString(),
                             },
                           });
-                          await options.authorizeEffect(jobId, server.id, db);
+                          await timed('authorization', () =>
+                            options.authorizeEffect(jobId, server.id, db),
+                          );
                           await assertIdleSleepAllowed(db, server.id, options.env);
                           // Persistence itself may wait; do not send a stale stop
                           // merely because its handoff record reached PostgreSQL.
@@ -1328,8 +1395,10 @@ export async function processServerOperation(
                   authorize: async () => {
                     try {
                       await options.verifyObservationHost?.(server.id, db);
-                      await options.authorizeEffect(jobId, server.id, db);
-                      await ownedRemote(db, server, options);
+                      await timed('authorization', () =>
+                        options.authorizeEffect(jobId, server.id, db),
+                      );
+                      await timed('provider_identity', () => ownedRemote(db, server, options));
                       return true;
                     } catch {
                       return false;
@@ -1414,7 +1483,7 @@ export async function processServerOperation(
       }
       if (operation.action === 'delete') {
         if (operation.phase !== 'delete') {
-          await options.authorizeEffect(jobId, server.id, db);
+          await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
           if (options.beforeDelete) await options.beforeDelete(server.id, db);
           else {
             const credential = await db
@@ -1576,7 +1645,7 @@ export async function processServerOperation(
         }
         if (!(await observeInstallation()))
           return wait('installation_terminal_unproven', 'operation_uncertain');
-        remote = await ownedRemote(db, server, options);
+        remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         if (installed(remote) && settled()) {
           await db
             .updateTable('managed_servers')
@@ -1707,6 +1776,13 @@ export async function processServerOperation(
         .where('lease_token', '=', token)
         .execute();
     }
+  }).then((result) => {
+    if (!acquired)
+      log('servers.operation_deferred', {
+        reason: 'server_lock_busy',
+        durationMs: Math.round(performance.now() - lockStarted),
+      });
+    return result;
   });
 }
 

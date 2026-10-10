@@ -5,6 +5,7 @@ import type { Identity } from '@nickhosting/auth';
 import {
   type AuthContext,
   assertPermission,
+  type createLogger,
   DomainError,
   platformConfigSchema,
   type SecretCodec,
@@ -44,6 +45,7 @@ type Store = ReturnType<typeof createDatabase>;
 // the connections needed for logout, role changes and ordinary reads.
 const uploadSlots = new WeakMap<Store['pool'], { active: number }>();
 interface Options {
+  logger?: ReturnType<typeof createLogger>;
   database: Store;
   identity: () => Promise<Identity>;
   codec: SecretCodec;
@@ -454,6 +456,7 @@ export function createApp(options: Options) {
       }),
   });
   registerGatewayRoutes(app, {
+    logger: options.logger,
     db,
     env,
     codec: options.codec,

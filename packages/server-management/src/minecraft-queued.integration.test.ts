@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { SecretCodec } from '@nickhosting/core';
+import { createLogger, type LogRecord, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
 import type {
@@ -497,7 +497,7 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
 });
 
 describe('host-bound Minecraft runtime image evidence', () => {
-  async function installed() {
+  async function installed(logger?: ReturnType<typeof createLogger>) {
     const operation = await queued();
     const external = lifecycleFixture();
     const result = await processServerOperation(f.db, operation.jobId, external.options);
@@ -529,6 +529,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       adapter: external.adapter,
       containerObserver: observer,
       env,
+      logger,
     });
     return { ...operation, external, observer, codec, management };
   }
@@ -694,41 +695,89 @@ describe('host-bound Minecraft runtime image evidence', () => {
     expect(listFiles).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
   });
-  it('reserves and authorizes an ordinary start without listing or downloading the runtime JAR', async () => {
-    const value = await installed();
-    const sample = vi.spyOn(hostResources, 'sampleLocalResources').mockImplementation(async () => ({
-      totalMemoryMiB: 8192,
-      availableMemoryMiB: 8192,
-      cpuCapacityPercent: 800,
-      cpuBusyPercent: 0,
-      availableDiskMiB: 1000000,
-      observedAt: new Date().toISOString(),
-    }));
-    const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
-    const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
-    const job = await enqueueServerOperation(
-      f.db,
-      f.context,
-      value.serverId,
-      { action: 'start', idempotencyKey: randomUUID() },
-      env,
-    );
-    try {
-      await value.management.lifecycle.reserveStart(value.serverId, job.jobId, 'start', f.db);
-      await value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db);
-      expect(sample).toHaveBeenCalled();
-      expect(
-        await f.db
-          .selectFrom('resource_reservations')
-          .select('server_id')
-          .where('server_id', '=', value.serverId)
-          .executeTakeFirst(),
-      ).toEqual({ server_id: value.serverId });
-      expect(listFiles).not.toHaveBeenCalled();
-      expect(download).not.toHaveBeenCalled();
-    } finally {
-      sample.mockRestore();
-    }
+  it.each([false, true])(
+    'times an ordinary start without artifact transfers even when logging fails=%s',
+    async (throwSink) => {
+      const records: LogRecord[] = [];
+      const value = await installed(
+        createLogger((record) => {
+          records.push(record);
+          if (throwSink) throw new Error('private-sink-failure');
+        }),
+      );
+      const sample = vi
+        .spyOn(hostResources, 'sampleLocalResources')
+        .mockImplementation(async () => ({
+          totalMemoryMiB: 8192,
+          availableMemoryMiB: 8192,
+          cpuCapacityPercent: 800,
+          cpuBusyPercent: 0,
+          availableDiskMiB: 1000000,
+          observedAt: new Date().toISOString(),
+        }));
+      const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
+      const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
+      const job = await enqueueServerOperation(
+        f.db,
+        f.context,
+        value.serverId,
+        { action: 'start', idempotencyKey: randomUUID() },
+        env,
+      );
+      try {
+        await value.management.lifecycle.reserveStart(value.serverId, job.jobId, 'start', f.db);
+        await value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db);
+        expect(sample).toHaveBeenCalled();
+        expect(
+          await f.db
+            .selectFrom('resource_reservations')
+            .select('server_id')
+            .where('server_id', '=', value.serverId)
+            .executeTakeFirst(),
+        ).toEqual({ server_id: value.serverId });
+        expect(listFiles).not.toHaveBeenCalled();
+        expect(download).not.toHaveBeenCalled();
+        expect(records.map((record) => (record.data as Record<string, unknown>).stage)).toEqual([
+          'reserve_start.observer_preflight',
+          'reserve_start.runtime_image',
+          'reserve_start.host_sampling',
+          'reserve_start.atomic_admission',
+          'authorize_effect.observer_preflight',
+          'authorize_effect.authorization',
+          'authorize_effect.runtime_image',
+          'authorize_effect.final_authorization',
+        ]);
+        for (const record of records) {
+          expect(record.event).toBe('server.runtime_stage');
+          expect(record.data).toEqual({
+            jobId: job.jobId,
+            serverId: value.serverId,
+            stage: expect.any(String),
+            durationMs: expect.any(Number),
+            outcome: 'succeeded',
+          });
+          expect((record.data as { durationMs: number }).durationMs).toBeGreaterThanOrEqual(0);
+        }
+        expect(JSON.stringify(records)).not.toContain('private-sink-failure');
+      } finally {
+        sample.mockRestore();
+      }
+    },
+  );
+  it('records a failed preflight without logging the raw error or changing rejection', async () => {
+    const records: LogRecord[] = [];
+    const value = await installed(createLogger((record) => records.push(record)));
+    const error = new Error('provider-private-credential');
+    value.observer.preflight.mockRejectedValueOnce(error);
+    await expect(
+      value.management.lifecycle.reserveStart(value.serverId, randomUUID(), 'start', f.db),
+    ).rejects.toBe(error);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.data).toMatchObject({
+      stage: 'reserve_start.observer_preflight',
+      outcome: 'failed',
+    });
+    expect(JSON.stringify(records)).not.toContain(error.message);
   });
   it('authorizes stop and observes an absent stopped container without artifact I/O', async () => {
     const value = await installed();

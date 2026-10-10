@@ -1,6 +1,7 @@
 import {
   type AuthContext,
   assertAuthContext,
+  type createLogger,
   DomainError,
   type SecretCodec,
 } from '@nickhosting/core';
@@ -216,6 +217,7 @@ export async function authorizeQueuedEffect(
 }
 
 export interface ManagementOptions {
+  logger?: ReturnType<typeof createLogger>;
   db: Kysely<Database>;
   codec: SecretCodec;
   env?: Environment;
@@ -228,6 +230,31 @@ export interface ManagementOptions {
 }
 
 export async function createManagementRuntime(options: ManagementOptions) {
+  async function timed<T>(
+    jobId: string,
+    serverId: string,
+    stage: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const started = performance.now();
+    let outcome = 'failed';
+    try {
+      const result = await work();
+      outcome = 'succeeded';
+      return result;
+    } finally {
+      // Diagnostics must never alter authorization, reservations or external effects.
+      try {
+        options.logger?.log('info', 'server.runtime_stage', {
+          jobId,
+          serverId,
+          stage,
+          durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+          outcome,
+        });
+      } catch {}
+    }
+  }
   const { db } = options;
   const env = options.env ?? {};
   const { values } = await getSettings(db, env);
@@ -367,6 +394,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   const lifecycle = {
     env,
+    logger: options.logger,
     verifyInitialInstallation: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.verifyInitialInstallation?.(context) ??
       null,
@@ -533,8 +561,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
     },
     adapter,
     authorizeEffect: async (jobId: string, serverId: string, connection: Kysely<Database>) => {
-      await verifyObservationHost(serverId, connection);
-      await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);
+      const stage = <T>(name: string, work: () => Promise<T>) =>
+        timed(jobId, serverId, `authorize_effect.${name}`, work);
+      await stage('observer_preflight', () => verifyObservationHost(serverId, connection));
+      await stage('authorization', () =>
+        authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
+      );
       const operation = await connection
         .selectFrom('server_operations')
         .select(['action', 'phase'])
@@ -544,11 +576,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
         ['start', 'restart'].includes(operation.action) ||
         (operation.action === 'provision' && operation.phase === 'initial_start')
       ) {
-        await assertRuntimeImage(serverId, connection, false);
+        await stage('runtime_image', () => assertRuntimeImage(serverId, connection, false));
         // Observer/provider proofs can outlive an automation grant. Re-read the
         // current actor, schedule revision, consent and Gateway generation only
         // after those slow proofs, at the final handoff to a new remote effect.
-        await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);
+        await stage('final_authorization', () =>
+          authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
+        );
       }
     },
     reserveInstallation: async (serverId: string, jobId: string, connection: Kysely<Database>) => {
@@ -562,10 +596,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
       action: 'start' | 'restart',
       connection: Kysely<Database>,
     ) => {
-      await verifyObservationHost(serverId, connection);
-      await assertRuntimeImage(serverId, connection, false);
-      await refreshObservations(connection);
-      await reserveStart(connection, serverId, jobId, action, env);
+      const stage = <T>(name: string, work: () => Promise<T>) =>
+        timed(jobId, serverId, `reserve_start.${name}`, work);
+      await stage('observer_preflight', () => verifyObservationHost(serverId, connection));
+      await stage('runtime_image', () => assertRuntimeImage(serverId, connection, false));
+      await stage('host_sampling', () => refreshObservations(connection));
+      await stage('atomic_admission', () => reserveStart(connection, serverId, jobId, action, env));
     },
     beforeDelete:
       options.cleanupExternal ??

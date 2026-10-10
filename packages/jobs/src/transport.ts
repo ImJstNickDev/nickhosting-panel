@@ -205,6 +205,15 @@ export async function startJobWorker(options: {
       const parsed = deliverySchema.safeParse(delivery.data);
       if (!parsed.success) throw new DomainError('validation_failed');
       const started = performance.now();
+      try {
+        options.logger.log('info', 'jobs.delivery_started', {
+          jobId: parsed.data.jobId,
+          publishedAt: new Date(delivery.timestamp).toISOString(),
+          deliveryAgeMs: Math.max(0, Date.now() - delivery.timestamp),
+        });
+      } catch {
+        /* Logging cannot change processing semantics. */
+      }
       const result = options.processor
         ? await options.processor(parsed.data.jobId)
         : await processJob(options.db, parsed.data.jobId, options.handlers);

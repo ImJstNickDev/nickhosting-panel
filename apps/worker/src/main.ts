@@ -23,6 +23,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       return createManagementRuntime({
         db,
         env,
+        logger,
         codec: new SecretCodec({
           activeKeyId: keyId,
           keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DomainError, SecretCodec } from '@nickhosting/core';
+import { createLogger, DomainError, type LogRecord, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { GatewayRoute } from '@nickhosting/game-sdk';
 import { safetyProviderServerSchema } from '@nickhosting/gateway-safety';
@@ -36,6 +36,8 @@ const token = randomBytes(32).toString('base64url'),
 const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
 const processStart = vi.fn<() => Promise<string | null>>(async () => null);
 const logs: unknown[] = [];
+const timingLogs: LogRecord[] = [];
+let throwTimingSink = false;
 let remote: Awaited<ReturnType<typeof f.adapter.getApplicationServer>>;
 let routeInput: Parameters<typeof setGatewayRoute>[2];
 const prefix = () => `/internal/gateway/${env.NH_GATEWAY_ID}`;
@@ -70,6 +72,8 @@ afterAll(async () => {
   await database?.destroy();
 });
 beforeEach(async () => {
+  timingLogs.length = 0;
+  throwTimingSink = false;
   f = await managementFixture(database.db, { interactive: true });
   serverId = await f.server();
   const server = await f.db
@@ -167,6 +171,10 @@ beforeEach(async () => {
     origins: ['http://localhost:3999'],
     env,
     log: (r) => logs.push(r),
+    logger: createLogger((record) => {
+      timingLogs.push(record);
+      if (throwTimingSink) throw new Error('private-log-sink');
+    }),
     identity: async () => {
       throw new DomainError('unauthenticated');
     },
@@ -348,6 +356,48 @@ describe('M3 Core service authentication and managed control plane', () => {
           .status,
       ).toBe(409);
   });
+  it.each([false, true])(
+    'correlates safe wake phases with the durable job even when logging fails=%s',
+    async (throwSink) => {
+      throwTimingSink = throwSink;
+      const wakeRequestId = randomUUID();
+      const response = await request(`${prefix()}/wake`, {
+        routeId: route.id,
+        routeRevision: route.revision,
+        requestId: wakeRequestId,
+      });
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as { operationId: string };
+      const phases = timingLogs.filter((record) => record.event === 'gateway.wake_stage');
+      expect(phases.map((record) => (record.data as Record<string, unknown>).stage)).toEqual([
+        'route_validation',
+        'management_configuration',
+        'host_sampling',
+        'admission_and_enqueue',
+      ]);
+      expect(timingLogs.at(-1)).toMatchObject({
+        event: 'gateway.wake_completed',
+        data: {
+          jobId: result.operationId,
+          wakeRequestId,
+          serverId,
+          routeId: route.id,
+          mode: 'waking',
+          outcome: 'succeeded',
+        },
+      });
+      for (const record of timingLogs) {
+        expect(record.data).toMatchObject({
+          requestId: response.headers.get('x-request-id'),
+          durationMs: expect.any(Number),
+        });
+        expect((record.data as { durationMs: number }).durationMs).toBeGreaterThanOrEqual(0);
+      }
+      expect(JSON.stringify(timingLogs)).not.toContain(token);
+      expect(JSON.stringify(timingLogs)).not.toContain(secret);
+      expect(JSON.stringify(timingLogs)).not.toContain('private-log-sink');
+    },
+  );
   it('uses real M2 admission for a burst wake and persists just one authorized operation', async () => {
     const responses = await Promise.all(
       Array.from({ length: 12 }, () =>
@@ -412,6 +462,48 @@ describe('M3 Core service authentication and managed control plane', () => {
     });
     expect((await request(`${prefix()}/observations`, observation())).status).toBe(409);
   });
+  it('logs accepted readiness timing once and keeps unchanged idle samples quiet', async () => {
+    const startedAt = new Date(Date.now() - 1000).toISOString();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running', intent: 'auto_wake_enabled' })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'waking', process_started_at: startedAt })
+      .where('server_id', '=', serverId)
+      .execute();
+    processStart.mockResolvedValue(startedAt);
+    route =
+      (await getGatewaySnapshot(f.db, env)).routes[0] ??
+      (() => {
+        throw new Error('Missing fixture route');
+      })();
+    expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
+    expect(timingLogs).toHaveLength(1);
+    expect(timingLogs[0]).toMatchObject({
+      event: 'gateway.observation_state_changed',
+      data: {
+        from: 'waking',
+        to: 'online',
+        serverId,
+        routeId: route.id,
+        validationMs: expect.any(Number),
+        processVerificationMs: expect.any(Number),
+        observationCommitMs: expect.any(Number),
+        managementConfigurationMs: expect.any(Number),
+        completedAt: expect.any(String),
+      },
+    });
+    route =
+      (await getGatewaySnapshot(f.db, env)).routes[0] ??
+      (() => {
+        throw new Error('Missing fixture route');
+      })();
+    expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
+    expect(timingLogs).toHaveLength(1);
+  });
   it('cannot mark a container playable without a corroborated running process', async () => {
     expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
     expect((await getGatewayState(f.db, serverId)).state).not.toBe('online');
@@ -419,6 +511,10 @@ describe('M3 Core service authentication and managed control plane', () => {
   });
   it('fails closed when fresh resource observation is insufficient', async () => {
     const failed = createApp({
+      logger: createLogger((record) => {
+        timingLogs.push(record);
+        throw new Error('private-sink-failure');
+      }),
       database,
       codec,
       origins: [],
@@ -443,6 +539,15 @@ describe('M3 Core service authentication and managed control plane', () => {
       }),
     });
     expect(result.status).toBe(503);
+    expect(timingLogs.at(-2)).toMatchObject({
+      event: 'gateway.wake_stage',
+      data: { stage: 'host_sampling', outcome: 'failed' },
+    });
+    expect(timingLogs.at(-1)).toMatchObject({
+      event: 'gateway.wake_completed',
+      data: { outcome: 'failed' },
+    });
+    expect(JSON.stringify(timingLogs)).not.toContain('private-sink-failure');
     expect(
       await f.db
         .selectFrom('server_operations')
