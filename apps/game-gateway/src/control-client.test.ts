@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createGatewayControlClient, GatewayRouteRevisionStaleError } from './control-client.js';
+import {
+  createGatewayControlClient,
+  GatewayProviderRateLimitedError,
+  GatewayRouteRevisionStaleError,
+} from './control-client.js';
 
 const gatewayId = randomUUID();
 const token = 'a'.repeat(43);
@@ -22,6 +26,57 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it.each(['snapshot', 'inventory', 'context', 'proof-read', 'proof-write', 'observations'])(
+    'recognizes explicit provider cooldown for %s',
+    async (action) => {
+      const client = createGatewayControlClient({
+        ...settings,
+        fetcher: vi.fn(async () =>
+          Response.json(
+            {
+              error: {
+                code: 'integration_unavailable',
+                messageKey: 'errors.integration_unavailable',
+                details: { gatewayControlReason: 'provider_rate_limited', retryAfterMs: 1500 },
+              },
+            },
+            { status: 503 },
+          ),
+        ),
+      });
+      await expect(client.requestJson(action)).rejects.toMatchObject({
+        name: 'GatewayProviderRateLimitedError',
+        retryAfterMs: 1500,
+      });
+    },
+  );
+  it.each([
+    { action: 'inventory', status: 500, reason: 'provider_rate_limited', delay: 1000 },
+    { action: 'inventory', status: 503, reason: 'collision', delay: 1000 },
+    { action: 'inventory', status: 503, reason: 'provider_rate_limited', delay: 300001 },
+    { action: 'inventory', status: 503, reason: 'provider_rate_limited', delay: 0 },
+    { action: 'wake', status: 503, reason: 'provider_rate_limited', delay: 1000 },
+  ])('does not trust unrelated cooldown $action/$status/$reason/$delay', async (input) => {
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: vi.fn(async () =>
+        Response.json(
+          {
+            error: {
+              code: 'integration_unavailable',
+              messageKey: 'errors.integration_unavailable',
+              details: { gatewayControlReason: input.reason, retryAfterMs: input.delay },
+            },
+          },
+          { status: input.status },
+        ),
+      ),
+    });
+    await expect(client.requestJson(input.action)).rejects.not.toBeInstanceOf(
+      GatewayProviderRateLimitedError,
+    );
+    await expect(client.requestJson(input.action)).rejects.toThrow(/^integration_unavailable$/);
+  });
   it.each(['context', 'proof-read', 'proof-write'])(
     'recognizes only authenticated explicit revision preconditions for %s',
     async (action) => {

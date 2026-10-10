@@ -60,6 +60,7 @@ export type Variables = {
   requestId: string;
   authHeaders: Headers;
   locale?: 'en' | 'it';
+  gatewayAuthenticated?: boolean;
 };
 
 async function body(c: Context): Promise<unknown> {
@@ -182,6 +183,25 @@ export function createApp(options: Options) {
       c.req.header('accept-language'),
       await options.defaultLocale?.().catch(() => 'en' as const),
     );
+    if (
+      c.get('gatewayAuthenticated') &&
+      failure instanceof PterodactylError &&
+      failure.reason === 'rate_limited'
+    ) {
+      const retryAfterMs = Math.min(300000, Math.max(1, failure.retryAfterMs ?? 60000));
+      c.header('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+      return c.json(
+        {
+          error: {
+            code: 'integration_unavailable',
+            messageKey: 'errors.integration_unavailable',
+            details: { gatewayControlReason: 'provider_rate_limited', retryAfterMs },
+          },
+          requestId: c.get('requestId'),
+        },
+        503,
+      );
+    }
     return c.json(
       { error: localizeError(failure, locale), requestId: c.get('requestId') },
       normalized.status as ContentfulStatusCode,

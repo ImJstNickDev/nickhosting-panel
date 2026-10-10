@@ -412,3 +412,38 @@ LISTEN uses one dedicated database connection, bounded setup and reconnection;
 a stalled hint connection never blocks authoritative polling. No migration or new
 service is required. Notifications contain no job or user payload, do not grant
 permission, and never substitute for a committed job.
+
+### 2026-10-11 — Provider request coordination and rate-limit recovery
+
+Core API and worker each own a process-scoped Pterodactyl transport coordinator.
+It survives per-request management runtime creation, while settings and credentials
+still resolve normally. Provider URL, credential scope and credential digest
+isolate request state. Concurrent identical bounded JSON GETs share one in-flight
+request and independently parse/validate their results; completed responses and
+raw transfers are not cached. Mutations are never combined or automatically
+retried, and invalidate pending reads before/after dispatch. Application and Client
+cooldowns remain separate. Coordination is not an account-wide, cross-process
+request budget and cannot guarantee that rate limits are never reached.
+
+A 429 records a bounded `Retry-After` delay (seconds or HTTP date, 1–300 seconds;
+60 seconds when absent/invalid). Calls during that cooldown fail as known rejected
+without another provider request. There is no sleeping mutation retry or replay of
+an uncertain external effect. Only authenticated Gateway errors expose the narrow
+503 payload `error.details = { gatewayControlReason: "provider_rate_limited",
+retryAfterMs }`, plus `Retry-After`. Ordinary browser errors remain sanitized.
+
+The Gateway distinguishes that explicit response from an actual failed collision,
+identity or topology check. It discards the candidate snapshot and pauses provider
+retries. Existing listeners retain only their previously committed lease; no new
+listener, extension, positive readiness or candidate authority is granted. Normal
+lease expiry still closes them, and a prolonged provider outage can still interrupt
+connections. Unknown errors and actual safety failures retain fail-closed behavior.
+
+Backend probes may reuse provider inventory from the exact route/context's last
+successful listener validation, only within `maximumObservationAgeMs` measured
+from the original inventory acquisition start. Backend probes still resolve Core
+context and inspect Docker/sockets and game readiness afresh. Revision, generation,
+context changes, expiration or failed listener renewal prevent reuse. Each listener
+bind/renewal fetches fresh provider inventory. This removes the repeated provider
+reads between nearby snapshot validation and backend observation without caching
+permission or treating a configured address as reachability proof.

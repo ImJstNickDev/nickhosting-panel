@@ -80,6 +80,7 @@ export function registerGatewayRoutes(
       c.req.header('x-nh-support-token')
     )
       throw new DomainError('unauthenticated');
+    c.set('gatewayAuthenticated', true);
     await next();
     if (c.res.status < 400) {
       // Diagnostic contact only; absence of a receipt must never invalidate a

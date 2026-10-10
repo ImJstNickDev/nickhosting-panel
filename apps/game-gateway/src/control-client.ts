@@ -34,6 +34,15 @@ export class GatewayRouteRevisionStaleError extends Error {
   }
 }
 
+/** An authenticated provider cooldown is unavailable evidence, not a collision.
+ * It never grants a new route, extends a lease or authorizes an external retry. */
+export class GatewayProviderRateLimitedError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super('gateway_provider_rate_limited');
+    this.name = 'GatewayProviderRateLimitedError';
+  }
+}
+
 export function createGatewayControlClient(
   options: GatewayControlClientOptions,
 ): GatewayControlClient {
@@ -105,6 +114,34 @@ export function createGatewayControlClient(
       }
       const parsed: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
       if (!response.ok) {
+        const cooldown = z
+          .object({
+            error: z.object({
+              code: z.literal('integration_unavailable'),
+              messageKey: z.literal('errors.integration_unavailable'),
+              details: z
+                .object({
+                  gatewayControlReason: z.literal('provider_rate_limited'),
+                  retryAfterMs: z.number().int().min(1).max(300000),
+                })
+                .strict(),
+            }),
+          })
+          .safeParse(parsed);
+        if (
+          response.status === 503 &&
+          [
+            'snapshot',
+            'inventory',
+            'context',
+            'proof-read',
+            'proof-write',
+            'observations',
+          ].includes(action) &&
+          cooldown.success
+        )
+          throw new GatewayProviderRateLimitedError(cooldown.data.error.details.retryAfterMs);
+
         const precondition = z
           .object({
             error: z.object({
@@ -138,7 +175,11 @@ export function createGatewayControlClient(
       return parsed;
     } catch (error) {
       if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
-      if (error instanceof GatewayRouteRevisionStaleError) throw error;
+      if (
+        error instanceof GatewayRouteRevisionStaleError ||
+        error instanceof GatewayProviderRateLimitedError
+      )
+        throw error;
       throw new DomainError('integration_unavailable');
     } finally {
       clearTimeout(timer);

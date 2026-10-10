@@ -362,6 +362,78 @@ describe('Gateway pre-bind and forwarding safety', () => {
     f.options.provider.listNodes = vi.fn(async () => [f.node, { ...f.node, id: 2 }]);
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
   });
+  it('shares successful listener provider evidence with backend probes, not socket or game samples', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    await safety.validateBackend(f.route);
+    await safety.validateBackend(f.route);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+    expect(f.options.resolveContext).toHaveBeenCalledTimes(3);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(3);
+    await safety.validate(f.route, [f.route.public]);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+  });
+  it.each(['revision', 'generation', 'context', 'expired', 'failed-renewal'] as const)(
+    'does not reuse provider evidence after %s',
+    async (change) => {
+      const f = fixture();
+      let now = f.observation.observedAt;
+      f.options.now = () => now;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      if (change === 'revision') f.route.revision++;
+      if (change === 'generation') f.route.generation = ids.server;
+      if (change === 'context') {
+        const old = f.options.resolveContext;
+        f.options.resolveContext = async (route) => ({
+          ...(await old(route)),
+          externalId: 'new-owner',
+        });
+      }
+      if (change === 'expired') {
+        now += 5001;
+        f.observation.observedAt = now;
+      }
+      if (change === 'failed-renewal') {
+        f.server.suspended = true;
+        await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+      }
+      const before = vi.mocked(f.options.provider.listNodes).mock.calls.length;
+      if (change === 'context' || change === 'failed-renewal')
+        await expect(safety.validateBackend(f.route)).rejects.toThrow();
+      else await safety.validateBackend(f.route);
+      expect(f.options.provider.listNodes).toHaveBeenCalledTimes(before + 1);
+    },
+  );
+  it('still rejects fresh Docker conflicts while sharing provider evidence', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const original = f.observation.containers[0];
+    if (!original) throw new Error('Missing fixture container');
+    f.observation.containers.push({ ...original, id: 'c'.repeat(64), name: '/foreign' });
+    await expect(safety.validateBackend(f.route)).rejects.toThrow();
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+  });
+  it('expires shared evidence if the protocol probe crosses its original age budget', async () => {
+    const f = fixture();
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.probeBackend = async () => {
+      now += 5001;
+      f.observation.observedAt = now;
+      return true;
+    };
+    await expect(safety.validateBackend(f.route)).rejects.toMatchObject({
+      reason: 'observation_stale',
+    });
+  });
   it('requires fresh inventory for every renewal', async () => {
     const f = fixture();
     const safety = f.validator();

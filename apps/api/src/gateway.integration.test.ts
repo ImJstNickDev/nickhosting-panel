@@ -4,6 +4,7 @@ import { createLogger, DomainError, type LogRecord, SecretCodec } from '@nickhos
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { GatewayRoute } from '@nickhosting/game-sdk';
 import { safetyProviderServerSchema } from '@nickhosting/gateway-safety';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
   getGatewaySnapshot,
   getGatewayState,
@@ -211,6 +212,28 @@ describe('M3 Core service authentication and managed control plane', () => {
       expect(text).not.toContain(secret);
       expect(text).not.toContain(token);
     }
+  });
+  it('returns bounded provider cooldown only after Gateway authentication', async () => {
+    vi.mocked(f.adapter.listNodes).mockRejectedValue(
+      new PterodactylError('rate_limited', 'application', 'rejected', 429, 1700),
+    );
+    const response = await request(`${prefix()}/inventory`, { operation: 'nodes' });
+    expect(response.status).toBe(503);
+    expect(response.headers.get('retry-after')).toBe('2');
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: 'integration_unavailable',
+        messageKey: 'errors.integration_unavailable',
+        details: { gatewayControlReason: 'provider_rate_limited', retryAfterMs: 1700 },
+      },
+    });
+    const denied = await app.request(`${prefix()}/inventory`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ operation: 'nodes' }),
+    });
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain('provider_rate_limited');
   });
   it('narrows provider inventory and verifies managed provenance', async () => {
     for (const data of [

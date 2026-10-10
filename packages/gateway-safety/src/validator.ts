@@ -326,7 +326,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   const policy = gatewayNetworkPolicySchema.parse(options.policy);
   const now = options.now ?? Date.now;
   // A prior successful listener validation retains only its proven backend
-  // shape. Every use re-reads provider, sockets, topology and the durable proof;
+  // shape. Every listener use re-reads provider, sockets, topology and durable proof;
   // this is not cached permission or cached inventory. New listeners cannot use it.
   const retainedBindings = new Map<
     string,
@@ -347,6 +347,17 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     );
     return result;
   }
+  type ProviderEvidence = {
+    started: number;
+    nodes: Awaited<ReturnType<GatewayProviderSource['listNodes']>>;
+    server: Awaited<ReturnType<GatewayProviderSource['getApplicationServer']>>;
+    nodeInventories: Awaited<ReturnType<typeof inventories>>;
+  };
+  // Only backend observations may share a successful listener check. A bind or
+  // renewal always fetches fresh provider inventory; sharing never extends its age.
+  const validatedProvider = new Map<string, { key: string; evidence: ProviderEvidence }>();
+  const evidenceKey = (route: GatewayRoute, context: GatewaySafetyContext) =>
+    JSON.stringify({ route, context });
   async function inspect(
     routeValue: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
@@ -357,14 +368,32 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       unavailable();
     const context = gatewaySafetyContextSchema.parse(await options.resolveContext(route));
     const started = now();
-    // Independent read-only evidence is collected concurrently. Nothing is
-    // cached: every bind/renewal still reads actual sockets and fresh inventory.
-    const [observation, nodes, server, nodeInventories] = await Promise.all([
-      options.observer.observe(),
-      options.provider.listNodes(),
-      options.provider.getApplicationServer(context.providerServerId),
-      inventories(),
-    ]);
+    const previous = listener ? undefined : validatedProvider.get(route.id);
+    const share =
+      previous?.key === evidenceKey(route, context) &&
+      previous.evidence.started <= started &&
+      started - previous.evidence.started < policy.maximumObservationAgeMs;
+    const providerRead = share
+      ? Promise.resolve(previous.evidence)
+      : Promise.all([
+          options.provider.listNodes(),
+          options.provider.getApplicationServer(context.providerServerId),
+          inventories(),
+        ]).then(([nodes, server, nodeInventories]) => ({
+          started,
+          nodes,
+          server,
+          nodeInventories,
+        }));
+    // Actual sockets/Docker topology and local context are still fresh on every
+    // probe. Settle both branches before abandoning a failed inspection.
+    const results = await Promise.allSettled([options.observer.observe(), providerRead]);
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
+    const [observed, provider] = results;
+    if (observed.status !== 'fulfilled' || provider.status !== 'fulfilled') unavailable();
+    const observation = observed.value,
+      providerEvidence = provider.value;
+    const { nodes, server, nodeInventories } = providerEvidence;
     if (observation.namespaceId !== observation.hostNamespaceId) unavailable('namespace_mismatch');
     if (
       observation.observedAt > now() ||
@@ -504,6 +533,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         unavailable();
     }
     if (
+      now() - providerEvidence.started > policy.maximumObservationAgeMs ||
       now() - started > policy.maximumObservationAgeMs ||
       now() - observation.observedAt > policy.maximumObservationAgeMs
     )
@@ -512,6 +542,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       route,
       context,
       observation,
+      providerEvidence,
       container,
       mayRetainStatus,
       backendBindingsComplete:
@@ -552,7 +583,10 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     const result = await options.probeBackend(state.route);
     if (!(typeof result === 'boolean' ? result : result.ready === true))
       unavailable('backend_protocol');
-    if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+    if (
+      now() - state.observation.observedAt > policy.maximumObservationAgeMs ||
+      now() - state.providerEvidence.started > policy.maximumObservationAgeMs
+    )
       unavailable('observation_stale');
     const proof: GatewayReachabilityProof = {
       version: 2,
@@ -565,7 +599,10 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       verifiedAt: now(),
     };
     await options.saveProof(state.route, proof);
-    if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+    if (
+      now() - state.observation.observedAt > policy.maximumObservationAgeMs ||
+      now() - state.providerEvidence.started > policy.maximumObservationAgeMs
+    )
       unavailable('observation_stale');
     // Return only the exact sample whose fresh binding/protocol proof was saved.
     // Boolean-only adapters retain the legacy data-plane fallback.
@@ -573,7 +610,19 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   }
   return {
     async validate(route, ownedBindings) {
+      validatedProvider.delete(route.id);
       const state = await inspect(route, ownedBindings, true);
+      const accepted = (backendReady: boolean) => {
+        validatedProvider.set(route.id, {
+          key: evidenceKey(state.route, state.context),
+          evidence: structuredClone(state.providerEvidence),
+        });
+        if (validatedProvider.size > 10000) {
+          const oldest = validatedProvider.keys().next().value;
+          if (oldest) validatedProvider.delete(oldest);
+        }
+        return { backendReady };
+      };
       const raw = await options.loadProof(route);
       const proof = gatewayReachabilityProofSchema.safeParse(raw);
       const matches =
@@ -591,7 +640,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
         if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
           unavailable('observation_stale');
-        return { backendReady: false };
+        return accepted(false);
       }
       const retainBinding = () => {
         if (!state.container) return;
@@ -613,7 +662,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         await proveBackend(state);
         if (route.mode === 'online') {
           retainBinding();
-          return { backendReady: true };
+          return accepted(true);
         }
       } else if (route.mode === 'online' && state.container.running) {
         // A failed game probe revokes forwarding, not an independently proven
@@ -624,14 +673,14 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
           unavailable('observation_stale');
         if (backendReady) {
           retainBinding();
-          return { backendReady: true };
+          return accepted(true);
         }
       }
       if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
       if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
         unavailable('observation_stale');
       retainBinding();
-      return { backendReady: false };
+      return accepted(false);
     },
     async validateBackend(route) {
       const state = await inspect(route, [], false);

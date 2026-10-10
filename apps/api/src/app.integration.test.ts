@@ -82,6 +82,7 @@ describe('Hono public backend contracts', () => {
       { authenticated: false },
     );
     expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain('provider_rate_limited');
     expect(logs.at(-1)).toMatchObject({
       code: 'integration_unavailable',
       status: 503,

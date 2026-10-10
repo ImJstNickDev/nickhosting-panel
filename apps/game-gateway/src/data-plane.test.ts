@@ -21,7 +21,10 @@ import {
   frameMinecraftPacket,
   readMinecraftFrame,
 } from '../../../games/minecraft/src/protocol.js';
-import { GatewayRouteRevisionStaleError } from './control-client.js';
+import {
+  GatewayProviderRateLimitedError,
+  GatewayRouteRevisionStaleError,
+} from './control-client.js';
 import { createGatewayDataPlane, type GatewayDataPlanePolicy } from './data-plane.js';
 
 const policy: GatewayDataPlanePolicy = {
@@ -1497,6 +1500,75 @@ describe('sleep protocol handling and observations', () => {
 });
 
 describe('lease, reconciliation and shutdown safety', () => {
+  it('preserves only the original committed lease during explicit provider cooldown', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port);
+    const f = plane([r], { lease: 150 });
+    await f.gateway.start();
+    const expiresAt = f.gateway.health().expiresAt;
+    vi.mocked(f.control.fetchSnapshot)
+      .mockClear()
+      .mockResolvedValue(f.snapshot([{ ...r, revision: 2 }], 2));
+    vi.mocked(f.safety.validate).mockRejectedValue(new GatewayProviderRateLimitedError(500));
+    await expect(f.gateway.refresh()).rejects.toBeInstanceOf(GatewayProviderRateLimitedError);
+    expect(f.gateway.health()).toMatchObject({
+      revision: 1,
+      expiresAt,
+      routes: 1,
+      controlAvailable: false,
+    });
+    expect((await exchange(backend.port, 'held authority')).toString()).toBe('held authority');
+    await expect(f.gateway.refresh()).rejects.toBeInstanceOf(GatewayProviderRateLimitedError);
+    await f.gateway.observe();
+    expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(1);
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    await delay(180);
+    await refuses(backend.port);
+    expect(f.gateway.metrics().leaseExpirations).toBe(1);
+  });
+  it('never opens a first listener on provider cooldown, then recovers with fresh evidence', async () => {
+    const backend = await tcpFixture();
+    const f = plane([route(backend.port)]);
+    vi.mocked(f.safety.validate).mockRejectedValueOnce(new GatewayProviderRateLimitedError(20));
+    await f.gateway.start();
+    expect(f.gateway.health().routes).toBe(0);
+    await refuses(backend.port);
+    await f.gateway.observe();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    await delay(25);
+    await f.gateway.refresh();
+    expect((await exchange(backend.port, 'recovered')).toString()).toBe('recovered');
+  });
+  it('rolls back staged listeners on provider cooldown at the final binding check', async () => {
+    const first = await tcpFixture();
+    const second = await tcpFixture();
+    const f = plane([route(first.port), route(second.port)]);
+    vi.mocked(f.safety.validate)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new GatewayProviderRateLimitedError(100));
+    await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toBeInstanceOf(
+      GatewayProviderRateLimitedError,
+    );
+    await refuses(first.port);
+    await refuses(second.port);
+    expect(f.gateway.health().routes).toBe(0);
+    await f.gateway.observe();
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+  });
+  it('does not manufacture negative readiness when an observation is rate limited', async () => {
+    const backend = await tcpFixture();
+    const f = plane([route(backend.port)]);
+    await f.gateway.start();
+    vi.mocked(f.safety.validateBackend).mockRejectedValue(new GatewayProviderRateLimitedError(100));
+    await f.gateway.observe();
+    await f.gateway.observe();
+    expect(f.safety.validateBackend).toHaveBeenCalledTimes(1);
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    expect((await exchange(backend.port, 'still authorized')).toString()).toBe('still authorized');
+  });
+
   it('revalidates one fresh snapshot after a revision race without interrupting committed TCP sessions', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port);

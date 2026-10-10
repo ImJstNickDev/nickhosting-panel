@@ -12,6 +12,7 @@ import {
   type ContainerObserver,
   createContainerObserver,
   createPterodactylAdapter,
+  createTransportCoordinator,
   type PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
@@ -227,6 +228,7 @@ export interface ManagementOptions {
   codec: SecretCodec;
   env?: Environment;
   adapter?: PterodactylAdapter;
+  transportCoordinator?: ReturnType<typeof createTransportCoordinator>;
   containerObserver?: ContainerObserver;
   cleanupExternal?: (serverId: string, connection: Kysely<Database>) => Promise<void>;
   reconcileExternal?: (
@@ -279,6 +281,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const adapter =
     options.adapter ??
     createPterodactylAdapter({
+      coordinator: options.transportCoordinator,
       baseURL: values.pterodactylBaseUrl ?? '',
       applicationKey: applicationKey ?? '',
       clientKey,
@@ -768,3 +771,6 @@ export async function createManagementRuntime(options: ManagementOptions) {
   };
 }
 export type ManagementRuntime = Awaited<ReturnType<typeof createManagementRuntime>>;
+
+/** Process-scoped request coordination; settings and credentials still resolve on each runtime. */
+export const createManagementTransportCoordinator = createTransportCoordinator;

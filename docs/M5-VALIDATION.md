@@ -2789,3 +2789,70 @@ is required. SFTPGo issue #18 remains an independent production-release gate.
 
 - Final batch-continuation rerun: `scripts/dev.sh pnpm test:m3 packages/jobs/src/jobs.integration.test.ts -t 'continues the same dispatch batch'`: **3 passed, 31 filtered**, 3.10 s. This is targeted evidence after the 31-test queue run, not a claim of a repeated full suite.
 - Final indexed governance: `python3 scripts/check-governance.py` passed (503 text files, 106 PNGs, 431 relative links, 4 TOML files, 44 ignore cases); heuristic secret scan passed. Biome passed on all 18 changed TypeScript files; `git diff --cached --check` passed.
+
+### 2026-10-11 — Owner cycle after bf7c456 and provider-rate correction
+
+Read-only correlation of the Owner-operated cycle beginning 23:33:55.936 UTC:
+join-to-process **2.633 s** (previous 5.627), Done-to-forwarding **3.399 s**
+(previous 5.820), process-exit-to-sleeping **11.273 s** (previous 11.781).
+Power HTTP completed 1.723 s after join; Docker started 0.910 s later. Redis
+publication followed accepted enqueue by approximately 4 ms, delivery took 6 ms,
+and final worker authorization took 436 ms. These distinguish power completion
+from process startup and do not claim the 1.5–2 s process target has passed.
+
+This cycle was not a clean functional pass. At 23:36:09.020 the provider Application
+API returned 429 during inventory; Core returned 503, Gateway closed its listener
+at 09.028 and Minecraft recorded player disconnection at 09.041. The listener
+recovered at 12.923. The pattern repeated at 23:37:09.719, recovering 13.472.
+The captured failure window contains 16 upstream 429s (12 inventory, 4 observation
+calls), not a measurement of total provider traffic or the configured quota.
+Stop arrived 9.566 s after the 60-second idle threshold, affected by that second
+interruption. Both jobs ultimately succeeded; final state was offline/sleeping,
+with no pending operation, sleep/wake job or error. Raw logs remain private.
+
+The correction shares simultaneous JSON reads across per-request adapter instances,
+retains provider cooldown metadata and avoids repeated calls during Retry-After.
+API and worker use separate process-scoped coordinators. Backend probes also share
+the last successful listener's exact route/context provider evidence within its
+original freshness budget. New listener and renewal inventory remains fresh, as do
+local context, Docker/network observation and game protocol probes. Gateway treats
+only the authenticated explicit provider-rate-limit response as transient and
+retains only existing committed leases; it never grants new authority from missing
+evidence. See [M3 contract](M3-API.md) for bounds and failure semantics.
+
+Validation:
+
+- Adapter transport/adapter/power files: **81/81 passed**; final active-request
+  eviction guard rerun of `packages/pterodactyl-adapter/src/transport.test.ts`:
+  **13/13 passed**. Includes coalescing, credential separation, Retry-After,
+  cross-adapter cooldown, mutation freshness and no mutation replay.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/control-client.test.ts apps/game-gateway/src/data-plane.test.ts`:
+  **132/132 passed**. Final concurrent cooldown guards: **5 passed, 89 filtered**
+  using `-t 'cooldown|rate limited'` on the data-plane file.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts`:
+  **104/104 passed**. Three consecutive listener/backend checks use one provider
+  inventory but three fresh Docker/context/game samples; renewal reads again.
+  Tests reject stale evidence, changed identity/revision/generation, failed renewal,
+  fresh Docker collisions and expiry during the protocol probe.
+- `scripts/dev.sh pnpm test:m3 apps/api/src/gateway.integration.test.ts`:
+  **21/21 passed**, including authenticated-only bounded cooldown metadata.
+- During integration a coordinator import had been formatted as type-only before
+  a value re-export was added. Typecheck caught it; the first API test attempts
+  failed during import without executing cases. The value import was corrected;
+  final TypeScript `scripts/dev.sh pnpm exec tsc --noEmit` passed.
+
+Independent technical review found no must-fix. It confirmed original-lease expiry,
+no new/staged listener authority, sanitized authentication boundary, fresh listener
+inventory and bounded backend-only evidence sharing. No new runtime, dependency,
+migration, container or game asset is needed. No provider setting, rate-limit value,
+account, API key, egg, server, production network or existing game data was changed.
+No M5 UI changed. SFTPGo #18 remains unchanged. Gateway activation needs its scoped
+development restart; end-to-end traffic reduction and post-change player stability
+remain unverified until activation and an Owner-operated cycle. Revert this commit
+and restart the Gateway under approval to roll back; no database rollback required.
+- `scripts/dev.sh pnpm test:m3 apps/api/src/app.integration.test.ts -t 'logs only safe provider failure'`: **1 passed, 8 filtered**, confirming ordinary browser diagnostics do not expose the Gateway cooldown contract.
+- Biome passed on all 16 changed TypeScript files; staged diff whitespace and
+  indexed governance passed (504 text files, 106 PNGs, 432 relative links, 4 TOML
+  files, 44 ignore cases; heuristic secret scan). Read-only Docker inspection
+  found development API, worker and Gateway running/healthy. API/worker watchers
+  load their changes; the Gateway still requires activation of this revision.

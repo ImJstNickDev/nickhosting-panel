@@ -18,7 +18,10 @@ import {
 import { GatewaySafetyError } from '@nickhosting/gateway-safety';
 import { NetworkObservationError } from '@nickhosting/pterodactyl-adapter';
 import { z } from 'zod';
-import { GatewayRouteRevisionStaleError } from './control-client.js';
+import {
+  GatewayProviderRateLimitedError,
+  GatewayRouteRevisionStaleError,
+} from './control-client.js';
 
 const positive = z.number().int().positive().max(2_147_483_647);
 export const gatewayDataPlanePolicySchema = z
@@ -125,6 +128,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   // breaks first-start readiness bootstrap without granting forwarding rights.
   let candidateSnapshot: GatewaySnapshot | undefined;
   let controlAvailable = false;
+  let providerRetryAt = 0;
+  const deferProvider = (error: GatewayProviderRateLimitedError) => {
+    controlAvailable = false;
+    providerRetryAt = Math.max(providerRetryAt, now() + error.retryAfterMs);
+  };
   let stopping = false;
   let started = false;
   let leaseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -726,6 +734,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         // Core may advance a route while fresh inventory/protocol evidence is
         // collected. This candidate never becomes authoritative; the already
         // committed route keeps only its original lease during a bounded retry.
+        if (error instanceof GatewayProviderRateLimitedError) {
+          candidateSnapshot = snapshot;
+          deferProvider(error);
+          throw error;
+        }
         if (error instanceof GatewayRouteRevisionStaleError) {
           candidateSnapshot = previousCandidate;
           throw error;
@@ -836,6 +849,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         )
           wakeRequests.delete(serverId);
     } catch (error) {
+      if (error instanceof GatewayProviderRateLimitedError) {
+        candidateSnapshot = snapshot;
+        deferProvider(error);
+      }
       if (error instanceof GatewayRouteRevisionStaleError) candidateSnapshot = previousCandidate;
       await Promise.all(staged.map((listener) => closeListener(listener)));
       throw error;
@@ -847,6 +864,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     return result;
   };
   const refresh = () => {
+    if (providerRetryAt > now())
+      return Promise.reject(new GatewayProviderRateLimitedError(providerRetryAt - now()));
     if (refreshing) return refreshing;
     const refreshStarted = performance.now();
     refreshing = (async () => {
@@ -863,8 +882,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     })()
       .catch((error: unknown) => {
         controlAvailable = false;
+        if (error instanceof GatewayProviderRateLimitedError) deferProvider(error);
         counters.snapshotErrors++;
-        options.logger?.log('warn', 'gateway.snapshot_unavailable');
+        options.logger?.log('warn', 'gateway.snapshot_unavailable', {
+          reason:
+            error instanceof GatewayProviderRateLimitedError
+              ? 'provider_rate_limited'
+              : 'control_unavailable',
+        });
         throw error;
       })
       .finally(() => {
@@ -874,6 +899,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     return refreshing;
   };
   const observe = () => {
+    if (providerRetryAt > now()) return Promise.resolve();
     if (observing) return observing;
     const cycleStarted = performance.now();
     let probeDuration = 0;
@@ -911,6 +937,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         const observedAt = new Date(now()).toISOString();
         const players: (number | undefined)[] = [];
         for (const route of routes) {
+          if (providerRetryAt > now()) return;
           const handler = protocol(route);
           if (!handler || stopping) {
             ready = false;
@@ -952,7 +979,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                 : undefined;
             players.push(playerCount);
             idle = idle && observation.idle === true && playerCount === 0;
-          } catch {
+          } catch (error) {
+            if (error instanceof GatewayProviderRateLimitedError) {
+              deferProvider(error);
+              return;
+            }
             // An idle-only failure suppresses sleep without discarding the
             // independent readiness proof; unknown readiness cannot advance.
             ready = ready && readinessConfirmed;
@@ -965,6 +996,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           }
         }
         try {
+          if (providerRetryAt > now()) return;
           if (
             !candidateSnapshot ||
             candidateSnapshot.gatewayId !== candidates.gatewayId ||
@@ -1035,7 +1067,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               reportDuration += performance.now() - reportStarted;
             });
           if (ready && anchor.mode === 'waking') refreshAfterReadiness = true;
-        } catch {
+        } catch (error) {
+          if (error instanceof GatewayProviderRateLimitedError) {
+            deferProvider(error);
+            return;
+          }
           counters.observationErrors++;
           options.logger?.log('warn', 'gateway.observation_unavailable', {
             serverId: anchor.serverId,
