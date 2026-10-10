@@ -1,5 +1,6 @@
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { allocationInventory } from './allocations.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
 import { createDownloadProxy, type DownloadProxyOptions } from './downloads.js';
 import { confirmInstallation } from './installation.js';
@@ -15,7 +16,6 @@ import {
   type TransportOptions,
 } from './transport.js';
 import {
-  allocationSchema,
   applicationServerSchema,
   type BuildUpdate,
   backupActivitySchema,
@@ -75,8 +75,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         `nests/${numericId(nestId)}/eggs/${numericId(eggId)}?include=variables,config`,
         eggSchema,
       ),
-    listAllocations: (nodeId: number) =>
-      transport.list('application', `nodes/${numericId(nodeId)}/allocations`, allocationSchema),
+    listAllocations: (nodeId: number) => allocationInventory(transport, nodeId),
     listUsers: () => transport.list('application', 'users', userSchema),
     listApplicationServers: () => transport.list('application', 'servers', applicationServerSchema),
     getApplicationServer: (id: number) =>

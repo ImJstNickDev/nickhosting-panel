@@ -1543,3 +1543,65 @@ This explains the healthcheck mismatch; it does not prove every Wings operation.
 No configuration or restart was applied. A local Python YAML parser was unavailable;
 only the two relevant plain scalar configuration fields were inspected with a
 bounded read-only match instead; no dependency was installed or secret printed.
+
+## Complete allocation inventory and bulk Owner pool selection — 2026-10-10
+
+Starting HEAD `61eeba929b2fb5f6b5e0ce1d9fd6ed910f3d7c82`. Owner authorized
+NickHosting-only corrections after creating the provider allocations themselves.
+No Panel/Wings configuration, allocation, server, listener or network was changed.
+The Owner's NickHosting pool remains unconfigured; no live Owner save was performed.
+
+Read-only inspection of the installed allocation controller found pagination
+without explicit ordering. The old 100-row-page adapter returned 2,400 rows but
+only 2,200 unique IDs, omitting 200 existing direct allocations while repeating
+200 new backend allocations. Adding `sort=id` did not change that result. A single
+bounded provider response returned all 2,400 unique allocations (400 existing direct,
+2,000 new backend, all new allocations free), with matching total/count metadata.
+The final adapter repeated that result with **one GET**, approximately 299 kB,
+using the existing protected credentials without printing them. No production
+credential extraction, deduplication of an incomplete result or provider mutation.
+
+Allocation discovery now rejects incomplete/duplicate/overlarge inventories rather
+than exposing a partial list to either the Owner or Gateway collision checks.
+Explicit supported bounds: 10,000 allocations per node and 4 MiB provider response.
+Providers clamping the page size fail closed. Owner selection is exact-address/range,
+searchable and paginated at 25 rows with bounded scrolling; selected/offscreen direct
+endpoint edits survive filtering. Foreign assignments and provider-node changes are
+covered. Saving remains an explicit Owner action with existing claim/identity guards.
+
+The first browser bulk-save attempt **failed with HTTP 413**: the general 64 KiB
+JSON limit was too small for 2,000 pins. Corrected only `PUT /v1/owner/nodes` to a
+bounded 4 MiB allowance; other JSON routes retain 64 KiB. Subsequent real authenticated
+handler/isolated PostgreSQL tests passed, including non-Owner and Origin denials.
+No failed attempt is counted as a pass.
+
+Focused commands and results (each prefixed with `scripts/dev.sh`):
+
+- `pnpm exec vitest run packages/pterodactyl-adapter/src packages/gateway-safety/src/validator.test.ts`: **311 passed**. Afterwards only an exact-boundary test was added; final `pnpm exec vitest run packages/pterodactyl-adapter/src/allocations.test.ts`: **17 passed**, including actual 10,000-row acceptance and 10,001-row rejection.
+- `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/allocation-pool.integration.test.ts packages/server-management/src/loopback-allocation.integration.test.ts`: **93 passed**.
+- `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t '2000-allocation'`: **1 passed, 30 intentionally filtered out**. Then complete affected API files, `apps/api/src/servers.integration.test.ts apps/api/src/app.integration.test.ts`: **39 passed**.
+- `pnpm exec vitest run apps/web/src/features/allocation-pool-model.test.ts`: **5 passed**, independently repeated by the UI reviewer.
+- Existing approved isolated browser harness via `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`, with the existing user-local Playwright library path: final `apps/web/tests/allocation-pool.browser.test.ts` **3 passed**; `apps/web/tests/direct-endpoints.browser.test.ts` **2 passed**. Real application/auth/database handlers; external provider inventory is an isolated fixture. A 2,400-row inventory saves 2,002 selected pins (2,000 range plus two original pins), preserves an offscreen endpoint, rejects claimed endpoint changes, and clears selection on provider-node change.
+- `pnpm typecheck`, `pnpm i18n:check` (**1,056 EN/IT/pseudolocale keys**), focused `pnpm exec biome check` on changed source/tests, and `git diff --check`: passed.
+- `pnpm build`: passed; existing large JavaScript chunk warning remains (about 872 kB minified), outside this focused correction.
+
+Reviewed actual rendered [desktop English](screenshots/m5/allocation-range-desktop-en.png)
+and [mobile Italian](screenshots/m5/allocation-range-mobile-it.png) screenshots.
+Both have zero automated axe violations, no page overflow or browser errors.
+Independent adapter/API and UI/content reviews found **no must-fix findings**.
+Optional UI follow-ups: restoring focus to the originating row after closing its
+endpoint editor and an explicit empty-filter result message. These do not alter
+selection, ownership or save correctness. Automated axe is not full WCAG certification.
+
+HTTPS returned **200** and all nine existing dev services remained healthy. Source
+watch/HMR apply these application changes; no Compose recreation, infrastructure
+cleanup, test game server or public-port bind. Database tests use isolated schemas
+in the already approved test stack and clean those fixtures only. Historical assets
+and review data are preserved. No historical full-suite/live-game rerun was needed.
+SFTPGo #18 and Docker-socket #22 remain unchanged production-release boundaries.
+A working allocation editor is not a claim of an activated public Gateway route or
+verified end-to-end gameplay; Owner pool selection and scoped pilot remain next.
+
+Final staged `python3 scripts/check-governance.py`: **passed**, 494 indexed text
+files, 97 reviewed PNGs, 417 relative links, four TOML files and 44 ignore cases.
+Secret scanning remains heuristic; all staged paths were explicitly inspected.

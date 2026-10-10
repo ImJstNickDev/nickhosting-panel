@@ -295,6 +295,17 @@ no hostname is guessed from a private backend or provider alias. All claimed por
 provider identities and allocation ownership are still checked. DNS planning for
 direct servers uses the frozen hostname/port; this task performs no real DNS writes.
 
+The Owner node editor supports explicit allocation address/port-range selection,
+search, selected-only filtering and 25-row pages in a bounded scroll region.
+Assigned foreign allocations are not included by range selection. Selected pins
+and edited direct endpoints remain in draft state across filters/pages; a single
+endpoint editor replaces one form per selected allocation. Saving validates that
+every selected identity is still present rather than silently dropping hidden or
+missing pins. Changing the provider node resets the selection. Inclusion/removal
+only changes the draft until the Owner saves; it never creates provider allocations.
+The complete-inventory and bounded request contracts are documented in
+[M2 API](M2-API.md).
+
 Gateway service metadata has an explicit authority union: compiled integration
 `supportSource: integration`, `declarationId`, `declarationVersion`, or the legacy
 signed-report fields. The integration currently declares Vanilla 26.1/protocol 775

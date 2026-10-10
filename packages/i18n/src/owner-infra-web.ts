@@ -1,4 +1,25 @@
 export const ownerInfraWebMessages: Record<string, readonly [string, string]> = {
+  'infra.allAddresses': ['All addresses', 'Tutti gli indirizzi'],
+  'infra.searchAllocations': ['Search by address, port or ID', 'Cerca per indirizzo, porta o ID'],
+  'infra.selectRange': [
+    'Port range on the selected address',
+    'Intervallo di porte sull’indirizzo selezionato',
+  ],
+  'infra.rangeFrom': ['First port', 'Prima porta'],
+  'infra.rangeTo': ['Last port', 'Ultima porta'],
+  'infra.includeRange': ['Include available allocations', 'Includi allocazioni disponibili'],
+  'infra.removeRange': ['Remove range from selection', 'Rimuovi intervallo dalla selezione'],
+  'infra.selectionCount': [
+    '{selected} selected · {total} allocations',
+    '{selected} selezionate · {total} allocazioni',
+  ],
+  'infra.onlySelected': ['Show selected only', 'Mostra solo selezionate'],
+  'infra.editEndpoint': ['Direct connection · {id}', 'Connessione diretta · {id}'],
+  'infra.allocationPages': ['Allocation pages', 'Pagine delle allocazioni'],
+  'infra.allocationPage': [
+    '{page} / {pages} · {count} results',
+    '{page} / {pages} · {count} risultati',
+  ],
   'infra.directEndpoint': ['Direct connection', 'Connessione diretta'],
   'infra.directHost': [
     'Player hostname for allocation {id}',

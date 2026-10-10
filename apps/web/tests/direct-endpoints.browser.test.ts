@@ -81,6 +81,12 @@ describe('Owner direct endpoints through protected handlers', () => {
       .getByRole('button', { name: locale === 'en' ? 'Edit' : 'Modifica', exact: true })
       .click();
     const dialog = owner.getByRole('dialog');
+    await dialog
+      .getByRole('button', {
+        name: `${locale === 'en' ? 'Direct connection' : 'Connessione diretta'} · ${spareId}`,
+        exact: true,
+      })
+      .click();
     await browserExpect(dialog.locator(`[name="directHost-${spareId}"]`)).toBeVisible();
     return dialog;
   }
@@ -129,6 +135,9 @@ describe('Owner direct endpoints through protected handlers', () => {
     });
     await owner.setViewportSize({ width: 390, height: 844 });
     const dialog = await open('it');
+    await dialog
+      .getByRole('button', { name: `Connessione diretta · ${claimedId}`, exact: true })
+      .click();
     const claimed = dialog.locator(`[name="directHost-${claimedId}"]`);
     await claimed.fill('changed.example.test');
     const refused = owner.waitForResponse(
@@ -139,6 +148,9 @@ describe('Owner direct endpoints through protected handlers', () => {
     expect((await refused).status()).toBe(409);
     await browserExpect(dialog).toBeVisible();
     await claimed.fill(originalHost);
+    await dialog
+      .getByRole('button', { name: `Connessione diretta · ${spareId}`, exact: true })
+      .click();
     await dialog.locator(`[name="directHost-${spareId}"]`).scrollIntoViewIfNeeded();
     await fixture.screenshot(owner, 'direct-endpoints-mobile-it');
     expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(

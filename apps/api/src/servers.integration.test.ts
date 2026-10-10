@@ -377,6 +377,82 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
     expect((await request(user, '/v1/owner/nodes', {}, { method: 'PUT' })).status).toBe(403);
   });
+  it('saves a 2000-allocation Owner pool with bounded JSON, authentication and Origin checks', async () => {
+    const previous = await f.db
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', f.nodeId)
+      .executeTakeFirstOrThrow();
+    const inventory = Array.from({ length: 2000 }, (_, index) => ({
+      id: 50000 + index,
+      ip: '10.20.0.1',
+      port: 30000 + index,
+      assigned: false,
+    }));
+    const originalList = f.adapter.listAllocations;
+    const list = vi.fn(async () => inventory);
+    f.adapter.listAllocations = list;
+    const payload = {
+      id: f.nodeId,
+      physicalHostId: f.hostId,
+      pterodactylNodeId: f.providerNodeId,
+      provisionUserId: 1,
+      backendAllocationPool: {
+        allocations: inventory.map((a) => ({ allocationId: a.id, address: a.ip, port: a.port })),
+        gatewayBindAddresses: ['192.0.2.10'],
+      },
+    };
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeGreaterThan(65536);
+    try {
+      expect((await request(null, '/v1/owner/nodes', payload, { method: 'PUT' })).status).toBe(401);
+      expect((await request(user, '/v1/owner/nodes', payload, { method: 'PUT' })).status).toBe(403);
+      expect(
+        (
+          await request(owner, '/v1/owner/nodes', payload, {
+            method: 'PUT',
+            headers: { origin: 'https://attacker.example.test' },
+          })
+        ).status,
+      ).toBe(403);
+      expect(list).not.toHaveBeenCalled();
+      expect(
+        (
+          await request(
+            owner,
+            '/v1/owner/nodes',
+            { value: 'x'.repeat(4 * 1024 * 1024) },
+            { method: 'PUT' },
+          )
+        ).status,
+      ).toBe(413);
+      expect(
+        (await request(owner, '/v1/owner/resource-hosts', payload, { method: 'PUT' })).status,
+      ).toBe(413);
+      const result = await request(owner, '/v1/owner/nodes', payload, { method: 'PUT' });
+      expect(result.status).toBe(200);
+      expect(
+        (
+          await f.db
+            .selectFrom('managed_nodes')
+            .select('backend_allocation_pool')
+            .where('id', '=', f.nodeId)
+            .executeTakeFirstOrThrow()
+        ).backend_allocation_pool,
+      ).toEqual(payload.backendAllocationPool);
+      expect(list).toHaveBeenCalled();
+    } finally {
+      f.adapter.listAllocations = originalList;
+      await f.db
+        .updateTable('managed_nodes')
+        .set({
+          backend_allocation_pool: JSON.stringify(previous.backend_allocation_pool),
+          installer_memory_mib: previous.installer_memory_mib,
+          installer_cpu_percent: previous.installer_cpu_percent,
+        })
+        .where('id', '=', f.nodeId)
+        .execute();
+    }
+  });
   it('exposes and enforces the environment-locked physical memory bound over HTTP', async () => {
     env.NH_NODE_MEMORY_OVERHEAD_PERCENT = '200';
     try {

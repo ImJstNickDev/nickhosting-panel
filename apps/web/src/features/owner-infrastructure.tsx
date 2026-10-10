@@ -37,6 +37,8 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { AllocationPoolEditor } from './allocation-pool-editor.js';
+import { allocationPins, initialAllocationSelection } from './allocation-pool-model.js';
 import { TableRegion } from './servers.js';
 
 type Row<T> = Json<{ [K in keyof T]: T[K] extends { __select__: infer S } ? S : T[K] }>;
@@ -548,7 +550,7 @@ function NodeForm({
   const [providerNode, setProviderNode] = useState(String(initial?.pterodactyl_node_id ?? ''));
   const [pool, setPool] = useState(Boolean(initial?.backend_allocation_pool));
   const [selected, setSelected] = useState(
-    new Set(initial?.backend_allocation_pool?.allocations.map((pin) => pin.allocationId) ?? []),
+    initialAllocationSelection(initial?.backend_allocation_pool?.allocations),
   );
   const [eggs, setEggs] = useState(
     initial?.backend_allocation_pool?.loopbackRemap?.verifiedEggs.map((egg) => ({
@@ -583,25 +585,15 @@ function NodeForm({
       onSubmit={async (data) => {
         if (pool && !initial?.backendAllocationPoolLocked && !allocations.data)
           throw new ApiError('integration_unavailable', 'errors.integration_unavailable');
-        const pins = allocations.data
-          ?.filter((allocation) => selected.has(allocation.id))
-          .map((allocation) => ({
-            allocationId: allocation.id,
-            address: allocation.ip,
-            port: allocation.port,
-            ...(data.has(`directOnly-${allocation.id}`) ? { delivery: 'direct' as const } : {}),
-            ...(text(data, `directHost-${allocation.id}`)
-              ? {
-                  directEndpoint: {
-                    hostname: text(data, `directHost-${allocation.id}`),
-                    port: number(data, `directPort-${allocation.id}`),
-                  },
-                }
-              : {}),
-            ...(allocation.ip === '127.0.0.1'
-              ? { backendAddress: text(data, 'bridgeAddress') }
-              : {}),
-          }));
+        let pins: ReturnType<typeof allocationPins> = [];
+        try {
+          pins =
+            pool && !initial?.backendAllocationPoolLocked && allocations.data
+              ? allocationPins(selected, allocations.data, text(data, 'bridgeAddress'))
+              : [];
+        } catch {
+          throw new ApiError('validation_failed', 'errors.validation_failed');
+        }
         await api(path('nodes'), {
           method: 'PUT',
           body: {
@@ -669,7 +661,8 @@ function NodeForm({
             value={providerNode}
             onChange={(event) => {
               setProviderNode(event.target.value);
-              setSelected(new Set());
+              setSelected(new Map());
+              setEggs([]);
             }}
             required
           >
@@ -747,96 +740,17 @@ function NodeForm({
               {providerNode && (
                 <QueryContent query={allocations}>
                   {(rows) => (
-                    <>
-                      <TableRegion label={t('infra.pool')}>
-                        <table>
-                          <thead>
-                            <tr>
-                              <th scope="col">{t('web.actions')}</th>
-                              <th scope="col">{t('infra.address')}</th>
-                              <th scope="col">{t('infra.port')}</th>
-                              <th scope="col">{t('web.status')}</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {rows.map((allocation) => (
-                              <tr key={allocation.id}>
-                                <td>
-                                  <Check
-                                    label={t('infra.selectAllocation', { id: allocation.id })}
-                                    checked={selected.has(allocation.id)}
-                                    disabled={
-                                      allocation.assigned &&
-                                      !initial?.backend_allocation_pool?.allocations.some(
-                                        (pin) => pin.allocationId === allocation.id,
-                                      )
-                                    }
-                                    onChange={(event) =>
-                                      setSelected((previous) => {
-                                        const copy = new Set(previous);
-                                        if (event.target.checked) copy.add(allocation.id);
-                                        else copy.delete(allocation.id);
-                                        return copy;
-                                      })
-                                    }
-                                  />
-                                </td>
-                                <td>{allocation.ip}</td>
-                                <td>{allocation.port}</td>
-                                <td>
-                                  {t(allocation.assigned ? 'infra.assigned' : 'infra.available')}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </TableRegion>
-
-                      {rows
-                        .filter((allocation) => selected.has(allocation.id))
-                        .map((allocation) => (
-                          <fieldset key={allocation.id} className="direct-allocation-fields">
-                            <legend>
-                              {t('infra.directEndpoint')} ·{' '}
-                              <code>
-                                {allocation.ip}:{allocation.port}
-                              </code>
-                            </legend>
-                            <div className="columns">
-                              <Input
-                                label={t('infra.directHost', { id: allocation.id })}
-                                name={`directHost-${allocation.id}`}
-                                defaultValue={
-                                  initial?.backend_allocation_pool?.allocations.find(
-                                    (pin) => pin.allocationId === allocation.id,
-                                  )?.directEndpoint?.hostname ?? ''
-                                }
-                              />
-                              <Input
-                                label={t('infra.directPort', { id: allocation.id })}
-                                name={`directPort-${allocation.id}`}
-                                type="number"
-                                min={1}
-                                max={65535}
-                                defaultValue={
-                                  initial?.backend_allocation_pool?.allocations.find(
-                                    (pin) => pin.allocationId === allocation.id,
-                                  )?.directEndpoint?.port ?? allocation.port
-                                }
-                              />
-                            </div>
-                            <Check
-                              label={t('infra.directOnly', { id: allocation.id })}
-                              name={`directOnly-${allocation.id}`}
-                              defaultChecked={
-                                initial?.backend_allocation_pool?.allocations.find(
-                                  (pin) => pin.allocationId === allocation.id,
-                                )?.delivery === 'direct'
-                              }
-                            />
-                          </fieldset>
-                        ))}
-                    </>
+                    <AllocationPoolEditor
+                      key={providerNode}
+                      rows={rows}
+                      selected={selected}
+                      retained={initialAllocationSelection(
+                        Number(providerNode) === initial?.pterodactyl_node_id
+                          ? initial.backend_allocation_pool?.allocations
+                          : [],
+                      )}
+                      onChange={setSelected}
+                    />
                   )}
                 </QueryContent>
               )}

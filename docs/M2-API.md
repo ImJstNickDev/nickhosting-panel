@@ -237,6 +237,24 @@ separate deployment settings and are not changed by the application.
 | GET/PUT `/v1/owner/runtime-mappings` | Owner runtime mappings, or mapping request described below. |
 | PUT `/v1/owner/user-limits` | `{userId,memoryMiB,cpuPercent,storageMiB,expiresAt?,reason}`; explicit audited limits, optional future expiry. Returns `204`. |
 
+Allocation discovery uses one complete, bounded provider response rather than
+combining unordered OFFSET pages. Installed Panel 1.x allocation pagination has
+no guaranteed ordering: a multi-page read was observed to duplicate allocations
+and omit others even when its row count matched the reported total. The adapter
+requires consistent total/count/page metadata and unique allocation IDs, including
+assigned allocations. It rejects truncated inventories, missing metadata, more
+than 10,000 allocations per node, or responses over the existing 4 MiB transport
+limit with `integration_unavailable`; it never deduplicates and accepts a partial
+inventory. This applies to Owner discovery, provisioning and Gateway collision
+checks alike. Nodes exceeding this explicit safety bound need an independently
+verified complete-inventory strategy before use; no provider configuration is
+changed by discovery.
+
+`PUT /v1/owner/nodes` accepts at most 4 MiB of JSON so an explicit pool of thousands
+of pins can be saved. The regular Owner/session and Origin checks, per-pin identity
+validation and retained-claim protections still apply. Other ordinary JSON routes
+retain their 64 KiB limit; this is not a general request-size increase.
+
 Host policy fields are `{id?,name,memoryLimitMiB,cpuLimitPercent,storagePoolMiB,
 memoryHeadroomMiB,cpuHeadroomPercent,diskHeadroomMiB,localDiskPath,observerId,
 uploadPolicy?,enabled?}`. RAM/disk headroom must each be at least 256 MiB and less than their

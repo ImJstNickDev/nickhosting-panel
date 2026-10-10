@@ -125,6 +125,14 @@ export function createApp(options: Options) {
       throw new DomainError('validation_failed', 413);
     },
   });
+  // Explicit Owner pools can contain thousands of pins. Other JSON endpoints
+  // retain their small limit; this route still enforces regular Owner + Origin.
+  const nodePoolBodyLimit = bodyLimit({
+    maxSize: 4 * 1024 * 1024,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
   app.use('*', async (c, next) => {
     // Only this authenticated binary route streams its body. Its handler checks
     // exact declared size, server storage, live authorization and actual bytes.
@@ -133,6 +141,8 @@ export function createApp(options: Options) {
       /^\/v1\/(?:servers\/[^/]+\/files|minecraft\/sources\/[^/]+)\/upload$/.test(c.req.path)
     )
       return next();
+    if (c.req.method === 'PUT' && c.req.path === '/v1/owner/nodes')
+      return nodePoolBodyLimit(c, next);
     return jsonBodyLimit(c, next);
   });
   app.use('*', async (c, next) => {
