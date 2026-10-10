@@ -18,6 +18,36 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('resolves inherited idle defaults with environment precedence and rejects invalid timeouts', () => {
+    expect(resolveConfig().values.gameIdleTimeouts).toEqual({});
+    expect(resolveConfig().values.defaultIdleTimeoutSeconds).toBe(-1);
+    expect(resolveConfig().values.idleTimeoutUserAccess).toBe('hidden');
+    expect(
+      resolveConfig(
+        {},
+        { NH_DEFAULT_IDLE_TIMEOUT_SECONDS: '600', NH_IDLE_TIMEOUT_USER_ACCESS: 'shorten-only' },
+      ).values,
+    ).toMatchObject({ defaultIdleTimeoutSeconds: 600, idleTimeoutUserAccess: 'shorten-only' });
+    const stored = {
+      'minecraft-java': { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } },
+    };
+    const environment = { 'minecraft-java': { gameTimeoutSeconds: -1, runtimeTimeouts: {} } };
+    expect(resolveConfig({ gameIdleTimeouts: stored }).values.gameIdleTimeouts).toMatchObject(
+      stored,
+    );
+    const resolved = resolveConfig(
+      { gameIdleTimeouts: stored },
+      { NH_GAME_IDLE_TIMEOUTS: JSON.stringify(environment) },
+    );
+    expect(resolved.values.gameIdleTimeouts).toMatchObject(environment);
+    expect(() => assertConfigWritable({ gameIdleTimeouts: stored }, resolved)).toThrow('conflict');
+    for (const invalid of [0, -2, 604801, 1.5])
+      expect(() =>
+        resolveConfig({
+          gameIdleTimeouts: { test: { gameTimeoutSeconds: invalid, runtimeTimeouts: {} } },
+        }),
+      ).toThrow('configuration_invalid');
+  });
   it('supplies a public metadata client identity while preserving Owner and environment overrides', () => {
     expect(resolveConfig().values.minecraftMetadataUserAgent).toContain(
       'https://github.com/ImJstNickDev/nickhosting-panel',

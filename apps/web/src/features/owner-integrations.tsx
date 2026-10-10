@@ -18,6 +18,7 @@ import {
   text,
 } from '../components/ui.js';
 import { getGameAdmin, getGameArtwork } from './integrations.js';
+import { IntegrationSleepSettings } from './sleep-timeout.js';
 
 export function OwnerIntegrationsPage() {
   const t = useT();
@@ -91,6 +92,7 @@ export function OwnerIntegrationsPage() {
                     />
                     <p className="muted">{t('owner.rolloutEvidence')}</p>
                   </ActionForm>
+                  <IntegrationSleepSettings gameId={module.id} />
                   {stored && (
                     <p>
                       <Time value={stored.rolloutUpdatedAt} />

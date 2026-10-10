@@ -808,3 +808,41 @@ Read-only follow-up: the Wings Docker healthcheck targets a different port from
 its configured API. The configured API returns HTTP 401 without credentials;
 Wings is responding. Its healthcheck mismatch is documented privately and left
 unchanged, outside this dev activation's mutation scope.
+
+## 2026-10-10 — Inherited sleep timeout configuration
+
+The independent development database has migrations
+`020_sleep_policy_inheritance.sql` and `021_sleep_policy_owner_controls.sql`.
+The first adds a boolean inheritance flag. The second separates Owner timeout/access
+authority from ordinary-user preferences, preserving old explicit timeouts and
+disabled policies as Owner baselines. The exact SQL and checksums were applied
+transactionally through the existing dev
+API container to `nickhosting_dev`, using the standard migration advisory lock.
+Counts/content hashes of users, hosts, nodes, mappings, servers, Gateway routes,
+Gateway states and platform settings were unchanged. No account reset, Owner
+configuration write, provider call, container recreation or network change.
+
+Before future image-based migration runs, rebuild the application image so its
+baked migrations include 020 and 021, as required by the existing procedure. Ordinary dev
+stop/start still uses persistent data and never automatically migrates or resets
+it. Retain both migrations and review data on rollback; do not rewrite migration
+history. Once policies use the new Owner controls, older application code cannot
+enforce them: prefer a reviewed forward fix, or plan an explicit policy conversion
+before running an older release. There is no automatic policy/schema downgrade.
+
+Owner → Settings exposes global time and user control. Owner → Integrations exposes
+game/runtime overrides. Server → Automation exposes Owner server overrides, or the
+permitted ordinary-user preference; hidden is the default user mode. Inputs are
+minutes: `-1` disables automatic idle sleep, while an explicit inheritance control
+falls back to runtime/game/global defaults. `NH_GAME_IDLE_TIMEOUTS`,
+`NH_DEFAULT_IDLE_TIMEOUT_SECONDS` and `NH_IDLE_TIMEOUT_USER_ACCESS` can lock defaults
+using normal typed configuration precedence; real instance values should normally
+be edited through Owner administration. Shorten-only users cannot disable or extend
+a finite Owner timeout.
+
+This feature does not create a game server, activate a public Gateway route,
+certify an additional runtime/version or alter wake/manual-stop consent. At the
+read-only pre-change check the Owner had saved a 2,000-pin pool; no managed server,
+route or Gateway server state existed. A real pilot still needs an installed
+Gateway-mode server with declared support, an explicitly configured route and the
+existing collision/reachability/approval checks before a public bind.

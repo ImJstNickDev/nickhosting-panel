@@ -69,6 +69,11 @@ export async function managementFixture(
       current[authSessionId] = sessionId;
     }
   }
+  // Legacy lifecycle fixtures explicitly grant timeout editing; production defaults hide it.
+  await sql`insert into platform_settings(key,value) values ('platform', '{"idleTimeoutUserAccess":"editable"}'::jsonb)
+    on conflict(key) do update set value = jsonb_set(platform_settings.value, '{idleTimeoutUserAccess}', '"editable"'::jsonb)`.execute(
+    db,
+  );
   const hostId = randomUUID(),
     nodeId = randomUUID(),
     mappingId = randomUUID(),

@@ -1605,3 +1605,96 @@ verified end-to-end gameplay; Owner pool selection and scoped pilot remain next.
 Final staged `python3 scripts/check-governance.py`: **passed**, 494 indexed text
 files, 97 reviewed PNGs, 417 relative links, four TOML files and 44 ignore cases.
 Secret scanning remains heuristic; all staged paths were explicitly inspected.
+
+## Inherited sleep timeouts and Owner user-control policy — 2026-10-10
+
+Starting HEAD `359a94b9b8c47f654168ced31ebaea7871d72b77`. The Owner requested a
+configurable idle timeout with game/runtime/server inheritance, then expanded the
+same task to global defaults and hidden/editable/shorten-only user controls.
+The completed model separates Owner authority from ordinary-user preferences:
+global → game → runtime → Owner server policy, then the permitted user preference.
+Hidden is the default access mode; -1 disables idle sleep. A finite shorten-only
+ceiling rejects increases/-1, clamps older user preferences after Owner tightening,
+and is enforced by the API rather than only HTML input constraints.
+
+Timeout-only writes preserve Gateway generation, readiness and wake jobs. User
+saves retain accumulated idle proof rather than postponing Owner-enforced sleep.
+Disabled intervals do not accrue idle time. Fresh observations and final power
+handoff use the effective timeout; an already handed-off effect can still be
+confirmed without replay, while a newly disallowed queued stop is rejected and
+recovers without releasing a running server's RAM reservation.
+
+Read-only dev preflight confirmed the Owner's 2,000-pin pool, zero managed servers,
+zero routes and zero Gateway server states. Exact additive migrations 020 and 021
+were applied explicitly to the independent `nickhosting_dev` database using the
+existing container, transaction/advisory-lock/checksum procedure. Eight table
+count/content-hash comparisons remained unchanged (users, hosts, nodes, mappings,
+servers, routes, states and platform settings). No timeout/access values were
+saved for the Owner. No provider mutation, public listener, container recreation,
+network change or new live test asset. Source watchers use the updated code.
+
+Development iteration record, retained separately from final passes:
+
+- One initial filtered API run failed during fixture Owner bootstrap with HTTP 500.
+  The cause was not established; the same test passed on rerun with a temporary
+  diagnostic callback, which was removed, and the complete affected API suite later
+  passed. No authentication restriction was removed to make it pass.
+- A new game-policy fixture failed a foreign-key check because its trusted manifest
+  had not been registered in that isolated database; corrected the test fixture.
+- Initial browser runs encountered a process using the earlier runtime-label DTO
+  and later a locator for a field removed by switching to inheritance. Updated the
+  fixture process/locator and reran the affected browser cases; failures are not
+  counted as passes.
+- The first combined six-file integration run returned **106 passed, 2 failed**:
+  existing platform-query exact-shape assertions omitted the new nullable metadata
+  and operational-editability flag. Updated exact expected contracts; no assertion
+  was weakened to ignore fields. Only the affected query/orchestration files were
+  rerun after that and the final disabled-idle-interval fix.
+
+Independent review corrected missing environment propagation on three early
+Gateway-state returns, hidden timeout/proposal redaction, repeated-save idle reset,
+and hidden/-1 operational-control availability. These are covered by targeted
+regressions. The visibility setting hides configuration controls/values, not the
+truthful operational state or a Gateway's upcoming sleep deadline. Existing manual
+stop/maintenance and automatic-start consent remain independent safety controls.
+
+Final focused evidence (commands prefixed with `scripts/dev.sh`):
+
+- `pnpm exec vitest run packages/core/src/core.test.ts packages/core/src/gateway-config.test.ts`: **54 passed**.
+- `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/gateway-orchestration.integration.test.ts packages/server-management/src/platform-queries.integration.test.ts packages/server-management/src/gateway-delivery.integration.test.ts apps/api/src/gateway.integration.test.ts apps/api/src/platform.integration.test.ts packages/database/src/platform.integration.test.ts`: first combined run **106 passed / 2 exact DTO failures** described above. The four unaffected files stayed passing. Final affected-file rerun, `packages/server-management/src/platform-queries.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts`: **80 passed**, including legacy migration, permission/ceiling, handoff recovery and disabled-interval regression. No historical full matrix repeated.
+- The same isolated browser wrapper with `--config vitest.browser.config.ts apps/web/tests/inherited-sleep.browser.test.ts` and existing Playwright user-local library path: **6 passed**. Existing `apps/web/tests/sleep-policy.browser.test.ts`: **1 passed**. A final UI correction reran the four affected cases (**4 passed, 2 intentionally excluded**), preserving earlier evidence for the unchanged remainder.
+- `pnpm typecheck`, `pnpm build`, `pnpm i18n:check`: passed, **1,082 EN/IT/pseudolocale keys**. Build retains the pre-existing large-chunk warning (about 884 kB minified JS).
+- Focused `pnpm exec biome check` on all 21 changed/new TS/TSX/JSON files: exit 0, no errors; three non-null-assertion style warnings in `automation.tsx`. `git diff --check`: passed.
+
+Browser evidence uses the actual app, protected API handlers, Better Auth and
+isolated PostgreSQL schemas; external provider inventory is a fixture. Global
+20-minute default, hidden-by-default behavior, independent wake when sleep is
+disabled, game/runtime/server precedence, full edits, shorten-only rejection,
+Owner ceiling and inherited fallback are exercised. EN/IT desktop/mobile axe checks
+reported zero violations and no mobile page overflow. This is not a blanket WCAG
+certification or live gameplay proof.
+
+Sanitized screenshots: [global Owner settings](screenshots/m5/inherited-sleep-global-desktop-en.png),
+[game/runtime Owner settings](screenshots/m5/inherited-sleep-owner-desktop-en.png),
+[server English](screenshots/m5/inherited-sleep-server-desktop-en.png),
+[server Italian mobile](screenshots/m5/inherited-sleep-server-mobile-it.png),
+[hidden control](screenshots/m5/inherited-sleep-hidden-desktop-en.png), and
+[shorten-only control](screenshots/m5/inherited-sleep-limited-desktop-en.png).
+Independent technical/accessibility/content review inspected all six and reported
+**no remaining must-fix**. Its final UI correction removes the ineffective Save
+button/inapplicable instructions from hidden locked policy controls.
+
+HTTPS returned 200; all nine existing dev services remained healthy. No provider
+or production service was changed, no game port was opened, and no test server
+was created. Isolated test schemas were cleaned by their existing harness; private
+review state was preserved. SFTPGo #18 remains a release gate; the accepted
+Docker-socket risk tracked by #22 is unchanged.
+Actual Gateway forwarding/sleep-wake on the new pool remains a separate scoped
+pilot requiring a real supported managed server and explicit route.
+
+Final read-only dev check resolved global timeout **-1**, access **hidden**, zero
+stored game policies and zero managed servers/routes/server policies. Both migration
+records are present. These are untouched defaults for the Owner to configure.
+Staged `python3 scripts/check-governance.py`: **passed**, 499 indexed text files,
+103 reviewed PNGs, 424 relative links, four TOML files and 44 ignore cases. Secret
+scanning remains heuristic; all staged paths and screenshots were inspected.

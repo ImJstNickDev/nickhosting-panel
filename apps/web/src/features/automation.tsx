@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client.js';
-import { useT } from '../app/i18n.js';
+import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import {
   ActionForm,
@@ -29,9 +29,16 @@ import {
   serverPath,
   useServer,
 } from './service-contracts.js';
+import {
+  readSleepAccess,
+  readSleepTimeout,
+  SleepAccessField,
+  SleepTimeoutField,
+} from './sleep-timeout.js';
 
 export function AutomationPage({ serverId }: { serverId: string }) {
   const t = useT(),
+    format = useFormat(),
     server = useServer(serverId),
     session = useSession();
   const policy = useQuery({
@@ -53,6 +60,9 @@ export function AutomationPage({ serverId }: { serverId: string }) {
   });
   const editable =
     server.data?.permissions.manage && session.data?.context.sessionType === 'regular';
+  const isOwner = session.data?.context.role === 'owner';
+  const sleepAccess = policy.data?.idleTimeout;
+  const restrictPolicyControls = policy.data?.policyControlsEditable === false;
   return (
     <>
       <Section title={t('service.startConsent')}>
@@ -134,60 +144,124 @@ export function AutomationPage({ serverId }: { serverId: string }) {
                 ]}
               />
             )}
-            {editable && (
-              <ActionForm
-                key={JSON.stringify(policy.data.policy)}
-                onSubmit={async (data) => {
-                  await api(`${serverPath(serverId)}/gateway`, {
-                    method: 'PUT',
-                    body: {
-                      ...policy.data!.policy,
-                      enabled: data.has('enabled'),
-                      idleTimeoutSeconds: data.has('autoSleep')
-                        ? number(data, 'idleMinutes') * 60
-                        : null,
-                      mode: text(data, 'mode'),
-                    },
-                  });
-                  await policy.refetch();
-                  await server.refetch();
-                }}
-              >
-                <Check
-                  name="enabled"
-                  defaultChecked={policy.data.policy.enabled}
-                  label={t('service.autoWake')}
-                />
-                <Check
-                  name="autoSleep"
-                  defaultChecked={policy.data.policy.idleTimeoutSeconds !== null}
-                  label={t('service.autoSleep')}
-                />
-                <Input
-                  label={t('service.idleMinutes')}
-                  name="idleMinutes"
-                  type="number"
-                  min={1}
-                  max={10080}
-                  defaultValue={
-                    policy.data.policy.idleTimeoutSeconds === null
-                      ? 30
-                      : Math.ceil(policy.data.policy.idleTimeoutSeconds / 60)
-                  }
-                  required
-                />
-                <Select
-                  label={t('service.automationMode')}
-                  name="mode"
-                  defaultValue={policy.data.policy.mode}
+            {editable &&
+              (restrictPolicyControls && !sleepAccess ? (
+                <>
+                  <Check
+                    label={t('service.autoWake')}
+                    checked={policy.data.policy.enabled}
+                    disabled
+                  />
+                  <Notice>{t('sleepTiming.ownerControlled')}</Notice>
+                </>
+              ) : (
+                <ActionForm
+                  key={JSON.stringify(policy.data.policy)}
+                  onSubmit={async (data) => {
+                    const idleTimeout = sleepAccess
+                      ? readSleepTimeout(data, 'idleMinutes')
+                      : undefined;
+                    const {
+                      idleTimeoutSeconds: _seconds,
+                      idleTimeoutInherited: _inherited,
+                      ...existingPolicy
+                    } = policy.data!.policy!;
+                    await api(`${serverPath(serverId)}/gateway`, {
+                      method: 'PUT',
+                      body: {
+                        ...existingPolicy,
+                        enabled: restrictPolicyControls
+                          ? existingPolicy.enabled
+                          : data.has('enabled'),
+                        ...(idleTimeout === undefined
+                          ? {}
+                          : {
+                              idleTimeoutInherited: idleTimeout === null,
+                              idleTimeoutSeconds:
+                                idleTimeout === null || idleTimeout === -1 ? null : idleTimeout,
+                              ...(isOwner
+                                ? {
+                                    idleTimeoutUserAccess: readSleepAccess(
+                                      data,
+                                      'sleepServerAccess',
+                                    ),
+                                  }
+                                : {}),
+                            }),
+                        mode: restrictPolicyControls ? existingPolicy.mode : text(data, 'mode'),
+                      },
+                    });
+                    await policy.refetch();
+                    await server.refetch();
+                  }}
                 >
-                  <option value="auto">{t('service.automatic')}</option>
-                  <option value="manually_stopped">{t('service.manuallyStopped')}</option>
-                  <option value="maintenance">{t('service.maintenance')}</option>
-                </Select>
-                <p className="muted">{t('service.manualStopPolicy')}</p>
-              </ActionForm>
-            )}
+                  <Check
+                    name="enabled"
+                    defaultChecked={policy.data.policy.enabled}
+                    label={t('service.autoWake')}
+                    disabled={restrictPolicyControls}
+                  />
+                  {sleepAccess && (
+                    <SleepTimeoutField
+                      name="idleMinutes"
+                      value={sleepAccess.overrideSeconds}
+                      inheritedSeconds={sleepAccess.inheritedSeconds}
+                      allowDisable={
+                        isOwner ||
+                        sleepAccess.userAccess !== 'shorten-only' ||
+                        sleepAccess.ownerBaselineSeconds === -1
+                      }
+                      maximumSeconds={
+                        !isOwner &&
+                        sleepAccess.userAccess === 'shorten-only' &&
+                        sleepAccess.ownerBaselineSeconds !== -1
+                          ? sleepAccess.ownerBaselineSeconds
+                          : 604800
+                      }
+                    />
+                  )}
+                  {isOwner && sleepAccess && 'ownerUserAccessOverride' in sleepAccess && (
+                    <SleepAccessField
+                      name="sleepServerAccess"
+                      value={sleepAccess.ownerUserAccessOverride ?? null}
+                      inherited={sleepAccess.inheritedUserAccess ?? 'hidden'}
+                    />
+                  )}
+                  {policy.data.idleTimeout && (
+                    <p className="muted">
+                      {t('sleepTiming.effective', {
+                        value:
+                          policy.data.idleTimeout.effectiveSeconds === -1
+                            ? t('sleepTiming.disabled')
+                            : t('sleepTiming.minutes', {
+                                minutes: format.number(
+                                  policy.data.idleTimeout.effectiveSeconds / 60,
+                                  3,
+                                ),
+                              }),
+                        source: t(`sleepTiming.source.${policy.data.idleTimeout.source}`),
+                      })}
+                    </p>
+                  )}
+                  <Select
+                    label={t('service.automationMode')}
+                    name="mode"
+                    disabled={restrictPolicyControls}
+                    defaultValue={policy.data.policy.mode}
+                  >
+                    <option value="auto">{t('service.automatic')}</option>
+                    <option value="manually_stopped">{t('service.manuallyStopped')}</option>
+                    <option value="maintenance">{t('service.maintenance')}</option>
+                  </Select>
+                  <p className="muted">
+                    {t(
+                      restrictPolicyControls
+                        ? 'sleepTiming.ownerControlled'
+                        : 'service.manualStopPolicy',
+                    )}
+                  </p>
+                </ActionForm>
+              ))}
           </>
         )}
       </Section>

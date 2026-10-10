@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { type AuthContext, DomainError, type DomainErrorCode } from '@nickhosting/core';
+import {
+  type AuthContext,
+  DomainError,
+  type DomainErrorCode,
+  idleTimeoutUserAccessSchema,
+} from '@nickhosting/core';
 import { type Database, type GatewayServerState, recordAudit } from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
@@ -7,6 +12,7 @@ import { type DB, type Environment, lockResources } from './admission.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, enqueueLockedServerOperation, parse } from './registry.js';
+import { resolveIdleTimeout } from './sleep-policy.js';
 
 type State = Selectable<Database['gateway_server_states']>;
 type Server = Selectable<Database['managed_servers']>;
@@ -35,7 +41,9 @@ export const gatewayPolicySchema = z.strictObject({
   enabled: z.boolean(),
   protocolId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
   gameVersion: z.string().min(1).max(100),
-  idleTimeoutSeconds: z.number().int().min(1).max(604800).nullable(),
+  idleTimeoutSeconds: z.number().int().min(1).max(604800).nullable().optional(),
+  idleTimeoutInherited: z.boolean().optional(),
+  idleTimeoutUserAccess: idleTimeoutUserAccessSchema.nullable().optional(),
   readinessTimeoutSeconds: z.number().int().min(1).max(86400),
   readinessMaxAgeSeconds: z.number().int().min(1).max(300),
   estimateMaxAgeSeconds: z.number().int().min(60).max(2592000),
@@ -132,7 +140,14 @@ function effectiveState(server: Server, state: State, now: Date): GatewayServerS
   return state.state;
 }
 
-async function publicState(db: DB, server: Server, state: State, now: Date): Promise<GatewayState> {
+async function publicState(
+  db: DB,
+  server: Server,
+  state: State,
+  now: Date,
+  env: Environment = {},
+): Promise<GatewayState> {
+  const idleTimeout = await resolveIdleTimeout(db, server.id, state, env);
   const samples = await db
     .selectFrom('gateway_startup_samples')
     .select('duration_ms')
@@ -159,8 +174,8 @@ async function publicState(db: DB, server: Server, state: State, now: Date): Pro
       state.enabled &&
       actual === 'online' &&
       state.idle_since &&
-      state.idle_timeout_seconds !== null
-        ? new Date(state.idle_since.getTime() + state.idle_timeout_seconds * 1000).toISOString()
+      idleTimeout.effectiveSeconds !== -1
+        ? new Date(state.idle_since.getTime() + idleTimeout.effectiveSeconds * 1000).toISOString()
         : null,
     errorCode:
       actual === 'blocked' ? (state.error_code ?? 'integration_unavailable') : state.error_code,
@@ -187,7 +202,7 @@ export async function getGatewayState(
       options.env,
       nowOf(options),
     );
-  return publicState(db, server, state, nowOf(options));
+  return publicState(db, server, state, nowOf(options), options.env);
 }
 
 export async function setGatewayPolicy(
@@ -205,10 +220,65 @@ export async function setGatewayPolicy(
     const current = await currentInteractiveContext(tx, context, options.env ?? {});
     const server = await authorizeServer(tx, current, serverId, 'server:manage');
     if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
+    const previous = await tx
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    const owner = current.role === 'owner';
+    const currentIdle = await resolveIdleTimeout(tx, serverId, previous ?? null, options.env);
+    const timeoutSupplied =
+      value.idleTimeoutSeconds !== undefined || value.idleTimeoutInherited !== undefined;
+    const newOverride =
+      value.idleTimeoutInherited === true ? null : (value.idleTimeoutSeconds ?? -1);
+    if (!owner) {
+      if (value.idleTimeoutUserAccess !== undefined) throw new DomainError('forbidden');
+      if (
+        timeoutSupplied &&
+        currentIdle.userAccess === 'hidden' &&
+        newOverride !== currentIdle.overrideSeconds
+      )
+        throw new DomainError('forbidden');
+      if (
+        timeoutSupplied &&
+        currentIdle.userAccess === 'shorten-only' &&
+        currentIdle.ownerBaselineSeconds !== -1 &&
+        newOverride !== null &&
+        (newOverride === -1 || newOverride > currentIdle.ownerBaselineSeconds)
+      )
+        throw new DomainError('forbidden');
+      if (
+        previous &&
+        currentIdle.ownerBaselineSeconds !== -1 &&
+        currentIdle.userAccess !== 'editable'
+      ) {
+        const mode =
+          server.intent === 'maintenance'
+            ? 'maintenance'
+            : server.intent === 'manually_stopped'
+              ? 'manually_stopped'
+              : 'auto';
+        if (
+          value.enabled !== previous.enabled ||
+          value.mode !== mode ||
+          value.protocolId !== previous.protocol_id ||
+          value.gameVersion !== previous.game_version ||
+          value.readinessTimeoutSeconds !== previous.readiness_timeout_seconds ||
+          value.readinessMaxAgeSeconds !== previous.readiness_max_age_seconds ||
+          value.estimateMaxAgeSeconds !== previous.estimate_max_age_seconds ||
+          value.wakeRetrySeconds !== previous.wake_retry_seconds
+        )
+          throw new DomainError('forbidden');
+      }
+    }
     if (!server.pterodactyl_uuid || server.installation_state !== 'installed')
       throw new DomainError('conflict');
     if (options.initializeOnly) {
-      if (value.enabled || value.idleTimeoutSeconds !== null || value.mode === 'auto')
+      if (
+        value.enabled ||
+        (value.idleTimeoutSeconds !== null && value.idleTimeoutSeconds !== undefined) ||
+        value.mode === 'auto'
+      )
         throw new DomainError('validation_failed');
       const existing = await tx
         .selectFrom('gateway_server_states')
@@ -247,6 +317,52 @@ export async function setGatewayPolicy(
             ? 'sleeping'
             : 'waking'
         : mode;
+    const oldMode =
+      server.intent === 'maintenance'
+        ? 'maintenance'
+        : server.intent === 'manually_stopped'
+          ? 'manually_stopped'
+          : 'auto';
+    const operationallyUnchanged =
+      previous &&
+      value.enabled === previous.enabled &&
+      value.mode === oldMode &&
+      value.protocolId === previous.protocol_id &&
+      value.gameVersion === previous.game_version &&
+      value.readinessTimeoutSeconds === previous.readiness_timeout_seconds &&
+      value.readinessMaxAgeSeconds === previous.readiness_max_age_seconds &&
+      value.estimateMaxAgeSeconds === previous.estimate_max_age_seconds &&
+      value.wakeRetrySeconds === previous.wake_retry_seconds;
+    if (operationallyUnchanged) {
+      // Editing a preference cannot manufacture fresh idle time or revoke a wake in flight.
+      await tx
+        .updateTable('gateway_server_states')
+        .set({
+          ...(owner
+            ? {
+                ...(timeoutSupplied ? { owner_idle_timeout_seconds: newOverride } : {}),
+                ...(value.idleTimeoutUserAccess !== undefined
+                  ? { owner_idle_timeout_user_access: value.idleTimeoutUserAccess }
+                  : {}),
+                idle_since: null,
+              }
+            : timeoutSupplied
+              ? {
+                  idle_timeout_seconds: newOverride === -1 ? null : newOverride,
+                  idle_timeout_inherited: newOverride === null,
+                }
+              : {}),
+          updated_at: now,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      await recordAudit(tx, current, 'gateway.policy.updated', {
+        serverId,
+        generation: previous.generation,
+        ...value,
+      });
+      return getGatewayState(tx, serverId, options);
+    }
     const row = {
       server_id: serverId,
       generation: randomUUID(),
@@ -254,7 +370,22 @@ export async function setGatewayPolicy(
       protocol_id: value.protocolId,
       game_version: value.gameVersion,
       state: initial,
-      idle_timeout_seconds: value.idleTimeoutSeconds,
+      idle_timeout_seconds:
+        owner || !timeoutSupplied
+          ? (previous?.idle_timeout_seconds ?? null)
+          : newOverride === -1
+            ? null
+            : newOverride,
+      idle_timeout_inherited:
+        owner || !timeoutSupplied
+          ? (previous?.idle_timeout_inherited ?? true)
+          : newOverride === null,
+      owner_idle_timeout_seconds:
+        owner && timeoutSupplied ? newOverride : (previous?.owner_idle_timeout_seconds ?? null),
+      owner_idle_timeout_user_access:
+        owner && value.idleTimeoutUserAccess !== undefined
+          ? value.idleTimeoutUserAccess
+          : (previous?.owner_idle_timeout_user_access ?? null),
       readiness_timeout_seconds: value.readinessTimeoutSeconds,
       readiness_max_age_seconds: value.readinessMaxAgeSeconds,
       estimate_max_age_seconds: value.estimateMaxAgeSeconds,
@@ -365,7 +496,7 @@ export async function requestGatewayWake(
       effectiveState(server, state, now) === 'online' ||
       (state.blocked_until && state.blocked_until > now)
     )
-      return publicState(tx, server, state, now);
+      return publicState(tx, server, state, now, options.env);
     // An uncertain reservation or operation is never a new automatic start.
     const reservation = await tx
       .selectFrom('resource_reservations')
@@ -484,10 +615,10 @@ export async function reportGatewayObservation(
     )
       throw new DomainError('validation_failed');
     if (['manually_stopped', 'maintenance'].includes(server.intent))
-      return publicState(tx, server, state, now);
+      return publicState(tx, server, state, now, options.env);
     // An identical observation is idempotent and cannot advance the idle timer.
     if (state.last_observed_at?.getTime() === observed.getTime())
-      return publicState(tx, server, state, now);
+      return publicState(tx, server, state, now, options.env);
     const activeOperation = server.active_operation_id
       ? await tx
           .selectFrom('server_operations')
@@ -571,6 +702,7 @@ export async function reportGatewayObservation(
         .execute();
       return getGatewayState(tx, serverId, options);
     }
+    const idleTimeout = await resolveIdleTimeout(tx, serverId, state, options.env);
     const freshIdle = value.idle === true && value.activeSessions === 0 && value.playerCount === 0;
     // Unknown player count is not affirmative proof of idleness. Gaps reset the
     // interval; a stale Gateway cannot sleep a server based on silence.
@@ -578,7 +710,12 @@ export async function reportGatewayObservation(
       state.last_observed_at !== null &&
       observed.getTime() - state.last_observed_at.getTime() <=
         state.readiness_max_age_seconds * 1000;
-    const idleSince = freshIdle ? (continuous ? (state.idle_since ?? observed) : observed) : null;
+    const idleSince =
+      freshIdle && idleTimeout.effectiveSeconds !== -1
+        ? continuous
+          ? (state.idle_since ?? observed)
+          : observed
+        : null;
     await tx
       .updateTable('gateway_server_states')
       .set({
@@ -620,9 +757,9 @@ export async function reportGatewayObservation(
       state.enabled &&
       value.quiescenceUntil !== undefined &&
       !server.active_operation_id &&
-      state.idle_timeout_seconds !== null &&
+      idleTimeout.effectiveSeconds !== -1 &&
       idleSince &&
-      observed.getTime() - idleSince.getTime() >= state.idle_timeout_seconds * 1000
+      observed.getTime() - idleSince.getTime() >= idleTimeout.effectiveSeconds * 1000
     ) {
       await sql`savepoint gateway_sleep`.execute(tx);
       try {
@@ -645,7 +782,8 @@ export async function reportGatewayObservation(
             state: 'blocked',
             sleep_job_id: result.jobId,
             readiness_observed_at: null,
-            idle_since: null,
+            // Retain affirmative idle evidence for the final worker handoff.
+            idle_since: idleSince,
             error_code: 'operation_uncertain',
             updated_at: now,
           })

@@ -273,4 +273,43 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
       quota: { userId: f.context.subjectUserId },
     });
   });
+  it('requires regular Owner authorization for inherited sleep policies and rejects unknown runtimes', async () => {
+    const path = '/v1/owner/integrations/minecraft-java/sleep-policy';
+    expect((await request(user, path)).status).toBe(403);
+    expect((await request(null, path)).status).toBe(401);
+    expect(await (await request(owner, path)).json()).toMatchObject({
+      gameId: 'minecraft-java',
+      gameTimeoutSeconds: null,
+      effectiveGameSeconds: -1,
+      locked: false,
+    });
+    expect(
+      (
+        await request(
+          owner,
+          path,
+          { gameTimeoutSeconds: 600, runtimeTimeouts: { invented: 30 } },
+          'PUT',
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (await request(owner, path, { gameTimeoutSeconds: 0, runtimeTimeouts: {} }, 'PUT')).status,
+    ).toBe(400);
+    const saved = await request(
+      owner,
+      path,
+      { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120, paper: -1 } },
+      'PUT',
+    );
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({
+      effectiveGameSeconds: 600,
+      runtimeTimeouts: { vanilla: 120, paper: -1 },
+    });
+    expect(
+      (await request(user, path, { gameTimeoutSeconds: -1, runtimeTimeouts: {} }, 'PUT')).status,
+    ).toBe(403);
+    expect((await request(owner, '/v1/owner/integrations/unknown/sleep-policy')).status).toBe(404);
+  });
 });

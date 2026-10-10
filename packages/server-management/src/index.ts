@@ -16,5 +16,6 @@ export * from './platform-queries.js';
 export * from './registry.js';
 export * from './runtime.js';
 export * from './schedules.js';
+export * from './sleep-policy.js';
 export * from './upload-admission.js';
 export * from './upload-policy.js';

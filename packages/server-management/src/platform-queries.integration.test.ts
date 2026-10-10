@@ -743,6 +743,8 @@ describe('M5 platform browser queries and metadata', () => {
       policy: null,
       state: null,
       proposedPolicy: null,
+      idleTimeout: null,
+      policyControlsEditable: false,
     });
     await f.db
       .updateTable('managed_servers')
@@ -803,6 +805,8 @@ describe('M5 platform browser queries and metadata', () => {
       policy: null,
       state: null,
       proposedPolicy: null,
+      idleTimeout: null,
+      policyControlsEditable: false,
     });
     await f.db
       .insertInto('gateway_server_states')
@@ -835,6 +839,7 @@ describe('M5 platform browser queries and metadata', () => {
       protocolId: 'fixture',
       gameVersion: '1',
       idleTimeoutSeconds: null,
+      idleTimeoutInherited: false,
       readinessTimeoutSeconds: 50,
       readinessMaxAgeSeconds: 10,
       estimateMaxAgeSeconds: 3600,

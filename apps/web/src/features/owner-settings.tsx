@@ -15,8 +15,8 @@ import {
   Section,
   Select,
   Textarea,
-  text,
 } from '../components/ui.js';
+import { GlobalSleepSettings } from './sleep-timeout.js';
 
 type Schema = {
   type?: string | string[];
@@ -84,11 +84,29 @@ export function OwnerSettingsPage() {
   return (
     <Page title={t('owner.platformSettings')}>
       <Notice>{t('owner.precedence')}</Notice>
+      <Section title={t('sleepTiming.title')}>
+        <GlobalSleepSettings
+          values={value.config.values}
+          lockedKeys={value.config.lockedKeys}
+          editable={editable}
+          onSaved={async () => {
+            await settings.refetch();
+          }}
+        />
+      </Section>
       {groups.map((group) => (
         <Section title={t(`owner.group.${group}`)} key={group}>
           <div className="settings-list">
             {Object.entries(schema.data.properties ?? {})
-              .filter(([key]) => groupFor(key) === group)
+              .filter(
+                ([key]) =>
+                  groupFor(key) === group &&
+                  ![
+                    'defaultIdleTimeoutSeconds',
+                    'idleTimeoutUserAccess',
+                    'gameIdleTimeouts',
+                  ].includes(key),
+              )
               .map(([key, definition]) => (
                 <details key={`${key}:${JSON.stringify(value.config.values[key])}`}>
                   <summary>

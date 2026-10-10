@@ -24,6 +24,7 @@ import {
   parse,
   publicServer,
 } from './registry.js';
+import { publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
 import { effectiveUploadPolicy } from './upload-policy.js';
 
 const pageSchema = z.object({
@@ -993,7 +994,13 @@ export async function getPlatformSleepPolicy(
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirst();
-  const unavailable = { policy: null, state: null, proposedPolicy: null };
+  const unavailable = {
+    policy: null,
+    state: null,
+    proposedPolicy: null,
+    idleTimeout: null,
+    policyControlsEditable: false,
+  };
   if (server.connection_mode === 'direct') return unavailable;
   if (!state) {
     if (
@@ -1016,20 +1023,41 @@ export async function getPlatformSleepPolicy(
       ...binding,
       enabled: false,
       idleTimeoutSeconds: null,
+      idleTimeoutInherited: true,
       readinessTimeoutSeconds: 600,
       readinessMaxAgeSeconds: 30,
       estimateMaxAgeSeconds: 604800,
       wakeRetrySeconds: 10,
       mode: server.intent === 'maintenance' ? 'maintenance' : 'manually_stopped',
     });
-    return { ...unavailable, proposedPolicy };
+    const idleTimeout = await publicIdleTimeout(db, serverId, null, context, env);
+    if (idleTimeout === null) {
+      delete proposedPolicy.idleTimeoutSeconds;
+      delete proposedPolicy.idleTimeoutInherited;
+    }
+    return { ...unavailable, proposedPolicy, idleTimeout };
   }
+  const idleTimeout = await publicIdleTimeout(db, serverId, state, context, env);
+  const effectiveIdle = await resolveIdleTimeout(db, serverId, state, env);
   return {
     policy: {
       enabled: state.enabled,
       protocolId: state.protocol_id,
       gameVersion: state.game_version,
-      idleTimeoutSeconds: state.idle_timeout_seconds,
+      ...(idleTimeout === null
+        ? {}
+        : {
+            idleTimeoutSeconds:
+              context.role === 'owner' && context.sessionType === 'regular'
+                ? state.owner_idle_timeout_seconds === -1
+                  ? null
+                  : state.owner_idle_timeout_seconds
+                : state.idle_timeout_seconds,
+            idleTimeoutInherited:
+              context.role === 'owner' && context.sessionType === 'regular'
+                ? state.owner_idle_timeout_seconds === null
+                : state.idle_timeout_inherited,
+          }),
       readinessTimeoutSeconds: state.readiness_timeout_seconds,
       readinessMaxAgeSeconds: state.readiness_max_age_seconds,
       estimateMaxAgeSeconds: state.estimate_max_age_seconds,
@@ -1041,6 +1069,11 @@ export async function getPlatformSleepPolicy(
             ? 'manually_stopped'
             : 'auto',
     },
+    idleTimeout,
+    policyControlsEditable:
+      (context.role === 'owner' && context.sessionType === 'regular') ||
+      effectiveIdle.ownerBaselineSeconds === -1 ||
+      effectiveIdle.userAccess === 'editable',
     state: await getGatewayState(db, serverId, { env }),
     proposedPolicy: null,
   };

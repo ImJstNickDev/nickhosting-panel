@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { authSessionId } from '@nickhosting/core';
-import { createDatabase } from '@nickhosting/database';
+import { createDatabase, updateSettings } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type {
   ApplicationServer,
   PterodactylAdapter,
   Resources,
 } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reserveStart } from './admission.js';
+import { trustedGameModules } from './game-modules.js';
 import {
   type GatewayObservation,
   type GatewayOrchestrationOptions,
@@ -24,8 +27,10 @@ import {
   processServerOperation,
   reconcileManagedServer,
 } from './lifecycle.js';
+import { getPlatformSleepPolicy } from './platform-queries.js';
 import { enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect } from './runtime.js';
+import { getGameSleepPolicy, resolveIdleTimeout, setGameSleepPolicy } from './sleep-policy.js';
 import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -217,6 +222,443 @@ async function report(
 }
 
 describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
+  it('migrates legacy positive and NULL timeouts to independent Owner authority without enabling sleep', async () => {
+    await configure();
+    const migration20 = await readFile(
+      new URL('../../database/migrations/020_sleep_policy_inheritance.sql', import.meta.url),
+      'utf8',
+    );
+    const migration21 = await readFile(
+      new URL('../../database/migrations/021_sleep_policy_owner_controls.sql', import.meta.url),
+      'utf8',
+    );
+    await expect(
+      f.db.transaction().execute(async (tx) => {
+        await sql`alter table gateway_server_states drop column owner_idle_timeout_seconds, drop column owner_idle_timeout_user_access, drop column idle_timeout_inherited`.execute(
+          tx,
+        );
+        await sql.raw(migration20).execute(tx);
+        expect(
+          (
+            await tx
+              .selectFrom('gateway_server_states')
+              .selectAll()
+              .where('server_id', '=', serverId)
+              .executeTakeFirstOrThrow()
+          ).idle_timeout_inherited,
+        ).toBe(false);
+        // Exercise both historical representations within this rolled-back fixture transaction.
+        await sql.raw(migration21).execute(tx);
+        expect(
+          await tx
+            .selectFrom('gateway_server_states')
+            .selectAll()
+            .where('server_id', '=', serverId)
+            .executeTakeFirstOrThrow(),
+        ).toMatchObject({
+          owner_idle_timeout_seconds: 10,
+          idle_timeout_seconds: null,
+          idle_timeout_inherited: true,
+        });
+        await sql`alter table gateway_server_states drop column owner_idle_timeout_seconds, drop column owner_idle_timeout_user_access`.execute(
+          tx,
+        );
+        await tx
+          .updateTable('gateway_server_states')
+          .set({ idle_timeout_seconds: null, idle_timeout_inherited: false })
+          .where('server_id', '=', serverId)
+          .execute();
+        await sql.raw(migration21).execute(tx);
+        expect(
+          await tx
+            .selectFrom('gateway_server_states')
+            .selectAll()
+            .where('server_id', '=', serverId)
+            .executeTakeFirstOrThrow(),
+        ).toMatchObject({
+          owner_idle_timeout_seconds: -1,
+          idle_timeout_seconds: null,
+          idle_timeout_inherited: true,
+        });
+        throw new Error('rollback isolated migration fixture');
+      }),
+    ).rejects.toThrow('rollback isolated migration fixture');
+  });
+
+  it('enforces hidden and shorten-only access against direct API policy changes and clamps old preferences', async () => {
+    await updateSettings(f.db, f.owner, {
+      defaultIdleTimeoutSeconds: 60,
+      idleTimeoutUserAccess: 'hidden',
+    });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      serverId,
+      { ...policy, idleTimeoutSeconds: null, idleTimeoutInherited: true },
+      options,
+    );
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toBeNull();
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).policy).not.toHaveProperty(
+      'idleTimeoutSeconds',
+    );
+    await expect(configure({ idleTimeoutSeconds: 10 })).rejects.toThrow('forbidden');
+    await expect(
+      configure({ idleTimeoutSeconds: null, idleTimeoutInherited: true, enabled: false }),
+    ).rejects.toThrow('forbidden');
+    await updateSettings(f.db, f.owner, { idleTimeoutUserAccess: 'shorten-only' });
+    await expect(configure({ idleTimeoutSeconds: 61 })).rejects.toThrow('forbidden');
+    await expect(
+      configure({ idleTimeoutSeconds: null, idleTimeoutInherited: false }),
+    ).rejects.toThrow('forbidden');
+    await configure({ idleTimeoutSeconds: 30 });
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      overrideSeconds: 30,
+      effectiveSeconds: 30,
+      source: 'server',
+      ownerBaselineSeconds: 60,
+    });
+    await updateSettings(f.db, f.owner, { defaultIdleTimeoutSeconds: 15 });
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      overrideSeconds: 30,
+      effectiveSeconds: 15,
+      source: 'default',
+    });
+    await updateSettings(f.db, f.owner, { idleTimeoutUserAccess: 'hidden' });
+    expect((await getPlatformSleepPolicy(f.db, f.owner, serverId)).idleTimeout).toMatchObject({
+      overrideSeconds: null,
+      effectiveSeconds: 15,
+    });
+    await expect(configure({ idleTimeoutUserAccess: 'editable' })).rejects.toThrow('forbidden');
+  });
+  it('keeps separate Owner server authority and respects game/runtime access precedence', async () => {
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      defaultIdleTimeoutSeconds: 900,
+      idleTimeoutUserAccess: 'hidden',
+      gameIdleTimeouts: {
+        [mapping.game_id]: {
+          gameTimeoutSeconds: 600,
+          userAccess: 'editable',
+          runtimeTimeouts: { fixture: 300 },
+          runtimeUserAccess: { fixture: 'shorten-only' },
+        },
+      },
+    });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      serverId,
+      { ...policy, idleTimeoutSeconds: 120, idleTimeoutUserAccess: 'editable' },
+      options,
+    );
+    await configure({ idleTimeoutSeconds: null, idleTimeoutInherited: false });
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      effectiveSeconds: -1,
+      ownerBaselineSeconds: 120,
+      overrideSeconds: -1,
+    });
+    const ownerView = await getPlatformSleepPolicy(f.db, f.owner, serverId);
+    expect(ownerView.idleTimeout).toMatchObject({
+      overrideSeconds: 120,
+      inheritedSeconds: 300,
+      inheritedUserAccess: 'shorten-only',
+      ownerUserAccessOverride: 'editable',
+    });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      serverId,
+      {
+        ...policy,
+        idleTimeoutSeconds: null,
+        idleTimeoutInherited: true,
+        idleTimeoutUserAccess: null,
+      },
+      options,
+    );
+    expect((await getPlatformSleepPolicy(f.db, f.context, serverId)).idleTimeout).toMatchObject({
+      effectiveSeconds: 300,
+      userAccess: 'shorten-only',
+      ownerBaselineSeconds: 300,
+    });
+  });
+  it('cannot extend idle time through repeated hidden or shorten-only no-op policy writes', async () => {
+    const fixture = await started();
+    await updateSettings(f.db, f.owner, {
+      defaultIdleTimeoutSeconds: 60,
+      idleTimeoutUserAccess: 'shorten-only',
+    });
+    await report(fixture);
+    const before = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await configure({ idleTimeoutSeconds: 10 });
+    const after = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(after.idle_since).toEqual(before.idle_since);
+    expect(after.generation).toBe(before.generation);
+    expect(after.state).toBe('online');
+  });
+  it('specialized game policy updates reset inherited idle evidence, preserve wake identity and honor environment locks', async () => {
+    await configure({
+      enabled: false,
+      mode: 'manually_stopped',
+      idleTimeoutInherited: true,
+      idleTimeoutSeconds: null,
+    });
+    const manifest = trustedGameModules.get('minecraft-java')?.manifest;
+    if (!manifest) throw new Error('Missing trusted Minecraft module');
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: manifest.id, version: manifest.version, manifest })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const before = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_since: clock })
+      .where('server_id', '=', serverId)
+      .execute();
+    await setGameSleepPolicy(f.db, f.owner, 'minecraft-java', {
+      gameTimeoutSeconds: 60,
+      runtimeTimeouts: { vanilla: 30 },
+      userAccess: 'shorten-only',
+      runtimeUserAccess: {},
+    });
+    const after = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(after.idle_since).toBeNull();
+    expect(after.generation).toBe(before.generation);
+    const env = { NH_GAME_IDLE_TIMEOUTS: '{}' };
+    expect(await getGameSleepPolicy(f.db, f.owner, 'minecraft-java', env)).toMatchObject({
+      locked: true,
+    });
+    await expect(
+      setGameSleepPolicy(
+        f.db,
+        f.owner,
+        'minecraft-java',
+        { gameTimeoutSeconds: 60, runtimeTimeouts: {} },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    await expect(
+      setGameSleepPolicy(f.db, { ...f.owner, sessionType: 'support' }, 'minecraft-java', {
+        gameTimeoutSeconds: 60,
+        runtimeTimeouts: {},
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('inherits game then runtime defaults, supports server overrides and preserves legacy disabled sleep', async () => {
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: {
+        [mapping.game_id]: { gameTimeoutSeconds: 120, runtimeTimeouts: { fixture: 60 } },
+      },
+    });
+    expect(await resolveIdleTimeout(f.db, serverId, null)).toMatchObject({
+      effectiveSeconds: 60,
+      source: 'runtime',
+      overrideSeconds: null,
+    });
+    expect(
+      await resolveIdleTimeout(f.db, serverId, {
+        idle_timeout_seconds: 15,
+        idle_timeout_inherited: false,
+      }),
+    ).toMatchObject({ effectiveSeconds: 15, source: 'server' });
+    expect(
+      await resolveIdleTimeout(f.db, serverId, {
+        idle_timeout_seconds: null,
+        idle_timeout_inherited: false,
+      }),
+    ).toMatchObject({ effectiveSeconds: -1, source: 'server' });
+    expect(
+      await resolveIdleTimeout(f.db, serverId, null, {
+        NH_GAME_IDLE_TIMEOUTS: JSON.stringify({
+          [mapping.game_id]: { gameTimeoutSeconds: 180, runtimeTimeouts: {} },
+        }),
+      }),
+    ).toMatchObject({ effectiveSeconds: 180, source: 'game' });
+    await configure({ idleTimeoutSeconds: null, idleTimeoutInherited: true });
+    const state = await getGatewayState(f.db, serverId);
+    expect((await wake()).state).toBe('waking');
+    expect(state.enabled).toBe(true);
+  });
+  it('honors environment-disabled sleep on duplicate observations and before the final worker power handoff', async () => {
+    const fixture = await started();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: 10, runtimeTimeouts: {} } },
+    });
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_timeout_inherited: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    await report(fixture);
+    const env = {
+      NH_GAME_IDLE_TIMEOUTS: JSON.stringify({
+        [mapping.game_id]: { gameTimeoutSeconds: -1, runtimeTimeouts: {} },
+      }),
+    };
+    expect(await report(fixture, {}, { env })).toMatchObject({ sleepEligibleAt: null });
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.env = env;
+    let externalPower = false;
+    fixture.stop.mockImplementationOnce(async (_id, _identifier, callbacks) => {
+      await callbacks.beforePower?.();
+      externalPower = true;
+      return { confirmed: false };
+    });
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+    expect(externalPower).toBe(false);
+    expect((await row()).runtime_state).toBe('running');
+  });
+  it('confirms an already sent sleep after inherited sleep is disabled without repeating remote power', async () => {
+    const fixture = await started();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: 10, runtimeTimeouts: {} } },
+    });
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_timeout_inherited: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point === 'remote_succeeded') throw new Error('isolated lost acknowledgement');
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('waiting');
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: -1, runtimeTimeouts: {} } },
+    });
+    advance(15001);
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+  });
+  it('does not accumulate hidden idle time while sleep is disabled by the environment', async () => {
+    const fixture = await started();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ idle_timeout_inherited: true })
+      .where('server_id', '=', serverId)
+      .execute();
+    const env = { NH_DEFAULT_IDLE_TIMEOUT_SECONDS: '-1' };
+    await report(fixture, {}, { env });
+    advance(10000);
+    await report(fixture, {}, { env });
+    expect(
+      (
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select('idle_since')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).idle_since,
+    ).toBeNull();
+    advance(1);
+    expect(
+      await report(fixture, {}, { env: { NH_DEFAULT_IDLE_TIMEOUT_SECONDS: '10' } }),
+    ).toMatchObject({
+      state: 'online',
+      sleepJobId: null,
+      sleepEligibleAt: new Date(clock.getTime() + 10000).toISOString(),
+    });
+  });
+  it('disabling inherited sleep does not disable intentional wake', async () => {
+    await configure({ idleTimeoutSeconds: null, idleTimeoutInherited: true });
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    await updateSettings(f.db, f.owner, {
+      gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: -1, runtimeTimeouts: {} } },
+    });
+    expect((await wake()).state).toBe('waking');
+  });
+  it.each([-1, 120])(
+    'fences a queued idle stop after inherited timeout changes to %s, retaining RAM and recovering readiness',
+    async (timeout) => {
+      const fixture = await started();
+      const mapping = await f.db
+        .selectFrom('runtime_egg_mappings')
+        .select('game_id')
+        .where('id', '=', f.mappingId)
+        .executeTakeFirstOrThrow();
+      await updateSettings(f.db, f.owner, {
+        gameIdleTimeouts: { [mapping.game_id]: { gameTimeoutSeconds: 10, runtimeTimeouts: {} } },
+      });
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ idle_timeout_inherited: true })
+        .where('server_id', '=', serverId)
+        .execute();
+      await report(fixture);
+      advance(10000);
+      const pending = await report(fixture);
+      expect(pending.sleepJobId).not.toBeNull();
+      await updateSettings(f.db, f.owner, {
+        gameIdleTimeouts: {
+          [mapping.game_id]: { gameTimeoutSeconds: timeout, runtimeTimeouts: {} },
+        },
+      });
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+      expect(fixture.stop).not.toHaveBeenCalled();
+      expect((await row()).runtime_state).toBe('running');
+      expect((await row()).active_operation_id).toBeNull();
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toHaveLength(1);
+      await reconcileGatewayState(f.db, serverId, options);
+      advance(1);
+      expect(await report(fixture)).toMatchObject({ state: 'online' });
+    },
+  );
+
   it('rejects an already queued Gateway wake if the server is direct, without releasing its reservation', async () => {
     await configure();
     const state = await wake();

@@ -1,4 +1,57 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'sleepTiming.shortenHint': [
+    'Choose a shorter time. Automatic sleep cannot be disabled.',
+    'Scegli un tempo più breve. La sospensione automatica non può essere disattivata.',
+  ],
+  'sleepTiming.userAccess': ['User control', 'Controllo utente'],
+  'sleepTiming.access.hidden': ['Hidden from users', 'Nascosto agli utenti'],
+  'sleepTiming.access.editable': [
+    'Users can change or disable sleep',
+    'Gli utenti possono modificare o disattivare la sospensione',
+  ],
+  'sleepTiming.access.shorten-only': [
+    'Users can only shorten the timeout',
+    'Gli utenti possono solo ridurre il tempo',
+  ],
+  'sleepTiming.source.user': ['server preference', 'preferenza del server'],
+  'sleepTiming.source.global': ['instance', 'istanza'],
+  'sleepTiming.source.owner-server': ['Owner server setting', 'impostazione Owner del server'],
+  'sleepTiming.ownerControlled': [
+    'The Owner manages automatic sleep for this server.',
+    'La sospensione automatica di questo server è gestita dall’Owner.',
+  ],
+  'sleepTiming.title': ['Automatic sleep', 'Sospensione automatica'],
+  'sleepTiming.game': ['Game default', 'Valore predefinito del gioco'],
+  'sleepTiming.setting': ['Idle timeout', 'Tempo di inattività'],
+  'sleepTiming.inherit': ['Inherit ({value})', 'Eredita ({value})'],
+  'sleepTiming.override': ['Override', 'Personalizza'],
+  'sleepTiming.timeout': ['Time without players (minutes)', 'Tempo senza giocatori (minuti)'],
+  'sleepTiming.disabledHint': [
+    '-1 disables automatic sleep.',
+    '-1 disattiva la sospensione automatica.',
+  ],
+  'sleepTiming.disabled': ['Disabled', 'Disattivata'],
+  'sleepTiming.minutes': ['{minutes} min', '{minutes} min'],
+  'sleepTiming.invalid': [
+    'Enter a positive time or -1 to disable sleep.',
+    'Inserisci un tempo positivo oppure -1 per disattivare la sospensione.',
+  ],
+  'sleepTiming.locked': [
+    'These defaults are set by the environment configuration.',
+    'Questi valori sono impostati dalla configurazione di ambiente.',
+  ],
+  'sleepTiming.capability': [
+    'Applies to servers with supported Gateway sleep. Unknown player counts never count as an empty server.',
+    'Si applica ai server con sospensione tramite Gateway supportata. Un numero di giocatori sconosciuto non indica un server vuoto.',
+  ],
+  'sleepTiming.effective': [
+    'Current timeout: {value} · Source: {source}',
+    'Tempo attuale: {value} · Origine: {source}',
+  ],
+  'sleepTiming.source.server': ['server', 'server'],
+  'sleepTiming.source.runtime': ['runtime', 'runtime'],
+  'sleepTiming.source.game': ['game', 'gioco'],
+  'sleepTiming.source.default': ['instance', 'istanza'],
   'service.directConfigured': ['Configured', 'Configurato'],
   'service.directReachability': [
     'Direct connection. This address is configured by the Owner; external reachability has not been verified.',

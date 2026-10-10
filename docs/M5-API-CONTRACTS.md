@@ -90,7 +90,7 @@ routes and their audit rules.
 | `/transfers` | `files`, bounded text-editor capacity, upload availability/reason/provider byte ceiling/server disk allowance, streaming download support, public SFTP endpoint/configuration/issuance hints and backup permissions. Download total-size limit is `null`; real provider/storage limits still apply. |
 | `/connections` | Domain `mode` plus frozen `connectionMode: gateway/direct`, configured hostname/SRV metadata, DNS states and every allocation role/transport. Gateway ports retain `unconfigured`, `disabled`, `unavailable` or `available` route status. Direct ports use only frozen `direct_endpoint` and report `configured`/`unconfigured`, with `reachability: unverified`. Configuration never claims an externally tested connection. |
 | `/metrics` | `limit` 1–500 (default 100), `from`, `to`, `before` ISO timestamps; `{items,nextBefore}` in descending observation order. Missing intervals remain gaps. |
-| `/sleep-policy` | `{policy,state,proposedPolicy}`; policy/state remain null when unconfigured or direct. A trusted installed integration may supply a validated initial proposal for Gateway-mode servers. GET never saves it. Complete editable enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; state reuses M3 readiness and startup estimates. |
+| `/sleep-policy` | `{policy,state,proposedPolicy,idleTimeout,policyControlsEditable}`; policy/state remain null when unconfigured or direct. A trusted installed integration may supply a validated initial proposal for Gateway-mode servers. GET never saves it. Permission-aware enabled/protocol/version, idle/readiness/estimate/wake-retry fields and intent-derived mode; hidden timeout fields are omitted for ordinary users; state reuses M3 readiness and startup estimates. |
 
 SFTP connection details require explicit `sftpPublicHostname` and `sftpPublicPort`;
 the private SFTPGo API URL is never used as a public fallback. These settings follow
@@ -312,6 +312,31 @@ signed-report fields. The integration currently declares Vanilla 26.1/protocol 7
 Gateway behavior. Compiled declaration validation, bounded route leases and all M3
 safety fences remain mandatory. Direct servers are rejected by route/policy/wake
 handlers and queued Gateway-effect authorization.
+
+## 2026-10-10 — Inherited idle sleep timeouts
+
+Owner administration separates the global idle timeout, a game's override,
+per-runtime overrides and a per-server override. The effective Owner order is
+server → runtime → game → global (disabled by default). UI values are minutes,
+`-1` disables only automatic idle sleep, and inheritance is an explicit choice.
+Ordinary users cannot edit Owner defaults. Temporary support sessions cannot leave
+automation grants.
+
+User control follows the same hierarchy: **hidden** by default, **editable**, or
+**shorten-only**. Hidden settings do not render for ordinary users and cannot be
+edited through the API. Shorten-only users can choose an earlier idle timeout but
+cannot increase the effective Owner timeout or use `-1` to disable a finite limit.
+An Owner-disabled timeout permits any finite shorter timeout. A stored user choice
+cannot exceed a subsequently tightened Owner limit; hidden mode ignores stored
+user overrides. The Owner baseline and user preference use separate authority
+fields. Owner administration remains editable regardless of ordinary-user mode.
+Runtime declarations come from trusted integration manifests; no Minecraft-specific
+condition is introduced in the shared editor.
+
+See [M3 contracts](M3-API.md) for seconds-based API values, environment locking,
+legacy-disabled preservation, effective policy metadata and queued-stop checks.
+Changing an idle timeout does not create a Gateway route, grant wake consent,
+resume manual stops, start a server or certify an unsupported game/version.
 
 ## 2026-10-10 — Runtime-first wizard and complete discovery
 

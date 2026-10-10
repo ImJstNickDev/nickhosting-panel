@@ -24,6 +24,7 @@ import { assertServerBackendAllocations, canonicalAllocationAddress } from './al
 import { effectiveNodeOverhead } from './configuration.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
+import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -1050,6 +1051,7 @@ export async function processServerOperation(
                             },
                           });
                           await options.authorizeEffect(jobId, server.id, db);
+                          await assertIdleSleepAllowed(db, server.id, options.env);
                           // Persistence itself may wait; do not send a stale stop
                           // merely because its handoff record reached PostgreSQL.
                           assertGatewaySleepFence(operation.plan, nowOf(options));

@@ -114,6 +114,14 @@ export async function updateSettings(
       .values({ key: 'platform', value })
       .onConflict((c) => c.column('key').doUpdateSet({ value, updated_at: new Date() }))
       .execute();
+    if (
+      'gameIdleTimeouts' in patch ||
+      'defaultIdleTimeoutSeconds' in patch ||
+      'idleTimeoutUserAccess' in patch
+    ) {
+      // Generic settings writes share the specialized editor's idle fence.
+      await tx.updateTable('gateway_server_states').set({ idle_since: null }).execute();
+    }
     await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
     return resolved;
   });

@@ -32,6 +32,20 @@ const origin = (protocols: string[]) =>
       return protocols.includes(url.protocol) && url.origin === value;
     });
 
+export const gameIdleTimeoutSchema = z.union([z.literal(-1), z.number().int().min(1).max(604800)]);
+export const idleTimeoutUserAccessSchema = z.enum(['hidden', 'editable', 'shorten-only']);
+export const gameIdleTimeoutsSchema = z.record(
+  z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+  z.strictObject({
+    gameTimeoutSeconds: gameIdleTimeoutSchema.nullable(),
+    userAccess: idleTimeoutUserAccessSchema.nullable().default(null),
+    runtimeUserAccess: z
+      .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), idleTimeoutUserAccessSchema)
+      .default({}),
+    runtimeTimeouts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), gameIdleTimeoutSchema),
+  }),
+);
+
 export const platformConfigSchema = z
   .object({
     instanceName: z.string().trim().min(1).max(100),
@@ -120,6 +134,9 @@ export const platformConfigSchema = z
       .max(100)
       .refine((v) => posix.normalize(v) === v && !/[\0-\x20?#]/.test(v))
       .optional(),
+    gameIdleTimeouts: gameIdleTimeoutsSchema,
+    defaultIdleTimeoutSeconds: gameIdleTimeoutSchema,
+    idleTimeoutUserAccess: idleTimeoutUserAccessSchema,
     gatewayEnabled: z.boolean(),
     gatewayId: z.uuid().optional(),
     gatewayPhysicalHostId: z.uuid().optional(),
@@ -159,6 +176,9 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   maxConcurrentProvisionsPerUser: 4,
   observationMaxAgeSeconds: 15,
   sftpCredentialTtlSeconds: 3600,
+  gameIdleTimeouts: {},
+  defaultIdleTimeoutSeconds: -1,
+  idleTimeoutUserAccess: 'hidden',
   gatewayEnabled: false,
   gatewayLeaseSeconds: 15,
   gatewayNodeProbes: {},
@@ -232,6 +252,9 @@ export const configEnvironmentKeys = {
   minecraftDownloadOrigins: 'NH_MINECRAFT_DOWNLOAD_ORIGINS',
   minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
+  gameIdleTimeouts: 'NH_GAME_IDLE_TIMEOUTS',
+  defaultIdleTimeoutSeconds: 'NH_DEFAULT_IDLE_TIMEOUT_SECONDS',
+  idleTimeoutUserAccess: 'NH_IDLE_TIMEOUT_USER_ACCESS',
   gatewayEnabled: 'NH_GATEWAY_ENABLED',
   gatewayId: 'NH_GATEWAY_ID',
   gatewayPhysicalHostId: 'NH_GATEWAY_PHYSICAL_HOST_ID',
@@ -301,6 +324,7 @@ export function resolveConfig(
       key === 'pterodactylDownloadOrigins' ||
       key === 'pterodactylUploadOrigins' ||
       [
+        'gameIdleTimeouts',
         'gatewayNetworkPolicy',
         'gatewayObserver',
         'gatewayNodeProbes',
@@ -314,6 +338,9 @@ export function resolveConfig(
       } catch {
         invalid([key]);
       }
+    } else if (key === 'defaultIdleTimeoutSeconds') {
+      if (!/^(-1|[1-9]\d*)$/.test(value)) invalid([key]);
+      merged[key] = Number(value);
     } else if (key === 'maxServersPerUser' && value === 'null') {
       merged[key] = null;
     } else if (numericKeys.has(key)) {

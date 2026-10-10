@@ -35,6 +35,7 @@ import {
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { authorizeScheduledEffect } from './schedules.js';
+import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
@@ -152,6 +153,10 @@ export async function authorizeQueuedEffect(
     )
       throw new DomainError('forbidden');
     assertGatewaySleepFence(operation.plan, new Date(), true);
+    // Recovered effects already handed off remain confirmable; new stops must
+    // still satisfy the current inherited policy and retained positive idle proof.
+    if (marker.kind === 'sleep' && operation.plan.gatewaySleepHandoffAt === undefined)
+      await assertIdleSleepAllowed(db, serverId, env);
   }
 
   if (operation.action === 'provision') {
