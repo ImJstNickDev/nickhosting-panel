@@ -815,6 +815,40 @@ async function verifyInstalledRuntime(
   }
   return { profile, choice, verified, imageEvidence };
 }
+/** Recover only the first Vanilla egg installation from verified required outputs.
+ * This is not evidence that an installer script succeeded, and old files cannot
+ * establish completion of a reinstall or wipe. */
+export async function verifyMinecraftInitialInstallation(
+  context: GameLifecycleContext,
+  options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
+): Promise<import('./lifecycle.js').InitialInstallationOutputs | null> {
+  if (context.operation().action !== 'provision' || context.operation().phase !== 'installation')
+    return null;
+  const profile = await context.db
+    .selectFrom('minecraft_server_profiles')
+    .selectAll()
+    .where('server_id', '=', context.server.id)
+    .executeTakeFirst();
+  if (!profile || profile.installed) return null;
+  const choice = await inspectMinecraftCombination(
+    context.db,
+    profile.combination_id,
+    options.env ?? {},
+  );
+  const runtime = choice.row.resolved_runtime as ResolvedMinecraftRuntime;
+  if (runtime.profile !== 'vanilla' || runtime.installation.kind !== 'server-jar') return null;
+  await context.authorize();
+  const verified = await verifyInstalledRuntime(context, options);
+  await context.authorize();
+  if (!verified.imageEvidence.observed) throw new DomainError('configuration_invalid');
+  return {
+    integrationId: 'minecraft-java',
+    combinationId: profile.combination_id,
+    mappingDigest: verified.choice.mappingDigest,
+    imageDigest: verified.imageEvidence.observed,
+    files: verified.verified,
+  };
+}
 /** Read-only launch attestation. Re-run before power and for a new process epoch:
  * SFTP/provider writes do not pass through browser mutation authorization. */
 export async function assertMinecraftLaunchInputs(

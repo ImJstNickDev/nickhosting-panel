@@ -22,6 +22,7 @@ import {
   prepareMinecraftContentPlan,
   prepareMinecraftCreationConfig,
   processMinecraftContent,
+  verifyMinecraftInitialInstallation,
   verifyMinecraftPendingContent,
   verifyMinecraftRestore,
 } from './minecraft-content.js';
@@ -1096,6 +1097,53 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     });
   });
 
+  it('attests initial Vanilla outputs without writing configuration or claiming script success', async () => {
+    const { f, serverId, files, context, options, operation } = await minecraftFixture();
+    operation.action = 'provision';
+    operation.phase = 'installation';
+    const write = vi.spyOn(context.adapter, 'writeFile');
+    const receipt = await verifyMinecraftInitialInstallation(context, options);
+    expect(receipt).toMatchObject({
+      integrationId: 'minecraft-java',
+      files: [{ path: 'server.jar', size: files.get('server.jar')?.length }],
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('installed')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).installed,
+    ).toBe(false);
+    operation.action = 'reinstall';
+    expect(await verifyMinecraftInitialInstallation(context, options)).toBeNull();
+    operation.action = 'wipe';
+    expect(await verifyMinecraftInitialInstallation(context, options)).toBeNull();
+  });
+  it.each(['hash', 'image', 'authorization', 'launch'] as const)(
+    'rejects initial Vanilla recovery with invalid %s evidence',
+    async (failure) => {
+      const { files, context, options, operation } = await minecraftFixture();
+      operation.action = 'provision';
+      operation.phase = 'installation';
+      if (failure === 'hash') files.set('server.jar', Buffer.from('corrupted'));
+      if (failure === 'image') options.observedImageDigest = async () => 'invalid-image-digest';
+      if (failure === 'authorization')
+        context.authorize = async () => {
+          throw new Error('revoked');
+        };
+      if (failure === 'launch') {
+        const get = context.adapter.getApplicationServer;
+        context.adapter.getApplicationServer = async (id) => ({
+          ...(await get(id)),
+          container: { image: 'foreign', startup_command: 'foreign', installed: true },
+        });
+      }
+      await expect(verifyMinecraftInitialInstallation(context, options)).rejects.toThrow();
+    },
+  );
   it('verifies a declaration-backed Vanilla installation without signatures and still rejects changed artifacts', async () => {
     const { f, serverId, files, context, options } = await minecraftFixture();
     await f.db.deleteFrom('minecraft_verification_evidence').execute();

@@ -1900,6 +1900,110 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await noPower.installationReservation()).toBeUndefined();
     expect(noPower.adapter.createServer).not.toHaveBeenCalled();
   });
+  const outputReceipt = {
+    integrationId: 'fixture',
+    combinationId: 'fixture-combination',
+    mappingDigest: 'fixture-mapping',
+    imageDigest: `sha256:${'a'.repeat(64)}`,
+    files: [{ path: 'server.jar', sha256: 'b'.repeat(64), size: 100 }],
+  };
+  it('recovers a missed first-install event from verified outputs without replay or automatic power', async () => {
+    const f = await fixture('provision');
+    f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    expect(await f.installationReservation()).toBeDefined();
+    f.tick();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn(async () => outputReceipt);
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan.installationProof).toMatchObject({
+      method: 'required_outputs_verified',
+      operationId: f.jobId,
+      providerUuid: f.remote.uuid,
+      ...outputReceipt,
+    });
+    expect(await f.installationReservation()).toBeUndefined();
+    expect(f.options.confirmInitialInstallationStopped).toHaveBeenCalledTimes(2);
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.reinstall).not.toHaveBeenCalled();
+    expect(await f.run()).toBe('duplicate');
+    expect(f.options.verifyInitialInstallation).toHaveBeenCalledTimes(1);
+  });
+  it('resumes after a crash following the durable output receipt without repeating creation or proof', async () => {
+    const f = await fixture('provision');
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn(async () => outputReceipt);
+    f.options.configureGameProvision = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('crash'))
+      .mockResolvedValue(true);
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.installationProof).toMatchObject({
+      method: 'required_outputs_verified',
+    });
+    expect(await f.installationReservation()).toBeUndefined();
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.verifyInitialInstallation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.confirmInstallation).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it.each([
+    'installer',
+    'game',
+    'identity',
+    'outputs',
+    'revocation',
+    'status',
+    'creation-time',
+  ] as const)(
+    'retains first-install admission when recovery fails %s verification',
+    async (failure) => {
+      const f = await fixture('provision');
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => failure !== 'installer');
+      f.options.verifyInitialInstallation = vi.fn(async () => {
+        if (failure === 'outputs') throw new DomainError('conflict');
+        if (failure === 'revocation')
+          f.options.authorizeEffect = async () => {
+            throw new DomainError('forbidden');
+          };
+        if (failure === 'status') f.remote.status = 'installing';
+        return outputReceipt;
+      });
+      if (failure === 'game') f.setState('running');
+      if (failure === 'identity') f.remote.uuid = randomUUID();
+      if (failure === 'creation-time') f.remote.created_at = '2000-01-01T00:00:00Z';
+      expect(await f.run()).toBe(
+        ['identity', 'outputs', 'revocation'].includes(failure) ? 'failed' : 'waiting',
+      );
+      expect((await f.operation()).plan.installConfirmed).toBeUndefined();
+      expect(await f.installationReservation()).toBeDefined();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.reinstall).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['reinstall', 'wipe'] as const)(
+    'never substitutes initial output proof for %s completion',
+    async (action) => {
+      const f = await fixture(action);
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+      f.options.verifyInitialInstallation = vi.fn(async () => outputReceipt);
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await f.run();
+        f.tick();
+      }
+      expect(f.options.verifyInitialInstallation).not.toHaveBeenCalled();
+      expect((await f.operation()).plan.installConfirmed).toBeUndefined();
+      expect(await f.installationReservation()).toBeDefined();
+    },
+  );
   it('does not infer installation completion after a daemon reset clears Panel status', async () => {
     for (const action of ['provision', 'reinstall', 'wipe'] as const) {
       const f = await fixture(action, { autoStart: true });

@@ -50,6 +50,9 @@ export interface TrustedGameModule {
 }
 export interface GameRuntimeHooks {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
+  verifyInitialInstallation?(
+    context: GameLifecycleContext,
+  ): Promise<import('./lifecycle.js').InitialInstallationOutputs | null>;
   processContent(context: GameLifecycleContext): Promise<boolean>;
   verifyRestore(context: GameLifecycleContext): Promise<boolean>;
   assertRuntimeImage(

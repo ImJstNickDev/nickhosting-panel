@@ -56,10 +56,26 @@ export interface GameLifecycleContext {
   event: (messageKey: string, data?: Record<string, unknown>) => Promise<void>;
   backup: () => Promise<boolean>;
 }
+export interface InitialInstallationOutputs {
+  integrationId: string;
+  combinationId: string;
+  mappingDigest: string;
+  imageDigest: string;
+  files: { path: string; sha256: string; size: number }[];
+}
 export interface LifecycleOptions {
   adapter: PterodactylAdapter;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
+  /** Read-only, trusted integration attestation; never used for reinstall/wipe. */
+  verifyInitialInstallation?: (
+    context: GameLifecycleContext,
+  ) => Promise<InitialInstallationOutputs | null>;
+  /** Host-bound proof that both the installer and game process are stopped. */
+  confirmInitialInstallationStopped?: (
+    serverId: string,
+    connection: Kysely<Database>,
+  ) => Promise<boolean>;
   processGameContent?: (context: GameLifecycleContext) => Promise<boolean>;
   verifyGameRestore?: (context: GameLifecycleContext) => Promise<boolean>;
   env?: Environment;
@@ -681,7 +697,7 @@ export async function processServerOperation(
           return false;
         }
       },
-      onConfirmed: async () => {
+      onConfirmed: async (outputs?: InitialInstallationOutputs) => {
         await db.transaction().execute(async (tx) => {
           await lockResources(tx);
           await tx
@@ -691,6 +707,14 @@ export async function processServerOperation(
                 ...operation.plan,
                 installConfirmed: true,
                 installConfirmedAt: nowOf(options).toISOString(),
+                installationProof: outputs
+                  ? {
+                      method: 'required_outputs_verified',
+                      operationId: jobId,
+                      providerUuid: server.pterodactyl_uuid,
+                      ...outputs,
+                    }
+                  : { method: 'live_installation_event' },
               }),
               updated_at: nowOf(options),
             })
@@ -707,7 +731,9 @@ export async function processServerOperation(
           .selectAll()
           .where('job_id', '=', jobId)
           .executeTakeFirstOrThrow();
-        await event('servers.operation.install_confirmed');
+        await event('servers.operation.install_confirmed', {
+          method: outputs ? 'required_outputs_verified' : 'live_installation_event',
+        });
       },
     });
     const observeInstallation = async () => {
@@ -795,6 +821,42 @@ export async function processServerOperation(
           throw new DomainError('operation_uncertain');
       },
     });
+    const recoverInitialInstallation = async () => {
+      if (
+        operation.action !== 'provision' ||
+        operation.phase !== 'installation' ||
+        operation.plan.installConfirmed === true ||
+        !operation.effect_started_at ||
+        operation.plan.installationEffectPrepared !== true ||
+        !options.verifyInitialInstallation ||
+        !options.confirmInitialInstallationStopped
+      )
+        return false;
+      const plan = provisionPlanSchema.parse(operation.plan.provision);
+      const assertOutcome = async () => {
+        await options.authorizeEffect(jobId, server.id, db);
+        await options.verifyObservationHost?.(server.id, db);
+        const remote = await ownedRemote(db, server, options);
+        if (
+          !installed(remote) ||
+          remote.egg !== plan.eggId ||
+          !Number.isFinite(Date.parse(remote.created_at)) ||
+          Date.parse(remote.created_at) <
+            (operation.effect_started_at?.getTime() ?? Infinity) - 5_000 ||
+          (await resources()).current_state !== 'offline' ||
+          !(await options.confirmInitialInstallationStopped?.(server.id, db))
+        )
+          throw new DomainError('operation_uncertain');
+      };
+      await assertOutcome();
+      const outputs = await options.verifyInitialInstallation(gameContext());
+      if (!outputs) return false;
+      // Streaming hashes can take time: never release installer admission using
+      // authorization, provider identity or process observations from before the read.
+      await assertOutcome();
+      await installationCallbacks(false).onConfirmed(outputs);
+      return true;
+    };
     try {
       const command = parseCommand(job.command);
       if (
@@ -876,7 +938,11 @@ export async function processServerOperation(
             .execute();
           return finish(false, false, 'integration_unavailable');
         }
-        if (!(await observeInstallation()))
+        if (
+          operation.plan.installConfirmed !== true &&
+          !(installed(remote) && (await recoverInitialInstallation())) &&
+          !(await observeInstallation())
+        )
           return wait('installation_terminal_unproven', 'operation_uncertain');
         remote = await ownedRemote(db, server, options);
         if (!installed(remote)) return wait('installation');
@@ -1472,6 +1538,8 @@ export async function processServerOperation(
         ].includes(error.code)
       )
         return finish(false, false, code);
+      if (operation.phase === 'installation' && code === 'operation_uncertain')
+        return wait('installation_terminal_unproven', code);
       return wait('provider_unavailable', code);
     } finally {
       await db

@@ -1794,3 +1794,67 @@ disk values; no host observation or server was manually seeded.
 No real server was created, started or changed. No quota/configuration or infrastructure
 mutation was performed. Existing dev source watching applies this API correction.
 The Owner can retry creation; actual installation/start still require normal admission.
+
+## M5 follow-up — Recover a missed initial installation event
+
+The Owner's first provision remained in Activity after Pterodactyl had completed
+its installer. Initial investigation found an unconfigured Wings WebSocket origin;
+after the Owner corrected it, authenticated status/stats worked but the transient
+installation event had already passed. Successful Panel status alone was correctly
+insufficient. No completion event or successful historical script execution was
+invented.
+
+The trusted Vanilla module now offers read-only verification of initial installation
+outputs, reusing artifact size/hash, immutable launch binding and observed runtime
+image checks. The lifecycle requires its original provisioning effect, exact provider
+identity, fresh successful provider state, an offline game process and host-bound
+confirmation that installer/game containers are not running. Authorization and
+observations are checked again after streaming. An atomic
+`required_outputs_verified` receipt releases only that operation's installer
+reservation. Existing game configuration and automatic route activation then resume.
+Reinstall/wipe remain on the strict event-confirmation path; valid old files do not
+establish a new installation outcome. The generic adapter was not relaxed.
+
+The download-origin allowlist was also empty. A read-only signed-URL origin check
+identified the configured Wings host; the Owner added its HTTPS origin through
+protected settings. No token or signed URL was printed or published. Existing source
+watching applied the fix, and the worker resumed the original job without a manual
+database patch, retry command, recreation, reinstall, wipe or power request.
+
+Read-only final checks on 2026-10-10 confirmed: original job `succeeded`, error and
+wait reason cleared, phase `complete`, no active operation, local/provider installation
+complete, provider power `offline`, and zero remaining installer reservations for
+that server. The verified server JAR was 60,417,588 bytes. The pinned TCP Gateway
+route was enabled; this is configuration evidence, not a new player-connect or
+sleep/wake end-to-end test. The original request had automatic start disabled.
+
+The worker performed the already-requested game configuration through its normal
+managed-server workflow. Diagnostic accesses were read-only and limited to that
+Owner-created managed server. No new test server, infrastructure change, provider
+configuration change or unrelated server mutation was performed. Issue #18 remains
+unchanged. Rollback is a reviewed code revert preserving receipts, server files and
+Owner settings; do not delete or reinstall the completed server to roll back code.
+
+Validation (isolated provider fixtures; no new real game server):
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts`
+  — **132 passed, one new fixture assertion failed**. That assertion incorrectly
+  expected a valid first observed image digest to fail before any digest was pinned;
+  the fixture now supplies an invalid digest. Product image policy was not weakened.
+- The same command with
+  `-t 'initial|first-install|reinstall completion|wipe completion'` after correction
+  — **21 passed, 112 skipped**, both files passed. This is a targeted final rerun,
+  not a second full-suite result. Coverage includes missed-event recovery, repeat
+  delivery, interruption after the durable receipt, invalid artifact/image/launch
+  evidence, identity and authorization changes, running processes, provider-state
+  changes, creation-time mismatch, and exclusion of reinstall/wipe.
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/installation.test.ts`
+  — **8 passed**; the generic transient-event confirmation contract is preserved.
+- `scripts/dev.sh pnpm exec tsc --noEmit` and focused Biome on the seven changed
+  TypeScript files — passed. A missing `installed` field in a new test fixture was
+  caught by the earlier typecheck and corrected before the passing final check.
+- Independent read-only review found no remaining must-fix. No browser layout,
+  translations or API payloads changed, so no new screenshot run was needed.
+- `python3 scripts/check-governance.py` and `git diff --cached --check` — passed:
+  501 indexed text files, 103 existing review PNGs, 425 relative links, 4 TOML
+  files and 44 ignore cases. Staged content was also inspected manually.

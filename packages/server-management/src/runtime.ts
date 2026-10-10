@@ -362,6 +362,29 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   const lifecycle = {
     env,
+    verifyInitialInstallation: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await gameRuntime(context.db, context.server.id))?.verifyInitialInstallation?.(context) ??
+      null,
+    confirmInitialInstallationStopped: async (serverId: string, connection: Kysely<Database>) => {
+      await verifyObservationHost(serverId, connection);
+      const server = await connection
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+      if (!server?.pterodactyl_uuid || !server.pterodactyl_id || !containerObserver)
+        throw new DomainError('configuration_invalid');
+      await verifyManagedIdentity(
+        connection,
+        server,
+        await adapter.getApplicationServer(server.pterodactyl_id),
+      );
+      return (
+        (await containerObserver.stopped(server.pterodactyl_uuid, 'installer')) &&
+        (await containerObserver.stopped(server.pterodactyl_uuid, 'server'))
+      );
+    },
     configureGameProvision: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.configureProvision(context) ?? true,
     processGameContent: async (context: import('./lifecycle.js').GameLifecycleContext) => {

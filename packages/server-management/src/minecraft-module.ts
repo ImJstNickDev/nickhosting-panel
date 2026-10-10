@@ -21,6 +21,7 @@ import {
   configureMinecraftProvision,
   type MinecraftContentOptions,
   processMinecraftContent,
+  verifyMinecraftInitialInstallation,
   verifyMinecraftRestore,
 } from './minecraft-content.js';
 import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
@@ -362,6 +363,8 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
   }
 
   const hooks: GameRuntimeHooks = {
+    verifyInitialInstallation: (context) =>
+      verifyMinecraftInitialInstallation(context, { env, observedImageDigest }),
     assertRuntimeImage: assertMinecraftRuntimeImage,
     assertLaunchFiles,
     assertFileMutation,

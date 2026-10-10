@@ -517,10 +517,24 @@ creation or reinstall. Installer reservations share host capacity with running
 servers, but never count against the user's active-game budget. Reservations
 survive unknown remote outcomes and missed completion evidence.
 
-An installation is reported complete only after a fresh backend `install completed`
+The generic installation confirmation path requires a fresh backend `install completed`
 notification followed by successful current Panel installation state on the same
 connection, plus independent observation that the exact installer container has
 terminated. The notification occurs on failure too, and a daemon reset can clear
 Panel status; neither signal alone is sufficient. A disconnected/missed event is
-an uncertain result requiring review, not an automatic retry. Game readiness and
-artifact validation are separate plugin capabilities in later milestones.
+an uncertain result, not permission to repeat the remote installation.
+
+**M5 initial-install recovery amendment:** a trusted game module may instead verify
+the required outputs of the original provisioning operation. This is a separate
+`required_outputs_verified` receipt, not a claim that a missed completion event was
+observed. The initial Vanilla implementation verifies the resolved server artifact's
+size and hashes, immutable runtime/egg/launch binding and observed runtime image.
+The lifecycle also checks the original creation effect and managed identity, current
+successful provider state, an offline game process, proof that the exact installer
+is no longer running,
+and authorization before and after verification. Only then can it release the
+installation reservation and continue the existing game-configuration workflow.
+Reinstall and wipe cannot use this recovery: old valid files cannot prove a new
+installation succeeded. Unsupported modules retain the generic confirmation path.
+Game readiness remains a separate requirement; successful output verification does
+not prove the game has started or that Gateway traffic is ready.
