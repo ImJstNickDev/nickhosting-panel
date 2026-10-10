@@ -6,6 +6,13 @@ networks, proxy hosts, DNS records or production services have been created or
 changed by this configuration pass. Commands that build images, prepare persistent
 state or run Compose require the separate activation approval below.
 
+The later Owner-authorized activation attempt and its PostgreSQL permission
+blocker are recorded in [M5 validation](M5-VALIDATION.md#2026-10-10--controlled-development-activation-initial-attempt).
+That record supersedes the historical “not activated” status above; production
+remains unapproved. Future preparation gives only the PostgreSQL mount parent
+0711 for its image's UID transition, while actual PGDATA and other private
+paths remain 0700. It never repairs existing state automatically.
+
 ## Files and service boundaries
 
 | File | Purpose |

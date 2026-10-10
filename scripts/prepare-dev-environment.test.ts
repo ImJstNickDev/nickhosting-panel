@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createPrivateKey, X509Certificate } from 'node:crypto';
 import {
   chmod,
@@ -222,5 +223,50 @@ describe('future development-only preparation', () => {
     await writeFile(join(root, 'mountdata/unrelated'), 'preserve-original');
     await prepareDevelopmentEnvironment({ root, ownerApproved: true, publicUrl });
     expect(await readFile(join(root, 'mountdata/unrelated'), 'utf8')).toBe('preserve-original');
+  });
+
+  it('permits only PostgreSQL mount traversal under umask 077 and never repairs existing state', async () => {
+    const root = await fixture();
+    // Changing umask in a Vitest worker is unsupported and would affect unrelated
+    // tests. Exercise the real helper in a separate process confined to this temp root.
+    execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `const { prepareDevelopmentEnvironment } = await import(process.argv[1]);
+         process.umask(0o077);
+         await prepareDevelopmentEnvironment({
+           root: process.argv[2], ownerApproved: true, publicUrl: process.argv[3],
+         });`,
+        new URL('./prepare-dev-environment.mjs', import.meta.url).href,
+        root,
+        publicUrl,
+      ],
+      { timeout: 35_000, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    for (const directory of [
+      'mountdata',
+      'mountdata/dev',
+      'mountdata/dev/postgres',
+      'mountdata/dev/redis',
+      'mountdata/dev/app',
+      'mountdata/dev/app/content',
+      'mountdata/dev/app/sources',
+      'mountdata/dev/mail',
+      'mountdata/dev/mail-tls',
+    ]) {
+      const expected = directory === 'mountdata/dev/postgres' ? 0o711 : 0o700;
+      expect((await lstat(join(root, directory))).mode & 0o777, directory).toBe(expected);
+    }
+    const envPath = join(root, '.env.dev.local');
+    const environment = await readFile(envPath, 'utf8');
+    const postgres = join(root, 'mountdata/dev/postgres');
+    await chmod(postgres, 0o700);
+    await expect(
+      prepareDevelopmentEnvironment({ root, ownerApproved: true, publicUrl }),
+    ).rejects.toThrow('preserved');
+    expect((await lstat(postgres)).mode & 0o777).toBe(0o700);
+    expect(await readFile(envPath, 'utf8')).toBe(environment);
   });
 });

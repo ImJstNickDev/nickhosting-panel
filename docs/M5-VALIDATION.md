@@ -271,3 +271,65 @@ configuration pass; their complete prior results and failures above remain intac
 SFTPGo's three retained-transport expected failures and issue #18 remain unchanged,
 not security passes or resolved release gates. No existing test resources,
 Pterodactyl servers, Wings data or production service was mutated.
+
+## 2026-10-10 — controlled development activation, initial attempt
+
+The Owner separately authorized the exact development activation procedure at
+`64fb70bff3fff0095fcef063aad91ebd17fd1b89`. Local/PR HEAD matched, the worktree
+was clean, and name/alias/network collision checks passed. Available memory was
+about 25 GiB and disk about 79 GiB. The private before/after audit records Docker
+identities/network metadata without copying container environments or provider
+credentials.
+
+Executed only the approved networkless directory helper, non-overwriting dev
+preparation, `compose.dev.yaml` parsing, `build api web`, and initial dependency
+`up -d --wait postgres redis provider mailpit`. Both application images built.
+Dedicated environment/private-key/SMTP-auth files are ignored and mode 0600;
+the public TLS certificate is intentionally 0644. No production credentials were
+accessed. Image installation retained pnpm's ignored-build-script warnings;
+no dependency approval policy was changed.
+
+The initial dependency start **failed** because PostgreSQL could not traverse its
+new mount parent. Preparation created `mountdata/dev/postgres` as UID 1000 mode
+0700. The official PostgreSQL 18 image created `18/` as root mode 0755 and its
+actual `18/docker` PGDATA as UID 70 mode 0700, then dropped privilege. UID 70
+could not traverse the mount parent. Nine automatic failed restarts occurred,
+without OOM; the coordinator stopped only `nickhosting-dev-postgres-1` to stop
+that loop. No migration or application startup proceeded through this failure.
+
+At this pause boundary:
+
+| Resource/check | Actual result |
+| --- | --- |
+| `nickhosting-dev-postgres-1` | Stopped after the permission failure; 9 failed automatic restarts preserved in evidence. |
+| `nickhosting-dev-redis-1` | Healthy, 0 restarts; pinned image reports Redis 8.10.2. |
+| `nickhosting-dev-provider-1` | Healthy, 0 restarts. |
+| `nickhosting-dev-mailpit-1` | Healthy, 0 restarts. |
+| New network | Only `nickhosting-dev-data`, internal. |
+| External network / ingress | No new attachment to `prod-frontend`; web/Vite/API/worker not started. |
+| Host ports | No published bindings on any new container. Image EXPOSE metadata is not a published port. |
+| Internal DNS | Redis/provider/Mailpit resolve from the dev provider namespace. The stopped PostgreSQL does not resolve; an initial probe including it failed, then running-service checks passed. |
+| Provider | Five authenticated inventories return HTTP 200 and empty data; unauthenticated inventory 403; POST/PUT/PATCH/DELETE all 405. No production provider call occurred. |
+| Mailpit | Internal readiness HTTP 200; SMTP delivery/browser verification not yet tested. |
+| Existing resources | All 94 pre-existing container identities and network attachments preserved; 91 had unchanged start/status metadata. Three already-restarting unrelated containers continued their pre-existing restart loops; none was operated on. All 27 pre-existing networks retained. |
+
+Redis logs the existing-host `vm.overcommit_memory` warning. No sysctl/kernel or
+host change is authorized or applied. This is a deployment diagnostic, not a
+reason to modify unrelated infrastructure during activation.
+
+Independent review confirmed the minimal correction: **only** the new PostgreSQL
+mount parent needs 0711 (traversal, no listing/write); actual PGDATA and the dev
+ancestor stay 0700. Since this differs from the exact reviewed preparation, the
+coordinator requested narrow approval before applying `chmod 0711 --
+./mountdata/dev/postgres` and resuming the already-approved sequence. No recursive
+chmod, new privileged helper, deletion, credential regeneration or state reset is
+needed. Rollback stops PostgreSQL dev before restoring 0700 on that parent.
+
+The future preparation script now explicitly sets 0711 only on the exclusively
+created PostgreSQL parent using a no-follow directory handle, including under
+`umask 077`. It still refuses existing state. **8/8 targeted preparation tests**,
+including the separate-process umask/non-overwrite regression, passed. These
+source changes do not apply the correction to the existing development directory.
+No UI or application behavior was changed. NPM handoff remains blocked until the
+upstream is actually healthy; no HTTPS/WSS, browser mail, persistence restart or
+migration success is claimed at this boundary.

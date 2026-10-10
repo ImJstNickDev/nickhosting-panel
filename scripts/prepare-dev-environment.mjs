@@ -204,6 +204,20 @@ export async function prepareDevelopmentEnvironment({ root, ownerApproved, publi
       const path = join(devRoot, directory);
       await assertDirectoryChain(dirname(path));
       await mkdir(path, { mode: 0o700 });
+      if (directory === 'postgres') {
+        // PostgreSQL 18 drops to its own UID after creating the versioned data
+        // directory. Permit traversal of this new mount parent, never listing or
+        // writes. Set explicitly so a restrictive umask cannot remove traversal.
+        const parent = await open(
+          path,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+        try {
+          await parent.chmod(0o711);
+        } finally {
+          await parent.close();
+        }
+      }
     }
     await writeExclusive(join(devRoot, 'mail-tls/key.pem'), tls.key, 0o600);
     await writeExclusive(join(devRoot, 'mail-tls/cert.pem'), tls.cert, 0o644);
