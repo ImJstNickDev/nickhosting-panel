@@ -318,3 +318,30 @@ the last acknowledged cursor. It runs only after an Owner action. Cancellation
 may leave the submitted page saved; it does not claim rollback. Existing disabled
 versions require the explicit “Also enable previously disabled supported versions”
 option. No endpoint, authorization or availability default was relaxed.
+
+## 2026-10-10 — Bounded Owner catalogs and measured scans
+
+The Owner Minecraft compatibility list accepts `pageSize` (1–100) and `after`
+(UUID) for keyset pagination, returning `{items, nextCursor}`. Owner authorization
+is unchanged. Calls without query parameters retain the legacy array response
+and its 1,000-row limit; the WebPanel now consumes the paginated contract, with an
+explicit failure rather than silent truncation beyond its 20,000-entry guard.
+
+Rows include presentation-only `releaseTime` and `releaseTimeStatus`
+(`available`, `unknown`, `unavailable`). Dates come from the official Mojang
+manifest through the existing metadata client, with a three-second request timeout
+and a five-minute coalesced cache. Metadata outages leave the catalog readable.
+Unknown dates stay last; database insertion dates are never substituted. Frozen
+runtime identities, compatibility declarations and evidence are unchanged.
+
+The reusable catalog browser provides search, integration-supplied filters,
+date/name ordering, 25-row pages and a keyboard-scrollable bounded viewport.
+Minecraft supplies runtime, release-type and availability filters. The default
+order is actual newest release first, including snapshots in the same chronology.
+
+The reusable scan view shows acknowledged cursor progress and a bounded log.
+Before the first response the progress indicator is indeterminate. Remaining time
+is an approximate measured estimate available after two completed batch requests
+in the current run; resume excludes earlier downtime. Paused, failed and complete
+runs do not display a remaining-time estimate. Existing explicit enabling,
+cancellation and retry semantics are unchanged.

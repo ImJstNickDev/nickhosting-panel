@@ -3,6 +3,7 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type createDatabase, getSettings, registerGame } from '@nickhosting/database';
 import {
   createMinecraftIdentityProvider,
+  createMinecraftReleaseDateLookup,
   minecraftAvatarUrl,
   minecraftEditablePropertyKeys,
   minecraftManifest,
@@ -54,6 +55,7 @@ export function registerMinecraftRoutes(
   },
 ) {
   const { db, env, principal, body, management } = options;
+  const releaseDates = createMinecraftReleaseDateLookup();
   const owner = async (c: C) => {
     const context = await principal(c, true);
     ownerOnly(context);
@@ -85,12 +87,31 @@ export function registerMinecraftRoutes(
   });
   app.get('/v1/owner/minecraft/compatibility', async (c) => {
     await owner(c);
-    const rows = await db
-      .selectFrom('minecraft_combinations')
-      .select('id')
-      .orderBy('created_at', 'desc')
-      .limit(1000)
-      .execute();
+    const query = c.req.query();
+    const paginated = Object.keys(query).length > 0;
+    const page = paginated
+      ? parse(
+          z
+            .object({
+              pageSize: z.coerce.number().int().min(1).max(100).default(100),
+              after: z.uuid().optional(),
+            })
+            .strict(),
+          query,
+        )
+      : undefined;
+    let selection = db.selectFrom('minecraft_combinations').select('id');
+    if (page?.after) selection = selection.where('id', '>', page.after);
+    const fetched = await (page
+      ? selection.orderBy('id', 'asc').limit(page.pageSize + 1)
+      : selection.orderBy('created_at', 'desc').limit(1000)
+    ).execute();
+    const rows = page ? fetched.slice(0, page.pageSize) : fetched;
+    const nextCursor = page && fetched.length > page.pageSize ? (rows.at(-1)?.id ?? null) : null;
+    const { values } = await getSettings(db, env);
+    const dateForRelease = rows.length
+      ? await releaseDates(values.minecraftMetadataUserAgent ?? '')
+      : undefined;
     const result = [];
     for (const row of rows) {
       const choice = await inspectMinecraftCombination(db, row.id, env);
@@ -99,6 +120,7 @@ export function registerMinecraftRoutes(
         mappingId: choice.row.mapping_id,
         enabled: choice.row.enabled,
         combination: choice.combination,
+        ...dateForRelease?.(choice.combination.release),
         runtime: choice.row.resolved_runtime,
         binding: choice.row.binding,
         identityDigest: choice.row.identity_digest,
@@ -109,7 +131,7 @@ export function registerMinecraftRoutes(
         evidence: choice.evidence,
       });
     }
-    return c.json(result);
+    return c.json(page ? { items: result, nextCursor } : result);
   });
   app.post('/v1/owner/minecraft/compatibility', async (c) => {
     const context = await owner(c);

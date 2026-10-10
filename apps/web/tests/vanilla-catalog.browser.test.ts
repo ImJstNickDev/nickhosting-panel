@@ -64,7 +64,7 @@ describe('Owner automatic Vanilla discovery', () => {
       '26.3',
       '26.1',
       '1.21.11',
-      ...Array.from({ length: 21 }, (_, i) => `25w${String(i + 1).padStart(2, '0')}a`),
+      ...Array.from({ length: 41 }, (_, i) => `25w${String(i + 1).padStart(2, '0')}a`),
     ];
     const versions = versionIds.map((id) => {
       const url = `https://piston-meta.mojang.com/v1/packages/fixture/${id}.json`;
@@ -88,7 +88,12 @@ describe('Owner automatic Vanilla discovery', () => {
       return {
         id,
         type: id.startsWith('25w') ? 'snapshot' : 'release',
-        releaseTime: id.startsWith('25w') ? '2026-10-01T00:00:00Z' : '2026-01-01T00:00:00Z',
+        releaseTime:
+          id === '25w01a'
+            ? '2025-01-01T00:00:00Z'
+            : id.startsWith('25w')
+              ? '2026-10-01T00:00:00Z'
+              : '2026-01-01T00:00:00Z',
         url,
         sha1: createHash('sha1').update(bytes).digest('hex'),
       };
@@ -130,7 +135,7 @@ describe('Owner automatic Vanilla discovery', () => {
     provider?.dispose();
     await fixture?.close();
   });
-  async function discover() {
+  async function discover(waitForCompletion = true) {
     const response = owner.waitForResponse(
       (item) =>
         item.request().method() === 'POST' &&
@@ -139,16 +144,10 @@ describe('Owner automatic Vanilla discovery', () => {
     await owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }).click();
     const result = await response;
     expect(result.status()).toBe(200);
-    await browserExpect(
-      owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }),
-    ).toBeEnabled();
-    const details = owner
-      .locator('details')
-      .filter({ hasText: 'No dedicated-server download is available.' });
-    if (await details.count())
-      await details.evaluate((element) => {
-        (element as HTMLDetailsElement).open = true;
-      });
+    if (waitForCompletion)
+      await browserExpect(
+        owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }),
+      ).toBeEnabled();
     return result.json() as Promise<{
       items: { id?: string; status: string; version: string; reason?: string }[];
     }>;
@@ -290,21 +289,114 @@ describe('Owner automatic Vanilla discovery', () => {
     await owner
       .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
       .check();
-    const firstPage = await discover();
+    let releasePage: () => void = () => {};
+    const heldPage = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    await owner.route('**/v1/owner/minecraft/catalog/sync', async (route) => {
+      if (route.request().postDataJSON()?.cursor === 40) await heldPage;
+      await route.continue();
+    });
+    const scan = discover(false);
+    try {
+      await browserExpect(
+        owner.getByRole('progressbar', { name: 'Version discovery progress' }),
+      ).toHaveAttribute('value', '40');
+      await browserExpect(owner.getByText(/Estimated remaining time/)).toBeVisible();
+      await fixture.screenshot(owner, 'catalog-scan-progress-desktop-en');
+    } finally {
+      releasePage();
+    }
+    const firstPage = await scan;
+    await browserExpect(
+      owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }),
+    ).toBeEnabled();
+    await owner.unroute('**/v1/owner/minecraft/catalog/sync');
     expect(firstPage.items).toHaveLength(20);
     expect(firstPage.items.every((item) => item.version.startsWith('25w'))).toBe(true);
     const choices = (await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')) as {
       version: string;
       releaseType: string;
     }[];
-    expect(choices.filter((choice) => choice.releaseType === 'snapshot')).toHaveLength(21);
+    expect(choices.filter((choice) => choice.releaseType === 'snapshot')).toHaveLength(41);
     expect(
       choices.some((choice) => choice.version === '1.21.11' && choice.releaseType === 'release'),
     ).toBe(true);
-    await owner
-      .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
-      .uncheck();
     expect(provider.remoteCount()).toBe(1);
+  });
+  it('keeps a large Owner catalog bounded, filters it and orders releases by official dates', async () => {
+    const region = owner.getByRole('region', { name: 'Runtime combinations', exact: true });
+    await browserExpect(region.getByRole('row')).toHaveCount(26);
+    await browserExpect(region.getByRole('row').nth(1).getByRole('cell').first()).toHaveText(
+      '25w41a',
+    );
+    const height = await region.evaluate((element) => element.getBoundingClientRect().height);
+    expect(height).toBeLessThanOrEqual(420);
+    expect(await region.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
+      true,
+    );
+    await region.focus();
+    await owner.keyboard.press('End');
+    await owner.getByRole('button', { name: 'Next', exact: true }).click();
+    expect(await region.evaluate((element) => element.scrollTop)).toBe(0);
+    await owner.getByLabel('Version type', { exact: true }).selectOption('release');
+    await browserExpect(region.getByRole('row')).toHaveCount(4);
+    await owner.getByLabel('Availability', { exact: true }).selectOption('true');
+    await browserExpect(region.getByRole('row')).toHaveCount(3);
+    await owner.getByLabel('Search versions', { exact: true }).fill('1.21');
+    await browserExpect(region.getByRole('row')).toHaveCount(2);
+    await owner.getByLabel('Search versions', { exact: true }).fill('');
+    await owner.getByLabel('Version type', { exact: true }).selectOption('');
+    await owner.getByLabel('Sort by', { exact: true }).selectOption('oldest');
+    await browserExpect(region.getByRole('row').nth(1).getByRole('cell').first()).toHaveText(
+      '25w01a',
+    );
+    await owner.getByLabel('Sort by', { exact: true }).selectOption('newest');
+    await fixture.screenshot(owner, 'catalog-browser-desktop-en');
+    expect(
+      (
+        await new AxeBuilder({ page: owner })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    const log = owner.getByRole('log', { name: 'Checked versions', exact: true });
+    expect(await log.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    expect(
+      await log.evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeLessThanOrEqual(290);
+    await journeyRequest(fixture, owner, '/api/auth/update-user', {
+      name: 'Morgan Owner',
+      locale: 'it',
+    });
+    await owner.setViewportSize({ width: 390, height: 844 });
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
+    await owner.getByLabel('Cerca versioni', { exact: true }).fill('25w');
+    await owner
+      .getByRole('checkbox', { name: 'Includi snapshot e versioni storiche', exact: true })
+      .check();
+    await owner.getByRole('button', { name: 'Scopri versioni Vanilla', exact: true }).click();
+    await browserExpect(
+      owner.getByRole('button', { name: 'Scopri versioni Vanilla', exact: true }),
+    ).toBeEnabled();
+    await fixture.screenshot(owner, 'catalog-browser-mobile-it');
+    expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect(
+      (
+        await new AxeBuilder({ page: owner })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    // Return to EN for subsequent shared fixture cases.
+    await journeyRequest(fixture, owner, '/api/auth/update-user', {
+      name: 'Morgan Owner',
+      locale: 'en',
+    });
+    await owner.setViewportSize({ width: 1440, height: 1000 });
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
   });
   it('renders runtime and release-only labels on Italian mobile with no overflow', async () => {
     const user = identities.user;
@@ -361,7 +453,7 @@ describe('Owner automatic Vanilla discovery', () => {
       }),
     ).toHaveCount(2);
     expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(
-      23,
+      43,
     );
     expect(provider.remoteCount()).toBe(1);
   });

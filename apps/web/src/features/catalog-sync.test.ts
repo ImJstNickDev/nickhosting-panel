@@ -102,3 +102,59 @@ describe('Owner Vanilla catalog discovery', () => {
     expect(result.items.map((item) => item.version)).toEqual(['26.2']);
   });
 });
+
+describe('catalog progress estimates', () => {
+  it('estimates only after two acknowledged batches and excludes unavailable status from success claims', async () => {
+    const clock = vi
+      .fn()
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(3000)
+      .mockReturnValueOnce(9000);
+    const progress = vi.fn();
+    await syncCatalogPages({
+      signal: new AbortController().signal,
+      now: clock,
+      request: async (cursor) => batch(`v${cursor}`, cursor === 2 ? null : cursor + 1),
+      progress,
+    });
+    expect(progress.mock.calls.map(([, measured]) => measured)).toEqual([
+      { completed: 1, total: 3, remainingSeconds: null },
+      { completed: 2, total: 3, remainingSeconds: 2 },
+      { completed: 3, total: 3, remainingSeconds: null },
+    ]);
+  });
+
+  it('resumes with a new measurement window, excluding downtime and previous work', async () => {
+    const clock = vi
+      .fn()
+      .mockReturnValueOnce(100000)
+      .mockReturnValueOnce(101000)
+      .mockReturnValueOnce(104000)
+      .mockReturnValueOnce(105000);
+    const progress = vi.fn();
+    await syncCatalogPages({
+      signal: new AbortController().signal,
+      previous: batch('v0', 1, 4),
+      now: clock,
+      request: async (cursor) => batch(`v${cursor}`, cursor === 3 ? null : cursor + 1, 4),
+      progress,
+    });
+    expect(progress.mock.calls.map(([, measured]) => measured)).toEqual([
+      { completed: 2, total: 4, remainingSeconds: null },
+      { completed: 3, total: 4, remainingSeconds: 2 },
+      { completed: 4, total: 4, remainingSeconds: null },
+    ]);
+  });
+
+  it('does not invent a rate for a zero-duration run or empty catalog', async () => {
+    const progress = vi.fn();
+    await syncCatalogPages({
+      signal: new AbortController().signal,
+      now: () => 0,
+      request: async () => ({ items: [], total: 0, nextCursor: null }),
+      progress,
+    });
+    expect(progress.mock.calls[0]?.[1]).toEqual({ completed: 0, total: 0, remainingSeconds: null });
+  });
+});

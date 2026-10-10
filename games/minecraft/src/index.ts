@@ -1,4 +1,5 @@
 export * from './catalog.js';
+export * from './catalog-dates.js';
 export * from './compatibility.js';
 export * from './image-policy.js';
 export * from './management.js';

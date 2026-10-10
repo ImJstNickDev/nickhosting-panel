@@ -321,3 +321,19 @@ uncertain/blocked states. Sanitize credentials and test assets. The SFTPGo
 revocation exception in issue #18 remains a cross-milestone production-release
 gate; neither this milestone reorder nor a UI warning resolves it or authorizes
 deployment.
+
+## Integration catalogs and scan feedback
+
+Version catalogs use a bounded, keyboard-scrollable viewport, pagination, search
+and integration-supplied filters. Default ordering uses official release dates,
+newest first across release types; offer oldest-first and name ordering too.
+Unknown dates are explicit and placed last, never inferred from insertion order.
+Large catalogs and scan logs must not extend the page indefinitely.
+
+Show real acknowledged scan progress, an indeterminate indicator before totals
+are known, and an approximate remaining-time estimate only after sufficient
+measurements. Keep logs in a separately scrollable region without repeatedly
+announcing every line to screen readers. Preserve cancellation, honest partial
+results and explicit resume. EN/IT labels, keyboard scrolling and contained mobile
+overflow are required. `CatalogBrowser` and `ScanProgress` provide shared patterns
+for trusted integration views rather than Minecraft-specific application rules.

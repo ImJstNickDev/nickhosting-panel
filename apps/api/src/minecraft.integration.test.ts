@@ -214,6 +214,74 @@ async function post(path: string, input: unknown) {
   });
 }
 describe('Minecraft backend API authorization and user projection', () => {
+  it('paginates more than 1000 Owner combinations without truncation, duplication or cursor ambiguity', async () => {
+    const firstId = await eligibleChoice(false);
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', firstId)
+      .executeTakeFirstOrThrow();
+    const copies = Array.from({ length: 1000 }, (_, index) => {
+      const combination = {
+        ...(source.combination as Record<string, unknown>),
+        buildId: `fixture-${index}`,
+      };
+      return {
+        id: randomUUID(),
+        mapping_id: source.mapping_id,
+        identity_digest: minecraftDigest({ combination, binding: source.binding }),
+        combination: JSON.stringify(combination),
+        binding: JSON.stringify(source.binding),
+        resolved_runtime: JSON.stringify(source.resolved_runtime),
+        mapping_digest: source.mapping_digest,
+        enabled: source.enabled,
+      };
+    });
+    await fixture.db.insertInto('minecraft_combinations').values(copies).execute();
+    actor = fixture.owner;
+    const expected = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .select('id')
+      .orderBy('id', 'asc')
+      .execute();
+    const ids: string[] = [];
+    let after: string | null = null;
+    do {
+      const response = await app.request(
+        `/v1/owner/minecraft/compatibility?pageSize=100${after ? `&after=${after}` : ''}`,
+      );
+      expect(response.status).toBe(200);
+      const page = await response.json();
+      expect(page.items.length).toBeLessThanOrEqual(100);
+      expect(page.items[0]).toHaveProperty('releaseTime');
+      ids.push(...page.items.map((item: { id: string }) => item.id));
+      if (page.nextCursor) expect(page.nextCursor).toBe(page.items.at(-1).id);
+      after = page.nextCursor;
+    } while (after);
+    expect(ids).toEqual(expected.map((row) => row.id));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBeGreaterThan(1000);
+  });
+  it('validates Owner catalog pagination after authorization and preserves empty legacy arrays', async () => {
+    const endpoint = '/v1/owner/minecraft/compatibility';
+    expect((await app.request(`${endpoint}?pageSize=101&after=bad`)).status).toBe(403);
+    actor = fixture.owner;
+    for (const query of [
+      'pageSize=101',
+      'pageSize=0',
+      'pageSize=1.5',
+      'after=bad',
+      'unexpected=true',
+    ]) {
+      expect((await app.request(`${endpoint}?${query}`)).status).toBe(400);
+    }
+    const afterLast = await app.request(
+      `${endpoint}?pageSize=100&after=ffffffff-ffff-4fff-bfff-ffffffffffff`,
+    );
+    expect(await afterLast.json()).toEqual({ items: [], nextCursor: null });
+    const legacy = await (await app.request(endpoint)).json();
+    expect(Array.isArray(legacy)).toBe(true);
+  });
   it('rejects user access to every technical compatibility administration route', async () => {
     const id = randomUUID();
     for (const [method, path] of [

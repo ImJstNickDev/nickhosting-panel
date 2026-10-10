@@ -2,7 +2,10 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { ApiError, api } from '../api/client.js';
-import { useT } from '../app/i18n.js';
+import { useFormat, useT } from '../app/i18n.js';
+import { CatalogBrowser } from '../components/catalog-browser.js';
+import { loadCatalogPages } from '../components/catalog-pages.js';
+import { ScanProgress } from '../components/scan-progress.js';
 import {
   ActionForm,
   Check,
@@ -19,7 +22,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
-import { type CatalogBatch, syncCatalogPages } from './catalog-sync.js';
+import { type CatalogBatch, type CatalogMeasurement, syncCatalogPages } from './catalog-sync.js';
 
 const checks = [
   'installation',
@@ -73,6 +76,8 @@ interface Combination {
   mappingId: string;
   enabled: boolean;
   support: string;
+  releaseTime?: string | null;
+  releaseTimeStatus?: 'available' | 'unknown' | 'unavailable';
   supportAuthority?: 'integration' | 'evidence';
   capabilities?: {
     installation: boolean;
@@ -85,6 +90,7 @@ interface Combination {
   };
   combination: {
     release: string;
+    releaseType?: string;
     profile: string;
     javaMajor: number;
     protocolId: number | null;
@@ -100,7 +106,15 @@ export function OwnerMinecraftPage() {
   const t = useT();
   const combinations = useQuery({
     queryKey: ['owner-minecraft-compatibility'],
-    queryFn: ({ signal }) => api<Combination[]>('/v1/owner/minecraft/compatibility', { signal }),
+    queryFn: ({ signal }) =>
+      loadCatalogPages<Combination>(
+        (after) =>
+          api<{ items: Combination[]; nextCursor: string | null }>(
+            `/v1/owner/minecraft/compatibility?${new URLSearchParams({ pageSize: '100', ...(after ? { after } : {}) })}`,
+            { signal },
+          ),
+        signal,
+      ),
   });
   const [selected, setSelected] = useState<string>('');
   return (
@@ -114,50 +128,96 @@ export function OwnerMinecraftPage() {
         ) : !combinations.data?.length ? (
           <Empty />
         ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t('gameAdmin.version')}</th>
-                  <th>{t('gameAdmin.runtime')}</th>
-                  <th>{t('gameAdmin.java')}</th>
-                  <th>{t('gameAdmin.protocol')}</th>
-                  <th>{t('gameAdmin.installationSupport')}</th>
-                  <th>{t('gameAdmin.support')}</th>
-                  <th>{t('gameAdmin.availability')}</th>
-                  <th>{t('web.actions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {combinations.data.map((choice) => (
-                  <tr key={choice.id}>
-                    <td>{choice.combination.release}</td>
-                    <td>{choice.combination.profile}</td>
-                    <td>{choice.combination.javaMajor}</td>
-                    <td>{choice.combination.protocolId ?? t('web.unknown')}</td>
-                    <td>
-                      {t(
-                        choice.capabilities?.installation
-                          ? 'gameAdmin.declaredSupported'
-                          : 'web.unavailable',
-                      )}
-                    </td>
-                    <td>{t(`gameAdmin.${choice.support}`)}</td>
-                    <td>{t(choice.enabled ? 'web.enabled' : 'web.disabled')}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="secondary"
-                        onClick={() => setSelected(choice.id)}
-                      >
-                        {t('web.details')}
-                      </button>
-                    </td>
+          <CatalogBrowser
+            items={combinations.data.map((choice) => ({
+              ...choice,
+              label: choice.combination.release,
+            }))}
+            label={t('gameAdmin.combinations')}
+            filters={[
+              {
+                id: 'runtime',
+                label: t('gameAdmin.runtime'),
+                value: (choice) => choice.combination.profile,
+                options: [...new Set(combinations.data.map((choice) => choice.combination.profile))]
+                  .sort()
+                  .map((value) => ({ value, label: value })),
+              },
+              {
+                id: 'type',
+                label: t('catalog.releaseType'),
+                value: (choice) => choice.combination.releaseType ?? 'unknown',
+                options: ['release', 'snapshot', 'old_beta', 'old_alpha', 'unknown'].map(
+                  (value) => ({ value, label: t(`catalog.type.${value}`) }),
+                ),
+              },
+              {
+                id: 'enabled',
+                label: t('gameAdmin.availability'),
+                value: (choice) => String(choice.enabled),
+                options: [
+                  { value: 'true', label: t('web.enabled') },
+                  { value: 'false', label: t('web.disabled') },
+                ],
+              },
+            ]}
+          >
+            {(visible) => (
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t('gameAdmin.version')}</th>
+                    <th>{t('catalog.releaseDate')}</th>
+                    <th>{t('gameAdmin.runtime')}</th>
+                    <th>{t('gameAdmin.java')}</th>
+                    <th>{t('gameAdmin.protocol')}</th>
+                    <th>{t('gameAdmin.installationSupport')}</th>
+                    <th>{t('gameAdmin.support')}</th>
+                    <th>{t('gameAdmin.availability')}</th>
+                    <th>{t('web.actions')}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {visible.map((choice) => (
+                    <tr key={choice.id}>
+                      <td>{choice.combination.release}</td>
+                      <td>
+                        {choice.releaseTime ? (
+                          <Time value={choice.releaseTime} />
+                        ) : (
+                          t('web.unknown')
+                        )}
+                      </td>
+                      <td>{choice.combination.profile}</td>
+                      <td>{choice.combination.javaMajor}</td>
+                      <td>{choice.combination.protocolId ?? t('web.unknown')}</td>
+                      <td>
+                        {t(
+                          choice.capabilities?.installation
+                            ? 'gameAdmin.declaredSupported'
+                            : 'web.unavailable',
+                        )}
+                      </td>
+                      <td>{t(`gameAdmin.${choice.support}`)}</td>
+                      <td>{t(choice.enabled ? 'web.enabled' : 'web.disabled')}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => setSelected(choice.id)}
+                        >
+                          {t('web.details')}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </CatalogBrowser>
+        )}
+        {combinations.data?.some((choice) => choice.releaseTimeStatus === 'unavailable') && (
+          <Notice>{t('catalog.datesUnavailable')}</Notice>
         )}
       </Section>
       {combinations.data
@@ -325,6 +385,7 @@ function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: 
 }
 function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
   const t = useT();
+  const format = useFormat();
   const mappings = useQuery({
     queryKey: ['runtime-mappings'],
     queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
@@ -336,6 +397,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
   const [all, setAll] = useState(false);
   const [enableSupported, setEnableSupported] = useState(false);
   const [batch, setBatch] = useState<CatalogBatch>();
+  const [measurement, setMeasurement] = useState<CatalogMeasurement>();
   const [busy, setBusy] = useState(false);
   const [cancelled, setCancelled] = useState(false);
   const [failure, setFailure] = useState<unknown>();
@@ -356,6 +418,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
     setBusy(true);
     setCancelled(false);
     setFailure(undefined);
+    setMeasurement(undefined);
     if (batch?.nextCursor === null) setBatch(undefined);
     try {
       await syncCatalogPages({
@@ -366,7 +429,10 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
             signal,
             body: { mappingId: selected, all, enableSupported, cursor, limit: 20 },
           }),
-        progress: setBatch,
+        progress: (result, measured) => {
+          setBatch(result);
+          setMeasurement(measured);
+        },
       });
     } catch (error) {
       if (mounted.current) {
@@ -448,31 +514,53 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
               {t('web.cancel')}
             </button>
           )}
-          {batch && (
-            <div>
-              <p role="status">
-                {t(
+          {(busy || batch) && (
+            <div className="stack">
+              <ScanProgress
+                label={t('gameAdmin.scanProgress')}
+                completed={batch ? (batch.nextCursor ?? batch.total) : undefined}
+                total={batch?.total}
+                status={
+                  batch
+                    ? t(
+                        busy
+                          ? 'gameAdmin.syncProgress'
+                          : batch.nextCursor === null
+                            ? 'gameAdmin.syncComplete'
+                            : 'gameAdmin.syncPartial',
+                        { count: batch.nextCursor ?? batch.total, total: batch.total },
+                      )
+                    : t('gameAdmin.scanPreparing')
+                }
+                estimate={
                   busy
-                    ? 'gameAdmin.syncProgress'
-                    : batch.nextCursor === null
-                      ? 'gameAdmin.syncComplete'
-                      : 'gameAdmin.syncPartial',
-                  { count: batch.items.length, total: batch.total },
+                    ? measurement?.remainingSeconds != null
+                      ? t('gameAdmin.scanEstimate', {
+                          minutes: format.number(
+                            Math.max(1, Math.ceil(measurement.remainingSeconds / 60)),
+                            0,
+                          ),
+                        })
+                      : t('gameAdmin.scanEstimating')
+                    : undefined
+                }
+                logLabel={t('gameAdmin.scanLog')}
+              >
+                {batch && (
+                  <ul>
+                    {batch.items.map((item) => (
+                      <li key={item.version}>
+                        {item.version}:{' '}
+                        {t(
+                          item.status === 'registered' ? 'gameAdmin.registered' : 'web.unavailable',
+                        )}
+                        {item.reason && <> — {t(`gameAdmin.catalogReason.${item.reason}`)}</>}
+                      </li>
+                    ))}
+                  </ul>
                 )}
-              </p>
-              <p>{t('gameAdmin.syncEvidence')}</p>
-              <details>
-                <summary>{t('web.details')}</summary>
-                <ul>
-                  {batch.items.map((item) => (
-                    <li key={item.version}>
-                      {item.version}:{' '}
-                      {t(item.status === 'registered' ? 'gameAdmin.registered' : 'web.unavailable')}
-                      {item.reason && <> — {t(`gameAdmin.catalogReason.${item.reason}`)}</>}
-                    </li>
-                  ))}
-                </ul>
-              </details>
+              </ScanProgress>
+              {batch && <p>{t('gameAdmin.syncEvidence')}</p>}
             </div>
           )}
         </div>

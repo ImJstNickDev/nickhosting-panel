@@ -981,3 +981,64 @@ EN/IT/pseudolocale **1015 keys**. Actual dev HTTPS returned **200** and Chromium
 received a Vite **connected** frame over **WSS**; no sign-in or account mutation.
 Index governance passed: **463 text files, 70 review PNGs, 382 relative links,
 4 TOML files, 44 ignored-path cases**. Staged whitespace checks passed.
+
+## 2026-10-10 — Bounded Owner version catalog and scan feedback
+
+Owner integration catalogs now use a fixed-height scroll region with 25-row
+pages, search, runtime/type/availability filters and date/name ordering. Minecraft
+release dates come from the official Mojang manifest, independent of database
+insertion order; unknown dates remain explicit and last. Authorized API pagination
+also removes the WebPanel's former silent 1,000-row truncation. Shared catalog and
+scan components are reusable by other trusted integration modules.
+
+Scans show acknowledged progress, approximate remaining time after two measured
+batches and a bounded keyboard-scrollable log. The browser test holds the third
+fixture request temporarily, proving the displayed **40/44** progress and measured
+estimate before completion. Cancellation/resume and explicit enabling remain intact.
+
+Focused final commands and results:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/components/catalog-browser.test.ts apps/web/src/components/catalog-pages.test.ts apps/web/src/features/catalog-sync.test.ts games/minecraft/src/catalog-dates.test.ts`:
+  **18 passed**, including date fallback/order, pagination, cancellation/resume and
+  deterministic-clock ETA checks.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/minecraft.integration.test.ts -t 'paginates more than|validates Owner catalog pagination'`:
+  **2 passed, 13 filtered**, including 1,001 catalog entries without omissions or
+  duplicates, authorization, cursor validation and legacy response compatibility.
+- `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/vanilla-catalog.browser.test.ts`:
+  **6 passed**. Real application handlers/authentication and isolated PostgreSQL;
+  external provider/metadata fixtures. Search, filters, mixed chronological order,
+  pagination/scroll reset, keyboard scrolling and active scan progress verified.
+  Desktop EN/mobile IT have zero Axe violations, page errors or body overflow.
+- `scripts/dev.sh pnpm typecheck`: passed across core, web and browser tests.
+- `scripts/dev.sh pnpm build`: passed, **1,039** localized keys; the existing
+  large-bundle warning remains. No full historical or live Minecraft suite repeated.
+
+Preserved failed attempts: the first browser run had **4 passed, 2 failed** from
+asserting a log after clearing it and a stale fixture count. The next had **5 passed,
+1 failed**, with a held-request timeout/unhandled test promise caused by a wrong
+ETA text selector. Test sequencing/selectors were corrected; the final six-test
+run has no failures or unhandled errors. These were fixture/assertion defects,
+not evidence of successful earlier runs.
+
+Reviewed real Chromium screenshots:
+[Catalog desktop EN](screenshots/m5/catalog-browser-desktop-en.png),
+[Catalog mobile IT](screenshots/m5/catalog-browser-mobile-it.png),
+[Active scan desktop EN](screenshots/m5/catalog-scan-progress-desktop-en.png).
+Independent technical and visual/content review found **no remaining must-fix
+issues**. The identified 1,000-row truncation was resolved and tested. Optional
+log-follow behavior and removing the focused Skip link from future screenshots
+are nonblocking polish, not claimed completed work.
+
+No Owner settings, enabled versions, mappings, provider resources or development
+application data were changed. Existing source/i18n watchers deliver the change;
+no migration, container restart or new infrastructure is required. Only existing
+approved isolated test services and disposable schemas were used; no live game
+assets were created. SFTPGo #18 and Docker-socket #22 remain unchanged. Rollback
+is a source revert, with no catalog-record deletion. PR #21 remains unmerged.
+
+Final scoped Biome check: **16 files passed**, with three pre-existing
+`!important` warnings in reduced-motion CSS. `scripts/dev.sh pnpm i18n:check`
+passed for all 1,039 keys. `python3 scripts/check-governance.py` passed for
+**470 indexed text files, 73 review PNGs, 385 relative links, 4 TOML files and
+44 ignored-path cases**; staged whitespace passed. The secret scan is heuristic,
+complemented by source and sanitized screenshot review.
