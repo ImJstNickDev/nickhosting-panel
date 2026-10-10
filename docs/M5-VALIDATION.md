@@ -547,3 +547,50 @@ Wings filesystem mount exists in this stack. Real Panel discovery does not enabl
 SFTP credential issuance or file access through SFTPGo. Existing file-management
 APIs use the separate Pterodactyl adapter and retain their own managed-identity and
 transfer-origin requirements. Issue #18 and observer/evidence prerequisites remain.
+
+### 2026-10-10 — prepared development host observer (not activated)
+
+Owner requested operational dev prerequisites while retaining sole responsibility
+for creating physical hosts, managed nodes and egg mappings. The deployment gap
+also affected the earlier production Compose proposal; running web/API containers
+alone never established complete provisioning readiness.
+
+Implemented a bounded host-native Unix observer and optional dev overlay. API and
+worker use remote physical metrics and the existing container identity observer;
+neither receives Docker's socket or Wings files. New configuration is opt-in and
+not present in the active private Compose selection. Exact activation and rollback
+are in [development operational prerequisites](M5-DEV-READINESS.md); the rendered
+unit/environment and machine-specific proposal are private. No helper/socket
+service, lingering change or new mount has been activated. Seven existing dev
+services remain healthy. No Owner configuration records or real servers created.
+
+Focused evidence (no historical full-suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/host-observer.test.ts`:
+  **7 passed**, including actual isolated Unix IPC, wrong identity, bounded input,
+  exact path allowlist, permissions, sanitized failures and stale-socket recovery
+  after a fixture process crash. Independent reviewer also confirmed these tests.
+- Existing `container-observer.test.ts`: **104 passed**; underlying fixed Docker
+  commands and UUID/process/image checks retained.
+- `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts -t observer`:
+  **4 passed, 36 outside filter**, including real-mode opt-in and Compose scope.
+- Isolated M2 database harness, `remote-observer.integration.test.ts`: original
+  **3 passed**; additional expired/future sample cases **2 passed, 3 outside filter**.
+  Remote samples persist accurately; wrong identity/path/age does not replace prior
+  observations. An initial test expectation failed because the helper samples
+  before the client checks response identity; corrected the test to verify rejected
+  persistence, without weakening implementation. No test container lifecycle change.
+- `scripts/dev.sh pnpm typecheck`: passed; targeted Biome and whitespace passed.
+- `systemd-analyze --user verify .codex/local/nickhosting-dev-observer.service`:
+  passed without installing/starting a unit. Service name absent; lingering disabled.
+- Read-only host mount-table inspection verified the proposed project-owned disk
+  probe shares the Wings storage filesystem. Direct directory inspection was
+  permission-denied and Wings lacks `stat`; no permission alteration or content
+  access was attempted. The probe avoids mounting or reading game directories.
+
+Independent security/configuration review: **zero remaining must-fix findings**.
+Stale/future regression suggestions implemented, login/linger effects and stale
+socket single-instance requirement documented. Activation, API-to-live-helper
+sampling and actual service restart remain **pending exact Owner approval**, not
+passed tests. Minecraft mapping certification and Gateway listener deployment are
+separate remaining prerequisites; SFTPGo stays disabled and issue #18 unchanged.

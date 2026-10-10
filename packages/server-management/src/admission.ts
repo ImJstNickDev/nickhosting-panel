@@ -4,6 +4,7 @@ import { availableParallelism, cpus } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, type HostSnapshot, recordAudit } from '@nickhosting/database';
+import type { HostObservationSample } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { effectiveNodeOverhead, resolveHostOverride } from './configuration.js';
@@ -497,22 +498,7 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
 }
 
 /** Explicit local observer identity prevents silently sampling this host for a remote node. */
-export async function observeLocalHost(
-  db: Kysely<Database>,
-  hostId: string,
-  observerId: string,
-  managed: HostSnapshot['managed'],
-  env: Environment = {},
-) {
-  const host = resolveHostOverride(
-    await db
-      .selectFrom('physical_hosts')
-      .selectAll()
-      .where('id', '=', hostId)
-      .executeTakeFirstOrThrow(),
-    env,
-  );
-  if (host.observer_id !== observerId) throw new DomainError('configuration_invalid');
+async function sampleLocalResources(path: string): Promise<HostObservationSample> {
   const before = cpus().map((cpu) => cpu.times);
   await delay(250);
   const after = cpus().map((cpu) => cpu.times);
@@ -529,9 +515,8 @@ export async function observeLocalHost(
   const info = await readFile('/proc/meminfo', 'utf8');
   const amount = (name: string) =>
     Number(new RegExp(`^${name}:\\s+(\\d+)`, 'm').exec(info)?.[1]) / 1024;
-  const disk = await statfs(host.local_disk_path);
-  const now = new Date();
-  const snapshot = hostSnapshotSchema.parse({
+  const disk = await statfs(path);
+  return {
     totalMemoryMiB: amount('MemTotal'),
     availableMemoryMiB: amount('MemAvailable'),
     cpuCapacityPercent: availableParallelism() * 100,
@@ -539,9 +524,32 @@ export async function observeLocalHost(
       ? Math.max(0, (1 - idle / total) * availableParallelism() * 100)
       : availableParallelism() * 100,
     availableDiskMiB: (disk.bavail * disk.bsize) / 1048576,
-    managed,
-    observedAt: now.toISOString(),
-  });
+    observedAt: new Date().toISOString(),
+  };
+}
+
+export async function observeLocalHost(
+  db: Kysely<Database>,
+  hostId: string,
+  observerId: string,
+  managed: HostSnapshot['managed'],
+  env: Environment = {},
+  sample?: (path: string) => Promise<HostObservationSample>,
+) {
+  const host = resolveHostOverride(
+    await db
+      .selectFrom('physical_hosts')
+      .selectAll()
+      .where('id', '=', hostId)
+      .executeTakeFirstOrThrow(),
+    env,
+  );
+  if (host.observer_id !== observerId) throw new DomainError('configuration_invalid');
+  const measured = await (sample ?? sampleLocalResources)(host.local_disk_path);
+  const snapshot = hostSnapshotSchema.parse({ ...measured, managed });
+  const now = new Date(snapshot.observedAt);
+  const age = Date.now() - now.getTime();
+  if (age < -1000 || age > 5000) throw new DomainError('integration_unavailable');
   await db
     .insertInto('host_observations')
     .values({

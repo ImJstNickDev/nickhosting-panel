@@ -461,3 +461,12 @@ claim is invented; do not roll back only one half of an incompatible release.
   and [NPM advanced configuration](https://nginxproxymanager.com/advanced-config/).
 - [Mailpit SMTP/TLS](https://mailpit.axllent.org/docs/configuration/smtp/)
   and [runtime options](https://mailpit.axllent.org/docs/configuration/runtime-options/).
+
+## Operational readiness follow-up
+
+The missing host/container observation bridge is now prepared as a bounded local
+helper and opt-in socket overlay; it is **not activated**. See
+[development operational prerequisites](M5-DEV-READINESS.md) for the exact approval
+boundary, restart/rollback behavior and Owner-owned configuration. This also
+clarifies the earlier production Compose readiness limitation. No host, node or
+runtime mapping is pre-populated.

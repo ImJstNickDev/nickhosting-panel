@@ -161,6 +161,28 @@ describe('scoped container environment', () => {
       ).toThrow(/independent/);
   });
 
+  it('enables the bounded host observer only with an explicit real-mode identity/socket pair', () => {
+    const input = {
+      ...deployment('development'),
+      NH_DEV_PROVIDER_MODE: 'real',
+      NH_DEV_OBSERVER_ID: 'dev-host',
+      NH_DEV_HOST_OBSERVER_SOCKET: '/run/nickhosting-observer/observer.sock',
+    };
+    const env = containerEnvironment(input);
+    expect(env.NH_OBSERVER_ID).toBe('dev-host');
+    expect(env.NH_HOST_OBSERVER_SOCKET).toBe(input.NH_DEV_HOST_OBSERVER_SOCKET);
+    expect(env.NH_DOCKER_OBSERVER_SOCKET).toBeUndefined();
+    for (const overrides of [
+      { NH_DEV_PROVIDER_MODE: 'sandbox' },
+      { NH_DEV_OBSERVER_ID: undefined },
+      { NH_DEV_OBSERVER_ID: '../other' },
+      { NH_DEV_HOST_OBSERVER_SOCKET: undefined },
+      { NH_DEV_HOST_OBSERVER_SOCKET: '/var/run/docker.sock' },
+    ])
+      expect(() => containerEnvironment({ ...input, ...overrides })).toThrow(/observer/);
+    expect(containerEnvironment(deployment('development')).NH_HOST_OBSERVER_SOCKET).toBeUndefined();
+  });
+
   it('encodes URL-reserved password characters without changing connection hosts', () => {
     const password = `test-only:@/%?#[]${'x'.repeat(32)}`;
     const result = containerEnvironment({
@@ -689,7 +711,11 @@ type ComposeConfiguration = {
 
 // Parse examples only: no .env auto-discovery and no inherited deployment/provider keys.
 // `compose config` is read-only and never connects to or creates Docker resources.
-function composeConfiguration(scope: 'dev' | 'prod', realProvider = false): ComposeConfiguration {
+function composeConfiguration(
+  scope: 'dev' | 'prod',
+  realProvider = false,
+  observer = false,
+): ComposeConfiguration {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) =>
@@ -707,11 +733,17 @@ function composeConfiguration(scope: 'dev' | 'prod', realProvider = false): Comp
       '-f',
       `compose.${scope}.yaml`,
       ...(realProvider ? ['-f', 'compose.dev.real.yaml'] : []),
+      ...(observer ? ['-f', 'compose.dev.observer.yaml'] : []),
       'config',
       '--format',
       'json',
     ],
-    { cwd: repository, env: environment, encoding: 'utf8', timeout: 15_000 },
+    {
+      cwd: repository,
+      env: { ...environment, ...(observer ? { NH_DEV_OBSERVER_ID: 'test-host' } : {}) },
+      encoding: 'utf8',
+      timeout: 15_000,
+    },
   );
   expect(parsed.error).toBeUndefined();
   expect(parsed.status, parsed.stderr).toBe(0);
@@ -719,6 +751,22 @@ function composeConfiguration(scope: 'dev' | 'prod', realProvider = false): Comp
 }
 
 describe('deployment Compose isolation (read-only configuration parsing)', () => {
+  it('mounts only the narrow observer socket into real API/worker without new networks or services', () => {
+    const base = composeConfiguration('dev', true);
+    const configured = composeConfiguration('dev', true, true);
+    expect(Object.keys(configured.services)).toEqual(Object.keys(base.services));
+    expect(configured.networks).toEqual(base.networks);
+    for (const [name, service] of Object.entries(configured.services)) {
+      const mounts = service.volumes ?? [];
+      expect(JSON.stringify(mounts)).not.toContain('/var/run/docker.sock');
+      const observerMount = mounts.find((mount) => mount.target === '/run/nickhosting-observer');
+      if (name === 'api' || name === 'worker') {
+        expect(observerMount).toMatchObject({ read_only: true, bind: { create_host_path: false } });
+        expect(service.environment?.NH_DEV_OBSERVER_ID).toBe('test-host');
+      } else expect(observerMount).toBeUndefined();
+    }
+  });
+
   it('gives only real-provider API/worker egress while preserving internal storage and ingress', () => {
     const { services, networks, name } = composeConfiguration('dev', true);
     expect(name).toBe('nickhosting-dev');

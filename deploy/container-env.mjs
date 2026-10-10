@@ -13,6 +13,16 @@ export function containerEnvironment(input) {
     (providerMode !== 'real' || !/^[a-f0-9]{64}$/.test(evidenceKey))
   )
     throw new Error('Invalid deployment field: NH_DEV_MINECRAFT_EVIDENCE_KEY');
+  const observerSocket = input.NH_DEV_HOST_OBSERVER_SOCKET;
+  const observerId = input.NH_DEV_OBSERVER_ID;
+  if (development && (observerSocket !== undefined || observerId !== undefined)) {
+    if (
+      providerMode !== 'real' ||
+      observerSocket !== '/run/nickhosting-observer/observer.sock' ||
+      !/^[a-zA-Z0-9_-]{1,64}$/.test(observerId ?? '')
+    )
+      throw new Error('Invalid development host observer configuration');
+  }
   const prefix = development ? 'NH_DEV_' : 'NH_PROD_';
   const notDevKey = (key) => !key.startsWith('NH_DEV_');
   const required = (name, secret = false) => {
@@ -140,7 +150,13 @@ export function containerEnvironment(input) {
         NH_PTERODACTYL_UPLOAD_ORIGINS: '[]',
         NH_MINECRAFT_DOWNLOAD_ORIGINS: '[]',
       });
-    else if (evidenceKey !== undefined) env.NH_MINECRAFT_EVIDENCE_KEY = evidenceKey;
+    else {
+      if (evidenceKey !== undefined) env.NH_MINECRAFT_EVIDENCE_KEY = evidenceKey;
+      if (observerSocket !== undefined) {
+        env.NH_HOST_OBSERVER_SOCKET = observerSocket;
+        env.NH_OBSERVER_ID = observerId;
+      }
+    }
   }
   return env;
 }

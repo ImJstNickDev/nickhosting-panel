@@ -1,0 +1,23 @@
+# Add only after approving the host helper activation in docs/M5-DEV-READINESS.md.
+# API/worker receive the bounded RPC socket, never the host Docker socket/files.
+services:
+  api:
+    environment:
+      NH_DEV_HOST_OBSERVER_SOCKET: /run/nickhosting-observer/observer.sock
+      NH_DEV_OBSERVER_ID: ${NH_DEV_OBSERVER_ID:?Verified physical observer identity required}
+    volumes:
+      - type: bind
+        source: ./mountdata/dev/observer
+        target: /run/nickhosting-observer
+        read_only: true
+        bind: { create_host_path: false }
+  worker:
+    environment:
+      NH_DEV_HOST_OBSERVER_SOCKET: /run/nickhosting-observer/observer.sock
+      NH_DEV_OBSERVER_ID: ${NH_DEV_OBSERVER_ID:?Verified physical observer identity required}
+    volumes:
+      - type: bind
+        source: ./mountdata/dev/observer
+        target: /run/nickhosting-observer
+        read_only: true
+        bind: { create_host_path: false }
