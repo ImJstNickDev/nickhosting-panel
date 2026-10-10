@@ -9,8 +9,10 @@ state or run Compose require the separate activation approval below.
 The later Owner-authorized activation attempt, PostgreSQL permission blocker and
 [successful internal activation](M5-VALIDATION.md#2026-10-10--approved-permission-correction-and-internal-development-readiness)
 are recorded in M5 validation, preserving the initial failures. The eight dev
-services are now healthy; **Owner NPM configuration and external HTTPS/WSS tests
-remain pending**. This supersedes the historical “not activated” status above;
+services were healthy at that handoff. The subsequent **Owner-authorized real
+provider mode** below supersedes the simulator-only restriction. NPM is now
+serving HTTPS; current focused evidence is in the latest M5 validation entry.
+This supersedes the historical “not activated” status above;
 production remains unapproved. Future preparation gives only the PostgreSQL mount parent
 0711 for its image's UID transition, while actual PGDATA and other private
 paths remain 0700. It never repairs existing state automatically.
@@ -20,6 +22,7 @@ paths remain 0700. It never repairs existing state automatically.
 | File | Purpose |
 | --- | --- |
 | `compose.dev.yaml` | Project `nickhosting-dev`; persistent review environment with source reload. |
+| `compose.dev.real.yaml` | Explicit real-provider overlay: API/worker egress and configured resolver, no simulator dependency. |
 | `compose.prod.yaml` | Project `nickhosting-prod`; configuration-only immutable release deployment. |
 | `Dockerfile` | Pinned Node 24.21.0, pnpm 10.33.0; development, compiled runtime and separate Nginx ingress stages. |
 | `.dockerignore` | Build-input allowlist excluding local environments, Git/Codex state, persistence, archives and keys. |
@@ -31,8 +34,9 @@ paths remain 0700. It never repairs existing state automatically.
 | `scripts/build-runtime.mjs` | Compiled JS workspaces, production exports and immutable SQL migration assets. |
 | `scripts/prepare-dev-environment.mjs` | Explicitly approved, nonroot, non-overwriting preparation of development secrets/storage/TLS. |
 
-Development has eight long-running services: `web`, `vite`, `api`, `worker`,
-`postgres`, `redis`, `provider`, `mailpit`. The `migrate` tools-profile service is
+Sandbox development has eight long-running services: `web`, `vite`, `api`, `worker`,
+`postgres`, `redis`, `provider`, `mailpit`. Real mode uses seven; the simulator is
+profiled off and can remain stopped without deletion. The `migrate` tools-profile service is
 an explicit one-shot operation. Production has `web`, `api`, `worker`, `postgres`,
 `redis` and the separate one-shot migrator; it contains no Vite, source mounts,
 provider simulator or captured-mail service.
@@ -52,11 +56,19 @@ configured external services. No service publishes a host port. PostgreSQL,
 Redis, Mailpit and the simulator have no NPM/public route. No Docker socket,
 Wings mount, host networking, privileged container or production data mount exists.
 
+The opt-in real overlay adds only `nickhosting-dev-egress` for API/worker outbound
+connections and the Owner-specified `NH_DEV_PROVIDER_DNS` resolver. It preserves
+the existing internal networks and web's external attachment. PostgreSQL, Redis,
+Mailpit, Vite and the simulator do not join egress. No proxy, second Panel, host
+port or production-network attachment is introduced for API/worker.
+
 An internal Docker network removes normal external routing; it is **not a
 complete host firewall**. Host services listening on its bridge gateway may still
-be reachable. Dev provider credentials and URLs are therefore independently
-locked to the local simulator at process startup, with no production keys or
-fallback. The ingress alone has production-network connectivity and implements
+be reachable. In the default sandbox mode, provider credentials and URLs are
+locked to the local simulator at process startup. Real mode deliberately uses
+Owner-configured Panel credentials under the existing managed-server ownership
+checks; it never imports existing Panel servers. The ingress alone has a direct
+production-network attachment and implements
 fixed upstream routes, not an arbitrary forwarding proxy. Its container receives
 no application secrets. Network attachment grants no authority to inspect or
 modify other services.
@@ -149,7 +161,7 @@ mail verification links belong in public evidence.
 | Redis instance / job prefix | Dedicated / `nickhosting-dev` | Dedicated / `nickhosting-prod` |
 | Persistence | `mountdata/dev/{postgres,redis,app,mail,mail-tls}` | `mountdata/prod/{postgres,redis,app}` |
 | Auth/encryption/setup | Independent generated secrets | Independently generated production secrets |
-| Provider | Local read-only empty inventory | Separately approved configuration/credentials |
+| Provider | Default sandbox, or explicit real mode using protected Owner settings | Separately approved configuration/credentials |
 
 App content/source staging lives under each environment's `app/`. Long bind
 syntax uses `create_host_path: false`; starting Compose cannot silently create
@@ -159,17 +171,124 @@ creates only its dedicated empty database/user. Restarting services retains revi
 accounts and data; tests retain their own `nickhosting-m2-tests` database and
 schema guards and must never run against this environment.
 
-Dev runtime rejects production-prefixed and direct external-provider settings,
+Dev runtime rejects production-prefixed and direct unscoped external-provider settings,
 generic database/job overrides, placeholder/reused credentials and disabled TLS
-verification. It pins Pterodactyl to `http://provider:9090`, disables real
-SFTPGo/Cloudflare/CurseForge authority and leaves Gateway disabled. The simulator
+verification. Sandbox pins Pterodactyl to `http://provider:9090`. Both modes disable
+SFTPGo/Cloudflare/CurseForge authority and leave Gateway disabled. The simulator
 supports connection validation and empty inventory only; game provisioning and
-provider-specific operations correctly remain unavailable. No routine UI action
+provider-specific operations correctly remain unavailable in sandbox. No sandbox UI action
 can create/delete a production server through these pinned provider credentials.
-Do not paste production credentials into the setup wizard or Owner settings.
-For first-run use the local simulator URL and independently generated sandbox
+For sandbox first-run use the local simulator URL and independently generated sandbox
 token from the private dev file in both key fields; environment precedence remains
-visible and authoritative. No game support evidence is fabricated.
+visible and authoritative. Real mode's deliberate credential reuse is described
+below; independent database/auth/encryption secrets must never be replaced with
+production values. No game support evidence is fabricated.
+
+## Real-provider development: configuration and daily use
+
+On 2026-10-10 the Owner explicitly authorized using the existing real Pterodactyl
+Panel for interactive development, including entering its Application/Client keys
+through protected NickHosting interfaces. This changes the earlier simulator-only
+policy, not the production deployment or unrelated-server mutation boundaries.
+
+The small mode selector is `NH_DEV_PROVIDER_MODE=sandbox|real`; omitted means
+sandbox, unknown values fail. The real Compose overlay sets `real` for API,
+worker and the explicit tools-profile migrator. The migrator retains only the
+internal data network and gains no provider access. In real mode the entrypoint supplies **no Pterodactyl URL, keys or
+transfer-origin overrides**. The regular settings/secret stores and adapter take
+effect, with encrypted write-only keys and defaults < Owner DB < explicit env
+precedence. Missing settings/keys fail unavailable rather than falling back to the
+simulator. The original Minecraft download-origin defaults also become available;
+the Owner can configure them normally. No provisioning/lifecycle implementation,
+authorization, session, CSRF or Origin rule changes.
+
+For this existing environment the private `.env.dev.local` records:
+
+```dotenv
+COMPOSE_FILE=compose.dev.yaml:compose.dev.real.yaml
+NH_DEV_PROVIDER_DNS=OWNER_SPECIFIED_RESOLVER
+```
+
+Use the resolver from private infrastructure notes; never commit its actual
+address. Compose reads the selected files from that environment file. **Do not
+append `-f compose.dev.yaml` to daily commands: explicit `-f` overrides the saved
+real-mode file selection.** The original activation commands below are historical.
+
+```sh
+docker compose --env-file .env.dev.local config --quiet
+docker compose --env-file .env.dev.local up -d --wait
+docker compose --env-file .env.dev.local stop
+# After deployment-adapter/dependency changes, rebuild/recreate only what changed:
+docker compose --env-file .env.dev.local build api
+docker compose --env-file .env.dev.local up -d --no-deps --wait api worker
+```
+
+No preparation, migration, chmod or account reset is needed on ordinary restarts.
+Review data, independent secrets, PostgreSQL/Redis state and source watching are
+preserved. Existing provider simulator credentials may remain private for a later
+return to sandbox; real mode never uses them.
+
+### Owner connection and Minecraft eligibility
+
+1. Sign in to the existing Owner account at `/owner/settings`. A completed sandbox
+   setup does not need a reset or a second Owner. For a genuinely new instance,
+   `/setup` accepts the same Panel URL and two keys through its protected flow.
+2. In the **Pterodactyl** section above Credentials, expand **Panel API URL**
+   (**URL API Panel** in Italian). Save `pterodactylBaseUrl` as the actual Panel
+   **HTTPS URL**, without adding `/api`, then save the
+   write-only `pterodactylApplicationKey` and `pterodactylClientKey` separately.
+   Enter real keys only in those private form fields, never in chat, source,
+   build arguments or frontend environment variables. An earlier sandbox bootstrap
+   may have stored no provider values because they were environment-locked.
+   If an old simulator URL is stored, replace it explicitly; there is no automatic
+   configuration deletion. No restart is needed after these DB-backed saves.
+3. Open `/owner/infrastructure` to discover actual nodes, nests, eggs and existing
+   allocations through the standard adapter. Missing scopes remain errors; no
+   automatic privilege increase or allocation/node/egg edit occurs. Configure
+   physical host, managed node, validated backend allocation pool and the Vanilla
+   runtime/egg mapping, including the actual image, startup and egg variables.
+   Configure the required metadata user-agent and exact trusted Wings WebSocket,
+   upload and download origins through Owner settings where applicable.
+4. In `/owner/integrations`, register/enable the trusted `minecraft-java` module
+   and choose its rollout. In `/owner/integrations/minecraft-java`, register the
+   exact Vanilla release/runtime/binding, import valid signed real-server evidence,
+   and enable availability. `/servers/new` shows only permitted, enabled, verified
+   combinations. A checkbox cannot manufacture compatibility; other runtimes and
+   Satisfactory remain unavailable unless their own requirements are satisfied.
+
+Evidence verification uses the existing server-only key contract. Real mode accepts
+optional **`NH_DEV_MINECRAFT_EVIDENCE_KEY`**, exactly 64 lowercase hex characters,
+and maps it to that verifier. It must be the trusted runner's original key, stored
+only in the private environment; this task does not generate a key, re-sign a
+report or claim new evidence. Sandbox rejects this option. Setting it requires a
+scoped API/worker recreation to load the environment, not a database reset.
+
+Historical M4 Vanilla 26.1 / Java 25 evidence is **not automatically portable** to
+a newly created mapping. Reuse requires the intact report/signature and key plus
+exact matching mapping, runtime and binding digests. Mapping identity includes its
+UUID and managed-node UUID; runtime metadata receipts include checksums, including
+the global Mojang manifest. Equivalent-looking settings or a changed metadata
+manifest may therefore fail verification legitimately. The shortest valid path
+is to check the original evidence context against the configured mapping; if it
+cannot match, a separately authorized real test must certify that exact mapping.
+Never edit the evidence or bypass validation to expose an ordinary-user choice.
+
+**Provider connectivity is not execution readiness.** Current provisioning/start
+also requires approved host/container observer access, a matching observer ID and
+fresh resource/image evidence. This dev stack intentionally has no Docker socket
+or host-observer mount; none is added by the provider switch. Real server operations
+remain blocked by those existing checks until an exact observer-access proposal
+is separately approved. Gateway deployment/listeners, SFTPGo, DNS writes and other
+production-release prerequisites remain separate. No real test server is created
+to prove this configuration change.
+
+To return to sandbox, stop only dev API/worker, change private `COMPOSE_FILE` back
+to `compose.dev.yaml`, remove any optional dev evidence-key setting, then run
+`docker compose --env-file .env.dev.local up -d --wait provider api worker`.
+This restores sandbox environment precedence without deleting the Owner's encrypted
+real-provider settings or accounts. Do not reset the DB, run prune/orphan removal,
+delete persistent paths or alter the external network. Any unused dev egress network
+can remain until separately scoped cleanup.
 
 Mailpit captures development mail privately. SMTP requires authenticated STARTTLS;
 the generated certificate names `mailpit`, and only its certificate is added to
@@ -210,8 +329,10 @@ internal routing and schema persistence across a scoped restart. Nginx module
 scratch directories all use its existing writable `/tmp`; the worker heartbeat
 probe explicitly closes its direct PostgreSQL pool before exiting. Neither fix
 weakens health predicates or container isolation. Production's matching Nginx
-template correction remains configuration-only. Mail delivery, HMR over NPM,
-cookie/CSRF behavior through HTTPS and account/session persistence remain pending.
+template correction remains configuration-only. A later real-browser probe
+confirmed the initial HMR WSS connection through NPM. Source-edit/refresh
+propagation, mail delivery, cookie/CSRF behavior through HTTPS and account/session
+persistence have not been reverified through this persistent environment.
 
 ## Original development activation request (subsequently approved)
 

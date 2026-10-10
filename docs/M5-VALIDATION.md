@@ -441,3 +441,88 @@ must-fix findings in this activation change**. The reviewer performed no
 infrastructure operations; the pre-existing-resource comparison is the
 coordinator's recorded audit. External NPM/browser evidence remains explicitly
 pending; this review does not waive that boundary or issue #18.
+
+## 2026-10-10 — explicit real-provider development mode
+
+Starting clean HEAD: `e6af505002afaa66fa04525e55295ace8cb47a91`. The Owner
+explicitly authorized switching the existing dev project to the real Panel,
+entering real Application/Client keys through the protected interface, and scoped
+dev configuration/restarts. The prior sandbox-only restriction is superseded;
+unrelated Panel servers, production infrastructure and release gates are not.
+
+`NH_DEV_PROVIDER_MODE` now selects default `sandbox` or explicit `real`. Real
+mode removes Pterodactyl URL/key/transfer-origin environment locks and restores
+the normal Minecraft content-origin defaults. Existing Owner settings, encrypted
+write-only secrets and the regular adapter are reused without product/API rewrites.
+Optional scoped evidence verification uses the original trusted runner key; no
+key or evidence was generated/imported and no game was promoted. Existing
+authorization, immutable identity, admission and compatibility gates are unchanged.
+
+The small `compose.dev.real.yaml` overlay adds **only API/worker** to the new
+`nickhosting-dev-egress` network, retains their internal dependencies and uses a
+configured resolver. It profiles the simulator off and removes its API startup
+dependency. Private `COMPOSE_FILE` persists the selection for ordinary stop/up
+commands; no recurring permission correction, migration or reset is needed.
+
+Read-only preflight confirmed the exact dev project, eight original containers,
+no host ports, directory ownership/modes, one Owner and completed setup, 15
+migrations and zero managed servers/stored provider secrets. API/worker alone
+were rebuilt/recreated. A DNS probe to the previously documented direct resolver
+container address timed out. Inspection proved the same DNS service already
+publishes port 53 on the host; selecting that existing endpoint only in dev
+resolved the Panel name successfully. API/worker were recreated once more for
+that resolver correction. No Bind9, host resolver, DNS record, published binding
+or production network was changed. Private notes retain the exact endpoint proof.
+
+Final dev state: **seven running healthy services**, zero current automatic
+restarts, simulator intentionally stopped (not deleted). Web/Vite/PostgreSQL/
+Redis/Mailpit identities are unchanged; only web retains `prod-frontend`, and
+all dev host-port bindings remain empty. Owner identity, completed setup and all
+migration checksums/timestamps are identical before/after. No reset or account
+replacement. Private dev auth/encryption/database/mail secrets were preserved.
+
+| Focused check | Actual result |
+| --- | --- |
+| Scoped environment tests in `scripts/deployment-config.test.ts` | **25 passed**, 11 outside filter before the separate evidence-key addition. Tests prove default sandbox, real-mode settings provenance/unlocked fields, no key fallback, and unchanged auth/storage isolation. |
+| Optional evidence-key regression only | **1 passed**, 37 outside filter; exact existing verifier format, real-only, no generated/default key. |
+| Compose-isolation tests only | **6 passed**, 31 outside filter; real overlay merge, simulator dependency/profile, API/worker-only egress/resolver, retained internal storage and sole ingress external attachment. |
+| Final real-overlay regression after review's migrator-mode correction | **1 passed**, 37 outside filter; explicit tools-profile migration accepts the optional real-mode evidence key but retains only the data network. No migration was run against dev. |
+| `vitest run packages/pterodactyl-adapter/src/connection.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/core/src/core.test.ts` via `scripts/dev.sh pnpm exec` | **89 passed**. Standard adapter uses isolated request fixtures, including discovery, separate credentials, explicit-allocation creation and secret/transfer isolation; no real provider calls. |
+| Isolated integration selection: `runtime.integration.test.ts` and `minecraft-registry.integration.test.ts`, filter `binds restart process evidence\|fails closed when the resource owner changes\|Minecraft Owner evidence` | **8 passed**, 28 outside filter. UUID/external identity protection and exact signed evidence/rollout eligibility remain enforced. |
+| Isolated `platform.integration.test.ts`, filter `resolves precedence\|stores encrypted authenticated secrets` | **2 failed**: filtering skipped the preceding migration test that creates this suite's fixture identities; both audit foreign keys correctly rejected the absent actor. This was a test-selection error, not a provider-mode failure. |
+| Rerun only the complete `platform.integration.test.ts` file with its fixture prerequisite | **5 passed**, 1.48 seconds; actual database precedence, encrypted secret storage/presence-only metadata, bootstrap preservation and rollout filtering. No source changes were needed. |
+| `scripts/dev.sh pnpm typecheck`; targeted Biome; whitespace | Passed. No frontend build needed: application/UI source and dependencies are unchanged. |
+| Selected real Compose and default sandbox parsing | Passed. Only dev application image built; no production build/deployment. |
+| Running API environment/settings check | Mode real; no `NH_PTERODACTYL_*` override; URL unlocked with default source until Owner saves it; Panel DNS resolution succeeds; Gateway remains disabled. |
+| Actual HTTPS + Chromium/Vite WebSocket smoke | HTTP **200**, browser certificate validation enabled, actual **WSS HMR connected frame** received through `dev.hub.nickhost.ing`. No CSS/catalog edit or account mutation performed. |
+
+Database regressions used only generated schemas on the already-running isolated
+M2 test PostgreSQL and removed only those generated schemas. No test services
+were started/restarted, historical schemas touched or dev DB used for fixtures.
+One initial test command selected a nonexistent filename and executed no tests;
+the corrected platform selection exposed the fixture-order dependency above. An initial browser
+launch lacked shared libraries; retry used the already-existing user-cache library
+path scoped to the Chromium child. No dependency download or OS change. A probe
+with an unused nonexistent import was corrected in the private test harness;
+the final environment/settings probe passed without application changes.
+
+**Authenticated real-Panel discovery is pending the Owner's interactive URL/key
+entry**, not reported as passed. No production credential was read/copied from
+old files or containers. No Panel API request or real game-server mutation was
+made in this configuration pass. Owner steps and exact prerequisites are in
+[real-provider development](M5-ENVIRONMENTS.md#real-provider-development-configuration-and-daily-use).
+Historical M4 evidence requires exact signed context; the current stack also lacks
+approved host/container observer access for provisioning/start. Neither prerequisite
+was bypassed. No Gateway/SFTPGo deployment, DNS write, UI redesign, M6 or PR merge.
+SFTPGo issue #18 remains an independent production-release blocker.
+
+Independent configuration/security review found and resolved one future-operation
+defect: the tools-profile migrator inherited the optional evidence key but defaulted
+to sandbox, rejecting startup. Its overlay now selects real mode without egress;
+the effective-Compose/environment regression passes. Documentation also now
+distinguishes the successful initial WSS connection from untested source-edit
+propagation. The reviewer inspected source and saved dev evidence without any
+infrastructure operations and confirmed **zero remaining must-fix findings**.
+Governance and staged-content hygiene pass (433 text files, 49 review PNGs,
+353 local links, 4 TOML files and 44 ignore cases); the
+credentials/discovery and real-creation prerequisites above remain explicit.

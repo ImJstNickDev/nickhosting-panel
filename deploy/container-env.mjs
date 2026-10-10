@@ -3,6 +3,16 @@ export function containerEnvironment(input) {
   const development = input.NH_DEPLOYMENT_ENV === 'development';
   if (!development && input.NH_DEPLOYMENT_ENV !== 'production')
     throw new Error('Explicit deployment environment required');
+  const providerMode = development ? (input.NH_DEV_PROVIDER_MODE ?? 'sandbox') : undefined;
+  if (development && !['sandbox', 'real'].includes(providerMode))
+    throw new Error('Invalid development provider mode');
+  const evidenceKey = input.NH_DEV_MINECRAFT_EVIDENCE_KEY;
+  if (
+    development &&
+    evidenceKey !== undefined &&
+    (providerMode !== 'real' || !/^[a-f0-9]{64}$/.test(evidenceKey))
+  )
+    throw new Error('Invalid deployment field: NH_DEV_MINECRAFT_EVIDENCE_KEY');
   const prefix = development ? 'NH_DEV_' : 'NH_PROD_';
   const notDevKey = (key) => !key.startsWith('NH_DEV_');
   const required = (name, secret = false) => {
@@ -101,18 +111,13 @@ export function containerEnvironment(input) {
         master,
         auth,
         setup,
-        required('SANDBOX_TOKEN', true),
+        ...(providerMode === 'sandbox' ? [required('SANDBOX_TOKEN', true)] : []),
         required('MAIL_PASSWORD', true),
-      ]).size !== 7
+      ]).size !== (providerMode === 'sandbox' ? 7 : 6)
     )
       throw new Error('Use independent credentials per purpose');
     Object.assign(env, {
-      NH_PTERODACTYL_BASE_URL: 'http://provider:9090',
-      NH_PTERODACTYL_APPLICATION_KEY: required('SANDBOX_TOKEN', true),
-      NH_PTERODACTYL_CLIENT_KEY: required('SANDBOX_TOKEN', true),
-      NH_PTERODACTYL_WEBSOCKET_ORIGINS: '[]',
-      NH_PTERODACTYL_DOWNLOAD_ORIGINS: '[]',
-      NH_PTERODACTYL_UPLOAD_ORIGINS: '[]',
+      NH_DEV_PROVIDER_MODE: providerMode,
       NH_SFTPGO_BASE_URL: 'http://provider:9090',
       NH_SFTPGO_API_KEY: 'development-disabled',
       NH_CLOUDFLARE_API_TOKEN: 'development-disabled',
@@ -124,8 +129,18 @@ export function containerEnvironment(input) {
       SMTP_USER: 'nickhosting-dev',
       SMTP_PASSWORD: required('MAIL_PASSWORD', true),
       NODE_EXTRA_CA_CERTS: '/run/dev-mail/cert.pem',
-      NH_MINECRAFT_DOWNLOAD_ORIGINS: '[]',
     });
+    if (providerMode === 'sandbox')
+      Object.assign(env, {
+        NH_PTERODACTYL_BASE_URL: 'http://provider:9090',
+        NH_PTERODACTYL_APPLICATION_KEY: required('SANDBOX_TOKEN', true),
+        NH_PTERODACTYL_CLIENT_KEY: required('SANDBOX_TOKEN', true),
+        NH_PTERODACTYL_WEBSOCKET_ORIGINS: '[]',
+        NH_PTERODACTYL_DOWNLOAD_ORIGINS: '[]',
+        NH_PTERODACTYL_UPLOAD_ORIGINS: '[]',
+        NH_MINECRAFT_DOWNLOAD_ORIGINS: '[]',
+      });
+    else if (evidenceKey !== undefined) env.NH_MINECRAFT_EVIDENCE_KEY = evidenceKey;
   }
   return env;
 }

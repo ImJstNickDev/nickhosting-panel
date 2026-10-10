@@ -1,6 +1,6 @@
 name: nickhosting-dev
 
-# Configuration only until the exact activation proposal receives Owner approval.
+# Default sandbox. Real-provider opt-in: compose.dev.real.yaml (same dev project).
 x-app: &app
   image: nickhosting-dev-app:local
   build: { context: ., target: development }

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, matchesGlob, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { containerEnvironment } from '../deploy/container-env.mjs';
+import { assertConfigWritable, resolveConfig } from '../packages/core/src/config.js';
 
 type Environment = 'development' | 'production';
 const repository = resolve('.');
@@ -234,30 +235,181 @@ describe('scoped container environment', () => {
     expect(Object.values(result).join('\n')).not.toContain('unused-production');
   });
 
-  it('rejects direct production-provider credentials and observer configuration in development', () => {
-    for (const field of [
-      'NH_PTERODACTYL_BASE_URL',
-      'NH_PTERODACTYL_APPLICATION_KEY',
-      'NH_PTERODACTYL_CLIENT_KEY',
+  it('defaults to sandbox, accepts only explicit supported modes and never echoes unknown values', () => {
+    const input = deployment('development');
+    const automatic = containerEnvironment(input);
+    expect(automatic.NH_DEV_PROVIDER_MODE).toBe('sandbox');
+    expect(containerEnvironment({ ...input, NH_DEV_PROVIDER_MODE: 'sandbox' })).toEqual(automatic);
+    for (const mode of ['', 'REAL', 'production', 'private-unrecognized-value']) {
+      try {
+        containerEnvironment({ ...input, NH_DEV_PROVIDER_MODE: mode });
+        throw new Error('Expected invalid mode rejection');
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe('Invalid development provider mode');
+        if (mode) expect((error as Error).message).not.toContain(mode);
+      }
+    }
+    expect(() =>
+      containerEnvironment({ ...deployment('production'), NH_DEV_PROVIDER_MODE: 'real' }),
+    ).toThrow('Development configuration prohibited in production');
+  });
+
+  it('real mode unlocks only provider and content settings while keeping other development boundaries', () => {
+    const input = deployment('development');
+    const sandbox = containerEnvironment(input);
+    delete input.NH_DEV_SANDBOX_TOKEN;
+    const result = containerEnvironment({ ...input, NH_DEV_PROVIDER_MODE: 'real' });
+    expect(result.NH_DEV_PROVIDER_MODE).toBe('real');
+    expect(Object.keys(result).filter((name) => name.startsWith('NH_PTERODACTYL_'))).toEqual([]);
+    expect(result).not.toHaveProperty('NH_MINECRAFT_DOWNLOAD_ORIGINS');
+    expect(result).not.toHaveProperty('NH_DEV_SANDBOX_TOKEN');
+    for (const name of [
+      'DATABASE_URL',
+      'REDIS_URL',
+      'BETTER_AUTH_SECRET',
+      'NH_SECRETS_MASTER_KEY',
+      'NH_SECRETS_KEY_ID',
+      'NH_SETUP_TOKEN',
+      'NH_JOB_PREFIX',
+      'NH_PUBLIC_URL',
+      'NH_API_URL',
+      'NH_GATEWAY_ENABLED',
       'NH_SFTPGO_BASE_URL',
       'NH_SFTPGO_API_KEY',
       'NH_CLOUDFLARE_API_TOKEN',
-      'DISCORD_CLIENT_SECRET',
-      'SMTP_HOST',
-      'SMTP_PASSWORD',
-      'NH_DOCKER_OBSERVER_SOCKET',
-      'NH_GATEWAY_ENABLED',
-      'NH_PUBLIC_URL',
-      'NH_API_URL',
-      'NH_MINECRAFT_CONTENT_ROOT',
-      'NH_MINECRAFT_SOURCE_ROOT',
       'NH_CURSEFORGE_API_KEY',
-      'NH_MINECRAFT_DOWNLOAD_ORIGINS',
+      'SMTP_HOST',
+      'SMTP_PORT',
+      'SMTP_SECURE',
+      'SMTP_USER',
+      'SMTP_PASSWORD',
+      'NODE_EXTRA_CA_CERTS',
     ])
+      expect(result[name], name).toBe(sandbox[name]);
+    expect(() =>
+      containerEnvironment({
+        ...input,
+        NH_DEV_PROVIDER_MODE: 'real',
+        NH_DEV_SANDBOX_TOKEN: 'unused',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      containerEnvironment({
+        ...input,
+        NH_DEV_PROVIDER_MODE: 'real',
+        NH_DEV_SANDBOX_TOKEN: input.NH_DEV_DB_PASSWORD,
+      }),
+    ).not.toThrow();
+    for (const value of [undefined, input.NH_DEV_DB_PASSWORD])
       expect(() =>
-        containerEnvironment({ ...deployment('development'), [field]: 'private-value' }),
-      ).toThrow(`development: ${field}`);
+        containerEnvironment({
+          ...input,
+          NH_DEV_PROVIDER_MODE: 'real',
+          NH_DEV_MAIL_PASSWORD: value,
+        }),
+      ).toThrow();
   });
+
+  it('permits only an explicit valid evidence verifier key in real development mode', () => {
+    const input = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
+    expect(containerEnvironment(input)).not.toHaveProperty('NH_MINECRAFT_EVIDENCE_KEY');
+    const fixtureKey = 'a'.repeat(64);
+    expect(
+      containerEnvironment({ ...input, NH_DEV_MINECRAFT_EVIDENCE_KEY: fixtureKey })
+        .NH_MINECRAFT_EVIDENCE_KEY,
+    ).toBe(fixtureKey);
+    for (const key of [
+      '',
+      'a'.repeat(63),
+      'a'.repeat(65),
+      'A'.repeat(64),
+      'z'.repeat(64),
+      `${fixtureKey}\n`,
+    ])
+      expect(() => containerEnvironment({ ...input, NH_DEV_MINECRAFT_EVIDENCE_KEY: key })).toThrow(
+        'Invalid deployment field: NH_DEV_MINECRAFT_EVIDENCE_KEY',
+      );
+    for (const mode of [undefined, 'sandbox'])
+      expect(() =>
+        containerEnvironment({
+          ...input,
+          NH_DEV_PROVIDER_MODE: mode,
+          NH_DEV_MINECRAFT_EVIDENCE_KEY: fixtureKey,
+        }),
+      ).toThrow('Invalid deployment field: NH_DEV_MINECRAFT_EVIDENCE_KEY');
+    expect(() => containerEnvironment({ ...input, NH_MINECRAFT_EVIDENCE_KEY: fixtureKey })).toThrow(
+      'External configuration prohibited in development: NH_MINECRAFT_EVIDENCE_KEY',
+    );
+    expect(() =>
+      containerEnvironment({
+        ...deployment('production'),
+        NH_DEV_MINECRAFT_EVIDENCE_KEY: fixtureKey,
+      }),
+    ).toThrow('Development configuration prohibited in production');
+  });
+
+  it('real mode uses existing Owner configuration precedence instead of a simulator fallback', () => {
+    const ownerSettings = {
+      pterodactylBaseUrl: 'https://panel.example.test',
+      pterodactylWebSocketOrigins: ['wss://wings.example.test'],
+      pterodactylDownloadOrigins: ['https://downloads.example.test'],
+      pterodactylUploadOrigins: ['https://uploads.example.test'],
+      minecraftDownloadOrigins: ['https://content.example.test'],
+    };
+    const input = deployment('development');
+    const real = containerEnvironment({ ...input, NH_DEV_PROVIDER_MODE: 'real' });
+    const resolved = resolveConfig(ownerSettings, real);
+    expect(resolved.values).toMatchObject(ownerSettings);
+    for (const key of Object.keys(ownerSettings) as Array<keyof typeof ownerSettings>) {
+      expect(resolved.sources[key]).toBe('database');
+      expect(resolved.lockedKeys).not.toContain(key);
+    }
+    expect(() => assertConfigWritable(ownerSettings, resolved)).not.toThrow();
+    const unavailable = resolveConfig({}, real);
+    expect(unavailable.values.pterodactylBaseUrl).toBeUndefined();
+    expect(unavailable.sources.minecraftDownloadOrigins).toBe('default');
+    const sandbox = resolveConfig(ownerSettings, containerEnvironment(input));
+    expect(sandbox.values.pterodactylBaseUrl).toBe('http://provider:9090');
+    expect(sandbox.values.pterodactylUploadOrigins).toEqual([]);
+    expect(() => assertConfigWritable(ownerSettings, sandbox)).toThrow();
+    const previousSimulatorSetting = { pterodactylBaseUrl: 'http://provider:9090' };
+    expect(resolveConfig(previousSimulatorSetting, real).values.pterodactylBaseUrl).toBe(
+      previousSimulatorSetting.pterodactylBaseUrl,
+    );
+  });
+
+  it.each(['sandbox', 'real'])(
+    'rejects direct production-provider credentials and observer configuration in development %s mode',
+    (mode) => {
+      for (const field of [
+        'NH_PTERODACTYL_BASE_URL',
+        'NH_PTERODACTYL_APPLICATION_KEY',
+        'NH_PTERODACTYL_CLIENT_KEY',
+        'NH_SFTPGO_BASE_URL',
+        'NH_SFTPGO_API_KEY',
+        'NH_CLOUDFLARE_API_TOKEN',
+        'DISCORD_CLIENT_SECRET',
+        'SMTP_HOST',
+        'SMTP_PASSWORD',
+        'NH_DOCKER_OBSERVER_SOCKET',
+        'NH_GATEWAY_ENABLED',
+        'NH_PUBLIC_URL',
+        'NH_API_URL',
+        'NH_MINECRAFT_CONTENT_ROOT',
+        'NH_MINECRAFT_SOURCE_ROOT',
+        'NH_CURSEFORGE_API_KEY',
+        'NH_MINECRAFT_DOWNLOAD_ORIGINS',
+      ])
+        expect(() =>
+          containerEnvironment({
+            ...deployment('development'),
+            NH_DEV_PROVIDER_MODE: mode,
+            [field]: 'private-value',
+          }),
+        ).toThrow(`development: ${field}`);
+    },
+  );
 });
 
 describe('deployment artifact boundaries', () => {
@@ -519,6 +671,8 @@ type ComposeService = {
   entrypoint?: string[];
   profiles?: string[];
   restart?: string;
+  dns?: string[];
+  depends_on?: Record<string, unknown>;
   volumes?: Array<{
     type: string;
     source: string;
@@ -535,7 +689,7 @@ type ComposeConfiguration = {
 
 // Parse examples only: no .env auto-discovery and no inherited deployment/provider keys.
 // `compose config` is read-only and never connects to or creates Docker resources.
-function composeConfiguration(scope: 'dev' | 'prod'): ComposeConfiguration {
+function composeConfiguration(scope: 'dev' | 'prod', realProvider = false): ComposeConfiguration {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) =>
@@ -552,6 +706,7 @@ function composeConfiguration(scope: 'dev' | 'prod'): ComposeConfiguration {
       `deploy/${scope}/.env.example`,
       '-f',
       `compose.${scope}.yaml`,
+      ...(realProvider ? ['-f', 'compose.dev.real.yaml'] : []),
       'config',
       '--format',
       'json',
@@ -564,6 +719,42 @@ function composeConfiguration(scope: 'dev' | 'prod'): ComposeConfiguration {
 }
 
 describe('deployment Compose isolation (read-only configuration parsing)', () => {
+  it('gives only real-provider API/worker egress while preserving internal storage and ingress', () => {
+    const { services, networks, name } = composeConfiguration('dev', true);
+    expect(name).toBe('nickhosting-dev');
+    expect(networks.egress).toMatchObject({ name: 'nickhosting-dev-egress' });
+    expect(networks.egress?.external).not.toBe(true);
+    expect(networks.data?.internal).toBe(true);
+    expect(networks.edge?.internal).toBe(true);
+    expect(networks.frontend?.external).toBe(true);
+    for (const [name, service] of Object.entries(services)) {
+      const real = ['api', 'worker'].includes(name);
+      expect(Object.keys(service.networks ?? {}).includes('egress'), name).toBe(real);
+      expect(Object.keys(service.networks ?? {}).includes('frontend'), name).toBe(name === 'web');
+      expect(service.ports ?? [], name).toEqual([]);
+      expect(service.privileged, name).not.toBe(true);
+      if (real) {
+        expect(service.environment?.NH_DEV_PROVIDER_MODE).toBe('real');
+        expect(service.dns).toEqual(['192.0.2.53']);
+        expect(Object.keys(service.networks ?? {})).toContain('data');
+        expect(
+          Object.keys(service.environment ?? {}).some((key) => key.startsWith('NH_PTERODACTYL_')),
+        ).toBe(false);
+      }
+    }
+    expect(services.api?.depends_on).not.toHaveProperty('provider');
+    expect(services.provider?.profiles).toEqual(['sandbox']);
+    expect(Object.keys(services.migrate?.networks ?? {})).toEqual(['data']);
+    expect(services.migrate?.environment?.NH_DEV_PROVIDER_MODE).toBe('real');
+    expect(() =>
+      containerEnvironment({
+        ...deployment('development'),
+        NH_DEV_PROVIDER_MODE: services.migrate?.environment?.NH_DEV_PROVIDER_MODE,
+        NH_DEV_MINECRAFT_EVIDENCE_KEY: 'a'.repeat(64),
+      }),
+    ).not.toThrow();
+  });
+
   it.each(['dev', 'prod'] as const)(
     'publishes no %s host ports and attaches only ingress to the pre-existing external network',
     (scope) => {
