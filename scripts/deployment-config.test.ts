@@ -261,6 +261,20 @@ describe('scoped container environment', () => {
 });
 
 describe('deployment artifact boundaries', () => {
+  it.each(['dev', 'prod'])(
+    'keeps all %s ingress module temporary files on its writable tmpfs',
+    async (mode) => {
+      const template = await readFile(
+        resolve(repository, `deploy/nginx/${mode}.conf.template`),
+        'utf8',
+      );
+      for (const kind of ['client_body', 'proxy', 'fastcgi', 'uwsgi', 'scgi']) {
+        expect(template).toMatch(new RegExp(`${kind}_temp_path /tmp/[a-z_]+;`));
+      }
+      expect(template).not.toContain('/var/cache/nginx');
+    },
+  );
+
   it('normalizes the exact ingress hostname and substitutes only its intended variable', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'nickhosting-ingress-test-'));
     try {

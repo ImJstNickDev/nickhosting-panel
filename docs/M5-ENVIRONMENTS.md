@@ -6,10 +6,12 @@ networks, proxy hosts, DNS records or production services have been created or
 changed by this configuration pass. Commands that build images, prepare persistent
 state or run Compose require the separate activation approval below.
 
-The later Owner-authorized activation attempt and its PostgreSQL permission
-blocker are recorded in [M5 validation](M5-VALIDATION.md#2026-10-10--controlled-development-activation-initial-attempt).
-That record supersedes the historical “not activated” status above; production
-remains unapproved. Future preparation gives only the PostgreSQL mount parent
+The later Owner-authorized activation attempt, PostgreSQL permission blocker and
+[successful internal activation](M5-VALIDATION.md#2026-10-10--approved-permission-correction-and-internal-development-readiness)
+are recorded in M5 validation, preserving the initial failures. The eight dev
+services are now healthy; **Owner NPM configuration and external HTTPS/WSS tests
+remain pending**. This supersedes the historical “not activated” status above;
+production remains unapproved. Future preparation gives only the PostgreSQL mount parent
 0711 for its image's UID transition, while actual PGDATA and other private
 paths remain 0700. It never repairs existing state automatically.
 
@@ -200,13 +202,18 @@ scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts scripts/de
 ```
 
 Use `config --quiet` with real private environment files; full interpolation output
-contains secrets. Dockerfile base-image manifests were inspected without pulling
-or building. Local compiled-runtime imports are checked without `tsx`, databases
-or provider calls. Actual image build, Nginx `-t`, container health, mail delivery,
-HMR over NPM, cookie/CSRF behavior through that proxy and restart persistence are
-**pending activation verification**, not passing live tests.
+contains secrets. The original configuration-only pass inspected Dockerfile
+base-image manifests without pulling/building and checked compiled-runtime imports
+without `tsx`, databases or provider calls. The subsequent authorized activation
+verified dev image builds, actual Nginx `-t`, all eight container health checks,
+internal routing and schema persistence across a scoped restart. Nginx module
+scratch directories all use its existing writable `/tmp`; the worker heartbeat
+probe explicitly closes its direct PostgreSQL pool before exiting. Neither fix
+weakens health predicates or container isolation. Production's matching Nginx
+template correction remains configuration-only. Mail delivery, HMR over NPM,
+cookie/CSRF behavior through HTTPS and account/session persistence remain pending.
 
-## Exact development activation request (not executed)
+## Original development activation request (subsequently approved)
 
 Recheck free memory/disk, names/aliases and network identity immediately beforehand.
 Read-only inspection on 2026-10-10 found ~25 GiB available RAM, ~79 GiB available
@@ -215,7 +222,8 @@ conflicting stable aliases on the existing bridge `prod-frontend`. These are
 point-in-time checks, not reserved resources. `mountdata/` is root-owned and
 `mountdata/dev` does not exist.
 
-Request approval for this bounded sequence only:
+The Owner subsequently approved this bounded sequence. It is retained for audit
+and future review, **not permission to rerun preparation or reset existing state**:
 
 1. Build/pull the pinned development application, ingress, PostgreSQL, Redis and
    Mailpit images; downloads/build cache consume disk. No existing image/service

@@ -333,3 +333,111 @@ source changes do not apply the correction to the existing development directory
 No UI or application behavior was changed. NPM handoff remains blocked until the
 upstream is actually healthy; no HTTPS/WSS, browser mail, persistence restart or
 migration success is claimed at this boundary.
+
+## 2026-10-10 — approved permission correction and internal development readiness
+
+The Owner authorized the exact nonrecursive command
+`chmod 0711 -- ./mountdata/dev/postgres` and continuation of development activation
+at reviewed HEAD `ac5a63617713267ddefab1cdb4efa5d9a2111961`. Before any mutation,
+the coordinator verified the exact workspace, local/PR HEAD, clean worktree,
+directory ownership/modes, absence of symlinks, and the original development
+PostgreSQL container identity against the private activation record. GitHub
+authentication remains `ImJstNickDev`; PR #21 remains open, unmerged, targeting
+`main` on `milestone/m5-webpanel`.
+
+Only the approved mount-parent mode changed: UID 1000, **0711**. The development
+ancestor remains UID 1000 mode **0700**; actual `18/docker` PGDATA remains UID 70
+mode **0700**, with unchanged ownership. No recursive chmod/chown, database reset,
+credential replacement or preparation-script rerun occurred. The same stopped
+PostgreSQL container recovered successfully.
+
+Two narrowly scoped startup defects were then corrected, without UI changes:
+
+- Nginx attempted to create its unused FastCGI module scratch directory under its
+  read-only root. Nine failed automatic web restarts occurred before the dev
+  ingress was stopped. All module scratch paths now use the already-approved
+  `/tmp` tmpfs. No mount, capability or permission was broadened. The corresponding
+  production template is corrected as configuration only; production was not built
+  or started. The dev web image was rebuilt and the dev ingress recreated.
+- The worker was processing heartbeats but Docker reported it unhealthy: the
+  probe queried `pg.Pool` directly and destroyed an uninitialized lazy Kysely
+  driver, leaving the pool's idle socket open. The original probe exited in
+  **11.11 seconds**, beyond its existing 10-second timeout. Explicit `pool.end()`
+  reduced the real development-DB probe to **1.58 seconds**. The heartbeat scope,
+  running-state/freshness predicate and timeout are unchanged. The shared dev
+  application image was rebuilt; only its dev API/worker/Vite/provider services
+  were recreated to use it.
+
+| Actual command / check | Result |
+| --- | --- |
+| Exact approved `chmod 0711 -- ./mountdata/dev/postgres`; host/container `stat` | Parent 0711; dev ancestor and actual PGDATA 0700; owners unchanged. |
+| `docker compose --env-file .env.dev.local -f compose.dev.yaml start --wait postgres` | Original development PostgreSQL container recovered, healthy. |
+| `docker compose --env-file .env.dev.local -f compose.dev.yaml --profile tools run --rm migrate` | **All 15 migrations (001–015) applied** before API/worker startup. Temporary migrator removed itself. No users, accounts or Owner setup seeded. |
+| `docker compose --env-file .env.dev.local -f compose.dev.yaml up -d --wait api worker vite web` | Initial web/worker health failures above retained as failures, not rewritten as a pass. |
+| Dev-only `build web`, `up -d --no-deps --wait web`, `build api`, `up -d --no-deps --wait api worker vite provider` | Corrected images built and scoped services healthy. No production image/service operation. |
+| `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts -t ingress` | **5 passed**, 27 outside the filter; includes dev/prod scratch-path regressions. This is targeted verification, not a new full-suite result. |
+| `scripts/dev.sh pnpm exec biome check deploy/container-health.mjs scripts/deployment-config.test.ts` | Passed. |
+| Dev private-env `config --quiet`; production example-env/tools-profile `config --quiet` | Both passed without printing interpolated secrets. |
+| `docker compose --env-file .env.dev.local -f compose.dev.yaml exec -T web nginx -t -c /tmp/nginx.conf` | Real Nginx syntax/configuration check passed. |
+| Internal Node HTTP/DNS checks from the dev API namespace | Seven service DNS names resolve; ingress `/`, transformed `/src/main.tsx`, `/v1/setup` and `/api/auth/get-session` all HTTP 200. Actual Vite/React source served; setup remains unclaimed/incomplete, session is null. Correct public Host/Origin used. |
+| Local simulator authorization/isolation | Five authenticated inventories HTTP 200 and empty; missing credentials 403; POST/PUT/PATCH/DELETE each 405. Provider URL remains pinned to the simulator, Gateway disabled. No real provider accessed. |
+| `docker compose --env-file .env.dev.local -f compose.dev.yaml restart postgres redis mailpit` | Approved development-only restart completed. API/worker logged transient DB/Redis disconnection errors, then recovered without restarting their processes. All eight services healthy; last five worker probe exit codes 0. |
+| Read-only SQL snapshot before/after restart | Identical database cluster identity, 15 migration names/checksums/applied timestamps and zero user/account/setup counts. This proves initialized schema persistence, **not yet review-account/session/mail persistence**. |
+| Post-restart ingress/DNS/simulator checks | Passed again. No seeded jobs or game mutations were needed. |
+| Final Docker resource audit against pre-activation ledger | All 94 pre-existing container identities/network attachments and all 27 original network configurations preserved. Three unrelated containers already in restart loops continued independently; no operation targeted them. Only the two approved internal dev networks and eight dev services exist as additions. |
+| `python3 scripts/check-governance.py`; `git diff --cached --check` | Passed: 432 indexed text files, 49 review PNGs, 352 local links, 4 TOML files and 44 ignore cases. Explicit staged-content inspection found no private environments, credentials, audit records or persistence. |
+
+The first internal HTTP probe used Node fetch with an overridden Host header;
+that client did not send the intended Host and ingress correctly closed the
+request. Switching the **test harness** to `node:http` with explicit Host passed;
+ingress host validation was not weakened. One topology snapshot caught transient
+metadata from an already-restarting unrelated container; a read-only diagnostic
+and complete repeat audit confirmed unchanged attachments. No infrastructure
+repair was attempted.
+
+Final services are all **running/healthy**, with **zero automatic restarts on the
+current instances** (manual restarts and earlier failed attempts above remain
+explicitly recorded):
+
+| Container | Network attachments |
+| --- | --- |
+| `nickhosting-dev-web` | `nickhosting-dev-edge`, existing external `prod-frontend` |
+| `nickhosting-dev-vite-1` | `nickhosting-dev-edge` |
+| `nickhosting-dev-api-1` | `nickhosting-dev-edge`, `nickhosting-dev-data` |
+| `nickhosting-dev-worker-1` | `nickhosting-dev-data` |
+| `nickhosting-dev-postgres-1` | `nickhosting-dev-data` |
+| `nickhosting-dev-redis-1` | `nickhosting-dev-data` |
+| `nickhosting-dev-provider-1` | `nickhosting-dev-data` |
+| `nickhosting-dev-mailpit-1` | `nickhosting-dev-data` |
+
+Both new networks are internal; only dev web joined the existing external network.
+Every dev container has empty host-port bindings, no privileged/host-network mode,
+Docker socket or unrelated bind mount. Persistent mounts remain under
+`mountdata/dev/`; ignored credentials and private audit records remain unpublished.
+Final available capacity was about **24 GiB RAM / 76 GiB disk**. The existing-host
+Redis overcommit warning remains; no host sysctl was changed.
+
+The upstream **`nickhosting-dev-web:8080` is ready internally**. The Owner must now
+configure the [documented NPM proxy host](M5-ENVIRONMENTS.md#exact-nginx-proxy-manager-proposal)
+for `dev.hub.nickhost.ing`, HTTP upstream, WebSocket support, certificate/Force SSL,
+Cache Assets disabled and scoped streaming/upload directives. NPM, DNS and
+certificates were not modified. External HTTPS/WSS HMR, Secure cookies, CSRF,
+mail/browser journeys and external-origin behavior remain **pending Owner NPM
+confirmation**. No claim of end-to-end NPM connectivity or authenticated-browser
+success is made from these internal probes.
+
+No full M1–M5/browser suite or live Minecraft scenario was repeated for these
+bounded activation fixes. Their historical evidence remains intact. SFTPGo issue
+#18 and its three expected failures remain a separate release blocker. No existing
+test persistence/ledger, production container, Pterodactyl/Wings resource, DNS or
+production deployment was changed. Development is left running for review; no
+cleanup, prune, `down -v` or orphan removal occurred. A safe scoped stop remains
+`docker compose --env-file .env.dev.local -f compose.dev.yaml stop`, retaining all
+development data.
+
+Independent technical/security review inspected the final source, targeted tests,
+documentation and saved health/network/persistence evidence: **zero remaining
+must-fix findings in this activation change**. The reviewer performed no
+infrastructure operations; the pre-existing-resource comparison is the
+coordinator's recorded audit. External NPM/browser evidence remains explicitly
+pending; this review does not waive that boundary or issue #18.

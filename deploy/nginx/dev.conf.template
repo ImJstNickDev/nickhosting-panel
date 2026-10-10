@@ -8,6 +8,9 @@ http {
   access_log off;
   client_body_temp_path /tmp/client_body;
   proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
   client_max_body_size 0;
   client_body_timeout 3600s;
   send_timeout 3600s;
