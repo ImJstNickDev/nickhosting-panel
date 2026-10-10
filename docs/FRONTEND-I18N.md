@@ -61,8 +61,10 @@ uses centered portrait cards: the integration-owned background art fades from
 fully opaque at the top to transparent at the bottom over a solid dark base,
 with a centered runtime label below. Compact cards wrap from the center; they do
 not stretch to fill the row. Native radios remain keyboard-accessible but are
-visually hidden: a contained border and decorative check communicate selection.
-Version rows use the same selection convention in a compact scrollable list.
+visually hidden: runtime selection uses a contained border, a subtle 4% scale
+and 85% opacity on other enabled cards, without a checkmark. Transitions take
+160 ms; reduced-motion preference removes both movement and animation. Version
+rows retain their decorative check in a compact scrollable list.
 Decorative art/checks do not duplicate accessible labels. Keyboard focus uses a
 restrained high-contrast outline, always available without an opt-in; programmatic
 heading focus has no decorative ring. Forced-colors mode retains selection cues.

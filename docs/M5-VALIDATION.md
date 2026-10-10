@@ -1237,3 +1237,29 @@ served by Vite. No rebuild/restart, infrastructure mutation, provider access, da
 migration or live test asset creation/cleanup occurred. Existing source HMR applies
 these changes. Rollback is a source revert, with no data operation. SFTPGo #18 and
 Docker-socket #22 remain independent release decisions; PR #21 stays open/unmerged.
+
+
+### 2026-10-10 — Runtime selection popout
+
+Owner refinement: remove the runtime checkmark, retain the selected border, scale
+the selected card by 1.04 and dim other enabled cards to 0.85 opacity with 160 ms
+transitions. Version rows are unchanged. Group padding contains the transform;
+layout and keyboard semantics stay unchanged. Reduced motion follows the device
+preference (no scale/transition); ordinary animation is enabled otherwise. No
+application accessibility preference was added. Forced-colors selection retains
+its explicit outline.
+
+Focused Biome (three changed source/test files) and web typecheck passed.
+The previous catalog browser command with `-t "discovers declared|offers a direct-only|completes later|renders runtime"`
+initially produced **3 passed, 1 failed, 2 filtered** (24.47 s): the existing harness
+emulates reduced motion, correctly suppressing the expected scale. The animation
+test now explicitly selects normal motion and separately checks reduced motion
+and forced colors. Affected rerun with `-t "discovers declared|offers a direct-only"`:
+**2 passed, 4 filtered**, 13.43 s. Includes no checkmark, scale, dimming, wrap bounds,
+keyboard selection and existing wizard regressions. No historical suite rerun.
+Actual screenshots: [desktop EN, normal motion](screenshots/m5/runtime-popout-desktop-en.png)
+and [mobile IT, reduced motion](screenshots/m5/runtime-popout-mobile-it.png).
+No production/provider operation, container restart, migration or live test assets.
+Rollback is source-only; existing development HMR applies the change.
+Independent source and desktop/mobile visual review: no must-fix findings.
+Index governance passed (479 text files, 87 PNGs, 401 links, 4 TOML files, 44 ignore cases).

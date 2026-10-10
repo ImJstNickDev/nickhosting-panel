@@ -281,6 +281,7 @@ describe('Owner automatic Vanilla discovery', () => {
       user.getByRole('heading', { name: 'Choose a runtime', exact: true }),
     ).toBeVisible();
     await browserExpect(user.getByRole('radio', { name: 'Paper', exact: true })).toHaveCount(0);
+    await user.emulateMedia({ reducedMotion: 'no-preference' });
     const runtimeCard = user.locator('.installer-choice-card');
     const stableRuntime = await positions(user);
     const initialCard = await runtimeCard.boundingBox();
@@ -292,6 +293,8 @@ describe('Owner automatic Vanilla discovery', () => {
     await vanilla.focus();
     await vanilla.press('Space');
     await browserExpect(vanilla).toBeChecked();
+    await browserExpect(runtimeCard.locator('.installer-choice-check')).toHaveCount(0);
+    await browserExpect(runtimeCard).toHaveCSS('transform', 'matrix(1.04, 0, 0, 1.04, 0, 0)');
     const desktopCard = await runtimeCard.boundingBox();
     expect(desktopCard?.height).toBeGreaterThan(desktopCard?.width ?? 0);
     expect(desktopCard?.width).toBeLessThanOrEqual(144);
@@ -312,7 +315,7 @@ describe('Owner automatic Vanilla discovery', () => {
     expect(await runtimeCard.evaluate((card) => getComputedStyle(card).outlineStyle)).toBe('solid');
     // Layout-only stress fixture: these clones are not selectable runtime
     // declarations and are removed before screenshots or continuing the journey.
-    const wrappedCards = await user.locator('.installer-choice-cards').evaluate((group) => {
+    const wrappedCards = await user.locator('.installer-choice-cards').evaluate(async (group) => {
       const template = group.firstElementChild;
       if (!template) throw new Error('Missing runtime card');
       const clones = Array.from({ length: 9 }, () => {
@@ -322,11 +325,15 @@ describe('Owner automatic Vanilla discovery', () => {
         return card;
       });
       try {
+        // Flush styles, then finish only this layout fixture's transitions.
+        group.getBoundingClientRect();
+        for (const animation of group.getAnimations({ subtree: true })) animation.finish();
         const cards = [template, ...clones].map((card) => card.getBoundingClientRect());
         const parent = group.getBoundingClientRect();
         return {
           rows: new Set(cards.map((card) => Math.round(card.top))).size,
           fits: cards.every((card) => card.left >= parent.left && card.right <= parent.right),
+          dimmed: clones.every((card) => getComputedStyle(card).opacity === '0.85'),
         };
       } finally {
         for (const card of clones) card.remove();
@@ -334,6 +341,15 @@ describe('Owner automatic Vanilla discovery', () => {
     });
     expect(wrappedCards.rows).toBeGreaterThan(1);
     expect(wrappedCards.fits).toBe(true);
+    expect(wrappedCards.dimmed).toBe(true);
+    await user.emulateMedia({ reducedMotion: 'reduce' });
+    await browserExpect(runtimeCard).toHaveCSS('transform', 'none');
+    await browserExpect(runtimeCard).toHaveCSS('transition-duration', '0s');
+    await user.emulateMedia({ forcedColors: 'active' });
+    await vanilla.evaluate((input) => (input as HTMLInputElement).blur());
+    await browserExpect(runtimeCard).toHaveCSS('outline-style', 'solid');
+    await user.emulateMedia({ reducedMotion: 'no-preference', forcedColors: 'none' });
+    await browserExpect(runtimeCard).toHaveCSS('transform', 'matrix(1.04, 0, 0, 1.04, 0, 0)');
     await fixture.screenshot(user, 'runtime-step-desktop-en');
     expect(
       (

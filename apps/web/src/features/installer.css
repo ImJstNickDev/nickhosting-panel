@@ -93,7 +93,7 @@
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.85rem;
-  padding: 0.4rem;
+  padding: 0.65rem;
 }
 .installer-choice-card {
   position: relative;
@@ -112,6 +112,9 @@
   background: #15272e;
   color: #fff;
   cursor: pointer;
+  transition:
+    transform 160ms ease,
+    opacity 160ms ease;
 }
 .installer-choice-art {
   position: absolute;
@@ -147,28 +150,20 @@
 .installer-choice-card:has(input:checked) {
   border-color: #36556a;
   box-shadow: inset 0 0 0 2px #fff;
+  transform: scale(1.04);
+}
+.installer-choice-cards:has(input:checked)
+  .installer-choice-card:not(:has(input:checked, input:disabled)) {
+  opacity: 0.85;
 }
 .installer-choice-check {
   display: none;
-}
-.installer-choice-card:has(input:checked) .installer-choice-check {
-  position: absolute;
-  top: 0.45rem;
-  right: 0.45rem;
-  display: grid;
-  place-items: center;
-  width: 1.3rem;
-  height: 1.3rem;
-  border-radius: 3px;
-  background: #fff;
-  color: #20323e;
-  font-weight: 700;
 }
 .installer-choice-card:has(input:focus-visible) {
   outline: 2px solid #36556a;
   outline-offset: 2px;
 }
-.installer-choice-card:has(input:disabled) {
+.installer-choice-cards .installer-choice-card:has(input:disabled) {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -181,7 +176,10 @@
     color: CanvasText;
     border-color: ButtonText;
   }
-  .installer-choice-card:has(input:checked),
+  .installer-choice-card:has(input:checked) {
+    outline: 2px solid Highlight;
+    outline-offset: -4px;
+  }
   .installer-choice-card:has(input:focus-visible) {
     outline-color: Highlight;
   }
@@ -340,6 +338,10 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .installer-choice-card:has(input:checked) {
+    transform: none;
+  }
+  .installer-choice-card,
   .installer-heading,
   .installer-heading h1,
   .installer-reveal {

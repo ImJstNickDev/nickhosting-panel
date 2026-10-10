@@ -124,9 +124,11 @@ export function VersionList({
                 disabled={o.disabled}
                 onChange={() => onChange(o.value)}
               />
-              <span className="installer-choice-check" aria-hidden="true">
-                ✓
-              </span>
+              {presentation === 'list' && (
+                <span className="installer-choice-check" aria-hidden="true">
+                  ✓
+                </span>
+              )}
               <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
                 {o.label ?? t(o.labelKey ?? '')}
               </span>
