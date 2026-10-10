@@ -156,7 +156,7 @@ async function publicState(
     .where('ready_at', '>=', new Date(now.getTime() - state.estimate_max_age_seconds * 1000))
     .where('ready_at', '<=', now)
     .orderBy('ready_at', 'desc')
-    .limit(20)
+    .limit(10)
     .execute();
   const actual = effectiveState(server, state, now);
   return {

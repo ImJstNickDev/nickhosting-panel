@@ -502,7 +502,6 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   return {
     async validate(route, ownedBindings) {
       const state = await inspect(route, ownedBindings, true);
-      if (route.mode === 'online') return proveBackend(state);
       const raw = await options.loadProof(route);
       const proof = gatewayReachabilityProofSchema.safeParse(raw);
       const matches =
@@ -517,12 +516,22 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       // Bootstrap from an actually ready owned backend using this inspection.
       // Stopped containers and protocol failures cannot replace a missing/stale
       // proof. This is the same gate used by readiness, not metadata promotion.
-      if (!matches) await proveBackend(state);
+      if (!matches) {
+        await proveBackend(state);
+        if (route.mode === 'online') return { backendReady: true };
+      } else if (route.mode === 'online' && state.container.running) {
+        // A failed game probe revokes forwarding, not an independently proven
+        // public binding. Ownership/collision/topology failures above still throw.
+        const backendReady = await options.probeBackend(route).catch(() => false);
+        if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
+        if (backendReady) return { backendReady: true };
+      }
       if (
         !(await options.probeNode(route)) ||
         now() - state.observation.observedAt > policy.maximumObservationAgeMs
       )
         unavailable();
+      return { backendReady: false };
     },
     async validateBackend(route) {
       const state = await inspect(route, [], false);

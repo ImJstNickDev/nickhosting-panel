@@ -101,3 +101,18 @@ for route leases, multiport evidence, forwarding fences and restart behavior.
 [Validation](M3-VALIDATION.md) distinguishes isolated fixture evidence from
 unverified production deployment prerequisites. No Minecraft/Satisfactory
 compatibility or production Gateway listener is claimed by M3.
+
+## M5 transition clarification
+
+Power confirmation uses fresh host-bound process identity where available, without
+waiting for Panel's cached resource state. Startup estimates use the last ten
+eligible measured cycles (minimum five) and never gate power or routing. Actual
+protocol readiness remains the forwarding gate; an egg's startup signal or a
+running container alone does not prove reachability from the Gateway namespace.
+
+Idle quiescence fences gameplay and wake effects, not bounded protocol status/ping
+or login-disconnect replies. A safe public listener can remain available while its
+backend stops: matching binding proof and fresh ownership/topology/node checks are
+still mandatory. Backend readiness loss immediately suppresses forwarding; identity,
+collision or lease failure still closes the listener. Passive responder connections
+are excluded from active gameplay session counts.

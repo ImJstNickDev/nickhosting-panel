@@ -683,6 +683,18 @@ describe('host-bound Minecraft runtime image evidence', () => {
     );
     expect(power).not.toHaveBeenCalled();
   });
+  it('shares fresh provider snapshots within image and launch authorization checks', async () => {
+    const value = await installed();
+    const getServer = vi.spyOn(value.external.adapter, 'getApplicationServer').mockClear();
+    await value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false);
+    expect(getServer).toHaveBeenCalledTimes(1);
+    getServer.mockClear();
+    const getEgg = vi.spyOn(value.external.adapter, 'getEgg').mockClear();
+    await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
+    // Identity-only observation + image authorization, then one server snapshot
+    // per launch-config authorization (including each transfer boundary).
+    expect(getServer.mock.calls.length).toBe(getEgg.mock.calls.length + 2);
+  });
   it('rehashes launch inputs for each process epoch and rejects an out-of-band file change', async () => {
     const value = await installed();
     await value.management.lifecycle.observeProcessStart(value.serverId, f.db);

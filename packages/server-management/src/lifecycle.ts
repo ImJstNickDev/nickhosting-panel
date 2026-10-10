@@ -356,11 +356,17 @@ export async function processServerOperation(
     };
     const wait = async (reason = 'waiting', errorCode: string | null = null): Promise<Result> => {
       const poll = typeof operation.plan.pollCount === 'number' ? operation.plan.pollCount + 1 : 1;
-      const next = new Date(
-        nowOf(options).getTime() +
-          Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4)) +
-          Math.floor(Math.random() * 500),
-      );
+      const processConfirmation =
+        options.observeProcessStart !== undefined &&
+        (['start', 'restart'].includes(operation.action) ||
+          (operation.action === 'provision' && operation.phase === 'initial_start')) &&
+        ['power_confirmation', 'start_terminal_unproven', 'restart_terminal_unproven'].includes(
+          reason,
+        );
+      // A fresh process signal must not wait behind exponential resource-cache
+      // polling. Provider failures and unrelated operations retain their backoff.
+      const delay = processConfirmation ? 2000 : Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4));
+      const next = new Date(nowOf(options).getTime() + delay + Math.floor(Math.random() * 500));
       await db.transaction().execute(async (tx) => {
         await tx
           .updateTable('operation_jobs')
@@ -925,6 +931,73 @@ export async function processServerOperation(
       // suppress automatic wake and release only this physically confirmed stop.
       return finish(false, true, 'conflict', false, true);
     };
+    const completeObservedStart = async (): Promise<Result | null> => {
+      if (
+        !options.observeProcessStart ||
+        !operation.effect_started_at ||
+        !(
+          (['start', 'restart'].includes(operation.action) && operation.phase === 'power') ||
+          (operation.action === 'provision' && operation.phase === 'initial_start')
+        )
+      )
+        return null;
+      const reason =
+        operation.action === 'restart' ? 'restart_terminal_unproven' : 'start_terminal_unproven';
+      let startedAt: string | null;
+      try {
+        startedAt = await options.observeProcessStart(server.id, db);
+      } catch {
+        return wait(reason, 'operation_uncertain');
+      }
+      const started = processStartTime(startedAt);
+      const previous = operation.plan.previousProcessStartedAt;
+      const previousTime = processStartTime(previous);
+      if (
+        started === null ||
+        started <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
+        started > BigInt(nowOf(options).getTime()) * 1_000_000n ||
+        (operation.action === 'restart' &&
+          previous !== undefined &&
+          previous !== null &&
+          (previousTime === null || started === previousTime))
+      )
+        return wait(reason, 'operation_uncertain');
+      // Fresh host-bound process proof supersedes Panel's cached resource state.
+      // It confirms power only: game readiness and forwarding remain separate.
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        const reservation = await tx
+          .updateTable('resource_reservations')
+          .set({ state: 'running', updated_at: nowOf(options) })
+          .where('server_id', '=', server.id)
+          .returning('server_id')
+          .executeTakeFirst();
+        if (!reservation) throw new DomainError('operation_uncertain');
+        await tx
+          .updateTable('managed_servers')
+          .set({ runtime_state: 'running', last_observed_at: nowOf(options) })
+          .where('id', '=', server.id)
+          .execute();
+      });
+      await update({
+        plan: {
+          ...operation.plan,
+          waitReason: null,
+          ...(operation.action === 'restart'
+            ? {
+                restartConfirmed: true,
+                restartConfirmedAt: nowOf(options).toISOString(),
+                restartProcessStartedAt: startedAt,
+              }
+            : {
+                startConfirmed: true,
+                startConfirmedAt: nowOf(options).toISOString(),
+                startProcessStartedAt: startedAt,
+              }),
+        },
+      });
+      return finish(true);
+    };
     const completeObservedStop = async (): Promise<Result | null> => {
       if (
         operation.action !== 'stop' ||
@@ -1031,7 +1104,6 @@ export async function processServerOperation(
           return wait('installation_terminal_unproven', 'operation_uncertain');
         remote = await ownedRemote(db, server, options);
         if (!installed(remote)) return wait('installation');
-        const current = await resources();
         await db
           .updateTable('managed_servers')
           .set({ installation_state: 'installed' })
@@ -1042,7 +1114,10 @@ export async function processServerOperation(
           if (externalStop) return externalStop;
           await activateProvisionGateway(db, server.id, jobId, options.env);
           await update({});
+          const observedStart = await completeObservedStart();
+          if (observedStart) return observedStart;
           if (!settled()) return wait('resource_cache_expiry');
+          const current = await resources();
           if (current.current_state === 'running') {
             await db.transaction().execute(async (tx) => {
               await lockResources(tx);
@@ -1058,6 +1133,7 @@ export async function processServerOperation(
             return wait('start_preboot_or_unknown', 'operation_uncertain');
           return wait('power_confirmation');
         }
+        const current = await resources();
         if (current.current_state !== 'offline') return wait('unexpected_provision_power_state');
         if (
           options.configureGameProvision &&
@@ -1142,6 +1218,8 @@ export async function processServerOperation(
         if (observedStop) return observedStop;
         const externalStop = await completeExternalStop();
         if (externalStop) return externalStop;
+        const observedStart = await completeObservedStart();
+        if (observedStart) return observedStart;
         const current = await resources();
         if (operation.phase === 'planned') {
           if (
@@ -1281,35 +1359,7 @@ export async function processServerOperation(
           return finish(true, true);
         }
         if (action !== 'stop' && current.current_state === 'running') {
-          if (action === 'restart' && options.observeProcessStart) {
-            let startedAt: string | null;
-            try {
-              startedAt = await options.observeProcessStart(server.id, db);
-            } catch {
-              return wait('restart_terminal_unproven', 'operation_uncertain');
-            }
-            const started = processStartTime(startedAt);
-            const previous = operation.plan.previousProcessStartedAt;
-            const previousTime = processStartTime(previous);
-            if (
-              started === null ||
-              !operation.effect_started_at ||
-              started <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
-              started > BigInt(nowOf(options).getTime()) * 1_000_000n ||
-              (previous !== undefined &&
-                previous !== null &&
-                (previousTime === null || started === previousTime))
-            )
-              return wait('restart_terminal_unproven', 'operation_uncertain');
-            await update({
-              plan: {
-                ...operation.plan,
-                restartConfirmed: true,
-                restartConfirmedAt: nowOf(options).toISOString(),
-                restartProcessStartedAt: startedAt,
-              },
-            });
-          } else if (action === 'restart') {
+          if (action === 'restart') {
             // Isolated legacy fixtures can omit the host observer. Production
             // always supplies it and must never fall back to cached uptime.
             const restarted =

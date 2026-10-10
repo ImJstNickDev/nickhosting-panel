@@ -2115,3 +2115,102 @@ Final staged governance and whitespace checks passed: 501 indexed text files,
 106 review PNGs, 428 relative links, four TOML files and 44 ignore cases.
 Independent screenshot/content review found no new visible defect or unresolved
 must-fix. No full historical suite was repeated for this follow-up.
+
+## 2026-10-10 — start confirmation and permanent status during idle stop
+
+Owner-observed follow-up: manual start took about five seconds before startup, one
+ready transition reportedly lagged by 46 seconds, and sleep briefly produced a
+Minecraft connection failure. Read-only correlation found queued-to-power-intent
+intervals of 5.955 s and 6.494 s. In the second cycle Minecraft logged `Done` at
+20:33:09.520 UTC, the lifecycle job completed at 20:33:17.958 and Core recorded
+Gateway readiness at 20:33:18.674. The first cycle's original container logs were
+not retained by Wings recreation; its reported 46-second post-`Done` interval is
+not independently reconstructed. Stop job creation-to-completion was 5.148 s; this is
+not a measurement of timeout-expiry-to-idle-detection latency.
+
+Installed Panel 1.11.11 caches the resource endpoint, including power state, for
+20 seconds ([upstream controller](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Http/Controllers/Api/Client/Servers/ResourceUtilizationController.php)).
+Wings 1.11.13 syncs configuration, manages the image/container and detects startup
+from the egg's configured output pattern ([power](https://github.com/pterodactyl/wings/blob/v1.11.13/server/power.go),
+[startup detection](https://github.com/pterodactyl/wings/blob/v1.11.13/server/listeners.go)).
+It does not verify NickHosting registry ownership or hash the JAR against our pinned
+runtime artifact. Those checks cannot truthfully be described as delegated to Wings.
+Installation remains Wings-owned; no installer is duplicated by this correction.
+
+A bounded read-only replay of the actual configuration/file verification helpers
+used the existing dev encrypted configuration and a PostgreSQL session enforcing
+`default_transaction_read_only=on`. It did not enqueue operations, reserve resources
+or send power commands. Safe output contained stage durations and method counts only:
+
+| Stage | Before deduplication | After deduplication |
+| --- | --- | --- |
+| Image and launch configuration | 1,160 ms; 2 server GETs, 1 egg GET | 1,077 ms; 1 server GET, 1 egg GET |
+| Full launch-file attestation | 5,902 ms; 7 server GETs, 4 egg GETs | 2,562 ms; 3 server GETs, 3 egg GETs |
+
+These are two live samples, not a benchmark or a promised start latency. The file
+was 60,417,588 bytes. Authorization also repeats at transfer boundaries; the slower
+sample crossed another boundary. The deterministic change removes the adjacent
+second server GET within each authorization and shares one snapshot for image and
+launch validation. There is no new provider TTL cache. JAR integrity remains an
+extra NickHosting runtime-consistency policy, checked before start and once per
+observed process epoch, because out-of-band provider/SFTP edits are possible.
+
+Fresh host-bound process evidence now confirms start/restart/initial-start without
+waiting for the cached resource response's 21-second safety window. Epochs must be
+strictly after the durable power intent, not future, and different for restart.
+A configured observer failure cannot fall back to cached `running`; reservations
+remain held. Confirmation polling stays at 2–2.5 seconds instead of growing to ten.
+Actual game protocol readiness is still required before forwarding. Startup estimates
+are informational only, using the most recent ten same-profile samples, requiring
+at least five; they never delay an operation.
+
+The idle quiescence fence previously destroyed passive status sockets alongside
+logins. It now retains bounded protocol status/ping and login-disconnect responses,
+while still preventing wake and forwarding until the fence reconciles. Responder
+sockets do not count as gameplay activity. Separately, failed backend readiness
+can retain a status-only public listener with matching durable binding proof and
+fresh node/topology checks. Missing ownership, collisions, stale leases and unknown
+bindings still close it. Fresh backend readiness is required to resume forwarding.
+An independent reviewer caught an intermediate regression where negative backend
+readiness also blocked sleeping-route wake; this was corrected and covered by
+Minecraft status/login and concurrent-wake tests before delivery.
+
+Idle timing remains observation-based: the timeout starts with confirmed zero
+players, not the unobserved instant a client disconnects. A qualifying fresh probe
+queues stop immediately; protocol/authorization calls, dispatch and graceful shutdown
+add elapsed time. Missing player counts never mean zero. This pass does not claim
+instant shutdown or a new live measured latency after the changes.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts` — **121 passed**, including twelve new confirmation/timing cases.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts` — **79 passed**.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts` — **77 passed**, including status during quiescence, false-readiness wake, forwarding downgrade/recovery and held-validation safety.
+- The isolated integration runner with `packages/server-management/src/minecraft-queued.integration.test.ts` — **36 passed, one new test failed** because its spy included fixture setup calls. Clearing only the fixture's prior mock history corrected the test; targeted `-t 'shares fresh provider snapshots'` — **1 passed, 36 skipped**. Production behavior was not changed to satisfy that assertion.
+- Root and WebPanel typecheck passed after the Gateway/API changes. No historical full-suite rerun or new live game scenario was performed.
+
+No game server was created, started, stopped, mutated or removed by this pass. No
+provider configuration, existing infrastructure, DNS or Pterodactyl/Wings service
+was changed. The approved isolated test stack was reused without restarting it.
+API/worker source watchers load backend edits; Gateway requires a separately
+approved scoped restart. Until activation and Owner testing, end-to-end corrected
+latency remains unverified. SFTPGo issue #18 remains unchanged.
+
+During live source/watch updates the Owner reported the console route showing only
+a request-failed message and an unexpected “Exit support” action. The Owner clarified
+this was a regular Owner session, **not** an assisted session. No support session is
+inferred. A watch reload may explain the interrupted request but does not establish
+the cause of the incorrect action. Per Owner direction this is recorded without an
+unrelated UI fix or a claim that the symptom is harmless/resolved.
+
+Final integration follow-up: the Gateway orchestration file ran **55 passed, three
+failed**. These were stale assertions expecting a wait after an already corroborated
+stop; source review of committed HEAD confirmed the earlier stop fast path already
+completed in that delivery. Assertions now require immediate success, replay as
+`duplicate`, the original single-stop/reservation safeguards, and the latest-ten
+estimate across eleven cycles. Targeted rerun with
+`-t 'replaying an old manual stop|idle sleep uses|recent same-profile'` — **3 passed,
+55 skipped**. No unrelated lifecycle behavior was altered for these tests.
+Final root/WebPanel typecheck and changed-source Biome checks passed. Independent
+review found no remaining must-fix. The Owner-reported UI fallback remains an
+uninvestigated observation, not a resolved issue or a claimed watcher-only defect.

@@ -524,9 +524,31 @@ describe('Gateway pre-bind and forwarding safety', () => {
         activeBindings: structuredClone(f.observation.containers[0]?.configuredBindings),
       });
       f.route.mode = 'online';
-      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      await expect(f.validator().validate(f.route, [])).resolves.toEqual({ backendReady: false });
+      await expect(f.validator().validateBackend(f.route)).rejects.toThrow(
+        'allocation_unavailable',
+      );
       vi.mocked(f.options.probeBackend).mockResolvedValue(true);
       await f.validator().validate(f.route, []);
+    },
+  );
+  it.each(['stopped', 'not-ready', 'probe-error'] as const)(
+    'retains a safe permanent listener when the online backend is %s, without forwarding',
+    async (failure) => {
+      const f = fixture();
+      await f.validator().validateBackend(f.route);
+      if (failure === 'stopped')
+        Object.assign(f.observation.containers[0] ?? {}, { running: false, activeBindings: [] });
+      else if (failure === 'not-ready') vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+      else vi.mocked(f.options.probeBackend).mockRejectedValue(new Error('connection refused'));
+      await expect(f.validator().validate(f.route, [])).resolves.toEqual({ backendReady: false });
+      expect(f.options.probeNode).toHaveBeenCalledWith(f.route);
+      // Losing node reachability or ownership still closes the listener.
+      vi.mocked(f.options.probeNode).mockResolvedValue(false);
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      vi.mocked(f.options.probeNode).mockResolvedValue(true);
+      f.server.external_id = 'foreign-resource';
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
     },
   );
   it('retains v1 only for its original container and upgrades only after a new protocol proof', async () => {

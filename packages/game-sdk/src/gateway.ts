@@ -199,19 +199,24 @@ export interface GatewayProtocolAdapter {
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
   response(context: GatewayProtocolContext, state: GatewayMode): Uint8Array | undefined;
   /** Optional stateful TCP status/ping dialogue; old datagram/fixture adapters
-   * retain the stateless classify/response contract. Never used when online. */
+   * retain the stateless classify/response contract. Used only while forwarding is fenced. */
   createSession?(context: GatewayProtocolContext): GatewayProtocolSession;
   probeReadiness(context: GatewayProtocolContext): Promise<{ ready: boolean }>;
   probeIdle?(context: GatewayProtocolContext): Promise<{ idle: boolean; playerCount?: number }>;
 }
 
 export interface GatewaySafety {
-  /** Freshly checks all provider allocations, host bindings and ownership.
-   * For an online route this MUST also prove the exact backend binding and a
-   * successful protocol reachability challenge from the Gateway namespace,
-   * persisting that proof. No separate validateBackend call is then required.
-   * Offline routes instead require matching prior proof and a fresh node probe. */
-  validate(route: GatewayRoute, ownedBindings: readonly GatewayEndpoint[]): Promise<void>;
+  /** Freshly checks provider allocations, host bindings and ownership. Missing
+   * binding proof requires a successful live backend protocol challenge. A matching
+   * prior proof plus fresh node reachability can retain a status-only listener when
+   * the backend stops: return backendReady:false to prohibit forwarding. Authorized
+   * sleeping/blocked routes may still request wake outside the quiescence fence.
+   * A void result retains the original contract (online backend proven ready). */
+  validate(
+    route: GatewayRoute,
+    ownedBindings: readonly GatewayEndpoint[],
+    // biome-ignore lint/suspicious/noConfusingVoidType: Preserve existing strict validator implementations returning Promise<void>.
+  ): Promise<void | { backendReady: boolean }>;
   /** Independent exact Docker binding identity and namespace reachability proof. */
   validateBackend(route: GatewayRoute): Promise<void>;
 }

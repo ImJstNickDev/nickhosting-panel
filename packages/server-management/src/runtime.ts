@@ -303,7 +303,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
       throw new DomainError('configuration_invalid');
     await containerObserver.preflight();
   }
-  async function observedImageDigest(connection: Kysely<Database>, serverId: string) {
+  async function observedImageDigest(
+    connection: Kysely<Database>,
+    serverId: string,
+    remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+  ) {
     await verifyObservationHost(serverId, connection);
     const server = await connection
       .selectFrom('managed_servers')
@@ -316,7 +320,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     await verifyManagedIdentity(
       connection,
       server,
-      await adapter.getApplicationServer(server.pterodactyl_id),
+      remote ?? (await adapter.getApplicationServer(server.pterodactyl_id)),
     );
     const digest = await containerObserver.imageIdentity(server.pterodactyl_uuid);
     if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest))

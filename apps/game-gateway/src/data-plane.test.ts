@@ -223,7 +223,10 @@ describe('persistent Gateway fixture forwarding', () => {
         evidenceExpiresAt: new Date(Date.now() + 60000).toISOString(),
       },
     };
-    const f = plane([gameRoute], { protocols: [minecraft] });
+    const f = plane([gameRoute], {
+      protocols: [minecraft],
+      safety: { validate: async () => ({ backendReady: false }) },
+    });
     await f.gateway.start();
     const handshake = (intent: number, version = 766) =>
       frameMinecraftPacket(
@@ -305,7 +308,10 @@ describe('persistent Gateway fixture forwarding', () => {
         };
       },
     });
-    const f = plane([route(backend.port, 'tcp', 'sleeping')], { protocols: [protocol] });
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      protocols: [protocol],
+      safety: { validate: async () => ({ backendReady: false }) },
+    });
     await f.gateway.start();
     const responses = await Promise.all(
       Array.from({ length: 12 }, (_, index) =>
@@ -365,7 +371,10 @@ describe('persistent Gateway fixture forwarding', () => {
         response: (mode) => ({ bytes: Buffer.from(mode), close: true }),
       }),
     });
-    const f = plane([route(backend.port, 'tcp', 'sleeping')], { protocols: [protocol] });
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      protocols: [protocol],
+      safety: { validate: async () => ({ backendReady: false }) },
+    });
     await f.gateway.start();
     expect((await exchange(backend.port, 'MISMATCH')).toString()).toBe('sleeping');
     expect(f.control.requestWake).not.toHaveBeenCalled();
@@ -385,6 +394,53 @@ describe('persistent Gateway fixture forwarding', () => {
     const encrypted = Buffer.alloc(65536, 0xff);
     expect(await exchange(backend.port, encrypted)).toEqual(encrypted);
     expect(createSession).not.toHaveBeenCalled();
+  });
+  it('retains authorized TCP/UDP responders when backend readiness drops and resumes only after fresh validation', async () => {
+    const tcp = await tcpFixture();
+    const udp = await udpFixture();
+    const a = route(tcp.port);
+    const b = { ...route(udp.port, 'udp'), serverId: a.serverId, generation: a.generation };
+    let backendReady = true;
+    let finishValidation: (() => void) | undefined;
+    const f = plane([a, b], {
+      safety: {
+        validate: async (candidate) => {
+          if (!backendReady && candidate.id === b.id)
+            await new Promise<void>((resolve) => {
+              finishValidation = resolve;
+            });
+          return { backendReady };
+        },
+      },
+    });
+    await f.gateway.start();
+    expect((await exchange(tcp.port, 'live')).toString()).toBe('live');
+    expect((await datagram(udp.port, 'live')).toString()).toBe('live');
+    const connection = connect(tcp.port, '127.0.0.1');
+    connection.on('error', () => {});
+    await once(connection, 'connect');
+    const closed = once(connection, 'close');
+    backendReady = false;
+    const refreshing = f.gateway.refresh();
+    await closed;
+    // The known failed TCP backend is fenced before a slower second route validates.
+    expect((await exchange(tcp.port, 'STATUS\n')).toString()).toBe('blocked\n');
+    finishValidation?.();
+    await refreshing;
+    const before = f.gateway.metrics();
+    for (const message of ['STATUS\n', 'JOIN\n']) {
+      expect((await exchange(tcp.port, message)).toString()).toBe('blocked\n');
+      expect((await datagram(udp.port, message)).toString()).toBe('blocked\n');
+    }
+    expect(f.gateway.metrics()).toMatchObject({
+      tcpBytesToBackend: before.tcpBytesToBackend,
+      udpBytesToBackend: before.udpBytesToBackend,
+    });
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    backendReady = true;
+    await f.gateway.refresh();
+    expect((await exchange(tcp.port, 'ready-again')).toString()).toBe('ready-again');
+    expect((await datagram(udp.port, 'ready-again')).toString()).toBe('ready-again');
   });
   it('streams binary TCP with half-close and concurrent clients on the same numeric port at distinct addresses', async () => {
     const backend = await tcpFixture();
@@ -1071,7 +1127,7 @@ describe('sleep protocol handling and observations', () => {
     );
     expect(clock - started).toBe(5000);
   });
-  it('synchronously fences every role before a held idle report, refusing a real concurrent TCP/UDP join', async () => {
+  it('fences gameplay before a held idle report while answering bounded TCP/UDP status and join rejection', async () => {
     const tcp = await tcpFixture();
     const udp = await udpFixture();
     const a = { ...route(tcp.port), sleepEligibleAt: new Date(Date.now() - 1000).toISOString() };
@@ -1096,6 +1152,10 @@ describe('sleep protocol handling and observations', () => {
     const observing = f.gateway.observe();
     await vi.waitFor(() => expect(reportObservation).toHaveBeenCalledOnce());
     expect(f.gateway.health().quiescentServers).toBe(1);
+    for (const request of ['STATUS\n', 'JOIN\n']) {
+      expect((await exchange(tcp.port, request)).toString()).toBe('blocked\n');
+      expect((await datagram(udp.port, request)).toString()).toBe('blocked\n');
+    }
     expect((await exchange(tcp.port, 'late-player').catch(() => Buffer.alloc(0))).length).toBe(0);
     const client = createSocket('udp4');
     client.send('late-datagram', udp.port, '127.0.0.1');
@@ -1123,6 +1183,81 @@ describe('sleep protocol handling and observations', () => {
     expect(f.gateway.metrics()).toMatchObject({ tcpBytesToBackend: 0, udpBytesToBackend: 0 });
     finish?.();
     await observing;
+    const stopped = [a, b].map((r) => ({ ...r, revision: 4, mode: 'sleeping' as const }));
+    await f.gateway.applySnapshot(f.snapshot(stopped, 4));
+    // Core confirming stop does not cancel an idle-report fence early.
+    expect((await exchange(tcp.port, 'JOIN\n')).toString()).toBe('blocked\n');
+    expect((await datagram(udp.port, 'STATUS\n')).toString()).toBe('blocked\n');
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    expect(f.gateway.metrics()).toMatchObject({ tcpBytesToBackend: 0, udpBytesToBackend: 0 });
+  });
+  it('keeps Minecraft status and ping available while quiescent, rejects login and expires with the lease', async () => {
+    const backend = await tcpFixture();
+    let clock = Date.now();
+    const gameRoute = {
+      ...route(backend.port),
+      sleepEligibleAt: new Date(clock - 1000).toISOString(),
+      protocol: {
+        handlerId: 'minecraft-java',
+        gameVersion: '1.20.4',
+        role: 'game',
+        minecraft: {
+          release: '1.20.4',
+          protocolId: 765,
+          family: 'netty' as const,
+          transfer: false,
+          acceptsTransfers: false as const,
+          choiceId: randomUUID(),
+          choiceDigest: 'a'.repeat(64),
+          evidenceRunId: randomUUID(),
+          evidenceExpiresAt: new Date(clock + 60000).toISOString(),
+        },
+      },
+    };
+    const minecraft = createMinecraftProtocolAdapter({
+      versions: [{ release: '1.20.4', protocolId: 765, family: 'netty', transfer: false }],
+      supportedReleases: ['1.20.4'],
+    });
+    const f = plane([gameRoute], {
+      now: () => clock,
+      protocols: [
+        {
+          ...minecraft,
+          probeReadiness: async () => ({ ready: true }),
+          probeIdle: async () => ({ idle: true, playerCount: 0 }),
+        },
+      ],
+    });
+    await f.gateway.start();
+    await f.gateway.observe();
+    expect(f.gateway.health().quiescentServers).toBe(1);
+    const handshake = (intent: number) =>
+      frameMinecraftPacket(
+        0,
+        Buffer.concat([
+          encodeMinecraftVarInt(765),
+          Buffer.from([9]),
+          Buffer.from('localhost'),
+          Buffer.from([0x63, 0xdd, intent]),
+        ]),
+      );
+    const nonce = Buffer.alloc(8, 17);
+    const reply = await exchange(
+      backend.port,
+      Buffer.concat([handshake(1), frameMinecraftPacket(0), frameMinecraftPacket(1, nonce)]),
+      true,
+    );
+    const status = readMinecraftFrame(reply, 1024);
+    expect(status?.body.toString()).toContain('cannot start right now');
+    expect(reply.subarray(status?.bytes)).toEqual(frameMinecraftPacket(1, nonce));
+    expect((await exchange(backend.port, handshake(2))).toString()).toContain(
+      'cannot start right now',
+    );
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    expect(f.gateway.metrics().tcpBytesToBackend).toBe(0);
+    clock += 60001;
+    expect(await exchange(backend.port, handshake(1)).catch(() => Buffer.alloc(0))).toHaveLength(0);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
   });
   it.each(['disabled', 'before-idle-timeout', 'waking', 'inconsistent-role-eligibility'] as const)(
     'does not fence ordinary idle measurements when %s',

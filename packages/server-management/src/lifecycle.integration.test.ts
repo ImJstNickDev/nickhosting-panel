@@ -857,6 +857,87 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.reservation()).toBeDefined();
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
   });
+  it.each(['start', 'restart', 'provision'] as const)(
+    'confirms %s from fresh process proof before the Panel resource cache expires',
+    async (action) => {
+      const f = await fixture(action, action === 'provision' ? { autoStart: true } : {});
+      const baseline = new Date(f.now().getTime() - 100_000).toISOString();
+      let proof: string | null = action === 'restart' ? baseline : null;
+      f.options.observeProcessStart = async () => proof;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing durable power intent');
+      expect((await f.operation()).phase).toBe(action === 'provision' ? 'initial_start' : 'power');
+      proof = new Date(effect.getTime() + 500).toISOString();
+      f.setState('offline'); // Panel still serves its pre-start resources cache.
+      f.adapter.getResources.mockClear();
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      expect((await f.reservation())?.state).toBe('running');
+      expect(await f.server()).toMatchObject({
+        runtime_state: 'running',
+        readiness: 'unknown',
+        active_operation_id: null,
+      });
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['null', 'unavailable', 'before_intent', 'equal_intent', 'future', 'malformed'] as const)(
+    'does not complete start using cached running state when physical proof is %s',
+    async (kind) => {
+      const f = await fixture('start');
+      f.options.observeProcessStart = async () => null;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing durable power intent');
+      f.tick();
+      f.setState('running');
+      f.options.observeProcessStart = async () => {
+        if (kind === 'null') return null;
+        if (kind === 'unavailable') throw new Error('isolated unavailable observer');
+        if (kind === 'malformed') return 'invalid';
+        if (kind === 'equal_intent') return effect.toISOString();
+        if (kind === 'before_intent') return new Date(effect.getTime() - 1).toISOString();
+        return new Date(f.now().getTime() + 1).toISOString();
+      };
+      expect(await f.run()).toBe('waiting');
+      expect((await f.operation()).plan.waitReason).toBe('start_terminal_unproven');
+      expect((await f.reservation())?.state).toBe('starting');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['start', 'restart'] as const)(
+    'keeps %s process confirmation polls bounded instead of growing to ten seconds',
+    async (action) => {
+      const f = await fixture(action);
+      f.options.observeProcessStart = async () => null;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        expect(await f.run()).toBe('waiting');
+        const job = await f.db
+          .selectFrom('operation_jobs')
+          .select('next_attempt_at')
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow();
+        const delay = job.next_attempt_at.getTime() - f.now().getTime();
+        expect(delay).toBeGreaterThanOrEqual(2000);
+        expect(delay).toBeLessThan(2500);
+        f.tick(3000);
+      }
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      expect(await f.reservation()).toBeDefined();
+    },
+  );
+  it('keeps the resource-cache safety window when no physical observer is available', async () => {
+    const f = await fixture('start');
+    expect(await f.run()).toBe('waiting');
+    f.tick(3000);
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.waitReason).toBe('resource_cache_expiry');
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
   it('confirms a fast restart from a new physical process despite missing the cached uptime reset', async () => {
     const f = await fixture('restart');
     const baseline = new Date(f.now().getTime() - 100_000).toISOString();

@@ -203,7 +203,11 @@ export interface MinecraftModuleOptions {
   codec: SecretCodec;
   env: Environment;
   adapter: PterodactylAdapter;
-  observedImageDigest: (connection: Kysely<Database>, serverId: string) => Promise<string | null>;
+  observedImageDigest: (
+    connection: Kysely<Database>,
+    serverId: string,
+    remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+  ) => Promise<string | null>;
   authorizeJob: (
     connection: Kysely<Database>,
     jobId: string,
@@ -234,19 +238,14 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       if (mapping?.game_id === 'minecraft-java') throw new DomainError('integration_unavailable');
       return;
     }
-    const observed = await observedImageDigest(connection, serverId);
     const server = await connection
       .selectFrom('managed_servers')
       .selectAll()
       .where('id', '=', serverId)
       .executeTakeFirstOrThrow();
-    await assertMinecraftRemoteLaunch(
-      connection,
-      serverId,
-      await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
-      env,
-      adapter,
-    );
+    const remote = await adapter.getApplicationServer(server.pterodactyl_id ?? 0);
+    const observed = await observedImageDigest(connection, serverId, remote);
+    await assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter);
     const evidence = await requireMinecraftRuntimeImageEvidence(
       connection,
       serverId,
@@ -309,18 +308,11 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         server,
         adapter,
         authorize: async () => {
-          await verifyManagedIdentity(
-            connection,
-            server,
-            await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
-          );
-          await assertMinecraftRemoteLaunch(
-            connection,
-            serverId,
-            await adapter.getApplicationServer(server.pterodactyl_id ?? 0),
-            env,
-            adapter,
-          );
+          // One fresh provider snapshot serves both checks within this authorization.
+          // Each later transfer boundary still obtains its own fresh snapshot.
+          const remote = await adapter.getApplicationServer(server.pterodactyl_id ?? 0);
+          await verifyManagedIdentity(connection, server, remote);
+          await assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter);
         },
       },
       { env, observedImageDigest },

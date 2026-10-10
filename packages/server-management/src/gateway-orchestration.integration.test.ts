@@ -1056,9 +1056,9 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     const fixture = await started();
     const input = { action: 'stop', idempotencyKey: randomUUID() };
     const stopped = await enqueueServerOperation(f.db, f.context, serverId, input);
-    expect(await fixture.process(stopped.jobId)).toBe('waiting');
-    advance(1000);
     expect(await fixture.process(stopped.jobId)).toBe('succeeded');
+    advance(1000);
+    expect(await fixture.process(stopped.jobId)).toBe('duplicate');
     const rearmed = await configure();
     expect(rearmed.state).toBe('sleeping');
     expect(await enqueueServerOperation(f.db, f.context, serverId, input)).toEqual(stopped);
@@ -1241,9 +1241,9 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         .where('server_id', '=', serverId)
         .execute(),
     ).toHaveLength(1);
-    expect(await fixture.process(sleeping.sleepJobId ?? '')).toBe('waiting');
-    advance(1000);
     expect(await fixture.process(sleeping.sleepJobId ?? '')).toBe('succeeded');
+    advance(1000);
+    expect(await fixture.process(sleeping.sleepJobId ?? '')).toBe('duplicate');
     expect(fixture.stop).toHaveBeenCalledTimes(1);
     expect((await row()).intent).toBe('sleeping');
     expect((await reconcileGatewayState(f.db, serverId, options)).state).toBe('sleeping');
@@ -1497,7 +1497,7 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
   it('uses only recent same-profile measured cycles for reliable startup estimates', async () => {
     await configure();
     const fixture = await lifecycleFixture();
-    for (let index = 0; index < 5; index++) {
+    for (let index = 0; index < 11; index++) {
       const state = await wake();
       expect(await fixture.process(state.wakeJobId ?? '')).toBe('waiting');
       advance(1000 + index * 100);
@@ -1505,12 +1505,15 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
       const current = { ...fixture, state };
       const ready = await report(current);
       if (index < 4) expect(ready.startupEstimate).toBeNull();
-      else expect(ready.startupEstimate).toEqual({ sampleCount: 5, p50Ms: 1200, p90Ms: 1400 });
+      else if (index === 4)
+        expect(ready.startupEstimate).toEqual({ sampleCount: 5, p50Ms: 1200, p90Ms: 1400 });
+      else if (index === 10)
+        expect(ready.startupEstimate).toEqual({ sampleCount: 10, p50Ms: 1500, p90Ms: 1900 });
       advance(10000);
       const stopping = await report(current);
-      expect(await fixture.process(stopping.sleepJobId ?? '')).toBe('waiting');
-      advance(1);
       expect(await fixture.process(stopping.sleepJobId ?? '')).toBe('succeeded');
+      advance(1);
+      expect(await fixture.process(stopping.sleepJobId ?? '')).toBe('duplicate');
       await reconcileGatewayState(f.db, serverId, options);
     }
     expect((await configure({ gameVersion: '2' })).startupEstimate).toBeNull();
