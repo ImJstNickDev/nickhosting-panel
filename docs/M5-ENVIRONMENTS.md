@@ -755,3 +755,56 @@ settings. Wait at least 31 seconds for leases to expire. Restore changed Owner
 Gateway settings from their private pre-change record. Preserve all data, tokens,
 allocation inventory and other containers. No prune, volume deletion, database
 reset, or change to Pterodactyl/Wings/network/firewall/NPM is part of this proposal.
+
+### Approved persistent Gateway activation — 2026-10-10
+
+The Owner explicitly approved the permanent development Gateway AppArmor exception,
+private TCP responder and scoped API/worker/web recreation at reviewed HEAD
+`d5234ff31b97289e68eaa742984ad8c66c68e570`. The clean worktree, independent process
+anchor/namespace, Docker daemon identity, provider node identity, free resources,
+zero routes and absent endpoint/name collisions were reverified before activation.
+
+The private Compose chain now includes the normal Gateway and live overlays.
+Application and web image builds completed; the nonroot namespace preflight passed.
+Only dev API/worker/web were recreated. PostgreSQL, Redis, Vite, mail and all
+review data were preserved. The Owner saved the four Gateway settings through an
+authenticated browser PATCH (HTTP 200); their exact values were verified before
+starting Gateway. No Owner session was extracted or synthesized. Hosts, managed
+nodes, runtime mappings, managed servers and users matched their pre-activation
+hashes. Gateway/probe are persistent services with restart policies.
+
+An actual Compose creation failure exposed an unquoted flow-list `tmpfs` value:
+commas produced separate mount entries and Docker rejected `noexec` as a path.
+Quoting the intended single mount fixed it, without changing resource/permission
+scope. A focused regression checks the parsed `tmpfs` exactly. The first ad-hoc
+observer diagnostic also used a package alias from the workspace root, where it
+was not resolvable; rerunning with the absolute module path passed. Neither failed
+attempt changed Pterodactyl or created a game listener; temporary diagnostic
+containers were removed automatically.
+
+Persistent Gateway checks passed: authenticated configuration/snapshot HTTP 200,
+zero routes, unauthenticated HTTP 401, private Unix readiness, full Docker/host
+observer and nonce round trip from its actual namespace. The responder retained
+default AppArmor; only Gateway uses the approved unconfined profile. Both services
+were restarted individually to check clean shutdown and recovery; Gateway correctly
+reported not-ready during its lease-drain period. The actual private responder
+endpoint remains in the ignored plan. No production network, Pterodactyl/Wings,
+NPM, DNS, router, firewall or game-server resource was changed.
+
+**Scope of success:** service/control-plane and private reachability readiness.
+There are still no Gateway game routes/listeners and no new provider allocations.
+The Owner still selects the allocation pool. A separately approved exact public
+pilot and proven test-owned server are required to establish real forwarding and
+Minecraft sleep/wake on this deployment. The existing service approval remains
+valid; this is not a request to reapprove the completed activation.
+
+Final check: all nine active dev services healthy, HTTPS and configured WSS HMR
+working after recreation/restarts. The existing Wings container reports an
+unhealthy Docker healthcheck (prior health not captured); its identity, start time,
+restart counter and networks are unchanged. This requires read-only diagnosis
+before relying on a live game pilot, not an unapproved production restart.
+
+Read-only follow-up: the Wings Docker healthcheck targets a different port from
+its configured API. The configured API returns HTTP 401 without credentials;
+Wings is responding. Its healthcheck mismatch is documented privately and left
+unchanged, outside this dev activation's mutation scope.

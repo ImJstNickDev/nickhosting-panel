@@ -182,6 +182,7 @@ describe('opt-in development Gateway Compose', () => {
     expect(probe?.security_opt).toEqual(['no-new-privileges:true']);
     expect(probe?.privileged).not.toBe(true);
     expect(probe?.read_only).toBe(true);
+    expect(probe?.tmpfs).toEqual(['/tmp:rw,noexec,nosuid,size=16m']);
     expect(probe?.ports ?? []).toEqual([]);
     expect(probe?.volumes).toHaveLength(1);
     expect(probe?.volumes?.[0]).toMatchObject({

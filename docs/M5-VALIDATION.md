@@ -1485,3 +1485,61 @@ screenshot review reported no remaining must-fix findings. Real process-signal,
 restart and nonce round-trip checks for the proposed permanent services remain
 pending their exact activation approval; browser/axe evidence is not a claim of
 complete WCAG conformance.
+
+## Approved persistent Gateway service activation — 2026-10-10
+
+Starting reviewed HEAD `d5234ff31b97289e68eaa742984ad8c66c68e570`; clean worktree.
+Owner approved the documented permanent development Gateway exception and private
+responder. Available resources at preflight: approximately 24 GiB RAM and 67 GiB
+disk. Independent host-process UID/executable/parent/start-time/namespace and Docker
+daemon identity matched the private baseline; provider node identity and all 400
+allocations were read-only verified. No proposed game/probe endpoint or container
+name collision; zero routes. Private environment backup retained; no secrets printed.
+
+Executed scoped commands/results:
+
+- `docker compose --env-file .env.dev.local --profile gateway config --quiet`: passed.
+- `docker compose --env-file .env.dev.local build api web`: passed using pinned runtime/dependencies; no upgrade. Application image `sha256:d656f8efd95cc9c1b2b00fdcc879782c9dc68be6477b3fb83fb6f8745dc82e36`; web image reused `sha256:556c85ef6c0f8f73e4deca5eb660fd6812516af1c33ede8d07e6e4d0e1f56ea6`.
+- Documented `run --rm --no-deps --entrypoint node gateway` namespace preflight: passed. Temporary container removed.
+- `docker compose --env-file .env.dev.local up -d --no-deps --wait api worker web`: passed; nginx used its configured graceful stop window. Database/Redis/Vite/mail were not recreated.
+- `docker compose --env-file .env.dev.local --profile gateway up -d --no-deps --wait node-probe`: first attempt **failed** (`invalid mount path: 'noexec'`), corrected YAML quoting, then passed. Only intended single `/tmp` tmpfs mount. `scripts/dev.sh pnpm exec vitest run scripts/gateway-deployment.test.ts`: **13 passed**, including the new exact tmpfs regression; no historical full suite rerun.
+- Owner-authenticated settings PATCH: **HTTP 200**; only four approved Gateway settings, exact values reverified. No session fabrication or credential extraction.
+- `docker compose --env-file .env.dev.local --profile gateway up -d --no-deps --wait gateway`: passed, healthy after the lease drain.
+- `docker exec nickhosting-dev-gateway-1 node /app/deploy/gateway-health.mjs`: passed. Actual-container checks returned configuration/snapshot **200**, **zero routes**, full network observer success (**104 containers**, including new dev services), matching namespace, private nonce round trip **true**, anonymous control request **401**.
+- Scoped `restart node-probe` and `restart gateway`: clean shutdown/recovery checks. Probe Docker event exit code **0**, subsequent nonce health passed; Gateway correctly not-ready during startup lease drain.
+
+One earlier ad-hoc full-observer command failed because a bare workspace package
+alias could not resolve from `/app/[eval]`. The absolute source import succeeded in
+automatically removed one-off diagnostics and subsequently in the persistent
+Gateway. This was a diagnostic invocation correction, not a relaxed safety check.
+
+Independent read-only data audit: physical hosts, managed nodes, mappings, managed
+servers and users match all five pre-change count/hash records. No new provider
+test asset, allocation or public game listener. All private backup/identity/plan
+records remain ignored. Existing SFTPGo #18 and Docker-socket #22 boundaries remain.
+A live forwarding/sleep-wake test remains pending Owner pool selection and exact
+public endpoint approval; healthy zero-route service does not establish gameplay.
+
+Final independent read-only audit: all **nine** active dev services healthy after
+restart; exactly Gateway and probe added, only API/worker/web replaced. Dedicated
+Gateway credentials only; approved host-network confinement and exact probe bind
+verified. No game-range listener. Panel/Wings IDs, start times, restart counters
+and network attachments unchanged. Docker reports Wings **unhealthy**; the previous
+baseline did not record health, so its prior health cannot be asserted. This is an
+observed provider-health limitation for the later pilot, not permission to restart
+or reconfigure Wings. No corrective production operation was attempted.
+
+HTTPS returned 200 and the real Vite WSS endpoint emitted its `connected` message.
+An initial ad-hoc WSS probe used `/` and timed out; retry on the actual configured
+`/__nickhosting_hmr` path passed without any application/proxy change. Gateway
+restart recovered after its expected not-ready drain, and the independent Unix
+health check returned exit 0. No remaining must-fix service-activation findings.
+
+Read-only follow-up clarified the Wings health signal: its Docker healthcheck
+uses a different local port from the API port in the mounted configuration and
+fails with curl code 7 (connection refused). A GET to the actually configured local
+API returned **401**, demonstrating an HTTP listener without using credentials.
+This explains the healthcheck mismatch; it does not prove every Wings operation.
+No configuration or restart was applied. A local Python YAML parser was unavailable;
+only the two relevant plain scalar configuration fields were inspected with a
+bounded read-only match instead; no dependency was installed or secret printed.
