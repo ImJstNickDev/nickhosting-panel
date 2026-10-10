@@ -1,4 +1,5 @@
 export * from './compatibility.js';
+export * from './image-policy.js';
 export * from './management.js';
 export * from './manifest.js';
 export * from './protocol.js';

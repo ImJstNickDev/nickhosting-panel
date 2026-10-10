@@ -101,6 +101,7 @@ export interface ServerTables {
     node_id: string;
     nest_id: number;
     egg_id: number;
+    image_mode: Generated<'static' | 'integration'>;
     docker_image: string;
     startup: string;
     environment: Json<Record<string, string>>;

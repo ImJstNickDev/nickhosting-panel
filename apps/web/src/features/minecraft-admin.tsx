@@ -50,6 +50,7 @@ interface Mapping {
   nest_id: number;
   egg_id: number;
   docker_image: string;
+  image_mode?: 'static' | 'integration';
   environment: Record<string, string>;
 }
 interface Egg {
@@ -314,8 +315,12 @@ function RegisterCombination({ refresh }: { refresh: () => void }) {
         binding: {
           profile,
           release,
-          image: mapping.docker_image,
-          imageJavaMajor: Number(data.get('imageJavaMajor')),
+          ...(mapping.image_mode === 'integration'
+            ? {}
+            : {
+                image: mapping.docker_image,
+                imageJavaMajor: Number(data.get('imageJavaMajor')),
+              }),
           declaredEggVariables: variables,
           bindings,
           fixedVariables: {},
@@ -398,15 +403,19 @@ function RegisterCombination({ refresh }: { refresh: () => void }) {
                     required
                   />
                 )}
-                <Input
-                  label={t('gameAdmin.java')}
-                  name="imageJavaMajor"
-                  type="number"
-                  min={8}
-                  max={100}
-                  step={1}
-                  required
-                />
+                {mapping?.image_mode === 'integration' ? (
+                  <Notice>{t('infra.imageManaged')}</Notice>
+                ) : (
+                  <Input
+                    label={t('gameAdmin.java')}
+                    name="imageJavaMajor"
+                    type="number"
+                    min={8}
+                    max={100}
+                    step={1}
+                    required
+                  />
+                )}
                 <Select
                   label={t('gameAdmin.installationKind')}
                   name="installationKind"

@@ -57,6 +57,8 @@ export async function assertMinecraftEggEnvironment(
   if (
     egg.id !== choice.mapping.egg_id ||
     egg.nest !== choice.mapping.nest_id ||
+    (choice.mapping.image_mode === 'integration' &&
+      ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(binding.image)) ||
     !egg.relationships?.variables
   )
     throw new DomainError('configuration_invalid');

@@ -268,6 +268,65 @@ function lifecycleFixture() {
   return { options, adapter, createServer, findServerByExternalId };
 }
 describe('queued Minecraft provisioning evidence revalidation', () => {
+  it('persists the integration image in the durable plan and refuses image substitution', async () => {
+    const selectedImage = 'ghcr.io/pterodactyl/yolks:java_21';
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ image_mode: 'integration', docker_image: '' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const pinnedBinding = { ...binding, image: selectedImage };
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        binding: JSON.stringify(pinnedBinding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        identity_digest: minecraftDigest({ combination, binding: pinnedBinding }),
+      })
+      .where('id', '=', choiceId)
+      .execute();
+    await evidence();
+    const getEgg = f.adapter.getEgg.bind(f.adapter);
+    Object.assign(f.adapter, {
+      getEgg: async (nest: number, egg: number) => ({
+        ...(await getEgg(nest, egg)),
+        docker_image: selectedImage,
+        docker_images: { java21: selectedImage },
+      }),
+    });
+    const operation = await queued();
+    const row = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', operation.jobId)
+      .executeTakeFirstOrThrow();
+    expect((row.plan.provision as ProvisionPlan).dockerImage).toBe(selectedImage);
+    await expect(
+      authorizeQueuedEffect(f.db, operation.jobId, operation.serverId, env, f.adapter),
+    ).resolves.toBeDefined();
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        plan: JSON.stringify({
+          ...row.plan,
+          provision: {
+            ...(row.plan.provision as ProvisionPlan),
+            dockerImage: 'ghcr.io/pterodactyl/yolks:java_25',
+          },
+        }),
+      })
+      .where('job_id', '=', operation.jobId)
+      .execute();
+    await expect(
+      authorizeQueuedEffect(f.db, operation.jobId, operation.serverId, env, f.adapter),
+    ).rejects.toThrow('configuration_invalid');
+  });
+
   it.each([
     'revoked',
     'failed-report',

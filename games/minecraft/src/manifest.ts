@@ -1,5 +1,6 @@
 import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { minecraftProfiles } from './compatibility.js';
+import { minecraftImagePolicy } from './image-policy.js';
 
 /** Public capabilities are implemented backend contracts, not a release support matrix. */
 export const minecraftManifest = gameManifestSchema.parse({
@@ -28,6 +29,7 @@ export const minecraftManifest = gameManifestSchema.parse({
     id,
     nameKey: `games.minecraft-java.runtimes.${id}`,
     supportedGameVersions: [],
+    imagePolicy: minecraftImagePolicy,
     supports: { mods: ['fabric', 'forge'].includes(id), plugins: ['paper', 'folia'].includes(id) },
   })),
   wizard: {

@@ -652,3 +652,69 @@ redesign. Owner now has the operational observation environment for registering
 host/node/mapping configuration themselves. Exact Minecraft evidence, transfer
 origins and any Gateway listener plan remain their distinct requirements, not
 claims established by this environment check. SFTPGo stays disabled; #18 unchanged.
+
+### 2026-10-10 — Integration-owned runtime images
+
+Trusted Game SDK manifests can now declare fixed images or unambiguous version/
+requirement rules. Minecraft resolves Java requirements from its existing trusted
+runtime metadata; each new combination freezes the exact resolved image in its
+signed evidence and durable provisioning plan. Owner mappings offer **Defined by
+integration** or **Fixed image**, localized in English/Italian. Existing static
+mappings, evidence digests and existing server images remain unchanged. Egg image
+allowlists, rollout and real compatibility evidence remain mandatory; this change
+certifies no additional runtime or version.
+
+Focused verification (no historical full-suite or live Minecraft rerun):
+
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/runtime-images.test.ts packages/game-sdk/src/game-sdk.test.ts games/minecraft/src/image-policy.test.ts games/minecraft/src/runtime.test.ts`:
+  **25 passed** across four files.
+- Through `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts`:
+  existing `registry.integration.test.ts` and `minecraft-registry.integration.test.ts`
+  **24 passed**; existing `minecraft-queued.integration.test.ts` **28 passed**.
+  New frozen-image/substitution case **1 passed, 28 filtered**. New
+  `runtime-images.integration.test.ts` initially **4 passed**, then the additional
+  trusted-module hook case **1 passed, 4 filtered**. These are separate full-file
+  and targeted results, not a claim that the historical matrix was repeated.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/runtime-images.browser.test.ts`:
+  **2 passed** using actual application/auth/Owner handlers and isolated PostgreSQL,
+  with the external provider simulated. Integration-mode save, static fallback and
+  unchanged legacy mapping verified. Axe: **zero violations** on English desktop
+  and Italian mobile; no JavaScript errors or horizontal overflow.
+- `scripts/dev.sh pnpm i18n:compile`: **947 keys**;
+  `scripts/dev.sh pnpm typecheck`: passed;
+  `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed. Existing production
+  bundle warning above 500 kB remains; no unrelated bundling rewrite.
+- Initial test-authoring failures involved a missing required UDP fixture role,
+  test import/translation namespace, wrong browser tab and duplicate mapping on
+  the same node. Fixtures were corrected and affected checks rerun successfully.
+  A TypeScript inference error in a new test was also corrected before typecheck.
+
+Reviewed real browser captures:
+[English desktop](screenshots/m5/runtime-images-integration-desktop-en.png) and
+[Italian mobile](screenshots/m5/runtime-images-integration-mobile-it.png).
+The Paper selection and synthetic egg in these isolated screenshots exercise the
+mapping form only; they are **not Paper runtime certification**. Coordinator and
+independent browser reviewer inspected readability, wrapping and dialog scrolling.
+Independent technical review found **zero remaining must-fix findings** after
+replacing an initial Minecraft-specific dispatch with the generic trusted-module
+`resolveProvisionImage` hook.
+
+Development activation: rebuilt the dev app image with
+`docker compose --env-file .env.dev.local build api`; recreated only API/worker via
+`docker compose --env-file .env.dev.local up -d --no-deps --wait api worker`.
+Applied exactly `016_runtime_images.sql` using the normal migration engine inside
+the existing dev API. All seven services healthy. Before/after counts unchanged:
+**1 physical host, 1 managed node, 0 runtime mappings, 1 user, 0 managed servers**.
+No Owner configuration seeded, database reset or production migration performed.
+Frontend/catalog watchers and network attachments were not changed.
+
+Read-only discovery through the regular encrypted configuration and Pterodactyl
+adapter succeeded. Installed egg metadata advertises policy images for Java
+8/11/16/17/18/21/25 in aggregate; this does not prove every egg supports every image.
+No provider writes, new game servers, egg changes or new infrastructure occurred.
+SFTPGo #18 and direct-socket #22 remain unchanged.
+
+Rollback requires a reviewed forward fix or data-aware migration: do not blindly
+remove the mode column or revert to a binary that hashes it differently after
+integration mappings exist. Preserve signed evidence and frozen provisioning
+images; never silently substitute another image to recover a failed operation.

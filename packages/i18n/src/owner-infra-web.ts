@@ -146,6 +146,13 @@ export const ownerInfraWebMessages: Record<string, readonly [string, string]> = 
   'infra.runtime': ['Runtime', 'Runtime'],
   'infra.nest': ['Nest', 'Nest'],
   'infra.egg': ['Egg', 'Egg'],
+  'infra.imageMode': ['Image selection', 'Scelta dell’immagine'],
+  'infra.imageIntegration': ['Defined by integration', 'Definita dall’integrazione'],
+  'infra.imageStatic': ['Fixed image', 'Immagine fissa'],
+  'infra.imageManaged': [
+    'The integration selects the image for the chosen version. The egg must support it.',
+    'L’integrazione seleziona l’immagine per la versione scelta. L’egg deve supportarla.',
+  ],
   'infra.image': ['Container image', 'Immagine del container'],
   'infra.startup': ['Startup command', 'Comando di avvio'],
   'infra.variables': ['Egg environment variables', 'Variabili d’ambiente dell’egg'],

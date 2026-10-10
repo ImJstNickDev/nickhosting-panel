@@ -44,6 +44,7 @@ import {
 } from './minecraft-content-contracts.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
+import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
@@ -508,7 +509,7 @@ export async function createManagedServer(
       externalId,
       userId: node.provision_user_id,
       eggId: mapping.egg_id,
-      dockerImage: mapping.docker_image,
+      dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
       startup: mapping.startup,
       environment,
       limits: value.limits,
@@ -1024,7 +1025,8 @@ export async function setRuntimeMapping(
         nodeId: id,
         nestId: z.number().int().positive(),
         eggId: z.number().int().positive(),
-        dockerImage: z.string().min(1),
+        imageMode: z.enum(['static', 'integration']).default('static'),
+        dockerImage: z.string().min(1).optional(),
         startup: z.string().min(1),
         environment: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()),
         portRoles: z
@@ -1059,6 +1061,11 @@ export async function setRuntimeMapping(
       .strict(),
     input,
   );
+  if (
+    (value.imageMode === 'static' && !value.dockerImage) ||
+    (value.imageMode === 'integration' && value.dockerImage !== undefined)
+  )
+    throw new DomainError('validation_failed');
   const game = await db
     .selectFrom('game_integrations')
     .select('manifest')
@@ -1096,7 +1103,11 @@ export async function setRuntimeMapping(
   if (
     !supportsStopConfirmation(egg) ||
     egg.nest !== value.nestId ||
-    ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(value.dockerImage)
+    !(
+      value.imageMode === 'static'
+        ? [value.dockerImage ?? '']
+        : integrationImageCandidates(value.gameId, value.runtimeId)
+    ).some((image) => [egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(image))
   )
     throw new DomainError('validation_failed');
   return db.transaction().execute(async (tx) => {
@@ -1109,7 +1120,8 @@ export async function setRuntimeMapping(
       node_id: node.id,
       nest_id: egg.nest,
       egg_id: egg.id,
-      docker_image: value.dockerImage,
+      image_mode: value.imageMode,
+      docker_image: value.imageMode === 'static' ? (value.dockerImage ?? '') : '',
       startup: value.startup,
       environment: JSON.stringify(value.environment),
       port_roles: JSON.stringify(value.portRoles),
@@ -1139,6 +1151,7 @@ export async function setRuntimeMapping(
         'nest_id',
         'egg_id',
         'docker_image',
+        'image_mode',
         'startup',
       ] as const)
         if (previous[key] !== row[key]) throw new DomainError('conflict');

@@ -952,7 +952,11 @@ function MappingForm({
   const t = useT();
   const [gameId, setGameId] = useState(initial?.game_id ?? ''),
     [nestId, setNestId] = useState(String(initial?.nest_id ?? '')),
-    [eggId, setEggId] = useState(String(initial?.egg_id ?? ''));
+    [eggId, setEggId] = useState(String(initial?.egg_id ?? '')),
+    [runtimeId, setRuntimeId] = useState(initial?.runtime_id ?? ''),
+    [imageModeOverride, setImageModeOverride] = useState<'static' | 'integration' | undefined>(
+      initial?.image_mode ?? (initial ? 'static' : undefined),
+    );
   const [variables, setVariables] = useState(
     Object.entries(initial?.environment ?? {}).map(([name, value]) => ({
       key: crypto.randomUUID(),
@@ -963,6 +967,10 @@ function MappingForm({
   const games = useQuery({
     queryKey: ['owner-games'],
     queryFn: () => api<Result<typeof listPlatformGames>>('/v1/platform/owner/games'),
+  });
+  const modules = useQuery({
+    queryKey: ['owner-game-modules'],
+    queryFn: () => api<Array<{ id: string; manifest: GameManifest }>>('/v1/owner/game-modules'),
   });
   const nodes = useQuery({
     queryKey: ['owner-nodes'],
@@ -980,6 +988,10 @@ function MappingForm({
   const manifest = games.data?.find((game) => game.id === gameId)?.manifest as
     | GameManifest
     | undefined;
+  const policy = modules.data
+    ?.find((module) => module.id === gameId)
+    ?.manifest.runtimes.find((runtime) => runtime.id === runtimeId)?.imagePolicy;
+  const imageMode = imageModeOverride ?? (policy ? 'integration' : 'static');
   const egg = eggs.data?.find((item) => String(item.id) === eggId);
   const images = egg
     ? [...new Set([egg.docker_image, ...Object.values(egg.docker_images ?? {})])]
@@ -1005,11 +1017,12 @@ function MappingForm({
           body: {
             ...(initial ? { id: initial.id } : {}),
             gameId,
-            runtimeId: text(data, 'runtime'),
+            runtimeId,
             nodeId: text(data, 'node'),
             nestId: Number(nestId),
             eggId: Number(eggId),
-            dockerImage: text(data, 'image'),
+            imageMode,
+            ...(imageMode === 'static' ? { dockerImage: text(data, 'image') } : {}),
             startup: text(data, 'startup'),
             environment: Object.fromEntries(
               variables.map((variable) => [variable.name, variable.value]),
@@ -1040,7 +1053,11 @@ function MappingForm({
           <Select
             label={t('infra.game')}
             value={gameId}
-            onChange={(event) => setGameId(event.target.value)}
+            onChange={(event) => {
+              setGameId(event.target.value);
+              setRuntimeId('');
+              setImageModeOverride(undefined);
+            }}
             required
           >
             <option value="">{t('infra.select')}</option>
@@ -1056,7 +1073,11 @@ function MappingForm({
         key={`${gameId}-${manifest?.version ?? 'pending'}`}
         label={t('infra.runtime')}
         name="runtime"
-        defaultValue={initial?.runtime_id ?? ''}
+        value={runtimeId}
+        onChange={(event) => {
+          setRuntimeId(event.target.value);
+          setImageModeOverride(undefined);
+        }}
         required
       >
         <option value="">{t('infra.select')}</option>
@@ -1132,20 +1153,44 @@ function MappingForm({
           )}
         </QueryContent>
       )}
-      <Select
-        key={`image-${egg?.id ?? 'pending'}`}
-        label={t('infra.image')}
-        name="image"
-        defaultValue={eggId === String(initial?.egg_id) ? initial?.docker_image : (images[0] ?? '')}
-        required
-      >
-        <option value="">{t('infra.select')}</option>
-        {images.map((image) => (
-          <option key={image} value={image}>
-            {image}
-          </option>
-        ))}
-      </Select>
+      <QueryContent query={modules}>
+        {() => (
+          <>
+            <Select
+              label={t('infra.imageMode')}
+              value={imageMode}
+              onChange={(event) =>
+                setImageModeOverride(event.target.value as 'static' | 'integration')
+              }
+            >
+              {(policy || imageMode === 'integration') && (
+                <option value="integration">{t('infra.imageIntegration')}</option>
+              )}
+              <option value="static">{t('infra.imageStatic')}</option>
+            </Select>
+            {imageMode === 'integration' ? (
+              <Notice>{t('infra.imageManaged')}</Notice>
+            ) : (
+              <Select
+                key={`image-${egg?.id ?? 'pending'}`}
+                label={t('infra.image')}
+                name="image"
+                defaultValue={
+                  eggId === String(initial?.egg_id) ? initial?.docker_image : (images[0] ?? '')
+                }
+                required
+              >
+                <option value="">{t('infra.select')}</option>
+                {images.map((image) => (
+                  <option key={image} value={image}>
+                    {image}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </>
+        )}
+      </QueryContent>
       <Textarea
         key={`startup-${eggId}`}
         label={t('infra.startup')}

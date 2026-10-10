@@ -71,6 +71,47 @@ unsupported action or placeholder integration counts toward M5 readiness.
 - Mapping includes startup variables, Docker image compatibility, install environment and supported feature flags. When mapping missing/mismatched, Owner sees a precise integration error; user cannot create a broken server.
 - Revisit mapping behavior if Pterodactyl 2.x changes its nest/egg APIs; adapter owns version translation.
 
+## Integration-owned container image selection
+
+Runtime descriptors may declare `imagePolicy`: a fixed integration image or rules
+with image references, inclusive version bounds and/or trusted runtime requirements.
+The SDK requires exactly one matching rule. Version ordering belongs to the
+integration (an explicit comparator), never an assumed SemVer parser. Missing
+metadata, unsupported requirements and ambiguous matches fail closed.
+
+Owner egg mappings select `imageMode: integration` or the existing `static` mode.
+Static remains the default for old API requests and existing database rows; these
+are never automatically converted. Integration mode has no Owner-selected Docker
+image. Only compiled first-party policy is authoritative, not a manifest edited
+in the database. The Owner UI shows “Defined by integration” and retains a fixed
+image alternative. No game-specific image decisions belong in shared UI components.
+
+Minecraft derives Java requirements from its existing release/build/loader metadata
+resolver. Its runtime descriptors declare explicit known Java-major → official
+Pterodactyl Yolks image rules; they do not infer future tag names or invent release
+ranges that disagree with metadata. This is the version-dependent behavior for
+Vanilla, Paper, Folia, Fabric and Forge. The generic SDK also supports literal
+version ranges and fixed-image games. Image requirements do **not** certify those
+runtimes; Vanilla remains the only M4 real-server-verified profile.
+
+References for the declared image families: [upstream Java build matrix](https://raw.githubusercontent.com/pterodactyl/yolks/master/.github/workflows/java.yml)
+and [Java 25 image definition](https://raw.githubusercontent.com/pterodactyl/yolks/master/java/25/Dockerfile).
+No image was pulled/run to establish new game support in this change.
+
+The actual image and Java requirement are resolved when registering an exact
+Minecraft combination, checked against the selected egg, and included in its
+existing signed binding. The provision plan copies that frozen image. Queued jobs
+and existing servers cannot silently acquire a different image when rules change.
+Image availability is rechecked against the provider before execution; Pterodactyl
+still owns egg installation, and runtime image selection does not fix an incompatible
+installer image/script. No egg mutation or automatic fallback is performed.
+
+Migration `016_runtime_images.sql` adds a default-static mode. Static evidence
+canonicalization excludes that new default field, preserving historical signatures;
+integration mode participates in the mapping digest. Existing populated mappings
+retain their identity/mode/image immutability. Do not downgrade by blindly dropping
+the column after integration-managed mappings exist.
+
 ## Wizard architecture
 
 Top-level steps always `Choose a game → Configure → Resources → Create`; `Configure` has plugin-defined conditional steps, defaults, validators and rich interactive widgets. UI uses common components with game-specific contributors. Progressive disclosure: simple Vanilla server requires few inputs; modded setup introduces appropriate options.

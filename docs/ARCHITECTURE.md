@@ -223,3 +223,12 @@ only retained M4 real-server evidence establishes Vanilla compatibility. No M5
 fixture deploys the production Gateway, mutates a pre-existing server, writes real
 DNS or resolves SFTPGo issue #18. Full source validation and independent rendered
 UX/accessibility review are required before milestone acceptance.
+
+### Runtime images (M5)
+
+Container image policy is declared by trusted integration runtime descriptors.
+Owner mappings choose a static override or integration-managed selection; the SDK
+provides generic fixed/range/requirement matching and integrations supply version
+semantics/metadata. Resolved images are bound to compatibility evidence and durable
+provision plans. Existing static evidence and server identities remain unchanged.
+See [integration-owned image selection](GAME-INTEGRATIONS.md#integration-owned-container-image-selection).

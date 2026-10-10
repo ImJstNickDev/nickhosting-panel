@@ -10,6 +10,7 @@ import {
   minecraftEvidenceSchema,
   minecraftSupport,
   publicMinecraftChoice,
+  resolveMinecraftImage,
 } from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely, Selectable } from 'kysely';
@@ -49,8 +50,9 @@ export function assertMinecraftDeclaredEnvironment(
     throw new DomainError('configuration_invalid');
 }
 export function minecraftMappingDigest(mapping: Mapping): string {
-  const { enabled: _enabled, ...identity } = mapping;
-  return minecraftDigest(identity);
+  const { enabled: _enabled, image_mode, ...identity } = mapping;
+  // Preserve the signed pre-image for every pre-existing static mapping.
+  return minecraftDigest(image_mode === 'integration' ? { ...identity, image_mode } : identity);
 }
 function verificationKey(env: Environment): Buffer | undefined {
   const value = env.NH_MINECRAFT_EVIDENCE_KEY;
@@ -92,7 +94,10 @@ export async function registerMinecraftCombination(
       .object({
         mappingId: z.uuid(),
         runtime: minecraftRuntimeRequestSchema,
-        binding: minecraftRuntimeMappingSchema,
+        binding: minecraftRuntimeMappingSchema.extend({
+          image: minecraftRuntimeMappingSchema.shape.image.optional(),
+          imageJavaMajor: minecraftRuntimeMappingSchema.shape.imageJavaMajor.optional(),
+        }),
       })
       .strict(),
     input,
@@ -109,6 +114,21 @@ export async function registerMinecraftCombination(
     options.metadata ??
     createRuntimeMetadataClient({ userAgent: values.minecraftMetadataUserAgent ?? '' });
   const runtime = await resolveMinecraftRuntime(value.runtime, metadata);
+  let binding: z.infer<typeof minecraftRuntimeMappingSchema>;
+  if (mapping.image_mode === 'integration') {
+    const selected = resolveMinecraftImage(runtime);
+    if (
+      (value.binding.image !== undefined && value.binding.image !== selected.image) ||
+      (value.binding.imageJavaMajor !== undefined &&
+        value.binding.imageJavaMajor !== runtime.javaMajor)
+    )
+      throw new DomainError('configuration_invalid');
+    binding = parse(minecraftRuntimeMappingSchema, {
+      ...value.binding,
+      image: selected.image,
+      imageJavaMajor: runtime.javaMajor,
+    });
+  } else binding = parse(minecraftRuntimeMappingSchema, value.binding);
   const protocols = await (options.protocols ?? fetchMinecraftProtocols)(
     values.minecraftProtocolSource,
   );
@@ -117,17 +137,19 @@ export async function registerMinecraftCombination(
   const declared =
     egg.relationships?.variables?.data.map((entry) => entry.attributes.env_variable) ?? [];
   if (
-    value.binding.image !== mapping.docker_image ||
-    value.binding.profile !== mapping.runtime_id ||
+    (mapping.image_mode === 'static' && binding.image !== mapping.docker_image) ||
+    (mapping.image_mode === 'integration' &&
+      ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(binding.image)) ||
+    binding.profile !== mapping.runtime_id ||
     egg.id !== mapping.egg_id ||
     egg.nest !== mapping.nest_id
   )
     throw new DomainError('configuration_invalid');
   // Image availability is a deployment prerequisite, not protocol incompatibility.
   // A pending Owner egg/image update leaves this immutable choice unavailable until tested.
-  const variables = validateMinecraftRuntimeMapping(runtime, value.binding);
+  const variables = validateMinecraftRuntimeMapping(runtime, binding);
   assertMinecraftDeclaredEnvironment(
-    value.binding.declaredEggVariables,
+    binding.declaredEggVariables,
     declared,
     { ...mapping.environment, ...variables },
     mapping.port_roles.flatMap((role) =>
@@ -151,7 +173,7 @@ export async function registerMinecraftCombination(
     }),
     protocolSource: protocols.source,
   });
-  const identity = minecraftDigest({ combination, binding: value.binding });
+  const identity = minecraftDigest({ combination, binding });
   const mappingDigest = minecraftMappingDigest(mapping);
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
@@ -179,7 +201,7 @@ export async function registerMinecraftCombination(
         identity_digest: identity,
         combination: JSON.stringify(combination),
         resolved_runtime: JSON.stringify(runtime),
-        binding: JSON.stringify(value.binding),
+        binding: JSON.stringify(binding),
         mapping_digest: mappingDigest,
       })
       .execute();

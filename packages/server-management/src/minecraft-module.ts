@@ -73,7 +73,7 @@ async function authorizeOperation(input: GameOperationAuthorization) {
         choice.row.mapping_id !== server.mapping_id ||
         choice.row.mapping_digest !== choice.mappingDigest ||
         choice.combination.profile !== mapping.runtime_id ||
-        binding.image !== mapping.docker_image ||
+        (mapping.image_mode === 'static' && binding.image !== mapping.docker_image) ||
         plan.dockerImage !== binding.image ||
         plan.eggId !== mapping.egg_id ||
         plan.startup !== mapping.startup ||
@@ -109,6 +109,11 @@ export const minecraftModule: TrustedGameModule = {
   id: 'minecraft-java',
   manifest: minecraftManifest,
   provisionAsResourceOwner: true,
+  resolveProvisionImage(mapping, binding) {
+    const selected = minecraftRuntimeMappingSchema.parse(binding);
+    if (selected.profile !== mapping.runtime_id) throw new DomainError('configuration_invalid');
+    return selected.image;
+  },
   async assertProfileBinding(db, server, mapping) {
     const profile = await db
       .selectFrom('minecraft_server_profiles')

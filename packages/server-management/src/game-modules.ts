@@ -26,6 +26,9 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Parse a previously validated immutable combination binding; never resolve
+   * current policy again for a queued operation or an existing server. */
+  resolveProvisionImage?(mapping: GameMapping, binding: unknown): string;
   assertProfileBinding(
     db: Kysely<Database>,
     server: ManagedGameServer,
