@@ -2512,3 +2512,91 @@ containers remain healthy. No production configuration changes, migration or
 data reset. No historical full-suite rerun; SFTPGo #18 remains unchanged. Rollback
 is a new revert commit; an automatically completed stop is not undone by reverting
 code, and the historical failed operation must not be rewritten.
+
+### 2026-10-11 — Remove repeated power preflight and preserve waiting status
+
+The next Owner cycle completed both operations, but retained substantial delay:
+join to Docker start7.252s; Minecraft Done to forwarding5.477s; player departure
+to stopping response61.596s; stopping response to physical exit11.713s. The
+Gateway withdrew its listener for4.405s during startup. Docker recreation is
+corroborated, but the old `safety_rejected` log does not distinguish a backend
+binding transition from aggregate validation timeout. The detailed read-only
+timeline is recorded in PR#21; no game commands were used to collect it.
+
+The measured worker stop effect included setup and repeated checks, not merely
+Minecraft shutdown. Its pre-power setup took5.358s, including1.004s authorization
+and1.762s provider identity reads; Minecraft stopping to container exit took0.496s.
+Start made three runtime-image checks totaling2.801s. Redis delivery was11ms.
+
+Changes:
+
+- Ordinary start/restart now performs one complete image/launch proof at the
+  final handoff after durable preparation. Intermediate local authority checks
+  and fresh atomic resource admission remain. A changed image after preparation
+  still prevents power. No JAR/Mojang download or proof cache was introduced.
+- Internal stop-console setup uses the current attempt's validated Application
+  metadata/UUID and current local permissions; it no longer repeatedly fetches
+  Application/Client server identities. Final provider identity and full authority
+  are checked after socket setup, and idle/fence checks remain after durable
+  handoff. Generic lifecycle callers retain explicit host verification unless
+  their full authorizer contract supplies it. Browser console auth is unchanged.
+- Existing waiting responders can survive corroborated backend container gaps
+  or absent effective bindings, with fresh public collision/topology/provider
+  checks, matching proof/generation and node challenge. New binds and forwarding
+  cannot use that exception; unsafe identity/collisions and aggregate timeout
+  still withdraw the listener. ADR0012 documents the narrow exception.
+- One duplicate Core context request was removed within each node-challenge
+  validation. Fixed safety-failure reasons and stop setup/terminal phase timings
+  now expose previously indistinguishable failures and latency.
+
+Focused validation and intermediate failures:
+
+- Minecraft queued tests initially had8failures/5passes: six old drift fixtures
+  reached their nonexistent host disk before the relocated final image proof;
+  those tests now use their isolated recorded admission observations. Two new
+  assertions wrongly expected one host sample although fixtures accumulate
+  multiple hosts. A diagnostic rerun reproduced the host-path issue while both
+  new full-runtime handoff cases passed. Final
+  `scripts/dev.sh pnpm test:m3 packages/server-management/src/minecraft-queued.integration.test.ts`
+  — **39/39 passed**. Full runtime tests retain actual admission with isolated
+  resource samples; image drift after preparation rejects power, with exactly one
+  image observation.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts apps/game-gateway/src/data-plane.test.ts apps/game-gateway/src/main.test.ts`
+  — **191 passed**. Added sleeping-transition and aggregate-timeout cases then
+  passed with `-t 'already owned waiting responder|aggregate validation timeout|sleeping proof|namespace|node challenge'`
+  across validator/data-plane: **16 passed,169 filtered**. Timeout closure remains
+  explicitly tested; the live interruption is not claimed resolved before retest.
+- `scripts/dev.sh pnpm test packages/pterodactyl-adapter/src/power.test.ts packages/pterodactyl-adapter/src/console.test.ts`
+  — **26 passed**; the subsequently added real-WebSocket request-count case passed
+  with `console.test.ts -t 'managed stop UUID'` (**1 passed,6 filtered**). Internal
+  stop setup requests only egg metadata, WebSocket credentials and power, without
+  extra Application/Client server fetches. Final lifecycle identity checks remain.
+- The complete lifecycle/orchestration run
+  `scripts/dev.sh pnpm test:m3 packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts`
+  — **230 passed,1 failed** (125.76s). The failure exposed the generic-caller host
+  contract described above; the explicit fallback was restored rather than
+  weakening that test. All82 sleep/wake orchestration tests passed in this run.
+- After restoring the generic host check,
+  `scripts/dev.sh pnpm test:m3 packages/server-management/src/lifecycle.integration.test.ts -t 'observations belong to another physical host|local stop-console|changes during console setup'`
+  — **4 passed,145 filtered**. The six new lifecycle cases had also passed in
+  their initial focused run, including revoked final start authority and changed
+  provider identity during console setup.
+- `scripts/dev.sh pnpm typecheck` — root/WebPanel passed; final backend
+  `scripts/dev.sh pnpm exec tsc --noEmit` passed after the host-contract correction.
+  Changed-source Biome (13 files) and whitespace checks passed.
+
+Independent code review found no remaining must-fix in the authorization or
+retained-status proof boundaries. The reviewer explicitly requires unknown
+validation timeouts to remain fail-closed; retaining an old responder on timeout
+would require separate cancellation/late-result fencing and is not part of this
+patch. Request-count reductions are tested, but lower real-cycle timings and the
+specific cause of the previous transient interruption still require Owner retest.
+
+Only existing approved isolated test services were reused; no new game assets or
+infrastructure. API/worker loaded source changes through existing development
+watchers and all development containers are healthy. No manual game commands,
+provider/configuration/network changes, database repair or Gateway restart were
+performed. The Gateway needs a separately approved scoped restart to load these
+changes; it is still running the earlier executable. SFTPGo#18 is unchanged.
+Rollback uses a new revert commit and, after activation, another explicitly
+approved Gateway restart; no schema migration or data reset is required.

@@ -13,6 +13,21 @@ export function supportsStopConfirmation(egg: Pick<Egg, 'config' | 'relationship
   );
 }
 export interface StopConfirmationOptions {
+  /** Fresh managed-identity proof from this exact lifecycle attempt, never a cache. */
+  verifiedServer?: ApplicationServer;
+  /** Fixed stage names and durations only; logger failures cannot affect power. */
+  onStage?(
+    stage:
+      | 'observer_preflight'
+      | 'server_metadata'
+      | 'egg_metadata'
+      | 'console_session'
+      | 'final_handoff'
+      | 'power_request'
+      | 'terminal_confirmation',
+    durationMs: number,
+    outcome: 'ok' | 'error',
+  ): void;
   authorize(): Promise<boolean>;
   /** Final permission fence immediately before a new power request. Ongoing
    * console authorization must not confuse its expiry with proof invalidation. */
@@ -23,7 +38,11 @@ export interface StopConfirmationOptions {
 interface Boundary {
   getApplicationServer(id: number): Promise<ApplicationServer>;
   getEgg(nestId: number, eggId: number): Promise<Egg>;
-  relayConsole(identifier: string, options: ConsoleRelayOptions): Promise<ConsoleRelay>;
+  relayConsole(
+    identifier: string,
+    options: ConsoleRelayOptions,
+    serverUUID: string,
+  ): Promise<ConsoleRelay>;
   power(identifier: string, action: 'stop'): Promise<void>;
 }
 /** A missed proof stays uncertain. No polling/cache age can substitute for this sequence. */
@@ -36,11 +55,32 @@ export async function stopWithConfirmation(
   observer?: ContainerObserver,
 ): Promise<{ confirmed: boolean }> {
   if (!observer) throw new PterodactylError('invalid_request', 'application', 'rejected');
-  await observer.preflight();
-  const server = await adapter.getApplicationServer(applicationId);
+  const timed = async <T>(
+    stage: Parameters<NonNullable<StopConfirmationOptions['onStage']>>[0],
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    const began = performance.now();
+    let outcome: 'ok' | 'error' = 'error';
+    try {
+      const result = await work();
+      outcome = 'ok';
+      return result;
+    } finally {
+      try {
+        options.onStage?.(stage, Math.round(performance.now() - began), outcome);
+      } catch {}
+    }
+  };
+  await timed('observer_preflight', () => observer.preflight());
+  const server =
+    options.verifiedServer ??
+    (await timed('server_metadata', () => adapter.getApplicationServer(applicationId)));
   if (
+    (options.verifiedServer && server.id !== applicationId) ||
     server.identifier !== identifier ||
-    !supportsStopConfirmation(await adapter.getEgg(server.nest, server.egg))
+    !supportsStopConfirmation(
+      await timed('egg_metadata', () => adapter.getEgg(server.nest, server.egg)),
+    )
   )
     throw new PterodactylError('invalid_request', 'application', 'rejected');
   let armed = false,
@@ -71,11 +111,17 @@ export async function stopWithConfirmation(
       void proof.then(finish, finish);
     } else stopping = false;
   };
-  const relay = await adapter.relayConsole(identifier, {
-    authorize: options.authorize,
-    onEvent,
-    maxDurationMs: Math.max(1000, timeoutMs),
-  });
+  const relay = await timed('console_session', () =>
+    adapter.relayConsole(
+      identifier,
+      {
+        authorize: options.authorize,
+        onEvent,
+        maxDurationMs: Math.max(1000, timeoutMs),
+      },
+      server.uuid,
+    ),
+  );
   const timer = setTimeout(() => {
     ended = true;
     finish();
@@ -84,15 +130,17 @@ export async function stopWithConfirmation(
   try {
     if (ended || !(await options.authorize()))
       throw new PterodactylError('permission_denied', 'client', 'rejected');
-    await options.beforePower?.();
+    await timed('final_handoff', async () => {
+      await options.beforePower?.();
+    });
     armed = true;
     try {
-      await adapter.power(identifier, 'stop');
+      await timed('power_request', () => adapter.power(identifier, 'stop'));
     } catch (error) {
       powerError = error;
       if (error instanceof PterodactylError && error.outcome === 'rejected') throw error;
     }
-    await complete;
+    await timed('terminal_confirmation', () => complete);
     if (proof) {
       await proof;
       return { confirmed };

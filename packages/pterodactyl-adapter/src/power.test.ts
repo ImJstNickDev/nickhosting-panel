@@ -11,6 +11,7 @@ function fixture(stop = 'end') {
     getApplicationServer: vi.fn(
       async () =>
         ({
+          id: 1,
           identifier: 'fixture',
           uuid: 'f729c8a1-6773-467a-af3f-a7ea8704f0bd',
           nest: 1,
@@ -46,6 +47,58 @@ function fixture(stop = 'end') {
   };
 }
 describe('stop confirmation from verified stop semantics', () => {
+  it('reuses only the supplied attempt identity and keeps phase logging non-authoritative', async () => {
+    const f = fixture();
+    const verifiedServer = await f.adapter.getApplicationServer();
+    f.adapter.getApplicationServer.mockClear();
+    const stages: string[] = [];
+    expect(
+      await stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        {
+          ...f.options,
+          verifiedServer,
+          onStage: (stage) => {
+            stages.push(stage);
+            throw new Error('private-log-failure');
+          },
+        },
+        20,
+        f.observer,
+      ),
+    ).toEqual({ confirmed: true });
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.adapter.getEgg).toHaveBeenCalledTimes(1);
+    expect(f.adapter.relayConsole).toHaveBeenCalledWith(
+      'fixture',
+      expect.any(Object),
+      verifiedServer.uuid,
+    );
+    expect(stages).toContain('console_session');
+    expect(stages).toContain('power_request');
+    expect(stages).toContain('terminal_confirmation');
+  });
+  it.each([{ id: 2 }, { identifier: 'foreign' }])(
+    'rejects a mismatched shared stop identity %j',
+    async (patch) => {
+      const f = fixture();
+      const verifiedServer = { ...(await f.adapter.getApplicationServer()), ...patch };
+      await expect(
+        stopWithConfirmation(
+          f.adapter,
+          1,
+          'fixture',
+          { ...f.options, verifiedServer },
+          20,
+          f.observer,
+        ),
+      ).rejects.toMatchObject({ outcome: 'rejected' });
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.relayConsole).not.toHaveBeenCalled();
+    },
+  );
   it('runs the final handoff fence after setup and before any stop power', async () => {
     const f = fixture();
     const beforePower = vi.fn(async () => {

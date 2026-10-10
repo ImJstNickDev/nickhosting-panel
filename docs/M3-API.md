@@ -338,3 +338,29 @@ plus clock-skew allowance and has an issue timestamp at/after the deadline. This
 may leave a stopped backend answering “Server stopping” for the remaining lease
 interval plus polling/validation time. These diagnostics expose that interval;
 this instrumentation does not shorten it or permit an early wake.
+
+### Final handoff and waiting-listener continuity (2026-10-11)
+
+Ordinary start/restart performs one complete runtime-image/launch check at the
+final power handoff, after durable preparation. Admission still takes a fresh
+host sample and reserves resources atomically. Intermediate authorization checks
+use current local permissions/policy; provisioning hooks may additionally read
+egg metadata. These changes introduce no cross-operation proof cache.
+
+An internal stop relay reuses its attempt's verified Application server identity
+and UUID instead of fetching Application/Client identities again during setup.
+Its intermediate checks still enforce current permissions. After socket setup,
+the lifecycle rechecks current provider identity and full authorization before
+power; automatic sleep also rechecks local authority/idle/fence after persisting
+handoff. Ordered terminal signals, physical stop proof and reservation release
+rules remain unchanged. Browser console authorization is unchanged.
+
+`servers.stop_stage` provides bounded durations for observer preflight, server/egg
+metadata, console setup, final handoff, power request and terminal confirmation.
+Those durations are nested inside the existing provider-effect span. Gateway
+`gateway.safety_failure` adds fixed reason codes including `validation_timeout`;
+raw errors and credentials are excluded. Existing status-only responders may
+survive verified backend recreation under the narrow renewal rules in
+[ADR 0012](decisions/0012-gateway-leases-and-sleep.md); unknown safety/timeout still
+withdraws the listener. This does not promise uninterrupted responses under all
+provider/control-plane failures.

@@ -168,8 +168,10 @@ export async function createGatewayRuntime(
         });
       },
       probeBackend: probe,
-      probeNode: async (route) => {
-        const identity = await context(route),
+      probeNode: async (route, validatedContext) => {
+        // The validator already resolved this exact route immediately before
+        // its fresh inspection; avoid a duplicate Core request in the same pass.
+        const identity = validatedContext ?? (await context(route)),
           target = settings.gatewayNodeProbes[String(identity.providerNodeId)];
         return target
           ? probeNodeEndpoint(

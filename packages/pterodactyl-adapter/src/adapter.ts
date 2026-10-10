@@ -246,7 +246,13 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       input: StopConfirmationOptions,
     ): Promise<{ confirmed: boolean }> {
       return stopWithConfirmation(
-        adapter,
+        {
+          ...adapter,
+          // Internal stop confirmation already has a freshly verified Application
+          // UUID. The browser console retains its independent Client identity read.
+          relayConsole: (identifier, relayOptions, serverUUID) =>
+            createConsoleRelay(transport, options, identifier, serverUUID, relayOptions),
+        },
         applicationId,
         identifier,
         input,

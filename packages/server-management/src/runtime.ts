@@ -560,6 +560,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
         : before;
     },
     adapter,
+    // Recheck revocable local authority at intermediate durable/console
+    // boundaries. Provider/image proofs belong to the final effect handoff,
+    // not every intermediate authorization in the same operation.
+    authorizeIntent: (jobId: string, serverId: string, connection: Kysely<Database>) =>
+      authorizeQueuedEffect(connection, jobId, serverId, env, adapter).then(() => undefined),
+    // authorizeEffect below binds each final handoff to this server's host.
+    effectAuthorizationVerifiesHost: true,
     authorizeEffect: async (jobId: string, serverId: string, connection: Kysely<Database>) => {
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `authorize_effect.${name}`, work);
@@ -599,7 +606,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `reserve_start.${name}`, work);
       await stage('observer_preflight', () => verifyObservationHost(serverId, connection));
-      await stage('runtime_image', () => assertRuntimeImage(serverId, connection, false));
+      // Image/launch identity is checked once immediately before power, after
+      // durable preparation. Admission still requires a fresh physical sample.
       await stage('host_sampling', () => refreshObservations(connection));
       await stage('atomic_admission', () => reserveStart(connection, serverId, jobId, action, env));
     },

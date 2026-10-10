@@ -72,3 +72,24 @@ supply protocol-native status/join responses and verified graceful-save semantic
 Public deployment, additional node-probe services, permissions, network/socket
 mounts and real ingress remain subject to operation-specific Owner approval.
 M2's temporary SFTPGo exception and issue #18 are unchanged.
+
+## 2026-10-11 amendment — Status continuity during backend recreation
+
+The v2 reachability proof identifies stable provider identity, allocation/binding
+shape and namespace/topology, rather than a replaceable Docker container ID.
+Wings may recreate that container during a normal start. An already-owned
+`waking` or `sleeping` listener may retain its status-only responder across an
+absent backend container or temporarily absent effective bindings. It requires
+the same consent generation/public endpoint, previously validated backend metadata,
+an unchanged current v2 proof, fresh complete provider/topology/socket/collision
+checks and a successful nonce challenge at the backend node. Retained metadata
+is bounded, process-local and conveys no permission independently of those checks.
+
+This exception cannot bootstrap a listener, authorize forwarding, validate an
+online backend, cover contradictory bindings/identity, or survive unknown topology
+or an aggregate validation timeout. Forwarding still requires complete current
+backend proof and game readiness. Restart loses retained metadata and keeps the
+existing bootstrap rules. Fixed diagnostic reason codes distinguish recreation,
+binding conflicts, topology/proof failures and validation timeouts without leaking
+provider payloads or credentials. A single validation pass may share its fresh
+Core context with the node challenge; it is not reused across validation passes.

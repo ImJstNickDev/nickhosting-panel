@@ -5,6 +5,7 @@ import type WebSocket from 'ws';
 import { WebSocketServer } from 'ws';
 import { createPterodactylAdapter } from './adapter.js';
 import type { ConsoleEvent, ConsoleRelay } from './console.js';
+import type { ApplicationServer } from './types.js';
 
 const uuid = 'f729c8a1-6773-467a-af3f-a7ea8704f0bd';
 const client = {
@@ -66,6 +67,7 @@ async function setup() {
   return {
     adapter,
     fetcher,
+    origin,
     incoming,
     origins,
     send(event: string, args: unknown[]) {
@@ -76,6 +78,67 @@ async function setup() {
 }
 
 describe('backend console mediation over a real isolated WebSocket', () => {
+  it('uses the managed stop UUID for its internal relay without refetching Application or Client identity', async () => {
+    const fixture = await setup();
+    const reads: string[] = [];
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      reads.push(path);
+      if (path.includes('/eggs/'))
+        return Response.json({
+          attributes: {
+            id: 1,
+            uuid,
+            name: 'fixture',
+            nest: 1,
+            description: null,
+            docker_image: 'fixture',
+            startup: 'fixture',
+            config: { stop: 'stop' },
+          },
+        });
+      if (path.endsWith('/websocket')) return fixture.fetcher(url, init);
+      if (path.endsWith('/power')) {
+        fixture.send('status', ['stopping']);
+        fixture.send('status', ['offline']);
+        return new Response(null, { status: 204 });
+      }
+      throw new Error('Unexpected identity refetch');
+    });
+    const observer = { preflight: vi.fn(async () => {}), stopped: vi.fn(async () => true) };
+    const adapter = createPterodactylAdapter({
+      baseURL: 'https://panel.example.com',
+      applicationKey: 'isolated-app-key',
+      clientKey: 'isolated-client-key',
+      fetcher,
+      webSocketOrigins: [fixture.origin],
+      containerObserver: observer,
+      timeoutMs: 1000,
+    });
+    const beforePower = vi.fn(async () => {}),
+      onConfirmed = vi.fn(async () => {});
+    const result = await adapter.stopWithConfirmation(1, client.identifier, {
+      verifiedServer: {
+        id: 1,
+        uuid,
+        identifier: client.identifier,
+        nest: 1,
+        egg: 1,
+      } as ApplicationServer,
+      authorize: async () => true,
+      beforePower,
+      onConfirmed,
+    });
+    expect(result).toEqual({ confirmed: true });
+    expect(reads).toEqual([
+      '/api/application/nests/1/eggs/1',
+      `/api/client/servers/${client.identifier}/websocket`,
+      `/api/client/servers/${client.identifier}/power`,
+    ]);
+    expect(beforePower).toHaveBeenCalledTimes(1);
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+    expect(observer.stopped).toHaveBeenCalledWith(uuid, 'server');
+  });
   it('sets the Panel Origin, authenticates internally, filters events and redacts tokens', async () => {
     const fixture = await setup();
     const events: ConsoleEvent[] = [];

@@ -15,6 +15,7 @@ import {
   type GatewaySnapshot,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
+import { GatewaySafetyError } from '@nickhosting/gateway-safety';
 import { z } from 'zod';
 import { GatewayRouteRevisionStaleError } from './control-client.js';
 
@@ -160,7 +161,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             controller.abort();
-            reject(new DomainError('integration_unavailable'));
+            reject(
+              new DomainError('integration_unavailable', 503, {
+                gatewaySafetyReason: 'validation_timeout',
+              }),
+            );
           }, policy.probeTimeoutMs);
           timer.unref();
         }),
@@ -724,6 +729,17 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           candidateSnapshot = previousCandidate;
           throw error;
         }
+        logTiming('gateway.safety_failure', {
+          ...routeIdentity(route),
+          reason:
+            error instanceof GatewaySafetyError
+              ? error.reason
+              : error instanceof DomainError &&
+                  error.details?.gatewaySafetyReason === 'validation_timeout'
+                ? 'validation_timeout'
+                : 'validation_failed',
+          routeMode: route.mode,
+        });
         const unsafe = listeners.get(route.id);
         if (unsafe) {
           logRouteTransition(unsafe, 'safety_rejected', false);

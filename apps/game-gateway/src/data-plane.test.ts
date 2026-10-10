@@ -12,6 +12,7 @@ import type {
   GatewaySafety,
   GatewaySnapshot,
 } from '@nickhosting/game-sdk';
+import { GatewaySafetyError } from '@nickhosting/gateway-safety';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createMinecraftProtocolAdapter,
@@ -1779,6 +1780,42 @@ describe('elapsed Gateway polling cadence', () => {
 });
 
 describe('transition-only Gateway diagnostics', () => {
+  it('identifies an aggregate validation timeout and still withdraws a listener without completed fresh safety evidence', async () => {
+    const backend = await tcpFixture();
+    const log = vi.fn();
+    const r = route(backend.port, 'tcp', 'waking');
+    const f = plane([r], { logger: { log }, policy: { probeTimeoutMs: 25 } });
+    await f.gateway.start();
+    vi.mocked(f.safety.validate).mockImplementation(async () => new Promise<void>(() => {}));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'gateway.safety_failure',
+      expect.objectContaining({ routeId: r.id, reason: 'validation_timeout' }),
+    );
+    expect(f.gateway.health().routes).toBe(0);
+    await refuses(backend.port);
+  });
+
+  it.each(['backend_container_missing', 'public_collision'] as const)(
+    'records the bounded safety reason %s without leaking exception payloads',
+    async (reason) => {
+      const backend = await tcpFixture();
+      const log = vi.fn();
+      const r = route(backend.port, 'tcp', 'waking');
+      const f = plane([r], { logger: { log } });
+      await f.gateway.start();
+      vi.mocked(f.safety.validate).mockRejectedValue(new GatewaySafetyError(reason));
+      await expect(f.gateway.refresh()).rejects.toThrow('allocation_unavailable');
+      expect(log).toHaveBeenCalledWith(
+        'info',
+        'gateway.safety_failure',
+        expect.objectContaining({ routeId: r.id, reason, routeMode: 'waking' }),
+      );
+      expect(f.gateway.health().routes).toBe(0);
+    },
+  );
+
   it('deduplicates identical snapshot renewals and records readiness and lease expiry without endpoint data', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'waking');

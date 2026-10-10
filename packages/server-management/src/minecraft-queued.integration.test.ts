@@ -680,9 +680,14 @@ describe('host-bound Minecraft runtime image evidence', () => {
     );
     const power = vi.fn(async () => {});
     Object.assign(value.external.adapter, { power });
-    expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
-      'failed',
-    );
+    expect(
+      await processServerOperation(f.db, job.jobId, {
+        ...value.management.lifecycle,
+        // Admission now precedes the final launch proof. Use this fixture's
+        // isolated host observation rather than its nonexistent host disk path.
+        reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action, env),
+      }),
+    ).toBe('failed');
     expect(power).not.toHaveBeenCalled();
   });
   it('uses one fresh provider snapshot for image authorization without inspecting runtime files', async () => {
@@ -739,7 +744,6 @@ describe('host-bound Minecraft runtime image evidence', () => {
         expect(download).not.toHaveBeenCalled();
         expect(records.map((record) => (record.data as Record<string, unknown>).stage)).toEqual([
           'reserve_start.observer_preflight',
-          'reserve_start.runtime_image',
           'reserve_start.host_sampling',
           'reserve_start.atomic_admission',
           'authorize_effect.observer_preflight',
@@ -759,6 +763,51 @@ describe('host-bound Minecraft runtime image evidence', () => {
           expect((record.data as { durationMs: number }).durationMs).toBeGreaterThanOrEqual(0);
         }
         expect(JSON.stringify(records)).not.toContain('private-sink-failure');
+      } finally {
+        sample.mockRestore();
+      }
+    },
+  );
+  it.each([false, true])(
+    'checks the image once at final ordinary-start handoff, including drift=%s after preparation',
+    async (drift) => {
+      const value = await installed();
+      await value.management.assertMinecraftRuntimeImage(value.serverId);
+      value.observer.imageIdentity.mockClear();
+      const sample = vi.spyOn(hostResources, 'sampleLocalResources').mockResolvedValue({
+        totalMemoryMiB: 8192,
+        availableMemoryMiB: 8192,
+        cpuCapacityPercent: 800,
+        cpuBusyPercent: 0,
+        availableDiskMiB: 1000000,
+        observedAt: new Date().toISOString(),
+      });
+      const power = vi.fn(async () => {});
+      Object.assign(value.external.adapter, { power });
+      const job = await enqueueServerOperation(
+        f.db,
+        f.context,
+        value.serverId,
+        { action: 'start', idempotencyKey: randomUUID() },
+        env,
+      );
+      let prepared = false;
+      try {
+        const result = await processServerOperation(f.db, job.jobId, {
+          ...value.management.lifecycle,
+          checkpoint: async (point) => {
+            if (point !== 'prepared') return;
+            expect(value.observer.imageIdentity).not.toHaveBeenCalled();
+            prepared = true;
+            if (drift) value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
+          },
+        });
+        expect(prepared).toBe(true);
+        expect(sample).toHaveBeenCalled();
+        expect(value.observer.imageIdentity).toHaveBeenCalledOnce();
+        expect(power).toHaveBeenCalledTimes(drift ? 0 : 1);
+        expect(result).toBe(drift ? 'failed' : 'waiting');
+        expect(vi.mocked(value.external.adapter.downloadFile)).not.toHaveBeenCalled();
       } finally {
         sample.mockRestore();
       }
@@ -980,9 +1029,12 @@ describe('host-bound Minecraft runtime image evidence', () => {
     value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
     const power = vi.fn(async () => {});
     Object.assign(value.external.adapter, { power });
-    expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
-      'failed',
-    );
+    expect(
+      await processServerOperation(f.db, job.jobId, {
+        ...value.management.lifecycle,
+        reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action, env),
+      }),
+    ).toBe('failed');
     expect(power).not.toHaveBeenCalled();
   });
   it('does not treat a Minecraft mapping with a missing profile as another game', async () => {

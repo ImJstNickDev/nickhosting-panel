@@ -188,10 +188,11 @@ async function fixture(
       async (
         _applicationId: number,
         _identifier: string,
-        input: { authorize: () => Promise<boolean>; onConfirmed: () => Promise<void> },
+        input: Parameters<PterodactylAdapter['stopWithConfirmation']>[2],
       ) => {
         if (!(await input.authorize()))
           throw new PterodactylError('permission_denied', 'client', 'rejected');
+        await input.beforePower?.();
         state = 'offline';
         await input.onConfirmed();
         return { confirmed: true };
@@ -647,6 +648,86 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
     expect((await f.server()).readiness).toBe('loading');
   });
+  it.each(['start', 'restart'] as const)(
+    'performs one final full authorization for ordinary %s after local intent checks',
+    async (action) => {
+      const f = await fixture(action);
+      if (action === 'restart') f.setState('running');
+      const intent = vi.fn(async () => {}),
+        effect = vi.fn(async () => {});
+      f.options.authorizeIntent = intent;
+      f.options.authorizeEffect = effect;
+      expect(await f.run()).toBe('waiting');
+      expect(intent).toHaveBeenCalledTimes(1);
+      expect(effect).toHaveBeenCalledTimes(1);
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('rejects ordinary power if full authority changes after preparation', async () => {
+    const f = await fixture('start');
+    f.options.authorizeIntent = async () => {};
+    let prepared = false;
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') prepared = true;
+    };
+    f.options.authorizeEffect = async () => {
+      if (prepared) throw new DomainError('forbidden');
+    };
+    expect(await f.run()).toBe('failed');
+    expect(prepared).toBe(true);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.operation()).toMatchObject({
+      effect_state: 'none',
+      plan: { rejected: true, powerEffectPrepared: false },
+    });
+  });
+  it('uses local stop-console reauthorization and shares metadata while retaining a fresh final identity check', async () => {
+    const f = await fixture('stop');
+    f.setState('running');
+    const intent = vi.fn(async () => {}),
+      effect = vi.fn(async () => {});
+    f.options.authorizeIntent = intent;
+    f.options.authorizeEffect = effect;
+    f.adapter.stopWithConfirmation.mockImplementationOnce(async (id, identifier, callbacks) => {
+      expect(callbacks.verifiedServer).toMatchObject({ id, identifier, uuid: f.remote.uuid });
+      const reads = f.adapter.getApplicationServer.mock.calls.length;
+      for (let i = 0; i < 3; i++) expect(await callbacks.authorize()).toBe(true);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(reads);
+      await callbacks.beforePower?.();
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(reads + 1);
+      f.setState('offline');
+      await callbacks.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('waiting');
+    expect(intent).toHaveBeenCalledTimes(4);
+    expect(effect).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(3);
+  });
+  it.each(['identity', 'permission'] as const)(
+    'rejects stop when %s changes during console setup',
+    async (change) => {
+      const f = await fixture('stop');
+      f.setState('running');
+      f.options.authorizeIntent = async () => {};
+      let setup = false;
+      f.options.authorizeEffect = async () => {
+        if (setup && change === 'permission') throw new DomainError('forbidden');
+      };
+      let sentPower = false;
+      f.adapter.stopWithConfirmation.mockImplementationOnce(async (_id, _identifier, callbacks) => {
+        setup = true;
+        if (change === 'identity') f.remote.uuid = randomUUID();
+        await callbacks.beforePower?.();
+        sentPower = true;
+        return { confirmed: false };
+      });
+      expect(await f.run()).toBe('failed');
+      expect(setup).toBe(true);
+      expect(sentPower).toBe(false);
+      expect((await f.server()).runtime_state).toBe('running');
+    },
+  );
   it.each([false, true])(
     'records bounded operation timings without changing effects when the logger throws=%s',
     async (throws) => {
