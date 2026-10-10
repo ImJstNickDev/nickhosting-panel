@@ -526,3 +526,24 @@ infrastructure operations and confirmed **zero remaining must-fix findings**.
 Governance and staged-content hygiene pass (433 text files, 49 review PNGs,
 353 local links, 4 TOML files and 44 ignore cases); the
 credentials/discovery and real-creation prerequisites above remain explicit.
+
+### 2026-10-10 — Owner-entered real provider discovery
+
+After the Owner saved the Panel URL and both keys through protected settings, a
+read-only probe inside the existing dev API used `containerEnvironment`, encrypted
+DB secrets and `createManagementRuntime().adapter`. Client account authentication
+and Application API discovery passed: **1 node, 5 nests, 21 eggs, 400 allocations**.
+Only counts were emitted; no credentials or provider identities were published.
+The first probe failed before making requests because workspace package imports
+were unavailable from the repository root; source entry imports corrected the
+probe without changing application code. No server mutation, migration, restart
+or infrastructure change occurred. This supersedes the pending discovery result
+above; it does not establish provisioning or game-runtime eligibility.
+
+SFTPGo remains explicitly disabled in development: the environment-locked
+`http://provider:9090` URL and disabled credential are legacy simulator guards,
+not an operational SFTPGo endpoint. No development SFTPGo service or authorized
+Wings filesystem mount exists in this stack. Real Panel discovery does not enable
+SFTP credential issuance or file access through SFTPGo. Existing file-management
+APIs use the separate Pterodactyl adapter and retain their own managed-identity and
+transfer-origin requirements. Issue #18 and observer/evidence prerequisites remain.
