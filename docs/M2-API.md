@@ -528,6 +528,22 @@ Wings volume mapping is implied by running local tests. Preserve PostgreSQL,
 ignored provenance ledgers and encryption keys during recovery; dropping Redis
 delivery state is not equivalent to cancelling a business operation.
 
+Temporary delivery deferrals (for example a busy per-server advisory lock) re-arm
+the existing PostgreSQL outbox entry after 500 ms, respecting the job's later
+`next_attempt_at` and an already earlier valid dispatch deadline. This is distinct
+from the unchanged 30-second lost-delivery recovery fallback. A consumer first
+locks the outbox row by job ID, waiting for a concurrent publication to commit,
+then checks the exact delivery generation; stale deliveries cannot reschedule a
+new generation or recreate a removed outbox row. Terminal jobs are not rearmed.
+Server operations that no longer own their server's active-operation slot or whose
+server is deleted return internal `inactive`, rather than requesting prompt retries.
+No job attempt, permission, provider effect or reservation is replayed by rearming;
+the regular processor retains all authorization, locks and idempotency checks.
+Worker delivery logs include processor/rearm `durationMs` and, on deferral,
+`deferredRetryScheduled`. This duration is not pure queue latency. Polling and
+external checks still add elapsed time; 500 ms is a retry delay, not an end-to-end
+latency guarantee.
+
 ## Installer admission and completion
 
 Managed node configuration accepts `installerMemoryMiB` and `installerCpuPercent`

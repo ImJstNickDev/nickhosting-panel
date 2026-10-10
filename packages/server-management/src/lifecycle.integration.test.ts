@@ -1398,6 +1398,20 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).limits.memory).toBe(256);
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it.each(['replaced', 'deleted'] as const)(
+    'does not request prompt delivery retries for an inactive %s operation',
+    async (reason) => {
+      const f = await fixture('start');
+      await f.db
+        .updateTable('managed_servers')
+        .set(reason === 'deleted' ? { deleted_at: f.now() } : { active_operation_id: null })
+        .where('id', '=', f.serverId)
+        .execute();
+      expect(await f.run()).toBe('inactive');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_started_at).toBeNull();
+    },
+  );
   it('reconciles only registered servers and conservatively accounts external starts', async () => {
     const f = await fixture('start');
     await f.db

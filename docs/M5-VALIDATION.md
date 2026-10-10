@@ -2291,3 +2291,63 @@ text files, 106 reviewed PNGs, 430 relative links, four TOML files, 44 ignore ca
 `git diff --cached --check` passed. No private infrastructure notes or credentials
 were staged. Rollback is a new revert commit of this patch, followed by a separately
 approved Gateway restart; there is no schema/data migration to reverse.
+
+### 2026-10-10 — Prompt durable retries after temporary delivery deferral
+
+The Owner's second post-activation wake completed its remote start but logged a
+`deferred` confirmation at 21:37:19.766 UTC, followed by success at 21:37:51.428.
+The existing dispatcher reserved its next recovery publication for 30 seconds
+later; `deferred` did not re-arm it. The historical log does not establish whether
+the particular deferral came from lock contention or another eligibility check.
+
+A temporary deferral now re-arms the existing durable outbox entry after 500 ms,
+respecting `next_attempt_at` and an earlier valid dispatch deadline. A transaction
+locks that outbox row by job ID before checking the publication generation. This
+also covers Redis delivering before the dispatcher's PostgreSQL commit. Stale
+generations, removed outbox rows and terminal jobs cannot be revived. No job
+attempt/effect is executed by rearming. The unchanged processor still authorizes
+and serializes all effects. Obsolete/deleted server operations return internal
+`inactive` rather than entering the short retry path. Generic jobs remain separate
+from server-domain tables. The 30-second lost-delivery recovery remains unchanged.
+Worker logs now include processor/rearm duration and whether a deferred retry was
+scheduled; those fields do not claim to isolate queue latency.
+
+Focused evidence:
+
+- New jobs targets initially produced **11 passed, two failed**. Both real Redis
+  cases exposed publication-before-commit: the first implementation's generation
+  predicate rejected a fast consumer before waiting for the publication lock.
+  Independent review identified the same race. Locking the outbox by ID before
+  comparing its generation corrected it. An intermediate one-case rerun passed;
+  the final new-target run passed **14**, with 13 existing cases filtered.
+- `scripts/dev.sh pnpm test:m3 packages/jobs/src/jobs.integration.test.ts` —
+  **27 passed** (complete affected file, 8.60 s). Real BullMQ tests defer once/three
+  times with the recovery interval still 30 seconds, finish within five seconds,
+  retain at least 450 ms between deliveries, and commit exactly one effect/attempt.
+  Coverage includes a consumer launched inside publication before commit, future
+  persisted backoff, stale generations, concurrent deferrals and terminal/deleted
+  outbox rows, plus existing lost-delivery recovery tests.
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/gateway-delivery.integration.test.ts packages/server-management/src/lifecycle.integration.test.ts --testNamePattern 'server-lock deferral|inactive .* operation'`
+  — **3 passed, 141 filtered**. Actual isolated PostgreSQL advisory-lock contention
+  is released and the admitted wake completes within the fixture's 12-second bound,
+  below the 30-second recovery fallback, with exactly one mocked provider power call.
+  Replaced/deleted operations request no prompt retry or provider effect.
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/gateway-delivery.integration.test.ts`
+  — final complete affected file **3 passed** (17.18 s), retaining Redis loss and
+  uncertain remote-effect recovery coverage.
+- `scripts/dev.sh pnpm typecheck` — passed root/WebPanel. An earlier test-stub
+  return type failed typecheck and was corrected before this final run.
+- Changed-source Biome — **five files passed**. No historical full-suite rerun.
+
+Independent re-review found the publication race resolved and no remaining must-fix.
+This addresses the observed 30-second deferral hole, not every second of protocol
+probing, polling, provider work or graceful shutdown. New live latency measurements
+still require an Owner-run cycle; no game was started/stopped to manufacture proof.
+
+Existing dev source watchers loaded the worker changes: graceful stop/start at
+21:45:46.641/21:45:49.382 UTC, worker/API healthy, deployed transport/lifecycle
+source hashes match the workspace. No manual container restart or Gateway change
+was needed. No Pterodactyl/Wings, networking, persistent review data or game-server
+mutation was performed. Existing approved isolated services were reused; temporary
+schemas/unique test Redis queues were cleaned by their fixtures. SFTPGo #18 remains
+unchanged. Rollback requires a new revert commit; no migration or data reset.

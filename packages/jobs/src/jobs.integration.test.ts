@@ -3,10 +3,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, createLogger, DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { sql } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { commandDigest } from './contracts.js';
 import { enqueueCommand, foundationHandlers, getJobStatus, processJob } from './store.js';
-import { createJobTransport, dispatchOutbox, startJobWorker } from './transport.js';
+import {
+  createJobTransport,
+  dispatchOutbox,
+  rearmDeferredDelivery,
+  startJobWorker,
+} from './transport.js';
 
 const command = {
   type: 'foundation.record-activity',
@@ -302,7 +307,205 @@ describe('PostgreSQL authoritative jobs', () => {
   });
 });
 
+describe('durable deferred delivery', () => {
+  async function publishedJob() {
+    const job = await submit();
+    await dispatchOutbox(fixture.db, { add: vi.fn() }, { recoveryIntervalMs: 30_000 });
+    return { job, deliveryId: `${job.id}-1` };
+  }
+
+  async function outbox(jobId: string) {
+    return fixture.db
+      .selectFrom('job_outbox')
+      .selectAll()
+      .where('job_id', '=', jobId)
+      .executeTakeFirstOrThrow();
+  }
+
+  it('brings the exact deferred generation forward without changing the durable job', async () => {
+    const { job, deliveryId } = await publishedJob();
+    const original = await outbox(job.id);
+    const before = Date.now();
+    expect(await rearmDeferredDelivery(fixture.db, job.id, deliveryId)).toBe(true);
+    const rearmed = await outbox(job.id);
+    expect(rearmed.generation).toBe(1);
+    expect(rearmed.last_dispatched_at).toEqual(original.last_dispatched_at);
+    expect(rearmed.next_dispatch_at.getTime()).toBeGreaterThanOrEqual(before + 450);
+    expect(rearmed.next_dispatch_at.getTime()).toBeLessThan(before + 2_000);
+    expect(rearmed.next_dispatch_at.getTime()).toBeLessThan(original.next_dispatch_at.getTime());
+    expect(await getJobStatus(fixture.db, job.id, member)).toMatchObject({
+      state: 'queued',
+      attempts: 0,
+    });
+    expect(await fixture.db.selectFrom('activity_events').selectAll().execute()).toHaveLength(0);
+  });
+
+  it('rearms a consumer that defers before publication commits its generation', async () => {
+    const job = await submit();
+    let consumer: Promise<boolean> | undefined;
+    await dispatchOutbox(
+      fixture.db,
+      {
+        add: vi.fn().mockImplementation(async (_name, _data, options) => {
+          consumer = rearmDeferredDelivery(fixture.db, job.id, String(options?.jobId));
+          // Redis delivers before the publisher commits; let the consumer reach the locked row.
+          await delay(50);
+          return undefined;
+        }),
+      },
+      { recoveryIntervalMs: 30_000 },
+    );
+    expect(await consumer).toBe(true);
+    const row = await outbox(job.id);
+    expect(row.generation).toBe(1);
+    expect(row.next_dispatch_at.getTime()).toBeLessThan(Date.now() + 2_000);
+  });
+
+  it('respects persisted future backoff and does not postpone an earlier dispatch', async () => {
+    const { job, deliveryId } = await publishedJob();
+    const due = new Date(Date.now() + 5_000);
+    await fixture.db
+      .updateTable('operation_jobs')
+      .set({ next_attempt_at: due })
+      .where('id', '=', job.id)
+      .execute();
+    await rearmDeferredDelivery(fixture.db, job.id, deliveryId);
+    expect((await outbox(job.id)).next_dispatch_at).toEqual(due);
+    // An already premature poll is corrected to the durable backoff rather than retried early.
+    const earlier = new Date(Date.now() + 200);
+    await fixture.db
+      .updateTable('job_outbox')
+      .set({ next_dispatch_at: earlier })
+      .where('job_id', '=', job.id)
+      .execute();
+    await rearmDeferredDelivery(fixture.db, job.id, deliveryId);
+    expect((await outbox(job.id)).next_dispatch_at).toEqual(due);
+    expect(await processJob(fixture.db, job.id)).toBe('deferred');
+    await fixture.db
+      .updateTable('operation_jobs')
+      .set({ next_attempt_at: new Date(0) })
+      .where('id', '=', job.id)
+      .execute();
+    await fixture.db
+      .updateTable('job_outbox')
+      .set({ next_dispatch_at: earlier })
+      .where('job_id', '=', job.id)
+      .execute();
+    await rearmDeferredDelivery(fixture.db, job.id, deliveryId);
+    expect((await outbox(job.id)).next_dispatch_at).toEqual(earlier);
+  });
+
+  it('does not reset a newer generation or recreate a removed outbox', async () => {
+    const { job, deliveryId } = await publishedJob();
+    await fixture.db
+      .updateTable('job_outbox')
+      .set({ generation: 2 })
+      .where('job_id', '=', job.id)
+      .execute();
+    const newer = await outbox(job.id);
+    expect(await rearmDeferredDelivery(fixture.db, job.id, deliveryId)).toBe(false);
+    expect(await rearmDeferredDelivery(fixture.db, job.id, `${job.id}-2-suffix`)).toBe(false);
+    expect(await rearmDeferredDelivery(fixture.db, job.id, `${randomUUID()}-2`)).toBe(false);
+    expect(await outbox(job.id)).toEqual(newer);
+    await fixture.db.deleteFrom('job_outbox').where('job_id', '=', job.id).execute();
+    expect(await rearmDeferredDelivery(fixture.db, job.id, `${job.id}-2`)).toBe(false);
+    expect(await fixture.db.selectFrom('job_outbox').selectAll().execute()).toHaveLength(0);
+  });
+
+  it.each(['succeeded', 'failed'] as const)('does not rearm a terminal %s job', async (state) => {
+    const { job, deliveryId } = await publishedJob();
+    await fixture.db
+      .updateTable('operation_jobs')
+      .set({ state, completed_at: new Date() })
+      .where('id', '=', job.id)
+      .execute();
+    const original = await outbox(job.id);
+    expect(await rearmDeferredDelivery(fixture.db, job.id, deliveryId)).toBe(false);
+    expect(await outbox(job.id)).toEqual(original);
+  });
+
+  it('bounds repeated concurrent deferrals without advancing generations or the deadline', async () => {
+    const { job, deliveryId } = await publishedJob();
+    await rearmDeferredDelivery(fixture.db, job.id, deliveryId);
+    const original = await outbox(job.id);
+    await Promise.all(
+      Array.from({ length: 12 }, () => rearmDeferredDelivery(fixture.db, job.id, deliveryId)),
+    );
+    expect(await outbox(job.id)).toEqual(original);
+  });
+
+  it.each([0, 99, 60_001, 500.5, Number.NaN])(
+    'rejects an unbounded defer delay %s',
+    async (delayMs) => {
+      const { job, deliveryId } = await publishedJob();
+      await expect(rearmDeferredDelivery(fixture.db, job.id, deliveryId, delayMs)).rejects.toThrow(
+        'validation_failed',
+      );
+    },
+  );
+});
+
 describe('isolated Redis/BullMQ delivery', () => {
+  it.each([1, 3])(
+    'resumes after %s deferred deliveries without the 30-second recovery wait or duplicate effects',
+    async (deferredCount) => {
+      const options = redisOptions();
+      const job = await submit();
+      const calls: number[] = [];
+      const deliveryResults: unknown[] = [];
+      options.logger = createLogger((record) => deliveryResults.push(record));
+      const runtime = await startJobWorker({
+        db: fixture.db,
+        ...options,
+        pollIntervalMs: 50,
+        recoveryIntervalMs: 30_000,
+        processor: async (jobId) => {
+          calls.push(Date.now());
+          if (calls.length <= deferredCount) return 'deferred';
+          return processJob(fixture.db, jobId);
+        },
+      });
+      try {
+        await eventually(
+          async () => (await getJobStatus(fixture.db, job.id, member)).state === 'succeeded',
+        ).catch(async (error: unknown) => {
+          throw new Error(
+            JSON.stringify({
+              calls,
+              deliveryResults,
+              outbox: await fixture.db
+                .selectFrom('job_outbox')
+                .selectAll()
+                .where('job_id', '=', job.id)
+                .execute(),
+            }),
+            { cause: error },
+          );
+        });
+        expect(calls).toHaveLength(deferredCount + 1);
+        expect((calls.at(-1) ?? 0) - (calls[0] ?? 0)).toBeLessThan(5_000);
+        for (let index = 1; index < calls.length; index++) {
+          expect((calls[index] ?? 0) - (calls[index - 1] ?? 0)).toBeGreaterThanOrEqual(450);
+        }
+        expect((await getJobStatus(fixture.db, job.id, member)).attempts).toBe(1);
+        expect(await fixture.db.selectFrom('activity_events').selectAll().execute()).toHaveLength(
+          1,
+        );
+        expect(await fixture.db.selectFrom('job_steps').selectAll().execute()).toHaveLength(1);
+        expect(await fixture.db.selectFrom('job_outbox').selectAll().execute()).toHaveLength(0);
+      } finally {
+        await runtime.close();
+        const cleanup = createJobTransport(options);
+        try {
+          await cleanup.queue.waitUntilReady();
+          await cleanup.queue.obliterate({ force: true });
+        } finally {
+          await cleanup.close();
+        }
+      }
+    },
+  );
+
   it('dispatches concurrently without double-publishing a due generation', async () => {
     const options = redisOptions();
     const transport = createJobTransport(options);

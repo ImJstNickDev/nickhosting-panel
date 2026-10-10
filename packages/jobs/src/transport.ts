@@ -127,6 +127,43 @@ export async function dispatchOutbox(
   return count;
 }
 
+/** A delivered but temporarily deferred job is not a lost delivery. Keep its
+ * retry durable without waiting for the crash-recovery interval. The generation
+ * fence prevents an old consumer from changing a newer publication's deadline. */
+export async function rearmDeferredDelivery(
+  db: Kysely<Database>,
+  jobId: string,
+  deliveryId: string,
+  delayMs = 500,
+): Promise<boolean> {
+  if (!Number.isInteger(delayMs) || delayMs < 100 || delayMs > 60_000)
+    throw new DomainError('validation_failed');
+  return db.transaction().execute(async (tx) => {
+    // Redis may deliver before dispatchOutbox commits the new generation. Lock
+    // by job ID alone first so that a fast consumer waits for that publication.
+    const publication = await tx
+      .selectFrom('job_outbox')
+      .select('generation')
+      .where('job_id', '=', jobId)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!publication || deliveryId !== `${jobId}-${publication.generation}`) return false;
+    // Do not lock the job: lifecycle consumers acquire job then outbox locks.
+    const result = await sql<{ job_id: string }>`
+      update job_outbox as outbox
+      set next_dispatch_at = greatest(
+        job.next_attempt_at,
+        least(outbox.next_dispatch_at, clock_timestamp() + ${delayMs} * interval '1 millisecond')
+      )
+      from operation_jobs as job
+      where outbox.job_id = ${jobId} and job.id = outbox.job_id
+        and job.state in ('queued', 'running')
+      returning outbox.job_id
+    `.execute(tx);
+    return result.rows.length === 1;
+  });
+}
+
 /** No connections or timers exist until this explicitly called factory runs. */
 export async function startJobWorker(options: {
   db: Kysely<Database>;
@@ -167,12 +204,19 @@ export async function startJobWorker(options: {
     async (delivery) => {
       const parsed = deliverySchema.safeParse(delivery.data);
       if (!parsed.success) throw new DomainError('validation_failed');
+      const started = performance.now();
       const result = options.processor
         ? await options.processor(parsed.data.jobId)
         : await processJob(options.db, parsed.data.jobId, options.handlers);
+      const deferredRetryScheduled =
+        result === 'deferred' && delivery.id !== undefined
+          ? await rearmDeferredDelivery(options.db, parsed.data.jobId, delivery.id)
+          : false;
       options.logger.log(result === 'failed' ? 'error' : 'info', 'jobs.delivery_processed', {
         jobId: parsed.data.jobId,
         result,
+        durationMs: Math.round(performance.now() - started),
+        ...(result === 'deferred' ? { deferredRetryScheduled } : {}),
       });
       return result;
     },

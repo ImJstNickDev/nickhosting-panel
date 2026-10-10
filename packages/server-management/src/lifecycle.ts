@@ -34,7 +34,14 @@ import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
 type Operation = Selectable<Database['server_operations']>;
-type Result = 'succeeded' | 'failed' | 'waiting' | 'deferred' | 'duplicate' | 'missing';
+type Result =
+  | 'succeeded'
+  | 'failed'
+  | 'waiting'
+  | 'deferred'
+  | 'inactive'
+  | 'duplicate'
+  | 'missing';
 export interface GameLifecycleContext {
   db: Kysely<Database>;
   server: Server;
@@ -312,7 +319,8 @@ export async function processServerOperation(
       .selectAll()
       .where('id', '=', operation.server_id)
       .executeTakeFirstOrThrow();
-    if (server.active_operation_id !== jobId || server.deleted_at) return 'deferred';
+    // Obsolete operations must not enter the transport's short contention retry.
+    if (server.active_operation_id !== jobId || server.deleted_at) return 'inactive';
     const token = randomUUID();
     const at = nowOf(options);
     await db
