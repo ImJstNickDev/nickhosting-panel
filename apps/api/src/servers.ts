@@ -561,6 +561,7 @@ export function registerServerRoutes(
           done();
         },
       );
+      let authorizationDenied = false;
       try {
         const relay = await service.adapter.relayConsole(identifier, {
           signal: controller.signal,
@@ -569,22 +570,34 @@ export function registerServerRoutes(
               await authorizeServer(db, await principal(c), c.req.param('id'));
               return true;
             } catch {
+              authorizationDenied = true;
               return false;
             }
           },
           onEvent: (event) => {
-            output.send({ event: event.type, data: JSON.stringify(event) });
+            if (authorizationDenied)
+              output.send({
+                event: 'error',
+                data: JSON.stringify({ type: 'error', code: 'forbidden' }),
+              });
+            else output.send({ event: event.type, data: JSON.stringify(event) });
             if (event.type === 'closed') void output.drain().then(done);
           },
         });
         try {
+          if (c.req.query('history') !== '0') await relay.requestLogs();
+          output.send({ event: 'connected', data: JSON.stringify({ type: 'connected' }) });
           await closed;
         } finally {
           relay.close();
         }
-      } catch {
+      } catch (error) {
         // No upstream exception details or credentials in an already-open stream.
-        output.send({ event: 'error', data: JSON.stringify({ code: 'integration_unavailable' }) });
+        const code =
+          authorizationDenied || (error instanceof DomainError && error.code === 'forbidden')
+            ? 'forbidden'
+            : 'integration_unavailable';
+        output.send({ event: 'error', data: JSON.stringify({ type: 'error', code }) });
         await output.drain();
       } finally {
         output.close();

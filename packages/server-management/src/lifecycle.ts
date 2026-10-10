@@ -63,6 +63,14 @@ export interface InitialInstallationOutputs {
   imageDigest: string;
   files: { path: string; sha256: string; size: number }[];
 }
+export interface ExternalStopReceipt {
+  containerId: string;
+  startedAt: string;
+  finishedAt: string;
+  activityId: string;
+  activityAt: string;
+  action: 'stop' | 'kill';
+}
 export interface LifecycleOptions {
   adapter: PterodactylAdapter;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
@@ -86,6 +94,11 @@ export interface LifecycleOptions {
   /** Trusted host-bound running process start. Null proves non-running/absent;
    * unavailability must throw. Production always supplies this observer. */
   observeProcessStart?: (serverId: string, connection: Kysely<Database>) => Promise<string | null>;
+  /** Successful interactive provider stop/kill plus matching exact terminal process evidence. */
+  observeExternalStop?: (
+    serverId: string,
+    connection: Kysely<Database>,
+  ) => Promise<ExternalStopReceipt | null>;
   /** Physical proof for a no-op stop, only when no compute/installer reservation exists. */
   confirmAlreadyStopped?: (serverId: string, connection: Kysely<Database>) => Promise<boolean>;
   /** Fresh admission revalidation before a power effect, not an implicit reservation. */
@@ -382,6 +395,7 @@ export async function processServerOperation(
       release = false,
       code: string | null = null,
       alreadyStopped = false,
+      confirmedStopped = false,
     ): Promise<Result> => {
       let rollbackLimits: Record<string, unknown> | undefined;
       if (
@@ -498,7 +512,18 @@ export async function processServerOperation(
             .execute();
         await tx
           .updateTable('managed_servers')
-          .set({ active_operation_id: null, updated_at: nowOf(options) })
+          .set({
+            active_operation_id: null,
+            updated_at: nowOf(options),
+            ...(confirmedStopped
+              ? {
+                  runtime_state: 'offline' as const,
+                  readiness: 'unknown' as const,
+                  last_observed_at: nowOf(options),
+                  ...(!isGatewaySleep(operation) ? { intent: 'manually_stopped' as const } : {}),
+                }
+              : {}),
+          })
           .where('id', '=', server.id)
           .where('active_operation_id', '=', jobId)
           .execute();
@@ -553,7 +578,17 @@ export async function processServerOperation(
             subject_id: job.subject_id,
             support_session_id: job.support_session_id,
             message_key: success ? 'servers.operation.succeeded' : 'servers.operation.failed',
-            data: JSON.stringify({ action: operation.action, code }),
+            data: JSON.stringify({
+              action: operation.action,
+              code,
+              ...(operation.plan.externalStopConfirmed
+                ? {
+                    source: 'provider_activity',
+                    reason: 'external_stop',
+                    receipt: operation.plan.externalStopConfirmed,
+                  }
+                : {}),
+            }),
           })
           .execute();
         await tx.deleteFrom('job_outbox').where('job_id', '=', jobId).execute();
@@ -857,6 +892,56 @@ export async function processServerOperation(
       await installationCallbacks(false).onConfirmed(outputs);
       return true;
     };
+    const completeExternalStop = async (): Promise<Result | null> => {
+      if (
+        !options.observeExternalStop ||
+        !operation.effect_started_at ||
+        !(
+          (['start', 'restart'].includes(operation.action) && operation.phase === 'power') ||
+          (operation.action === 'provision' && operation.phase === 'initial_start')
+        )
+      )
+        return null;
+      const receipt = await options.observeExternalStop(server.id, db);
+      if (!receipt) return null;
+      const started = processStartTime(receipt.startedAt);
+      const finished = processStartTime(receipt.finishedAt);
+      const effect = BigInt(operation.effect_started_at.getTime()) * 1_000_000n;
+      if (
+        started === null ||
+        finished === null ||
+        started <= effect ||
+        finished < started ||
+        finished > BigInt(nowOf(options).getTime()) * 1_000_000n ||
+        Date.parse(receipt.activityAt) < operation.effect_started_at.getTime() ||
+        receipt.startedAt === operation.plan.previousProcessStartedAt
+      )
+        return null;
+      await update({
+        plan: { ...operation.plan, waitReason: null, externalStopConfirmed: receipt },
+      });
+      // The process demonstrably started, then an interactive provider stop
+      // ended that exact epoch. The start did not achieve its requested outcome;
+      // suppress automatic wake and release only this physically confirmed stop.
+      return finish(false, true, 'conflict', false, true);
+    };
+    const completeObservedStop = async (): Promise<Result | null> => {
+      if (
+        operation.action !== 'stop' ||
+        operation.phase !== 'power' ||
+        operation.plan.stopConfirmed !== true ||
+        !options.confirmAlreadyStopped
+      )
+        return null;
+      // The persisted terminal proof belongs to this operation. Recheck the
+      // exact host/process before releasing capacity: Panel resources can still
+      // report running for 20 seconds. This never grants another power effect.
+      await ownedRemote(db, server, options);
+      await options.verifyObservationHost?.(server.id, db);
+      if (!(await options.confirmAlreadyStopped(server.id, db)))
+        return wait('stop_terminal_unproven', 'operation_uncertain');
+      return finish(true, true, null, false, true);
+    };
     try {
       const command = parseCommand(job.command);
       if (
@@ -953,6 +1038,8 @@ export async function processServerOperation(
           .where('id', '=', server.id)
           .execute();
         if (operation.phase === 'initial_start') {
+          const externalStop = await completeExternalStop();
+          if (externalStop) return externalStop;
           await activateProvisionGateway(db, server.id, jobId, options.env);
           await update({});
           if (!settled()) return wait('resource_cache_expiry');
@@ -1051,6 +1138,10 @@ export async function processServerOperation(
       }
       if (['start', 'stop', 'restart'].includes(operation.action)) {
         const action = operation.action as 'start' | 'stop' | 'restart';
+        const observedStop = await completeObservedStop();
+        if (observedStop) return observedStop;
+        const externalStop = await completeExternalStop();
+        if (externalStop) return externalStop;
         const current = await resources();
         if (operation.phase === 'planned') {
           if (
@@ -1171,6 +1262,8 @@ export async function processServerOperation(
             await effect('power', () =>
               options.adapter.power(server.pterodactyl_identifier ?? '', action),
             );
+          const stopped = await completeObservedStop();
+          if (stopped) return stopped;
           return wait('power_confirmation');
         }
         if (!settled()) return wait('resource_cache_expiry');
@@ -1593,8 +1686,70 @@ export async function reconcileManagedServer(
       .set({ installation_state: state })
       .where('id', '=', server.id)
       .execute();
-    const current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
+    let current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
     const now = nowOf(options);
+    let externalStop: ExternalStopReceipt | null = null;
+    if (!server.active_operation_id && options.observeExternalStop) {
+      const reserved = await db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', server.id)
+        .executeTakeFirst();
+      if (
+        reserved ||
+        (server.intent === 'manually_stopped' && current.current_state !== 'offline')
+      ) {
+        try {
+          externalStop = await options.observeExternalStop(server.id, db);
+        } catch (error) {
+          // Missing activity permission/observer evidence is not proof of a stop.
+          // Continue conservative state reconciliation without releasing capacity.
+          if (error instanceof DomainError && error.code === 'provenance_mismatch') throw error;
+        }
+      }
+      if (externalStop)
+        current = {
+          ...current,
+          current_state: 'offline',
+          resources: { ...current.resources, memory_bytes: 0, cpu_absolute: 0 },
+        };
+    }
+    if (
+      current.current_state !== 'offline' &&
+      server.runtime_state === 'offline' &&
+      !server.active_operation_id &&
+      options.confirmAlreadyStopped
+    ) {
+      const latestPower = await db
+        .selectFrom('server_operations')
+        .select(['action', 'phase', 'plan'])
+        .where('server_id', '=', server.id)
+        .where('action', 'in', ['start', 'restart', 'stop', 'provision'])
+        .orderBy('updated_at', 'desc')
+        .orderBy('job_id', 'desc')
+        .executeTakeFirst();
+      const confirmedAt =
+        typeof latestPower?.plan.stopConfirmedAt === 'string'
+          ? Date.parse(latestPower.plan.stopConfirmedAt)
+          : NaN;
+      if (
+        latestPower?.action === 'stop' &&
+        latestPower.phase === 'complete' &&
+        latestPower.plan.stopConfirmed === true &&
+        confirmedAt <= now.getTime() &&
+        now.getTime() - confirmedAt < settleOf(options)
+      ) {
+        // A completed ordered stop can precede expiry of Panel's resources
+        // cache. Do not re-import that cached running sample as an external
+        // start or recreate its released reservation. A new running process,
+        // newer power operation or expired cache window defeats this exception.
+        await options.verifyObservationHost?.(server.id, db);
+        if (await options.confirmAlreadyStopped(server.id, db)) {
+          await ownedRemote(db, server, options);
+          return 'observed';
+        }
+      }
+    }
     await observation(db, server, current, now);
     await db.transaction().execute(async (tx) => {
       await lockResources(tx);
@@ -1627,6 +1782,34 @@ export async function reconcileManagedServer(
         .selectAll()
         .where('server_id', '=', server.id)
         .executeTakeFirst();
+      if (externalStop && !locked.active_operation_id) {
+        await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
+        await tx
+          .updateTable('managed_servers')
+          .set({
+            intent: 'manually_stopped',
+            runtime_state: 'offline',
+            readiness: 'unknown',
+            last_observed_at: now,
+            updated_at: now,
+          })
+          .where('id', '=', server.id)
+          .execute();
+        if (reservation)
+          await tx
+            .insertInto('server_events')
+            .values({
+              server_id: server.id,
+              job_id: null,
+              actor_id: null,
+              subject_id: server.owner_id,
+              support_session_id: null,
+              message_key: 'servers.operation.stop_confirmed',
+              data: JSON.stringify({ source: 'provider_activity', receipt: externalStop }),
+            })
+            .execute();
+        return;
+      }
       const overhead = effectiveNodeOverhead(node, options.env);
       const physicalMemory = physicalMemoryMiB(server.limits.memory, overhead);
       const installation = await tx

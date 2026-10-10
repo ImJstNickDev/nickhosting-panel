@@ -220,7 +220,11 @@ export async function createConsoleRelay(
         return;
       }
       if (!authenticated) return;
-      if (event.event === 'console output' || event.event === 'install output') {
+      if (
+        event.event === 'console output' ||
+        event.event === 'install output' ||
+        event.event === 'daemon message'
+      ) {
         let line = parseInput(z.string().max(32768), event.args[0]);
         for (const secret of hidden) line = line.replaceAll(secret, '[redacted]');
         emit({ type: 'console', data: line });

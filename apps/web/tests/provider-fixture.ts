@@ -561,6 +561,10 @@ export async function installBrowserFixtures(
     },
     listBackups: async (id) => [...remote(id).backups.values()].map((b) => ({ ...b.metadata })),
     listBackupActivity: async (id) => structuredClone(remote(id).activities),
+    listPowerActivity: async (id) => {
+      remote(id);
+      return [];
+    },
     getBackup: async (id, backupId) => {
       const b = remote(id).backups.get(backupId);
       if (!b) throw new PterodactylError('not_found', 'client', 'rejected');

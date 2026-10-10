@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { api, consumeEvents } from '../api/client.js';
+import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
+import { useSession } from '../app/session.js';
 import {
   ActionForm,
   Empty,
@@ -46,63 +47,141 @@ function ConsoleOutput({
   );
 }
 
+type ConsoleLine = { type: 'console' | 'status'; data: string };
+function transientFailure(error: unknown) {
+  const failure = apiError(error);
+  return (
+    error instanceof TypeError ||
+    ['integration_unavailable', 'internal_error', 'rate_limited'].includes(failure.code) ||
+    failure.status >= 500
+  );
+}
 export function ConsolePage({ serverId }: { serverId: string }) {
   const t = useT();
   const server = useServer(serverId);
-  const [lines, setLines] = useState<string[]>([]);
+  const session = useSession();
+  const context = session.data?.context;
+  const identity =
+    !session.error && context
+      ? JSON.stringify([
+          context.actorUserId,
+          context.subjectUserId,
+          context.sessionType,
+          context.support?.id,
+        ])
+      : undefined;
+  const [buffer, setBuffer] = useState<{ scope: string; lines: ConsoleLine[] }>({
+    scope: '',
+    lines: [],
+  });
+  const scope = `${identity}:${serverId}`;
+  const lines =
+    buffer.scope === scope && identity
+      ? buffer.lines.map((line) =>
+          line.type === 'status' ? t(`service.consoleStatus.${line.data}`) : line.data,
+        )
+      : [];
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<unknown>();
   const [connection, setConnection] = useState(0);
+  const [retained, setRetained] = useState(false);
   const [follow, setFollow] = useState(true);
   const output = useRef<HTMLElement>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: an explicit reconnect restarts this stream.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: explicit reconnect and authenticated identity delimit the stream.
   useEffect(() => {
+    if (!identity) return;
+    const key = ['console-buffer', identity, serverId];
+    // These inactive query entries are erased by the existing sign-out/support identity reset.
+    // Keep at most five server buffers in this tab, never persistent browser storage.
+    const caches = queryClient.getQueryCache().findAll({ queryKey: ['console-buffer'] });
+    for (const cache of caches
+      .sort((a, b) => a.state.dataUpdatedAt - b.state.dataUpdatedAt)
+      .slice(0, Math.max(0, caches.length - 4))) {
+      if (JSON.stringify(cache.queryKey) !== JSON.stringify(key))
+        queryClient.removeQueries({ queryKey: cache.queryKey, exact: true });
+    }
+    let current = queryClient.getQueryData<ConsoleLine[]>(key) ?? [];
+    setBuffer({ scope, lines: current });
+    setRetained(current.length > 0);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const retry = () => {
+      timer = setTimeout(
+        () => void connect(),
+        Math.min(1000 * 2 ** Math.min(attempts++, 5), 30000),
+      );
+    };
     async function connect() {
       setState('connecting');
       setError(undefined);
       try {
-        await consumeEvents(`${serverPath(serverId)}/console`, {
-          signal: controller.signal,
-          onEvent: (event) => {
-            const payload = JSON.parse(event.data) as {
-              type: string;
-              data?: unknown;
-              code?: string;
-            };
-            if (payload.type === 'error')
-              throw { code: payload.code, messageKey: 'errors.integration_unavailable' };
-            if (payload.type === 'closed') {
-              setState('disconnected');
-              return;
-            }
-            setState('connected');
-            if (payload.type === 'console' && typeof payload.data === 'string') {
-              // React escapes text. Strip terminal control sequences, never render HTML.
-              const value = payload.data.replace(terminalEscapes, '').replace(terminalControls, '');
-              setLines((previous) => [...previous, value.slice(-8192)].slice(-300));
-            }
+        await consumeEvents(
+          `${serverPath(serverId)}/console${current.length ? '?history=0' : ''}`,
+          {
+            signal: controller.signal,
+            onEvent: (event) => {
+              const payload = JSON.parse(event.data) as {
+                type?: string;
+                data?: unknown;
+                code?: string;
+              };
+              const type = payload.type ?? event.type;
+              if (type === 'error')
+                throw new ApiError(
+                  payload.code ?? 'integration_unavailable',
+                  payload.code === 'forbidden' ? 'errors.forbidden' : 'service.consoleUnavailable',
+                );
+              if (type === 'closed') {
+                setState('disconnected');
+                return;
+              }
+              setState('connected');
+              attempts = 0;
+              if ((type === 'console' || type === 'status') && typeof payload.data === 'string') {
+                if (
+                  type === 'status' &&
+                  !['offline', 'starting', 'running', 'stopping'].includes(payload.data)
+                )
+                  return;
+                // React escapes text. Strip terminal control sequences, never render HTML.
+                const value = payload.data
+                  .replace(terminalEscapes, '')
+                  .replace(terminalControls, '');
+                const line: ConsoleLine = { type, data: value.slice(-8192) };
+                current = [...current, line].slice(-300);
+                queryClient.setQueryData(key, current);
+                setBuffer({ scope, lines: current });
+              }
+            },
           },
-        });
+        );
         if (!controller.signal.aborted) {
           setState('disconnected');
-          timer = setTimeout(() => void connect(), 5000);
+          setRetained(current.length > 0);
+          retry();
         }
       } catch (failure) {
         if (!controller.signal.aborted) {
           setError(failure);
           setState('disconnected');
+          if (transientFailure(failure)) {
+            setRetained(current.length > 0);
+            retry();
+          } else {
+            current = [];
+            queryClient.removeQueries({ queryKey: key, exact: true });
+            setBuffer({ scope, lines: [] });
+          }
         }
       }
     }
-    setLines([]);
     void connect();
     return () => {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [serverId, connection]);
+  }, [serverId, identity, scope, connection]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll after each new bounded batch of output.
   useEffect(() => {
     if (follow && output.current) output.current.scrollTop = output.current.scrollHeight;
@@ -126,6 +205,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       >
         {Boolean(error) && <ErrorNotice error={error} />}
         <ConsoleOutput output={output} lines={lines} />
+        {retained && <p className="muted">{t('service.consoleRetained')}</p>}
         <label className="check">
           <input
             type="checkbox"
@@ -244,7 +324,8 @@ export function Telemetry({ serverId }: { serverId: string }) {
     queryKey: ['resources', serverId],
     queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
     refetchInterval: 10000,
-    retry: false,
+    retry: (attempt, error) => attempt < 2 && transientFailure(error),
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
   const history = useQuery({
     queryKey: ['metrics', serverId, hours, before],
@@ -279,7 +360,16 @@ export function Telemetry({ serverId }: { serverId: string }) {
   const stale = live.dataUpdatedAt && Date.now() - live.dataUpdatedAt > 30000;
   return (
     <Section title={t('service.telemetry')}>
-      {live.error && <ErrorNotice error={live.error} retry={() => void live.refetch()} />}
+      {live.error && (
+        <ErrorNotice
+          error={
+            transientFailure(live.error)
+              ? new ApiError('integration_unavailable', 'service.telemetryUnavailable')
+              : live.error
+          }
+          retry={() => void live.refetch()}
+        />
+      )}
       {Boolean(stale) && <Notice>{t('service.staleTelemetry')}</Notice>}
       <div className="toolbar">
         <Select

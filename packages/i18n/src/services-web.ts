@@ -1,4 +1,23 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'service.consoleStatus.offline': ['Server stopped.', 'Server spento.'],
+  'service.consoleStatus.starting': ['Server starting…', 'Avvio del server…'],
+  'service.consoleStatus.running': [
+    'Server process running.',
+    'Processo del server in esecuzione.',
+  ],
+  'service.consoleStatus.stopping': ['Server stopping…', 'Arresto del server…'],
+  'service.consoleRetained': [
+    'Output retained in this tab. Messages while disconnected may be missing.',
+    'Output conservato in questa scheda. Potrebbero mancare messaggi ricevuti durante la disconnessione.',
+  ],
+  'service.consoleUnavailable': [
+    'Console connection lost. Reconnecting…',
+    'Connessione alla console interrotta. Riconnessione…',
+  ],
+  'service.telemetryUnavailable': [
+    'Live measurements are temporarily unavailable. Retrying…',
+    'Le misurazioni in tempo reale non sono disponibili. Nuovo tentativo in corso…',
+  ],
   'sleepTiming.shortenHint': [
     'Choose a shorter time. Automatic sleep cannot be disabled.',
     'Scegli un tempo più breve. La sospensione automatica non può essere disattivata.',

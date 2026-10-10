@@ -739,14 +739,14 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     f.tick();
     expect(await processServerOperation(f.db, started.jobId, f.options)).toBe('succeeded');
     const qualifiedStop = await enqueue('stop');
-    expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('waiting');
-    f.tick();
     expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('succeeded');
+    f.tick();
+    expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('duplicate');
     expect(await f.reservation()).toBeUndefined();
     const repeatedStop = await enqueue('stop');
     expect(await processServerOperation(f.db, repeatedStop.jobId, f.options)).toBe('succeeded');
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
-    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(3);
     const deleted = await enqueue('delete');
     expect(await processServerOperation(f.db, deleted.jobId, f.options)).toBe('waiting');
     f.tick();
@@ -1693,6 +1693,102 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).limits).toMatchObject({ memory: 128, disk: 64 });
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it.each(['start', 'restart', 'provision'] as const)(
+    'reconciles an interactive external stop after a proven %s epoch',
+    async (action) => {
+      const f = await fixture(action, { autoStart: true });
+      expect(await f.run()).toBe('waiting');
+      const effectAt = (await f.operation()).effect_started_at?.getTime() ?? 0;
+      f.tick(3000);
+      f.setState('offline');
+      const receipt = {
+        containerId: 'a'.repeat(64),
+        startedAt: new Date(effectAt + 500).toISOString(),
+        finishedAt: new Date(effectAt + 2500).toISOString(),
+        activityId: 'owner-stop',
+        activityAt: new Date(effectAt + 2000).toISOString(),
+        action: 'kill' as const,
+      };
+      f.options.observeExternalStop = vi.fn(async () => receipt);
+      expect(await f.run()).toBe('failed');
+      expect(await f.reservation()).toBeUndefined();
+      expect(await f.server()).toMatchObject({
+        active_operation_id: null,
+        intent: 'manually_stopped',
+        runtime_state: 'offline',
+      });
+      expect((await f.operation()).plan.externalStopConfirmed).toEqual(receipt);
+      expect((await f.operation()).plan.waitReason).toBeNull();
+      f.setState('running'); // stale provider resource cache after terminal completion
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect(await f.reservation()).toBeUndefined();
+      expect((await f.server()).runtime_state).toBe('offline');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['missing', 'previous-epoch', 'pre-effect-stop'] as const)(
+    'retains pending start capacity without a correlated terminal stop: %s',
+    async (condition) => {
+      const f = await fixture('start');
+      f.adapter.power.mockImplementation(async () => {});
+      expect(await f.run()).toBe('waiting');
+      const at = (await f.operation()).effect_started_at?.getTime() ?? 0;
+      f.tick();
+      f.options.observeExternalStop = vi.fn(async () =>
+        condition === 'missing'
+          ? null
+          : {
+              containerId: 'a'.repeat(64),
+              startedAt: new Date(
+                at + (condition === 'previous-epoch' ? -1000 : 500),
+              ).toISOString(),
+              finishedAt: new Date(at + 2000).toISOString(),
+              activityId: 'old-stop',
+              activityAt: new Date(
+                at + (condition === 'pre-effect-stop' ? -1000 : 1000),
+              ).toISOString(),
+              action: 'stop' as const,
+            },
+      );
+      expect(await f.run()).toBe('waiting');
+      expect(await f.reservation()).toBeDefined();
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('releases an already online reservation only for a corroborated interactive external stop', async () => {
+    const f = await fixture('start');
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    f.setState('offline');
+    f.options.observeExternalStop = vi.fn(async () => {
+      throw new DomainError('forbidden');
+    });
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect((await f.server()).runtime_state).toBe('offline');
+    expect(await f.reservation()).toMatchObject({ state: 'uncertain' });
+    const at = f.now().getTime();
+    f.options.observeExternalStop = vi.fn(async () => ({
+      containerId: 'a'.repeat(64),
+      startedAt: new Date(at - 10000).toISOString(),
+      finishedAt: new Date(at - 500).toISOString(),
+      activityId: 'external-stop',
+      activityAt: new Date(at - 1000).toISOString(),
+      action: 'stop' as const,
+    }));
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.server()).toMatchObject({
+      intent: 'manually_stopped',
+      runtime_state: 'offline',
+      readiness: 'unknown',
+    });
+    f.setState('running');
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeUndefined();
+    expect((await f.server()).runtime_state).toBe('offline');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
   it('retains accepted start reservations through a long offline preboot and does not replay power', async () => {
     for (const action of ['start', 'provision'] as const) {
       const f = await fixture(action, { autoStart: true });
@@ -1756,6 +1852,106 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.reservation()).toBeUndefined();
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
     expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('completes an observed stop immediately despite cached running resources', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      // Ordered provider/Docker confirmation arrived; the resources cache has not changed.
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.server()).toMatchObject({
+      runtime_state: 'offline',
+      readiness: 'unknown',
+      active_operation_id: null,
+      intent: 'manually_stopped',
+    });
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('does not recreate stopped capacity from a stale running reconciliation sample', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('succeeded');
+    f.tick(1000);
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    expect(await f.server()).toMatchObject({ runtime_state: 'offline', readiness: 'unknown' });
+    expect(await f.reservation()).toBeUndefined();
+    expect(
+      await f.db
+        .selectFrom('server_events')
+        .select('message_key')
+        .where('server_id', '=', f.serverId)
+        .where('message_key', '=', 'servers.reconciliation.external_start')
+        .execute(),
+    ).toEqual([]);
+    // An actual new process must defeat even a recent stop receipt.
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.server()).toMatchObject({ runtime_state: 'running' });
+    expect(await f.reservation()).toBeDefined();
+  });
+  it('does not suppress a current observation using an expired stop receipt', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('succeeded');
+    f.tick();
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeDefined();
+  });
+  it.each(['running', 'unavailable', 'identity'] as const)(
+    'retains stop capacity if the fresh confirmation is %s',
+    async (failure) => {
+      const f = await fixture('stop');
+      await f.prepareReservation();
+      f.setState('running');
+      f.options.confirmAlreadyStopped = vi.fn(async () => {
+        if (failure === 'unavailable') throw new Error('observer unavailable');
+        return false;
+      });
+      const original = f.adapter.stopWithConfirmation.getMockImplementation();
+      f.adapter.stopWithConfirmation.mockImplementation(async (...args) => {
+        const result = await original?.(...args);
+        if (failure === 'identity') f.remote.uuid = randomUUID();
+        return result ?? { confirmed: false };
+      });
+      expect(await f.run()).toBe(failure === 'identity' ? 'failed' : 'waiting');
+      expect(await f.reservation()).toBeDefined();
+      expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it('recovers a confirmed stop before cache expiry without sending another stop', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    expect(await f.run()).toBe('waiting');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.tick(3000);
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
   });
   it('recovers persisted stop proof after worker loss before the provider helper returned', async () => {
     const f = await fixture('stop');

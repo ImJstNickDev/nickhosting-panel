@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { browserHarness } from './harness.js';
+import { browserHarness, browserPassword } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
@@ -152,11 +152,102 @@ describe('M5 browser files, backups, console and automation', () => {
       user.getByRole('heading', { name: 'Resource usage', exact: true }),
     ).toBeVisible();
     await browserExpect(user.locator('figure.metric-chart')).toHaveCount(4);
+    // SPA navigation retains the tab-scoped buffer; no provider log replay duplicates.
+    await user.getByRole('link', { name: 'Files', exact: true }).click();
+    await user.getByRole('link', { name: 'Console', exact: true }).click();
+    await browserExpect(user.locator('.console pre')).toContainText(
+      'There are 0 of a max of 20 players online',
+    );
+    await browserExpect(
+      user.getByText('Output retained in this tab.', { exact: false }),
+    ).toBeVisible();
+    const contents = await user.locator('.console pre').innerText();
+    expect(contents.match(/There are 0 of a max of 20 players online/g)).toHaveLength(1);
     await harness.screenshot(user, 'console-telemetry-desktop-en');
     const audit = await new AxeBuilder({ page: user })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
       .analyze();
     expect(audit.violations.map((v) => v.id)).toEqual([]);
+  });
+  it('reconnects a failed console stream, but clears retained output and stops on authorization denial', async () => {
+    let attempts = 0;
+    await user.route('**/v1/servers/*/console*', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      attempts++;
+      if (attempts === 1)
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body: 'event: error\ndata: {"code":"integration_unavailable"}\n\n',
+        });
+      if (attempts === 2)
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body: 'event: console\ndata: {"type":"console","data":"reconnected fixture"}\n\n',
+        });
+      return route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: '{"error":{"code":"forbidden","messageKey":"errors.forbidden"}}',
+      });
+    });
+    await user.goto(`${base}/console`);
+    await browserExpect(user.locator('.console pre')).toContainText('reconnected fixture');
+    await browserExpect(user.getByRole('alert')).toContainText('You do not have permission');
+    await browserExpect(user.locator('.console pre')).not.toContainText('reconnected fixture');
+    const deniedAttempts = attempts;
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    expect(attempts).toBe(deniedAttempts);
+    await user.unroute('**/v1/servers/*/console*');
+  });
+  it('retries transient telemetry failures without reporting the integration disabled', async () => {
+    let failures = 0;
+    await user.route('**/v1/servers/*/resources', async (route) => {
+      failures++;
+      if (failures <= 2)
+        return route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: '{"error":{"code":"integration_unavailable","messageKey":"errors.integration_unavailable"}}',
+        });
+      return route.continue();
+    });
+    await user.goto(`${base}/console`);
+    await browserExpect(user.locator('figure.metric-chart')).toHaveCount(4);
+    await browserExpect.poll(() => failures).toBeGreaterThanOrEqual(3);
+    await browserExpect(
+      user.getByText('This integration is unavailable.', { exact: true }),
+    ).not.toBeVisible();
+    await user.unroute('**/v1/servers/*/resources');
+  });
+  it('erases console buffers when signing out and back into the same account', async () => {
+    await user.goto(`${base}/console`);
+    await user.getByLabel('Command', { exact: true }).fill('private-session-marker');
+    await user.getByRole('button', { name: 'Send', exact: true }).click();
+    await browserExpect(user.locator('.console pre')).toContainText('private-session-marker');
+    await user.getByRole('link', { name: 'Settings', exact: true }).first().click();
+    await user.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await browserExpect(user).toHaveURL(`${harness.origin}/login`);
+    await user.waitForLoadState('networkidle');
+    // Isolated fixture setup has already authenticated three accounts in the same minute.
+    await harness.database.db.deleteFrom('rateLimit').execute();
+    await user.getByLabel('Email', { exact: true }).fill('alex@journey.example.test');
+    await user.getByLabel('Password', { exact: true }).fill(browserPassword);
+    const signedIn = user.waitForResponse((response) =>
+      response.url().endsWith('/api/auth/sign-in/email'),
+    );
+    await user.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const response = await signedIn;
+    expect(await response.json()).not.toHaveProperty('error');
+    expect(response.status()).toBe(200);
+    await user.getByRole('link', { name: 'Servers', exact: true }).first().click();
+    await user.getByRole('link', { name: 'Survival', exact: true }).click();
+    await user.getByRole('link', { name: 'Console', exact: true }).click();
+    await browserExpect(user.locator('.console pre')).toContainText(
+      'Browser provider fixture attached',
+    );
+    await browserExpect(user.locator('.console pre')).not.toContainText('private-session-marker');
   });
   it('creates a durable backup, confirms replacement and restores original file contents', async () => {
     const files = await provider.files();

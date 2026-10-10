@@ -157,6 +157,66 @@ describe('typed Pterodactyl boundary', () => {
     ]);
     expect(String(fetcher.mock.calls[1]?.[0])).toContain('filter%5Bevent%5D=backup.restore');
   });
+  it('reads bounded recent power receipts and strips private activity metadata', async () => {
+    const receipt = {
+      id: 'b'.repeat(40),
+      event: 'server:power.kill',
+      timestamp: '2026-10-10T19:53:12Z',
+      is_api: false,
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      list(
+        [
+          {
+            ...receipt,
+            ip: 'private-address',
+            properties: { token: 'private-token' },
+            actor: { email: 'private@example.test' },
+          },
+          { ...receipt, id: 'c'.repeat(40), event: 'server:power.stop' },
+        ],
+        1,
+        9,
+      ),
+    );
+    const rows = await createPterodactylAdapter({ ...config, fetcher }).listPowerActivity(
+      'f729c8a1',
+    );
+    expect(rows).toEqual([receipt, { ...receipt, id: 'c'.repeat(40), event: 'server:power.stop' }]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+      'filter%5Bevent%5D=server%3Apower.&sort=-timestamp&per_page=100&page=1',
+    );
+  });
+  it.each([
+    'ascending',
+    'unknown event',
+    'missing origin',
+    'wrong page',
+    'oversized',
+    'truncated tie',
+  ])('rejects ambiguous power history: %s', async (failure) => {
+    const receipt: Record<string, unknown> = {
+      id: 'b'.repeat(40),
+      event: 'server:power.kill',
+      timestamp: '2026-10-10T19:53:12Z',
+      is_api: false,
+    };
+    if (failure === 'unknown event') receipt.event = 'server:power.unknown';
+    if (failure === 'missing origin') delete receipt.is_api;
+    const rows =
+      failure === 'ascending'
+        ? [receipt, { ...receipt, timestamp: '2026-10-10T19:53:13Z' }]
+        : failure === 'oversized' || failure === 'truncated tie'
+          ? Array.from({ length: failure === 'oversized' ? 101 : 100 }, () => receipt)
+          : [receipt];
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(list(rows, failure === 'wrong page' ? 2 : 1, 2));
+    await expect(
+      createPterodactylAdapter({ ...config, fetcher }).listPowerActivity('f729c8a1'),
+    ).rejects.toMatchObject({ reason: 'invalid_response' });
+  });
   it('paginates locally constructed URLs; strips token fields and keeps allocated resources distinct', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

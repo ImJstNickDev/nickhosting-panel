@@ -94,7 +94,7 @@ export type GatewayNetworkPolicy = z.infer<typeof gatewayNetworkPolicySchema>;
 
 export const gatewayReachabilityProofSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     routeId: z.uuid(),
     serverId: z.uuid(),
     allocationId: z.uuid(),
@@ -251,10 +251,16 @@ function identityDigest(
   observation: NetworkObservation,
   container: ObservedContainer,
   network: ObservedNetwork,
+  node: GatewayNetworkPolicy['nodes'][number],
+  version: 1 | 2,
 ) {
   return createHash('sha256')
     .update(
       JSON.stringify({
+        // v1 remains readable only against its original Docker container.
+        // v2 binds reachability to the durable, freshly corroborated provider
+        // identity. Wings routinely recreates a container for the same server.
+        ...(version === 2 ? { version, providerNodeUuid: node.nodeUuid } : {}),
         serverId: route.serverId,
         nodeId: route.nodeId,
         allocationId: route.allocationId,
@@ -264,7 +270,7 @@ function identityDigest(
         namespaceId: observation.namespaceId,
         dockerDaemonId: observation.dockerDaemonId,
         container: {
-          id: container.id,
+          ...(version === 1 ? { id: container.id } : {}),
           name: container.name,
           networkMode: container.networkMode,
           bindings: [...container.configuredBindings].sort((a, b) =>
@@ -457,14 +463,31 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       route,
       observation,
       container,
-      digest: identityDigest(route, context, observation, container, selectedNetwork),
+      digest: identityDigest(
+        route,
+        context,
+        observation,
+        container,
+        selectedNetwork,
+        selectedNode,
+        2,
+      ),
+      legacyDigest: identityDigest(
+        route,
+        context,
+        observation,
+        container,
+        selectedNetwork,
+        selectedNode,
+        1,
+      ),
     };
   }
   async function proveBackend(state: Awaited<ReturnType<typeof inspect>>) {
     if (!state.container.running || !(await options.probeBackend(state.route))) unavailable();
     if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
     const proof: GatewayReachabilityProof = {
-      version: 1,
+      version: 2,
       routeId: state.route.id,
       serverId: state.route.serverId,
       allocationId: state.route.allocationId,
@@ -489,7 +512,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         proof.data.allocationId !== route.allocationId ||
         proof.data.namespaceId !== state.observation.namespaceId ||
         proof.data.dockerDaemonId !== state.observation.dockerDaemonId ||
-        proof.data.digest !== state.digest ||
+        proof.data.digest !== (proof.data.version === 1 ? state.legacyDigest : state.digest) ||
         proof.data.verifiedAt > now() ||
         !(await options.probeNode(route)) ||
         now() - state.observation.observedAt > policy.maximumObservationAgeMs

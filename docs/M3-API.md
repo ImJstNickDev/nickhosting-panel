@@ -161,6 +161,15 @@ A client cannot supply the Docker process timestamp. Ordinary idle reports measu
 the window; only a bounded, validated forwarding fence can authorize automatic
 stop after the window expires. See ADR 0012 for timeout/restart behavior.
 
+Successful Minecraft launch-file attestations are bounded and shared across runtime
+factories within the same API/worker database instance. Concurrent identical checks
+share one stream. This does not cache provider keys, permissions or the management
+runtime: current provider/image checks and Docker process identity remain fresh.
+The proof fingerprint includes the exact process epoch, installed profile/content
+metadata, runtime binding and evidence; mutation invalidation and changed metadata
+invalidate the proof. Each new process still needs its initial artifact check.
+API and worker processes do not share an unverified cross-process cache.
+
 ## Configuration and deployment prerequisites
 
 Settings resolve defaults < Owner database values < explicit environment values.
@@ -207,8 +216,17 @@ or reporting idle evidence, covering an old process's maximum lease and skew.
 
 A first-ever backend needs one explicit admitted/manual start and protocol proof
 before a sleeping listener can be established. Later sleeping restarts require
-the same container/network/binding proof and a fresh nonce challenge to a persistent
-responder on the effective backend IP. `startNodeProbe` is an explicit helper,
+the same durable provider/network/binding proof and a fresh nonce challenge to a
+persistent responder on the effective backend IP. Reachability proof v2 tolerates
+Wings replacing Docker's ephemeral container ID, while binding the provider node UUID
+and retaining exact managed/provider/allocation identities, Docker daemon, namespace,
+network and configured ports. Every use still checks the fresh uniquely identified
+container, topology and collisions; online forwarding still requires a running backend
+and successful game protocol probe. Missing or ambiguous containers fail closed.
+Legacy v1 proofs remain valid only for their original container; only a successful
+new backend probe can establish v2, never a metadata-only conversion. An old Gateway
+binary cannot consume v2 proofs, so rollback requires compatible validation and fresh
+reachability evidence rather than assuming a seamless return to v1. `startNodeProbe` is an explicit helper,
 never an automatic listener. Its deployment needs its own reviewed endpoint and
 Owner approval; M3's responder exists only in the approved isolated fixture.
 

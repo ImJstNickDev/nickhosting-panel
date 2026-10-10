@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getRequestListener } from '@hono/node-server';
 import { createIdentity, type IdentityMail } from '@nickhosting/auth';
-import { authSessionId, SecretCodec } from '@nickhosting/core';
+import { authSessionId, DomainError, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftManifest } from '@nickhosting/minecraft';
@@ -74,6 +74,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     return app.request(`${origin}/v1/servers/${server}/files/upload?path=world.bin`, init);
   }
   const relayClose = vi.fn();
+  const requestConsoleLogs = vi.fn(async () => {});
   let consoleAuthorization: ConsoleRelayOptions['authorize'] | undefined;
   async function request(
     client: AuthClient | null,
@@ -280,7 +281,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         return {
           close: relayClose,
           sendCommand: async () => {},
-          requestLogs: async () => {},
+          requestLogs: requestConsoleLogs,
           requestStats: async () => {},
         };
       }),
@@ -735,9 +736,14 @@ describe('M2 Hono API with real invitation, password and session authentication'
       expect(response.headers.get('cache-control')).toBe('no-store');
       expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     }
+    const logsBefore = requestConsoleLogs.mock.calls.length;
     const console = await request(user, `/v1/servers/${server}/console`);
     expect(console.status).toBe(200);
     const events = await console.text();
+    expect(requestConsoleLogs.mock.calls.length).toBe(logsBefore + 1);
+    const resumed = await request(user, `/v1/servers/${server}/console?history=0`);
+    await resumed.text();
+    expect(requestConsoleLogs.mock.calls.length).toBe(logsBefore + 1);
     expect(events).toContain('Isolated console output');
     expect(events).toContain('event: closed');
     expect(events).not.toMatch(/token|socket|wss:/);
@@ -900,7 +906,11 @@ describe('M2 Hono API with real invitation, password and session authentication'
     const stream = await request(user, `/v1/servers/${server}/console`);
     const output = await stream.text();
     expect(output).toContain('integration_unavailable');
+    expect(output).toContain('"type":"error"');
     expect(output).not.toContain(providerSecret);
+    vi.mocked(f.adapter.relayConsole).mockRejectedValueOnce(new DomainError('forbidden'));
+    const deniedStream = await request(user, `/v1/servers/${server}/console`);
+    expect(await deniedStream.text()).toContain('{"type":"error","code":"forbidden"}');
     expect(
       (
         await request(user, `/v1/servers/${server}/operations`, {

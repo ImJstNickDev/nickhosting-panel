@@ -29,6 +29,7 @@ import { createGameRuntimeDispatcher, trustedGameModules } from './game-modules.
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   createLifecycleProcessor,
+  type ExternalStopReceipt,
   reconcileManagedServer,
   verifyManagedIdentity,
 } from './lifecycle.js';
@@ -411,6 +412,65 @@ export async function createManagementRuntime(options: ManagementOptions) {
         await adapter.getApplicationServer(server.pterodactyl_id),
       );
       return containerObserver.stopped(server.pterodactyl_uuid, 'server');
+    },
+    observeExternalStop: async (
+      serverId: string,
+      connection: Kysely<Database>,
+    ): Promise<ExternalStopReceipt | null> => {
+      await verifyObservationHost(serverId, connection);
+      const server = await connection
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+      if (
+        !server?.pterodactyl_uuid ||
+        !server.pterodactyl_id ||
+        !server.pterodactyl_identifier ||
+        !containerObserver?.terminalProcess
+      )
+        return null;
+      await verifyManagedIdentity(
+        connection,
+        server,
+        await adapter.getApplicationServer(server.pterodactyl_id),
+      );
+      const before = await containerObserver.terminalProcess(server.pterodactyl_uuid);
+      if (!before) return null;
+      const events = await adapter.listPowerActivity(server.pterodactyl_identifier);
+      const latest = events[0];
+      if (!latest) return null;
+      const at = Date.parse(latest.timestamp);
+      const ties = events.filter((event) => Date.parse(event.timestamp) === at);
+      if (
+        ties.some(
+          (event) =>
+            !['server:power.stop', 'server:power.kill'].includes(event.event) || event.is_api,
+        )
+      )
+        return null;
+      // Provider activities have second precision. Require the command's whole
+      // second to follow process creation; never adopt an old preboot stop.
+      if (
+        at < Date.parse(before.startedAt) ||
+        at > Date.now() ||
+        at > Date.parse(before.finishedAt) + 1000
+      )
+        return null;
+      const after = await containerObserver.terminalProcess(server.pterodactyl_uuid);
+      await verifyManagedIdentity(
+        connection,
+        server,
+        await adapter.getApplicationServer(server.pterodactyl_id),
+      );
+      if (!after || JSON.stringify(before) !== JSON.stringify(after)) return null;
+      return {
+        ...after,
+        activityId: latest.id,
+        activityAt: latest.timestamp,
+        action: latest.event === 'server:power.kill' ? 'kill' : 'stop',
+      };
     },
     observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
       await verifyObservationHost(serverId, connection);

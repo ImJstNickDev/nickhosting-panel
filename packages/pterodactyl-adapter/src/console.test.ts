@@ -88,6 +88,8 @@ describe('backend console mediation over a real isolated WebSocket', () => {
     expect(fixture.origins).toEqual(['https://panel.example.com']);
     expect(fixture.incoming[0]).toEqual({ event: 'auth', args: ['jwt-fixture-secret-0'] });
     fixture.send('console output', ['server ready jwt-fixture-secret-0 client-fixture-secret']);
+    fixture.send('daemon message', ['Pulling image app-fixture-secret']);
+    fixture.send('install output', ['Installer output client-fixture-secret']);
     fixture.send('auth', ['do-not-forward']);
     fixture.send('status', ['running']);
     fixture.send('stats', [
@@ -98,9 +100,11 @@ describe('backend console mediation over a real isolated WebSocket', () => {
         token: 'do-not-forward',
       }),
     ]);
-    await vi.waitFor(() => expect(events).toHaveLength(3));
+    await vi.waitFor(() => expect(events).toHaveLength(5));
     expect(events).toEqual([
       { type: 'console', data: 'server ready [redacted] [redacted]' },
+      { type: 'console', data: 'Pulling image [redacted]' },
+      { type: 'console', data: 'Installer output [redacted]' },
       { type: 'status', data: 'running' },
       { type: 'stats', data: { memory_bytes: 100, cpu_absolute: 4, disk_bytes: 20 } },
     ]);

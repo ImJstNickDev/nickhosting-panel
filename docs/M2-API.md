@@ -94,6 +94,12 @@ transition from the authenticated backend WebSocket, an independent exact-contai
 Docker observation proving the process is no longer running, and no earlier
 unresolved power effect. Wings can emit offline after a failed output stream while
 the process still runs; the WebSocket transition alone cannot release capacity.
+After that durable stop receipt, a fresh host-bound check of the exact container
+can complete the stop without waiting for the provider's resource cache to expire.
+Offline state, job completion and reservation release commit together. Running or
+unverifiable container evidence retains the reservation; this path never
+issues another power request. The conservative cached-resource path remains when
+independent confirmation is unavailable.
 Other caret signal modes or unknown stop semantics are unsupported for automatic
 release and fail closed. Restart completion requires a verified running Docker
 process whose start
@@ -103,6 +109,22 @@ restart; the worker recovers from physical evidence without replaying power.
 Missing or invalid physical evidence cannot fall back to cached telemetry. These
 capability gates do not change egg or Wings configuration. Their actual
 implementation and test status are recorded in the [validation report](M2-VALIDATION.md).
+
+An interactive stop/kill performed directly in the provider can also be reconciled
+without sending another power command. This requires the latest authenticated Panel
+power activity to be an interactive stop/kill (no later or tied start/restart), plus
+two matching fresh observations of the exact exited Docker process and managed
+provider identity. An interrupted pending start/restart must additionally prove
+that this process started after that operation's effect intent. The operation ends
+as failed with an external-stop receipt, the server becomes manually stopped, and
+capacity is released atomically. An already-online server uses the same corroborated
+stop evidence; stale resource-cache samples cannot recreate its reservation.
+
+This does not infer Owner intent from a crash, an absent container, a preboot state
+or an API-origin power action. Missing activity permission, hidden/incomplete
+history, ambiguous event ordering or changed process identity retain conservative
+uncertainty. Existing external-start accounting does not revoke manual-stop
+suppression. A new explicit NickHosting start is needed to resume automatic wake.
 
 A stop requested for an already-offline server may complete without sending power
 only when the backend verifies its current host/provider identity and exact
@@ -132,7 +154,7 @@ project clients should use the authorized per-server operation view above.
 
 | Method/path | Contract |
 | --- | --- |
-| GET `/v1/servers/:id/console` | SSE relay of allowlisted console/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. |
+| GET `/v1/servers/:id/console` | SSE relay of allowlisted console/daemon/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. Requests bounded provider log replay on an empty console; `history=0` skips replay when retaining a browser buffer. Errors use a typed, sanitized SSE envelope. |
 | POST `/v1/servers/:id/console` | `{command}` (1–4,096 characters) → `204`. Audit records the request, not raw command text. |
 | GET `/v1/servers/:id/files?path=` | Directory listing under the server root. |
 | GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; no fixed total byte limit, signed URL remains private. |

@@ -1858,3 +1858,180 @@ Validation (isolated provider fixtures; no new real game server):
 - `python3 scripts/check-governance.py` and `git diff --cached --check` — passed:
   501 indexed text files, 103 existing review PNGs, 425 relative links, 4 TOML
   files and 44 ignore cases. Staged content was also inspected manually.
+
+## M5 follow-up — Console continuity and Gateway transition investigation
+
+Read-only investigation of the Owner's existing managed Vanilla server separated
+the reported UI and transition failures. No extra start, stop, reinstall, file
+operation or synthetic player join was sent. Existing Owner-triggered operations
+and automatic policy continued independently.
+
+- Console omitted Wings daemon messages and localized status transitions; the API
+  did not request provider log history. The adapter now mediates daemon output with
+  existing secret redaction; the WebPanel renders status messages and requests the
+  provider's available recent log tail on an empty console.
+- Component remounts erased console output. A bounded in-memory buffer now survives
+  SPA navigation, isolated by actor/subject/support identity and server, cleared at
+  authentication boundaries. It is not durable logging: messages emitted while
+  disconnected can be missing, especially transient daemon output. The UI says so.
+- SSE error envelopes were ignored by the frontend, and exceptions did not reconnect.
+  Typed errors now trigger bounded transient retries; permission loss clears output
+  and ends retries. Telemetry likewise retries transient failures and distinguishes
+  unavailable measurements from an unavailable game integration. The precise upstream
+  cause of the Owner's earlier one-off resource error was not retained in old logs;
+  no claim of a proven rate-limit or provider outage is made.
+- The original wake timeline recorded request-to-power delays of 35.761 seconds and
+  5.834 seconds. One real Minecraft `Done` at 21:42:21 local preceded stored readiness
+  at 21:43:11 by about 50 seconds. The process launch-file cache was recreated on every
+  API runtime, causing repeated full JAR downloads/hashes during Gateway observation.
+  Successful proofs now survive runtime recreation with fresh identity/image checks,
+  metadata/process fences and bounded singleflight; failed proofs are never cached.
+- A stop was physically confirmed at 21:44:45.892, but the job finished at 21:45:13.318.
+  It unnecessarily waited for the 20-second provider resource cache plus polling.
+  Durable stop proof followed by fresh exact-container non-running evidence now
+  completes atomically without that delay. Missing proof still fails closed.
+- The start path still retains its existing conservative resource-cache settlement,
+  and each new process still requires initial artifact verification and real game
+  readiness. Neither these changes nor a console `Done` line imply instantaneous
+  start, automatic reconnect or permission to bypass admission/readiness.
+- Gateway metrics showed 163 observation errors, 167 snapshot errors and zero lease
+  expirations during investigation. The old logs do not identify every failure's
+  cause. An independent validation in the actual Gateway namespace later reproduced
+  a dormant-route proof failure while Core metadata requests all returned HTTP 200.
+  The saved proof predated a Wings container recreation: its digest included Docker's
+  ephemeral container ID. That explains a concrete listener-loss path; it does not
+  establish that every reported disconnect has the same cause.
+
+Browser evidence uses the real React/API fixture harness with isolated provider
+responses, not the live game server. Reviewed screenshots:
+[desktop English](screenshots/m5/console-retained-desktop-en.png) and
+[mobile Italian](screenshots/m5/console-retained-mobile-it.png).
+
+The new reachability proof v2 removes only the ephemeral Docker ID and adds the
+provider node UUID. Durable identity, exact bindings, daemon/namespace/network,
+fresh container checks and collisions remain enforced. A running container alone
+cannot enable forwarding: a real game protocol probe is still required. Existing
+v1 proofs are not relabelled; after container replacement, the Owner's next normal
+start and successful protocol probe must establish v2. Missing/ambiguous containers
+still fail closed during replacement. The Gateway process has not been restarted
+in this investigation, so this change has not yet been verified in a live cycle.
+
+Focused validation (approved existing isolated services; no full historical suite):
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/console.test.ts`
+  — **6 passed**.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts`
+  — **70 passed**, including durable identity across container replacement, legacy
+  proof handling, readiness, namespace/network/binding drift and ambiguous identity.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts`
+  — **31 passed**; a later targeted authorization-loss SSE regression also passed.
+- The same integration runner with
+  `packages/server-management/src/minecraft-queued.integration.test.ts` — **36 passed**.
+  After stable evidence ordering was added to the cache fingerprint, only its three
+  affected cases were rerun: **3 passed, 33 skipped**. An earlier expected callback
+  count was corrected to include the additional process fence; no fence was removed.
+- The lifecycle file initially reported **98 passed, 2 failed**: a previous test
+  expected the removed stop delay, and a new retry fixture advanced less than the
+  backoff plus jitter. Fixture expectations/timing were corrected. Final affected
+  run with `-t 'stop|sleep'` — **16 passed, 84 skipped**. An intermediate rerun also
+  exposed the extra fresh-stop observation count; the assertion now expects it.
+- Browser runner:
+  `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts`
+  with focused name filters, not the whole file: **five cases passed** across the
+  final runs. They cover console/navigation history and real units, reconnect and
+  permission denial, telemetry retry, clearing buffers across sign-out/sign-in,
+  and Italian mobile/pseudolocalized service views. Initial fixture-only failures
+  concerned a required error message key, redirect timing and isolated auth rate
+  limits; these were corrected without changing production authentication policy.
+- Root and WebPanel TypeScript checks, i18n catalog check and focused Biome passed.
+  Four pre-existing non-null assertion warnings remain in the console feature and
+  browser test file.
+- Independent source/security and desktop/mobile screenshot review found no must-fix
+  in the console, attestation cache, stop fast path or v2 proof change.
+
+Activation boundary: API/worker use the existing development source watcher. Gateway
+requires a separately approved restart of only `nickhosting-dev-gateway-1`; its
+startup intentionally drains leases for 31 seconds. No listener/network/provider
+configuration change is proposed. A restart interrupts Gateway connections. Code
+rollback must preserve data and use compatible proof validation: old binaries reject
+v2, and a fresh backend proof may be needed. No new assets were created or cleaned;
+Pterodactyl/Wings configuration, unrelated servers and issue #18 remain untouched.
+
+### External Pterodactyl stop discovered during this investigation
+
+The Owner confirmed that the later pending wake was deliberately force-stopped in
+Pterodactyl. Read-only authenticated provider history independently returned an
+interactive `server:power.stop` and `server:power.kill` at 21:53:12 local, after the
+API start at 21:53:05. The installed Panel controller records these events after
+its daemon request succeeds; this is acceptance of the request, not by itself proof
+that the process stopped. The same semantics are visible in the upstream
+[Panel power controller](https://github.com/pterodactyl/panel/blob/1.0-develop/app/Http/Controllers/Api/Client/Servers/PowerController.php).
+
+An exited Docker process alone cannot distinguish a deliberate stop from Wings'
+[crash recovery](https://github.com/pterodactyl/wings/blob/v1.11.13/server/crash.go).
+The adapter now exposes a bounded, sanitized latest power history (100 records,
+first page only, checked descending timestamps, preserved ties). Unknown events,
+missing API/interactive origin, invalid ordering and malformed pagination fail
+closed. It strips actor details, IP addresses and arbitrary provider properties.
+The exact live read-only adapter call returned the nine power records for this
+managed server, including the two interactive stop receipts; no mutation was sent.
+Six targeted adapter tests passed (41 unrelated cases skipped). Review then added
+a denial for a full 100-row latest-timestamp group that could hide a conflicting
+start on page two. Its first fixture accidentally supplied one row; after correcting
+the fixture to 100 rows, the added case passed (47 unrelated cases skipped).
+
+Independent review also caught a regression in the immediate-stop optimization:
+reconciliation could read cached `running` and recreate a released reservation.
+A recent completed stop now requires fresh host-bound non-running proof before
+suppressing that stale sample; a genuinely running replacement defeats the guard.
+Seven focused stop/reconciliation tests passed (95 unrelated cases skipped), and
+independent review cleared this finding.
+
+The external-stop correction now uses two matching exact exited-process observations
+and the latest interactive stop/kill receipt. It ends a correlated pending
+start/restart/first-start as failed, records the external stop and suppresses wake;
+no successful start is invented. The same corroboration handles an external stop
+of an already-online server. Cached running samples cannot resurrect reservations
+on the following reconciliation. API-origin actions, unavailable/hidden activity,
+crashes and ambiguous/preboot states remain uncertain rather than being guessed.
+This does not promise synchronization of every possible external action; external
+starts retain existing accounting and do not silently revoke manual-stop intent.
+
+Actual read-only verification at 22:09:29 local found the Owner's original wake
+terminalized by the normal source-watching worker at 22:07:38: job `failed`, phase
+`failed`, external-stop receipt present, active operation cleared, server offline
+and manually stopped, and **zero compute reservations**. No direct database patch
+or power request was used. Its prior `waitReason` remains in the historical plan;
+the final code clears this field for future terminalizations. No historical record
+was rewritten just to change that cosmetic field.
+
+Additional focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/container-observer.test.ts`
+  — **111 passed**.
+- The isolated integration runner above, with lifecycle and runtime integration
+  files and `-t 'interactive external stop|correlated terminal stop|already online reservation|reconciliation sample|expired stop receipt|observed stop immediately|fresh confirmation|confirmed stop before cache'`
+  — **21 passed, 125 skipped**.
+- After adding initial-provision-start and unavailable-activity cases, lifecycle
+  `-t 'reconciles an interactive external stop|already online reservation'`
+  — **4 passed, 105 skipped**. After clearing the terminal wait reason, only
+  `-t 'reconciles an interactive external stop'` was rerun: **3 passed, 106 skipped**.
+- Combined typecheck passed root source checking, then caught the new adapter method
+  missing from the WebPanel's isolated provider fixture. Added an empty power-history
+  fixture that still checks server identity. The WebPanel source/test typecheck
+  rerun passed; `scripts/dev.sh pnpm i18n:check` passed for 1,089 EN/IT/pseudolocale
+  keys. No authentication or provider boundary was relaxed.
+
+Remaining live verification: the running Gateway still predates these changes.
+After an approved scoped restart and the Owner's next explicit admitted start,
+a new real game readiness proof is needed for v2. The next real-client cycle must
+measure wake-to-power, readiness-to-forwarding and stop-to-sleeping timing, including
+the intermittent disconnect report. Those timings are not claimed as already fixed
+or remeasured by fixture tests.
+
+Final independent review found no unresolved must-fix after the cache-resurrection
+and truncated-activity fixes. Focused Biome passed on all 21 changed TS/TSX/JSON
+files with the four existing warnings noted above. `git diff --cached --check` and
+`python3 scripts/check-governance.py` passed: 501 indexed text files, 105 review PNGs,
+427 relative links, four TOML files and 44 ignore cases. No historical full-suite or
+live Minecraft scenario was rerun; earlier evidence is preserved.

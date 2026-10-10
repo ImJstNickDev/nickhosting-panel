@@ -198,6 +198,86 @@ describe('management runtime execution-time authorization', () => {
     );
     expect(observer.processStartedAt).not.toHaveBeenCalled();
   });
+  it.each([
+    'valid',
+    'absent',
+    'api',
+    'later-start',
+    'tied-start',
+    'old',
+    'replaced',
+    'foreign',
+  ] as const)(
+    'corroborates an interactive external stop with exact terminal evidence: %s',
+    async (condition) => {
+      const serverId = await f.server();
+      const remote = await providerIdentity(serverId);
+      Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+      const at = Math.floor(Date.now() / 1000) * 1000 - 2000;
+      const terminal = {
+        containerId: 'a'.repeat(64),
+        startedAt: new Date(at - 10000).toISOString(),
+        finishedAt: new Date(at + 500).toISOString(),
+      };
+      const stopEvent = {
+        id: 'stop-receipt',
+        event: 'server:power.kill',
+        timestamp: new Date(at).toISOString(),
+        is_api: false,
+      };
+      const events =
+        condition === 'absent'
+          ? []
+          : [
+              {
+                ...stopEvent,
+                ...(condition === 'api' ? { is_api: true } : {}),
+                ...(condition === 'old' ? { timestamp: new Date(at - 20000).toISOString() } : {}),
+              },
+            ];
+      if (condition === 'later-start' || condition === 'tied-start')
+        events.unshift({
+          ...stopEvent,
+          id: 'new-start',
+          event: 'server:power.start',
+          is_api: true,
+          timestamp: new Date(at + (condition === 'later-start' ? 1000 : 0)).toISOString(),
+        });
+      const activity = vi.fn(async () => events);
+      Object.assign(f.adapter, { listPowerActivity: activity });
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => true),
+        terminalProcess: vi.fn(async () => terminal),
+      };
+      if (condition === 'replaced')
+        observer.terminalProcess
+          .mockResolvedValueOnce(terminal)
+          .mockResolvedValue({ ...terminal, containerId: 'b'.repeat(64) });
+      if (condition === 'foreign') remote.external_id = 'foreign';
+      const management = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      if (condition === 'foreign') {
+        await expect(management.lifecycle.observeExternalStop(serverId, f.db)).rejects.toThrow(
+          'provenance_mismatch',
+        );
+        expect(activity).not.toHaveBeenCalled();
+      } else if (condition === 'valid') {
+        await expect(management.lifecycle.observeExternalStop(serverId, f.db)).resolves.toEqual({
+          ...terminal,
+          activityId: stopEvent.id,
+          activityAt: stopEvent.timestamp,
+          action: 'kill',
+        });
+      } else
+        await expect(management.lifecycle.observeExternalStop(serverId, f.db)).resolves.toBeNull();
+    },
+  );
   it('refuses new lifecycle effects when the physical observer is absent or unavailable', async () => {
     const queued = await stop();
     const absent = await createManagementRuntime({

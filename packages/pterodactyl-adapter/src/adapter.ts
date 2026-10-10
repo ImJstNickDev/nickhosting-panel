@@ -29,6 +29,7 @@ import {
   nodeSchema,
   type PowerAction,
   type ProvisionPlan,
+  powerActivitySchema,
   provisionPlanSchema,
   resourcesSchema,
   type StartupUpdate,
@@ -347,6 +348,36 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         `${clientServer(identifier)}/activity?filter%5Bevent%5D=backup.restore&sort=-timestamp`,
         backupActivitySchema,
       ),
+    async listPowerActivity(identifier: string) {
+      // Bounded recent history, not an unbounded audit export. The latest group
+      // is all reconciliation may use; never follow provider pagination links.
+      const result = await transport.json(
+        'client',
+        `${clientServer(identifier)}/activity?filter%5Bevent%5D=server%3Apower.&sort=-timestamp&per_page=100&page=1`,
+        z.object({
+          object: z.literal('list'),
+          data: z.array(z.object({ attributes: powerActivitySchema })).max(100),
+          meta: z.object({ pagination: z.object({ current_page: z.literal(1) }) }).optional(),
+        }),
+      );
+      const rows = result.data.map(({ attributes }) => attributes);
+      // A full page containing only the latest timestamp may hide a conflicting
+      // start on the next page. Do not decide intent from a truncated tie group.
+      if (
+        rows.length === 100 &&
+        Date.parse(rows[0]?.timestamp ?? '') === Date.parse(rows[99]?.timestamp ?? '')
+      )
+        throw new PterodactylError('invalid_response', 'client', 'rejected');
+
+      if (
+        rows.some(
+          (row, index) =>
+            index > 0 && Date.parse(row.timestamp) > Date.parse(rows[index - 1]?.timestamp ?? ''),
+        )
+      )
+        throw new PterodactylError('invalid_response', 'client', 'rejected');
+      return rows;
+    },
     getBackup: (identifier: string, backupId: string) =>
       transport.entity('client', backupPath(identifier, backupId), backupSchema),
     createBackup(

@@ -164,6 +164,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await f.validator().validate(f.route, []);
     expect(f.options.probeBackend).toHaveBeenCalledWith(f.route);
     expect(f.proof()).toMatchObject({
+      version: 2,
       serverId: f.route.serverId,
       allocationId: f.route.allocationId,
       namespaceId: 'net:[100]',
@@ -452,15 +453,101 @@ describe('Gateway pre-bind and forwarding safety', () => {
     f.options.probeNode = vi.fn(async () => false);
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
   });
-  it.each(['container', 'network', 'binding', 'daemon', 'namespace'])(
+  it.each(['sleeping', 'waking'] as const)(
+    'retains the %s listener across a corroborated Wings container recreation',
+    async (mode) => {
+      const f = fixture();
+      await f.validator().validateBackend(f.route);
+      f.route.mode = mode;
+      Object.assign(f.observation.containers[0] ?? {}, {
+        id: 'f'.repeat(64),
+        running: false,
+        activeBindings: [],
+      });
+      vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+      await f.validator().validate(f.route, []);
+      expect(f.options.probeNode).toHaveBeenCalledWith(f.route);
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      // A retained waiting listener is not evidence that game traffic may forward.
+      await expect(f.validator().validateBackend(f.route)).rejects.toThrow(
+        'allocation_unavailable',
+      );
+      Object.assign(f.observation.containers[0] ?? {}, {
+        running: true,
+        activeBindings: structuredClone(f.observation.containers[0]?.configuredBindings),
+      });
+      f.route.mode = 'online';
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      vi.mocked(f.options.probeBackend).mockResolvedValue(true);
+      await f.validator().validate(f.route, []);
+    },
+  );
+  it('retains v1 only for its original container and upgrades only after a new protocol proof', async () => {
+    const f = fixture();
+    await f.validator().validateBackend(f.route);
+    const legacy: GatewayReachabilityProof = {
+      ...(f.proof() as GatewayReachabilityProof),
+      version: 1,
+      // Frozen digest produced by the original v1 fixture/identity format.
+      digest: 'bcc7f84e90237b9a40c22abc7b97dbe777e572a56202c68e89e739fc6ef901bc',
+    };
+    await f.options.saveProof(f.route, legacy);
+    f.route.mode = 'sleeping';
+    await f.validator().validate(f.route, []);
+    expect(f.proof()?.version).toBe(1);
+    Object.assign(f.observation.containers[0] ?? {}, { id: 'f'.repeat(64) });
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    expect(f.proof()?.version).toBe(1);
+    vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+    await expect(f.validator().validateBackend(f.route)).rejects.toThrow('allocation_unavailable');
+    expect(f.proof()?.version).toBe(1);
+    vi.mocked(f.options.probeBackend).mockResolvedValue(true);
+    await f.validator().validateBackend(f.route);
+    expect(f.proof()?.version).toBe(2);
+    await f.validator().validate(f.route, []);
+  });
+  it.each(['uuid', 'externalId', 'claim', 'nodeUuid'] as const)(
+    'rejects a dormant proof after coherent provider %s identity replacement',
+    async (field) => {
+      const f = fixture();
+      await f.validator().validateBackend(f.route);
+      const context = await f.options.resolveContext(f.route);
+      f.route.mode = 'sleeping';
+      if (field === 'uuid') {
+        context.providerServerUuid = f.server.uuid = '77777777-7777-4777-8777-777777777777';
+        Object.assign(f.observation.containers[0] ?? {}, { name: `/${f.server.uuid}` });
+      } else if (field === 'externalId') {
+        context.externalId = f.server.external_id = 'different-owner-resource';
+      } else if (field === 'claim') {
+        context.providerAllocationId = f.allocation.id = 8;
+      } else {
+        f.node.uuid = 'replacement-node';
+        const node = f.options.policy.nodes[0];
+        if (node) node.nodeUuid = f.node.uuid;
+      }
+      f.options.resolveContext = vi.fn(async () => context);
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      expect(f.options.probeNode).not.toHaveBeenCalled();
+    },
+  );
+  it('still fails closed when the recreated provider container is missing or ambiguous', async () => {
+    const f = fixture();
+    await f.validator().validateBackend(f.route);
+    f.route.mode = 'waking';
+    const original = f.observation.containers.splice(0);
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    const container = original[0];
+    if (!container) throw new Error('missing fixture container');
+    f.observation.containers.push(...original, { ...container, id: 'f'.repeat(64) });
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+  });
+  it.each(['network', 'binding', 'daemon', 'namespace'])(
     'invalidates sleeping proof after %s drift',
     async (kind) => {
       const f = fixture();
       await f.validator().validateBackend(f.route);
       f.route.mode = 'sleeping';
       Object.assign(f.observation.containers[0] ?? {}, { running: false });
-      if (kind === 'container')
-        Object.assign(f.observation.containers[0] ?? {}, { id: 'f'.repeat(64) });
       if (kind === 'network')
         Object.assign(f.observation.networks[0] ?? {}, { id: 'f'.repeat(64) });
       if (kind === 'binding')

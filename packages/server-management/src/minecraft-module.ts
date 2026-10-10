@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
@@ -189,6 +190,14 @@ export const minecraftModule: TrustedGameModule = {
     };
   },
 };
+interface LaunchAttestation {
+  proof: string;
+  complete: Promise<void>;
+}
+// Management runtimes are request/job scoped. Only successful artifact proofs
+// and their in-flight work may survive them; provider/auth checks never do.
+const launchAttestations = new WeakMap<Kysely<Database>, Map<string, LaunchAttestation>>();
+const maxLaunchAttestations = 1024;
 export interface MinecraftModuleOptions {
   db: Kysely<Database>;
   codec: SecretCodec;
@@ -247,7 +256,41 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     if (requireObserved && !evidence.verified) throw new DomainError('integration_unavailable');
     return evidence;
   }
-  const launchEpochs = new Map<string, string>();
+  let launchEpochs = launchAttestations.get(db);
+  if (!launchEpochs) {
+    launchEpochs = new Map<string, LaunchAttestation>();
+    launchAttestations.set(db, launchEpochs);
+  }
+  const attestations = launchEpochs;
+  async function launchProof(
+    serverId: string,
+    connection: Kysely<Database>,
+    epoch: string,
+    image: Awaited<ReturnType<typeof assertMinecraftRuntimeImage>>,
+  ) {
+    const profile = await connection
+      .selectFrom('minecraft_server_profiles')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const choice = await inspectMinecraftCombination(connection, profile.combination_id, env);
+    // Profile revision/manifest also invalidate proofs across API and worker
+    // processes after content changes or restoration. Current evidence and
+    // immutable artifact/binding metadata must agree even for the same process.
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          epoch,
+          image,
+          profile,
+          choice: choice.row,
+          mapping: choice.mapping,
+          // SQL row order is not evidence identity.
+          evidence: choice.evidence.map((report) => JSON.stringify(report)).sort(),
+        }),
+      )
+      .digest('hex');
+  }
   async function assertLaunchFiles(serverId: string, connection: Kysely<Database>) {
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
@@ -333,7 +376,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         directory = [directory, component].filter(Boolean).join('/');
       }
     }
-    launchEpochs.delete(serverId);
+    attestations.delete(serverId);
   }
   /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
   async function minecraftOptions(): Promise<MinecraftContentOptions> {
@@ -369,7 +412,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     assertLaunchFiles,
     assertFileMutation,
     invalidateLaunchEpoch: (serverId) => {
-      launchEpochs.delete(serverId);
+      attestations.delete(serverId);
     },
     async configureProvision(context: GameLifecycleContext) {
       const profile = await context.db
@@ -391,22 +434,48 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       return profile ? verifyMinecraftRestore(context, await minecraftOptions()) : true;
     },
     async verifyProcessEpoch(serverId, connection, before, readAgain) {
+      // Fresh on every caller, including cache hits: current provider identity,
+      // launch configuration, Docker image and support/evidence authorization.
       const image = await assertMinecraftRuntimeImage(serverId, connection);
       if (!image) return before;
-      if (before !== null) {
-        const proof = `${before}:${image.report?.runId ?? image.expected}`;
-        if (launchEpochs.get(serverId) !== proof) {
-          await assertLaunchFiles(serverId, connection);
-          // Store only after the second epoch read confirms the same process.
-        }
+      if (before === null) {
+        attestations.delete(serverId);
+        if ((await readAgain()) !== null) throw new DomainError('operation_uncertain');
+        return null;
       }
-      // Image and process reads are separate pinned observations. A replacement
-      // between them must not attach an old image proof to a new process epoch.
+      const proof = await launchProof(serverId, connection, before, image);
+      let entry = attestations.get(serverId);
+      if (entry?.proof !== proof) {
+        entry = { proof, complete: Promise.resolve() };
+        const pending = entry;
+        if (attestations.size >= maxLaunchAttestations)
+          attestations.delete(attestations.keys().next().value as string);
+        attestations.set(serverId, pending);
+        pending.complete = (async () => {
+          await assertLaunchFiles(serverId, connection);
+          // Never retain a proof acquired across a restart, profile change or
+          // explicit invalidation while the potentially large file streamed.
+          if (
+            (await readAgain()) !== before ||
+            (await launchProof(serverId, connection, before, image)) !== proof ||
+            attestations.get(serverId) !== pending
+          )
+            throw new DomainError('operation_uncertain');
+        })().catch((error: unknown) => {
+          if (attestations.get(serverId) === pending) attestations.delete(serverId);
+          throw error;
+        });
+      }
+      await entry.complete;
+      // Every singleflight waiter independently checks its process epoch and
+      // current DB inputs; a successful peer cannot bless a replacement process.
       const after = await readAgain();
-      if (before !== after) throw new DomainError('operation_uncertain');
-      if (after !== null)
-        launchEpochs.set(serverId, `${after}:${image.report?.runId ?? image.expected}`);
-      else launchEpochs.delete(serverId);
+      if (
+        before !== after ||
+        (await launchProof(serverId, connection, before, image)) !== proof ||
+        attestations.get(serverId) !== entry
+      )
+        throw new DomainError('operation_uncertain');
       return after;
     },
   };
