@@ -610,3 +610,56 @@ review data. The dedicated ingress path remains service-authenticated and reject
 access when disabled; rebuild the previous web image if removing the path is
 required. No `down -v`, prune, orphan removal, host process changes or production
 resource cleanup.
+
+
+### Approved attempt — namespace permission blocker (2026-10-10)
+
+The Owner approved the service-only proposal above at reviewed HEAD
+`4b6e1a60b2f716d47e348faa262cbb5c583560a4`. Git was clean; the recorded independent
+host process UID, executable, parent, start time, namespace and Docker daemon
+identity were reverified. Private independent UUID/token were generated without
+printing them; existing dev configuration and data were preserved. The approved
+application and web image builds succeeded.
+
+The exact nonroot namespace preflight failed at
+`readlink('/run/nickhosting-host-proc/ns/net')` with **EACCES**. The one-off
+container was automatically removed by `--rm`. As the approved procedure requires,
+execution stopped before API/worker/web recreation and before starting Gateway.
+No root/capability escalation, permissions changes, game listeners or node probes
+were attempted. The previous private `COMPOSE_FILE` chain was restored; the new
+UUID/token remain private for reuse. Seven existing dev services remain healthy;
+HTTPS returned 200. The older stopped sandbox provider was preserved unchanged.
+
+Docker reports AppArmor enabled and the existing application uses `docker-default`.
+The exact cause of the cross-container namespace read denial is **not yet proven**.
+Reading the same host process metadata works as the development user on the host.
+New images remain available locally; existing running containers keep their
+previous images. No prune or persistent-state cleanup was performed.
+
+### Next diagnostic proposal — NOT approved or executed
+
+`compose.dev.gateway-diagnostic.yaml` changes only the temporary Gateway service's
+AppArmor setting to `unconfined`, retaining UID/GID, no capabilities,
+`no-new-privileges`, default seccomp, read-only mounts and resource limits. This
+removes one mandatory confinement layer for a disposable process which already
+has the explicitly described host-network/Docker-socket exposure. It must never
+be added to private `COMPOSE_FILE`, used with `up`, or applied to the permanent
+Gateway without a separate reviewed decision.
+
+Exact proposed command (namespace read only; no Gateway main, TCP/UDP listener,
+Core request, Docker API command, database access or source modification):
+
+```sh
+docker compose --env-file .env.dev.local \
+  -f compose.dev.yaml -f compose.dev.real.yaml -f compose.dev.observer.yaml \
+  -f compose.dev.gateway.yaml -f compose.dev.gateway-diagnostic.yaml \
+  --profile gateway run --rm --no-deps --entrypoint node gateway -e \
+  'const f=require("node:fs");const a=f.readlinkSync("/proc/self/ns/net");const b=f.readlinkSync("/run/nickhosting-host-proc/ns/net");if(a!==b)process.exit(1);for(const n of ["tcp","tcp6","udp","udp6"])f.readFileSync("/run/nickhosting-host-proc/net/"+n);console.log("Independent namespace preflight passed");'
+```
+
+Reverify the private recorded host-process identity before the command and verify
+the one-off container is gone afterwards. Rollback is its automatic `--rm` removal;
+the running dev project and private Compose selection are unchanged. Stop and
+report either result. A successful diagnostic does not approve relaxing permanent
+Gateway confinement or prove routing, full observer access, or sleep/wake.
+Missing Owner Gateway policy and backend pool remain separate prerequisites.

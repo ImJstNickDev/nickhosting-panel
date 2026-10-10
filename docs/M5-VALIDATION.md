@@ -1363,3 +1363,29 @@ A healthy empty Gateway is not evidence of a working game route. The exact scope
 proposal, remaining Owner configuration and rollback are in
 [M5 environments](M5-ENVIRONMENTS.md#development-gateway--prepared-activation-pending-2026-10-10).
 Issues #18 and #22 remain unchanged. Production deployment remains unauthorized.
+
+
+## 2026-10-10 — Approved Gateway activation attempt, stopped at namespace preflight
+
+Reviewed starting HEAD: `4b6e1a60b2f716d47e348faa262cbb5c583560a4`, clean worktree.
+Owner expressly approved the preceding service-only proposal. Read-only identity,
+container-name and network checks matched; available RAM approximately 25,084 MiB,
+filesystem free 68 GiB. Private bootstrap generated; no secrets printed.
+
+Actual commands/results:
+
+- `docker compose --env-file .env.dev.local --profile gateway config --quiet`: passed.
+- `docker compose --env-file .env.dev.local build api web`: passed, locked dependencies. App image `sha256:f6346654de604d6c01e251b6a8da973984fe6b634ef15a799022540045a5195e`; web image `sha256:556c85ef6c0f8f73e4deca5eb660fd6812516af1c33ede8d07e6e4d0e1f56ea6`.
+- Documented `run --rm --no-deps --entrypoint node gateway` namespace preflight: **FAILED**, exit 1, `EACCES` reading `/run/nickhosting-host-proc/ns/net`. This is an actual failed deployment prerequisite, not a passing activation test.
+- Temporary container `nickhosting-dev-gateway-run-32ed7d55a457` removed automatically; no permanent Gateway created. API/worker/web recreation deliberately skipped after failure.
+- Restored prior private Compose selection; repeated `config --quiet`: passed. Dedicated new private Gateway credentials retained; application data and accounts untouched.
+- Scoped Docker status: all seven existing dev services still healthy with original uptimes; stopped historical provider unchanged. No game/test server or probe created. No new network/public port, NPM, Wings or production mutation.
+- `curl --silent --output /dev/null --write-out 'HTTPS status: %{http_code}\n' https://dev.hub.nickhost.ing/`: **200**.
+- New unexecuted diagnostic overlay parsed using real Compose, comparing objects in memory without printing secrets: only Gateway AppArmor security option differs. Other services/networks, nonroot UID, dropped capabilities and absence of published ports preserved.
+
+Previous 92 focused source tests remain valid; source implementation is unchanged
+and no historical suite repeated. Activation is blocked pending the exact one-off
+diagnostic approval in [M5 environments](M5-ENVIRONMENTS.md#next-diagnostic-proposal--not-approved-or-executed).
+AppArmor is a hypothesis, not yet a confirmed cause. Independent review also
+confirmed missing Owner Gateway host/network/observer settings prevent health;
+zero-route readiness would not validate actual forwarding or Docker observer access.
