@@ -22,6 +22,7 @@ import {
 } from '@nickhosting/database';
 import { localizeAuthError, localizeError, resolveLocale } from '@nickhosting/i18n';
 import { enqueueCommand, getJobStatus } from '@nickhosting/jobs';
+import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import type { ManagementRuntime } from '@nickhosting/server-management';
 import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -164,6 +165,15 @@ export function createApp(options: Options) {
       requestId: c.get('requestId'),
       code: normalized.code,
       status: normalized.status,
+      route: c.req.routePath,
+      ...(failure instanceof PterodactylError
+        ? {
+            provider: 'pterodactyl',
+            scope: failure.scope,
+            reason: failure.reason,
+            upstreamStatus: failure.upstreamStatus,
+          }
+        : {}),
     });
     const locale = resolveLocale(
       c.get('locale'),

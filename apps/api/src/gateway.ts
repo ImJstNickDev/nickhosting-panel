@@ -195,7 +195,10 @@ export function registerGatewayRoutes(
         (await management.adapter.listNodes()).map((n) => ({ id: n.id, uuid: n.uuid })),
       );
     if (value.operation === 'allocations') {
-      if (!(await management.adapter.listNodes()).some((n) => n.id === value.nodeId))
+      // The validator independently reads fresh provider nodes for every inspection.
+      // Scope discovery here to Owner-configured nodes without repeating that API call.
+      const config = await gatewayConfiguration(db, env);
+      if (!config.gatewayNetworkPolicy?.nodes.some((n) => n.nodeId === value.nodeId))
         throw new DomainError('not_found');
       return c.json(
         (await management.adapter.listAllocations(value.nodeId)).map((a) => ({

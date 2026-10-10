@@ -88,6 +88,10 @@ beforeEach(async () => {
     NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
     NH_GATEWAY_CONTROL_TOKEN: token,
     NH_PTERODACTYL_APPLICATION_KEY: secret,
+    NH_GATEWAY_NETWORK_POLICY: JSON.stringify({
+      nodes: [{ nodeId: f.providerNodeId, nodeUuid: f.nodeId, networkMode: 'fixture-bridge' }],
+      maximumObservationAgeMs: 5000,
+    }),
   };
   await setGatewayPolicy(f.db, f.context, serverId, policy);
   routeInput = {
@@ -218,6 +222,39 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(
       (await request(`${prefix()}/inventory`, { operation: 'server', routeId: route.id })).status,
     ).toBe(409);
+  });
+  it('scopes allocations to configured nodes without duplicating fresh node discovery', async () => {
+    const before = vi.mocked(f.adapter.listNodes).mock.calls.length;
+    expect(
+      (
+        await request(`${prefix()}/inventory`, {
+          operation: 'allocations',
+          nodeId: f.providerNodeId,
+        })
+      ).status,
+    ).toBe(200);
+    expect(f.adapter.listNodes).toHaveBeenCalledTimes(before);
+    expect(f.adapter.listAllocations).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await request(`${prefix()}/inventory`, {
+          operation: 'allocations',
+          nodeId: f.providerNodeId + 1,
+        })
+      ).status,
+    ).toBe(404);
+    expect(f.adapter.listAllocations).toHaveBeenCalledTimes(1);
+    // Absence of an Owner policy never widens discovery to provider-wide nodes.
+    delete env.NH_GATEWAY_NETWORK_POLICY;
+    expect(
+      (
+        await request(`${prefix()}/inventory`, {
+          operation: 'allocations',
+          nodeId: f.providerNodeId,
+        })
+      ).status,
+    ).toBe(404);
+    expect(f.adapter.listAllocations).toHaveBeenCalledTimes(1);
   });
   it('rejects stale routes, foreign server selectors and unexpected credentials in requests', async () => {
     expect(

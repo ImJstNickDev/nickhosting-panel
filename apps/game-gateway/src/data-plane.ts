@@ -578,11 +578,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       if (stopping) throw new DomainError('integration_unavailable');
       try {
         await bounded(async () => {
-          if (!listeners.has(route.id) && route.mode !== 'online') {
-            // A running manually started backend can establish its first proof.
-            // Offline failure is expected; listener validation still fails closed.
-            await options.safety.validateBackend(route).catch(() => {});
-          }
+          // Listener validation can establish its initial proof from the same
+          // fresh inspection; a separate backend inspection duplicates inventory.
           await options.safety.validate(route, owned);
         });
       } catch (error) {

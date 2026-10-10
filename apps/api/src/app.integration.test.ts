@@ -3,7 +3,7 @@ import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { SecretCodec } from '@nickhosting/core';
 import { saveBootstrapConfiguration } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { validateConnection } from '@nickhosting/pterodactyl-adapter';
+import { PterodactylError, validateConnection } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from './app.js';
 
@@ -72,6 +72,27 @@ describe('Hono public backend contracts', () => {
     if (database) await database.destroy();
   });
 
+  it('logs only safe provider failure diagnostics with a route template', async () => {
+    app.get('/v1/provider-diagnostic/:id', () => {
+      throw new PterodactylError('rate_limited', 'application', 'rejected', 429);
+    });
+    const response = await request(
+      '/v1/provider-diagnostic/private-server?token=private-token',
+      undefined,
+      { authenticated: false },
+    );
+    expect(response.status).toBe(503);
+    expect(logs.at(-1)).toMatchObject({
+      code: 'integration_unavailable',
+      status: 503,
+      route: '/v1/provider-diagnostic/:id',
+      provider: 'pterodactyl',
+      scope: 'application',
+      reason: 'rate_limited',
+      upstreamStatus: 429,
+    });
+    expect(JSON.stringify(logs.at(-1))).not.toMatch(/private-server|private-token/);
+  });
   it('provides health/status and localized safe errors with mandatory CSRF checks', async () => {
     expect((await request('/healthz')).status).toBe(200);
     expect((await request('/v1/setup')).status).toBe(200);

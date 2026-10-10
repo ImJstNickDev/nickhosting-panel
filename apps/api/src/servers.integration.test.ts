@@ -1542,6 +1542,72 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
   });
 
+  it('keeps an idle console HTTP connection alive and closes it on authorization loss', async () => {
+    const serverId = await f.server();
+    let relayInput: ConsoleRelayOptions | undefined;
+    const close = vi.fn();
+    vi.mocked(f.adapter.relayConsole).mockImplementationOnce(async (_id, input) => {
+      relayInput = input;
+      expect(await input.authorize()).toBe(true);
+      input.onEvent({ type: 'status', data: 'offline' });
+      return {
+        close,
+        sendCommand: async () => {},
+        requestLogs: async () => {},
+        requestStats: async () => {},
+      };
+    });
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const clear = vi.spyOn(globalThis, 'clearInterval');
+    const server = createServer(getRequestListener(app.fetch));
+    // Shorter than production's 30 seconds, longer than the real heartbeat.
+    server.setTimeout(12000);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing test listener');
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/v1/servers/${serverId}/console`,
+        { headers: user.headers() },
+      );
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('Missing console stream');
+      let text = '';
+      // Two real heartbeats prove the connection survives an otherwise fatal idle timeout.
+      while ((text.match(/event: heartbeat/g) ?? []).length < 2) {
+        const next = await reader.read();
+        expect(next.done).toBe(false);
+        text += new TextDecoder().decode(next.value);
+      }
+      expect(text.match(/event: status/g)).toHaveLength(1);
+      expect(text).not.toContain('event: error');
+      await f.db
+        .updateTable('managed_servers')
+        .set({ owner_id: outsiderId })
+        .where('id', '=', serverId)
+        .execute();
+      expect(await relayInput?.authorize()).toBe(false);
+      relayInput?.onEvent({ type: 'closed' });
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        text += new TextDecoder().decode(next.value);
+      }
+      expect(text).toContain('{"type":"error","code":"forbidden"}');
+      expect(close).toHaveBeenCalledOnce();
+      const heartbeatIndex = interval.mock.calls.findIndex((call) => call[1] === 10000);
+      expect(heartbeatIndex).toBeGreaterThanOrEqual(0);
+      expect(clear).toHaveBeenCalledWith(interval.mock.results[heartbeatIndex]?.value);
+    } finally {
+      interval.mockRestore();
+      clear.mockRestore();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('streams binary uploads and downloads through the actual Node/Hono HTTP bridge', async () => {
     const serverId = await f.server();
     const binary = new Uint8Array(2 * 1024 ** 2 + 11).fill(0xa5);

@@ -904,6 +904,17 @@ describe('sleep protocol handling and observations', () => {
       expect(f.gateway.metrics()).toMatchObject({ observationsDiscarded: 1, observationErrors: 0 });
     },
   );
+  it('does not duplicate initial sleeping listener inventory through a standalone backend check', async () => {
+    const backend = await tcpFixture();
+    const f = plane([route(backend.port, 'tcp', 'sleeping')]);
+    await f.gateway.start();
+    expect(f.gateway.health().routes).toBe(1);
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    expect(f.safety.validateBackend).not.toHaveBeenCalled();
+    await f.gateway.refresh();
+    expect(f.safety.validate).toHaveBeenCalledTimes(3);
+    expect(f.safety.validateBackend).not.toHaveBeenCalled();
+  });
   it('probes and reports first-run readiness even while the listener remains unsafe to bind', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port, 'tcp', 'waking');
@@ -921,7 +932,7 @@ describe('sleep protocol handling and observations', () => {
     expect(f.control.reportObservation).toHaveBeenCalledWith(
       expect.objectContaining({ routeId: r.id, ready: true, activeSessions: 0 }),
     );
-    expect(f.safety.validateBackend).toHaveBeenCalledTimes(2);
+    expect(f.safety.validateBackend).toHaveBeenCalledTimes(1);
   });
   it('counts active sessions across every port before reporting protocol idleness', async () => {
     const tcp = await tcpFixture();

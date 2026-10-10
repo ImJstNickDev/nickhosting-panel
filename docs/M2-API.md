@@ -154,7 +154,7 @@ project clients should use the authorized per-server operation view above.
 
 | Method/path | Contract |
 | --- | --- |
-| GET `/v1/servers/:id/console` | SSE relay of allowlisted console/daemon/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. Requests bounded provider log replay on an empty console; `history=0` skips replay when retaining a browser buffer. Errors use a typed, sanitized SSE envelope. |
+| GET `/v1/servers/:id/console` | SSE relay of allowlisted console/daemon/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. Requests bounded provider log replay on an empty console; `history=0` skips replay when retaining a browser buffer. Errors use a typed, sanitized SSE envelope. A bounded `heartbeat` every 10 seconds keeps an otherwise silent stream alive without polling the provider; it never replaces authorization checks. |
 | POST `/v1/servers/:id/console` | `{command}` (1–4,096 characters) → `204`. Audit records the request, not raw command text. |
 | GET `/v1/servers/:id/files?path=` | Directory listing under the server root. |
 | GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; no fixed total byte limit, signed URL remains private. |

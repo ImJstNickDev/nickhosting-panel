@@ -270,3 +270,13 @@ No provider/database credentials are required. This proves endpoint reachability
 not game readiness, player idleness or external connectivity. The development
 Compose live overlay is unapplied until its specific approval; see
 [M5 environments](M5-ENVIRONMENTS.md#mixed-directgateway-allocation-pools-and-next-activation-proposal).
+
+
+Gateway polling avoids duplicate inspections within the same proof bootstrap:
+non-online listener validation can establish a missing proof from its already fresh
+inspection only when the exact owned backend is running and passes a real protocol
+probe. The independent node challenge, topology age fences and another fresh check
+immediately before binding remain. Allocation inventory is restricted to the Owner's
+configured node policy without repeating the remote node-list call; the validator
+still obtains a fresh node inventory and checks node UUIDs. No TTL inventory cache
+or relaxation of ownership/collision checks is introduced.

@@ -435,6 +435,53 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await expect(f.validator().validateBackend(f.route)).rejects.toThrow('allocation_unavailable');
     expect(f.options.saveProof).not.toHaveBeenCalled();
   });
+  it('bootstraps a waiting listener with one fresh inspection and a real protocol proof', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    await f.validator().validate(f.route, []);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(1);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(1);
+    expect(f.options.probeNode).toHaveBeenCalledTimes(1);
+    expect(f.proof()?.version).toBe(2);
+    // Renewal still reads fresh collision/identity evidence, without rehashing proof.
+    await f.validator().validate(f.route, []);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(2);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(1);
+  });
+  it('rejects bootstrap evidence that expires during the actual backend probe', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    f.options.probeBackend = vi.fn(async () => {
+      clock += f.options.policy.maximumObservationAgeMs + 1;
+      return true;
+    });
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    expect(f.options.saveProof).not.toHaveBeenCalled();
+    expect(f.options.probeNode).not.toHaveBeenCalled();
+  });
+  it.each(['protocol', 'identity', 'collision', 'node challenge'] as const)(
+    'never bootstraps a waiting listener past a failed %s check',
+    async (failure) => {
+      const f = fixture();
+      f.route.mode = 'waking';
+      if (failure === 'protocol') vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+      if (failure === 'identity') f.server.external_id = 'foreign-resource';
+      if (failure === 'collision')
+        f.observation.sockets.push({
+          ...f.route.public,
+          inode: '123',
+          processOwned: false,
+        });
+      if (failure === 'node challenge') vi.mocked(f.options.probeNode).mockResolvedValue(false);
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      if (failure !== 'node challenge') expect(f.options.saveProof).not.toHaveBeenCalled();
+    },
+  );
   it('does not establish first sleeping proof without a previously ready exact binding', async () => {
     const f = fixture();
     f.route.mode = 'sleeping';
@@ -496,6 +543,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await f.validator().validate(f.route, []);
     expect(f.proof()?.version).toBe(1);
     Object.assign(f.observation.containers[0] ?? {}, { id: 'f'.repeat(64) });
+    vi.mocked(f.options.probeBackend).mockResolvedValue(false);
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
     expect(f.proof()?.version).toBe(1);
     vi.mocked(f.options.probeBackend).mockResolvedValue(false);
@@ -513,6 +561,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
       await f.validator().validateBackend(f.route);
       const context = await f.options.resolveContext(f.route);
       f.route.mode = 'sleeping';
+      Object.assign(f.observation.containers[0] ?? {}, { running: false, activeBindings: [] });
       if (field === 'uuid') {
         context.providerServerUuid = f.server.uuid = '77777777-7777-4777-8777-777777777777';
         Object.assign(f.observation.containers[0] ?? {}, { name: `/${f.server.uuid}` });

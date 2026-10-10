@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { AxeBuilder } from '@axe-core/playwright';
+import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness, browserPassword } from './harness.js';
@@ -168,6 +169,83 @@ describe('M5 browser files, backups, console and automation', () => {
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
       .analyze();
     expect(audit.violations.map((v) => v.id)).toEqual([]);
+  });
+  it('records status transitions once across repeated snapshots, reconnects and retained navigation', async () => {
+    const original = provider.adapter.relayConsole;
+    const streams = new Set<ConsoleRelayOptions>();
+    let connections = 0;
+    provider.adapter.relayConsole = async (id, input) => {
+      const relay = await original(id, input);
+      if (!input.signal?.aborted) {
+        streams.add(input);
+        input.signal?.addEventListener('abort', () => streams.delete(input), { once: true });
+        connections++;
+      }
+      return { ...relay, requestLogs: async () => {} };
+    };
+    const emit = (type: 'console' | 'status', data: string) => {
+      if (!streams.size) throw new Error('Fixture console was not attached');
+      for (const stream of streams)
+        if (!stream.signal?.aborted)
+          stream.onEvent({ type, data } as Parameters<ConsoleRelayOptions['onEvent']>[0]);
+    };
+    const offlineCount = async () =>
+      (await user.locator('.console pre').innerText()).match(/Server stopped\./g)?.length ?? 0;
+    try {
+      await user.goto(`${base}/console`);
+      await browserExpect.poll(() => connections).toBeGreaterThanOrEqual(1);
+      await browserExpect(
+        user.getByRole('status', { name: '', exact: true }).filter({ hasText: /^Connected$/ }),
+      ).toBeVisible();
+      const connected = () =>
+        browserExpect(user.getByRole('status').filter({ hasText: /^Connected$/ })).toBeVisible();
+      let previousConnections = connections;
+      emit('status', 'offline');
+      emit('console', 'A real log between status snapshots');
+      emit('status', 'offline');
+      await browserExpect.poll(offlineCount).toBe(1);
+      await user.getByRole('button', { name: 'Reconnect', exact: true }).click();
+      await browserExpect.poll(() => connections).toBeGreaterThan(previousConnections);
+      await connected();
+      previousConnections = connections;
+      emit('status', 'offline');
+      emit('console', 'Reconnected marker');
+      await browserExpect(user.locator('.console pre')).toContainText('Reconnected marker');
+      expect(await offlineCount()).toBe(1);
+      await user.getByRole('link', { name: 'Files', exact: true }).click();
+      await user.getByRole('link', { name: 'Console', exact: true }).click();
+      await browserExpect.poll(() => connections).toBeGreaterThan(previousConnections);
+      await connected();
+      previousConnections = connections;
+      emit('status', 'offline');
+      emit('console', 'Navigation marker');
+      await browserExpect(user.locator('.console pre')).toContainText('Navigation marker');
+      expect(await offlineCount()).toBe(1);
+      await harness.screenshot(user, 'console-status-deduplicated-en');
+      // The last observed state survives eviction of its original line from the bounded buffer.
+      for (let index = 0; index < 305; index++) {
+        emit('console', `Fixture log ${index}`);
+        // Let the real bounded SSE writer drain; this is history eviction, not flood testing.
+        if (index % 20 === 19)
+          await browserExpect(user.locator('.console pre')).toContainText(`Fixture log ${index}`);
+      }
+      await browserExpect(user.locator('.console pre')).toContainText('Fixture log 304');
+      expect(await offlineCount()).toBe(0);
+      await user.getByRole('button', { name: 'Reconnect', exact: true }).click();
+      await browserExpect.poll(() => connections).toBeGreaterThan(previousConnections);
+      await connected();
+      emit('status', 'offline');
+      emit('console', 'Still stopped');
+      await browserExpect(user.locator('.console pre')).toContainText('Still stopped');
+      expect(await offlineCount()).toBe(0);
+      emit('status', 'running');
+      emit('status', 'offline');
+      await browserExpect(user.locator('.console pre')).toContainText('Server process running.');
+      await browserExpect.poll(offlineCount).toBe(1);
+    } finally {
+      await user.goto(`${base}/files`);
+      provider.adapter.relayConsole = original;
+    }
   });
   it('reconnects a failed console stream, but clears retained output and stops on authorization denial', async () => {
     let attempts = 0;

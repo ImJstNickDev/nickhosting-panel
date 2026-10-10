@@ -48,6 +48,7 @@ function ConsoleOutput({
 }
 
 type ConsoleLine = { type: 'console' | 'status'; data: string };
+type ConsoleBuffer = { lines: ConsoleLine[]; lastStatus?: string };
 function transientFailure(error: unknown) {
   const failure = apiError(error);
   return (
@@ -100,7 +101,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       if (JSON.stringify(cache.queryKey) !== JSON.stringify(key))
         queryClient.removeQueries({ queryKey: cache.queryKey, exact: true });
     }
-    let current = queryClient.getQueryData<ConsoleLine[]>(key) ?? [];
+    const cached = queryClient.getQueryData<ConsoleBuffer>(key);
+    let current = cached?.lines ?? [];
+    let lastStatus = cached?.lastStatus;
     setBuffer({ scope, lines: current });
     setRetained(current.length > 0);
     const controller = new AbortController();
@@ -144,13 +147,19 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                   !['offline', 'starting', 'running', 'stopping'].includes(payload.data)
                 )
                   return;
+                // Status snapshots recur on provider stats/reconnects. Preserve transitions,
+                // including across navigation or after the original status scrolls out.
+                if (type === 'status') {
+                  if (payload.data === lastStatus) return;
+                  lastStatus = payload.data;
+                }
                 // React escapes text. Strip terminal control sequences, never render HTML.
                 const value = payload.data
                   .replace(terminalEscapes, '')
                   .replace(terminalControls, '');
                 const line: ConsoleLine = { type, data: value.slice(-8192) };
                 current = [...current, line].slice(-300);
-                queryClient.setQueryData(key, current);
+                queryClient.setQueryData<ConsoleBuffer>(key, { lines: current, lastStatus });
                 setBuffer({ scope, lines: current });
               }
             },

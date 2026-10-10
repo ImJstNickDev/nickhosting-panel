@@ -2035,3 +2035,83 @@ files with the four existing warnings noted above. `git diff --cached --check` a
 `python3 scripts/check-governance.py` passed: 501 indexed text files, 105 review PNGs,
 427 relative links, four TOML files and 44 ignore cases. No historical full-suite or
 live Minecraft scenario was rerun; earlier evidence is preserved.
+
+
+## M5 follow-up — Repeated console status and intermittent resource errors
+
+The Owner observed repeated offline console messages and intermittent console/resource
+errors after the transition investigation. Repeated typed status snapshots were
+appended unconditionally, including after reconnect/navigation. The UI now retains
+the last observed status separately from its bounded log lines, scoped to the same
+actor/subject/support/server identity. It suppresses identical status snapshots,
+including after old lines are evicted; real state transitions and normal log lines
+are preserved. It does not hide provider failures or authorization denial.
+
+An offline Wings console sent only its initial status and stats during a 30-second
+read-only adapter observation. API HTTP sockets have a 30-second idle timeout. Console
+SSE now sends a bounded heartbeat every ten seconds, with no extra provider request;
+authorization checks and stream cleanup remain. A real Node/Hono test with a 12-second
+idle timeout survived two heartbeat cycles over 20 seconds and then terminated after
+actual database permission revocation. This proves the quiet-stream path without
+changing Pterodactyl, proxy timeouts or global socket policies.
+
+The reported request reference correlated to an `integration_unavailable` API failure
+at 22:18:24 local, without an API restart at that instant. Its old log lacks the
+underlying provider reason: it cannot honestly be attributed to HTTP 429. Later API
+watch reloads during this correction can interrupt in-flight development requests.
+New safe diagnostics record the registered route template and typed provider scope,
+reason and HTTP status; they exclude dynamic IDs, query strings, credentials, actor
+metadata and upstream bodies. A targeted test proves that exclusion.
+
+Read-only provider observations returned Application HTTP 200 with 32/240 remaining
+and Client HTTP 200 with 704/720 remaining; a later Application sample had 134/240.
+These are quota samples, not measurements of aggregate traffic or proof of throttling.
+Source inspection nevertheless found duplicate Gateway requests: the allocation
+endpoint re-fetched nodes, and a missing non-online listener performed a separate
+backend safety inspection before listener validation repeated it. Both duplicates
+are removed, retaining fresh node UUID/identity/inventory/collision checks, live
+protocol proof and the final fresh check before bind. For one configured node and
+one missing listener the nominal refresh/observation pair falls from thirteen to
+seven Application requests, excluding elapsed latency and other callers. There is
+no new TTL cache and no claim that every historical failure shared this cause.
+
+Validation was deliberately focused:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/app.integration.test.ts -t 'safe provider failure'`
+  — **1 passed, 8 skipped**.
+- The same integration runner with `apps/api/src/servers.integration.test.ts`
+  and `-t 'idle console HTTP|sensitive upstream errors'` — **2 passed, 30 skipped**,
+  including real HTTP silence/heartbeat and authorization-revocation behavior.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts apps/game-gateway/src/data-plane.test.ts`
+  — **150 passed**. An added bootstrap expiry regression was then checked with the
+  focused bootstrap selection: **6 passed, 70 skipped**. Freshness expiry still denies.
+- The isolated integration runner with `apps/api/src/gateway.integration.test.ts`
+  — **17 passed**, including configured-node authorization and no duplicate node lookup.
+- Real-browser service tests selected the new repeated-status case and existing
+  reconnect/authorization-denial case; both passed across focused runs. Initial
+  fixtures assumed one StrictMode connection and exceeded the protected SSE queue
+  with a synchronous 305-event burst; the fixture now tracks active connections and
+  drains in bounded batches. Production queue limits were not changed.
+
+The prior Owner-approved Gateway restart loaded the earlier transition fix at
+`8f94c3bc9a88f7c3e947ce8ab31be8eed3c0f67d`. These later polling changes require another
+scoped Gateway restart; source mounts alone do not reload that process. API/WebPanel
+use their existing development watch/HMR. No game-server command, new infrastructure,
+provider configuration change or new test asset was created. Legacy-proof activation
+still requires the Owner's explicit start and real readiness, as documented above.
+
+
+Final dedup browser run: **1 passed, 12 skipped** with a captured and reviewed
+[actual browser screenshot](screenshots/m5/console-status-deduplicated-en.png).
+Its fixture was also corrected to track active rather than aborted StrictMode
+relays before emitting test output. The screenshot shows one stopped message
+across repeated snapshots/reconnect/navigation; real transitions remain covered.
+`scripts/dev.sh pnpm typecheck` passed for root and WebPanel source/tests. Focused
+Biome passed with the same four pre-existing non-null assertion warnings. Independent
+source review found no must-fix; actual forwarding/latency after the new Gateway
+polling change remains unverified until its separately approved restart.
+
+Final staged governance and whitespace checks passed: 501 indexed text files,
+106 review PNGs, 428 relative links, four TOML files and 44 ignore cases.
+Independent screenshot/content review found no new visible defect or unresolved
+must-fix. No full historical suite was repeated for this follow-up.

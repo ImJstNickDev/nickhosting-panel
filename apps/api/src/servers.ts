@@ -562,6 +562,7 @@ export function registerServerRoutes(
         },
       );
       let authorizationDenied = false;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
         const relay = await service.adapter.relayConsole(identifier, {
           signal: controller.signal,
@@ -587,6 +588,13 @@ export function registerServerRoutes(
         try {
           if (c.req.query('history') !== '0') await relay.requestLogs();
           output.send({ event: 'connected', data: JSON.stringify({ type: 'connected' }) });
+          // Offline Wings can remain silent. Keep the HTTP stream active without
+          // polling the provider; relay authorization checks still run independently.
+          heartbeat = setInterval(() => {
+            if (!authorizationDenied && !controller.signal.aborted)
+              output.send({ event: 'heartbeat', data: JSON.stringify({ type: 'heartbeat' }) });
+          }, 10000);
+          heartbeat.unref();
           await closed;
         } finally {
           relay.close();
@@ -600,6 +608,7 @@ export function registerServerRoutes(
         output.send({ event: 'error', data: JSON.stringify({ type: 'error', code }) });
         await output.drain();
       } finally {
+        if (heartbeat) clearInterval(heartbeat);
         output.close();
         controller.abort();
       }

@@ -505,15 +505,20 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       if (route.mode === 'online') return proveBackend(state);
       const raw = await options.loadProof(route);
       const proof = gatewayReachabilityProofSchema.safeParse(raw);
+      const matches =
+        proof.success &&
+        proof.data.routeId === route.id &&
+        proof.data.serverId === route.serverId &&
+        proof.data.allocationId === route.allocationId &&
+        proof.data.namespaceId === state.observation.namespaceId &&
+        proof.data.dockerDaemonId === state.observation.dockerDaemonId &&
+        proof.data.digest === (proof.data.version === 1 ? state.legacyDigest : state.digest) &&
+        proof.data.verifiedAt <= now();
+      // Bootstrap from an actually ready owned backend using this inspection.
+      // Stopped containers and protocol failures cannot replace a missing/stale
+      // proof. This is the same gate used by readiness, not metadata promotion.
+      if (!matches) await proveBackend(state);
       if (
-        !proof.success ||
-        proof.data.routeId !== route.id ||
-        proof.data.serverId !== route.serverId ||
-        proof.data.allocationId !== route.allocationId ||
-        proof.data.namespaceId !== state.observation.namespaceId ||
-        proof.data.dockerDaemonId !== state.observation.dockerDaemonId ||
-        proof.data.digest !== (proof.data.version === 1 ? state.legacyDigest : state.digest) ||
-        proof.data.verifiedAt > now() ||
         !(await options.probeNode(route)) ||
         now() - state.observation.observedAt > policy.maximumObservationAgeMs
       )
