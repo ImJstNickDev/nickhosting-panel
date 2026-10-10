@@ -207,3 +207,67 @@ Rollback before deployment is to close the unmerged milestone PR. Any later
 application rollback must drain scheduled work and preserve durable operation
 history; do not drop migrations 014/015 or restore a database blindly over external
 effects. No production migration or rollback was executed in this milestone.
+
+## 2026-10-10 — persistent development / production configuration pass
+
+This focused follow-up starts from PR #21 HEAD
+`97c0b24c0e06d8443186fa351caf9974cc88b635`. It adds the
+[environment architecture and exact activation proposal](M5-ENVIRONMENTS.md),
+separate dev/prod Compose projects, pinned multi-stage images, source supervision,
+HTTPS-aware Vite networking, same-origin ingress, environment guards and safe
+future development preparation. It does not redesign application routes or alter
+any M1–M4 provider/Gateway acceptance boundary.
+
+| Actual command / check | Result |
+| --- | --- |
+| `docker compose --env-file deploy/dev/.env.example -f compose.dev.yaml --profile tools config --quiet` | Parsed development interpolation/dependencies, including explicit migration service. |
+| `docker compose --env-file deploy/prod/.env.example -f compose.prod.yaml --profile tools config --quiet` | Parsed production configuration; placeholders are intentionally rejected by runtime guards. |
+| `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts scripts/dev-provider.test.ts scripts/dev-watch.test.ts scripts/prepare-dev-environment.test.ts apps/web/vite-network.test.ts` | **76 passed**, 5 files, 4.90 seconds. Temporary files/loopback fixtures only; no Docker resource creation. |
+| Preparation test file rerun after equivalent PEM-regex formatting for the publication scanner | **7 passed**; the previous 76-test result is retained separately. |
+| `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts -t Compose` after adding the migrator's read-only SMTP trust-certificate mount | **5 passed**, 25 outside the filter; avoids a missing-certificate startup warning without broad reruns. |
+| `scripts/dev.sh pnpm typecheck` | Passed, including frontend/browser types. |
+| `scripts/dev.sh pnpm lint` | No errors; 36 warnings and 2 informational diagnostics. |
+| `scripts/dev.sh pnpm format:check` | Passed. |
+| `scripts/dev.sh pnpm build` | Passed; 943 EN/IT/pseudolocale keys, unchanged 815.75 kB main JS / 231.49 kB gzip. Existing chunk-size advisory retained. |
+| `scripts/dev.sh pnpm build:runtime` | Passed; compiled API/worker and workspace exports, SQL assets; test helpers/testing export excluded. |
+| `scripts/dev.sh pnpm --dir build/runtime install --prod --offline --frozen-lockfile --ignore-scripts` | Passed; 190 cached production packages, no downloads, no development dependencies. Generated output only. |
+| Plain Node imports of compiled API runtime and jobs, without `tsx` | Passed; no service, database or provider connection started. |
+| Read-only `docker buildx imagetools inspect` | Verified pinned Node 24.21.0, Nginx-unprivileged and Mailpit 1.31.4 manifests. No pull/build/run. PostgreSQL/Redis use existing verified pinned image references. |
+| Read-only container/network/name/alias checks | Existing `prod-frontend` bridge found; neither proposed stable name/alias nor dev/prod project network names were occupied. |
+| Governance, indexed links/TOML/ignore paths and whitespace | Passed after staging this configuration follow-up; no real environment, key, private note or persistent state is tracked. |
+
+New tests exercise environment/purpose credential separation, placeholder and
+cross-environment rejection, immutable production image requirements, TLS/origin
+handling, forced local provider endpoints, Compose isolation, actual disposable
+TypeScript runtime builds and exclusion of tests/private build inputs. The real
+supervisor subprocess test verifies that a slow SIGTERM shutdown completes before
+replacement. CSS/UI changes do not restart workers. Catalog compilation precedes
+Vite and runs again on catalog changes. Vite's actual config runner loads with a
+writable temporary cache; no direct/internal HMR fallback is enabled.
+
+The ingress shell test uses temporary paths and **fake `nginx`/`envsubst`** to
+check normalization/substitution/order. It does not prove actual Nginx syntax or
+network behavior. Simulator tests call real provider connection-validation code
+against a temporary loopback-only empty inventory; all mutation methods are denied.
+Preparation tests generate TLS/credentials solely in disposable temporary roots.
+No actual `.env.dev.local`, `.env.prod.local`, `mountdata/dev` or `mountdata/prod`
+was created.
+
+Independent configuration/security review identified and resolved: Vite's default
+writes to read-only dependency directories; explicit `:443`/hostname normalization
+mismatch; inert test helpers in compiled artifacts; and documentation that implied
+API connection draining despite the existing immediate connection close. Affected
+regressions pass. Final independent review reports **zero remaining must-fix
+configuration findings**. All 67 previously recorded private files/ledgers retain
+their recorded hashes. Source watchers, provider fixtures and preparation also
+received bounded separate-agent implementation/test review.
+
+**Not executed:** Docker image builds, container/network creation or attachment,
+Nginx `-t` inside its image, NPM/DNS/certificate changes, migrations against new
+persistent state, live HTTPS/HMR/mail/persistence verification or production
+deployment. These require the exact separate activation approval. Full database,
+browser and historical live Minecraft scenarios were not repeated for this focused
+configuration pass; their complete prior results and failures above remain intact.
+SFTPGo's three retained-transport expected failures and issue #18 remain unchanged,
+not security passes or resolved release gates. No existing test resources,
+Pterodactyl servers, Wings data or production service was mutated.

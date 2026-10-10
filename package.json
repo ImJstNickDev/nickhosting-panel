@@ -25,7 +25,8 @@
     "test:isolated": "tsx scripts/test-env.ts pnpm test:integration",
     "test:m2": "tsx scripts/test-env.ts --m2 pnpm test:integration",
     "dev:gateway": "tsx --env-file=.env.gateway.local apps/game-gateway/src/main.ts",
-    "test:m3": "tsx scripts/test-env.ts --m2 pnpm test:integration"
+    "test:m3": "tsx scripts/test-env.ts --m2 pnpm test:integration",
+    "build:runtime": "node scripts/build-runtime.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",

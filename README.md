@@ -87,3 +87,8 @@ implement Satisfactory.
 [Reviewed browser screenshots](docs/M5-SCREENSHOTS.md) cover the actual application;
 [validation](docs/M5-VALIDATION.md) distinguishes real handlers, external fixtures,
 full-suite results and targeted review corrections.
+
+Persistent review development and separate immutable production configuration are
+prepared in [M5 environments](docs/M5-ENVIRONMENTS.md). Activation, the external
+network attachment and the Owner-managed NPM proxy host require the explicit
+proposal approval; production remains undeployed.

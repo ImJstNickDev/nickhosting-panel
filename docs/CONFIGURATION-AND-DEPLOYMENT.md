@@ -169,3 +169,14 @@ Install the pinned user-local test browser with
 `--with-deps` or install OS packages without their own approval. The production
 build includes `THIRD-PARTY-NOTICES.md` and `THIRD-PARTY-WORKER-NOTICES.txt`; retain
 both alongside static assets. See [M5 dependency provenance](M5-DEPENDENCIES.md).
+
+## Persistent development and separate production configuration
+
+The Owner-approved M5 architecture is specified in [M5 environments](M5-ENVIRONMENTS.md):
+`compose.dev.yaml` provides HTTPS-proxied Vite HMR and isolated persistent review
+state; `compose.prod.yaml` uses compiled immutable artifacts and independent
+credentials/storage. The development hostname and external network in those
+configuration examples were explicitly supplied for this task; other private
+infrastructure notes remain unpublished. Read the exact activation proposal and
+rollback before any Docker operation. The prepared configuration does not grant
+activation, NPM/DNS mutation or production deployment approval.
