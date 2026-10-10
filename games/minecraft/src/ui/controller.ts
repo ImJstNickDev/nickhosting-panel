@@ -88,6 +88,7 @@ export const minecraftChoiceSchema = z
     id: uuid,
     version: z.string().min(1).max(80),
     runtime: z.enum(['vanilla', 'paper', 'folia', 'fabric', 'forge']),
+    releaseTime: z.iso.datetime({ offset: true }).nullable().optional(),
     releaseType: z.enum(['release', 'snapshot', 'old_alpha', 'old_beta']).optional(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
   })
@@ -162,6 +163,41 @@ export function minecraftContentCapabilities(runtime: MinecraftUiChoice['runtime
     plugins: runtime === 'paper' || runtime === 'folia',
   };
 }
+/** Release chronology is independent of release kind; unknown dates stay last. */
+export function minecraftCatalogOptions(
+  raw: unknown,
+  handler: string,
+  values: UiValues,
+): UiOption[] {
+  const choices = z.array(minecraftChoiceSchema).max(10000).parse(raw);
+  if (handler === 'runtimes')
+    return [...new Set(choices.map((choice) => choice.runtime))].map((runtime) => ({
+      value: runtime,
+      labelKey: `games.minecraft-java.runtimes.${runtime}`,
+      disabled: false,
+    }));
+  if (handler !== 'choices') throw new MinecraftUiError('integration_unavailable');
+  return choices
+    .filter((choice) => !values.runtime || choice.runtime === values.runtime)
+    .sort((a, b) => {
+      const first = Date.parse(a.releaseTime ?? ''),
+        second = Date.parse(b.releaseTime ?? '');
+      if (Number.isFinite(first) !== Number.isFinite(second))
+        return Number.isFinite(first) ? -1 : 1;
+      return (
+        (Number.isFinite(first) && first !== second
+          ? second - first
+          : b.version.localeCompare(a.version, 'en', { numeric: true })) || a.id.localeCompare(b.id)
+      );
+    })
+    .map((choice) => ({
+      value: choice.id,
+      label: choice.version,
+      disabled: false,
+      releaseType: choice.releaseType ?? 'release',
+      ...(choice.capabilities ? { capabilities: choice.capabilities } : {}),
+    }));
+}
 /** Same-origin NickHosting only; no provider URL/token or arbitrary API path is accepted. */
 export function createMinecraftUiController(client: GameUiClient) {
   const request = (path: string, method: 'GET' | 'POST', body?: unknown, signal?: AbortSignal) =>
@@ -174,7 +210,11 @@ export function createMinecraftUiController(client: GameUiClient) {
     z
       .array(minecraftChoiceSchema)
       .max(10000)
-      .parse(await request('/v1/minecraft/choices', 'GET', undefined, signal));
+      .parse(
+        await (client.catalogRequest
+          ? client.catalogRequest('/v1/minecraft/choices', signal)
+          : request('/v1/minecraft/choices', 'GET', undefined, signal)),
+      );
   const operate = async (
     serverId: string,
     idempotencyKey: string,
@@ -204,23 +244,10 @@ export function createMinecraftUiController(client: GameUiClient) {
   return {
     choices,
     async runtimeOptions(signal?: AbortSignal): Promise<UiOption[]> {
-      const runtimes = [...new Set((await choices(signal)).map((choice) => choice.runtime))];
-      return runtimes.map((runtime) => ({
-        value: runtime,
-        labelKey: `games.minecraft-java.runtimes.${runtime}`,
-        disabled: false,
-      }));
+      return minecraftCatalogOptions(await choices(signal), 'runtimes', {});
     },
     async choiceOptions(signal?: AbortSignal, runtime?: string): Promise<UiOption[]> {
-      return (await choices(signal))
-        .filter((choice) => !runtime || choice.runtime === runtime)
-        .map((choice) => ({
-          value: choice.id,
-          label: choice.version,
-          disabled: false,
-          releaseType: choice.releaseType ?? 'release',
-          ...(choice.capabilities ? { capabilities: choice.capabilities } : {}),
-        }));
+      return minecraftCatalogOptions(await choices(signal), 'choices', { runtime });
     },
     profile,
     async worlds(serverId: string, signal?: AbortSignal) {

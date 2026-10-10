@@ -1,9 +1,10 @@
 import { type TrustedGameUiModule, type UiOption, uiOptionSchema } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 import { useT } from '../app/i18n.js';
 import { Check, Empty, ErrorNotice, Loading } from '../components/ui.js';
+import { creationCatalogQuery } from './creation-catalog.js';
 import { gameUiClient } from './integrations.js';
 
 export function VersionList({
@@ -28,8 +29,16 @@ export function VersionList({
   const field = module.descriptor.creation.fields.find((entry) => entry.id === fieldId);
   const source = field?.type === 'choice' ? field.source : undefined;
   const dependencies = Object.fromEntries((source?.dependsOn ?? []).map((id) => [id, values[id]]));
-  const options = useQuery({
-    queryKey: ['installer-choices', module.descriptor.gameId, fieldId, dependencies],
+  const shared = Boolean(
+    source &&
+      module.creationCatalog?.handlers.includes(source.handler) &&
+      module.creationCatalog.applies?.(source.handler, values) !== false,
+  );
+  const catalog = useQuery({ ...creationCatalogQuery(module), enabled: shared });
+  const loadedOptions = useQuery({
+    enabled: !shared,
+    staleTime: 60_000,
+    queryKey: ['creation', 'installer-choices', module.descriptor.gameId, fieldId, dependencies],
     queryFn: async ({ signal }) =>
       z
         .array(uiOptionSchema)
@@ -42,6 +51,17 @@ export function VersionList({
               : [],
         ),
   });
+  const sharedOptions = useMemo(
+    () =>
+      catalog.data === undefined || !shared
+        ? undefined
+        : z
+            .array(uiOptionSchema)
+            .max(10000)
+            .parse(module.creationCatalog?.options(catalog.data, source?.handler ?? '', values)),
+    [catalog.data, shared, module, source?.handler, values],
+  );
+  const options = shared ? { ...catalog, data: sharedOptions } : loadedOptions;
   useEffect(() => {
     if (options.data) onChoices(options.data);
   }, [options.data, onChoices]);

@@ -10,6 +10,7 @@ import { z } from 'zod';
 import {
   createMinecraftUiController,
   MinecraftUiError,
+  minecraftCatalogOptions,
   minecraftContentCapabilities,
 } from './controller.js';
 
@@ -540,6 +541,12 @@ export const minecraftUiModule = defineTrustedGameUiModule({
   playerAppearance: {
     fallback: new URL('./assets/player-placeholder.svg', import.meta.url).href,
     avatarUrl: (name) => `https://api.mcheads.org/head/${encodeURIComponent(name)}/64`,
+  },
+  creationCatalog: {
+    handlers: ['runtimes', 'choices'],
+    applies: (_handler, values) => values.sourceMode !== 'modpack',
+    load: (client, signal) => createMinecraftUiController(client).choices(signal),
+    options: minecraftCatalogOptions,
   },
   handlers: {
     'prepare-create': async (client, context) => {

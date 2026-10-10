@@ -134,3 +134,35 @@ suite was rerun. No production or provider resource was read or mutated, no
 settings or availability changed, no containers restarted and no test asset was
 created. The disposable profiling process exited and closed its DB connection.
 SFTPGo #18 and Docker-socket #22 remain unchanged. PR #21 stays open/unmerged.
+
+## Follow-up — Implemented optimization and repeat measurement
+
+After Owner authorization, repeated the same read-only service-path replay on
+**the same 693 enabled combinations**, plus the new 25-row Owner summary request.
+Three sequential rounds, identical instrumentation and exclusions; raw evidence is
+ignored `catalog-profile-after-results.jsonl` with `catalog-profile-after.mjs`.
+The persistent manifest had completed its first worker sync before measurement.
+No external calls occurred in any measured request.
+
+| Path | Before SQL | After SQL | Before median ms | After median ms |
+| --- | ---: | ---: | ---: | ---: |
+| Owner complete catalog, all 693 rows | 2,093 | 21 | 957.50 | 149.47 |
+| User games | 2,774 | 4 | 741.95 | 29.37 |
+| User runtime choices, all 693 | 2,773 | 3 | 840.33 | 44.62 |
+| User version choices, all 693 | 2,773 | 3 | 744.62 | 44.45 |
+
+The current Owner UI instead requests a **25-row summary**: four queries,
+**30.33 ms median** (15.89–89.49 ms), **21,721 JSON bytes**, compared with the old
+1,513,551-byte full response. This is a deliberately smaller response, not a
+like-for-like full-payload speedup. Equivalent complete-catalog after samples were
+227.71, 149.47 and 62.10 ms. User games samples: 29.37/28.32/50.87 ms; runtime:
+92.91/44.62/26.25 ms; version: 44.45/100.89/26.92 ms. Small samples and host scheduling
+still apply; no p95 or real browser click-to-display duration is claimed.
+
+A real Chromium test now separately confirms one games request prefetched from
+Servers and **one shared choices request** across Runtime → Name → Version,
+Show all and Back. Consequently the normal fresh-cache wizard avoids the third
+backend request altogether. Its requests use real isolated application handlers
+and database data, with external metadata/provider fixtures; this establishes
+request reuse, not production latency. The public development login returned HTTPS
+200 with an actual Vite connected frame over WSS after the source updates.

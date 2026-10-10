@@ -17,12 +17,12 @@ import {
   Page,
   Section,
 } from '../components/ui.js';
+import { creationGamesQuery, prefetchCreationCatalog } from './creation-catalog.js';
 import { GameFields } from './game-sections.js';
 import { PlayerList, VersionList } from './installer-fields.js';
 import { gameUiClient, gameUiRegistry, getGameArtwork } from './integrations.js';
 import './installer.css';
 
-type GameEntry = { id: string; access: { canCreate: boolean }; manifest: { runtimes?: unknown[] } };
 type Quota = {
   remaining: { memoryMiB: number; cpuPercent: number; storageMiB: number | null };
   storagePolicy: 'GLOBAL_POOL' | 'PER_USER_BUDGET';
@@ -52,10 +52,7 @@ export function CreateServerPage() {
     key = useRef(idempotencyKey()),
     seeded = useRef(new Set<string>()),
     initializedDisk = useRef(false);
-  const games = useQuery({
-    queryKey: ['creation-games'],
-    queryFn: ({ signal }) => api<GameEntry[]>('/v1/games', { signal }),
-  });
+  const games = useQuery(creationGamesQuery);
   const quota = useQuery({
     queryKey: ['creation-quota'],
     queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
@@ -135,6 +132,7 @@ export function CreateServerPage() {
   function selectGame(id: string) {
     const extension = gameUiRegistry.get(id);
     if (!extension) return;
+    prefetchCreationCatalog(extension);
     setGameId(id);
     setValues({ ...extension.descriptor.creation.defaults });
     setChoices({});

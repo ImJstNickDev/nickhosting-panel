@@ -1,10 +1,19 @@
 import { createTrustedGameUiRegistry, type GameUiClient } from '@nickhosting/game-sdk/ui';
 import { minecraftUiModule } from '@nickhosting/minecraft/ui';
-import { api, upload } from '../api/client.js';
+import { api, queryClient, upload } from '../api/client.js';
 
 /** Executable modules and artwork are build-time imports, never API URLs. */
 export const gameUiRegistry = createTrustedGameUiRegistry([minecraftUiModule]);
-export const gameUiClient: GameUiClient = { request: api, upload };
+export const gameUiClient: GameUiClient = {
+  request: api,
+  upload,
+  catalogRequest: (path) =>
+    queryClient.fetchQuery({
+      queryKey: ['creation', 'request', path],
+      queryFn: ({ signal }) => api(path, { signal }),
+      staleTime: 60_000,
+    }),
+};
 export function getGameArtwork(gameId: string): string | undefined {
   const module = gameUiRegistry.get(gameId);
   const asset = module?.descriptor.artwork;

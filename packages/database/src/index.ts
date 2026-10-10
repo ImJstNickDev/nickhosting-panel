@@ -7,6 +7,7 @@ import type { GatewayTables } from './gateway-types.js';
 import type { HealthTables } from './health-types.js';
 import type { AuthTables } from './identity-types.js';
 import type { JobTables } from './job-types.js';
+import type { MinecraftMetadataTables } from './minecraft-metadata-types.js';
 import type { MinecraftSourceTables } from './minecraft-source-types.js';
 import type { MinecraftTables } from './minecraft-types.js';
 import type { ScheduleTables } from './schedule-types.js';
@@ -19,6 +20,7 @@ export interface Database
     GatewayTables,
     GatewayRouteTables,
     MinecraftTables,
+    MinecraftMetadataTables,
     MinecraftSourceTables,
     ScheduleTables,
     HealthTables {

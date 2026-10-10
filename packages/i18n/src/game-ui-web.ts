@@ -19,6 +19,15 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
   'catalog.type.old_beta': ['Beta', 'Beta'],
   'catalog.type.old_alpha': ['Alpha', 'Alpha'],
   'catalog.type.unknown': ['Unknown', 'Sconosciuto'],
+  'catalog.metadataMissing': [
+    'Release metadata has not been synchronized yet.',
+    'I metadati delle versioni non sono ancora stati sincronizzati.',
+  ],
+  'catalog.metadataStale': [
+    'Showing the last saved release metadata.',
+    'Sono mostrati gli ultimi metadati delle versioni salvati.',
+  ],
+  'catalog.metadataUpdated': ['Last metadata update', 'Ultimo aggiornamento dei metadati'],
   'catalog.releaseDate': ['Released', 'Data di uscita'],
   'catalog.datesUnavailable': [
     'Release dates could not be loaded. Versions without a known date appear last.',

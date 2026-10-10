@@ -68,6 +68,14 @@ export async function api<T = unknown>(
     redirect: 'error',
   });
   if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
+  const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
+  if (method !== 'GET' && path.startsWith('/v1/owner/')) {
+    // Catalog visibility depends on Owner mappings, rollout and availability. Never retain
+    // inactive projections after a write; active views refetch under current identity.
+    await queryClient.cancelQueries({ queryKey: ['creation'] });
+    queryClient.removeQueries({ queryKey: ['creation'], type: 'inactive' });
+    await queryClient.invalidateQueries({ queryKey: ['creation'] });
+  }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }

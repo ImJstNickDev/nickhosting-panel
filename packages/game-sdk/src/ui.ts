@@ -498,6 +498,8 @@ export function actionAvailability(
   return { enabled: true };
 }
 export interface GameUiClient {
+  /** Optional application-owned, identity-cleared cache for authorized creation GETs. */
+  catalogRequest?(path: string, signal?: AbortSignal): Promise<unknown>;
   /** Same-origin application client owns cookies, CSRF, support context, errors and cancellation. */
   request(
     path: string,
@@ -524,6 +526,13 @@ export interface TrustedGameUiModule {
   descriptor: GameUiDescriptor;
   catalogs: { en: Readonly<Record<string, string>>; it: Readonly<Record<string, string>> };
   handlers: Readonly<Record<string, GameUiHandler>>;
+  /** Trusted code only: one authorized catalog, synchronous field projections. */
+  creationCatalog?: {
+    handlers: readonly string[];
+    applies?(handler: string, values: UiValues): boolean;
+    load(client: GameUiClient, signal?: AbortSignal): Promise<unknown>;
+    options(data: unknown, handler: string, values: UiValues): UiOption[];
+  };
   /** Bundled first-party assets only; never supplied by the API descriptor. */
   assets?: Readonly<Record<string, string>>;
   /** Trusted integration owns avatar provider and bundled fallback; never API-supplied URLs. */
@@ -564,6 +573,14 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
   for (const handler of handlerIds)
     if (!Object.hasOwn(module.handlers, handler) || typeof module.handlers[handler] !== 'function')
       throw new Error('game_ui_handler_missing');
+  if (
+    module.creationCatalog &&
+    (!module.creationCatalog.handlers.length ||
+      module.creationCatalog.handlers.some((handler) => !handlerIds.includes(handler)) ||
+      typeof module.creationCatalog.load !== 'function' ||
+      typeof module.creationCatalog.options !== 'function')
+  )
+    throw new Error('game_ui_catalog_invalid');
   const keys = new Set<string>();
   const walk = (value: unknown, name?: string): void => {
     if (typeof value === 'string' && name?.endsWith('Key')) keys.add(value);
@@ -585,6 +602,14 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     catalogs: deepFreeze({ en: { ...module.catalogs.en }, it: { ...module.catalogs.it } }),
     handlers: Object.freeze({ ...module.handlers }),
     assets: Object.freeze({ ...module.assets }),
+    ...(module.creationCatalog
+      ? {
+          creationCatalog: Object.freeze({
+            ...module.creationCatalog,
+            handlers: Object.freeze([...module.creationCatalog.handlers]),
+          }),
+        }
+      : {}),
     ...(module.playerAppearance
       ? { playerAppearance: Object.freeze({ ...module.playerAppearance }) }
       : {}),

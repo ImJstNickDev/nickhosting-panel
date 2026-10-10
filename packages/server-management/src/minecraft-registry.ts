@@ -4,7 +4,6 @@ import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
   assertMinecraftChoice,
-  compareMinecraftChoices,
   fetchMinecraftProtocols,
   minecraftCombinationSchema,
   minecraftDeclaredCapabilities,
@@ -16,7 +15,7 @@ import {
   vanillaEggBinding,
 } from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
-import type { Kysely, Selectable } from 'kysely';
+import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import {
   createRuntimeMetadataClient,
@@ -28,6 +27,7 @@ import {
 } from '../../../games/minecraft/src/runtime.js';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { getMinecraftMetadataStatus } from './minecraft-metadata.js';
 import { ownerOnly, parse } from './registry.js';
 
 type Mapping = Selectable<Database['runtime_egg_mappings']>;
@@ -245,11 +245,22 @@ export async function inspectMinecraftCombination(db: DB, id: string, env: Envir
     .selectAll()
     .where('combination_id', '=', row.id)
     .execute();
+  return inspectLoadedCombination(row, mapping, reports, env);
+}
+
+type CombinationRow = Selectable<Database['minecraft_combinations']>;
+type EvidenceRow = Selectable<Database['minecraft_verification_evidence']>;
+function inspectLoadedCombination(
+  row: CombinationRow,
+  mapping: Mapping,
+  reports: readonly EvidenceRow[],
+  env: Environment,
+  mappingDigest = minecraftMappingDigest(mapping),
+) {
   const evidence = reports
     .filter((report) => validSignature(report.report, report.signature, env))
     .map((report) => minecraftEvidenceSchema.parse(report.report));
   const combination = minecraftCombinationSchema.parse(row.combination);
-  const mappingDigest = minecraftMappingDigest(mapping);
   return {
     row,
     mapping,
@@ -261,6 +272,58 @@ export async function inspectMinecraftCombination(db: DB, id: string, env: Envir
       combination.profile === 'vanilla' ? ('integration' as const) : ('signed-evidence' as const),
     support: minecraftSupport(combination, mappingDigest, row.identity_digest, evidence),
   };
+}
+
+/** Load related data once for the complete selection. Public declared installation
+ * does not need signed diagnostics; undeclared runtimes retain their evidence gate. */
+export async function inspectMinecraftCombinations(
+  db: DB,
+  rows: readonly CombinationRow[],
+  env: Environment = {},
+  diagnostics = true,
+) {
+  if (!rows.length) return [];
+  const mappings = await db
+    .selectFrom('runtime_egg_mappings')
+    .selectAll()
+    .where('id', 'in', [...new Set(rows.map((row) => row.mapping_id))])
+    .execute();
+  const byMapping = new Map(mappings.map((mapping) => [mapping.id, mapping]));
+  const mappingDigests = new Map(
+    mappings.map((mapping) => [mapping.id, minecraftMappingDigest(mapping)]),
+  );
+  const evidenceIds = rows
+    .filter(
+      (row) =>
+        diagnostics ||
+        !minecraftDeclaredCapabilities(minecraftCombinationSchema.parse(row.combination))
+          .installation,
+    )
+    .map((row) => row.id);
+  const reports = evidenceIds.length
+    ? await db
+        .selectFrom('minecraft_verification_evidence')
+        .selectAll()
+        .where('combination_id', 'in', evidenceIds)
+        .execute()
+    : [];
+  const byChoice = new Map<string, EvidenceRow[]>();
+  for (const report of reports) {
+    const entries = byChoice.get(report.combination_id) ?? [];
+    entries.push(report);
+    byChoice.set(report.combination_id, entries);
+  }
+  return rows.map((row) => {
+    const mapping = byMapping.get(row.mapping_id);
+    if (!mapping) throw new DomainError('integration_unavailable');
+    return inspectLoadedCombination(
+      row,
+      mapping,
+      byChoice.get(row.id) ?? [],
+      env,
+      mappingDigests.get(mapping.id),
+    );
+  });
 }
 
 export async function requireMinecraftChoice(
@@ -275,6 +338,15 @@ export async function requireMinecraftChoice(
     .selectAll()
     .where('integration_id', '=', 'minecraft-java')
     .executeTakeFirst();
+  assertLoadedMinecraftChoice(choice, rollout, context);
+  return choice;
+}
+
+function assertLoadedMinecraftChoice(
+  choice: ReturnType<typeof inspectLoadedCombination>,
+  rollout: Selectable<Database['game_rollouts']> | undefined,
+  context: AuthContext,
+) {
   if (
     !rollout ||
     !evaluateGameAccess(
@@ -297,20 +369,41 @@ export async function requireMinecraftChoice(
       rollout.state === 'private-testing' &&
       (context.role === 'owner' || rollout.allowlist.includes(context.subjectUserId)),
   });
-  return choice;
 }
 
 export async function minecraftCatalog(db: DB, context: AuthContext, env: Environment = {}) {
+  const rollout = await db
+    .selectFrom('game_rollouts')
+    .selectAll()
+    .where('integration_id', '=', 'minecraft-java')
+    .executeTakeFirst();
+  if (
+    !rollout ||
+    !evaluateGameAccess(
+      { gameId: 'minecraft-java', state: rollout.state, allowedUserIds: rollout.allowlist },
+      { userId: context.subjectUserId, role: context.role },
+    ).canCreate
+  )
+    return [];
   const rows = await db
-    .selectFrom('minecraft_combinations')
-    .select('id')
-    .where('enabled', '=', true)
+    .selectFrom('minecraft_combinations as choice')
+    .leftJoin('minecraft_release_metadata as release', (join) =>
+      join.on('release.id', '=', sql<string>`choice.combination->>'release'`),
+    )
+    .selectAll('choice')
+    .select('release.release_time as releaseTime')
+    .where('choice.enabled', '=', true)
     .execute();
+  const dates = new Map(rows.map((row) => [row.id, row.releaseTime?.toISOString() ?? null]));
+  const loaded = await inspectMinecraftCombinations(db, rows, env, false);
   const choices = [];
-  for (const row of rows) {
+  for (const choice of loaded) {
     try {
-      const choice = await requireMinecraftChoice(db, context, row.id, env);
-      choices.push(publicMinecraftChoice(row.id, choice.combination));
+      assertLoadedMinecraftChoice(choice, rollout, context);
+      choices.push({
+        ...publicMinecraftChoice(choice.row.id, choice.combination),
+        releaseTime: dates.get(choice.row.id) ?? null,
+      });
     } catch (error) {
       if (
         !(error instanceof DomainError) ||
@@ -319,7 +412,17 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
         throw error;
     }
   }
-  return choices.sort(compareMinecraftChoices);
+  const compare = new Intl.Collator('en', { numeric: true }).compare;
+  return choices.sort(
+    (left, right) =>
+      (left.releaseTime === null ? 1 : 0) - (right.releaseTime === null ? 1 : 0) ||
+      (left.releaseTime && right.releaseTime
+        ? Date.parse(right.releaseTime) - Date.parse(left.releaseTime)
+        : 0) ||
+      compare(right.version, left.version) ||
+      compare(left.runtime, right.runtime) ||
+      compare(left.id, right.id),
+  );
 }
 
 export async function setMinecraftAvailability(
@@ -395,4 +498,139 @@ export async function importMinecraftEvidence(
       kind: value.report.kind,
     });
   });
+}
+
+const minecraftOwnerDetail = (choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>) => ({
+  id: choice.row.id,
+  mappingId: choice.row.mapping_id,
+  enabled: choice.row.enabled,
+  combination: choice.combination,
+  runtime: choice.row.resolved_runtime,
+  binding: choice.row.binding,
+  identityDigest: choice.row.identity_digest,
+  mappingDigest: choice.mappingDigest,
+  support: choice.support,
+  supportAuthority: choice.supportAuthority,
+  capabilities: choice.capabilities,
+  evidence: choice.evidence,
+});
+
+export async function listMinecraftOwnerCombinations(
+  db: DB,
+  query: Record<string, string>,
+  env: Environment = {},
+) {
+  let selection = db
+    .selectFrom('minecraft_combinations as choice')
+    .leftJoin('minecraft_release_metadata as release', (join) =>
+      join.on('release.id', '=', sql<string>`choice.combination->>'release'`),
+    );
+  const releaseTime = (value: Date | null) => ({
+    releaseTime: value?.toISOString() ?? null,
+    releaseTimeStatus: value ? ('available' as const) : ('unknown' as const),
+  });
+  if (query.view === 'summary') {
+    const page = parse(
+      z
+        .object({
+          view: z.literal('summary'),
+          page: z.coerce.number().int().min(1).max(100000).default(1),
+          pageSize: z.coerce.number().int().min(1).max(100).default(25),
+          search: z.string().max(128).optional(),
+          runtime: z.string().max(128).optional(),
+          releaseType: z
+            .enum(['release', 'snapshot', 'old_alpha', 'old_beta', 'unknown'])
+            .optional(),
+          availability: z.enum(['enabled', 'disabled']).optional(),
+          order: z.enum(['newest', 'oldest', 'name-asc', 'name-desc']).default('newest'),
+        })
+        .strict(),
+      query,
+    );
+    if (page.search)
+      selection = selection.where(
+        sql<boolean>`strpos(lower(concat(choice.combination->>'release', ' ', choice.combination->>'profile')), lower(${page.search})) > 0`,
+      );
+    if (page.runtime)
+      selection = selection.where(sql<string>`choice.combination->>'profile'`, '=', page.runtime);
+    if (page.releaseType)
+      selection = selection.where(
+        sql<string>`coalesce(choice.combination->>'releaseType', 'unknown')`,
+        '=',
+        page.releaseType,
+      );
+    if (page.availability)
+      selection = selection.where('choice.enabled', '=', page.availability === 'enabled');
+    const count = await selection
+      .select((eb) => eb.fn.countAll<string>().as('total'))
+      .executeTakeFirstOrThrow();
+    const runtimes = await db
+      .selectFrom('minecraft_combinations')
+      .select(sql<string>`combination->>'profile'`.as('runtime'))
+      .distinct()
+      .orderBy('runtime')
+      .execute();
+    // Natural numeric name order is deterministic across pages, unlike insertion order.
+    const naturalName = sql<string>`(select string_agg(case when part[1] ~ '^[0-9]+$' then lpad(part[1], 20, '0') else lower(part[1]) end, '' order by ordinal) from regexp_matches(choice.combination->>'release', '[0-9]+|[^0-9]+', 'g') with ordinality as parts(part, ordinal)) collate "C"`;
+    let ordered = selection.selectAll('choice').select('release.release_time as releaseTime');
+    if (page.order === 'newest' || page.order === 'oldest')
+      ordered = ordered.orderBy(
+        sql`release.release_time ${sql.raw(page.order === 'newest' ? 'desc' : 'asc')} nulls last`,
+      );
+    ordered = ordered
+      .orderBy(naturalName, page.order === 'name-asc' || page.order === 'oldest' ? 'asc' : 'desc')
+      .orderBy('choice.id', 'asc');
+    const rows = await ordered
+      .limit(page.pageSize)
+      .offset((page.page - 1) * page.pageSize)
+      .execute();
+    const items = rows.map((row) => {
+      const combination = minecraftCombinationSchema.parse(row.combination);
+      return {
+        id: row.id,
+        mappingId: row.mapping_id,
+        enabled: row.enabled,
+        combination,
+        ...releaseTime(row.releaseTime),
+        supportAuthority: combination.profile === 'vanilla' ? 'integration' : 'signed-evidence',
+        capabilities: minecraftDeclaredCapabilities(combination),
+      };
+    });
+    return {
+      items,
+      total: Number(count.total),
+      page: page.page,
+      pageSize: page.pageSize,
+      runtimes: runtimes.map((row) => row.runtime),
+      metadataStatus: await getMinecraftMetadataStatus(db),
+    };
+  }
+  const page = Object.keys(query).length
+    ? parse(
+        z
+          .object({
+            pageSize: z.coerce.number().int().min(1).max(100).default(100),
+            after: z.uuid().optional(),
+          })
+          .strict(),
+        query,
+      )
+    : undefined;
+  if (page?.after) selection = selection.where('choice.id', '>', page.after);
+  const fetched = await (page
+    ? selection.orderBy('choice.id', 'asc').limit(page.pageSize + 1)
+    : selection.orderBy('choice.created_at', 'desc').limit(1000)
+  )
+    .selectAll('choice')
+    .select('release.release_time as releaseTime')
+    .execute();
+  const rows = page ? fetched.slice(0, page.pageSize) : fetched;
+  const dates = new Map(rows.map((row) => [row.id, row.releaseTime]));
+  const choices = await inspectMinecraftCombinations(db, rows, env);
+  const result = choices.map((choice) => ({
+    ...minecraftOwnerDetail(choice),
+    ...releaseTime(dates.get(choice.row.id) ?? null),
+  }));
+  const nextCursor = page && fetched.length > page.pageSize ? (rows.at(-1)?.id ?? null) : null;
+  return page ? { items: result, nextCursor } : result;
 }

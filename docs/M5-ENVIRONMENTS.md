@@ -479,3 +479,32 @@ The helper was never activated; no systemd service or lingering change is needed
 [Issue #22](https://github.com/ImJstNickDev/nickhosting-panel/issues/22) records the
 accepted Docker authority and future hardening. Production stays configuration-only.
 Host/node/mapping registration remains exclusively the Owner's responsibility.
+
+## 2026-10-10 — Local Minecraft manifest and catalog optimization
+
+The existing development database now includes additive migration
+`019_minecraft_metadata.sql`: release metadata and durable synchronization state.
+It was applied explicitly to `nickhosting_dev` using the exact migration SQL,
+standard transaction/advisory lock and checksum record through an existing dev
+container process. No users, settings, mappings, combinations or servers were reset.
+The running worker completed its initial official-manifest synchronization (918
+metadata entries); the 693 existing enabled combinations were unchanged.
+
+No Compose/network changes or container recreation were needed. Existing source
+watchers reload API/worker code and compile translations. For later image builds or
+production preparation, migration 019 must be included in the image and explicitly
+applied before updated services start, following the migration/rebuild procedure
+above. Starting development still does not apply migrations automatically.
+
+The worker checks due state every 30 seconds, downloads the official manifest at
+most once per 15-minute successful cycle, and retains persistent last-good data
+across restarts/outages. It needs the existing configured metadata User-Agent and
+outbound HTTPS to the trusted official metadata endpoint. A failed attempt retries
+after 60 seconds. The Owner page shows absent/stale metadata and last-success time;
+list reads never fall back to upstream HTTP. This synchronization does not register
+or enable combinations, download server artifacts or touch Pterodactyl resources.
+
+Rollback: revert application code if necessary and leave the additive metadata
+tables/data and recorded migration intact. Do not drop tables, reset dev data or
+edit migration history as routine rollback. Existing provider ownership boundaries,
+SFTPGo #18 and direct Docker-socket #22 are unchanged. Production was not deployed.

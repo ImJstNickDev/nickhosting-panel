@@ -345,3 +345,54 @@ is an approximate measured estimate available after two completed batch requests
 in the current run; resume excludes earlier downtime. Paused, failed and complete
 runs do not display a remaining-time estimate. Existing explicit enabling,
 cancellation and retry semantics are unchanged.
+
+## 2026-10-10 — Aggregated catalogs, local manifest and shared creation cache
+
+This checkpoint supersedes the earlier all-pages WebPanel loading and request-time
+Mojang date lookup. Legacy no-query array and `pageSize`/`after` cursor responses
+remain supported, now with bulk related-data reads.
+
+The current Owner UI uses
+`GET /v1/owner/minecraft/compatibility?view=summary&page=1&pageSize=25`.
+Optional `search`, `runtime`, `releaseType`, `availability=enabled|disabled` and
+`order=newest|oldest|name-asc|name-desc` are applied before pagination. Response:
+`{items,total,page,pageSize,runtimes,metadataStatus}`. Runtime facets span the full
+catalog. Search is a literal case-insensitive substring, not SQL wildcard syntax;
+unknown dates sort last with deterministic ties. Summary rows omit full runtime
+bindings, digests and evidence. `GET /v1/owner/minecraft/compatibility/:id` loads the
+protected full detail when selected. Both endpoints remain Owner-only.
+
+The ordinary catalog loads rollout once, combinations/dates together, and mappings
+in bulk: three queries for integration-declared choices. Undeclared runtimes add
+one bulk evidence query when necessary. The same eligibility assertion used by
+single-choice operations still checks enabled mappings, frozen mapping identity,
+rollout/tester access and required signed evidence. Mutating operations continue
+to reauthorize current state. Public choices add `releaseTime: string | null`;
+release families are interleaved by real chronology, unknown dates last.
+
+Migration 019 stores validated official manifest metadata and durable refresh
+state. List endpoints read local data only. The worker independently polls due
+state every 30 seconds; successful external refreshes are spaced 15 minutes apart.
+A 60-second cross-worker lease fences late writers, a 10-second HTTP timeout bounds
+work, and failures retry after 60 seconds while preserving last-good data. Identical
+manifest hashes do not rewrite release rows; changed manifests upsert only new or
+modified rows. Upstream omissions retain known chronology. No automatic mapping,
+combination registration, enablement or evidence promotion occurs. Explicit Owner
+discovery also reuses the local manifest, while still fetching required per-version
+metadata and provider egg information for the requested registration operation.
+
+Trusted Game SDK UI modules can declare optional `creationCatalog` with `handlers`,
+`load`, synchronous `options`, and optional `applies` projections. Registry validation
+checks handler references; executable modules remain first-party imports. The
+application supplies an optional same-origin `catalogRequest` backed by the existing
+identity-cleared QueryClient. Creation cache keys share the `creation` namespace
+and a 60-second freshness window. Servers asynchronously prefetches games; selecting
+an integration prefetches its choices. Runtime/version steps reuse those choices,
+including Back and Show all, without separate HTTP requests during freshness.
+
+Successful Owner writes invalidate creation caches in that browser. Existing
+identity/support transitions cancel and clear/reset the same keys. Other browsers
+refresh according to query freshness; cached options never authorize creation.
+First access without cached data may still show loading. Owner paging keeps prior
+rows during a refresh with `aria-busy`; filters/order remain controlled by the
+request after errors/retry rather than resetting to misleading defaults.

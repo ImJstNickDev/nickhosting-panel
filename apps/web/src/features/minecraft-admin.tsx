@@ -1,10 +1,9 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
-import { ApiError, api } from '../api/client.js';
+import { ApiError, api, queryClient } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
-import { CatalogBrowser } from '../components/catalog-browser.js';
-import { loadCatalogPages } from '../components/catalog-pages.js';
+import { CatalogBrowser, initialCatalogRequest } from '../components/catalog-browser.js';
 import { ScanProgress } from '../components/scan-progress.js';
 import {
   ActionForm,
@@ -104,19 +103,35 @@ interface Combination {
 /** Owner-only technical UI. Ordinary creation never imports this support matrix. */
 export function OwnerMinecraftPage() {
   const t = useT();
+  const [catalogRequest, setCatalogRequest] = useState(initialCatalogRequest);
   const combinations = useQuery({
-    queryKey: ['owner-minecraft-compatibility'],
+    queryKey: ['owner-minecraft-compatibility', catalogRequest],
+    staleTime: 60_000,
+    placeholderData: keepPreviousData,
     queryFn: ({ signal }) =>
-      loadCatalogPages<Combination>(
-        (after) =>
-          api<{ items: Combination[]; nextCursor: string | null }>(
-            `/v1/owner/minecraft/compatibility?${new URLSearchParams({ pageSize: '100', ...(after ? { after } : {}) })}`,
-            { signal },
-          ),
-        signal,
+      api<{
+        items: Combination[];
+        total: number;
+        page: number;
+        pageSize: number;
+        runtimes: string[];
+        metadataStatus: { lastSuccessAt: string | null; stale: boolean };
+      }>(
+        `/v1/owner/minecraft/compatibility?${new URLSearchParams({ view: 'summary', pageSize: '25', page: String(catalogRequest.page), search: catalogRequest.search, order: catalogRequest.order, ...Object.fromEntries(Object.entries(catalogRequest.filters).filter(([, value]) => value)) })}`,
+        { signal },
       ),
   });
   const [selected, setSelected] = useState<string>('');
+  const detail = useQuery({
+    queryKey: ['owner-minecraft-detail', selected],
+    enabled: Boolean(selected),
+    queryFn: ({ signal }) =>
+      api<Combination>(`/v1/owner/minecraft/compatibility/${selected}`, { signal }),
+  });
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['owner-minecraft-compatibility'] });
+    if (selected) void detail.refetch();
+  };
   return (
     <Page title={t('gameAdmin.minecraft')}>
       <Notice>{t('gameAdmin.evidenceBoundary')}</Notice>
@@ -125,11 +140,15 @@ export function OwnerMinecraftPage() {
           <Loading />
         ) : combinations.error ? (
           <ErrorNotice error={combinations.error} retry={() => void combinations.refetch()} />
-        ) : !combinations.data?.length ? (
-          <Empty />
         ) : (
           <CatalogBrowser
-            items={combinations.data.map((choice) => ({
+            server={{
+              request: catalogRequest,
+              total: combinations.data?.total ?? 0,
+              pending: combinations.isFetching,
+              onChange: setCatalogRequest,
+            }}
+            items={(combinations.data?.items ?? []).map((choice) => ({
               ...choice,
               label: choice.combination.release,
             }))}
@@ -139,12 +158,12 @@ export function OwnerMinecraftPage() {
                 id: 'runtime',
                 label: t('gameAdmin.runtime'),
                 value: (choice) => choice.combination.profile,
-                options: [...new Set(combinations.data.map((choice) => choice.combination.profile))]
+                options: [...(combinations.data?.runtimes ?? [])]
                   .sort()
                   .map((value) => ({ value, label: value })),
               },
               {
-                id: 'type',
+                id: 'releaseType',
                 label: t('catalog.releaseType'),
                 value: (choice) => choice.combination.releaseType ?? 'unknown',
                 options: ['release', 'snapshot', 'old_beta', 'old_alpha', 'unknown'].map(
@@ -152,12 +171,12 @@ export function OwnerMinecraftPage() {
                 ),
               },
               {
-                id: 'enabled',
+                id: 'availability',
                 label: t('gameAdmin.availability'),
                 value: (choice) => String(choice.enabled),
                 options: [
-                  { value: 'true', label: t('web.enabled') },
-                  { value: 'false', label: t('web.disabled') },
+                  { value: 'enabled', label: t('web.enabled') },
+                  { value: 'disabled', label: t('web.disabled') },
                 ],
               },
             ]}
@@ -172,7 +191,6 @@ export function OwnerMinecraftPage() {
                     <th>{t('gameAdmin.java')}</th>
                     <th>{t('gameAdmin.protocol')}</th>
                     <th>{t('gameAdmin.installationSupport')}</th>
-                    <th>{t('gameAdmin.support')}</th>
                     <th>{t('gameAdmin.availability')}</th>
                     <th>{t('web.actions')}</th>
                   </tr>
@@ -198,7 +216,6 @@ export function OwnerMinecraftPage() {
                             : 'web.unavailable',
                         )}
                       </td>
-                      <td>{t(`gameAdmin.${choice.support}`)}</td>
                       <td>{t(choice.enabled ? 'web.enabled' : 'web.disabled')}</td>
                       <td>
                         <button
@@ -216,23 +233,36 @@ export function OwnerMinecraftPage() {
             )}
           </CatalogBrowser>
         )}
-        {combinations.data?.some((choice) => choice.releaseTimeStatus === 'unavailable') && (
-          <Notice>{t('catalog.datesUnavailable')}</Notice>
+        {combinations.data?.metadataStatus && (
+          <div>
+            {!combinations.data.metadataStatus.lastSuccessAt ? (
+              <Notice>{t('catalog.metadataMissing')}</Notice>
+            ) : (
+              <>
+                {combinations.data.metadataStatus.stale && (
+                  <Notice>{t('catalog.metadataStale')}</Notice>
+                )}
+                <p className="muted">
+                  {t('catalog.metadataUpdated')}:{' '}
+                  <Time value={combinations.data.metadataStatus.lastSuccessAt} />
+                </p>
+              </>
+            )}
+          </div>
         )}
       </Section>
-      {combinations.data
-        ?.filter((c) => c.id === selected)
-        .map((choice) => (
-          <CombinationDetail
-            key={choice.id}
-            choice={choice}
-            refresh={() => void combinations.refetch()}
-          />
-        ))}
-      <SyncVanillaCatalog refresh={() => void combinations.refetch()} />
+      {selected &&
+        (detail.isPending ? (
+          <Loading />
+        ) : detail.error ? (
+          <ErrorNotice error={detail.error} retry={() => void detail.refetch()} />
+        ) : detail.data ? (
+          <CombinationDetail key={detail.data.id} choice={detail.data} refresh={refresh} />
+        ) : null)}
+      <SyncVanillaCatalog refresh={refresh} />
       <details>
         <summary>{t('gameAdmin.advancedRegistration')}</summary>
-        <RegisterCombination refresh={() => void combinations.refetch()} />
+        <RegisterCombination refresh={refresh} />
       </details>
     </Page>
   );

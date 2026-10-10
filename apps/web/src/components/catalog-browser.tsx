@@ -8,6 +8,18 @@ export interface CatalogItem {
   releaseTime?: string | null;
 }
 export type CatalogOrder = 'newest' | 'oldest' | 'name-asc' | 'name-desc';
+export interface CatalogRequest {
+  page: number;
+  search: string;
+  order: CatalogOrder;
+  filters: Record<string, string>;
+}
+export const initialCatalogRequest: CatalogRequest = {
+  page: 1,
+  search: '',
+  order: 'newest',
+  filters: {},
+};
 export function compareCatalogItems(a: CatalogItem, b: CatalogItem, order: CatalogOrder) {
   const names = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
   if (order === 'newest' || order === 'oldest') {
@@ -29,7 +41,14 @@ export function CatalogBrowser<T extends CatalogItem>({
   label,
   filters,
   children,
+  server,
 }: {
+  server?: {
+    request: CatalogRequest;
+    total: number;
+    pending: boolean;
+    onChange(request: CatalogRequest): void;
+  };
   items: T[];
   label: string;
   filters: {
@@ -42,23 +61,32 @@ export function CatalogBrowser<T extends CatalogItem>({
 }) {
   const t = useT(),
     format = useFormat();
-  const [search, setSearch] = useState(''),
-    [order, setOrder] = useState<CatalogOrder>('newest');
-  const [selected, setSelected] = useState<Record<string, string>>({}),
+  const [localSearch, setSearch] = useState(''),
+    [localOrder, setOrder] = useState<CatalogOrder>('newest');
+  const [localSelected, setSelected] = useState<Record<string, string>>({}),
     [page, setPage] = useState(0);
+  // The request survives a query-error unmount. It is authoritative in server mode.
+  const search = server?.request.search ?? localSearch;
+  const order = server?.request.order ?? localOrder;
+  const selected = server?.request.filters ?? localSelected;
   const query = search.trim().toLocaleLowerCase();
-  const matching = items
-    .filter(
-      (item) =>
-        item.label.toLocaleLowerCase().includes(query) &&
-        filters.every(
-          (filter) => !selected[filter.id] || filter.value(item) === selected[filter.id],
-        ),
-    )
-    .sort((a, b) => compareCatalogItems(a, b, order));
+  const matching = server
+    ? items
+    : items
+        .filter(
+          (item) =>
+            item.label.toLocaleLowerCase().includes(query) &&
+            filters.every(
+              (filter) => !selected[filter.id] || filter.value(item) === selected[filter.id],
+            ),
+        )
+        .sort((a, b) => compareCatalogItems(a, b, order));
   const pageSize = 25,
-    pages = Math.max(1, Math.ceil(matching.length / pageSize)),
-    current = Math.min(page, pages - 1);
+    pages = Math.max(1, Math.ceil((server?.total ?? matching.length) / pageSize)),
+    current = server ? server.request.page - 1 : Math.min(page, pages - 1);
+  function change(patch: Partial<CatalogRequest>) {
+    server?.onChange({ ...server.request, page: 1, ...patch });
+  }
   return (
     <div className="catalog-browser">
       <div className="catalog-filters">
@@ -67,8 +95,11 @@ export function CatalogBrowser<T extends CatalogItem>({
           type="search"
           value={search}
           onChange={(event) => {
-            setSearch(event.target.value);
-            setPage(0);
+            if (server) change({ search: event.target.value });
+            else {
+              setSearch(event.target.value);
+              setPage(0);
+            }
           }}
         />
         {filters.map((filter) => (
@@ -77,8 +108,11 @@ export function CatalogBrowser<T extends CatalogItem>({
             label={filter.label}
             value={selected[filter.id] ?? ''}
             onChange={(event) => {
-              setSelected((previous) => ({ ...previous, [filter.id]: event.target.value }));
-              setPage(0);
+              if (server) change({ filters: { ...selected, [filter.id]: event.target.value } });
+              else {
+                setSelected((previous) => ({ ...previous, [filter.id]: event.target.value }));
+                setPage(0);
+              }
             }}
           >
             <option value="">{t('catalog.all')}</option>
@@ -93,8 +127,11 @@ export function CatalogBrowser<T extends CatalogItem>({
           label={t('catalog.order')}
           value={order}
           onChange={(event) => {
-            setOrder(event.target.value as CatalogOrder);
-            setPage(0);
+            if (server) change({ order: event.target.value as CatalogOrder });
+            else {
+              setOrder(event.target.value as CatalogOrder);
+              setPage(0);
+            }
           }}
         >
           {(['newest', 'oldest', 'name-asc', 'name-desc'] as const).map((value) => (
@@ -108,11 +145,12 @@ export function CatalogBrowser<T extends CatalogItem>({
         key={`${current}/${search}/${order}/${JSON.stringify(selected)}`}
         className="catalog-viewport table-scroll"
         aria-label={label}
+        aria-busy={server?.pending}
         // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard access to the bounded scroll region.
         tabIndex={0}
       >
         {matching.length ? (
-          children(matching.slice(current * pageSize, (current + 1) * pageSize))
+          children(server ? matching : matching.slice(current * pageSize, (current + 1) * pageSize))
         ) : (
           <Empty text={t('catalog.noMatches')} />
         )}
@@ -120,8 +158,8 @@ export function CatalogBrowser<T extends CatalogItem>({
       <div className="catalog-pagination">
         <p role="status">
           {t('catalog.count', {
-            count: format.number(matching.length, 0),
-            total: format.number(items.length, 0),
+            count: format.number(server?.total ?? matching.length, 0),
+            total: format.number(server?.total ?? items.length, 0),
           })}
         </p>
         <div className="actions">
@@ -129,7 +167,10 @@ export function CatalogBrowser<T extends CatalogItem>({
             type="button"
             className="secondary"
             disabled={current === 0}
-            onClick={() => setPage(current - 1)}
+            onClick={() => {
+              if (server) change({ page: current });
+              else setPage(current - 1);
+            }}
           >
             {t('catalog.previous')}
           </button>
@@ -143,7 +184,10 @@ export function CatalogBrowser<T extends CatalogItem>({
             type="button"
             className="secondary"
             disabled={current >= pages - 1}
-            onClick={() => setPage(current + 1)}
+            onClick={() => {
+              if (server) change({ page: current + 2 });
+              else setPage(current + 1);
+            }}
           >
             {t('web.next')}
           </button>

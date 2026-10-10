@@ -29,6 +29,8 @@ afterAll(async () => {
   await database?.destroy();
 });
 beforeEach(async () => {
+  // Each case owns its choices; large catalog fixtures must not enable later cases.
+  await database.db.updateTable('minecraft_combinations').set({ enabled: false }).execute();
   fixture = await managementFixture(database.db, { interactive: true });
   const node = await fixture.db
     .selectFrom('managed_nodes')
@@ -244,13 +246,33 @@ describe('Minecraft backend API authorization and user projection', () => {
       .select('id')
       .orderBy('id', 'asc')
       .execute();
+    let sqlCount = 0;
+    const measured = fixture.db.withPlugin({
+      transformQuery(args) {
+        sqlCount++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const measuredApp = new Hono<{ Variables: Variables }>();
+    registerMinecraftRoutes(measuredApp, {
+      db: measured,
+      env,
+      principal: async () => actor,
+      body: async (c) => c.req.json(),
+      management,
+    });
     const ids: string[] = [];
     let after: string | null = null;
     do {
-      const response = await app.request(
+      sqlCount = 0;
+      const response = await measuredApp.request(
         `/v1/owner/minecraft/compatibility?pageSize=100${after ? `&after=${after}` : ''}`,
       );
       expect(response.status).toBe(200);
+      expect(sqlCount).toBe(3);
       const page = await response.json();
       expect(page.items.length).toBeLessThanOrEqual(100);
       expect(page.items[0]).toHaveProperty('releaseTime');
@@ -261,6 +283,125 @@ describe('Minecraft backend API authorization and user projection', () => {
     expect(ids).toEqual(expected.map((row) => row.id));
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids.length).toBeGreaterThan(1000);
+    const summaryIds: string[] = [];
+    for (let page = 1; summaryIds.length < ids.length; page++) {
+      sqlCount = 0;
+      const response = await measuredApp.request(
+        `/v1/owner/minecraft/compatibility?view=summary&pageSize=100&page=${page}`,
+      );
+      expect(response.status).toBe(200);
+      expect(sqlCount).toBe(4);
+      const body = await response.json();
+      expect(body.total).toBe(ids.length);
+      summaryIds.push(...body.items.map((item: { id: string }) => item.id));
+    }
+    expect(summaryIds).toEqual(ids);
+  });
+  it('serves filtered chronological Owner summaries in bounded queries with lazy protected evidence details', async () => {
+    const sourceId = await eligibleChoice(false);
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', sourceId)
+      .executeTakeFirstOrThrow();
+    const versions = [
+      { version: 'ordering-1.2', type: 'release', date: '2020-01-01', enabled: true },
+      { version: 'ordering-1.10', type: 'release', date: '2022-01-01', enabled: false },
+      { version: 'ordering-snapshot', type: 'snapshot', date: '2021-01-01', enabled: true },
+      { version: 'ordering-unknown', type: 'old_alpha', date: null, enabled: true },
+    ] as const;
+    for (const version of versions) {
+      await fixture.db
+        .insertInto('minecraft_combinations')
+        .values({
+          id: randomUUID(),
+          mapping_id: source.mapping_id,
+          identity_digest: minecraftDigest({ version, sourceId }),
+          mapping_digest: source.mapping_digest,
+          combination: JSON.stringify({
+            ...(source.combination as object),
+            release: version.version,
+            releaseType: version.type,
+          }),
+          resolved_runtime: '{}',
+          binding: '{}',
+          enabled: version.enabled,
+        })
+        .execute();
+      if (version.date)
+        await fixture.db
+          .insertInto('minecraft_release_metadata')
+          .values({
+            id: version.version,
+            release_type: version.type,
+            release_time: new Date(version.date),
+            metadata_url: 'https://example.test/metadata',
+            sha1: 'a'.repeat(40),
+          })
+          .onConflict((c) => c.column('id').doNothing())
+          .execute();
+    }
+    let count = 0;
+    const measured = fixture.db.withPlugin({
+      transformQuery(args) {
+        count++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const measuredApp = new Hono<{ Variables: Variables }>();
+    registerMinecraftRoutes(measuredApp, {
+      db: measured,
+      env,
+      principal: async () => actor,
+      body: async (c) => c.req.json(),
+      management,
+    });
+    actor = fixture.owner;
+    const endpoint = '/v1/owner/minecraft/compatibility?view=summary&search=ordering-&pageSize=2';
+    const response = await measuredApp.request(endpoint);
+    expect(response.status).toBe(200);
+    expect(count).toBe(4);
+    const first = await response.json();
+    expect(first).toMatchObject({ total: 4, page: 1, pageSize: 2, runtimes: ['vanilla'] });
+    expect(
+      first.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.10', 'ordering-snapshot']);
+    expect(first.items[0]).not.toHaveProperty('evidence');
+    expect(first.items[0]).not.toHaveProperty('runtime');
+    const second = await (await measuredApp.request(`${endpoint}&page=2`)).json();
+    expect(
+      second.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.2', 'ordering-unknown']);
+    const filtered = await (
+      await measuredApp.request(
+        `${endpoint}&releaseType=release&availability=enabled&runtime=vanilla`,
+      )
+    ).json();
+    expect(filtered.total).toBe(1);
+    expect(filtered.items[0].combination.release).toBe('ordering-1.2');
+    const oldest = await (await measuredApp.request(`${endpoint}&order=oldest`)).json();
+    expect(
+      oldest.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.2', 'ordering-snapshot']);
+    const names = await (
+      await measuredApp.request(`${endpoint}&order=name-asc&releaseType=release`)
+    ).json();
+    expect(
+      names.items.map((row: { combination: { release: string } }) => row.combination.release),
+    ).toEqual(['ordering-1.2', 'ordering-1.10']);
+    const detail = await (
+      await app.request(`/v1/owner/minecraft/compatibility/${sourceId}`)
+    ).json();
+    expect(detail).toHaveProperty('evidence');
+    actor = fixture.context;
+    expect((await app.request(`/v1/owner/minecraft/compatibility/${sourceId}`)).status).toBe(403);
+    expect((await app.request(`${endpoint}&page=bad`)).status).toBe(403);
+    actor = fixture.owner;
+    expect((await app.request(`${endpoint}&page=bad`)).status).toBe(400);
+    expect((await app.request(`${endpoint}&order=unsafe`)).status).toBe(400);
   });
   it('validates Owner catalog pagination after authorization and preserves empty legacy arrays', async () => {
     const endpoint = '/v1/owner/minecraft/compatibility';
@@ -375,6 +516,7 @@ describe('Minecraft backend API authorization and user projection', () => {
       id: choiceId,
       version: '1.21.1',
       releaseType: 'release',
+      releaseTime: null,
       runtime: 'vanilla',
     });
     const wizard = await (await app.request('/v1/minecraft/wizard')).json();

@@ -329,3 +329,27 @@ describe('installer page contracts', () => {
     ).toBe(false);
   });
 });
+
+it('shares a trusted integration catalog across field handlers without executable API descriptors', async () => {
+  const source = moduleFixture();
+  const catalog = {
+    handlers: ['choices', 'maps'],
+    load: async () => [{ value: 'duel-map', label: 'Duel map', disabled: false }],
+    options: (data: unknown) => data as { value: string; label: string; disabled: boolean }[],
+  };
+  const module = defineTrustedGameUiModule({ ...source, creationCatalog: catalog });
+  const data = await module.creationCatalog?.load({ request: async () => [] });
+  expect(module.creationCatalog?.options(data, 'maps', { mode: 'duel' })).toEqual([
+    { value: 'duel-map', label: 'Duel map', disabled: false },
+  ]);
+  expect(Object.isFrozen(module.creationCatalog?.handlers)).toBe(true);
+  expect(() =>
+    defineTrustedGameUiModule({
+      ...source,
+      creationCatalog: { ...catalog, handlers: ['unknown'] },
+    }),
+  ).toThrow('game_ui_catalog_invalid');
+  expect(
+    gameUiDescriptorSchema.safeParse({ ...source.descriptor, creationCatalog: catalog }).success,
+  ).toBe(false);
+});

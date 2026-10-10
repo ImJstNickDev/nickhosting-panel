@@ -313,3 +313,36 @@ describe('Minecraft browser module and exact API contracts', () => {
     expect(client.request).not.toHaveBeenCalled();
   });
 });
+
+describe('shared creation catalog chronology', () => {
+  it('mixes release kinds by official dates and leaves unknown dates last', () => {
+    const catalog = minecraftUiModule.creationCatalog;
+    const data = [
+      {
+        id: '10000000-0000-4000-8000-000000000001',
+        version: '26.1',
+        runtime: 'vanilla',
+        releaseType: 'release',
+        releaseTime: '2026-03-01T00:00:00Z',
+      },
+      {
+        id: '10000000-0000-4000-8000-000000000002',
+        version: '26.2-snapshot-1',
+        runtime: 'vanilla',
+        releaseType: 'snapshot',
+        releaseTime: '2026-04-01T00:00:00Z',
+      },
+      {
+        id: '10000000-0000-4000-8000-000000000003',
+        version: '99.0',
+        runtime: 'vanilla',
+        releaseTime: null,
+      },
+    ];
+    expect(
+      catalog?.options(data, 'choices', { runtime: 'vanilla' }).map((entry) => entry.label),
+    ).toEqual(['26.2-snapshot-1', '26.1', '99.0']);
+    expect(catalog?.options(data, 'choices', { runtime: 'paper' })).toEqual([]);
+    expect(catalog?.applies?.('choices', { sourceMode: 'modpack' })).toBe(false);
+  });
+});

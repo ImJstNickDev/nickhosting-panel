@@ -337,3 +337,11 @@ announcing every line to screen readers. Preserve cancellation, honest partial
 results and explicit resume. EN/IT labels, keyboard scrolling and contained mobile
 overflow are required. `CatalogBrowser` and `ScanProgress` provide shared patterns
 for trusted integration views rather than Minecraft-specific application rules.
+
+Creation catalogs should preload asynchronously from Servers and reuse trusted
+integration data across wizard steps. Keep authorized cache data through normal
+navigation while invalidating on identity/Owner changes; never use cached choices
+as mutation authorization. Catalog filters/order must remain consistent after
+failed requests and retry. Owner paging/filtering is server-side, with full evidence
+loaded only when details are opened. Display missing/stale local metadata honestly;
+reading a list must not wait for an upstream manifest request.

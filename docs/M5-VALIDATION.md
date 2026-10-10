@@ -1053,3 +1053,81 @@ and zero external requests. Synthetic role inputs exclude session authentication
 actual browser/proxy/rendering timings remain unmeasured. Independent methodology
 and evidence review passed. No app code, configuration, provider or infrastructure
 change; no historical suite rerun. Optimizations await Owner discussion.
+
+## 2026-10-10 — Catalog optimization, persistent manifest and wizard reuse
+
+Implemented after the measurement review. The ordinary Minecraft catalog uses
+three aggregate queries for declared Vanilla choices, with one additional bulk
+evidence query only when undeclared runtimes require it. Owner summary pages use
+four queries and load full evidence separately. The SDK now supports a shared
+trusted creation catalog; Servers prefetches games and runtime/version steps reuse
+one authorized choices response. Real release dates interleave snapshots/releases.
+
+Migration 019 adds persistent manifest/date metadata and synchronization state.
+The worker refreshes every 15 minutes, guarded by a durable cross-worker lease;
+failed downloads preserve last-good data. It applies only new/changed metadata
+rows and never registers/enables runtime combinations automatically. List reads
+and explicit Owner discovery manifest reads use the local copy.
+
+Final focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/creation-catalog.test.ts games/minecraft/src/ui/ui.test.ts packages/game-sdk/src/ui.test.ts apps/web/src/components/catalog-browser.test.ts apps/worker/src/minecraft-metadata.test.ts`:
+  **31 passed**. Covers request reuse, Owner-write and identity invalidation,
+  trusted generic SDK projections, chronological options, controlled filters on
+  remount and worker metadata polling failures.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-registry.integration.test.ts apps/api/src/minecraft.integration.test.ts`:
+  **24 passed**. Includes 1,001 entries with exact bounded SQL counts, global
+  filtering/sorting/pagination, legacy responses, Owner detail authorization,
+  mapping identity and rollout/evidence gates. Initial failures were stale expected
+  additive fields and a large fixture leaking into an empty-catalog assertion;
+  expectations and test isolation were corrected before the passing run.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-metadata.integration.test.ts`:
+  **5 passed**. Changed/unchanged manifest, unchanged-row preservation, last-good
+  failure recovery, concurrent lease election and late-writer/crash fencing.
+- `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/vanilla-catalog.browser.test.ts`:
+  **6 passed**, final 26.38 s. Actual Chromium/handlers/auth/database with external
+  metadata/provider fixtures. Asserts exactly one games request from Servers and
+  one choices request across runtime/name/version/Back/Show all; only the initial
+  fixture metadata sync fetches the manifest. Also checks mixed release chronology,
+  server-side filters/pages, discovery progress and Owner details. Desktop EN/mobile
+  IT: zero Axe violations, page errors or body overflow. Earlier six-test run also
+  passed; only this focused file was repeated after final regression coverage.
+- `scripts/dev.sh pnpm build` and `scripts/dev.sh pnpm typecheck`: passed.
+  **1,042 EN/IT/pseudolocale keys**; existing >500 kB bundle warning remains.
+  No full historical suite or live Minecraft test was rerun.
+
+[Repeat performance measurement](M5-CATALOG-PERFORMANCE.md) uses the same 693
+actual dev combinations, forced read-only profiling and the same explicit
+backend-only limitations. User games median **742 → 29 ms**; choices **840 → 45 ms**.
+New Owner 25-row summary: **30 ms**, 21,721 bytes, four SQL queries; this is a
+smaller response than the old full catalog, whose like-for-like result is recorded
+separately. No browser click-to-display timing is inferred from these numbers.
+
+Reviewed actual screenshots:
+[Optimized Owner desktop EN](screenshots/m5/catalog-optimized-desktop-en.png),
+[Optimized Owner mobile IT](screenshots/m5/catalog-optimized-mobile-it.png).
+Independent technical review found one P2: server-mode filters reset visually after
+an error/remount while retaining the old query. Controls now derive from the parent
+request; a React remount regression covers this. Final source and visual/content
+review found **no remaining must-fix issues**. Focused Skip-link screenshot state
+and redundant filtered count wording remain nonblocking polish.
+
+The additive migration was explicitly applied to the existing development database,
+with exact SQL/checksum and the normal migration advisory lock, without reset or
+modification of existing Owner/server records. First worker sync stored **918**
+official metadata entries; existing **693 enabled combinations** stayed unchanged.
+Existing watchers reload source; no container recreation, network change, production
+operation or Pterodactyl API mutation was performed. Anonymous actual dev smoke:
+HTTPS **200**, secure **WSS** and Vite **connected** frame. Tests used existing
+approved isolated services and disposable schemas; no real game assets created.
+
+Rollback reverts source and retains the additive tables/migration record; no routine
+data deletion or migration downgrade. Future built deployments require migration
+019 before the new code starts. Production release still depends on independent
+SFTPGo #18 and Docker-socket #22 decisions. PR #21 remains open/unmerged.
+
+Final scoped Biome: **30 files passed**. i18n check: **1,042 keys passed**.
+Index governance: **479 text files, 75 review PNGs, 389 relative links, 4 TOML files,
+44 ignored-path cases**, passed; staged whitespace passed. The heuristic secret
+scan complements explicit source and screenshot review. All seven existing dev
+containers remained healthy; no container was recreated for this change.

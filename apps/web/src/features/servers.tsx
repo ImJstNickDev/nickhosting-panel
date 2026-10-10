@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { type ReactNode, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import type {
   getPlatformQuota,
@@ -29,6 +29,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { creationGamesQuery } from './creation-catalog.js';
 import { getGameArtwork } from './integrations.js';
 import { platformPath, type ServerInfo, serverPath, useServer } from './service-contracts.js';
 
@@ -276,6 +277,12 @@ export function HomePage() {
   );
 }
 export function ServersPage() {
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void queryClient.prefetchQuery(creationGamesQuery);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
   const t = useT();
   const [filters, setFilters] = useState({ q: '', state: '', projectId: '' });
   const [cursors, setCursors] = useState<string[]>([]);

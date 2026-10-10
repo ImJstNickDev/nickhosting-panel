@@ -3,6 +3,7 @@ import { type Database, getSettings } from '@nickhosting/database';
 import {
   createRuntimeMetadataClient,
   fetchMinecraftProtocols,
+  minecraftManifestUrl,
   minecraftReleaseCatalog,
   type RuntimeMetadataClient,
 } from '@nickhosting/minecraft';
@@ -10,6 +11,7 @@ import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
 import type { Environment } from './admission.js';
+import { cachedMinecraftManifest } from './minecraft-metadata.js';
 import { registerMinecraftCombination, setMinecraftAvailability } from './minecraft-registry.js';
 import { ownerOnly, parse } from './registry.js';
 
@@ -54,7 +56,10 @@ export async function syncMinecraftCatalog(
     read(url) {
       let result = reads.get(url);
       if (!result) {
-        result = underlying.read(url);
+        result =
+          !options.metadata && url === minecraftManifestUrl
+            ? cachedMinecraftManifest(db)
+            : underlying.read(url);
         reads.set(url, result);
       }
       return result;
