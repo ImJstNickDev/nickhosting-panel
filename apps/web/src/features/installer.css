@@ -71,6 +71,89 @@
   outline: 2px solid var(--accent, #174f91);
   outline-offset: 2px;
 }
+.installer-choice-cards {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.25rem;
+  padding: 0.5rem;
+}
+.installer-choice-card {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: flex-end;
+  width: min(100%, 14rem);
+  aspect-ratio: 3 / 4;
+  padding: 1.25rem;
+  overflow: hidden;
+  border: 2px solid #30424a;
+  border-radius: 0.6rem;
+  background: #15272e;
+  color: #fff;
+  cursor: pointer;
+}
+.installer-choice-art {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+}
+.installer-choice-card input {
+  position: absolute;
+  top: 0.9rem;
+  right: 0.9rem;
+  width: 1.2rem;
+  height: 1.2rem;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--blue, #164cb1);
+}
+.installer-choice-card input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.installer-choice-title {
+  font-size: 1.3rem;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.installer-choice-card:hover {
+  border-color: var(--blue, #164cb1);
+}
+.installer-choice-card:has(input:checked) {
+  outline: 2px solid var(--blue, #164cb1);
+  outline-offset: 3px;
+}
+.installer-choice-card:has(input:focus-visible) {
+  outline: 3px solid #e8ac12;
+  outline-offset: 4px;
+  box-shadow: 0 0 0 2px #172c4b;
+}
+.installer-choice-card:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+@media (forced-colors: active) {
+  .installer-choice-art {
+    display: none;
+  }
+  .installer-choice-card {
+    background: Canvas;
+    color: CanvasText;
+    border-color: ButtonText;
+  }
+  .installer-choice-card:has(input:checked),
+  .installer-choice-card:has(input:focus-visible) {
+    outline-color: Highlight;
+  }
+}
 .installer-versions {
   max-height: 20rem;
   overflow: auto;

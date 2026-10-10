@@ -11,6 +11,7 @@ export function VersionList({
   module,
   fieldId,
   versionFilter = true,
+  presentation = 'list',
   values,
   value,
   onChange,
@@ -19,6 +20,7 @@ export function VersionList({
   module: TrustedGameUiModule;
   fieldId: string;
   versionFilter?: boolean;
+  presentation?: 'list' | 'cards';
   values: Record<string, unknown>;
   value: unknown;
   onChange(value: string): void;
@@ -27,6 +29,9 @@ export function VersionList({
   const t = useT();
   const [all, setAll] = useState(false);
   const field = module.descriptor.creation.fields.find((entry) => entry.id === fieldId);
+  const artwork = module.descriptor.artwork
+    ? module.assets?.[module.descriptor.artwork.assetId]
+    : undefined;
   const source = field?.type === 'choice' ? field.source : undefined;
   const dependencies = Object.fromEntries((source?.dependsOn ?? []).map((id) => [id, values[id]]));
   const shared = Boolean(
@@ -92,12 +97,24 @@ export function VersionList({
         />
       ) : (
         <div
-          className="installer-versions"
+          className={presentation === 'cards' ? 'installer-choice-cards' : 'installer-versions'}
           role="radiogroup"
           aria-label={t(field?.labelKey ?? 'gameUi.version')}
         >
           {visible.map((o) => (
-            <label key={o.value} className="installer-version">
+            <label
+              key={o.value}
+              className={presentation === 'cards' ? 'installer-choice-card' : 'installer-version'}
+            >
+              {presentation === 'cards' && artwork && (
+                <img
+                  className="installer-choice-art"
+                  src={artwork}
+                  alt=""
+                  aria-hidden="true"
+                  draggable={false}
+                />
+              )}
               <input
                 type="radio"
                 name={`server-${fieldId}`}
@@ -106,7 +123,9 @@ export function VersionList({
                 disabled={o.disabled}
                 onChange={() => onChange(o.value)}
               />
-              <span>{o.label ?? t(o.labelKey ?? '')}</span>
+              <span className={presentation === 'cards' ? 'installer-choice-title' : undefined}>
+                {o.label ?? t(o.labelKey ?? '')}
+              </span>
             </label>
           ))}
         </div>

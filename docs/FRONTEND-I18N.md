@@ -56,7 +56,12 @@ Game cards use the integration's bundled art through the static registry, with a
 consistent crop and bounded useful width. Adjacent game/server text supplies the
 name; redundant artwork has empty alternative text. Unknown modules retain an
 honest text fallback. Source/provenance belongs with the game integration. The
-art does not become a hero panel, background effect or substitute for real state.
+art does not become a hero panel or substitute for real state. Runtime selection
+uses centered portrait cards: the integration-owned background art fades from
+fully opaque at the top to transparent at the bottom over a solid dark base,
+with the runtime label below. Native radios retain keyboard selection, visible
+focus and checked states; decorative images do not duplicate accessible labels.
+Version selection remains a compact scrollable list.
 Configured CPU/RAM/disk on cards are labeled as limits, not current usage.
 
 ### Visual and behavior conventions

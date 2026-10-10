@@ -1131,3 +1131,38 @@ Index governance: **479 text files, 75 review PNGs, 389 relative links, 4 TOML f
 44 ignored-path cases**, passed; staged whitespace passed. The heuristic secret
 scan complements explicit source and screenshot review. All seven existing dev
 containers remained healthy; no container was recreated for this change.
+
+
+### 2026-10-10 — Wizard runtime artwork cards
+
+Wizard step 2 now presents runtime choices as centered 3:4 portrait cards using
+trusted, bundled integration artwork. The image fades from opaque at the top to
+transparent at the bottom over a dark base; the runtime name stays opaque and
+readable. Native radios preserve keyboard selection, disabled and checked states,
+with whole-card focus and a forced-colors fallback. Version lists, eligibility,
+catalog caching and API contracts are unchanged.
+
+Focused final validation:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/features/installer.css apps/web/src/features/installer-fields.tsx apps/web/src/features/create-server.tsx apps/web/tests/vanilla-catalog.browser.test.ts`: passed, four files.
+- `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/vanilla-catalog.browser.test.ts -t "discovers declared|offers a direct-only|completes later|renders runtime"`:
+  **4 passed, 2 excluded by the name filter**, final **14.46 s**. Actual Chromium,
+  application handlers/auth/database and existing approved isolated services;
+  external provider/metadata fixtures. Coverage includes keyboard selection,
+  loaded artwork, portrait geometry, mobile reflow, Axe, creation navigation and
+  unchanged catalog request reuse. These results do not claim a full historical
+  suite run.
+
+The first focused run also passed (15.00 s). Screenshot inspection revealed that
+shared input sizing stretched the radio focus ring; the card-specific input sizing
+and whole-card focus treatment were corrected before the final focused rerun.
+Reviewed final screenshots: [desktop EN](screenshots/m5/runtime-cards-desktop-en.png)
+and [mobile IT](screenshots/m5/runtime-cards-mobile-it.png). Independent read-only
+source and rendered UX/content/accessibility review found **no must-fix findings**.
+
+No backend, SDK, configuration, infrastructure or provider mutation. Existing dev
+source watchers apply the UI change. No live test assets created or cleaned;
+no container recreation or database migration. Rollback reverts only this source
+and documentation change. SFTPGo #18 and Docker-socket #22 remain independent
+release decisions; PR #21 stays open and unmerged.

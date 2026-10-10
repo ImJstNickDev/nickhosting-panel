@@ -300,6 +300,7 @@ export function CreateServerPage() {
                   module={module}
                   fieldId={page.field}
                   versionFilter={page.kind === 'version-list'}
+                  presentation={page.kind === 'choice-list' ? 'cards' : 'list'}
                   values={values}
                   value={values[page.field]}
                   onChange={(v) => update(page.field, v)}

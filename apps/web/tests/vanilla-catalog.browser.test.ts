@@ -270,7 +270,20 @@ describe('Owner automatic Vanilla discovery', () => {
       user.getByRole('heading', { name: 'Choose a runtime', exact: true }),
     ).toBeVisible();
     await browserExpect(user.getByRole('radio', { name: 'Paper', exact: true })).toHaveCount(0);
-    await user.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    const vanilla = user.getByRole('radio', { name: 'Vanilla', exact: true });
+    await vanilla.focus();
+    await vanilla.press('Space');
+    await browserExpect(vanilla).toBeChecked();
+    const runtimeCard = user.locator('.installer-choice-card').filter({ has: vanilla });
+    const desktopCard = await runtimeCard.boundingBox();
+    expect(desktopCard?.height).toBeGreaterThan(desktopCard?.width ?? 0);
+    await browserExpect(runtimeCard.locator('img')).toHaveAttribute('alt', '');
+    await browserExpect
+      .poll(() =>
+        runtimeCard.locator('img').evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      )
+      .toBeGreaterThan(0);
+    expect(await runtimeCard.evaluate((card) => getComputedStyle(card).outlineStyle)).toBe('solid');
     await fixture.screenshot(user, 'runtime-step-desktop-en');
     expect(
       (
@@ -438,6 +451,18 @@ describe('Owner automatic Vanilla discovery', () => {
       user.getByRole('heading', { name: 'Scegli un runtime', exact: true }),
     ).toBeVisible();
     await user.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    const mobileCard = await user.locator('.installer-choice-card').boundingBox();
+    expect(mobileCard?.height).toBeGreaterThan(mobileCard?.width ?? 0);
+    expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect(
+      (
+        await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
     await fixture.screenshot(user, 'runtime-step-mobile-it');
     await user.getByRole('button', { name: 'Avanti', exact: true }).click();
     await user.getByLabel('Nome del server', { exact: true }).fill('Mondo Vanilla');
