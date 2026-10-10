@@ -1042,3 +1042,14 @@ passed for all 1,039 keys. `python3 scripts/check-governance.py` passed for
 **470 indexed text files, 73 review PNGs, 385 relative links, 4 TOML files and
 44 ignored-path cases**; staged whitespace passed. The secret scan is heuristic,
 complemented by source and sanitized screenshot review.
+
+## 2026-10-10 — Catalog loading measurement, no optimization
+
+[Measured service-path breakdown](M5-CATALOG-PERFORMANCE.md) records three rounds
+on the current 693-entry development catalog with a forced read-only database
+connection. Owner list: 2,093 queries, 640–1,220 ms; the sole cold Mojang request
+was 149 ms. Wizard user paths: approximately 673–975 ms each, 2,773/2,774 queries
+and zero external requests. Synthetic role inputs exclude session authentication;
+actual browser/proxy/rendering timings remain unmeasured. Independent methodology
+and evidence review passed. No app code, configuration, provider or infrastructure
+change; no historical suite rerun. Optimizations await Owner discussion.
