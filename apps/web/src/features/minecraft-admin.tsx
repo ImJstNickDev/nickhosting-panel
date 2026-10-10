@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { ApiError, api } from '../api/client.js';
 import { useT } from '../app/i18n.js';
@@ -19,6 +19,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { type CatalogBatch, syncCatalogPages } from './catalog-sync.js';
 
 const checks = [
   'installation',
@@ -322,11 +323,6 @@ function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: 
     </>
   );
 }
-type CatalogBatch = {
-  items: { version: string; releaseType: string; id?: string; status: string; reason?: string }[];
-  nextCursor: number | null;
-  total: number;
-};
 function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
   const t = useT();
   const mappings = useQuery({
@@ -341,28 +337,48 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
   const [enableSupported, setEnableSupported] = useState(false);
   const [batch, setBatch] = useState<CatalogBatch>();
   const [busy, setBusy] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
   const [failure, setFailure] = useState<unknown>();
+  const controller = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      controller.current?.abort();
+    };
+  }, []);
   const selected = mappingId || (eligible.length === 1 ? eligible[0]?.id : '');
   async function sync() {
-    if (!selected || busy) return;
+    if (!selected || controller.current) return;
+    const active = new AbortController();
+    controller.current = active;
     setBusy(true);
+    setCancelled(false);
     setFailure(undefined);
+    if (batch?.nextCursor === null) setBatch(undefined);
     try {
-      const response = await api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
-        body: {
-          mappingId: selected,
-          all,
-          enableSupported,
-          cursor: batch?.nextCursor ?? 0,
-          limit: 20,
-        },
+      await syncCatalogPages({
+        previous: batch,
+        signal: active.signal,
+        request: (cursor, signal) =>
+          api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
+            signal,
+            body: { mappingId: selected, all, enableSupported, cursor, limit: 20 },
+          }),
+        progress: setBatch,
       });
-      setBatch(response);
-      refresh();
     } catch (error) {
-      setFailure(error);
+      if (mounted.current) {
+        if (!active.signal.aborted) setFailure(error);
+        else setCancelled(true);
+      }
     } finally {
-      setBusy(false);
+      controller.current = null;
+      if (mounted.current) {
+        setBusy(false);
+        refresh();
+      }
     }
   }
   return (
@@ -383,6 +399,8 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
             onChange={(event) => {
               setMappingId(event.target.value);
               setBatch(undefined);
+              setCancelled(false);
+              setFailure(undefined);
             }}
           >
             <option value="">{t('gameAdmin.mapping')}</option>
@@ -399,6 +417,8 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
             onChange={(event) => {
               setAll(event.target.checked);
               setBatch(undefined);
+              setCancelled(false);
+              setFailure(undefined);
             }}
           />
           <Check
@@ -408,30 +428,51 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
             onChange={(event) => {
               setEnableSupported(event.target.checked);
               setBatch(undefined);
+              setCancelled(false);
+              setFailure(undefined);
             }}
           />
           {failure !== undefined && <ErrorNotice error={failure} />}
+          {cancelled && <Notice>{t('gameAdmin.syncCancelled')}</Notice>}
           <button type="button" disabled={busy || !selected} onClick={() => void sync()}>
             {t(
               busy
                 ? 'web.loading'
-                : batch?.nextCursor
-                  ? 'gameAdmin.syncMore'
+                : batch?.nextCursor || cancelled || failure !== undefined
+                  ? 'gameAdmin.syncResume'
                   : 'gameAdmin.syncCatalog',
             )}
           </button>
+          {busy && (
+            <button type="button" className="secondary" onClick={() => controller.current?.abort()}>
+              {t('web.cancel')}
+            </button>
+          )}
           {batch && (
-            <div aria-live="polite">
+            <div>
+              <p role="status">
+                {t(
+                  busy
+                    ? 'gameAdmin.syncProgress'
+                    : batch.nextCursor === null
+                      ? 'gameAdmin.syncComplete'
+                      : 'gameAdmin.syncPartial',
+                  { count: batch.items.length, total: batch.total },
+                )}
+              </p>
               <p>{t('gameAdmin.syncEvidence')}</p>
-              <ul>
-                {batch.items.map((item) => (
-                  <li key={item.version}>
-                    {item.version}:{' '}
-                    {t(item.status === 'registered' ? 'gameAdmin.registered' : 'web.unavailable')}
-                    {item.reason && <> — {t(`gameAdmin.catalogReason.${item.reason}`)}</>}
-                  </li>
-                ))}
-              </ul>
+              <details>
+                <summary>{t('web.details')}</summary>
+                <ul>
+                  {batch.items.map((item) => (
+                    <li key={item.version}>
+                      {item.version}:{' '}
+                      {t(item.status === 'registered' ? 'gameAdmin.registered' : 'web.unavailable')}
+                      {item.reason && <> — {t(`gameAdmin.catalogReason.${item.reason}`)}</>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
             </div>
           )}
         </div>

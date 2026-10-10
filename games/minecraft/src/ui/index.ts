@@ -19,6 +19,13 @@ const namespace = 'games.minecraft-java';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   name: ['Minecraft Java', 'Minecraft Java'],
+  'installer.runtime': ['Choose a runtime', 'Scegli un runtime'],
+  'fields.runtime': ['Runtime', 'Runtime'],
+  'runtimes.vanilla': ['Vanilla', 'Vanilla'],
+  'runtimes.paper': ['Paper', 'Paper'],
+  'runtimes.folia': ['Folia', 'Folia'],
+  'runtimes.fabric': ['Fabric', 'Fabric'],
+  'runtimes.forge': ['Forge', 'Forge'],
   'installer.version': ['Choose a version', 'Scegli una versione'],
   'installer.operators': ['Who should be an operator?', 'Chi sarà operatore?'],
   'installer.whitelist': ['Do you want to turn whitelist on?', 'Vuoi attivare la whitelist?'],
@@ -30,7 +37,7 @@ const translated: Record<string, [string, string]> = {
   'installer.small': ['1–2', '1–2'],
   'installer.medium': ['3–5', '3–5'],
   'installer.large': ['6+', '6+'],
-  'fields.choiceId': ['Version and runtime', 'Versione e runtime'],
+  'fields.choiceId': ['Version', 'Versione'],
   'fields.sourceMode': ['Server content', 'Contenuti del server'],
   'fields.empty': ['New world', 'Nuovo mondo'],
   'fields.modpack': ['Modpack archive', 'Archivio modpack'],
@@ -224,6 +231,14 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       eula: false,
     },
     pages: [
+      {
+        id: 'runtime',
+        titleKey: k('installer.runtime'),
+        field: 'runtime',
+        kind: 'choice-list',
+        position: 'before-name',
+        resetFields: ['choiceId', 'operators', 'whitelist', 'whitelistEnabled', 'eula'],
+      },
       { id: 'version', titleKey: k('installer.version'), field: 'choiceId', kind: 'version-list' },
       {
         id: 'operators',
@@ -259,7 +274,12 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
     createHandler: 'create',
     prepareHandler: 'prepare-create',
     fields: [
-      field('choiceId', { type: 'choice', required: true, source: { handler: 'choices' } }),
+      field('runtime', { type: 'choice', required: true, source: { handler: 'runtimes' } }),
+      field('choiceId', {
+        type: 'choice',
+        required: true,
+        source: { handler: 'choices', dependsOn: ['runtime'] },
+      }),
       field('operators', {
         type: 'multi-text',
         maxItems: 1000,
@@ -543,7 +563,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
       const choice = (await controller.choices(context.signal)).find(
         (choice) => choice.id === context.values.choiceId,
       );
-      if (!choice) throw new MinecraftUiError('integration_unavailable');
+      if (!choice || (context.values.runtime && context.values.runtime !== choice.runtime))
+        throw new MinecraftUiError('integration_unavailable');
       return {
         values: {
           ...context.values,
@@ -553,7 +574,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
             : {}),
         },
         summary: [
-          { labelKey: k('fields.choiceId'), value: `${choice.version} · ${choice.runtime}` },
+          { labelKey: k('fields.runtime'), value: choice.runtime },
+          { labelKey: k('fields.choiceId'), value: choice.version },
         ],
       };
     },
@@ -589,6 +611,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         .deletePaths,
     'upload-world': (client, context) => uploadArchive(client, context, 'world'),
     'upload-modpack': (client, context) => uploadArchive(client, context, 'modpack'),
+    runtimes: (client, context) =>
+      createMinecraftUiController(client).runtimeOptions(context.signal),
     choices: async (client, context) => {
       const controller = createMinecraftUiController(client);
       if (context.values.sourceMode === 'modpack' && context.values.sourceId) {
@@ -602,7 +626,8 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           disabled: false,
         }));
       }
-      return controller.choiceOptions(context.signal);
+      if (typeof context.values.runtime !== 'string') return [];
+      return controller.choiceOptions(context.signal, context.values.runtime);
     },
     create: async (client, context) => {
       const controller = createMinecraftUiController(client),

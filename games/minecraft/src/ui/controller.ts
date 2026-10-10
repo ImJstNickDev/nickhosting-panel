@@ -203,14 +203,24 @@ export function createMinecraftUiController(client: GameUiClient) {
     );
   return {
     choices,
-    async choiceOptions(signal?: AbortSignal): Promise<UiOption[]> {
-      return (await choices(signal)).map((choice) => ({
-        value: choice.id,
-        label: `${choice.version} · ${choice.runtime}`,
+    async runtimeOptions(signal?: AbortSignal): Promise<UiOption[]> {
+      const runtimes = [...new Set((await choices(signal)).map((choice) => choice.runtime))];
+      return runtimes.map((runtime) => ({
+        value: runtime,
+        labelKey: `games.minecraft-java.runtimes.${runtime}`,
         disabled: false,
-        releaseType: choice.releaseType ?? 'release',
-        ...(choice.capabilities ? { capabilities: choice.capabilities } : {}),
       }));
+    },
+    async choiceOptions(signal?: AbortSignal, runtime?: string): Promise<UiOption[]> {
+      return (await choices(signal))
+        .filter((choice) => !runtime || choice.runtime === runtime)
+        .map((choice) => ({
+          value: choice.id,
+          label: choice.version,
+          disabled: false,
+          releaseType: choice.releaseType ?? 'release',
+          ...(choice.capabilities ? { capabilities: choice.capabilities } : {}),
+        }));
     },
     profile,
     async worlds(serverId: string, signal?: AbortSignal) {

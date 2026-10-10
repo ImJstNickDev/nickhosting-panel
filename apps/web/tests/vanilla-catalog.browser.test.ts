@@ -60,7 +60,13 @@ describe('Owner automatic Vanilla discovery', () => {
       },
     ];
     const documents = new Map<string, Buffer>();
-    const versions = ['26.3', '26.1', '1.21.11'].map((id) => {
+    const versionIds = [
+      '26.3',
+      '26.1',
+      '1.21.11',
+      ...Array.from({ length: 21 }, (_, i) => `25w${String(i + 1).padStart(2, '0')}a`),
+    ];
+    const versions = versionIds.map((id) => {
       const url = `https://piston-meta.mojang.com/v1/packages/fixture/${id}.json`;
       const bytes = Buffer.from(
         JSON.stringify({
@@ -79,7 +85,13 @@ describe('Owner automatic Vanilla discovery', () => {
         }),
       );
       documents.set(url, bytes);
-      return { id, type: 'release', url, sha1: createHash('sha1').update(bytes).digest('hex') };
+      return {
+        id,
+        type: id.startsWith('25w') ? 'snapshot' : 'release',
+        releaseTime: id.startsWith('25w') ? '2026-10-01T00:00:00Z' : '2026-01-01T00:00:00Z',
+        url,
+        sha1: createHash('sha1').update(bytes).digest('hex'),
+      };
     });
     documents.set(minecraftManifestUrl, Buffer.from(JSON.stringify({ versions })));
     const protocols = Buffer.from(
@@ -127,6 +139,16 @@ describe('Owner automatic Vanilla discovery', () => {
     await owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }).click();
     const result = await response;
     expect(result.status()).toBe(200);
+    await browserExpect(
+      owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }),
+    ).toBeEnabled();
+    const details = owner
+      .locator('details')
+      .filter({ hasText: 'No dedicated-server download is available.' });
+    if (await details.count())
+      await details.evaluate((element) => {
+        (element as HTMLDetailsElement).open = true;
+      });
     return result.json() as Promise<{
       items: { id?: string; status: string; version: string; reason?: string }[];
     }>;
@@ -200,7 +222,10 @@ describe('Owner automatic Vanilla discovery', () => {
       )
       .execute();
     await owner
-      .getByRole('checkbox', { name: 'Enable supported versions in this batch', exact: true })
+      .getByRole('checkbox', {
+        name: 'Also enable previously disabled supported versions',
+        exact: true,
+      })
       .check();
     await discover();
     expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(2);
@@ -225,9 +250,25 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.goto(`${fixture.origin}/servers/new`);
     await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
     await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Choose a runtime', exact: true }),
+    ).toBeVisible();
+    await browserExpect(user.getByRole('radio', { name: 'Paper', exact: true })).toHaveCount(0);
+    await user.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    await fixture.screenshot(user, 'runtime-step-desktop-en');
+    expect(
+      (
+        await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
     await user.getByLabel('Server name', { exact: true }).fill('Direct Vanilla');
     await user.getByLabel('Server name', { exact: true }).press('Enter');
-    await user.getByRole('radio', { name: '1.21.11 · vanilla', exact: true }).check();
+    await user.getByRole('radio', { name: '1.21.11', exact: true }).check();
+    await browserExpect(user.getByRole('radio', { name: /vanilla/i })).toHaveCount(0);
+    await fixture.screenshot(user, 'runtime-versions-desktop-en');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect(
       user.getByRole('heading', { name: 'Who should be an operator?', exact: true }),
@@ -239,6 +280,70 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect(user.getByRole('button', { name: '6+', exact: true })).toBeVisible();
     expect(provider.remoteCount()).toBe(1);
+    expect(pageErrors).toEqual([]);
+  });
+  it('completes later pages beyond a snapshot-only first page and restores explicitly enabled stable choices', async () => {
+    await fixture.database.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: false })
+      .execute();
+    await owner
+      .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
+      .check();
+    const firstPage = await discover();
+    expect(firstPage.items).toHaveLength(20);
+    expect(firstPage.items.every((item) => item.version.startsWith('25w'))).toBe(true);
+    const choices = (await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')) as {
+      version: string;
+      releaseType: string;
+    }[];
+    expect(choices.filter((choice) => choice.releaseType === 'snapshot')).toHaveLength(21);
+    expect(
+      choices.some((choice) => choice.version === '1.21.11' && choice.releaseType === 'release'),
+    ).toBe(true);
+    await owner
+      .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
+      .uncheck();
+    expect(provider.remoteCount()).toBe(1);
+  });
+  it('renders runtime and release-only labels on Italian mobile with no overflow', async () => {
+    const user = identities.user;
+    await journeyRequest(fixture, user, '/api/auth/update-user', {
+      name: 'Italian reviewer',
+      locale: 'it',
+    });
+    await user.setViewportSize({ width: 390, height: 844 });
+    await user.goto(`${fixture.origin}/servers/new`);
+    await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Scegli un runtime', exact: true }),
+    ).toBeVisible();
+    await user.getByRole('radio', { name: 'Vanilla', exact: true }).check();
+    await fixture.screenshot(user, 'runtime-step-mobile-it');
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await user.getByLabel('Nome del server', { exact: true }).fill('Mondo Vanilla');
+    await user.getByLabel('Nome del server', { exact: true }).press('Enter');
+    await user.getByRole('radio', { name: '1.21.11', exact: true }).check();
+    await browserExpect(user.getByRole('radio', { name: '25w01a', exact: true })).toHaveCount(0);
+    await user.getByLabel('Mostra tutte le versioni', { exact: true }).check();
+    await browserExpect(user.getByRole('radio', { name: '25w01a', exact: true })).toBeVisible();
+    await user.getByLabel('Mostra tutte le versioni', { exact: true }).uncheck();
+    await fixture.screenshot(user, 'runtime-versions-mobile-it');
+    expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    expect(
+      (
+        await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    // Back through Name to Runtime retains the selected runtime and choice.
+    await user.getByRole('button', { name: 'Indietro', exact: true }).click();
+    await user.getByRole('button', { name: 'Indietro', exact: true }).click();
+    await browserExpect(user.getByRole('radio', { name: 'Vanilla', exact: true })).toBeChecked();
     expect(pageErrors).toEqual([]);
   });
   it('shows a recognized-contract error without mutating provider resources or prior registrations', async () => {
@@ -255,7 +360,9 @@ describe('Owner automatic Vanilla discovery', () => {
         exact: false,
       }),
     ).toHaveCount(2);
-    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(2);
+    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(
+      23,
+    );
     expect(provider.remoteCount()).toBe(1);
   });
 });

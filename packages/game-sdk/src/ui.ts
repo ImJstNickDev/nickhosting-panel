@@ -165,7 +165,9 @@ export const gameUiDescriptorSchema = z
                 id,
                 titleKey: key,
                 field: fieldId,
-                kind: z.enum(['version-list', 'players', 'toggle-players']),
+                kind: z.enum(['choice-list', 'version-list', 'players', 'toggle-players']),
+                position: z.enum(['before-name', 'configuration']).default('configuration'),
+                resetFields: z.array(fieldId).max(64).default([]),
                 lookupHandler: id.optional(),
                 toggleField: fieldId.optional(),
                 seedField: fieldId.optional(),
@@ -306,21 +308,23 @@ export const gameUiDescriptorSchema = z
       const toggle = d.creation.fields.find((f) => f.id === page.toggleField);
       const seed = d.creation.fields.find((f) => f.id === page.seedField);
       if (
-        (page.kind === 'version-list' && field?.type !== 'choice') ||
-        (page.kind !== 'version-list' &&
+        (['choice-list', 'version-list'].includes(page.kind) && field?.type !== 'choice') ||
+        (!['choice-list', 'version-list'].includes(page.kind) &&
           (field?.type !== 'multi-text' || field.format !== 'player-name')) ||
         (page.kind === 'toggle-players' && toggle?.type !== 'boolean') ||
         (page.seedField && (seed?.type !== 'multi-text' || seed.format !== 'player-name'))
       )
         context.addIssue({ code: 'custom', message: 'invalid_page_field_type' });
       if (
-        ![page.field, ...[page.toggleField, page.seedField].filter((v): v is string => !!v)].every(
-          (f) => creationFields.has(f),
-        )
+        ![
+          page.field,
+          ...page.resetFields,
+          ...[page.toggleField, page.seedField].filter((v): v is string => !!v),
+        ].every((f) => creationFields.has(f))
       )
         context.addIssue({ code: 'custom', message: 'invalid_page_field' });
       if (
-        (page.kind !== 'version-list' && !page.lookupHandler) ||
+        (!['choice-list', 'version-list'].includes(page.kind) && !page.lookupHandler) ||
         (page.kind === 'toggle-players' && !page.toggleField)
       )
         context.addIssue({ code: 'custom', message: 'invalid_page_contract' });

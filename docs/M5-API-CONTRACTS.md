@@ -301,3 +301,20 @@ signed-report fields. The integration currently declares Vanilla 26.1/protocol 7
 Gateway behavior. Compiled declaration validation, bounded route leases and all M3
 safety fences remain mandatory. Direct servers are rejected by route/policy/wake
 handlers and queued Gateway-effect authorization.
+
+## 2026-10-10 — Runtime-first wizard and complete discovery
+
+Trusted UI creation pages support `kind: "choice-list"`,
+`position: "before-name" | "configuration"` and validated `resetFields`.
+Minecraft supplies its runtime page before Name; choices derive from authorized
+`/v1/minecraft/choices`, not a hardcoded list of unavailable runtimes. Version
+options depend on the selected runtime and display release names only. Changing
+runtime clears dependent version/player/whitelist/EULA state. Shared Core remains
+game-agnostic. Snapshot-only results have an explicit stable-filter empty state.
+
+Owner discovery now consumes the existing bounded catalog endpoint sequentially
+until `nextCursor: null`, with actual checked counts, cancellation and retry from
+the last acknowledged cursor. It runs only after an Owner action. Cancellation
+may leave the submitted page saved; it does not claim rollback. Existing disabled
+versions require the explicit “Also enable previously disabled supported versions”
+option. No endpoint, authorization or availability default was relaxed.

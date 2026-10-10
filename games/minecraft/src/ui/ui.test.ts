@@ -67,11 +67,43 @@ describe('Minecraft browser module and exact API contracts', () => {
     expect(await controller.choiceOptions()).toEqual([
       {
         value: choiceId,
-        label: '26.1 · vanilla',
+        label: '26.1',
         disabled: false,
         releaseType: 'release',
         capabilities: { playerManagement: true, gateway: true, sleepWake: true },
       },
+    ]);
+  });
+  it('declares runtime before name, offers only eligible runtimes, and filters version-only labels', async () => {
+    const client = clientFixture();
+    const paperId = '10000000-0000-4000-8000-000000000002';
+    const release = { id: choiceId, version: '26.1', runtime: 'vanilla' };
+    client.request.mockResolvedValue([release, { ...release, id: paperId, runtime: 'paper' }]);
+    expect(minecraftUiModule.descriptor.creation.pages[0]).toMatchObject({
+      field: 'runtime',
+      kind: 'choice-list',
+      position: 'before-name',
+      resetFields: ['choiceId', 'operators', 'whitelist', 'whitelistEnabled', 'eula'],
+    });
+    expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
+      { value: 'vanilla', labelKey: 'games.minecraft-java.runtimes.vanilla', disabled: false },
+      { value: 'paper', labelKey: 'games.minecraft-java.runtimes.paper', disabled: false },
+    ]);
+    expect(
+      await minecraftUiModule.handlers.choices?.(client, { values: { runtime: 'vanilla' } }),
+    ).toEqual([{ value: choiceId, label: '26.1', disabled: false, releaseType: 'release' }]);
+    expect(
+      await minecraftUiModule.handlers.choices?.(client, { values: { runtime: 'forge' } }),
+    ).toEqual([]);
+    expect(await minecraftUiModule.handlers.choices?.(client, { values: {} })).toEqual([]);
+    await expect(
+      minecraftUiModule.handlers['prepare-create']?.(client, {
+        values: { runtime: 'paper', choiceId },
+      }),
+    ).rejects.toThrow('integration_unavailable');
+    client.request.mockResolvedValue([release]);
+    expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
+      { value: 'vanilla', labelKey: 'games.minecraft-java.runtimes.vanilla', disabled: false },
     ]);
   });
   it('retains legacy direct capability flags and clears unsupported player fields in preparation', async () => {
@@ -88,7 +120,7 @@ describe('Minecraft browser module and exact API contracts', () => {
     expect(await controller.choiceOptions()).toEqual([
       {
         value: choiceId,
-        label: '1.6.4 · vanilla',
+        label: '1.6.4',
         disabled: false,
         releaseType: 'release',
         capabilities: { playerManagement: false, gateway: false, sleepWake: false },

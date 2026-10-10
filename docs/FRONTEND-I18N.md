@@ -71,8 +71,10 @@ screenshot review; preserve that density as content grows.
 
 Forms preserve entered data on request failure. Destructive dialogs state actual
 loss and require the supported confirmation; no fabricated undo. The creation installer keeps relevant choices/drafts across Back and uses
-server-filtered runtime choices. Its current Vanilla path has separate name,
-version, operators, whitelist and player-count/resource pages; the final Create
+server-filtered runtime choices. Its current Vanilla path is Game → Runtime → Name → Version → Operators →
+Whitelist → Resources → Create. Runtime selection is explicit even when only
+Vanilla is eligible; version rows show only the release identifier. It has separate
+player-count/resource controls; the final Create
 action records EULA acceptance. No project or content-source picker is shown.
 Future preset/modpack creation is tracked separately in issue #24. All submitted jobs link to
 Activity; accepted, running, blocked, uncertain, failed and completed remain

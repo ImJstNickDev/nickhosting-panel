@@ -60,6 +60,10 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
     'This choice is no longer available. Refresh the available options.',
     'Questa opzione non è più disponibile. Aggiorna le opzioni disponibili.',
   ],
+  'gameUi.noStableVersions': [
+    'No stable versions are available. Show all versions to see the other enabled versions.',
+    'Non sono disponibili versioni stabili. Attiva Mostra tutte le versioni per vedere le altre versioni abilitate.',
+  ],
   'gameUi.noOptions': [
     'No compatible options available',
     'Nessuna opzione compatibile disponibile',
@@ -170,17 +174,34 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
   ],
   'gameAdmin.syncCatalog': ['Discover Vanilla versions', 'Scopri versioni Vanilla'],
   'gameAdmin.syncMore': ['Discover more versions', 'Scopri altre versioni'],
+  'gameAdmin.syncResume': ['Resume discovery', 'Riprendi la ricerca'],
+  'gameAdmin.syncProgress': [
+    'Checked {count} of {total} versions',
+    'Controllate {count} versioni su {total}',
+  ],
+  'gameAdmin.syncComplete': [
+    'Discovery completed: {count} versions checked',
+    'Ricerca completata: {count} versioni controllate',
+  ],
+  'gameAdmin.syncPartial': [
+    'Discovery incomplete: {count} of {total} versions checked. Resume to continue.',
+    'Ricerca incompleta: controllate {count} versioni su {total}. Riprendi per continuare.',
+  ],
+  'gameAdmin.syncCancelled': [
+    'Discovery stopped. Saved versions are preserved; the interrupted request may have saved additional versions. Resume to continue.',
+    'Ricerca interrotta. Le versioni salvate vengono conservate; la richiesta interrotta potrebbe averne salvate altre. Riprendi per continuare.',
+  ],
   'gameAdmin.syncHelp': [
-    'The integration reads official versions and configures recognized eggs. No game servers are created.',
-    'L’integrazione legge le versioni ufficiali e configura gli egg riconosciuti. Non vengono creati server di gioco.',
+    'The integration reads official versions and validates the configured egg. No game servers are created.',
+    'L’integrazione legge le versioni ufficiali e convalida l’egg configurato. Non vengono creati server di gioco.',
   ],
   'gameAdmin.enableSupportedBatch': [
-    'Enable supported versions in this batch',
-    'Abilita le versioni supportate di questo gruppo',
+    'Also enable previously disabled supported versions',
+    'Abilita anche le versioni supportate già disabilitate',
   ],
   'gameAdmin.syncEvidence': [
-    'New supported Vanilla versions are enabled by the integration. Existing disabled versions stay disabled unless you select the batch enable option.',
-    'Le nuove versioni Vanilla supportate vengono abilitate dall’integrazione. Quelle già disabilitate restano tali, salvo selezionare l’abilitazione del gruppo.',
+    'New supported Vanilla versions are enabled by the integration. Previously disabled versions stay disabled unless you choose to enable them.',
+    'Le nuove versioni Vanilla supportate vengono abilitate dall’integrazione. Quelle già disabilitate restano tali, salvo scegliere di abilitarle.',
   ],
   'gameAdmin.includeHistorical': [
     'Include snapshots and historical versions',

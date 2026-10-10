@@ -70,14 +70,20 @@ export function CreateServerPage() {
     (entry) =>
       !entry.requiredCapability || chosenCapabilities?.[entry.requiredCapability] !== false,
   );
-  const gameSteps = pages.length || 1,
-    resourcesStep = 2 + gameSteps,
+  const beforeName = pages.filter((entry) => entry.position === 'before-name');
+  const configurationPages = pages.filter((entry) => entry.position !== 'before-name');
+  const nameStep = 1 + beforeName.length,
+    configurationStep = nameStep + 1,
+    resourcesStep = configurationStep + (configurationPages.length || 1),
     finalStep = resourcesStep + 1;
-  const page = pages[step - 2];
+  const page =
+    step > 0 && step < nameStep
+      ? beforeName[step - 1]
+      : configurationPages[step - configurationStep];
   const title =
     step === 0
       ? 'gameUi.chooseGame'
-      : step === 1
+      : step === nameStep
         ? 'gameUi.nameQuestion'
         : step === resourcesStep
           ? 'gameUi.playersQuestion'
@@ -100,15 +106,31 @@ export function CreateServerPage() {
     }
   }, [quota.data]);
   const update = (id: string, value: unknown) => {
-    setValues((v) => ({ ...v, [id]: value }));
+    const resets = page?.field === id && values[id] !== value ? page.resetFields : [];
+    setValues((v) => {
+      const next = { ...v, [id]: value };
+      for (const field of resets) {
+        delete next[field];
+        if (module?.descriptor.creation.defaults[field] !== undefined)
+          next[field] = module.descriptor.creation.defaults[field];
+      }
+      return next;
+    });
+    if (resets.length) {
+      setChoices((previous) =>
+        Object.fromEntries(Object.entries(previous).filter(([field]) => !resets.includes(field))),
+      );
+      seeded.current.clear();
+      setPreparedSummary([]);
+    }
     setErrors((e) => ({ ...e, [id]: '' }));
     key.current = idempotencyKey();
   };
-  const receiveVersions = useCallback(
+  const receiveChoices = useCallback(
     (options: UiOption[]) => {
-      setChoices((previous) => ({ ...previous, [versionField ?? 'choiceId']: options }));
+      setChoices((previous) => ({ ...previous, [page?.field ?? 'choiceId']: options }));
     },
-    [versionField],
+    [page?.field],
   );
   function selectGame(id: string) {
     const extension = gameUiRegistry.get(id);
@@ -130,11 +152,11 @@ export function CreateServerPage() {
     if (busy || playerPending || result || !module) return;
     setFailure(undefined);
     setErrors({});
-    if (step === 1 && !name.trim()) {
+    if (step === nameStep && !name.trim()) {
       setErrors({ name: 'required' });
       return;
     }
-    if (page?.kind === 'version-list') {
+    if (page?.kind === 'version-list' || page?.kind === 'choice-list') {
       const selected = choices[page.field]?.some(
         (o) => o.value === values[page.field] && !o.disabled,
       );
@@ -223,7 +245,7 @@ export function CreateServerPage() {
           <h1 ref={heading} tabIndex={-1}>
             {t(title)}
           </h1>
-          {step === 1 && <p>{t('gameUi.nameHint')}</p>}
+          {step === nameStep && <p>{t('gameUi.nameHint')}</p>}
         </header>
         {failure !== undefined && <ErrorNotice error={failure} />}
         {Object.values(errors).some(Boolean) && <div role="alert">{t('gameUi.required')}</div>}
@@ -261,7 +283,7 @@ export function CreateServerPage() {
                 })}
               </div>
             ))}
-          {step === 1 && (
+          {step === nameStep && (
             <Input
               label={t('gameUi.serverName')}
               required
@@ -275,13 +297,15 @@ export function CreateServerPage() {
           )}
           {page && module && (
             <>
-              {page.kind === 'version-list' && (
+              {(page.kind === 'version-list' || page.kind === 'choice-list') && (
                 <VersionList
                   module={module}
+                  fieldId={page.field}
+                  versionFilter={page.kind === 'version-list'}
                   values={values}
                   value={values[page.field]}
                   onChange={(v) => update(page.field, v)}
-                  onChoices={receiveVersions}
+                  onChoices={receiveChoices}
                 />
               )}
               {page.kind === 'players' && page.lookupHandler && (
@@ -332,7 +356,7 @@ export function CreateServerPage() {
               )}
             </>
           )}
-          {step === 2 && !pages.length && module && (
+          {step === configurationStep && !configurationPages.length && module && (
             <GameFields
               module={module}
               fields={module.descriptor.creation.fields}

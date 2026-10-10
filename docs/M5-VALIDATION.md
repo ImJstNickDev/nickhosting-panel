@@ -923,3 +923,61 @@ record; replaced it with `$HOME`. No credential was present.
 Final index governance: **461 text files, 66 reviewed PNGs, 378 relative links,
 4 TOML files, 44 ignored-path cases — passed**. Staged whitespace passed; private
 files remain ignored. The scanner is heuristic, not a guarantee against every secret.
+
+## 2026-10-10 — Runtime step and truncated discovery correction
+
+Read-only development diagnosis found **20 stable release entries disabled** from
+the old policy and **19 enabled snapshots**. Default stable filtering therefore
+correctly had no eligible results, while Show all exposed only registered snapshots.
+The Owner UI previously fetched only one 20-entry page, making this incomplete
+catalog easy to mistake for complete discovery. No dev entries were automatically
+enabled or deleted during this correction.
+
+Creation is now Game → Runtime → Name → Version, with generic SDK choice pages
+positioned before Name. Only eligible runtime choices appear; selecting Vanilla
+produces release-only version labels. Runtime-dependent cache/reset contracts avoid
+stale choices. Snapshot-only stable-filter results explain how to reveal other
+enabled versions. The Owner discovery action now processes all bounded pages
+sequentially, preserving completed results across failures, supporting cancellation
+and explicit resume. Previously disabled entries still require the explicit Owner
+enabling checkbox; cancellation does not imply rollback of an in-flight request.
+
+Targeted evidence:
+
+- Minecraft UI/Game SDK units: **20 passed**. Catalog paging helper: **7 passed**,
+  covering sequential completion, retry cursor, cancellation and invalid cursor bounds.
+- Browser runner: `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- `apps/web/tests/vanilla-catalog.browser.test.ts`: **5 passed** (13.57s). Real
+  authenticated handlers/database with isolated providers/metadata prove Runtime
+  before Name, release-only labels, stable/all filtering and a snapshot-only first
+  page of 20 followed automatically by the later stable entries. Explicit enabling
+  makes previously disabled fixture releases eligible. EN desktop/IT mobile runtime
+  and version views pass Axe; no page errors or viewport overflow.
+- `apps/web/tests/platform.browser.test.ts -t 'creates a verified-choice|renders the installer'`:
+  **2 passed, 9 filtered** (18.70s), including complete fixture creation, first-start
+  admission refusal and preserved Italian mobile Back/reduced-motion behavior.
+- Aggregate `scripts/dev.sh pnpm typecheck`: passed. No full historical suites or
+  live Minecraft tests repeated; no extra infrastructure was started.
+
+Reviewed actual screenshots: [Runtime desktop](screenshots/m5/runtime-step-desktop-en.png),
+[Runtime mobile](screenshots/m5/runtime-step-mobile-it.png),
+[Versions desktop](screenshots/m5/runtime-versions-desktop-en.png),
+[Versions mobile](screenshots/m5/runtime-versions-mobile-it.png).
+Independent technical and visual review: **no must-fix findings**. Switching between
+two eligible runtimes has controller/descriptor tests; the browser fixture truthfully
+offers only Vanilla, so it does not claim multi-runtime real-server support.
+
+The existing dev source/i18n watchers deliver this change without database migration,
+container recreation, Owner configuration mutation or production interaction.
+No test-owned live assets created. Disposable test schemas are cleaned by the harness.
+SFTPGo #18, Docker-socket #22 and direct-endpoint reachability boundaries are unchanged.
+Rollback is a source revert; already synchronized catalog entries are durable records
+and must not be removed as cleanup. PR #21 remains unmerged.
+
+Final focused aggregate unit run (`games/minecraft/src/ui/ui.test.ts`,
+`packages/game-sdk/src/ui.test.ts`, `apps/web/src/features/catalog-sync.test.ts`):
+**27 passed**. Final build passed (existing bundle-size warning), Biome clean,
+EN/IT/pseudolocale **1015 keys**. Actual dev HTTPS returned **200** and Chromium
+received a Vite **connected** frame over **WSS**; no sign-in or account mutation.
+Index governance passed: **463 text files, 70 review PNGs, 382 relative links,
+4 TOML files, 44 ignored-path cases**. Staged whitespace checks passed.

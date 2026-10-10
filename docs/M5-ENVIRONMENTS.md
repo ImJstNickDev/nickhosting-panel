@@ -253,7 +253,11 @@ return to sandbox; real mode never uses them.
    its rollout. In `/owner/integrations/minecraft-java`, select the Vanilla mapping
    and synchronize the official version catalog. New supported Vanilla entries are
    enabled by default. Existing disabled entries stay disabled unless the Owner
-   explicitly enables them (individually or with the sync batch option).
+   explicitly enables them. To include previously disabled catalog entries, select
+   **Also enable previously disabled supported versions**, then **Discover Vanilla
+   versions**. One action now processes every bounded page; leave historical versions
+   unchecked for stable releases, or include them to discover snapshots as well.
+   Progress distinguishes completed, partial and cancelled discovery.
    Integration declarations establish installation/direct-connect support; a local
    signed test report or verifier key is **not** required for declared Vanilla.
    The Owner capability view distinguishes installation, direct connection,

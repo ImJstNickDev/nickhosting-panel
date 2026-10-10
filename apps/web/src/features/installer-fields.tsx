@@ -8,12 +8,16 @@ import { gameUiClient } from './integrations.js';
 
 export function VersionList({
   module,
+  fieldId,
+  versionFilter = true,
   values,
   value,
   onChange,
   onChoices,
 }: {
   module: TrustedGameUiModule;
+  fieldId: string;
+  versionFilter?: boolean;
   values: Record<string, unknown>;
   value: unknown;
   onChange(value: string): void;
@@ -21,44 +25,62 @@ export function VersionList({
 }) {
   const t = useT();
   const [all, setAll] = useState(false);
+  const field = module.descriptor.creation.fields.find((entry) => entry.id === fieldId);
+  const source = field?.type === 'choice' ? field.source : undefined;
+  const dependencies = Object.fromEntries((source?.dependsOn ?? []).map((id) => [id, values[id]]));
   const options = useQuery({
-    queryKey: ['installer-choices', module.descriptor.gameId],
+    queryKey: ['installer-choices', module.descriptor.gameId, fieldId, dependencies],
     queryFn: async ({ signal }) =>
       z
         .array(uiOptionSchema)
         .max(10000)
         .parse(
-          await module.handlers[module.descriptor.creation.choicesHandler]?.(gameUiClient, {
-            values,
-            signal,
-          }),
+          source
+            ? await module.handlers[source.handler]?.(gameUiClient, { values, signal })
+            : field?.type === 'choice'
+              ? field.options
+              : [],
         ),
   });
   useEffect(() => {
     if (options.data) onChoices(options.data);
   }, [options.data, onChoices]);
   const visible =
-    options.data?.filter((o) => all || !o.releaseType || o.releaseType === 'release') ?? [];
+    options.data?.filter(
+      (o) => !versionFilter || all || !o.releaseType || o.releaseType === 'release',
+    ) ?? [];
   return (
     <>
-      <Check
-        label={t('gameUi.showAllVersions')}
-        checked={all}
-        onChange={(e) => setAll(e.target.checked)}
-      />
+      {versionFilter && (
+        <Check
+          label={t('gameUi.showAllVersions')}
+          checked={all}
+          onChange={(e) => setAll(e.target.checked)}
+        />
+      )}
       {options.isPending ? (
         <Loading />
       ) : options.error ? (
         <ErrorNotice error={options.error} retry={() => void options.refetch()} />
       ) : !visible.length ? (
-        <Empty text={t('gameUi.noOptions')} />
+        <Empty
+          text={t(
+            versionFilter && !all && options.data?.length
+              ? 'gameUi.noStableVersions'
+              : 'gameUi.noOptions',
+          )}
+        />
       ) : (
-        <div className="installer-versions" role="radiogroup" aria-label={t('gameUi.version')}>
+        <div
+          className="installer-versions"
+          role="radiogroup"
+          aria-label={t(field?.labelKey ?? 'gameUi.version')}
+        >
           {visible.map((o) => (
             <label key={o.value} className="installer-version">
               <input
                 type="radio"
-                name="server-version"
+                name={`server-${fieldId}`}
                 value={o.value}
                 checked={value === o.value}
                 disabled={o.disabled}
