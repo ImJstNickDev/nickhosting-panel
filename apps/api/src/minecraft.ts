@@ -370,6 +370,9 @@ export function registerMinecraftRoutes(
       input.minecraft.configuration,
       content,
     );
+    // Content preparation can involve remote work; sample immediately before admission.
+    // The first server cannot depend on worker reconciliation having sampled this host.
+    await service.refreshObservations();
     return c.json(
       await createManagedServer(
         db,

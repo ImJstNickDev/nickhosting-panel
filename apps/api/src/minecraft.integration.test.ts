@@ -544,6 +544,53 @@ describe('Minecraft backend API authorization and user projection', () => {
         .executeTakeFirstOrThrow(),
     ).toEqual({ combination_id: choiceId });
   });
+  it.each(['missing', 'stale'] as const)(
+    'refreshes %s host observations before first Minecraft creation',
+    async (kind) => {
+      const choiceId = await eligibleChoice(false);
+      if (kind === 'missing')
+        await fixture.db
+          .deleteFrom('host_observations')
+          .where('host_id', '=', fixture.hostId)
+          .execute();
+      else await fixture.observe({}, new Date(0));
+      const response = await post('/v1/minecraft/servers', createInput(choiceId));
+      expect(response.status).toBe(202);
+      const observation = await fixture.db
+        .selectFrom('host_observations')
+        .select('observed_at')
+        .where('host_id', '=', fixture.hostId)
+        .executeTakeFirstOrThrow();
+      expect(Date.now() - observation.observed_at.getTime()).toBeLessThan(15000);
+      const created = await response.json();
+      expect(
+        await fixture.db
+          .selectFrom('managed_servers')
+          .select('id')
+          .where('id', '=', created.serverId)
+          .executeTakeFirst(),
+      ).toBeDefined();
+    },
+  );
+  it('still refuses creation when the observer cannot supply a valid sample', async () => {
+    const choiceId = await eligibleChoice(false);
+    await fixture.db
+      .deleteFrom('host_observations')
+      .where('host_id', '=', fixture.hostId)
+      .execute();
+    const service = await management();
+    management.mockResolvedValue({ ...service, refreshObservations: async () => {} });
+    const response = await post('/v1/minecraft/servers', createInput(choiceId));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: 'resources_unavailable' });
+    expect(
+      await fixture.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('owner_id', '=', actor.subjectUserId)
+        .execute(),
+    ).toEqual([]);
+  });
   it('creates Vanilla without an evidence key/report and exposes accurate Owner feature diagnostics', async () => {
     const choiceId = await eligibleChoice(false);
     const response = await post('/v1/minecraft/servers', createInput(choiceId));

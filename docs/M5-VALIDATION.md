@@ -1768,3 +1768,29 @@ forwarding/sleep/wake remains to be exercised on the server the Owner will creat
 Issue #18 and the existing production-release/infrastructure boundaries are unchanged.
 Rollback is a reviewed code revert with retained data; automatic routes already
 reserved/activated must be inspected explicitly, never broadly deleted or retargeted.
+
+## M5 follow-up — First Minecraft creation resource observation
+
+An Owner creation request failed with `resources_unavailable` before creating any
+managed server. Read-only investigation found no `host_observations` row, despite
+matching enabled host/observer identities. The Minecraft creation endpoint omitted
+`refreshObservations`, unlike the generic server endpoint. The worker intentionally
+skips reconciliation when no managed server exists, so first creation could not rely
+on a background sample. This was absent admission evidence, not measured RAM exhaustion.
+
+The Minecraft endpoint now refreshes the existing observer immediately after content
+preparation and before transactional creation/admission. No thresholds, quotas, host
+settings, worker scheduling or provider policy changed. A missing valid sample still
+fails closed. The dev sampler was exercised read-only and returned valid memory/CPU/
+disk values; no host observation or server was manually seeded.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/minecraft.integration.test.ts`
+  — **19 passed**, including missing/stale first-creation observations and refusal
+  when refreshing supplies no valid sample. Provider effects remain isolated fixtures.
+- `scripts/dev.sh pnpm exec tsc --noEmit` — passed.
+- Focused Biome on both changed API files, indexed governance and diff hygiene — passed.
+- Independent read-only reviewer found no must-fix; no historical full-suite rerun.
+
+No real server was created, started or changed. No quota/configuration or infrastructure
+mutation was performed. Existing dev source watching applies this API correction.
+The Owner can retry creation; actual installation/start still require normal admission.
