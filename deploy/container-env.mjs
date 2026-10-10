@@ -13,17 +13,22 @@ export function containerEnvironment(input) {
     (providerMode !== 'real' || !/^[a-f0-9]{64}$/.test(evidenceKey))
   )
     throw new Error('Invalid deployment field: NH_DEV_MINECRAFT_EVIDENCE_KEY');
-  const observerSocket = input.NH_DEV_HOST_OBSERVER_SOCKET;
-  const observerId = input.NH_DEV_OBSERVER_ID;
-  if (development && (observerSocket !== undefined || observerId !== undefined)) {
+  const prefix = development ? 'NH_DEV_' : 'NH_PROD_';
+  const observerSocket = input[`${prefix}DOCKER_OBSERVER_SOCKET`];
+  const observerId = input[`${prefix}OBSERVER_ID`];
+  if (
+    input[`${prefix}HOST_OBSERVER_SOCKET`] !== undefined ||
+    input.NH_HOST_OBSERVER_SOCKET !== undefined
+  )
+    throw new Error('Remote host observer configuration is unsupported');
+  if (observerSocket !== undefined || observerId !== undefined) {
     if (
-      providerMode !== 'real' ||
-      observerSocket !== '/run/nickhosting-observer/observer.sock' ||
+      (development && providerMode !== 'real') ||
+      observerSocket !== '/var/run/docker.sock' ||
       !/^[a-zA-Z0-9_-]{1,64}$/.test(observerId ?? '')
     )
-      throw new Error('Invalid development host observer configuration');
+      throw new Error('Invalid direct Docker observer configuration');
   }
-  const prefix = development ? 'NH_DEV_' : 'NH_PROD_';
   const notDevKey = (key) => !key.startsWith('NH_DEV_');
   const required = (name, secret = false) => {
     const value = input[prefix + name];
@@ -42,6 +47,8 @@ export function containerEnvironment(input) {
     'NH_SECRETS_MASTER_KEY',
     'NH_SETUP_TOKEN',
     'NH_JOB_PREFIX',
+    'NH_DOCKER_OBSERVER_SOCKET',
+    'NH_OBSERVER_ID',
   ]) {
     if (input[field] !== undefined)
       throw new Error(`Use environment-scoped field instead of ${field}`);
@@ -152,11 +159,11 @@ export function containerEnvironment(input) {
       });
     else {
       if (evidenceKey !== undefined) env.NH_MINECRAFT_EVIDENCE_KEY = evidenceKey;
-      if (observerSocket !== undefined) {
-        env.NH_HOST_OBSERVER_SOCKET = observerSocket;
-        env.NH_OBSERVER_ID = observerId;
-      }
     }
+  }
+  if (observerSocket !== undefined) {
+    env.NH_DOCKER_OBSERVER_SOCKET = observerSocket;
+    env.NH_OBSERVER_ID = observerId;
   }
   return env;
 }

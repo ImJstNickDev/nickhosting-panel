@@ -10,7 +10,6 @@ import {
   type ContainerObserver,
   createContainerObserver,
   createPterodactylAdapter,
-  createRemoteHostObserver,
   type PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
@@ -233,12 +232,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     : await getSecret(db, options.codec, 'pterodactylClientKey', env);
   if (!options.adapter && (!values.pterodactylBaseUrl || !applicationKey || !clientKey))
     throw new DomainError('integration_unavailable');
-  const remoteObserver = env.NH_HOST_OBSERVER_SOCKET
-    ? createRemoteHostObserver(env.NH_HOST_OBSERVER_SOCKET, env.NH_OBSERVER_ID ?? '')
-    : undefined;
   const containerObserver =
     options.containerObserver ??
-    remoteObserver ??
     (values.dockerObserverSocket
       ? createContainerObserver(values.dockerObserverSocket)
       : undefined);
@@ -279,14 +274,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       if (host.enabled && env.NH_OBSERVER_ID === host.observer_id) {
         // Conservative admission does not credit cached managed telemetry against
         // a newer host sample. All direct servers and other workloads stay counted.
-        await observeLocalHost(
-          connection,
-          host.id,
-          env.NH_OBSERVER_ID,
-          {},
-          env,
-          remoteObserver ? (path) => remoteObserver.sample(path) : undefined,
-        );
+        await observeLocalHost(connection, host.id, env.NH_OBSERVER_ID, {}, env);
       }
     }
   }

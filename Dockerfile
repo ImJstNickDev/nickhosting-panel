@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+FROM docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144 AS docker-cli
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tooling
 WORKDIR /app
 RUN npm install --global pnpm@10.33.0
@@ -8,6 +9,7 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 
 FROM dependencies AS development
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 RUN mkdir -p /app/mountdata && chown -R node:node /app
 USER node
 ENTRYPOINT ["node", "deploy/container-entry.mjs"]
@@ -21,6 +23,7 @@ RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS runtime
 ENV NODE_ENV=production
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
 COPY --from=production-dependencies --chown=node:node /app/ ./
 USER node

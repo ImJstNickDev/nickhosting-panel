@@ -594,3 +594,61 @@ socket single-instance requirement documented. Activation, API-to-live-helper
 sampling and actual service restart remain **pending exact Owner approval**, not
 passed tests. Minecraft mapping certification and Gateway listener deployment are
 separate remaining prerequisites; SFTPGo stays disabled and issue #18 unchanged.
+
+### 2026-10-10 — Owner-approved direct Docker activation
+
+The Owner superseded the prepared helper proposal with explicit direct Docker
+socket access for development and future production, accepting the risk in
+[issue #22](https://github.com/ImJstNickDev/nickhosting-panel/issues/22). Dev/prod
+will not run together. The helper/service/remote-only tests were removed from the
+active implementation; the historical report above describes that unactivated
+attempt faithfully. No systemd unit or lingering change was made.
+
+Changes: direct-socket overlays for dev/prod API+worker only; scoped environment
+validation and existing socket group access; pinned Docker CLI 29.6.2 in dev/runtime
+image stages. Production remains configuration-only. A physical sampling bug was
+corrected: dev `availableParallelism()` was 1 under the container quota, whereas
+host counters and Docker report 14 logical CPUs. Sampling now consistently uses
+host counter capacity (1400 percent), rejects invalid counters/memory/disk, and
+retains admission/provider ownership rules.
+
+Actual authorized dev operations:
+
+- Updated only scoped observer inputs and private Compose overlay selection;
+  preserved all credentials. Built only the dev app image.
+- `docker compose --env-file .env.dev.local up -d --no-deps --wait api worker`:
+  both recreated healthy. Supplementary group matches the existing socket group;
+  socket permissions unchanged. Only API/worker have the socket mount. No host
+  ports, network attachments, frontend, data services or production services changed.
+- Standard adapter `createContainerObserver(...).preflight()` from the API passed.
+  Worker Docker CLI independently reports 14 CPUs. Actual API physical sample:
+  1400 percent CPU, 64302.22 MiB total memory, approximately 24362 MiB available
+  memory and 72383 MiB available disk at that instant (not Owner quota suggestions).
+  `/app/mountdata` is the existing dev app bind on the host filesystem already
+  verified to back Wings data; no Wings contents mounted or read.
+- `docker compose --env-file .env.dev.local restart api worker`: passed; all seven
+  dev services healthy afterwards and Docker preflight still works. Database
+  counts before/after: physical hosts 0, managed nodes 0, runtime mappings 0,
+  Owner/user accounts 1. No migrations or records seeded.
+- Actual Chromium navigation: HTTPS **200**, certificate verification enabled,
+  secure Vite WSS endpoint and **HMR connected frame** received. No UI changes or
+  source-edit propagation retest. Existing frontend/catalog watchers unchanged.
+
+Focused source verification:
+
+- `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts -t 'scoped container environment|deployment Compose isolation'`:
+  **36 passed, 6 outside filter**. Two initial assertions expected the old rejection
+  text; corrected to assert the rejected field after validation moved earlier.
+- `host-resources.test.ts`: **10 passed** (physical-vs-quota CPU, counter changes,
+  malformed memory/disk and failure behavior).
+- `scripts/dev.sh pnpm typecheck`: passed. Targeted Biome and whitespace passed.
+- No historical full M1–M5 test matrix or game-server scenario repeated.
+- Independent review: **zero must-fix**, with requested actual CLI/resource/disk
+  evidence completed above. Full Docker API authority is an accepted limitation,
+  not a security guarantee from the read-only bind mount.
+
+No real servers created or modified, no production deployment, no frontend
+redesign. Owner now has the operational observation environment for registering
+host/node/mapping configuration themselves. Exact Minecraft evidence, transfer
+origins and any Gateway listener plan remain their distinct requirements, not
+claims established by this environment check. SFTPGo stays disabled; #18 unchanged.

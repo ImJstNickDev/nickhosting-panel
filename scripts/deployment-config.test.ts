@@ -161,27 +161,42 @@ describe('scoped container environment', () => {
       ).toThrow(/independent/);
   });
 
-  it('enables the bounded host observer only with an explicit real-mode identity/socket pair', () => {
-    const input = {
-      ...deployment('development'),
-      NH_DEV_PROVIDER_MODE: 'real',
-      NH_DEV_OBSERVER_ID: 'dev-host',
-      NH_DEV_HOST_OBSERVER_SOCKET: '/run/nickhosting-observer/observer.sock',
-    };
-    const env = containerEnvironment(input);
-    expect(env.NH_OBSERVER_ID).toBe('dev-host');
-    expect(env.NH_HOST_OBSERVER_SOCKET).toBe(input.NH_DEV_HOST_OBSERVER_SOCKET);
-    expect(env.NH_DOCKER_OBSERVER_SOCKET).toBeUndefined();
-    for (const overrides of [
-      { NH_DEV_PROVIDER_MODE: 'sandbox' },
-      { NH_DEV_OBSERVER_ID: undefined },
-      { NH_DEV_OBSERVER_ID: '../other' },
-      { NH_DEV_HOST_OBSERVER_SOCKET: undefined },
-      { NH_DEV_HOST_OBSERVER_SOCKET: '/var/run/docker.sock' },
-    ])
-      expect(() => containerEnvironment({ ...input, ...overrides })).toThrow(/observer/);
-    expect(containerEnvironment(deployment('development')).NH_HOST_OBSERVER_SOCKET).toBeUndefined();
-  });
+  it.each(['development', 'production'] as const)(
+    'enables direct Docker observation only with the explicit scoped %s identity/socket pair',
+    (environment) => {
+      const prefix = environment === 'development' ? 'NH_DEV_' : 'NH_PROD_';
+      const input = {
+        ...deployment(environment),
+        ...(environment === 'development' ? { NH_DEV_PROVIDER_MODE: 'real' } : {}),
+        [`${prefix}OBSERVER_ID`]: 'physical-host',
+        [`${prefix}DOCKER_OBSERVER_SOCKET`]: '/var/run/docker.sock',
+      };
+      const env = containerEnvironment(input);
+      expect(env.NH_OBSERVER_ID).toBe('physical-host');
+      expect(env.NH_DOCKER_OBSERVER_SOCKET).toBe('/var/run/docker.sock');
+      expect(env.NH_HOST_OBSERVER_SOCKET).toBeUndefined();
+      for (const overrides of [
+        { [`${prefix}OBSERVER_ID`]: undefined },
+        { [`${prefix}OBSERVER_ID`]: '../other' },
+        { [`${prefix}DOCKER_OBSERVER_SOCKET`]: undefined },
+        { [`${prefix}DOCKER_OBSERVER_SOCKET`]: 'tcp://docker:2375' },
+        { [`${prefix}HOST_OBSERVER_SOCKET`]: '/run/remote.sock' },
+        { NH_HOST_OBSERVER_SOCKET: '/run/remote.sock' },
+        ...(environment === 'development' ? [{ NH_DEV_PROVIDER_MODE: 'sandbox' }] : []),
+      ])
+        expect(() => containerEnvironment({ ...input, ...overrides })).toThrow(/observer/);
+      expect(
+        containerEnvironment(deployment(environment)).NH_DOCKER_OBSERVER_SOCKET,
+      ).toBeUndefined();
+      const migrate = containerEnvironment({
+        ...deployment(environment),
+        [`${prefix}PHYSICAL_HOST_ID`]: 'physical-host',
+        [`${prefix}DOCKER_GID`]: '123',
+      });
+      expect(migrate.NH_DOCKER_OBSERVER_SOCKET).toBeUndefined();
+      expect(migrate.NH_OBSERVER_ID).toBeUndefined();
+    },
+  );
 
   it('encodes URL-reserved password characters without changing connection hosts', () => {
     const password = `test-only:@/%?#[]${'x'.repeat(32)}`;
@@ -429,7 +444,7 @@ describe('scoped container environment', () => {
             NH_DEV_PROVIDER_MODE: mode,
             [field]: 'private-value',
           }),
-        ).toThrow(`development: ${field}`);
+        ).toThrow(field);
     },
   );
 });
@@ -694,6 +709,7 @@ type ComposeService = {
   profiles?: string[];
   restart?: string;
   dns?: string[];
+  group_add?: string[];
   depends_on?: Record<string, unknown>;
   volumes?: Array<{
     type: string;
@@ -733,14 +749,22 @@ function composeConfiguration(
       '-f',
       `compose.${scope}.yaml`,
       ...(realProvider ? ['-f', 'compose.dev.real.yaml'] : []),
-      ...(observer ? ['-f', 'compose.dev.observer.yaml'] : []),
+      ...(observer ? ['-f', `compose.${scope}.observer.yaml`] : []),
       'config',
       '--format',
       'json',
     ],
     {
       cwd: repository,
-      env: { ...environment, ...(observer ? { NH_DEV_OBSERVER_ID: 'test-host' } : {}) },
+      env: {
+        ...environment,
+        ...(observer
+          ? {
+              [`NH_${scope.toUpperCase()}_PHYSICAL_HOST_ID`]: 'test-host',
+              [`NH_${scope.toUpperCase()}_DOCKER_GID`]: '123',
+            }
+          : {}),
+      },
       encoding: 'utf8',
       timeout: 15_000,
     },
@@ -751,21 +775,38 @@ function composeConfiguration(
 }
 
 describe('deployment Compose isolation (read-only configuration parsing)', () => {
-  it('mounts only the narrow observer socket into real API/worker without new networks or services', () => {
-    const base = composeConfiguration('dev', true);
-    const configured = composeConfiguration('dev', true, true);
-    expect(Object.keys(configured.services)).toEqual(Object.keys(base.services));
-    expect(configured.networks).toEqual(base.networks);
-    for (const [name, service] of Object.entries(configured.services)) {
-      const mounts = service.volumes ?? [];
-      expect(JSON.stringify(mounts)).not.toContain('/var/run/docker.sock');
-      const observerMount = mounts.find((mount) => mount.target === '/run/nickhosting-observer');
-      if (name === 'api' || name === 'worker') {
-        expect(observerMount).toMatchObject({ read_only: true, bind: { create_host_path: false } });
-        expect(service.environment?.NH_DEV_OBSERVER_ID).toBe('test-host');
-      } else expect(observerMount).toBeUndefined();
-    }
-  });
+  it.each(['dev', 'prod'] as const)(
+    'mounts the approved direct Docker socket into %s API/worker only',
+    (scope) => {
+      const base = composeConfiguration(scope, scope === 'dev');
+      const configured = composeConfiguration(scope, scope === 'dev', true);
+      expect(Object.keys(configured.services)).toEqual(Object.keys(base.services));
+      expect(configured.networks).toEqual(base.networks);
+      const prefix = `NH_${scope.toUpperCase()}_`;
+      for (const [name, service] of Object.entries(configured.services)) {
+        const socket = service.volumes?.find((mount) => mount.target === '/var/run/docker.sock');
+        if (name === 'api' || name === 'worker') {
+          expect(socket).toMatchObject({
+            source: '/var/run/docker.sock',
+            read_only: true,
+            bind: { create_host_path: false },
+          });
+          expect(service.environment?.[`${prefix}OBSERVER_ID`]).toBe('test-host');
+          expect(service.environment?.[`${prefix}DOCKER_OBSERVER_SOCKET`]).toBe(
+            '/var/run/docker.sock',
+          );
+          expect(service.group_add).toEqual(['123']);
+        } else {
+          expect(socket).toBeUndefined();
+          expect(service.environment?.[`${prefix}OBSERVER_ID`]).toBeUndefined();
+          expect(service.environment?.[`${prefix}DOCKER_OBSERVER_SOCKET`]).toBeUndefined();
+          expect(service.group_add).toBeUndefined();
+        }
+        expect(service.ports ?? []).toEqual([]);
+        expect(service.privileged).not.toBe(true);
+      }
+    },
+  );
 
   it('gives only real-provider API/worker egress while preserving internal storage and ingress', () => {
     const { services, networks, name } = composeConfiguration('dev', true);

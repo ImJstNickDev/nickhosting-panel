@@ -275,10 +275,9 @@ Never edit the evidence or bypass validation to expose an ordinary-user choice.
 
 **Provider connectivity is not execution readiness.** Current provisioning/start
 also requires approved host/container observer access, a matching observer ID and
-fresh resource/image evidence. This dev stack intentionally has no Docker socket
-or host-observer mount; none is added by the provider switch. Real server operations
-remain blocked by those existing checks until an exact observer-access proposal
-is separately approved. Gateway deployment/listeners, SFTPGo, DNS writes and other
+fresh resource/image evidence. The original provider switch did not include observer access. The later
+Owner-approved direct-socket overlay supplies it; see the operational readiness
+follow-up below. Configuration and runtime evidence checks still apply. Gateway deployment/listeners, SFTPGo, DNS writes and other
 production-release prerequisites remain separate. No real test server is created
 to prove this configuration change.
 
@@ -303,8 +302,8 @@ validity period and needs an explicitly scoped renewal, not a blanket TLS bypass
 
 Production needs its own SMTP/OAuth/provider configuration and resolver/reachability
 verification. Never copy development/test credentials, fixtures or compatibility
-evidence into it. The Compose stack does **not** deploy a Game Gateway, node
-observer or SFTPGo/Wings mount; existing M3 topology/lease checks and separate
+evidence into it. The base Compose stack does **not** deploy a Game Gateway or SFTPGo/Wings
+mount; the approved observation overlay supplies direct Docker access, while existing M3 topology/lease checks and separate
 infrastructure approvals still apply. SFTPGo [issue #18](https://github.com/ImJstNickDev/nickhosting-panel/issues/18)
 remains an independent production-release blocker.
 
@@ -464,9 +463,11 @@ claim is invented; do not roll back only one half of an incompatible release.
 
 ## Operational readiness follow-up
 
-The missing host/container observation bridge is now prepared as a bounded local
-helper and opt-in socket overlay; it is **not activated**. See
-[development operational prerequisites](M5-DEV-READINESS.md) for the exact approval
-boundary, restart/rollback behavior and Owner-owned configuration. This also
-clarifies the earlier production Compose readiness limitation. No host, node or
-runtime mapping is pre-populated.
+The Owner approved direct Docker socket observation for dev and future production,
+with dev/prod never active simultaneously. The optional direct-socket overlays and
+actual activation evidence supersede the earlier missing-observer/host-helper
+proposal. See [development operational prerequisites](M5-DEV-READINESS.md).
+The helper was never activated; no systemd service or lingering change is needed.
+[Issue #22](https://github.com/ImJstNickDev/nickhosting-panel/issues/22) records the
+accepted Docker authority and future hardening. Production stays configuration-only.
+Host/node/mapping registration remains exclusively the Owner's responsibility.

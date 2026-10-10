@@ -1,116 +1,90 @@
 # Development operational prerequisites
 
-The real Panel connection is verified; this does not establish provisioning
-readiness. The earlier dev and production Compose configurations omitted the
-host/container observation bridge required by the existing admission and lifecycle
-code. This is a deployment integration gap, not a new development-only policy.
-Production remains configuration-only and must not be called operationally ready.
+## Owner decision: direct Docker observation
 
-## Prepared host observer — activation pending
+On 2026-10-10 the Owner explicitly chose direct Docker socket access for both dev
+and future production. Dev and prod will **never run simultaneously** on this
+host. Their independent reservation databases therefore do not need a shared
+admission coordinator under this constraint. This is an operating requirement,
+not an automatically enforced distributed lock.
 
-[The helper](../packages/pterodactyl-adapter/src/host-observer.ts) runs as the
-current host user, using the existing read-only Docker observer implementation.
-Its private Unix RPC exposes only host resource samples and exact-UUID container
-state, process epoch and image identity. It has no DB credentials, Panel keys,
-TCP listener, lifecycle commands or filesystem content operations. Sampling uses
-physical host CPU/RAM, including other services and direct Pterodactyl servers;
-disk sampling is restricted to configured canonical directories.
+API/worker use the existing Pterodactyl adapter's fixed Docker observation commands.
+The development overlay is [compose.dev.observer.yaml](../compose.dev.observer.yaml);
+production has its [separate overlay](../compose.prod.observer.yaml), configuration
+only. A pinned Docker CLI is included in both application image stages. Neither
+frontend nor migration tools receive the socket or observer configuration.
 
-[The optional dev overlay](../compose.dev.observer.yaml) mounts only its private
-socket directory read-only into API/worker. Neither receives Docker's socket,
-host processes, Wings files or a new network. The helper itself runs with the
-current user's existing Docker access, which is privileged: the limited RPC is
-the application's access boundary, not a claim that Docker access is read-only.
+Direct socket access grants Docker API authority even with a read-only bind mount.
+The application currently issues read-only observation commands, but compromise
+could affect unrelated containers or the host. Non-root UID, capability dropping
+and no-new-privileges do not remove this authority. The Owner accepted this interim
+risk; [issue #22](https://github.com/ImJstNickDev/nickhosting-panel/issues/22) tracks
+restricted observation alternatives. SFTPGo issue #18 remains a separate gate.
 
-The helper requires the same UID as dev API/worker, private directory `0700`,
-socket `0600`, a stable observer identity and an exact disk-path allowlist. A
-filesystem probe directory may be project-owned on the **verified same filesystem**
-as the game volumes; no game directory mount or read access is necessary. Recheck
-this relationship if storage moves. Do not measure the API container overlay.
+The previously prepared host helper was **never activated** and has been removed
+from the active implementation. Its historical commit `3fe39e5` remains a possible
+reference for future hardening. No user service, lingering change, new network,
+Wings mount, production deployment or host socket permission change is required.
 
-The source timestamp and observer identity are checked before persisting a sample.
-Stale/unavailable/wrong-identity data fail closed; there is no container-local
-fallback when the remote observer is configured. Managed resource credits remain
-empty/conservative. The existing provider UUID/external-ID checks remain in place.
+## Configuration and daily operation
 
-## Exact activation boundary
+Private development environment inputs:
 
-No helper, service unit, socket directory or observer mount has been activated by
-this change. The reviewed private plan in `.codex/local/m5-observer-activation.md`
-contains resolved paths and identity for this machine; never publish that file.
-The proposed operations are:
+```dotenv
+COMPOSE_FILE=compose.dev.yaml:compose.dev.real.yaml:compose.dev.observer.yaml
+NH_DEV_PHYSICAL_HOST_ID=your-stable-host-identity
+NH_DEV_DOCKER_GID=your-existing-socket-group-id
+```
 
-1. Create only `mountdata/dev/observer/` as the development UID, mode `0700`.
-   Preserve existing paths; refuse symlinks or unexpected ownership/permissions.
-2. Install the rendered [user service](../deploy/dev/host-observer.service.example)
-   as `nickhosting-dev-observer.service`, with its separate private environment
-   file. Do not overwrite any existing unit. No DB/provider credentials enter it.
-3. Enable lingering for this user **only if separately approved**, then enable/start
-   this one user service. Lingering currently is disabled; without it the helper
-   may stop after logout and is not guaranteed at boot. Enabling it also keeps the
-   user's other enabled user services eligible to run after logout.
-4. Append `compose.dev.observer.yaml` to private `COMPOSE_FILE`, set the matching
-   `NH_DEV_OBSERVER_ID`, build the existing dev application image and recreate only
-   dev API/worker. Existing web external-network attachment and all data remain.
-5. Verify the helper's read-only preflight and resource sample from the API
-   namespace, scoped restart recovery, HTTPS/HMR and unchanged DB configuration
-   counts. Do not register any physical host, managed node, mapping, rollout or
-   evidence entry. Do not create a game server for this verification.
-
-Proposed lifecycle (after exact approval and private plan preparation):
+Use the actual numeric Docker socket group, without chmod/chown on the host socket.
+The overlay injects paired scoped socket/observer settings only into API/worker.
+The disk probe `/app/mountdata` uses the already-existing application bind mount;
+it must be on the same verified filesystem as game storage. Recheck this if storage
+moves; do not infer disk capacity from an unrelated container overlay filesystem.
+Physical memory comes from host `/proc/meminfo`; CPU uses the full host CPU counter
+set rather than the API/worker cgroup quota. Invalid samples fail closed.
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now nickhosting-dev-observer.service
 docker compose --env-file .env.dev.local config --quiet
 docker compose --env-file .env.dev.local build api
 docker compose --env-file .env.dev.local up -d --no-deps --wait api worker
+# Normal later lifecycle, preserving all data:
+docker compose --env-file .env.dev.local stop
+docker compose --env-file .env.dev.local up -d --wait
 ```
 
-No new Docker service/network/host port, NPM/DNS change, production deployment,
-Pterodactyl mutation or Wings modification is included. `loginctl enable-linger`
-is a separate host-level operation requiring explicit approval; if administrative
-authentication is required, the Owner performs it. No automatic privilege escalation.
+No explicit `-f compose.dev.yaml`: that would discard the private overlay selection.
+The dev web ingress stays on its existing external network with unchanged HTTPS
+and Vite WSS/HMR. No host ports are added. PostgreSQL, Redis, mail and Owner data
+remain independent from production and are not reset.
 
-The unit restarts after failure. Explicit stale-socket recovery removes only the
-same owned socket after an `ECONNREFUSED` probe and inode/owner/type recheck. Live
-sockets, unknown errors, files and symlinks are preserved. Keep a single systemd
-instance; do not launch parallel manual helpers. Private-directory ownership and
-single-instance execution are required because unlink is not an atomic conditional
-inode operation. Reboot/kill recovery must be distinguished from graceful restart
-in actual validation evidence.
+Production uses `compose.prod.yaml:compose.prod.observer.yaml`, its own private
+`NH_PROD_PHYSICAL_HOST_ID`, `NH_PROD_DOCKER_GID` and immutable application images.
+Stop dev before any separately approved production deployment. No production
+service is started by preparing or activating the development configuration.
 
-Rollback: restore the previous private `COMPOSE_FILE`, remove the scoped observer
-identity and recreate only API/worker; stop/disable only this user service. Keep
-all DB data, host records, ledgers and keys. With no observer, admission correctly
-becomes unavailable. Preserve the helper directory; remove only the exact unit
-installed by this operation after stopping it. Restore lingering only with Owner
-approval after checking whether other user services now rely on it.
+Rollback: restore the previous two-file dev `COMPOSE_FILE` and recreate only
+API/worker. Keep all data and Owner settings. Without observation, operations that
+require resource admission correctly fail closed. No cleanup of game resources.
 
-## Owner configuration after activation
+## What the Owner configures
 
-The environment supplies observations; **the Owner supplies configuration**:
+No physical host, managed node, runtime mapping, rollout or evidence row is seeded.
+Use the private handoff values for observer identity and `/app/mountdata` as the
+verified filesystem probe. Choose budgets/headroom from actual host measurements,
+not aggregate Pterodactyl allocations. The container Docker socket path is supplied
+by the environment and does not need to be entered again in Owner settings.
 
-- Register a physical host using the provided observer identity and approved
-  filesystem probe path. Choose RAM/CPU/storage budgets and headroom from actual
-  measurements and intended policy, not aggregate configured Pterodactyl limits.
-- Register the Pterodactyl node, explicit backend allocation pool and provisioning
-  account. That account must be controlled by the Client key; Application API
-  users-read permission is necessary for validation. Do not import existing servers.
-- Configure Vanilla egg/image/startup/variables and rollout. Set the Minecraft
-  metadata user-agent with a real HTTPS contact URL. Public metadata connectivity
-  is required; protocol metadata already has a checked-in trusted default.
-- Import evidence valid for the **exact** runtime/mapping/binding and configure its
-  trusted verification key. Historical M4 evidence is not automatically valid for
-  newly created mapping identities. A changed context requires real validation
-  after Owner configuration, not a fabricated signature or an admin checkbox.
-- Set trusted Wings WebSocket/upload/download origins to enable the corresponding
-  console/transfers. Panel connectivity alone does not verify those endpoints.
+Then configure the provider node, provisioning account, explicit backend allocation
+pool, and Vanilla egg/image/startup/variables. Application users-read permission and
+a Client key controlling the provisioning account are required. Set the Minecraft
+metadata user-agent with a real HTTPS contact URL and configure trusted Wings
+WebSocket/upload/download origins as appropriate. No existing servers are imported.
 
-The helper activation can make configuration and admission infrastructure available;
-it cannot pre-certify mappings the Owner has not created. Signed Minecraft evidence
-and a separately approved Gateway endpoint/network plan remain prerequisites for
-verified game availability and sleep/wake/public gameplay respectively. No Gateway
-listener is activated by this change. SFTPGo remains disabled at the Owner's request;
-issue #18 remains a production-release gate. Do not claim “Create → Start → Play”
-passed until actual Owner configuration and the corresponding checks are complete.
+Minecraft evidence must match the exact runtime/mapping/binding and its trusted
+verification key. Historical M4 evidence cannot automatically certify newly created
+mapping identities. Configuration alone does not create evidence. Separately
+approved Gateway endpoints/listeners remain necessary for Gateway gameplay and
+sleep/wake. This change does not start that service or open game ports. SFTPGo stays
+disabled as accepted by the Owner. Environment observation readiness is distinct
+from completed game certification and an end-to-end Create/Start/Play validation.
