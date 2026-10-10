@@ -32,6 +32,14 @@ http {
     location /v1/ { include /opt/nickhosting/proxy.conf; proxy_pass http://core; }
     location = /api/auth { include /opt/nickhosting/proxy.conf; proxy_pass http://core; }
     location /api/auth/ { include /opt/nickhosting/proxy.conf; proxy_pass http://core; }
+    # Dedicated service bearer authentication is enforced by Core. Browser
+    # sessions confer no access; never log or cache control-plane requests.
+    location /internal/gateway/ {
+      include /opt/nickhosting/proxy.conf;
+      client_max_body_size 1m;
+      proxy_pass http://core;
+    }
+    location /internal/ { return 404; }
     location /api/ { return 404; }
     location / { include /opt/nickhosting/proxy.conf; proxy_pass http://vite; }
   }

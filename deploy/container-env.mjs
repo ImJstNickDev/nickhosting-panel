@@ -3,6 +3,9 @@ export function containerEnvironment(input) {
   const development = input.NH_DEPLOYMENT_ENV === 'development';
   if (!development && input.NH_DEPLOYMENT_ENV !== 'production')
     throw new Error('Explicit deployment environment required');
+  const gatewayEnabled = input.NH_DEV_GATEWAY_ENABLED ?? 'false';
+  if (development && !['true', 'false'].includes(gatewayEnabled))
+    throw new Error('Invalid deployment field: NH_DEV_GATEWAY_ENABLED');
   const providerMode = development ? (input.NH_DEV_PROVIDER_MODE ?? 'sandbox') : undefined;
   if (development && !['sandbox', 'real'].includes(providerMode))
     throw new Error('Invalid development provider mode');
@@ -164,6 +167,32 @@ export function containerEnvironment(input) {
   if (observerSocket !== undefined) {
     env.NH_DOCKER_OBSERVER_SOCKET = observerSocket;
     env.NH_OBSERVER_ID = observerId;
+  }
+  // Opt-in deployment only. Host/node/pool policies remain Owner configuration;
+  // enabling the service never invents routes or relaxes topology validation.
+  if (development && gatewayEnabled === 'true') {
+    const id = input.NH_DEV_GATEWAY_ID;
+    const token = required('GATEWAY_CONTROL_TOKEN', true);
+    if (
+      providerMode !== 'real' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id ?? '') ||
+      !/^[A-Za-z0-9_-]{43,512}$/.test(token) ||
+      [
+        databasePassword,
+        redisPassword,
+        master,
+        auth,
+        setup,
+        input.NH_DEV_MAIL_PASSWORD,
+        input.NH_DEV_SANDBOX_TOKEN,
+        evidenceKey,
+      ].includes(token)
+    )
+      throw new Error('Invalid development Gateway bootstrap');
+    env.NH_GATEWAY_ENABLED = 'true';
+    env.NH_GATEWAY_ID = id;
+    env.NH_GATEWAY_CONTROL_TOKEN = token;
+    env.NH_GATEWAY_CORE_URL = url.origin;
   }
   return env;
 }

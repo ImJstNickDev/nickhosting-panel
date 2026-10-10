@@ -1327,3 +1327,39 @@ runtime Enter, immediate name focus and existing later-step keyboard regressions
 [Actual focus screenshot](screenshots/m5/wizard-name-keyboard-desktop-en.png) reviewed;
 independent source review found no must-fix. No historical suite rerun or live assets.
 Rollback is source-only; PR #21 remains open/unmerged and release gates unchanged.
+
+
+## 2026-10-10 — Development Gateway activation preparation (not activated)
+
+Request: start reactivating the existing Game Gateway for interactive development.
+The base stack had no Gateway service and forced `NH_GATEWAY_ENABLED=false`.
+Added the opt-in Compose overlay, independent scoped service bootstrap, private
+Unix readiness check and narrowly authenticated dev ingress control prefix.
+No routing, admission, protocol, lease or provider ownership policy was weakened.
+No UI change, Owner host/node/egg mapping, route or allocation was created.
+
+Read-only dev inspection: seven existing services healthy; no Gateway container
+name collision; API retains edge/data/egress, only web attaches to `prod-frontend`.
+Approximately 25,103 MiB available RAM and 68 GiB available filesystem space at
+inspection (not a future admission decision). Owner Gateway settings/routes and
+managed-node backend allocation pool absent. An independently identified existing
+host user service manager supplied readable namespace/socket metadata; exact
+identity recorded privately. Root PID1 namespace was not readable by the dev
+user; no permissions changed. Container-side proof remains untested.
+
+Final focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts scripts/gateway-deployment.test.ts apps/game-gateway/src/control-client.test.ts apps/game-gateway/src/main.test.ts`: **92 passed**, 4 files, 2.52 seconds. Includes actual Compose parsing with fictitious credentials, service isolation, default-disabled/real-mode opt-in, credential rejection, Unix health and existing runtime/control recovery tests.
+- `scripts/dev.sh pnpm exec tsc --noEmit`: passed.
+- `scripts/dev.sh pnpm exec biome check deploy/container-env.mjs scripts/deployment-config.test.ts deploy/gateway-health.mjs deploy/gateway-health.d.mts scripts/gateway-deployment.test.ts`: passed after formatting.
+- `python3 scripts/check-governance.py` and `git diff --check`: passed (rechecked after staging).
+- Independent configuration/security review: no must-fix findings. Clarified game readiness versus zero-route control health; moved namespace preflight before any API/worker/web recreation.
+
+No images built, containers started/restarted, persistent data changed or game
+ports bound. No full historical/live-server suite repeated for deployment-only
+changes. Nginx runtime validation, container namespace access, HTTPS service
+control and all actual forwarding/sleep-wake tests remain pending activation.
+A healthy empty Gateway is not evidence of a working game route. The exact scoped
+proposal, remaining Owner configuration and rollback are in
+[M5 environments](M5-ENVIRONMENTS.md#development-gateway--prepared-activation-pending-2026-10-10).
+Issues #18 and #22 remain unchanged. Production deployment remains unauthorized.

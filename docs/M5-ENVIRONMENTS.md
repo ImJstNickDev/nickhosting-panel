@@ -22,6 +22,7 @@ paths remain 0700. It never repairs existing state automatically.
 | File | Purpose |
 | --- | --- |
 | `compose.dev.yaml` | Project `nickhosting-dev`; persistent review environment with source reload. |
+| `compose.dev.gateway.yaml` | Optional host-network Gateway; prepared only, separate activation approval required. |
 | `compose.dev.real.yaml` | Explicit real-provider overlay: API/worker egress and configured resolver, no simulator dependency. |
 | `compose.prod.yaml` | Project `nickhosting-prod`; configuration-only immutable release deployment. |
 | `Dockerfile` | Pinned Node 24.21.0, pnpm 10.33.0; development, compiled runtime and separate Nginx ingress stages. |
@@ -174,7 +175,7 @@ schema guards and must never run against this environment.
 Dev runtime rejects production-prefixed and direct unscoped external-provider settings,
 generic database/job overrides, placeholder/reused credentials and disabled TLS
 verification. Sandbox pins Pterodactyl to `http://provider:9090`. Both modes disable
-SFTPGo/Cloudflare/CurseForge authority and leave Gateway disabled. The simulator
+SFTPGo/Cloudflare/CurseForge authority and leave Gateway disabled unless the separately approved Gateway overlay is enabled. The simulator
 supports connection validation and empty inventory only; game provisioning and
 provider-specific operations correctly remain unavailable in sandbox. No sandbox UI action
 can create/delete a production server through these pinned provider credentials.
@@ -508,3 +509,104 @@ Rollback: revert application code if necessary and leave the additive metadata
 tables/data and recorded migration intact. Do not drop tables, reset dev data or
 edit migration history as routine rollback. Existing provider ownership boundaries,
 SFTPGo #18 and direct Docker-socket #22 are unchanged. Production was not deployed.
+
+
+## Development Gateway — prepared, activation pending (2026-10-10)
+
+The default stack still disables Gateway. `compose.dev.gateway.yaml` adds an
+explicit opt-in to the **existing** M3/M4 implementation, not another proxy.
+`NH_DEV_GATEWAY_ENABLED=true` is passed only to Core/worker by the overlay;
+production and sandbox defaults remain disabled. Gateway gets a dedicated UUID
+and independent random control token, never the application env file, database,
+authentication or provider credentials. Host/node/network/probe policies remain
+Owner settings; enabling the overlay does not create them, routes or servers.
+
+The proposed `nickhosting-dev-gateway-1` service uses the existing development
+application image, UID/GID from the dev configuration, 256 MiB/1 CPU, read-only
+source mounts, no capabilities, and `no-new-privileges`. It runs in the **host
+network namespace**, required by current collision/reachability verification.
+It joins no Docker bridge and creates no network. This is a new, explicit
+exception to the base dev network isolation and requires operation-specific
+approval. The Docker socket has host-equivalent authority even mounted read-only
+(issue #22). Host networking also permits reaching host-local services; it is not
+an egress security boundary.
+
+Independent namespace proof is mounted read-only at `/run/nickhosting-host-proc`.
+Choose an independently verified long-lived host process readable by the service
+UID (for example the existing host user service manager), not `/proc/self` or the
+Gateway's own process. Before activation record the host process UID, executable,
+parent, start time and namespace; recheck before mounting. `/proc/1/ns/net` is
+not readable by the current dev UID. Do not change permissions or add privileges
+as a workaround. Reboot/process replacement requires re-verification, updated
+private path/namespace pin and service recreation; a stale proof fails closed.
+Container access to the proposed proof is **not yet tested**.
+
+Control communication uses the existing dev HTTPS origin and the narrowly routed
+`/internal/gateway/` prefix in dev ingress. Core requires the exact Gateway UUID
+and dedicated bearer; browser cookies/support sessions do not authorize it.
+Other `/internal/` paths return 404. No NPM/DNS/certificate change is proposed.
+Diagnostics use an authenticated Unix socket in service-owned tmpfs, with no
+HTTP health port. `/readyz` checks the control-plane lease; zero-route readiness
+must never be reported as proof that forwarding or sleep/wake works.
+
+### Proposed activation, not executed
+
+Private `.env.dev.local` additions (do not print values or replace existing keys):
+
+- `NH_DEV_GATEWAY_ID`: one persistent UUID, generated once.
+- `NH_DEV_GATEWAY_CONTROL_TOKEN`: independently generated 32 random bytes encoded
+  base64url; separate from all application/provider secrets.
+- `NH_DEV_GATEWAY_HOST_PROC`: independently verified host process directory.
+- Append `compose.dev.gateway.yaml` to the existing `COMPOSE_FILE` chain, preserving
+  the base, real-provider and observer overlays.
+
+Owner settings still required: `gatewayPhysicalHostId` referencing the existing
+host, `gatewayObserver` with container path `/run/nickhosting-host-proc`, socket
+`/var/run/docker.sock`, pinned host namespace and Docker daemon identity;
+`gatewayNetworkPolicy` for every actual provider node; `gatewayNodeProbes` for
+approved responders. No host, node, egg mapping or allocation is created by this
+preparation. Never fill policy values by guessing. Read-only inspection found
+zero routes, no Owner Gateway settings and no backend allocation pool on the
+configured managed node. The Owner must select eligible backend allocations and
+public addresses before any route can become useful.
+
+After exact Owner approval and verified policy prerequisites:
+
+```sh
+# Parse privately; never dump interpolated secrets.
+docker compose --env-file .env.dev.local --profile gateway config --quiet
+# Refresh app/ingress images only; no dependency upgrades or migrations.
+docker compose --env-file .env.dev.local build api web
+# First verify namespace access using the same nonroot service, before runtime:
+docker compose --env-file .env.dev.local --profile gateway run --rm --no-deps \
+  --entrypoint node gateway -e 'const f=require("node:fs");const a=f.readlinkSync("/proc/self/ns/net");const b=f.readlinkSync("/run/nickhosting-host-proc/ns/net");if(a!==b)process.exit(1);for(const n of ["tcp","tcp6","udp","udp6"])f.readFileSync("/run/nickhosting-host-proc/net/"+n);'
+# Recreate only the explicitly approved dev processes. Preserve DB/Redis/Vite/mail.
+docker compose --env-file .env.dev.local up -d --no-deps --wait api worker web
+docker compose --env-file .env.dev.local --profile gateway up -d --no-deps --wait gateway
+```
+
+The read-only one-off preflight creates a temporary dev container with the same
+host-network/socket/proc exposure; it also requires approval. It opens no listener.
+The full network observer additionally validates the pinned namespace/daemon and
+fresh inventories before each game listener. If the preflight fails, stop; no
+root/capability escalation or permission repair is authorized by these commands.
+Gateway changes require a scoped service restart; source mounts alone do not add
+auto-reload to it. Existing API/worker/Vite reload remains unchanged.
+
+**No game-listener or nonce endpoint is included in this first activation proposal.**
+It can establish control-plane health with zero routes only after valid Owner
+configuration. Each actual public/nonce address, port and transport needs a
+separate exact endpoint approval and fresh collision/reachability evidence before
+binding. Initial game/backend readiness requires an admitted manual start; a running container
+alone does not suffice. Existing direct servers remain direct. The compiled
+Vanilla declaration currently enables Gateway only for the tested 26.1 combination;
+other usable Vanilla versions remain direct unless the integration declares support.
+
+Rollback: stop only `gateway`, remove the Gateway overlay from the private
+`COMPOSE_FILE` chain, then recreate only dev API/worker with the previous overlays.
+Core returns to disabled; wait at least 31 seconds for old leases to expire before
+any replacement Gateway authority. Preserve private token/UUID, DB, Redis and
+review data. The dedicated ingress path remains service-authenticated and rejects
+access when disabled; rebuild the previous web image if removing the path is
+required. No `down -v`, prune, orphan removal, host process changes or production
+resource cleanup.

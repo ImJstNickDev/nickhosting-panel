@@ -34,6 +34,37 @@ function deployment(environment: Environment): Record<string, string> {
 }
 
 describe('scoped container environment', () => {
+  it('requires explicit real-mode Gateway opt-in and an independent service identity', () => {
+    const bootstrap = {
+      NH_DEV_PROVIDER_MODE: 'real',
+      NH_DEV_GATEWAY_ENABLED: 'true',
+      NH_DEV_GATEWAY_ID: '226af6c8-bff1-4155-9bb4-9996aef82877',
+      NH_DEV_GATEWAY_CONTROL_TOKEN: `gateway-test-only-${'g'.repeat(43)}`,
+    };
+    const input: Record<string, string> = { ...deployment('development'), ...bootstrap };
+    const result = containerEnvironment(input);
+    expect(result.NH_GATEWAY_ENABLED).toBe('true');
+    expect(result.NH_GATEWAY_ID).toBe(bootstrap.NH_DEV_GATEWAY_ID);
+    expect(result.NH_GATEWAY_CONTROL_TOKEN).toBe(bootstrap.NH_DEV_GATEWAY_CONTROL_TOKEN);
+    expect(result.NH_GATEWAY_CORE_URL).toBe(input.NH_DEV_PUBLIC_URL);
+    expect(result).not.toHaveProperty('NH_GATEWAY_NETWORK_POLICY');
+    expect(result).not.toHaveProperty('NH_GATEWAY_PHYSICAL_HOST_ID');
+    for (const override of [
+      { NH_DEV_PROVIDER_MODE: 'sandbox' },
+      { NH_DEV_GATEWAY_ENABLED: 'yes' },
+      { NH_DEV_GATEWAY_ID: 'invalid' },
+      { NH_DEV_GATEWAY_CONTROL_TOKEN: undefined },
+      { NH_DEV_GATEWAY_CONTROL_TOKEN: 'too-short' },
+      { NH_DEV_GATEWAY_CONTROL_TOKEN: `${'x'.repeat(43)}\n` },
+      { NH_DEV_GATEWAY_CONTROL_TOKEN: input.NH_DEV_AUTH_SECRET },
+    ])
+      expect(() => containerEnvironment({ ...input, ...override })).toThrow();
+    expect(containerEnvironment({ ...input, NH_DEV_GATEWAY_ENABLED: 'false' })).not.toHaveProperty(
+      'NH_GATEWAY_CONTROL_TOKEN',
+    );
+    expect(() => containerEnvironment({ ...deployment('production'), ...bootstrap })).toThrow();
+  });
+
   it.each(['development', 'production'] as const)(
     'constructs independent %s database/Redis/auth scope without mutating inputs',
     (environment) => {
@@ -463,6 +494,19 @@ describe('deployment artifact boundaries', () => {
       expect(template).not.toContain('/var/cache/nginx');
     },
   );
+
+  it('routes only the dedicated Gateway control prefix to Core in development', async () => {
+    const template = await readFile(resolve(repository, 'deploy/nginx/dev.conf.template'), 'utf8');
+    expect(template).toMatch(/location \/internal\/gateway\/\s*\{[^}]*proxy_pass http:\/\/core;/);
+    expect(template).toContain('location /internal/ { return 404; }');
+    expect(template).toContain('access_log off;');
+    expect(template).not.toContain('Authorization ""');
+    const production = await readFile(
+      resolve(repository, 'deploy/nginx/prod.conf.template'),
+      'utf8',
+    );
+    expect(production).not.toContain('location /internal/gateway/');
+  });
 
   it('normalizes the exact ingress hostname and substitutes only its intended variable', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'nickhosting-ingress-test-'));
