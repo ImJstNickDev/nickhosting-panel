@@ -2417,3 +2417,98 @@ transition deduplication, sink isolation and unchanged authorization/fences. Cur
 API, worker and Gateway containers are healthy. API/worker use existing source
 watchers; the Gateway process has not yet loaded this instrumentation. No new
 post-instrumentation live timing result is claimed.
+
+### 2026-10-11 — Owner retest: rejected idle stop and oscillating route authority
+
+The next Owner-run cycle exposed a real failure, not a successful sleep test.
+Read-only correlation (UTC, local time UTC+2) shows the idle stop job created at
+22:13:38.497, a lock-busy delivery at38.944 and a retry at39.960. Its first
+authorization succeeded at40.521, durable power intent was prepared at40.796,
+and final authorization failed at40.857 with `forbidden`. The operation completed
+failed at40.865. Its durable journal records `effect_state=none`, `rejected=true`,
+`powerEffectPrepared=false`, `acknowledged=false`, and no Gateway sleep handoff or
+confirmed stop. No provider power effect was sent by that operation; the Minecraft
+process remained running. These are failure evidence, not successful shutdowns.
+
+Source analysis found that an observation arriving during the active idle-stop
+operation cleared `idle_since`, invalidating the final authorization that the
+earlier affirmative idle observation had established. The failed `sleep_job_id`
+then remained attached: a healthy readiness report set the server online, while
+the next reconciliation blocked it again. The Gateway correctly followed that
+alternating Core authority, interrupting forwarding sessions. In this path the
+Gateway's `backend_not_ready` diagnostic describes a blocked Core route; it does
+not establish a failed Minecraft protocol probe. No Minecraft pause setting,
+Pterodactyl configuration or readiness timeout was changed to hide the failure.
+
+The new timing logs also distinguish unrelated latency in the preceding wake:
+job creation22:11:59.282, initial Redis publication59.749, worker delivery59.761
+(12ms delivery age), provider effect prepared22:12:01.959 and observed process
+start22:12:03.652732709. A busy confirmation delivery at05.296 retried at06.311,
+then completed08.097. The prior durable retry correction therefore avoided its
+old 30-second deferral on this cycle. These timings do not establish instantaneous
+startup, nor explain every second as queue delay.
+
+The correction keeps a pending stop's route blocked and retains affirmative idle
+proof only for its exact active job/generation/process, fresh zero-player sample,
+current enabled policy and original unexpired fence. Contrary/unknown evidence
+revokes that proof. Recovery detaches only a completed failed attempt whose journal
+proves power was never prepared or was explicitly rejected before handoff, with no
+power handoff/acknowledgement/stop confirmation; its
+failed journal and running reservation remain. Fresh observations must establish
+a new complete idle interval. Prepared, uncertain, handed-off or mismatched
+operations remain blocked even if the backend answers status successfully.
+
+The deterministic checkpoint regression first **failed** against the previous
+source (expected successful stop, got failed), then passed with the correction.
+Command: `scripts/dev.sh pnpm test:m3 packages/server-management/src/gateway-orchestration.integration.test.ts -t 'retains affirmative idle proof when a fresh observation races'`.
+An intermediate targeted matrix (`-t 'retains affirmative idle proof|revokes a prepared sleep|retires only a rejected|keeps an unresolved'`)
+passed **18 tests, 58 filtered** before additional terminal/policy negatives.
+
+The existing dev source watchers loaded the correction without a manual container
+restart. Normal configured automation subsequently recovered the old rejected
+attempt and created a **new** idle stop at22:21:03.751 UTC, after fresh idle evidence
+began at22:20:01.820. Minecraft logged stopping/saving at22:21:07.121; the original
+container exited at22:21:07.491795402 and the new job succeeded at22:21:08.719.
+Read-only database verification found `sleeping`, provider runtime `offline`,
+no active operation and no retained sleep job. The old failed job remains failed
+in history. No manual game command, database repair, policy change or provider
+configuration change was issued by Codex. The application's existing automatic
+sleep policy did perform the stop after loading the fix.
+
+Gateway diagnostics then recorded `sleeping` at22:21:20.790 after its original
+quiescence deadline22:21:16.527. An intervening unavailable interval overlapped
+an API source-watcher reload (22:21:11.931–22:21:15.895); this is not a clean
+end-to-end latency benchmark. The outstanding fence and validation/polling delay
+remain; this fix does not claim immediate MOTD transitions or remove lease safety.
+
+An intermediate complete affected-file run had **78 passed, 3 failed**. Two existing
+policy-revocation regressions required recovery of conclusively never-prepared
+stops as well as explicit pre-handoff rejection; that distinct journal case was
+restored. The third was a new terminal-job fixture missing its required
+`completed_at`, corrected with an external assertion that the concurrent
+observation actually completed (checkpoint exceptions must not falsely pass a
+negative lifecycle test). A subsequent focused run had **6 passed, 1 failed**:
+the newly added ambiguous-journal fixture had not removed its rejection marker;
+the fixture was corrected before final verification. No production authorization
+or lease check was removed to satisfy these tests.
+
+Final checks on the corrected source:
+
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/gateway-orchestration.integration.test.ts`
+  — **82/82 passed** (32.42s), including 24 new race, negative-observation,
+  policy/terminal-state and recovery regressions; existing admission, process,
+  quiescence, manual-stop and uncertain-effect cases retained.
+- `scripts/dev.sh pnpm typecheck` — root and WebPanel passed. After the final
+  recovery guard, `scripts/dev.sh pnpm exec tsc --noEmit` also passed.
+- `scripts/dev.sh pnpm exec biome check packages/server-management/src/gateway-orchestration.ts packages/server-management/src/gateway-orchestration.integration.test.ts`
+  — both files passed; `git diff --check` passed.
+
+Independent read-only review found no remaining must-fix after checking the final
+recovery guard and negative fixtures. Only the existing approved isolated M2
+database services were used; fixtures clean their own temporary schemas. No new
+infrastructure, test-owned game asset, manual game command or Gateway restart was
+performed. Dev API/worker source hashes match the workspace and all development
+containers remain healthy. No production configuration changes, migration or
+data reset. No historical full-suite rerun; SFTPGo #18 remains unchanged. Rollback
+is a new revert commit; an automatically completed stop is not undone by reverting
+code, and the historical failed operation must not be rewritten.

@@ -11,11 +11,34 @@ import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { authorizeServer, enqueueLockedServerOperation, parse } from './registry.js';
+import {
+  assertGatewaySleepFence,
+  authorizeServer,
+  enqueueLockedServerOperation,
+  parse,
+} from './registry.js';
 import { resolveIdleTimeout } from './sleep-policy.js';
 
 type State = Selectable<Database['gateway_server_states']>;
 type Server = Selectable<Database['managed_servers']>;
+function matchingSleepOperation(
+  operation: Selectable<Database['server_operations']> | undefined,
+  serverId: string,
+  state: State,
+): operation is Selectable<Database['server_operations']> {
+  const marker = operation?.plan.gatewayAutomation;
+  return (
+    operation?.job_id === state.sleep_job_id &&
+    operation?.server_id === serverId &&
+    operation?.action === 'stop' &&
+    typeof marker === 'object' &&
+    marker !== null &&
+    'kind' in marker &&
+    marker.kind === 'sleep' &&
+    'generation' in marker &&
+    marker.generation === state.generation
+  );
+}
 export interface GatewayOrchestrationOptions {
   env?: Environment;
   /** Trusted Core route/revision revalidation, inside the observation's global
@@ -622,10 +645,63 @@ export async function reportGatewayObservation(
     const activeOperation = server.active_operation_id
       ? await tx
           .selectFrom('server_operations')
-          .select('action')
+          .selectAll()
           .where('job_id', '=', server.active_operation_id)
           .executeTakeFirst()
       : undefined;
+    if (state.sleep_job_id) {
+      // A prepared stop still needs its retained affirmative idle proof at the
+      // final handoff. A concurrent positive sample must not erase that proof,
+      // nor advertise the server as playable while the stop remains unresolved.
+      let retainedIdle = false;
+      const sleepJob = await tx
+        .selectFrom('operation_jobs')
+        .select('state')
+        .where('id', '=', state.sleep_job_id)
+        .executeTakeFirst();
+      if (
+        sleepJob &&
+        ['queued', 'running'].includes(sleepJob.state) &&
+        state.enabled &&
+        server.intent === 'sleeping' &&
+        server.active_operation_id === state.sleep_job_id &&
+        matchingSleepOperation(activeOperation, serverId, state) &&
+        !['failed', 'complete'].includes(activeOperation.phase) &&
+        server.runtime_state === 'running' &&
+        value.processStartedAt !== null &&
+        value.processStartedAt === state.process_started_at &&
+        value.ready &&
+        value.idle === true &&
+        value.playerCount === 0 &&
+        value.activeSessions === 0 &&
+        state.idle_since &&
+        state.last_observed_at &&
+        observed.getTime() - state.last_observed_at.getTime() <=
+          state.readiness_max_age_seconds * 1000
+      ) {
+        try {
+          assertGatewaySleepFence(activeOperation.plan, now);
+          const idleTimeout = await resolveIdleTimeout(tx, serverId, state, options.env);
+          retainedIdle =
+            idleTimeout.effectiveSeconds !== -1 &&
+            state.last_observed_at.getTime() - state.idle_since.getTime() >=
+              idleTimeout.effectiveSeconds * 1000;
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+        }
+      }
+      await tx
+        .updateTable('gateway_server_states')
+        .set({
+          last_observed_at: observed,
+          idle_since: retainedIdle ? state.idle_since : null,
+          readiness_observed_at: null,
+          updated_at: now,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      return reconcileLocked(tx, serverId, options);
+    }
     if (
       !value.processStartedAt ||
       server.runtime_state !== 'running' ||
@@ -866,7 +942,58 @@ async function reconcileLocked(
         })
         .where('server_id', '=', serverId)
         .execute();
-    } else if (job.state === 'failed') await block(tx, state, 'operation_uncertain', now);
+    } else if (job.state === 'failed') {
+      const operation = await tx
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', state.sleep_job_id)
+        .executeTakeFirst();
+      if (
+        server.intent === 'sleeping' &&
+        server.runtime_state === 'running' &&
+        !server.active_operation_id &&
+        reservation &&
+        job.completed_at &&
+        matchingSleepOperation(operation, serverId, state) &&
+        operation.phase === 'failed' &&
+        operation.effect_state === 'none' &&
+        ((operation.plan.rejected === true && operation.plan.powerEffectPrepared === false) ||
+          (operation.effect_started_at === null &&
+            operation.plan.powerEffectPrepared === undefined &&
+            operation.plan.effectAttempts === undefined)) &&
+        operation.plan.gatewaySleepHandoffAt === undefined &&
+        operation.plan.acknowledged !== true &&
+        operation.plan.stopConfirmed !== true &&
+        operation.plan.stopConfirmedAt === undefined
+      ) {
+        // Retire only a never-prepared or conclusively rejected pre-handoff attempt. Keep its
+        // journal and compute reservation; new observations must establish a
+        // new idle interval before a distinct stop can be authorized.
+        await tx
+          .updateTable('gateway_server_states')
+          .set({
+            sleep_job_id: null,
+            state: 'blocked',
+            readiness_observed_at: null,
+            idle_since: null,
+            last_observed_at: null,
+            error_code: 'operation_uncertain',
+            blocked_until: null,
+            updated_at: now,
+          })
+          .where('server_id', '=', serverId)
+          .execute();
+        await tx
+          .updateTable('managed_servers')
+          .set({
+            intent: 'auto_wake_enabled',
+            readiness: 'unknown',
+            updated_at: now,
+          })
+          .where('id', '=', serverId)
+          .execute();
+      } else await block(tx, state, 'operation_uncertain', now);
+    }
   } else if (state.wake_job_id && state.state === 'waking') {
     const job = await tx
       .selectFrom('operation_jobs')

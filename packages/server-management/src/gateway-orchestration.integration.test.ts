@@ -1256,6 +1256,236 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     ).toHaveLength(0);
     expect((await wake()).state).toBe('waking');
   });
+  it('retains affirmative idle proof when a fresh observation races the prepared sleep handoff', async () => {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      advance(1);
+      expect(await report(fixture, { quiescenceUntil: undefined })).toMatchObject({
+        state: 'blocked',
+        sleepJobId: pending.sleepJobId,
+      });
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { playerCount: undefined },
+    { playerCount: 1 },
+    { activeSessions: 1 },
+    { idle: false },
+    { ready: false },
+    { processStartedAt: null },
+    { processStartedAt: '2026-01-01T00:00:00.000Z' },
+  ])('revokes a prepared sleep on ambiguous or changed observation %j', async (patch) => {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      advance(1);
+      await report(fixture, { ...patch, quiescenceUntil: undefined });
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+    expect(fixture.stop).not.toHaveBeenCalled();
+    expect(
+      (
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select('idle_since')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).idle_since,
+    ).toBeNull();
+  });
+  it.each(['gap', 'disabled-policy', 'terminal-job', 'terminal-operation'])(
+    'does not retain prepared sleep proof after %s',
+    async (condition) => {
+      const fixture = await started();
+      await report(fixture);
+      advance(10000);
+      const pending = await report(fixture);
+      let observationChecked = false;
+      fixture.lifecycle.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        advance(condition === 'gap' ? 15001 : 1);
+        if (condition === 'disabled-policy')
+          await f.db
+            .updateTable('gateway_server_states')
+            .set({ enabled: false })
+            .where('server_id', '=', serverId)
+            .execute();
+        if (condition === 'terminal-job')
+          await f.db
+            .updateTable('operation_jobs')
+            .set({ state: 'failed', completed_at: clock })
+            .where('id', '=', pending.sleepJobId ?? '')
+            .execute();
+        if (condition === 'terminal-operation')
+          await f.db
+            .updateTable('server_operations')
+            .set({ phase: 'failed' })
+            .where('job_id', '=', pending.sleepJobId ?? '')
+            .execute();
+        await report(fixture, { quiescenceUntil: undefined });
+        expect(
+          (
+            await f.db
+              .selectFrom('gateway_server_states')
+              .select('idle_since')
+              .where('server_id', '=', serverId)
+              .executeTakeFirstOrThrow()
+          ).idle_since,
+        ).toBeNull();
+        observationChecked = true;
+      };
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+      expect(observationChecked).toBe(true);
+      expect(fixture.stop).not.toHaveBeenCalled();
+    },
+  );
+  async function rejectedSleep() {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    fixture.lifecycle.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      advance(1);
+      await report(fixture, { playerCount: undefined, quiescenceUntil: undefined });
+    };
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+    expect(fixture.stop).not.toHaveBeenCalled();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('job_id', '=', pending.sleepJobId ?? '')
+      .executeTakeFirstOrThrow();
+    expect(operation).toMatchObject({
+      effect_state: 'none',
+      phase: 'failed',
+      plan: {
+        rejected: true,
+        powerEffectPrepared: false,
+        acknowledged: false,
+        effectAttempts: { power: 1 },
+      },
+    });
+    expect(operation.effect_started_at).not.toBeNull();
+    return { fixture, pending, operation };
+  }
+  it('retires only a rejected pre-handoff sleep journal and establishes a new idle interval', async () => {
+    const { fixture, pending, operation } = await rejectedSleep();
+    const reservations = await f.db
+      .selectFrom('resource_reservations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+      state: 'blocked',
+      sleepJobId: null,
+    });
+    advance(1);
+    const online = await report(fixture, { quiescenceUntil: undefined });
+    expect(online).toMatchObject({ state: 'online', sleepJobId: null });
+    expect(online.sleepEligibleAt).toBe(new Date(clock.getTime() + 10000).toISOString());
+    for (let i = 0; i < 2; i++) {
+      advance(1);
+      expect((await reconcileGatewayState(f.db, serverId, options)).state).toBe('online');
+      expect((await report(fixture, { quiescenceUntil: undefined })).state).toBe('online');
+    }
+    expect(
+      await f.db
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', pending.sleepJobId ?? '')
+        .executeTakeFirstOrThrow(),
+    ).toEqual(operation);
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toEqual(reservations);
+    expect(
+      await f.db
+        .selectFrom('server_operations')
+        .select('job_id')
+        .where('server_id', '=', serverId)
+        .where('action', '=', 'stop')
+        .execute(),
+    ).toHaveLength(1);
+  });
+  it.each([
+    'prepared',
+    'uncertain',
+    'confirmed',
+    'power-prepared',
+    'unproven-none',
+    'handoff',
+    'acknowledged',
+    'stop-confirmed',
+    'stop-confirmed-at',
+    'generation',
+    'other-active-job',
+  ])('keeps an unresolved %s sleep blocked despite repeated positive probes', async (condition) => {
+    const { fixture, pending, operation } = await rejectedSleep();
+    if (['prepared', 'uncertain', 'confirmed'].includes(condition)) {
+      await f.db
+        .updateTable('server_operations')
+        .set({ effect_state: condition as 'prepared' | 'uncertain' | 'confirmed' })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+    } else if (condition === 'other-active-job') {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: fixture.state.wakeJobId })
+        .where('id', '=', serverId)
+        .execute();
+    } else {
+      const plan = { ...operation.plan };
+      if (condition === 'power-prepared') plan.powerEffectPrepared = true;
+      if (condition === 'unproven-none') delete plan.rejected;
+      if (condition === 'handoff') plan.gatewaySleepHandoffAt = clock.toISOString();
+      if (condition === 'acknowledged') plan.acknowledged = true;
+      if (condition === 'stop-confirmed') plan.stopConfirmed = true;
+      if (condition === 'stop-confirmed-at') plan.stopConfirmedAt = clock.toISOString();
+      if (condition === 'generation')
+        plan.gatewayAutomation = {
+          ...(plan.gatewayAutomation as object),
+          generation: randomUUID(),
+        };
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify(plan) })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+    }
+    for (let i = 0; i < 2; i++) {
+      advance(1);
+      expect(await report(fixture, { quiescenceUntil: undefined })).toMatchObject({
+        state: 'blocked',
+        sleepJobId: pending.sleepJobId,
+      });
+      expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+        state: 'blocked',
+        sleepJobId: pending.sleepJobId,
+      });
+    }
+    expect(
+      await f.db
+        .selectFrom('resource_reservations')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toHaveLength(1);
+    expect(fixture.stop).not.toHaveBeenCalled();
+  });
   it('measures ordinary idle without stopping until a current ingress fence is supplied', async () => {
     const fixture = await started();
     const initial = await report(fixture, { quiescenceUntil: undefined });

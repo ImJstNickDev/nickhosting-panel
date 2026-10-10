@@ -94,6 +94,23 @@ effects, so disabling sleep or raising its timeout cannot silently execute an ol
 stop. Fresh zero-player observations, quiescence, authorization, manual suppression
 and resource/identity fences still apply; missing player counts never mean zero.
 
+While an automatic stop is active, observations cannot promote the route back to
+`online`. Fresh affirmative zero-player observations for the same process and
+exact sleep operation retain its existing idle proof only while its original
+quiescence fence and current sleep policy remain valid. Unknown activity, changed
+process identity or an observation gap invalidates that proof. New reports never
+extend the stop's recorded fence.
+
+A failed sleep operation remains blocked when its external outcome is uncertain.
+Core can retire its sleep reference only when the durable journal conclusively
+records that power was never prepared or was rejected before handoff, with no
+acknowledged effect, while the
+same managed server is still running with its reservation and no active operation.
+The failed operation/history and reservation are preserved. Fresh readiness and a
+new full idle interval are then required; the failed stop is not replayed. This
+prevents readiness reports and reconciliation from alternating between online and
+blocked around the same failed operation.
+
 State is `sleeping`, `waking`, `online`, `blocked`, `maintenance` or
 `manually_stopped`. `online` requires fresh game-protocol readiness correlated
 with the exact running Docker process, not just a Panel running status. State
