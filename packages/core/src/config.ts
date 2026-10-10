@@ -32,6 +32,20 @@ const origin = (protocols: string[]) =>
       return protocols.includes(url.protocol) && url.origin === value;
     });
 
+export const gameIdleTimeoutSchema = z.union([z.literal(-1), z.number().int().min(1).max(604800)]);
+export const idleTimeoutUserAccessSchema = z.enum(['hidden', 'editable', 'shorten-only']);
+export const gameIdleTimeoutsSchema = z.record(
+  z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+  z.strictObject({
+    gameTimeoutSeconds: gameIdleTimeoutSchema.nullable(),
+    userAccess: idleTimeoutUserAccessSchema.nullable().default(null),
+    runtimeUserAccess: z
+      .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), idleTimeoutUserAccessSchema)
+      .default({}),
+    runtimeTimeouts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), gameIdleTimeoutSchema),
+  }),
+);
+
 export const platformConfigSchema = z
   .object({
     instanceName: z.string().trim().min(1).max(100),
@@ -71,6 +85,7 @@ export const platformConfigSchema = z
     storagePolicy: z.enum(['GLOBAL_POOL', 'PER_USER_BUDGET']),
     defaultUserMemoryMiB: z.number().int().min(1).max(1048576),
     defaultUserCpuPercent: z.number().int().min(1).max(100000),
+    defaultServerStorageMiB: z.number().int().min(16).max(1073741824),
     defaultUserStorageMiB: z.number().int().min(1).max(1073741824),
     maxServersPerUser: z.number().int().min(1).max(10000).nullable(),
     maxConcurrentProvisionsPerUser: z.number().int().min(1).max(100),
@@ -78,6 +93,10 @@ export const platformConfigSchema = z
     sftpgoBaseUrl: httpUrl.optional(),
     sftpgoDataRoot: z.string().startsWith('/').optional(),
     sftpgoInstanceId: z.uuid().optional(),
+    // Public SSH endpoint is explicitly configured, never inferred from the
+    // private SFTPGo HTTP management URL or the Wings filesystem mapping.
+    sftpPublicHostname: z.union([z.hostname(), z.ipv4(), z.ipv6()]).optional(),
+    sftpPublicPort: z.number().int().min(1).max(65535).optional(),
     dnsInstanceId: z.uuid().optional(),
     sftpCredentialTtlSeconds: z.number().int().min(60).max(86400),
     cloudflareZoneId: z
@@ -115,6 +134,9 @@ export const platformConfigSchema = z
       .max(100)
       .refine((v) => posix.normalize(v) === v && !/[\0-\x20?#]/.test(v))
       .optional(),
+    gameIdleTimeouts: gameIdleTimeoutsSchema,
+    defaultIdleTimeoutSeconds: gameIdleTimeoutSchema,
+    idleTimeoutUserAccess: idleTimeoutUserAccessSchema,
     gatewayEnabled: z.boolean(),
     gatewayId: z.uuid().optional(),
     gatewayPhysicalHostId: z.uuid().optional(),
@@ -149,14 +171,20 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   defaultUserMemoryMiB: 16384,
   defaultUserCpuPercent: 400,
   defaultUserStorageMiB: 32768,
+  defaultServerStorageMiB: 4096,
   maxServersPerUser: null,
   maxConcurrentProvisionsPerUser: 4,
   observationMaxAgeSeconds: 15,
   sftpCredentialTtlSeconds: 3600,
+  gameIdleTimeouts: {},
+  defaultIdleTimeoutSeconds: -1,
+  idleTimeoutUserAccess: 'hidden',
   gatewayEnabled: false,
   gatewayLeaseSeconds: 15,
   gatewayNodeProbes: {},
   gatewayDataPolicy: defaultGatewayDataPolicy,
+  minecraftMetadataUserAgent:
+    'NickHostingPanel/0.1 (+https://github.com/ImJstNickDev/nickhosting-panel)',
   minecraftContentRoot: './mountdata/minecraft-content',
   minecraftSourceRoot: './mountdata/minecraft-sources',
   minecraftSourceGlobalBytes: 20 * 1024 ** 3,
@@ -197,12 +225,15 @@ export const configEnvironmentKeys = {
   defaultUserMemoryMiB: 'NH_DEFAULT_USER_MEMORY_MIB',
   defaultUserCpuPercent: 'NH_DEFAULT_USER_CPU_PERCENT',
   defaultUserStorageMiB: 'NH_DEFAULT_USER_STORAGE_MIB',
+  defaultServerStorageMiB: 'NH_DEFAULT_SERVER_STORAGE_MIB',
   maxServersPerUser: 'NH_MAX_SERVERS_PER_USER',
   maxConcurrentProvisionsPerUser: 'NH_MAX_CONCURRENT_PROVISIONS_PER_USER',
   observationMaxAgeSeconds: 'NH_OBSERVATION_MAX_AGE_SECONDS',
   sftpgoBaseUrl: 'NH_SFTPGO_BASE_URL',
   sftpgoDataRoot: 'NH_SFTPGO_DATA_ROOT',
   sftpgoInstanceId: 'NH_SFTPGO_INSTANCE_ID',
+  sftpPublicHostname: 'NH_SFTP_PUBLIC_HOSTNAME',
+  sftpPublicPort: 'NH_SFTP_PUBLIC_PORT',
   sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
   cloudflareZoneId: 'NH_CLOUDFLARE_ZONE_ID',
   dnsInstanceId: 'NH_DNS_INSTANCE_ID',
@@ -221,6 +252,9 @@ export const configEnvironmentKeys = {
   minecraftDownloadOrigins: 'NH_MINECRAFT_DOWNLOAD_ORIGINS',
   minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
+  gameIdleTimeouts: 'NH_GAME_IDLE_TIMEOUTS',
+  defaultIdleTimeoutSeconds: 'NH_DEFAULT_IDLE_TIMEOUT_SECONDS',
+  idleTimeoutUserAccess: 'NH_IDLE_TIMEOUT_USER_ACCESS',
   gatewayEnabled: 'NH_GATEWAY_ENABLED',
   gatewayId: 'NH_GATEWAY_ID',
   gatewayPhysicalHostId: 'NH_GATEWAY_PHYSICAL_HOST_ID',
@@ -241,10 +275,12 @@ const numericKeys = new Set<PlatformConfigKey>([
   'defaultUserMemoryMiB',
   'defaultUserCpuPercent',
   'defaultUserStorageMiB',
+  'defaultServerStorageMiB',
   'maxServersPerUser',
   'maxConcurrentProvisionsPerUser',
   'observationMaxAgeSeconds',
   'sftpCredentialTtlSeconds',
+  'sftpPublicPort',
   'gatewayLeaseSeconds',
   'minecraftSourceGlobalBytes',
   'minecraftSourceUserBytes',
@@ -288,6 +324,7 @@ export function resolveConfig(
       key === 'pterodactylDownloadOrigins' ||
       key === 'pterodactylUploadOrigins' ||
       [
+        'gameIdleTimeouts',
         'gatewayNetworkPolicy',
         'gatewayObserver',
         'gatewayNodeProbes',
@@ -301,6 +338,9 @@ export function resolveConfig(
       } catch {
         invalid([key]);
       }
+    } else if (key === 'defaultIdleTimeoutSeconds') {
+      if (!/^(-1|[1-9]\d*)$/.test(value)) invalid([key]);
+      merged[key] = Number(value);
     } else if (key === 'maxServersPerUser' && value === 'null') {
       merged[key] = null;
     } else if (numericKeys.has(key)) {

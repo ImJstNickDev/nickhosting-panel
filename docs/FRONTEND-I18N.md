@@ -25,10 +25,141 @@ protocol IDs, test checklists and support badges belong to Owner administration.
 An administrative checkbox cannot manufacture compatibility. M5 must neither
 promise a modded Vanilla runtime nor provide fake Satisfactory functionality.
 
+## Implemented conventions — M5, 2026-10-09
+
+The [task-flow inventory](M5-JOURNEYS.md) precedes the implemented screens. The
+[common integration checklist](M5-COMMON-INTEGRATION.md) connects each journey to
+actual API, job and browser coverage; [M5 API contracts](M5-API-CONTRACTS.md)
+defines permission, uncertainty, stream and configuration behavior. These
+implementation notes do not replace the acceptance standards below or claim the
+pending final consolidated review has passed.
+
+### Application and integration ownership
+
+`apps/web` uses React/Vite, React Router, TanStack Query and Lingui; versions are
+pinned in its manifest/lockfile. Shared semantic primitives live in
+`apps/web/src/components/ui.tsx`, with page headings, labeled fields, error/status
+notices, tables and native dialogs. The shell owns ordinary/Owner navigation,
+identity context and common server services. Regular platform operators have a
+restricted Administration area for audit and read-only settings; Owner mutation
+controls are absent and backend checks remain authoritative. It moves focus to the page heading
+on navigation and supplies a skip link and a mobile navigation disclosure.
+
+Trusted first-party game modules own validated creation/management descriptors,
+handlers, namespaced catalogs and bundled artwork. The generic renderers use the
+browser-safe Game SDK; API JSON cannot install executable UI, remote imports or
+arbitrary asset URLs. Available controls combine effective permissions with
+verified runtime/capability, rollout, configured provider and current server state.
+Do not replace these checks with a game-name conditional in each shared screen.
+
+Game cards use the integration's bundled art through the static registry, with a
+consistent crop and bounded useful width. Adjacent game/server text supplies the
+name; redundant artwork has empty alternative text. Unknown modules retain an
+honest text fallback. Source/provenance belongs with the game integration. The
+art does not become a hero panel or substitute for real state. Runtime selection
+uses centered portrait cards: the integration-owned background art fades from
+fully opaque at the top to transparent at the bottom over a solid dark base,
+with a centered runtime label below. Compact cards wrap from the center; they do
+not stretch to fill the row. Native radios remain keyboard-accessible but are
+visually hidden: runtime selection uses a contained border, a subtle 4% scale
+and 85% opacity on other enabled cards, without a checkmark. Transitions take
+160 ms; reduced-motion preference removes both movement and animation. Version
+rows retain their decorative check in a compact scrollable list.
+Decorative art/checks do not duplicate accessible labels. Keyboard focus uses a
+restrained high-contrast outline, always available without an opt-in; programmatic
+heading focus has no decorative ring. Forced-colors mode retains selection cues.
+Configured CPU/RAM/disk on cards are labeled as limits, not current usage.
+
+### Visual and behavior conventions
+
+M5 currently supports **one light theme**. Use warm neutral background, white
+working surfaces, dark text, restrained blue actions and named semantic state
+colors. System fonts, compact consistent spacing, tabular resource numbers and
+contained table scrolling prioritize working information. A dark theme is not an
+available preference and is not silently represented by untested screenshots.
+The initial overly wide single-server artwork card was constrained during actual
+screenshot review; preserve that density as content grows.
+
+Forms preserve entered data on request failure. Destructive dialogs state actual
+loss and require the supported confirmation; no fabricated undo. The creation installer keeps relevant choices/drafts across Back and uses
+server-filtered runtime choices. Its current Vanilla path is Game → Runtime → Name → Version → Operators →
+Whitelist → Resources → Create. Runtime selection is explicit even when only
+Vanilla is eligible; version rows show only the release identifier. It has separate
+player-count/resource controls; the final Create
+action records EULA acceptance. No project or content-source picker is shown.
+The step counter, heading region, error slot, content pane and actions have stable
+positions. Errors occupy a reserved slot above the actions, clear of animated
+content. Bounded scrolling accommodates long choices/player lists without moving
+navigation. Enter on a selected game or runtime advances through the usual
+validation; entering the Name step focuses its textbox. Entering versions focuses the selected or first enabled native radio
+without selecting it; Up/Down changes selection. Entering operators focuses its
+input; enabling whitelist focuses its player input. Late catalog responses do not
+steal focus after the user moves elsewhere. Empty player-input Enter advances,
+while nonempty Enter performs lookup and pending/composing input cannot advance.
+Whitelist question and Yes/No controls move as one group; animation starts only
+on a toggle, not on entry. Player
+lookup temporarily makes its input read-only instead of disabling it, preserving
+Enter focus without stealing focus after the user moves away. Server/player name
+fields discourage password-manager autofill with field-scoped vendor hints;
+authentication fields keep normal password-manager support. Shared storage has
+no wizard field or reminder; limited storage retains its explicit input. Resource
+preset limits remain visible without explanatory filler.
+Future preset/modpack creation is tracked separately in issue #24. All submitted jobs link to
+Activity; accepted, running, blocked, uncertain, failed and completed remain
+distinct. A created/offline capacity-denied server is not presented as a failed
+creation or automatically started again.
+
+Console updates use bounded SSE parsing/display (300 retained lines with a
+per-line bound); charts show timestamps, units and gaps. Historical reads paginate
+instead of accumulating unbounded data. Binary uploads use Blob/XHR progress and
+cancellation, and file/backup downloads use native same-origin streaming links.
+Only the text editor has its own size limit. Authority is checked server-side
+throughout transfers; the browser never sees a privileged provider URL/token.
+An uncertain upload or restore cannot be described as rolled back without proof.
+
+### Catalogs and locale behavior
+
+English is the source language and Italian is required. Shared EN/IT message
+pairs are in `packages/i18n/src/*web.ts`; game catalogs live with their first-party
+module. `scripts/compile-web-i18n.ts` merges those reviewed sources and compiles
+Lingui ICU messages for `en`, `it` and a development pseudolocale. Missing locale
+keys/empty pairs or malformed ICU fail compilation. The compiled JSON is build
+output checked by `pnpm i18n:check`; do not hand-edit it.
+
+`useT` localizes application content/errors; unknown keys show a localized generic
+fallback, not a raw implementation key. `useFormat` uses `Intl` for dates, relative
+time, numbers and byte units. Real remote console/player/catalog content remains
+source text. Browser preference is used before sign-in; the account locale takes
+over after authentication. Explicit locale changes persist through the existing
+profile operation. The pseudolocale is for development verification, not an
+advertised third translation. EN/IT completeness and ICU plural/long-text behavior
+are tested in `apps/web/src/app/i18n.test.ts`; localization also includes existing
+backend mail/job/error catalogs and game contributions.
+
+### Reproducible browser evidence
+
+Browser tests start the actual Hono/React application through
+`apps/web/tests/harness.ts`, use migrated disposable schemas on the approved
+isolated services and create identities through real setup/invitation handlers.
+Playwright runs Chromium under Vitest. NickHosting API routes are not route-mocked;
+mail, Discord transport and the stateful Pterodactyl/SFTP/content providers are
+isolated fixtures. Browser Minecraft fixture signatures explicitly identify
+synthetic evidence and do not certify real game/runtime combinations.
+
+The account, Discord, platform, services and Minecraft browser files cover actual
+mutations and results alongside axe checks and sanitized screenshots. Include
+both EN/IT and desktop/mobile in the final inventory. This is not cross-browser,
+assistive-technology or complete WCAG certification: record the actual devices,
+manual keyboard/focus/reflow checks, omissions and independent findings. Review
+screenshots for density, wording, meaningful unavailable states and truthful
+resource labels. Do not replace a failed scenario with a screenshot-only claim.
+Final full-suite results and independent UX/accessibility acceptance remain a
+separate consolidation step; targeted development runs are preserved honestly.
+
 ## Routes and surfaces
 
 - Public invite registration, sign-in, password reset/recovery, Discord redirect/linking, optional passkeys/TOTP, email verification, and protected one-time Owner setup.
-- User Home, Servers with search/filters, four-step Create Server wizard, Activity/jobs, Settings: profile, locale, password, linked Discord, passkeys, TOTP and active sessions.
+- User Home, Servers with search/filters, centered Create Server installer, Activity/jobs, Settings: profile, locale, password, linked Discord, passkeys, TOTP and active sessions.
 - Per-server Overview; Console with live CPU/RAM/network charts and commands; Files with binary uploads, editing and streamed downloads; SFTP credential management; Backups/Restore; Network/connection details; Automation/Sleep; Settings; project grouping, sharing and permissions. SDK-defined management sections appear only for supported capabilities.
 - Minecraft management for eligible combinations: properties, independent player identity/OP/whitelist, worlds and applicable content workflows, including explicit replacement consent and verified backup choice. Unsupported mod/plugin operations are not shown as available for Vanilla.
 - Owner Overview/health; Users/invites/quotas/support; all NickHosting servers; Infrastructure/nodes/Gateway; Game Integrations/allowlists/egg and runtime mappings/compatibility evidence; Operations/failures/audit; platform settings and protected credentials.
@@ -181,7 +312,7 @@ No hardcoded English UI text.
 
 - Shared catalogs live in the i18n package; each `games/*` integration owns namespaced catalogs, loaded on demand where useful.
 - Use native `Intl` for numbers, relative times, memory units and dates. Raw server console, player chat and remote catalog descriptions remain source text; do not claim they are translated.
-- Add a locale through registration, extraction, translation and compilation. Missing keys fall back to English and fail appropriate completeness checks for required release locales.
+- Add a locale through registration, extraction, translation and compilation. Required release locales must have matching complete catalogs; missing translations fail compilation/completeness checks. An unrecognized runtime key displays a localized generic fallback, never the raw implementation key.
 - Detect browser locale anonymously, persist account preference after sign-in and allow explicit switching. Locale-prefixed panel URLs are not required.
 - Supported game wake/sleep helper messages use client language where the protocol supplies it, otherwise the Owner-configured server locale.
 - Test pseudo-localization/long strings, flexible layouts and RTL readiness where feasible. Critical actions and statuses must not be lost to clipping or truncation.
@@ -218,3 +349,27 @@ uncertain/blocked states. Sanitize credentials and test assets. The SFTPGo
 revocation exception in issue #18 remains a cross-milestone production-release
 gate; neither this milestone reorder nor a UI warning resolves it or authorizes
 deployment.
+
+## Integration catalogs and scan feedback
+
+Version catalogs use a bounded, keyboard-scrollable viewport, pagination, search
+and integration-supplied filters. Default ordering uses official release dates,
+newest first across release types; offer oldest-first and name ordering too.
+Unknown dates are explicit and placed last, never inferred from insertion order.
+Large catalogs and scan logs must not extend the page indefinitely.
+
+Show real acknowledged scan progress, an indeterminate indicator before totals
+are known, and an approximate remaining-time estimate only after sufficient
+measurements. Keep logs in a separately scrollable region without repeatedly
+announcing every line to screen readers. Preserve cancellation, honest partial
+results and explicit resume. EN/IT labels, keyboard scrolling and contained mobile
+overflow are required. `CatalogBrowser` and `ScanProgress` provide shared patterns
+for trusted integration views rather than Minecraft-specific application rules.
+
+Creation catalogs should preload asynchronously from Servers and reuse trusted
+integration data across wizard steps. Keep authorized cache data through normal
+navigation while invalidating on identity/Owner changes; never use cached choices
+as mutation authorization. Catalog filters/order must remain consistent after
+failed requests and retry. Owner paging/filtering is server-side, with full evidence
+loaded only when details are opened. Display missing/stale local metadata honestly;
+reading a list must not wait for an upstream manifest request.

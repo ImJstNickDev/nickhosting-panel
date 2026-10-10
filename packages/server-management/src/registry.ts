@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   type AuthContext,
   assertPermission,
+  authSessionId,
   DomainError,
   type Permission,
 } from '@nickhosting/core';
@@ -35,6 +36,7 @@ import {
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
+import { planProvisionGateway } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   type MinecraftPreparedContent,
@@ -43,6 +45,7 @@ import {
 } from './minecraft-content-contracts.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
+import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
@@ -63,7 +66,7 @@ export const createServerSchema = z
     mappingId: id,
     name,
     projectId: id.optional(),
-    limits: limitsSchema,
+    limits: limitsSchema.extend({ disk: limitsSchema.shape.disk.optional() }),
     autoStart: z.boolean().default(true),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
@@ -284,13 +287,23 @@ export async function createManagedServer(
   options: { minecraftInitialContent?: MinecraftPreparedContent } = {},
 ) {
   assertPermission(context, 'server:manage', { ownerUserId: context.subjectUserId });
-  const value = parse(createServerSchema, input);
-  const hash = digest({ kind: 'create', subject: context.subjectUserId, value });
+  const request = parse(createServerSchema, input);
+  const hash = digest({ kind: 'create', subject: context.subjectUserId, value: request });
   return db.transaction().execute(async (tx) => {
-    await requestLock(tx, context, value.idempotencyKey);
-    const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
+    await requestLock(tx, context, request.idempotencyKey);
+    const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
     if (previous) return previous;
     await lockResources(tx);
+    const { values: config } = await getSettings(tx, env);
+    if (request.limits.disk === undefined && config.storagePolicy !== 'GLOBAL_POOL')
+      throw new DomainError('validation_failed');
+    const value = {
+      ...request,
+      limits: parse(limitsSchema, {
+        ...request.limits,
+        disk: request.limits.disk ?? config.defaultServerStorageMiB,
+      }),
+    };
     const mapping = await tx
       .selectFrom('runtime_egg_mappings')
       .selectAll()
@@ -353,7 +366,6 @@ export async function createManagedServer(
       if (!project || project.owner_id !== context.subjectUserId)
         throw new DomainError('forbidden');
     }
-    const { values: config } = await getSettings(tx, env);
     const count = await tx
       .selectFrom('managed_servers')
       .select(tx.fn.countAll<string>().as('n'))
@@ -402,6 +414,16 @@ export async function createManagedServer(
     );
     const { pool, allocations: inventory } = await validatedBackendInventory(adapter, node, env);
     await assertBackendPoolNamespace(tx, node, pool, env);
+    const connectionMode =
+      minecraft && (!minecraft.capabilities.gateway || !config.gatewayEnabled)
+        ? 'direct'
+        : 'gateway';
+    const directClaims = await tx
+      .selectFrom('server_allocations')
+      .select('direct_endpoint')
+      .where('direct_endpoint', 'is not', null)
+      .execute();
+
     const owned = await tx
       .selectFrom('server_allocations as allocation')
       .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
@@ -415,6 +437,15 @@ export async function createManagedServer(
       .execute();
     const free: typeof inventory = [];
     for (const allocation of inventory) {
+      if (connectionMode === 'direct') {
+        if (
+          !allocation.directEndpoint ||
+          directClaims.some((claim) =>
+            isDeepStrictEqual(claim.direct_endpoint, allocation.directEndpoint),
+          )
+        )
+          continue;
+      } else if (allocation.delivery === 'direct' || !pool.gatewayBindAddresses.length) continue;
       if (
         allocation.assigned ||
         (canonicalAllocationAddress(allocation.ip) === '127.0.0.1' &&
@@ -462,6 +493,7 @@ export async function createManagedServer(
         pterodactyl_uuid: null,
         pterodactyl_identifier: null,
         limits: JSON.stringify(value.limits),
+        connection_mode: connectionMode,
         active_operation_id: jobId,
         last_observed_at: null,
         deleted_at: null,
@@ -477,6 +509,8 @@ export async function createManagedServer(
         pterodactyl_allocation_id: allocation.id,
         address: canonicalAllocationAddress(allocation.ip),
         backend_address: allocation.backendAddress,
+        direct_endpoint:
+          connectionMode === 'direct' ? JSON.stringify(allocation.directEndpoint) : null,
         port: allocation.port,
         role: role.role,
         protocols: role.protocols,
@@ -484,6 +518,12 @@ export async function createManagedServer(
       };
     });
     await tx.insertInto('server_allocations').values(allocationRows).execute();
+    const plannedServer = await tx
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const gatewayProvision = await planProvisionGateway(tx, plannedServer, mapping.game_id, env);
     const primary = allocationRows.find((r) => r.is_primary);
     if (!primary) throw new DomainError('configuration_invalid');
     const environment = { ...mapping.environment };
@@ -507,7 +547,7 @@ export async function createManagedServer(
       externalId,
       userId: node.provision_user_id,
       eggId: mapping.egg_id,
-      dockerImage: mapping.docker_image,
+      dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
       startup: mapping.startup,
       environment,
       limits: value.limits,
@@ -548,6 +588,7 @@ export async function createManagedServer(
       {
         provision,
         autoStart: value.autoStart,
+        ...(gatewayProvision ? { gatewayProvision } : {}),
         ...(options.minecraftInitialContent
           ? { minecraftInitialContent: options.minecraftInitialContent }
           : {}),
@@ -857,7 +898,10 @@ export async function enqueueServerOperation(
       // M3 consent changes are interactive effects. Do not carry authority
       // across either lock wait. Legacy internal M2 calls without a Gateway
       // policy retain their existing context contract.
-      const actor = policy ? await currentInteractiveContext(tx, context, env) : context;
+      const actor =
+        policy || context[authSessionId]
+          ? await currentInteractiveContext(tx, context, env)
+          : context;
       await authorizeServer(tx, actor, serverId, 'server:operate');
       await tx
         .updateTable('managed_servers')
@@ -898,7 +942,7 @@ export async function enqueueServerOperation(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     const actor =
-      policy || value.action === 'minecraft-content'
+      policy || context[authSessionId] || value.action === 'minecraft-content'
         ? await currentInteractiveContext(tx, context, env)
         : context;
     const result = await enqueueLockedServerOperation(
@@ -1020,7 +1064,8 @@ export async function setRuntimeMapping(
         nodeId: id,
         nestId: z.number().int().positive(),
         eggId: z.number().int().positive(),
-        dockerImage: z.string().min(1),
+        imageMode: z.enum(['static', 'integration']).default('static'),
+        dockerImage: z.string().min(1).optional(),
         startup: z.string().min(1),
         environment: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()),
         portRoles: z
@@ -1055,6 +1100,11 @@ export async function setRuntimeMapping(
       .strict(),
     input,
   );
+  if (
+    (value.imageMode === 'static' && !value.dockerImage) ||
+    (value.imageMode === 'integration' && value.dockerImage !== undefined)
+  )
+    throw new DomainError('validation_failed');
   const game = await db
     .selectFrom('game_integrations')
     .select('manifest')
@@ -1092,7 +1142,11 @@ export async function setRuntimeMapping(
   if (
     !supportsStopConfirmation(egg) ||
     egg.nest !== value.nestId ||
-    ![egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(value.dockerImage)
+    !(
+      value.imageMode === 'static'
+        ? [value.dockerImage ?? '']
+        : integrationImageCandidates(value.gameId, value.runtimeId)
+    ).some((image) => [egg.docker_image, ...Object.values(egg.docker_images ?? {})].includes(image))
   )
     throw new DomainError('validation_failed');
   return db.transaction().execute(async (tx) => {
@@ -1105,7 +1159,8 @@ export async function setRuntimeMapping(
       node_id: node.id,
       nest_id: egg.nest,
       egg_id: egg.id,
-      docker_image: value.dockerImage,
+      image_mode: value.imageMode,
+      docker_image: value.imageMode === 'static' ? (value.dockerImage ?? '') : '',
       startup: value.startup,
       environment: JSON.stringify(value.environment),
       port_roles: JSON.stringify(value.portRoles),
@@ -1135,6 +1190,7 @@ export async function setRuntimeMapping(
         'nest_id',
         'egg_id',
         'docker_image',
+        'image_mode',
         'startup',
       ] as const)
         if (previous[key] !== row[key]) throw new DomainError('conflict');

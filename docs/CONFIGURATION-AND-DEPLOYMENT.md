@@ -105,3 +105,96 @@ The [isolated fixture proposal](M3-TEST-INFRASTRUCTURE.md) has its own narrowly
 approved resources and rollback. It does not establish production reachability
 or authorize changes to the existing external frontend network. The SFTPGo 2.7.6
 exception remains tracked by issue #18 before production release.
+
+## M5 WebPanel build and development
+
+`apps/web` is the React application. `scripts/dev.sh pnpm dev:web` binds Vite to
+loopback. Set `NH_WEB_API_PROXY` in the development command environment to the
+local Core API origin when using separate development processes; `/api` and
+`/v1` are forwarded with the original Origin header. Add the exact development
+origin to the existing API trusted-origin configuration. Never use a wildcard
+origin or disable the existing CSRF/invitation checks to make development work.
+
+`scripts/dev.sh pnpm build` compiles catalogs and writes static assets to
+`apps/web/dist/`. `scripts/dev.sh pnpm --filter @nickhosting/web preview` provides
+a loopback review server. A production host must serve these assets with SPA
+fallback for browser routes and proxy `/api/auth/*` and `/v1/*` to Core on the
+same public HTTPS origin. Preserve streaming/backpressure for uploads, downloads
+and console SSE, and do not impose an arbitrary small transfer-body limit.
+Assets are not a new Pterodactyl proxy, Gateway listener or separately deployed
+authentication service. Applying reverse-proxy/host/container configuration
+requires the existing operation-specific approval; M5 does not deploy it.
+
+Only public presentation is compiled into the browser. Runtime configuration and
+secrets remain server-side with defaults → Owner DB → environment precedence.
+The new `NH_SFTP_PUBLIC_HOSTNAME` and `NH_SFTP_PUBLIC_PORT` declare the public SFTP
+endpoint. The UI never derives it from a private SFTPGo administrative URL.
+Absent endpoint/provider configuration is shown as unavailable. Revocation's
+retained-SSH-transport limitation remains the separate issue #18 release gate.
+
+Apply the existing migration command before running changed services. M5 adds
+schedule/run tables and internal service-contact records. Run API and worker
+from the same reviewed revision. Worker polling uses PostgreSQL due claims and
+existing durable jobs; Redis delivery alone is not the source of truth. Health
+marks missing/stale worker or Gateway contact unknown; merely loading the Owner
+page does not prove those services healthy or deploy them.
+
+## Isolated browser verification
+
+`scripts/dev.sh pnpm test:browser` uses the verified isolated M2 service wrapper,
+a disposable PostgreSQL schema per suite, and fresh loopback HTTP ports. The
+actual React/Vite app, Hono API, Better Auth, migrations, authorization and job
+processor run together. External Pterodactyl, DNS, identity/content metadata and
+Discord boundaries use documented fixtures. No test route replaces a NickHosting
+API handler. Browser suites never create users by seeding database identities.
+
+Playwright's pinned Chromium is installed in the current user's cache. On this
+validation host, missing Chromium shared libraries were obtained using
+`apt-get download` and extracted with `dpkg-deb -x` under the user's cache;
+`LD_LIBRARY_PATH` is scoped to the spawned browser. No OS package was installed or
+upgraded. Other development hosts can use their approved compatible browser
+installation; installing OS dependencies is a separate infrastructure decision.
+The harness closes its browser/listener and drops only its test schema. It does
+not start, restart or clean Docker services.
+
+Raw screenshots remain ignored under `.codex/local/m5-browser/`. Only reviewed,
+sanitized browser screenshots may be copied to `docs/screenshots/m5/`. Governance
+accepts PNG files only in that directory, validates their envelope/checksums and
+rejects embedded metadata and trailing payloads. Pixel privacy still requires
+manual review. Original artworks and dependency notices remain separate from
+screenshot evidence.
+
+Install the pinned user-local test browser with
+`scripts/dev.sh pnpm exec playwright install chromium` if absent. Do not append
+`--with-deps` or install OS packages without their own approval. The production
+build includes `THIRD-PARTY-NOTICES.md` and `THIRD-PARTY-WORKER-NOTICES.txt`; retain
+both alongside static assets. See [M5 dependency provenance](M5-DEPENDENCIES.md).
+
+## Persistent development and separate production configuration
+
+The Owner-approved M5 architecture is specified in [M5 environments](M5-ENVIRONMENTS.md):
+`compose.dev.yaml` provides HTTPS-proxied Vite HMR and isolated persistent review
+state; `compose.prod.yaml` uses compiled immutable artifacts and independent
+credentials/storage. The development hostname and external network in those
+configuration examples were explicitly supplied for this task; other private
+infrastructure notes remain unpublished. Read the exact activation proposal and
+rollback before any Docker operation. The prepared configuration does not grant
+activation, NPM/DNS mutation or production deployment approval.
+
+### Creation storage defaults
+
+`defaultServerStorageMiB` / `NH_DEFAULT_SERVER_STORAGE_MIB` controls the finite
+server disk allowance assigned when creation omits disk under `GLOBAL_POOL`.
+Default: 4096 MiB, preserving the previous wizard default. It follows normal
+configuration precedence and does not change existing server limits. Shared-pool
+creation hides the disk picker; allocation and backup reservations still count
+against physical pool/free-space safety. `PER_USER_BUDGET` creation requires an
+explicit disk value. This setting is not an unlimited-storage or auto-expansion
+implementation.
+
+Minecraft metadata requests default to the public NickHosting application identity
+and project repository contact; Owner `minecraftMetadataUserAgent` or
+`NH_MINECRAFT_METADATA_USER_AGENT` can override it. Catalog discovery needs no
+private provider key for Mojang metadata. Compatibility report verification still
+requires the existing private `NH_MINECRAFT_EVIDENCE_KEY` and legitimately produced
+identity-matching evidence; metadata discovery does not create or replace that key.

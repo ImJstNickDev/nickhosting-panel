@@ -1,7 +1,9 @@
 import { DomainError, type PlatformRole } from '@nickhosting/core';
 import { z } from 'zod';
+import { runtimeImagePolicySchema } from './runtime-images.js';
 
 export * from './gateway.js';
+export * from './runtime-images.js';
 
 export const gameRolloutStates = [
   'development',
@@ -122,6 +124,7 @@ export const gameManifestSchema = z
             id: identifier,
             nameKey: translationKey,
             supportedGameVersions: z.array(z.string().min(1)),
+            imagePolicy: runtimeImagePolicySchema.optional(),
             supports: z.record(z.string(), z.boolean()),
           })
           .strict(),

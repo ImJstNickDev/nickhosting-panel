@@ -171,7 +171,57 @@ export function minecraftSupport(
   return 'unverified';
 }
 
-/** Owner availability and test evidence are deliberately independent authorities. */
+export const minecraftCapabilityDeclaration = {
+  id: 'minecraft-java/vanilla',
+  version: 1,
+} as const;
+
+export function minecraftGatewaySupported(
+  combination: Pick<
+    MinecraftCombination,
+    'release' | 'releaseType' | 'family' | 'profile' | 'protocolId'
+  >,
+): boolean {
+  return (
+    combination.profile === 'vanilla' &&
+    combination.releaseType === 'release' &&
+    combination.family === 'netty' &&
+    combination.release === '26.1' &&
+    combination.protocolId === 775
+  );
+}
+
+/** Compiled integration support is independent of per-installation signed test reports.
+ * Installation is offered only after metadata/artifact and local egg validation. This
+ * exact Gateway pair has real M4 coverage; unknown/legacy/snapshot protocols retain
+ * direct access, without claiming protocol-aware readiness, idle or wake support. */
+export function minecraftDeclaredCapabilities(combination: MinecraftCombination) {
+  const installation = combination.profile === 'vanilla';
+  const gateway = minecraftGatewaySupported(combination);
+  // UUID-based ops/whitelist JSON files were introduced in 1.7.6. Opaque
+  // snapshots cannot be ordered safely and retain manual provider management.
+  const parts = combination.release.split('.').map(Number);
+  const playerManagement =
+    installation &&
+    combination.releaseType === 'release' &&
+    /^\d+\.\d+(?:\.\d+)?$/.test(combination.release) &&
+    ((parts[0] ?? 0) > 1 ||
+      ((parts[0] ?? 0) === 1 &&
+        ((parts[1] ?? 0) > 7 || ((parts[1] ?? 0) === 7 && (parts[2] ?? 0) >= 6))));
+  return {
+    installation,
+    directConnection: installation,
+    playerManagement,
+    gateway,
+    readiness: gateway,
+    playerIdle: gateway,
+    sleepWake: gateway,
+  };
+}
+
+/** Owner availability remains authoritative; signed reports describe diagnostic
+ * evidence and do not gate compiled Vanilla installation support. Other profiles
+ * retain their existing private-testing/evidence policy until declared supported. */
 export function assertMinecraftChoice(
   input: {
     combination: MinecraftCombination;
@@ -183,6 +233,8 @@ export function assertMinecraftChoice(
   },
   now = new Date(),
 ): void {
+  if (!input.enabled) throw new DomainError('integration_unavailable');
+  if (minecraftDeclaredCapabilities(input.combination).installation) return;
   const support = minecraftSupport(
     input.combination,
     input.mappingDigest,
@@ -190,10 +242,7 @@ export function assertMinecraftChoice(
     input.evidence,
     now,
   );
-  if (
-    !input.enabled ||
-    (support !== 'verified' && !(input.privateTester && support === 'experimental'))
-  )
+  if (support !== 'verified' && !(input.privateTester && support === 'experimental'))
     throw new DomainError('integration_unavailable');
 }
 
@@ -202,7 +251,9 @@ export function publicMinecraftChoice(id: string, combination: MinecraftCombinat
   return {
     id,
     version: combination.release,
+    releaseType: combination.releaseType,
     runtime: combination.profile,
+    capabilities: minecraftDeclaredCapabilities(combination),
     ...(combination.buildId ? { build: combination.buildId } : {}),
     ...(combination.loaderVersion ? { loaderVersion: combination.loaderVersion } : {}),
   };

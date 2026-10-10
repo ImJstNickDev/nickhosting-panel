@@ -7,12 +7,13 @@ import {
   gatewayMinecraftProtocolSchema,
   gatewaySnapshotSchema,
 } from '@nickhosting/game-sdk';
-import { minecraftDigest } from '@nickhosting/minecraft';
+import { minecraftCapabilityDeclaration } from '@nickhosting/minecraft';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import {
   allocationAddressesOverlap,
+  backendAllocationAddress,
   canonicalAllocationAddress,
   effectiveBackendAllocationPool,
 } from './allocation-pool.js';
@@ -21,14 +22,14 @@ import { currentInteractiveContext } from './interactive-context.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { authorizeServer, parse } from './registry.js';
 
-/** Existing managed servers retain verified management when creation availability is disabled.
- * Experimental testing is always checked against the actual server Owner, never the API caller. */
+/** Existing managed servers retain declared routing when creation availability is disabled.
+ * Compiled support declarations are independent of local diagnostic test reports. */
 export async function requireMinecraftGatewayProtocol(
   db: DB,
   serverId: string,
   registration: { handlerId: string; gameVersion: string },
   env: Environment = {},
-  now = new Date(),
+  _now = new Date(),
 ): Promise<GatewayMinecraftProtocol | undefined> {
   const server = await db
     .selectFrom('managed_servers as server')
@@ -39,12 +40,13 @@ export async function requireMinecraftGatewayProtocol(
     .where('server.deleted_at', 'is', null)
     .executeTakeFirst();
   if (!server) throw new DomainError('not_found');
+  if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
   if (server.game_id !== 'minecraft-java') {
     if (registration.handlerId === 'minecraft-java') throw new DomainError('configuration_invalid');
     return undefined;
   }
   const unavailable = () =>
-    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_evidence' });
+    new DomainError('integration_unavailable', 503, { reason: 'minecraft_gateway_unsupported' });
   const profile = await db
     .selectFrom('minecraft_server_profiles')
     .selectAll()
@@ -55,6 +57,7 @@ export async function requireMinecraftGatewayProtocol(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   if (
     choice.row.mapping_id !== server.mapping_id ||
+    choice.row.mapping_digest !== choice.mappingDigest ||
     choice.mapping.game_id !== server.game_id ||
     choice.mapping.runtime_id !== server.runtime_id ||
     choice.combination.profile !== server.runtime_id ||
@@ -64,38 +67,7 @@ export async function requireMinecraftGatewayProtocol(
     choice.combination.protocolId === null
   )
     throw unavailable();
-  const rollout = await db
-    .selectFrom('game_rollouts')
-    .selectAll()
-    .where('integration_id', '=', 'minecraft-java')
-    .executeTakeFirst();
-  if (!rollout) throw unavailable();
-  if (choice.support !== 'verified') {
-    const owner = await db
-      .selectFrom('user')
-      .select(['id', 'role'])
-      .where('id', '=', server.owner_id)
-      .executeTakeFirst();
-    if (
-      choice.support !== 'experimental' ||
-      rollout.state !== 'private-testing' ||
-      !owner ||
-      (owner.role !== 'owner' && !rollout.allowlist.includes(owner.id))
-    )
-      throw unavailable();
-  }
-  const matching = choice.evidence
-    .filter(
-      (report) =>
-        report.combinationDigest === minecraftDigest(choice.combination) &&
-        report.choiceDigest === choice.row.identity_digest &&
-        report.mappingDigest === choice.mappingDigest &&
-        Date.parse(report.recordedAt) <= now.getTime() &&
-        now.getTime() - Date.parse(report.recordedAt) < 180 * 86400000,
-    )
-    .sort((a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt));
-  const report = matching[0];
-  if (!report || (matching[1] && matching[1].recordedAt === report.recordedAt)) throw unavailable();
+  if (!choice.capabilities.gateway) throw unavailable();
   return gatewayMinecraftProtocolSchema.parse({
     release: choice.combination.release,
     protocolId: choice.combination.protocolId,
@@ -104,8 +76,9 @@ export async function requireMinecraftGatewayProtocol(
     acceptsTransfers: false,
     choiceId: choice.row.id,
     choiceDigest: choice.row.identity_digest,
-    evidenceRunId: report.runId,
-    evidenceExpiresAt: new Date(Date.parse(report.recordedAt) + 180 * 86400000).toISOString(),
+    supportSource: 'integration',
+    declarationId: minecraftCapabilityDeclaration.id,
+    declarationVersion: minecraftCapabilityDeclaration.version,
   });
 }
 
@@ -155,6 +128,7 @@ export async function setGatewayRoute(
     if (current.sessionType !== 'regular') throw new DomainError('forbidden');
     const config = await gatewayConfiguration(tx, env);
     const server = await authorizeServer(tx, current, value.serverId, 'server:manage');
+    if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
     if (
       !server.pterodactyl_uuid ||
       !server.pterodactyl_id ||
@@ -171,28 +145,6 @@ export async function setGatewayRoute(
         env,
       );
     }
-    const node = await tx
-      .selectFrom('managed_nodes')
-      .selectAll()
-      .where('id', '=', server.node_id)
-      .executeTakeFirstOrThrow();
-    const claim = await tx
-      .selectFrom('server_allocations')
-      .selectAll()
-      .where('id', '=', value.allocationId)
-      .where('server_id', '=', server.id)
-      .where('node_id', '=', node.id)
-      .executeTakeFirst();
-    const pool = effectiveBackendAllocationPool(node, env);
-    if (
-      !node.enabled ||
-      node.physical_host_id !== config.gatewayPhysicalHostId ||
-      !claim ||
-      !claim.protocols.includes(value.transport) ||
-      !pool?.gatewayBindAddresses.includes(address) ||
-      allocationAddressesOverlap(address, claim.backend_address)
-    )
-      throw new DomainError('allocation_unavailable');
     const existing = await tx
       .selectFrom('gateway_routes')
       .selectAll()
@@ -204,22 +156,20 @@ export async function setGatewayRoute(
     if (
       old &&
       (old.server_id !== server.id ||
-        old.allocation_id !== claim.id ||
+        old.allocation_id !== value.allocationId ||
         old.public_address !== address ||
         old.public_port !== value.publicPort ||
         old.transport !== value.transport)
     )
       throw new DomainError('conflict');
-    if (
-      existing.some(
-        (row) =>
-          row.id !== id &&
-          row.public_port === value.publicPort &&
-          row.transport === value.transport &&
-          allocationAddressesOverlap(address, row.public_address),
-      )
-    )
-      throw new DomainError('allocation_unavailable');
+    const claim = await validateGatewayRouteEndpoint(
+      tx,
+      server.node_id,
+      { ...value, id },
+      config,
+      env,
+      !old,
+    );
     await tx
       .insertInto('gateway_routes')
       .values({
@@ -244,6 +194,111 @@ export async function setGatewayRoute(
     });
     return { id };
   });
+}
+/** Shared namespace validation. Caller holds the global resource lock. No auth
+ * bypass: interactive authorization and trusted durable provision ownership are
+ * checked independently by their entry points. */
+export async function validateGatewayRouteEndpoint(
+  tx: DB,
+  serverNodeId: string,
+  value: z.infer<typeof routeInput> & { id: string },
+  config: { gatewayId: string; gatewayPhysicalHostId: string },
+  env: Environment = {},
+  checkDisabled = true,
+) {
+  const address = canonicalAllocationAddress(value.publicAddress);
+  if (
+    !address ||
+    address !== value.publicAddress ||
+    ['0.0.0.0', '::'].includes(address) ||
+    address.startsWith('::ffff:')
+  )
+    throw new DomainError('validation_failed');
+  const node = await tx
+    .selectFrom('managed_nodes')
+    .selectAll()
+    .where('id', '=', serverNodeId)
+    .executeTakeFirstOrThrow();
+  const claim = await tx
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('id', '=', value.allocationId)
+    .where('server_id', '=', value.serverId)
+    .where('node_id', '=', node.id)
+    .executeTakeFirst();
+  const pool = effectiveBackendAllocationPool(node, env);
+  if (
+    !node.enabled ||
+    node.physical_host_id !== config.gatewayPhysicalHostId ||
+    !claim ||
+    !claim.protocols.includes(value.transport) ||
+    !pool?.gatewayBindAddresses.includes(address) ||
+    allocationAddressesOverlap(address, claim.backend_address)
+  )
+    throw new DomainError('allocation_unavailable');
+  const existing = await tx
+    .selectFrom('gateway_routes')
+    .selectAll()
+    .where('gateway_id', '=', config.gatewayId)
+    .execute();
+  if (
+    existing.some(
+      (row) =>
+        row.id !== value.id &&
+        row.public_port === value.publicPort &&
+        row.transport === value.transport &&
+        allocationAddressesOverlap(address, row.public_address),
+    )
+  )
+    throw new DomainError('allocation_unavailable');
+  if (value.enabled || checkDisabled) {
+    // Direct allocations can share the Gateway's IP, but never its listener port.
+    // Include disabled pools and retained claims: removing an editable pin does
+    // not release the corresponding provider binding. Wings publishes both
+    // transports, independently of the game's declared transport roles.
+    const hostNodes = await tx
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('physical_host_id', '=', node.physical_host_id)
+      .execute();
+    for (const hostNode of hostNodes) {
+      const hostPool = effectiveBackendAllocationPool(hostNode, env);
+      if (
+        hostPool?.allocations.some(
+          (pin) =>
+            pin.port === value.publicPort &&
+            allocationAddressesOverlap(address, backendAllocationAddress(pin)),
+        )
+      )
+        throw new DomainError('allocation_unavailable');
+    }
+    const hostClaims = await tx
+      .selectFrom('server_allocations as allocation')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select('allocation.backend_address')
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+      .where('allocation.port', '=', value.publicPort)
+      .execute();
+    if (hostClaims.some((entry) => allocationAddressesOverlap(address, entry.backend_address)))
+      throw new DomainError('allocation_unavailable');
+    const hostRoutes = await tx
+      .selectFrom('gateway_routes as route')
+      .innerJoin('server_allocations as allocation', 'allocation.id', 'route.allocation_id')
+      .innerJoin('managed_nodes as ownerNode', 'ownerNode.id', 'allocation.node_id')
+      .select(['route.id', 'route.public_address'])
+      .where('ownerNode.physical_host_id', '=', node.physical_host_id)
+      .where('route.public_port', '=', value.publicPort)
+      .where('route.transport', '=', value.transport)
+      .execute();
+    if (
+      hostRoutes.some(
+        (entry) =>
+          entry.id !== value.id && allocationAddressesOverlap(address, entry.public_address),
+      )
+    )
+      throw new DomainError('allocation_unavailable');
+  }
+  return claim;
 }
 export async function listGatewayRoutes(db: DB, context: AuthContext) {
   assertPermission(context, 'settings:write');
@@ -294,6 +349,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .where('route.gateway_id', '=', gatewayId)
       .where('route.enabled', '=', true)
       .where('server.deleted_at', 'is', null)
+      .where('server.connection_mode', '=', 'gateway')
       .where('server.pterodactyl_uuid', 'is not', null)
       .where('node.enabled', '=', true)
       .where('node.physical_host_id', '=', config.gatewayPhysicalHostId)
@@ -386,7 +442,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         Math.min(
           now + config.gatewayLeaseSeconds * 1000,
           ...routes.map((route) =>
-            route.protocol?.minecraft
+            route.protocol?.minecraft && route.protocol.minecraft.supportSource !== 'integration'
               ? Date.parse(route.protocol.minecraft.evidenceExpiresAt)
               : Number.POSITIVE_INFINITY,
           ),
@@ -431,6 +487,7 @@ export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {
     ])
     .where('s.id', '=', route.serverId)
     .where('s.deleted_at', 'is', null)
+    .where('s.connection_mode', '=', 'gateway')
     .where('a.id', '=', route.allocationId)
     .executeTakeFirst();
   if (!row?.pterodactyl_id || !row.pterodactyl_uuid) throw new DomainError('not_found');

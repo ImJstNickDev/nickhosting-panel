@@ -6,6 +6,8 @@ export interface BackendAllocationPool {
     allocationId: number;
     address: string;
     backendAddress?: string;
+    delivery?: 'backend' | 'direct';
+    directEndpoint?: { hostname: string; port: number };
     port: number;
   }>;
   loopbackRemap?: {
@@ -101,6 +103,7 @@ export interface ServerTables {
     node_id: string;
     nest_id: number;
     egg_id: number;
+    image_mode: Generated<'static' | 'integration'>;
     docker_image: string;
     startup: string;
     environment: Json<Record<string, string>>;
@@ -129,6 +132,7 @@ export interface ServerTables {
     pterodactyl_uuid: string | null;
     pterodactyl_identifier: string | null;
     limits: Json<ServerLimits>;
+    connection_mode: Generated<'gateway' | 'direct'>;
     runtime_state: Generated<'offline' | 'starting' | 'running' | 'stopping' | 'unknown'>;
     readiness: Generated<'unknown' | 'loading' | 'ready' | 'degraded'>;
     intent: Generated<'manually_stopped' | 'maintenance' | 'auto_wake_enabled' | 'sleeping'>;
@@ -146,6 +150,11 @@ export interface ServerTables {
     pterodactyl_allocation_id: number;
     address: string;
     backend_address: string;
+    direct_endpoint: ColumnType<
+      { hostname: string; port: number } | null,
+      string | null | undefined,
+      string | null
+    >;
     port: number;
     role: string;
     protocols: ('tcp' | 'udp')[];

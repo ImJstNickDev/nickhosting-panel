@@ -70,6 +70,10 @@ export async function updateSettings(
       .executeTakeFirst();
     assertConfigWritable(patch, resolveConfig(previous?.value ?? {}, env));
     const value = { ...previous?.value, ...patch };
+    // Internal reset requests use undefined; JSON PATCH clients cannot supply
+    // it. Remove the stored override before resolving/validating default policy.
+    for (const key of Object.keys(value) as Array<keyof PlatformConfig>)
+      if (value[key] === undefined) delete value[key];
     const resolved = resolveConfig(value, env);
     // Policy changes must validate already committed reservations under the same
     // lock as admission; switching storage modes cannot hide existing use.
@@ -110,6 +114,14 @@ export async function updateSettings(
       .values({ key: 'platform', value })
       .onConflict((c) => c.column('key').doUpdateSet({ value, updated_at: new Date() }))
       .execute();
+    if (
+      'gameIdleTimeouts' in patch ||
+      'defaultIdleTimeoutSeconds' in patch ||
+      'idleTimeoutUserAccess' in patch
+    ) {
+      // Generic settings writes share the specialized editor's idle fence.
+      await tx.updateTable('gateway_server_states').set({ idle_since: null }).execute();
+    }
     await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
     return resolved;
   });

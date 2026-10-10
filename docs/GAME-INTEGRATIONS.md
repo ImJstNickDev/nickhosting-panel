@@ -71,13 +71,56 @@ unsupported action or placeholder integration counts toward M5 readiness.
 - Mapping includes startup variables, Docker image compatibility, install environment and supported feature flags. When mapping missing/mismatched, Owner sees a precise integration error; user cannot create a broken server.
 - Revisit mapping behavior if Pterodactyl 2.x changes its nest/egg APIs; adapter owns version translation.
 
+## Integration-owned container image selection
+
+Runtime descriptors may declare `imagePolicy`: a fixed integration image or rules
+with image references, inclusive version bounds and/or trusted runtime requirements.
+The SDK requires exactly one matching rule. Version ordering belongs to the
+integration (an explicit comparator), never an assumed SemVer parser. Missing
+metadata, unsupported requirements and ambiguous matches fail closed.
+
+Owner egg mappings select `imageMode: integration` or the existing `static` mode.
+Static remains the default for old API requests and existing database rows; these
+are never automatically converted. Integration mode has no Owner-selected Docker
+image. Only compiled first-party policy is authoritative, not a manifest edited
+in the database. The Owner UI shows “Defined by integration” and retains a fixed
+image alternative. No game-specific image decisions belong in shared UI components.
+
+Minecraft derives Java requirements from its existing release/build/loader metadata
+resolver. Its runtime descriptors declare explicit known Java-major → official
+Pterodactyl Yolks image rules; they do not infer future tag names or invent release
+ranges that disagree with metadata. This is the version-dependent behavior for
+Vanilla, Paper, Folia, Fabric and Forge. The generic SDK also supports literal
+version ranges and fixed-image games. Image requirements do **not** certify those
+runtimes; Vanilla remains the only M4 real-server-verified profile.
+
+References for the declared image families: [upstream Java build matrix](https://raw.githubusercontent.com/pterodactyl/yolks/master/.github/workflows/java.yml)
+and [Java 25 image definition](https://raw.githubusercontent.com/pterodactyl/yolks/master/java/25/Dockerfile).
+No image was pulled/run to establish new game support in this change.
+
+The actual image and Java requirement are resolved when registering an exact
+Minecraft combination, checked against the selected egg, and included in its
+immutable binding. Diagnostic reports retain their exact signed identity; they are
+not required to enable declared Vanilla installation. The provision plan copies
+that frozen image. Queued jobs
+and existing servers cannot silently acquire a different image when rules change.
+Image availability is rechecked against the provider before execution; Pterodactyl
+still owns egg installation, and runtime image selection does not fix an incompatible
+installer image/script. No egg mutation or automatic fallback is performed.
+
+Migration `016_runtime_images.sql` adds a default-static mode. Static evidence
+canonicalization excludes that new default field, preserving historical signatures;
+integration mode participates in the mapping digest. Existing populated mappings
+retain their identity/mode/image immutability. Do not downgrade by blindly dropping
+the column after integration-managed mappings exist.
+
 ## Wizard architecture
 
 Top-level steps always `Choose a game → Configure → Resources → Create`; `Configure` has plugin-defined conditional steps, defaults, validators and rich interactive widgets. UI uses common components with game-specific contributors. Progressive disclosure: simple Vanilla server requires few inputs; modded setup introduces appropriate options.
 
 Minecraft example:
 
-- Show only evidence-backed, Owner-enabled runtime/version choices. Vanilla is the only runtime with M4 real-server verification; Paper/Folia/Fabric/Forge remain unavailable to ordinary users until their evidence passes. Private testing follows the existing rollout/allowlist contracts.
+- Show Owner-enabled runtime/version choices supported by the compiled integration and locally validated against the selected egg. Vanilla installation/direct access does not require a signed test for each mapping. Gateway/sleep/wake are separate declared capabilities. Paper/Folia/Fabric/Forge retain their existing evidence/private-testing controls; they are not promoted by Vanilla support.
 - If user **selects a modpack**, detect loader and Minecraft version from modpack metadata and skip redundant runtime/version selection. Still ask operators/whitelist and relevant gameplay options.
 - Players/OP UI may use MCHeads renders via `https://api.mcheads.org/head/{player}/{size}` but must verify account UUID/identity separately and handle cache/errors.
 - Existing-server modpack install triggers explicit wipe warning and pre-wipe verified backup option, never a silent merge.
@@ -105,7 +148,7 @@ States: `development`, `private-testing`, `public`, `disabled-for-new-servers`. 
 The M5 Owner area exposes signed compatibility evidence, tested combinations,
 runtime/egg mappings and internal support states. Ordinary creation uses simple
 eligible release/runtime choices: no protocol IDs, support checklist or experimental
-badges. Owner enablement cannot manufacture missing compatibility evidence. Missing
+badges. Owner enablement cannot manufacture test evidence or undeclared Gateway support. Missing
 provider credentials or unsupported capabilities produce honest actionable states,
 never a working-looking control backed by a placeholder.
 
@@ -124,3 +167,74 @@ A protocol adapter for Minecraft Java can explore `node-minecraft-protocol` as a
 - Idle detection with players joining/leaving, manual-stop suppression and wake after sleep.
 - Client protocol compatibility matrix, status-ping vs join behavior, unavailable resources replies.
 - First-party UI sections register translations and accessibility metadata.
+
+### Integration-owned Vanilla discovery — 2026-10-10
+
+The Owner no longer needs to author each Vanilla version's binding. The integration
+owns its Java ranges (8 through 1.16.5, 16 for 1.17–1.17.1, 17 for 1.18–1.20.4,
+21 for 1.20.5–1.21.11, 25 from 26.1), checked against hash-verified official
+metadata. Snapshot Java requirements come from metadata, not lexical ordering.
+Other loaders retain their own requirements. Download availability, Java suitability
+and protocol/game evidence remain distinct facts.
+
+Owner `POST /v1/owner/minecraft/catalog/sync` accepts a mapping, optional historical
+versions and a bounded cursor/limit. It reads the official catalog, validates an
+actual server download and registers combinations using the integration's known
+Vanilla egg variable/JAR contract. Repeated pages are idempotent. Unknown eggs
+report their unsupported contract; advanced explicit registration remains available.
+It does not run an installer or create a remote server. Declared Vanilla candidates
+can become eligible through the existing Owner availability/rollout controls without
+entering per-version bindings or signing local test reports. Catalog synchronization
+accepts `enableSupported: true` as an explicit Owner request to enable the declared
+candidates it registers; this does not change integration rollout.
+
+A metadata candidate is not a real-server test result. Existing exact signed reports
+cannot be rebound to another mapping, image or artifact. The compiled integration
+declares Vanilla installation/direct access independently of those reports. Gateway,
+readiness, player-idleness and sleep/wake support are separately declared; currently
+the real M4-covered Vanilla 26.1/protocol 775 combination declares these features.
+Unknown, legacy and snapshot protocols retain direct installation without pretending
+to support those protocol-dependent features. Other runtime profiles are unchanged.
+Owner diagnostics show declared capability and actual test evidence separately.
+
+Creation uses trusted SDK installer-page descriptors for a centered sequence,
+with no Vanilla content-source or project picker. Runtime choice lists use
+release types to reveal snapshots/historical candidates only on request, while
+server-side eligibility remains authoritative. MCHeads images are optional
+presentation; independent Mojang name/UUID validation authorizes no action and
+remains required when recording players. Preset player counts are resource
+suggestions, not performance guarantees. Shared storage is Owner-managed through
+`defaultServerStorageMiB` (environment `NH_DEFAULT_SERVER_STORAGE_MIB`); omitted
+disk is resolved server-side only in global-pool mode, then frozen in the durable
+request. Pool/headroom/backup accounting and optional personal budgets remain.
+
+Future project-context creation and game presets are tracked in issues
+[#23](https://github.com/ImJstNickDev/nickhosting-panel/issues/23) and
+[#24](https://github.com/ImJstNickDev/nickhosting-panel/issues/24), not implemented here.
+
+Discovery references: [Mojang's hash-bearing version manifest](https://piston-meta.mojang.com/mc/game/version_manifest_v2.json)
+and the [upstream Vanilla egg contract](https://raw.githubusercontent.com/pterodactyl/panel/develop/database/Seeders/eggs/minecraft/egg-vanilla-minecraft.json).
+The manifest is the v2 counterpart of the requested launcher catalog and supplies
+hashes for individual version metadata. No Pterodactyl installer code is copied.
+
+### Direct delivery and support authority — Owner amendment, 2026-10-10
+
+The integration is authoritative for its declared functionality. A newly configured
+Vanilla mapping does not require `minecraftEvidenceKey` or a signed local report to
+install and run a supported server. Official artifact integrity, runtime/egg/image
+validation, resource admission, rollout and managed-provider identity remain mandatory.
+Observed runtime identity is retained without inventing a historical certification.
+
+Provisioning freezes `connection_mode` as `gateway` or `direct`. Direct mode is used
+when the integration does not declare Gateway support or Gateway is disabled. It
+requires an explicit Owner-advertised `directEndpoint` for each selected allocation;
+private backend IPs and provider aliases are never silently promoted to public
+addresses. Eligible public provider bindings require an explicitly direct pool entry.
+Configuration does not prove NAT, firewall or Internet reachability and does not
+change any network or listener.
+
+Direct servers retain manual lifecycle, admission, files and supported game operations.
+They have no Gateway routes, automatic player-idle sleep or join-triggered wake.
+Authorized schedules remain separate and preserve manual-stop suppression. Existing
+servers retain their previous delivery identity; changing a pool or support declaration
+does not silently reroute them. See the dated [ADR 0013 amendment](decisions/0013-minecraft-evidence-and-content.md#owner-amendment--2026-10-10-declared-capabilities-and-direct-delivery).

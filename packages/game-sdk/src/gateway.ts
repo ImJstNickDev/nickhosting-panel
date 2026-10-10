@@ -26,20 +26,34 @@ export const gatewayEndpointSchema = z
   .strict();
 export type GatewayEndpoint = z.infer<typeof gatewayEndpointSchema>;
 
-/** Core-minted, service-only metadata. Registry availability alone cannot mint this proof. */
+/** Core-minted, service-only routing metadata. The authority is explicit:
+ * compiled integration declarations are not installation test attestations. */
+const minecraftProtocolBase = z.object({
+  release: z.string().min(1).max(128),
+  protocolId: z.number().int().nonnegative().max(2147483647),
+  family: z.literal('netty'),
+  transfer: z.boolean(),
+  acceptsTransfers: z.literal(false),
+  choiceId: z.uuid(),
+  choiceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+});
 export const gatewayMinecraftProtocolSchema = z
-  .object({
-    release: z.string().min(1).max(128),
-    protocolId: z.number().int().nonnegative().max(2147483647),
-    family: z.literal('netty'),
-    transfer: z.boolean(),
-    acceptsTransfers: z.literal(false),
-    choiceId: z.uuid(),
-    choiceDigest: z.string().regex(/^[a-f0-9]{64}$/),
-    evidenceRunId: z.uuid(),
-    evidenceExpiresAt: timestamp,
-  })
-  .strict()
+  .union([
+    minecraftProtocolBase
+      .extend({
+        supportSource: z.literal('integration'),
+        declarationId: z.string().min(1).max(128),
+        declarationVersion: z.number().int().positive(),
+      })
+      .strict(),
+    minecraftProtocolBase
+      .extend({
+        supportSource: z.literal('evidence').optional(),
+        evidenceRunId: z.uuid(),
+        evidenceExpiresAt: timestamp,
+      })
+      .strict(),
+  ])
   .refine((value) => !value.transfer || (value.protocolId >= 766 && value.protocolId < 1073741824));
 export type GatewayMinecraftProtocol = z.infer<typeof gatewayMinecraftProtocolSchema>;
 

@@ -43,6 +43,51 @@ function mappingInput() {
 }
 
 describe('managed registry, projects, runtime mapping and allocation ownership', () => {
+  it('assigns the Owner disk default in shared storage and freezes idempotent retries', async () => {
+    const input = f.input();
+    const { disk: _disk, ...limits } = input.limits;
+    const request = { ...input, limits };
+    const result = await createManagedServer(f.db, f.adapter, f.context, request, {
+      NH_DEFAULT_SERVER_STORAGE_MIB: '512',
+    });
+    const stored = await f.db
+      .selectFrom('managed_servers')
+      .select('limits')
+      .where('id', '=', result.serverId)
+      .executeTakeFirstOrThrow();
+    expect(stored.limits.disk).toBe(512);
+    expect(
+      await createManagedServer(f.db, f.adapter, f.context, request, {
+        NH_DEFAULT_SERVER_STORAGE_MIB: '1024',
+      }),
+    ).toEqual(result);
+  });
+  it('requires explicit disk under personal budgets and keeps global-pool admission', async () => {
+    const input = f.input();
+    const { disk: _disk, ...limits } = input.limits;
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...input, limits },
+        {
+          NH_STORAGE_POLICY: 'PER_USER_BUDGET',
+        },
+      ),
+    ).rejects.toThrow('validation_failed');
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...input, limits },
+        {
+          NH_DEFAULT_SERVER_STORAGE_MIB: '1000000',
+        },
+      ),
+    ).rejects.toThrow('storage_exhausted');
+  });
   it('refuses lifecycle work while a persisted ambiguous upload still owns its server', async () => {
     const serverId = await f.server();
     await pendingUploadFixture(f.db, serverId);

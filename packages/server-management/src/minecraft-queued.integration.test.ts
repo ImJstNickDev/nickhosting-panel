@@ -8,6 +8,7 @@ import type {
   PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { reserveStart } from './admission.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
   inspectMinecraftCombination,
@@ -16,6 +17,13 @@ import {
 } from './minecraft-registry.js';
 import { createManagedServer, enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect, createManagementRuntime } from './runtime.js';
+import {
+  createSchedule,
+  getAutomationConsent,
+  runDueSchedules,
+  setAutomationConsent,
+  updateSchedule,
+} from './schedules.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -68,6 +76,19 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   f = await managementFixture(database.db, { interactive: true });
+  await f.db
+    .updateTable('managed_nodes')
+    .set({
+      backend_allocation_pool: JSON.stringify({
+        ...f.backendAllocationPool,
+        allocations: f.backendAllocationPool.allocations.map((pin) => ({
+          ...pin,
+          directEndpoint: { hostname: `${f.nodeId}.example.test`, port: pin.port },
+        })),
+      }),
+    })
+    .where('id', '=', f.nodeId)
+    .execute();
   await f.db
     .insertInto('game_integrations')
     .values({ id: 'minecraft-java', version: '1.0.0', manifest: {} })
@@ -260,9 +281,67 @@ function lifecycleFixture() {
   return { options, adapter, createServer, findServerByExternalId };
 }
 describe('queued Minecraft provisioning evidence revalidation', () => {
+  it('persists the integration image in the durable plan and refuses image substitution', async () => {
+    const selectedImage = 'ghcr.io/pterodactyl/yolks:java_21';
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ image_mode: 'integration', docker_image: '' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const mapping = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .selectAll()
+      .where('id', '=', f.mappingId)
+      .executeTakeFirstOrThrow();
+    const pinnedBinding = { ...binding, image: selectedImage };
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        binding: JSON.stringify(pinnedBinding),
+        mapping_digest: minecraftMappingDigest(mapping),
+        identity_digest: minecraftDigest({ combination, binding: pinnedBinding }),
+      })
+      .where('id', '=', choiceId)
+      .execute();
+    await evidence();
+    const getEgg = f.adapter.getEgg.bind(f.adapter);
+    Object.assign(f.adapter, {
+      getEgg: async (nest: number, egg: number) => ({
+        ...(await getEgg(nest, egg)),
+        docker_image: selectedImage,
+        docker_images: { java21: selectedImage },
+      }),
+    });
+    const operation = await queued();
+    const row = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', operation.jobId)
+      .executeTakeFirstOrThrow();
+    expect((row.plan.provision as ProvisionPlan).dockerImage).toBe(selectedImage);
+    await expect(
+      authorizeQueuedEffect(f.db, operation.jobId, operation.serverId, env, f.adapter),
+    ).resolves.toBeDefined();
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        plan: JSON.stringify({
+          ...row.plan,
+          provision: {
+            ...(row.plan.provision as ProvisionPlan),
+            dockerImage: 'ghcr.io/pterodactyl/yolks:java_25',
+          },
+        }),
+      })
+      .where('job_id', '=', operation.jobId)
+      .execute();
+    await expect(
+      authorizeQueuedEffect(f.db, operation.jobId, operation.serverId, env, f.adapter),
+    ).rejects.toThrow('configuration_invalid');
+  });
+
   it.each([
     'revoked',
-    'failed-report',
     'tampered-plan',
     'tampered-startup',
     'extra-environment',
@@ -276,7 +355,6 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
         .set({ enabled: false })
         .where('id', '=', choiceId)
         .execute();
-    if (change === 'failed-report') await evidence(true);
     if (change === 'mapping-change')
       await f.db
         .updateTable('runtime_egg_mappings')
@@ -453,12 +531,113 @@ describe('host-bound Minecraft runtime image evidence', () => {
     });
     return { ...operation, external, observer, codec, management };
   }
+  it.each(['consent', 'schedule'] as const)(
+    'rechecks scheduled %s revocation after a deferred runtime provider proof',
+    async (revoked) => {
+      const value = await installed();
+      const consent = await getAutomationConsent(f.db, f.context, value.serverId);
+      await setAutomationConsent(
+        f.db,
+        f.context,
+        value.serverId,
+        { allowed: true, expectedIntent: consent.expectedIntent },
+        env,
+      );
+      const at = new Date(Date.now() + 1000);
+      const input = {
+        name: 'Isolated scheduled start',
+        action: 'start' as const,
+        timing: { kind: 'once' as const, at: at.toISOString() },
+        timeZone: 'UTC',
+        enabled: true,
+      };
+      const schedule = await createSchedule(f.db, f.context, value.serverId, input, env);
+      expect(await runDueSchedules(f.db, env, { now: at })).toEqual({ dispatched: 1, skipped: 0 });
+      const occurrence = await f.db
+        .selectFrom('schedule_occurrences')
+        .select('job_id')
+        .where('schedule_id', '=', schedule.id)
+        .executeTakeFirstOrThrow();
+      if (!occurrence.job_id) throw new Error('Missing scheduled test job');
+      const jobId = occurrence.job_id;
+      const power = vi.fn(async () => {});
+      Object.assign(value.external.adapter, { power });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      // Defer only the final, post-preparation authorization's provider proof.
+      // Earlier authorizations must pass, otherwise this cannot reproduce the race.
+      const processing = processServerOperation(f.db, jobId, {
+        ...value.management.lifecycle,
+        reserveStart: (serverId, id, action, db) => reserveStart(db, serverId, id, action, env),
+        checkpoint: async (point) => {
+          if (point !== 'prepared') return;
+          const remote = await value.external.adapter.getApplicationServer(1);
+          vi.mocked(value.external.adapter.getApplicationServer).mockImplementationOnce(
+            async () => {
+              entered.resolve();
+              await release.promise;
+              return remote;
+            },
+          );
+        },
+      });
+      try {
+        await Promise.race([
+          entered.promise,
+          processing.then(() => {
+            throw new Error('Operation finished before the deferred provider proof');
+          }),
+        ]);
+        expect(power).not.toHaveBeenCalled();
+        if (revoked === 'consent') {
+          const current = await getAutomationConsent(f.db, f.context, value.serverId);
+          await setAutomationConsent(
+            f.db,
+            f.context,
+            value.serverId,
+            { allowed: false, expectedIntent: current.expectedIntent },
+            env,
+          );
+        } else {
+          await updateSchedule(
+            f.db,
+            f.context,
+            value.serverId,
+            schedule.id,
+            { ...input, enabled: false, revision: schedule.revision },
+            env,
+          );
+        }
+      } finally {
+        release.resolve();
+      }
+      expect(await processing).toBe('failed');
+      expect(power).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .select(['effect_state', 'plan'])
+          .where('job_id', '=', jobId)
+          .executeTakeFirstOrThrow(),
+      ).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, powerEffectPrepared: false },
+      });
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirst(),
+      ).toBeUndefined();
+    },
+  );
   it('distinguishes absent initial containers from proof required for playable readiness', async () => {
     const value = await installed();
     value.observer.imageIdentity.mockResolvedValue(null);
     await expect(
       value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
-    ).resolves.toMatchObject({ expected: imageDigest, observed: null, verified: false });
+    ).resolves.toMatchObject({ expected: null, observed: null, verified: false, report: null });
     await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
       'integration_unavailable',
     );
@@ -552,6 +731,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
   });
   it('rejects changed actual image contents under an unchanged mutable image tag', async () => {
     const value = await installed();
+    await value.management.assertMinecraftRuntimeImage(value.serverId);
     value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
     await expect(
       value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
@@ -590,28 +770,48 @@ describe('host-bound Minecraft runtime image evidence', () => {
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).rejects.toThrow('operation_uncertain');
   });
-  it('restricts signed installation bootstrap evidence to the actual private tester', async () => {
+  it('uses compiled Vanilla support without local signatures or historical reports', async () => {
     const value = await installed();
-    await evidence(false, new Date(), 'installation-bootstrap');
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
-      'integration_unavailable',
-    );
     await f.db
-      .updateTable('game_rollouts')
-      .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
+      .deleteFrom('minecraft_verification_evidence')
+      .where('combination_id', '=', choiceId)
       .execute();
-    await expect(
-      value.management.assertMinecraftRuntimeImage(value.serverId),
-    ).resolves.toMatchObject({ verified: true, report: { kind: 'installation-bootstrap' } });
-    await f.db
-      .updateTable('game_rollouts')
-      .set({ allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
-      .execute();
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
-      'integration_unavailable',
+    const noKey = { ...env, NH_MINECRAFT_EVIDENCE_KEY: undefined };
+    const management = await createManagementRuntime({
+      db: f.db,
+      codec: value.codec,
+      adapter: value.external.adapter,
+      containerObserver: value.observer,
+      env: noKey,
+    });
+    await expect(management.assertMinecraftRuntimeImage(value.serverId)).resolves.toMatchObject({
+      expected: imageDigest,
+      observed: imageDigest,
+      verified: true,
+      report: null,
+    });
+    await expect(management.lifecycle.observeProcessStart(value.serverId, f.db)).resolves.toEqual(
+      expect.any(String),
     );
+    expect(
+      await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select('runtime_image_digest')
+        .where('server_id', '=', value.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ runtime_image_digest: imageDigest });
+  });
+  it('pins exactly one competing first-observed image and refuses the other', async () => {
+    const value = await installed();
+    const { requireMinecraftRuntimeImageEvidence } = await import(
+      './minecraft-runtime-evidence.js'
+    );
+    const results = await Promise.allSettled([
+      requireMinecraftRuntimeImageEvidence(f.db, value.serverId, imageDigest, env),
+      requireMinecraftRuntimeImageEvidence(f.db, value.serverId, `sha256:${'c'.repeat(64)}`, env),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
   });
   it('rejects a queued start before its power effect if actual image content changed', async () => {
     const value = await installed();
@@ -622,6 +822,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       { action: 'start', idempotencyKey: randomUUID() },
       env,
     );
+    await value.management.assertMinecraftRuntimeImage(value.serverId);
     value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
     const power = vi.fn(async () => {});
     Object.assign(value.external.adapter, { power });
@@ -640,12 +841,15 @@ describe('host-bound Minecraft runtime image evidence', () => {
       value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
     ).rejects.toThrow('integration_unavailable');
   });
-  it('does not retain an older successful image report after a newer failed run', async () => {
+  it('does not treat a failed historical report as authority over declared Vanilla installation', async () => {
     const value = await installed();
     await evidence(true);
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
-      'integration_unavailable',
-    );
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId),
+    ).resolves.toMatchObject({
+      verified: true,
+      report: null,
+    });
   });
   it('binds observation to the right host and live managed provider identity first', async () => {
     const value = await installed();

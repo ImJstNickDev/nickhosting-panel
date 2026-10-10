@@ -237,6 +237,24 @@ separate deployment settings and are not changed by the application.
 | GET/PUT `/v1/owner/runtime-mappings` | Owner runtime mappings, or mapping request described below. |
 | PUT `/v1/owner/user-limits` | `{userId,memoryMiB,cpuPercent,storageMiB,expiresAt?,reason}`; explicit audited limits, optional future expiry. Returns `204`. |
 
+Allocation discovery uses one complete, bounded provider response rather than
+combining unordered OFFSET pages. Installed Panel 1.x allocation pagination has
+no guaranteed ordering: a multi-page read was observed to duplicate allocations
+and omit others even when its row count matched the reported total. The adapter
+requires consistent total/count/page metadata and unique allocation IDs, including
+assigned allocations. It rejects truncated inventories, missing metadata, more
+than 10,000 allocations per node, or responses over the existing 4 MiB transport
+limit with `integration_unavailable`; it never deduplicates and accepts a partial
+inventory. This applies to Owner discovery, provisioning and Gateway collision
+checks alike. Nodes exceeding this explicit safety bound need an independently
+verified complete-inventory strategy before use; no provider configuration is
+changed by discovery.
+
+`PUT /v1/owner/nodes` accepts at most 4 MiB of JSON so an explicit pool of thousands
+of pins can be saved. The regular Owner/session and Origin checks, per-pin identity
+validation and retained-claim protections still apply. Other ordinary JSON routes
+retain their 64 KiB limit; this is not a general request-size increase.
+
 Host policy fields are `{id?,name,memoryLimitMiB,cpuLimitPercent,storagePoolMiB,
 memoryHeadroomMiB,cpuHeadroomPercent,diskHeadroomMiB,localDiskPath,observerId,
 uploadPolicy?,enabled?}`. RAM/disk headroom must each be at least 256 MiB and less than their
@@ -257,7 +275,7 @@ override refuses conflicting Owner overhead edits while allowing unrelated node
 fields to be changed.
 
 Provisioning requires an explicitly configured `backendAllocationPool` on the
-managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port}],
+managed node. Its shape is `{allocations:[{allocationId,address,backendAddress?,port,delivery?,directEndpoint?}],
 gatewayBindAddresses:[address,...],loopbackRemap?}`. There is **no inferred/default
 pool**. `address` identifies the exact canonical Pterodactyl allocation IP;
 `backendAddress` identifies the effective Wings/Docker binding for future Gateway
@@ -296,9 +314,17 @@ IDs, provider addresses and ports are checked against fresh inventory on the
 selected provider node, both at reservation and before new remote creation.
 Assigned inventory collisions are checked after effective binding translation;
 unknown same-port loopback semantics fail closed. Gateway declarations must be
-exact, non-wildcard and disjoint from effective backend bindings. Other managed
-nodes on the same physical host cannot overlap effective backend/gateway
-namespaces, including durable claims in disabled pools. Wings publishes both
+exact, non-wildcard and disjoint from effective **Gateway backend** bindings.
+Explicit `delivery:'direct'` pins with a `directEndpoint:{hostname,port}` may share
+a Gateway ingress IP on different ports. This allows one provider node to serve
+both delivery modes; an IP alone does not reserve every port. Backend-only pins
+still require a different IP, and existing claims retain their immutable connection
+mode. On the same physical host, pool edits and route registration reject actual
+overlapping address/port endpoints, including sibling nodes, environment overrides,
+disabled routes/pools and retained allocation claims. Public route ports need not
+equal backend ports, so collision checks use the actual registered public port.
+Existing routes can still be disabled after a conflicting environment override;
+creating or enabling a conflicting route remains blocked. Wings publishes both
 TCP and UDP for each allocation, so a different SDK transport is not collision
 protection. Migration 009 stores provider `address` and `backend_address`
 separately, backfills existing direct claims and prevents identity retargeting.

@@ -783,6 +783,34 @@ describe('durable server external services', () => {
     expect(f.users.size).toBe(1);
     expect(f.sftpCalls.filter((method) => method === 'POST')).toHaveLength(1);
   });
+  it('plans direct DNS from immutable external endpoint and refuses missing endpoints', async () => {
+    for (const mode of ['custom-subdomain', 'static-host-port'] as const) {
+      const port = mode === 'static-host-port' ? 28091 : 28090;
+      const f = await fixture(mode);
+      await f.db
+        .updateTable('managed_servers')
+        .set({ connection_mode: 'direct' })
+        .where('id', '=', f.serverId)
+        .execute();
+      const request = mode === 'custom-subdomain' ? { subdomain: f.subdomain } : {};
+      await expect(
+        previewServerDns(f.db, f.context, f.serverId, request, f.options),
+      ).rejects.toThrow('configuration_invalid');
+      await f.db
+        .updateTable('server_allocations')
+        .set({ direct_endpoint: JSON.stringify({ hostname: 'direct.example.test', port }) })
+        .where('server_id', '=', f.serverId)
+        .execute();
+      const plan = await previewServerDns(f.db, f.context, f.serverId, request, f.options);
+      expect(plan.port).toBe(port);
+      if (mode === 'static-host-port') expect(plan.hostname).toBe('direct.example.test');
+      else {
+        expect(plan.records[0]).toMatchObject({ type: 'CNAME', content: 'direct.example.test' });
+        expect(plan.records[1]).toMatchObject({ type: 'SRV', data: { port } });
+      }
+      expect(f.dnsCalls).toEqual([]);
+    }
+  });
   it('uses plugin-declared SRV and assigned port; static mode performs no provider calls', async () => {
     const f = await fixture();
     const plan = await previewServerDns(

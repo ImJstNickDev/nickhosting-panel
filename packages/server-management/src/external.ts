@@ -531,25 +531,30 @@ async function connectionPlan(
     if (typeof value !== 'string' || !value) throw new DomainError('configuration_invalid');
     return value;
   };
+  const direct = server.connection_mode === 'direct' ? allocation.direct_endpoint : null;
+  if (server.connection_mode === 'direct' && !direct)
+    throw new DomainError('configuration_invalid');
+  const port = direct?.port ?? allocation.port;
   if (manifest.connection.mode === 'static-host-port') {
     if (request.subdomain) throw new DomainError('validation_failed');
     return planConnection({
       mode: 'static-host-port',
-      hostname: configured(manifest.connection.hostnameSettingKey),
-      port: allocation.port,
+      hostname: direct?.hostname ?? configured(manifest.connection.hostnameSettingKey),
+      port,
     });
   }
-  if (!request.subdomain || !config.dnsTarget) throw new DomainError('configuration_invalid');
+  const dnsTarget = direct?.hostname ?? config.dnsTarget;
+  if (!request.subdomain || !dnsTarget) throw new DomainError('configuration_invalid');
   if (manifest.connection.srv && !allocation.protocols.includes(manifest.connection.srv.proto))
     throw new DomainError('configuration_invalid');
   return planConnection({
     mode: 'custom-subdomain',
     zoneName: configured(manifest.connection.zoneSettingKey),
     subdomain: request.subdomain,
-    port: allocation.port,
+    port,
     target: {
-      type: isIP(config.dnsTarget) === 4 ? 'A' : isIP(config.dnsTarget) === 6 ? 'AAAA' : 'CNAME',
-      content: config.dnsTarget,
+      type: isIP(dnsTarget) === 4 ? 'A' : isIP(dnsTarget) === 6 ? 'AAAA' : 'CNAME',
+      content: dnsTarget,
     },
     srv: manifest.connection.srv
       ? { service: manifest.connection.srv.service, protocol: manifest.connection.srv.proto }

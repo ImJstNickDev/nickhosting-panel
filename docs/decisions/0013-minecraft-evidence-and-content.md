@@ -1,6 +1,8 @@
 # ADR 0013: Minecraft evidence and recoverable content
 
-Status: implemented and validated for M4; pending Owner milestone review.
+Status: M4 decision retained below; amended by the Owner on 2026-10-10 during M5.
+
+The original signed-evidence gating decision is historical. The dated amendment below governs current Vanilla availability and delivery; installation/content safety requirements remain in force.
 
 ## Decision
 
@@ -76,3 +78,35 @@ installation behavior beyond an egg's capabilities needs explicit capability
 checks; it must not compete with the egg installer. The Owner approved Vanilla
 alone for M4 live acceptance, with other profile/egg combinations remaining
 unverified until future real tests.
+
+## Owner amendment — 2026-10-10: declared capabilities and direct delivery
+
+The Owner rejected per-installation certification as a prerequisite for ordinary
+Vanilla creation. Trusted first-party integrations declare functionality; installing
+an integration supplies that policy. Signed reports remain diagnostic evidence in
+Owner administration, with their original identities, outcomes and dates preserved.
+Neither missing `minecraftEvidenceKey` nor a missing report for a new Vanilla mapping
+blocks integration-declared installation/direct access. This supersedes the original
+Vanilla creation and local attestation gates above; it does not rewrite M4 test results.
+
+Installation, direct connection, Gateway, readiness, player-idleness and sleep/wake
+are separate capabilities. Vanilla declares installation/direct access after normal
+metadata, artifact, egg/image and allocation validation. The currently declared
+Gateway pair is Vanilla 26.1/protocol 775, backed by the existing real M4 coverage.
+Older/unknown/snapshot protocols do not gain Gateway claims merely because they can
+install. Paper/Folia/Fabric/Forge and other undeclared profiles retain their existing
+controls. Owner rollout still governs availability, not protocol truth.
+
+New provisioning freezes direct delivery when Gateway support is absent or Gateway
+is disabled. Every direct allocation needs an explicit Owner-advertised endpoint;
+absence is actionable configuration failure, never an inferred public address.
+Direct servers cannot enter Gateway snapshots or sleep/wake jobs. Manual lifecycle
+and explicitly consented schedules retain M2 admission and identity enforcement.
+Existing servers are not silently rerouted by this amendment.
+
+Runtime observation, immutable binding checks, artifact verification, process fencing
+and protected-file/content recovery continue. Local signed reports are not replaced
+with fabricated passing reports. Service-only Gateway DTOs explicitly distinguish
+compiled declarations from legacy evidence, and existing lease/safety checks remain.
+External direct reachability remains unverified until tested; no public binding,
+firewall/NAT change or production mutation is implied.

@@ -11,13 +11,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
+import * as contentDisk from '../../content-providers/src/disk.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
+  assertMinecraftLaunchInputs,
   configureMinecraftProvision,
   type MinecraftContentOptions,
   type MinecraftPreparedContent,
   prepareMinecraftContentPlan,
+  prepareMinecraftCreationConfig,
   processMinecraftContent,
   verifyMinecraftPendingContent,
   verifyMinecraftRestore,
@@ -34,6 +37,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     database = await createTestDatabase();
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await database?.destroy();
   });
   async function launcherJar(
@@ -829,6 +833,14 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
   it.each([true, false])(
     'consented replacement (old files: %s) verifies removals and selection and safely retries the same job',
     async (oldContent) => {
+      // Tiny isolated fixtures need the absolute safety margin, not 10% of
+      // a shared multi-terabyte host. Production's 10% default is unchanged.
+      const checkDisk = contentDisk.assertContentDiskSpace;
+      vi.spyOn(contentDisk, 'assertContentDiskSpace').mockImplementation(
+        (directory, bytes, policy) =>
+          checkDisk(directory, bytes, { ...policy, minimumFreePercent: 1 }),
+      );
+
       const selected = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };
       const f = await installedPackFixture(selected);
       const root = `./mountdata/test-assets/m4-replacement-${randomUUID()}`;
@@ -1082,6 +1094,78 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     await expect(verifyMinecraftRestore(unbound.context, unbound.options)).rejects.toMatchObject({
       code: 'configuration_invalid',
     });
+  });
+
+  it('verifies a declaration-backed Vanilla installation without signatures and still rejects changed artifacts', async () => {
+    const { f, serverId, files, context, options } = await minecraftFixture();
+    await f.db.deleteFrom('minecraft_verification_evidence').execute();
+    options.env = {};
+    expect(await configureMinecraftProvision(context, options)).toBe(true);
+    const profile = await f.db
+      .selectFrom('minecraft_server_profiles')
+      .select(['installed', 'installed_manifest'])
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.installed).toBe(true);
+    expect(profile.installed_manifest).toEqual([
+      {
+        path: 'server.jar',
+        size: files.get('server.jar')?.length,
+        sha256: createHash('sha256')
+          .update(files.get('server.jar') ?? '')
+          .digest('hex'),
+      },
+    ]);
+    files.set('server.jar', Buffer.from('changed runtime jar'));
+    await expect(assertMinecraftLaunchInputs(context, options)).rejects.toThrow('conflict');
+  });
+
+  it('applies declared modern whitelist configuration before a first generated properties file', async () => {
+    const { f, serverId, files, context, options } = await minecraftFixture();
+    await f.db.deleteFrom('minecraft_verification_evidence').execute();
+    options.env = {};
+    files.delete('server.properties');
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration: JSON.stringify({ eula: true, properties: { 'white-list': true } }),
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(await configureMinecraftProvision(context, options)).toBe(true);
+    expect(files.get('server.properties')?.toString()).toContain('white-list=true');
+  });
+  it('rejects unsupported legacy player management before any installation effects', async () => {
+    const { f, combinationId, files, options } = await minecraftFixture();
+    const choice = await f.db
+      .selectFrom('minecraft_combinations')
+      .select('combination')
+      .where('id', '=', combinationId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({
+          ...(choice.combination as object),
+          release: '1.6.4',
+          family: 'legacy',
+        }),
+      })
+      .where('id', '=', combinationId)
+      .execute();
+    const before = [...files.entries()];
+    for (const configuration of [
+      { eula: true, operators: ['Player'] },
+      { eula: true, whitelist: ['Player'] },
+      { eula: true, properties: { 'white-list': true } },
+    ])
+      await expect(
+        prepareMinecraftCreationConfig(f.db, combinationId, configuration, options),
+      ).rejects.toThrow('integration_unavailable');
+    expect([...files.entries()]).toEqual(before);
+    await expect(
+      prepareMinecraftCreationConfig(f.db, combinationId, { eula: true }, options),
+    ).resolves.toMatchObject({ configuration: { eula: true } });
   });
 
   it('fences initial security configuration before the first write and clears it only after a complete retry', async () => {

@@ -50,6 +50,39 @@ function hello(intent: number, protocol = 767): Buffer {
   );
 }
 describe('production Minecraft Gateway module', () => {
+  it('accepts only exact compiled declarations without claiming a local evidence run', () => {
+    const adapter = createMinecraftGatewayModuleAdapter({ now: () => now });
+    const selected = route();
+    selected.protocol.gameVersion = '26.1';
+    selected.protocol.minecraft = {
+      release: '26.1',
+      protocolId: 775,
+      family: 'netty',
+      transfer: true,
+      acceptsTransfers: false,
+      choiceId: randomUUID(),
+      choiceDigest: 'a'.repeat(64),
+      supportSource: 'integration',
+      declarationId: 'minecraft-java/vanilla',
+      declarationVersion: 1,
+    };
+    expect(gatewayRouteSchema.safeParse(selected).success).toBe(true);
+    expect(adapter.supports(selected)).toBe(true);
+    const session = adapter.createSession?.({
+      route: selected,
+      signal: new AbortController().signal,
+    });
+    expect(session?.classify(hello(2, 775)).kind).toBe('join');
+    selected.protocol.minecraft.declarationVersion = 2;
+    expect(adapter.supports(selected)).toBe(false);
+    expect(session?.response('waking')).toEqual({ close: true });
+    selected.protocol.minecraft.declarationVersion = 1;
+    selected.protocol.minecraft.protocolId = 774;
+    expect(adapter.supports(selected)).toBe(false);
+    selected.protocol.minecraft.protocolId = 775;
+    selected.protocol.minecraft.declarationId = 'owner-checkbox';
+    expect(adapter.supports(selected)).toBe(false);
+  });
   it('provides the existing loader contract without fetching metadata', () => {
     expect(gatewayProtocols).toHaveLength(1);
     expect(gatewayProtocols[0]?.id).toBe('minecraft-java');
@@ -102,6 +135,7 @@ describe('production Minecraft Gateway module', () => {
       signal: new AbortController().signal,
     });
     expect(session?.classify(hello(1)).kind).toBe('continue');
+    if (selected.protocol.minecraft.supportSource === 'integration') throw new Error('fixture');
     selected.protocol.minecraft.evidenceRunId = randomUUID();
     expect(session?.classify(frameMinecraftPacket(0)).kind).toBe('unsupported');
     expect(session?.response('sleeping')).toEqual({ close: true });

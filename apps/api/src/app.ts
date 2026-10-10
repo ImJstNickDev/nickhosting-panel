@@ -6,12 +6,12 @@ import {
   type AuthContext,
   assertPermission,
   DomainError,
+  platformConfigSchema,
   type SecretCodec,
   safeError,
 } from '@nickhosting/core';
 import {
   type createDatabase,
-  gameCatalog,
   getSettings,
   recordAudit,
   registerGame,
@@ -22,16 +22,21 @@ import {
 } from '@nickhosting/database';
 import { localizeAuthError, localizeError, resolveLocale } from '@nickhosting/i18n';
 import { enqueueCommand, getJobStatus } from '@nickhosting/jobs';
-import { type ManagementRuntime, minecraftCatalog } from '@nickhosting/server-management';
+import type { ManagementRuntime } from '@nickhosting/server-management';
 import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
+import { availableGameCatalog, registerGameModuleRoutes } from './game-modules.js';
 import { registerGatewayRoutes } from './gateway.js';
+import { registerHealthRoutes } from './health.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
+import { registerPlatformRoutes } from './platform.js';
+import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
+import { registerWebSessionRoutes, supportToken } from './web-session.js';
 
 type Store = ReturnType<typeof createDatabase>;
 // Shared by every application/runtime using this pool; uploads cannot consume
@@ -120,6 +125,14 @@ export function createApp(options: Options) {
       throw new DomainError('validation_failed', 413);
     },
   });
+  // Explicit Owner pools can contain thousands of pins. Other JSON endpoints
+  // retain their small limit; this route still enforces regular Owner + Origin.
+  const nodePoolBodyLimit = bodyLimit({
+    maxSize: 4 * 1024 * 1024,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
   app.use('*', async (c, next) => {
     // Only this authenticated binary route streams its body. Its handler checks
     // exact declared size, server storage, live authorization and actual bytes.
@@ -128,6 +141,8 @@ export function createApp(options: Options) {
       /^\/v1\/(?:servers\/[^/]+\/files|minecraft\/sources\/[^/]+)\/upload$/.test(c.req.path)
     )
       return next();
+    if (c.req.method === 'PUT' && c.req.path === '/v1/owner/nodes')
+      return nodePoolBodyLimit(c, next);
     return jsonBodyLimit(c, next);
   });
   app.use('*', async (c, next) => {
@@ -187,8 +202,8 @@ export function createApp(options: Options) {
     await next();
   });
 
-  const noSupport = (c: Context) => {
-    if (c.req.header('x-nh-support-token')) throw new DomainError('forbidden');
+  const noSupport = (c: Context<{ Variables: Variables }>) => {
+    if (supportToken(c)) throw new DomainError('forbidden');
   };
   const principal = async (
     c: Context<{ Variables: Variables }>,
@@ -197,7 +212,7 @@ export function createApp(options: Options) {
     if (regularOnly) noSupport(c);
     const { context, locale } = await c
       .get('identity')
-      .authenticate(c.get('authHeaders'), c.req.header('x-nh-support-token'));
+      .authenticate(c.get('authHeaders'), supportToken(c));
     c.set('locale', locale);
     if (context.sessionType === 'support')
       await recordAudit(db, context, 'support.request', {
@@ -243,7 +258,10 @@ export function createApp(options: Options) {
     headers.set('cache-control', 'no-store');
     return new Response(
       JSON.stringify({
-        error: localizeAuthError(payload.code ?? 'UNKNOWN', locale),
+        error: localizeAuthError(
+          payload.code ?? (response.status === 429 ? 'TOO_MANY_REQUESTS' : 'UNKNOWN'),
+          locale,
+        ),
         requestId: c.get('requestId'),
       }),
       { status: response.status, headers },
@@ -318,9 +336,18 @@ export function createApp(options: Options) {
     assertPermission(context, 'settings:read');
     return c.json({ config: await getSettings(db, env), secrets: await secretStatus(db, env) });
   });
+  app.get('/v1/owner/settings/schema', async (c) => {
+    const context = await principal(c, true);
+    assertPermission(context, 'settings:read');
+    return c.json(z.toJSONSchema(platformConfigSchema));
+  });
   app.patch('/v1/owner/settings', async (c) =>
     c.json(await updateSettings(db, await principal(c, true), await body(c), env)),
   );
+  app.delete('/v1/owner/settings/:key', async (c) => {
+    const key = validate(platformConfigSchema.keyof(), c.req.param('key'));
+    return c.json(await updateSettings(db, await principal(c, true), { [key]: undefined }, env));
+  });
   app.put('/v1/owner/secrets/:name', async (c) => {
     const name = validate(z.enum(secretNames), c.req.param('name'));
     const input = validate(
@@ -338,41 +365,10 @@ export function createApp(options: Options) {
     await registerGame(db, await principal(c, true), input.manifest, input.rollout);
     return c.body(null, 204);
   });
-  app.get('/v1/games', async (c) => {
-    const context = await principal(c);
-    const games = await gameCatalog(db, context);
-    const choices = games.some((game) => game.id === 'minecraft-java')
-      ? await minecraftCatalog(db, context, env)
-      : [];
-    return c.json(
-      games.map((game) => {
-        if (game.id !== 'minecraft-java') return game;
-        // Only eligible releases reach ordinary game discovery, even if an Owner
-        // registered a broader descriptive manifest. Technical evidence is separate.
-        const manifest = game.manifest as {
-          runtimes: Array<{ id: string; supportedGameVersions: string[] }>;
-        };
-        return {
-          ...game,
-          manifest: {
-            ...manifest,
-            runtimes: manifest.runtimes
-              .filter((runtime) => choices.some((choice) => choice.runtime === runtime.id))
-              .map((runtime) => ({
-                ...runtime,
-                supportedGameVersions: [
-                  ...new Set(
-                    choices
-                      .filter((choice) => choice.runtime === runtime.id)
-                      .map((choice) => choice.version),
-                  ),
-                ],
-              })),
-          },
-        };
-      }),
-    );
-  });
+  registerGameModuleRoutes(app, { principal });
+  app.get('/v1/games', async (c) =>
+    c.json(await availableGameCatalog(db, await principal(c), env)),
+  );
   app.post('/v1/jobs', async (c) => {
     const context = await principal(c);
     const input = validate(
@@ -405,6 +401,37 @@ export function createApp(options: Options) {
       }
     };
   };
+  registerWebSessionRoutes(app, { db, env, codec: options.codec, principal, body });
+  registerHealthRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerScheduleRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerPlatformRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
   registerServerRoutes(app, {
     db,
     env,

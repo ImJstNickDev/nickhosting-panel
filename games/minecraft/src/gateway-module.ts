@@ -4,6 +4,7 @@ import {
   type GatewayRoute,
   gatewayMinecraftProtocolSchema,
 } from '@nickhosting/game-sdk';
+import { minecraftCapabilityDeclaration, minecraftGatewaySupported } from './compatibility.js';
 import { createMinecraftProtocolAdapter } from './protocol.js';
 
 /** Local trusted module for NH_GATEWAY_PROTOCOL_MODULES. No registry/network reads or provider keys. */
@@ -22,9 +23,22 @@ export function createMinecraftGatewayModuleAdapter(
     )
       return;
     const parsed = gatewayMinecraftProtocolSchema.safeParse(route.protocol.minecraft);
-    if (
-      !parsed.success ||
-      parsed.data.release !== route.protocol.gameVersion ||
+    if (!parsed.success || parsed.data.release !== route.protocol.gameVersion) return;
+    if (parsed.data.supportSource === 'integration') {
+      const declaration = parsed.data;
+      if (
+        declaration.declarationId !== minecraftCapabilityDeclaration.id ||
+        declaration.declarationVersion !== minecraftCapabilityDeclaration.version ||
+        !minecraftGatewaySupported({
+          release: declaration.release,
+          releaseType: 'release',
+          profile: 'vanilla',
+          family: declaration.family,
+          protocolId: declaration.protocolId,
+        })
+      )
+        return;
+    } else if (
       Date.parse(parsed.data.evidenceExpiresAt) <= (options.now?.() ?? new Date()).getTime()
     )
       return;

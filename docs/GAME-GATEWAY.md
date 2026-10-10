@@ -6,6 +6,51 @@ One long-running service **inside the `nickhosting-panel` deployment** (separate
 
 **Only server UUIDs explicitly marked NickHosting-managed** can be registered with the gateway. A game server created directly in Pterodactyl remains direct and must never be intercepted or imported automatically.
 
+## Optional per-server delivery
+
+An integration may support installation and direct play without supporting the Gateway
+protocol. The Owner-approved M5 amendment separates these capabilities. New servers
+use a frozen `connection_mode`: `gateway` only when declared and enabled, otherwise
+`direct` with explicit Owner-configured endpoints. Existing servers retain their mode.
+Direct servers are excluded from route snapshots, policy, wake/idle observation and
+queued Gateway effects. Their ordinary start/stop and authorized schedules continue
+to use M2 admission; direct play does not imply automatic wake or readiness detection.
+
+Compiled Minecraft declarations identify their own ID/version in service-only route
+metadata. They are not relabeled local test attestations. The Gateway validates the
+compiled declaration and exact supported release/protocol. Existing legacy attestation
+DTOs remain readable with their expiry checks. Authenticated control-plane routing,
+lease expiry, collision checks, process epochs and forwarding fences remain required.
+The current declaration enables Vanilla 26.1/protocol 775 Gateway behavior; other
+Vanilla versions can use direct access without a claim of protocol compatibility.
+
+An explicit advertised direct hostname/port is a configuration fact, not proof of
+external reachability. No fallback to a private allocation address, no automatic
+public listener and no networking changes are authorized by direct mode.
+
+## Automatic registration during creation
+
+New Gateway-mode servers supplied by a trusted first-party module with a Gateway
+protocol binding reserve their public routes together with their private allocation
+claims. The node's Owner-configured pool must declare one unambiguous Gateway bind
+address; public and backend endpoints use the same numerical port on different IPs.
+Each allocation's declared TCP/UDP transports retain separate route identities.
+No endpoint is guessed from a provider alias, host interface or Docker bridge.
+
+The durable provisioning job activates its reserved routes only after provider
+identity, egg installation and game configuration have been verified. Route intent
+is pinned in the job: replay cannot choose another endpoint, duplicate registrations
+or undo an Owner's later disable action. A configuration/collision error is reported
+rather than treating a partially configured server as successfully connected.
+Direct servers and existing servers without automatic route intent are unchanged.
+
+Registration initializes the trusted protocol policy with inherited idle timing;
+it does not grant automatic-start consent. Manual-stop and maintenance suppression
+remain authoritative. The Gateway still validates fresh provider inventory, host
+listeners, Docker bindings and actual backend reachability before opening a listener,
+and requires game readiness before forwarding. Route configuration and a snapshot
+lease are not evidence of successful listener binding or external connectivity.
+
 ## Bind/forward model
 
 - Gateway takes a configured **public game endpoint** (bound interface/IP + port + TCP/UDP role).

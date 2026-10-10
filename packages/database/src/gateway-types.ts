@@ -17,6 +17,9 @@ export interface GatewayTables {
     game_version: string;
     state: GatewayServerState;
     idle_timeout_seconds: number | null;
+    idle_timeout_inherited: Generated<boolean>;
+    owner_idle_timeout_seconds: Generated<number | null>;
+    owner_idle_timeout_user_access: Generated<'hidden' | 'editable' | 'shorten-only' | null>;
     readiness_timeout_seconds: number;
     readiness_max_age_seconds: number;
     estimate_max_age_seconds: number;

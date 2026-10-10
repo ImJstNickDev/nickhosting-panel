@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { type AuthContext, assertPermission, DomainError, safeError } from '@nickhosting/core';
+import {
+  type AuthContext,
+  assertPermission,
+  authSessionId,
+  DomainError,
+  safeError,
+} from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
 import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
@@ -16,7 +22,14 @@ import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
 import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import {
+  activateProvisionGateway,
+  assertProvisionGatewayStart,
+  prepareProvisionGatewayStart,
+} from './gateway-provision.js';
+import { currentInteractiveContext } from './interactive-context.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
+import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -608,7 +621,12 @@ export async function processServerOperation(
           .select('server_id')
           .where('server_id', '=', server.id)
           .executeTakeFirst()) !== undefined;
-      if (operation.plan.gatewayAutomation !== undefined || minecraftProvision) {
+      if (
+        phase === 'initial_start' ||
+        operation.plan.gatewayAutomation !== undefined ||
+        operation.plan.scheduleAutomation !== undefined ||
+        minecraftProvision
+      ) {
         // Preparing durable intent and provider identity checks can take time.
         // Do not carry an earlier automation grant across that interval. A
         // failure here proves perform() was never called, unlike a lost reply.
@@ -616,6 +634,7 @@ export async function processServerOperation(
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
           await options.authorizeEffect(jobId, server.id, db);
+          if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
         } catch (error) {
           await update({
             effect_state: 'none',
@@ -868,6 +887,8 @@ export async function processServerOperation(
           .where('id', '=', server.id)
           .execute();
         if (operation.phase === 'initial_start') {
+          await activateProvisionGateway(db, server.id, jobId, options.env);
+          await update({});
           if (!settled()) return wait('resource_cache_expiry');
           if (current.current_state === 'running') {
             await db.transaction().execute(async (tx) => {
@@ -890,6 +911,9 @@ export async function processServerOperation(
           !(await options.configureGameProvision(gameContext()))
         )
           return wait('game_configuration');
+        await options.authorizeEffect(jobId, server.id, db);
+        await activateProvisionGateway(db, server.id, jobId, options.env);
+        await update({});
         if (operation.plan.autoStart === true) {
           if (!options.reserveStart) throw new DomainError('configuration_invalid');
           if (typeof operation.plan.reservationCreated !== 'boolean') {
@@ -914,6 +938,8 @@ export async function processServerOperation(
             .where('server_id', '=', server.id)
             .executeTakeFirst();
           if (!reservation) throw new DomainError('conflict');
+          await prepareProvisionGatewayStart(db, server.id, jobId, nowOf(options));
+          await update({});
           await effect('initial_start', () =>
             options.adapter.power(server.pterodactyl_identifier ?? '', 'start'),
           );
@@ -1039,6 +1065,7 @@ export async function processServerOperation(
                             },
                           });
                           await options.authorizeEffect(jobId, server.id, db);
+                          await assertIdleSleepAllowed(db, server.id, options.env);
                           // Persistence itself may wait; do not send a stale stop
                           // merely because its handoff record reached PostgreSQL.
                           assertGatewaySleepFence(operation.plan, nowOf(options));
@@ -1614,6 +1641,7 @@ export async function resolveUncertainOperation(
   context: AuthContext,
   serverId: string,
   input: unknown,
+  env: Environment = {},
 ): Promise<'resolved' | 'deferred'> {
   assertPermission(context, 'platform:manage');
   if (context.sessionType !== 'regular') throw new DomainError('forbidden');
@@ -1659,6 +1687,15 @@ export async function resolveUncertainOperation(
       throw new DomainError('conflict');
     await connection.transaction().execute(async (tx) => {
       await lockResources(tx);
+      // A bound browser session can expire, be revoked or lose its Owner role
+      // while waiting for this lock or provider proof. Check the live authority
+      // on the pinned transaction immediately before any resolution mutation.
+      // Unbound internal callers retain the existing domain-test contract.
+      const current = context[authSessionId]
+        ? await currentInteractiveContext(tx, context, env)
+        : context;
+      assertPermission(current, 'platform:manage');
+      if (current.sessionType !== 'regular') throw new DomainError('forbidden');
       await tx
         .updateTable('operation_jobs')
         .set({
@@ -1676,7 +1713,7 @@ export async function resolveUncertainOperation(
           plan: JSON.stringify({
             ...operation.plan,
             ownerResolution: {
-              actorId: context.actorUserId,
+              actorId: current.actorUserId,
               reason: parsed.data.reason,
               at: new Date().toISOString(),
             },
@@ -1700,7 +1737,7 @@ export async function resolveUncertainOperation(
         .where('server_id', '=', serverId)
         .execute();
       await tx.deleteFrom('job_outbox').where('job_id', '=', operation.job_id).execute();
-      await recordAudit(tx, context, 'server.operation.owner_resolution', {
+      await recordAudit(tx, current, 'server.operation.owner_resolution', {
         serverId,
         jobId: operation.job_id,
         reason: parsed.data.reason,
@@ -1711,8 +1748,8 @@ export async function resolveUncertainOperation(
         .values({
           server_id: serverId,
           job_id: operation.job_id,
-          actor_id: context.actorUserId,
-          subject_id: context.subjectUserId,
+          actor_id: current.actorUserId,
+          subject_id: current.subjectUserId,
           support_session_id: null,
           message_key: 'servers.operation.owner_resolution',
           data: JSON.stringify({ outcome: 'acknowledged_unknown_failure' }),

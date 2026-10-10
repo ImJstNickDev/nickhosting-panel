@@ -1,0 +1,40 @@
+<svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 480" fill="none">
+  <!-- Original NickHosting M5 illustration. Created for this repository; no Mojang assets or logo. -->
+  <path fill="#d9e4e3" d="M0 0h960v480H0z"/>
+  <path fill="#f6f3dd" d="M726 62h68v68h-68z"/>
+  <path fill="#edf2ec" d="M90 87h80V69h91v18h61v24H90zm376-33h58V37h74v17h79v23H466z"/>
+  <path fill="#b7c9c3" d="M0 260h85v-46h95v-55h98v36h75v-30h104v58h108v-37h112v-41h80v38h92v70h111v227H0z"/>
+  <path fill="#849e95" d="M0 317h122v-58h132v-32h85v53h157v-38h69v63h129v-78h115v29h65v50h86v174H0z"/>
+  <path fill="#497c77" d="M0 408h151v-45h158v-33h211v36h166v-27h136v29h138v112H0z"/>
+  <path fill="#73a0a5" d="M374 373h114v15h80v20h-93v20h-93v21h-64v31H166v-19h102v-23h74v-28h89v-17h-57z"/>
+  <path fill="#558d8f" d="M425 394h56v10h-34v9h-45v-10h23zm-94 48h43v10h-43zm-88 26h60v8h-60z"/>
+  <path fill="#78834c" d="m42 330 150-65 181 78-148 69z"/>
+  <path fill="#536b39" d="m42 330 183 82v68H42z"/>
+  <path fill="#4b5739" d="m225 412 148-69v137H225z"/>
+  <path fill="#849454" d="m42 330 150-65 181 78-21 10-160-66-128 53z"/>
+  <path fill="#6c6548" d="m65 381 55 25v33l-55-25zm73 41 62 28v30h-62z"/>
+  <path fill="#3d5136" d="m243 430 63-30v24l-63 29zm72-27 37-18v23l-37 18z"/>
+  <path fill="#637243" d="m689 361 143-62 128 56v125H689z"/>
+  <path fill="#85924f" d="m689 361 143-62 128 56v13l-128-54-124 55z"/>
+  <path fill="#564f38" d="M786 233h23v99l-23 11z"/>
+  <path fill="#386347" d="m747 207 47-23 74 30-48 25-73-15z"/>
+  <path fill="#294f3b" d="m747 224 73 30v43l-73-30zm73 30 48-25v43l-48 25z"/>
+  <path fill="#507b4c" d="m729 211 67-34 89 39-65 31z"/>
+  <path fill="#3b6240" d="m729 211 91 36v34l-91-35z"/>
+  <path fill="#2c5139" d="m820 247 65-31v33l-65 32z"/>
+  <path fill="#608552" d="m755 176 43-20 58 25-41 21z"/>
+  <path fill="#486d44" d="m755 176 60 26v29l-60-26z"/>
+  <path fill="#335b3a" d="m815 202 41-21v30l-41 20z"/>
+  <path fill="#514b36" d="M154 273h22v60l-22 10z"/>
+  <path fill="#305844" d="m111 233 55-27 72 29-60 31-67-28z"/>
+  <path fill="#254938" d="m111 238 67 28v39l-67-28zm67 28 60-31v38l-60 32z"/>
+  <path fill="#567b4a" d="m109 213 60-28 73 32-64 30z"/>
+  <path fill="#3f6740" d="m109 213 69 34v35l-69-33z"/>
+  <path fill="#315538" d="m178 247 64-30v36l-64 29z"/>
+  <path fill="#6b8951" d="m128 185 40-20 56 24-45 22z"/>
+  <path fill="#4b7143" d="m128 185 51 26v25l-51-26z"/>
+  <path fill="#355b3a" d="m179 211 45-22v26l-45 21z"/>
+  <path fill="#b9af7b" d="m629 325 49-21 45 18-50 23z"/>
+  <path fill="#918565" d="m629 325 44 20v30l-44-20z"/>
+  <path fill="#766c56" d="m673 345 50-23v31l-50 22z"/>
+</svg>

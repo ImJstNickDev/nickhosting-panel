@@ -104,6 +104,113 @@ async function attest(kind: 'protocol-fixture' | 'real-server' = 'real-server') 
   );
 }
 describe('Minecraft Owner evidence and user eligibility', () => {
+  it('loads more than 1000 declared choices in three queries and orders all families by local dates', async () => {
+    const source = await f.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', choiceId)
+      .executeTakeFirstOrThrow();
+    const entries = Array.from({ length: 1001 }, (_, index) => ({
+      id: randomUUID(),
+      mapping_id: source.mapping_id,
+      combination: JSON.stringify({
+        ...combination,
+        release: `bulk-${index}`,
+        releaseType: index % 2 ? 'snapshot' : 'release',
+      }),
+      resolved_runtime: '{}',
+      binding: '{}',
+      mapping_digest: source.mapping_digest,
+      identity_digest: minecraftDigest({ bulk: index, choiceId }),
+      enabled: true,
+    }));
+    await f.db.insertInto('minecraft_combinations').values(entries).execute();
+    await f.db
+      .insertInto('minecraft_release_metadata')
+      .values([
+        {
+          id: 'bulk-0',
+          release_type: 'release',
+          release_time: new Date('2025-01-01'),
+          metadata_url: 'https://example.test/0',
+          sha1: 'a'.repeat(40),
+        },
+        {
+          id: 'bulk-1',
+          release_type: 'snapshot',
+          release_time: new Date('2026-01-01'),
+          metadata_url: 'https://example.test/1',
+          sha1: 'b'.repeat(40),
+        },
+      ])
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    let count = 0;
+    const measured = f.db.withPlugin({
+      transformQuery(args) {
+        count++;
+        return args.node;
+      },
+      async transformResult(args) {
+        return args.result;
+      },
+    });
+    const choices = await minecraftCatalog(measured, f.context, env);
+    expect(count).toBe(3);
+    expect(choices.filter((choice) => entries.some((row) => row.id === choice.id))).toHaveLength(
+      1001,
+    );
+    expect(choices.slice(0, 2).map((choice) => choice.version)).toEqual(['bulk-1', 'bulk-0']);
+    expect(choices.find((choice) => choice.version === 'bulk-2')?.releaseTime).toBeNull();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ docker_image: 'changed/image:21' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    expect(
+      (await minecraftCatalog(measured, f.context, env)).some((choice) =>
+        entries.some((row) => row.id === choice.id),
+      ),
+    ).toBe(false);
+  });
+  it('bulk choices retain undeclared runtime signatures, private testing and availability gates', async () => {
+    const paper = { ...combination, profile: 'paper' };
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ combination: JSON.stringify(paper), enabled: true })
+      .where('id', '=', choiceId)
+      .execute();
+    const present = async () =>
+      (await minecraftCatalog(f.db, f.context, env)).some((row) => row.id === choiceId);
+    expect(await present()).toBe(false);
+    const value = {
+      ...(await report('protocol-fixture')),
+      combinationDigest: minecraftDigest(paper),
+    };
+    await importMinecraftEvidence(
+      f.db,
+      f.owner,
+      choiceId,
+      { report: value, signature: signMinecraftEvidence(value, env) },
+      env,
+    );
+    expect(await present()).toBe(false);
+    await f.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
+      .where('integration_id', '=', 'minecraft-java')
+      .execute();
+    expect(await present()).toBe(true);
+    expect((await minecraftCatalog(f.db, f.context, {})).some((row) => row.id === choiceId)).toBe(
+      false,
+    );
+    await f.db
+      .updateTable('game_rollouts')
+      .set({ allowlist: [] })
+      .where('integration_id', '=', 'minecraft-java')
+      .execute();
+    expect(await present()).toBe(false);
+  });
   it('registers only a complete explicitly frozen actual egg environment', async () => {
     const versionUrl = 'https://piston-meta.mojang.com/v1/packages/fixture/1.21.1.json';
     const version = Buffer.from(
@@ -196,15 +303,14 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       registerMinecraftCombination(f.db, adapter, f.owner, input, env, { metadata, protocols }),
     ).resolves.toEqual({ id: expect.any(String) });
   });
-  it('an Owner checkbox cannot manufacture compatibility', async () => {
+  it('compiled Vanilla installation works without local evidence while diagnostics remain truthful', async () => {
     await setMinecraftAvailability(f.db, f.owner, choiceId, { enabled: true }, env);
     expect((await inspectMinecraftCombination(f.db, choiceId, env)).support).toBe('unverified');
-    await expect(requireMinecraftChoice(f.db, f.context, choiceId, env)).rejects.toThrow(
-      'integration_unavailable',
-    );
-    expect((await minecraftCatalog(f.db, f.context, env)).some((row) => row.id === choiceId)).toBe(
-      false,
-    );
+    await expect(requireMinecraftChoice(f.db, f.context, choiceId)).resolves.toMatchObject({
+      supportAuthority: 'integration',
+      capabilities: { installation: true, gateway: false, sleepWake: false },
+    });
+    expect((await minecraftCatalog(f.db, f.context)).some((row) => row.id === choiceId)).toBe(true);
     const value = await report();
     await expect(
       importMinecraftEvidence(
@@ -222,7 +328,12 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     const row = (await minecraftCatalog(f.db, f.context, env)).find(
       (entry) => entry.id === choiceId,
     );
-    expect(row).toEqual({ id: choiceId, version: '1.21.1', runtime: 'vanilla' });
+    expect(row).toMatchObject({
+      id: choiceId,
+      version: '1.21.1',
+      releaseType: 'release',
+      runtime: 'vanilla',
+    });
     expect((await inspectMinecraftCombination(f.db, choiceId, env)).support).toBe('verified');
     await f.db
       .updateTable('runtime_egg_mappings')
@@ -272,10 +383,12 @@ describe('Minecraft Owner evidence and user eligibility', () => {
       ),
     ).resolves.toBeUndefined();
   });
-  it('fixtures stay hidden except explicit private-testing allowlists', async () => {
+  it('diagnostic fixture evidence does not gate Vanilla but rollout and allowlists remain authoritative', async () => {
     await attest('protocol-fixture');
     await setMinecraftAvailability(f.db, f.owner, choiceId, { enabled: true }, env);
-    await expect(requireMinecraftChoice(f.db, f.owner, choiceId, env)).rejects.toThrow();
+    await expect(requireMinecraftChoice(f.db, f.owner, choiceId, env)).resolves.toMatchObject({
+      supportAuthority: 'integration',
+    });
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
