@@ -91,6 +91,91 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.locator('.fm-sort-arrow')).toHaveAttribute('data-order', 'ascending');
     await user.getByRole('button', { name: 'Name', exact: true }).click();
   });
+  it('reserves the Files viewport with accessible skeletons for initial and folder loads without hiding cached files', async () => {
+    for (const locale of ['en', 'it'] as const) {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+      await user.setViewportSize(
+        locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+      );
+      let release = () => {};
+      let pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let blockedPath = '';
+      const url = `**/v1/servers/${provider.ids.serverId}/files?*`;
+      await user.route(url, async (route) => {
+        if (new URL(route.request().url()).searchParams.get('path') === blockedPath) await pending;
+        await route.continue();
+      });
+      try {
+        await user.goto(base);
+        const list = user.locator('.fm-list');
+        const manager = user.locator('.file-manager');
+        await browserExpect(list).toHaveAttribute('aria-busy', 'true');
+        await browserExpect(list.locator('button, input, [tabindex]')).toHaveCount(0);
+        const height = (await manager.boundingBox())?.height;
+        expect(height).toBeGreaterThan(400);
+        const status = manager.getByRole('status');
+        await browserExpect(status).toHaveText(locale === 'en' ? 'Loading…' : 'Caricamento…');
+        expect(await status.evaluate((element) => getComputedStyle(element).clipPath)).toBe(
+          'inset(50%)',
+        );
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(audit.violations.map(({ id }) => id)).toEqual([]);
+        await harness.screenshot(
+          user,
+          `file-skeleton-list-${locale === 'en' ? 'desktop-en' : 'mobile-it'}`,
+        );
+        release();
+        await browserExpect(row('world')).toBeVisible();
+        expect((await manager.boundingBox())?.height).toBe(height);
+        // Revalidation keeps useful existing data, not skeleton rows.
+        pending = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await user
+          .getByRole('button', {
+            name: locale === 'en' ? 'Refresh files' : 'Aggiorna file',
+            exact: true,
+          })
+          .click();
+        await browserExpect(row('world')).toBeVisible();
+        await browserExpect(user.locator('.fm-loading')).toHaveCount(0);
+        release();
+        // A new folder uses the current grid view while its listing is unknown.
+        await user
+          .getByRole('button', { name: locale === 'en' ? 'Grid' : 'Griglia', exact: true })
+          .click();
+        blockedPath = 'world';
+        pending = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const gridHeight = (await manager.boundingBox())?.height;
+        await row('world').getByRole('button', { name: 'world', exact: true }).click();
+        await browserExpect(user.locator('.fm-grid.fm-loading')).toBeVisible();
+        expect((await manager.boundingBox())?.height).toBe(gridHeight);
+        await browserExpect(list.getByRole('button')).toHaveCount(0);
+        await harness.screenshot(
+          user,
+          `file-skeleton-grid-${locale === 'en' ? 'desktop-en' : 'mobile-it'}`,
+        );
+        release();
+        await browserExpect(row('level.dat')).toBeVisible();
+        expect((await manager.boundingBox())?.height).toBe(gridHeight);
+      } finally {
+        release();
+        await user.unroute(url);
+      }
+    }
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    expect(errors).toEqual([]);
+  });
   it('does not force tab focus after click or reload, while keeping keyboard navigation visible', async () => {
     await user.goto(base);
     const tabs = user.locator('.tabs');
@@ -449,9 +534,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await page.goto(base);
         const search = page.getByRole('searchbox', { name: 'Search this folder' });
         const mac = platform === 'MacIntel';
-        const keys = mac ? 'Meta+k' : 'Control+k';
+        const keys = 'Alt+k';
         await browserExpect(search).toHaveAttribute('placeholder', 'Search');
-        await browserExpect(page.locator('.fm-search kbd')).toHaveText(mac ? '⌘ + K' : 'CTRL + K');
+        await browserExpect(search).toHaveAttribute('aria-keyshortcuts', 'Alt+K');
+        await browserExpect(page.locator('.fm-search kbd')).toHaveText(mac ? '⌥ + K' : 'ALT + K');
         await page.keyboard.press(keys);
         await browserExpect(search).toBeFocused();
         if (platform === 'Linux x86_64')
@@ -499,16 +585,16 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await page.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
         await browserExpect(page.locator('.file-manager')).toHaveCount(0);
         expect(
-          await page.evaluate((isMac) => {
+          await page.evaluate(() => {
             const event = new KeyboardEvent('keydown', {
               key: 'k',
-              ctrlKey: !isMac,
-              metaKey: isMac,
+              code: 'KeyK',
+              altKey: true,
               bubbles: true,
               cancelable: true,
             });
             return document.dispatchEvent(event);
-          }, mac),
+          }),
         ).toBe(true);
       } finally {
         await page.close();

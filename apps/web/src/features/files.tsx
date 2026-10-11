@@ -70,6 +70,49 @@ type UploadItem = {
   error?: unknown;
 };
 const dragType = 'application/x-nickhosting-files';
+const filePlaceholders = Array.from({ length: 12 }, (_, index) => ({
+  id: `file-placeholder-${index}`,
+  width: `${40 + (index % 4) * 12}%`,
+}));
+
+function FileListSkeleton({ view }: { view: 'list' | 'grid' }) {
+  const t = useT();
+  return (
+    <>
+      <div className={`fm-list fm-${view} fm-loading`} aria-busy="true">
+        <div className="fm-columns" aria-hidden="true">
+          <span className="fm-skeleton fm-skeleton-check" />
+          <span className="fm-skeleton fm-skeleton-heading" />
+          <span className="fm-skeleton fm-skeleton-heading" />
+          <span className="fm-skeleton fm-skeleton-heading" />
+        </div>
+        <ul aria-hidden="true">
+          {filePlaceholders.map(({ id, width }) => (
+            <li className="fm-entry" key={id}>
+              <span className="fm-skeleton fm-skeleton-check" />
+              <span className="fm-filename">
+                <span className="fm-skeleton fm-skeleton-icon" />
+                <span className="fm-skeleton fm-skeleton-name" style={{ width }} />
+              </span>
+              <span className="fm-size">
+                <span className="fm-skeleton" />
+              </span>
+              <span className="fm-date">
+                <span className="fm-skeleton" />
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="fm-count" aria-hidden="true">
+        <span className="fm-skeleton fm-skeleton-heading" />
+      </div>
+      <span className="sr-only" role="status">
+        {t('web.loading')}
+      </span>
+    </>
+  );
+}
 
 function FileIcon({ folder, archive = false }: { folder: boolean; archive?: boolean }) {
   return (
@@ -231,13 +274,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }, []);
   useEffect(() => {
     const focusSearch = (event: globalThis.KeyboardEvent) => {
-      const modifier = macKeyboard
-        ? event.metaKey && !event.ctrlKey
-        : event.ctrlKey && !event.metaKey;
-      const pathRequest = event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyG';
-      const searchRequest = modifier && !event.altKey && event.key.toLowerCase() === 'k';
+      const modifier = event.altKey && !event.ctrlKey && !event.metaKey;
+      const pathRequest = modifier && event.code === 'KeyG';
+      const searchRequest = modifier && event.code === 'KeyK';
       if (
         event.defaultPrevented ||
+        event.isComposing ||
         event.shiftKey ||
         (!pathRequest && !searchRequest) ||
         document.querySelector('dialog[open]')
@@ -254,7 +296,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
     document.addEventListener('keydown', focusSearch);
     return () => document.removeEventListener('keydown', focusSearch);
-  }, [macKeyboard, editPath]);
+  }, [editPath]);
   useEffect(() => {
     if (!menu) return;
     menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -726,14 +768,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             ref={searchInput}
             type="search"
             aria-label={t('file.search')}
-            aria-keyshortcuts={macKeyboard ? 'Meta+K' : 'Control+K'}
+            aria-keyshortcuts="Alt+K"
             placeholder={t('file.searchLabel')}
             value={search}
             onFocus={() => setPathEditing(false)}
             onChange={(event) => setSearch(event.target.value)}
           />
           <span aria-hidden="true">
-            <kbd>{macKeyboard ? '⌘ + K' : 'CTRL + K'}</kbd>
+            <kbd>{macKeyboard ? '⌥ + K' : 'ALT + K'}</kbd>
           </span>
         </div>
         <div className="fm-tools">
@@ -931,9 +973,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         </span>
       )}
       {files.isPending ? (
-        <Loading />
+        <FileListSkeleton view={view} />
       ) : files.error ? (
-        <ErrorNotice error={files.error} retry={() => void files.refetch()} />
+        <>
+          <div className="fm-list fm-list-error">
+            <ErrorNotice error={files.error} retry={() => void files.refetch()} />
+          </div>
+          <div className="fm-count" />
+        </>
       ) : (
         <>
           <div className={`fm-list fm-${view}`}>

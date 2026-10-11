@@ -4845,3 +4845,54 @@ of EN/IT/pseudo and only the intended source/test/docs/sanitized screenshots.
 Governance passed:603 indexed text files,151 review PNGs,501 relative links,
 4 TOML files and44 ignore cases; the secret scan remains heuristic. No persistent
 dev review data, live servers or existing infrastructure were changed.
+
+
+### Files skeleton loading and consistent Alt shortcuts (2026-10-12)
+
+Directory loading now renders static, noninteractive skeleton rows or grid tiles
+instead of a visible Loading paragraph. The listing uses its existing responsive
+height bound as a stable viewport, including empty/error results, and reserves the
+count footer. Toolbar/breadcrumb remain available; no stale directory files are
+used as placeholders. Background refetch retains current data. Shapes are hidden
+from assistive technology; aria-busy and one localized, visually hidden status
+report loading without invented counts or progress. No animation/delay added.
+
+Owner follow-up aligns shortcuts: Search uses ALT+K (⌥+K on macOS); path retains
+ALT+G (⌥+G). Physical key codes support Option-generated characters. Repeated
+invocation selects the input, Search closes path entry, and dialogs/composition or
+extra modifiers retain their own behavior. Ctrl/Cmd+K is no longer intercepted.
+
+The first targeted skeleton browser run reached and passed initial layout/axe
+checks, then failed because its Refresh selector omitted the existing word
+“files”. Corrected the test selector to the actual localized accessible name;
+no product correction was required. Final scoped evidence follows below.
+
+Only Files presentation/shortcuts, focused browser coverage and documentation
+changed. No API, dependency, provider, credential or live resource changes. Tests
+reuse existing approved isolated services and real handlers with external-provider
+fixtures. No Docker lifecycle operation, game mutation or dev data reset. Rollback:
+revert the frontend commit. Issue#18 and existing release limitations remain.
+
+Validation:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/features/files.tsx apps/web/src/features/files.css apps/web/tests/file-manager.browser.test.ts`: passed.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'reserves the Files viewport|platform-specific search'`:
+  **2/2 selected passed**,12 skipped. The skeleton case verifies stable overall
+  height before/after initial and uncached-folder results, list/grid presentation,
+  nonfocusable placeholders, visually hidden localized loading, retained data
+  during refresh, no horizontal overflow and zero axe findings on initial pending
+  EN desktop/IT mobile screens. Existing shortcut coverage checks hints, focus,
+  selection, path/search handoff, dialog exclusions and unmount on simulated
+  Windows/Linux/macOS identities. Chromium only; native browser certification is
+  not inferred. No historical full suite rerun.
+
+Reviewed running-fixture screenshots:
+[list desktop](screenshots/m5/file-skeleton-list-desktop-en.png),
+[grid desktop](screenshots/m5/file-skeleton-grid-desktop-en.png),
+[list mobile](screenshots/m5/file-skeleton-list-mobile-it.png),
+[grid mobile](screenshots/m5/file-skeleton-grid-mobile-it.png).
+
+Independent source and four-screen UX/accessibility review: **no remaining must-fix**.
+The isolated harness cleaned its disposable test state. Public staging contains
+only the intended frontend/test/docs files and sanitized PNGs; no private data.

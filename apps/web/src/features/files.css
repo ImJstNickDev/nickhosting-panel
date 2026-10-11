@@ -153,6 +153,7 @@
   margin-right: 6px;
 }
 .fm-list {
+  height: min(62svh, 720px);
   max-height: min(62svh, 720px);
   min-height: 180px;
   overflow: auto;
@@ -259,10 +260,54 @@
   min-height: 34px;
 }
 .fm-count {
+  min-height: 40px;
   padding: 10px 18px;
   border-top: 1px solid #e9ebee;
   color: #667181;
   font-size: 0.8rem;
+}
+.fm-loading {
+  overflow: hidden;
+  pointer-events: none;
+}
+.fm-skeleton {
+  display: inline-block;
+  height: 12px;
+  max-width: 100%;
+  border-radius: 4px;
+  background: #e8edf1;
+  vertical-align: middle;
+}
+.fm-skeleton-check {
+  width: 17px;
+  height: 17px;
+}
+.fm-skeleton-heading {
+  width: 62px;
+}
+.fm-loading .fm-columns {
+  min-height: 50px;
+}
+.fm-loading .fm-skeleton-icon {
+  width: 23px;
+  height: 23px;
+  flex: 0 0 auto;
+}
+.fm-loading .fm-filename {
+  min-height: 36px;
+}
+.fm-loading .fm-size .fm-skeleton {
+  width: 48px;
+}
+.fm-loading .fm-date .fm-skeleton {
+  width: 112px;
+}
+.fm-list-error > .notice {
+  margin: 12px 18px;
+}
+.fm-grid.fm-loading .fm-skeleton-icon {
+  width: 38px;
+  height: 38px;
 }
 .fm-grid > ul {
   display: grid;
@@ -512,7 +557,7 @@
   display: none;
 }
 
-.fm-columns .sr-only {
+.file-manager .sr-only {
   position: absolute;
   width: 1px;
   height: 1px;

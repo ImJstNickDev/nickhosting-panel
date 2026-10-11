@@ -484,6 +484,14 @@ List is default; Grid is optional. External file drops use the same upload queue
 as the toolbar, with per-file progress, speed, cancellation and errors. Directory
 uploads are not silently flattened.
 
+Initial and uncached-directory loads use noninteractive skeleton rows/tiles for
+the selected view, without a visible Loading paragraph. The listing and count
+footer reserve the same bounded height across loading, loaded, empty and error
+states, so the file manager does not collapse between folders. Existing data stays
+visible during background refresh. Skeleton shapes are decorative; `aria-busy`
+and a localized visually hidden status communicate loading to assistive technology.
+The placeholders are static and introduce no animation or artificial delay.
+
 The compact icon toolbar provides Refresh, New folder, New text file, Upload and
 Upload folder with localized accessible names and shared tooltips. Folder selection
 preserves the chosen root and descendant file paths. Preparation creates a new
@@ -495,7 +503,7 @@ provider writes can still race preflight checks; this is not an atomic filesyste
 transaction. The existing server-side upload policy and admission remain required.
 Search sits to the left of the action icons, with List/Grid at the far right in
 the same desktop toolbar; small screens wrap these controls without overflow.
-The search field displays CTRL + K on Windows/Linux and ⌘ + K on macOS, without
+The search field displays ALT + K on Windows/Linux and ⌥ + K on macOS, without
 parentheses; the shortcut focuses/selects the current-folder search. It is active
 only while Files is mounted and yields to open dialogs/editor shortcuts. The
 input also declares its platform-specific `aria-keyshortcuts`. Direct-path entry
