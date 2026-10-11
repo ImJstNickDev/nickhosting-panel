@@ -211,6 +211,8 @@ export interface GatewayControl {
 }
 
 export interface GatewayProbeDiagnostic {
+  /** One-based attempt within a single bounded readiness probe. */
+  attempt?: number;
   stage: 'tcp_connect' | 'status_response' | 'pong' | 'total';
   durationMs: number;
   outcome: 'ok' | 'failed';

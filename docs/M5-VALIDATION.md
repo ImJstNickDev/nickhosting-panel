@@ -4275,3 +4275,39 @@ or improve measured latency. A new specifically approved Gateway restart and
 Owner-driven Start are needed to obtain the finer trace. No production commands,
 new test assets or infrastructure operations occurred during implementation.
 Final source TypeScript check and focused seven-file Biome check passed.
+
+### 2026-10-11 — Bounded startup status retry and Core overlap
+
+The Owner-driven24ec302 trace demonstrated a successful TCP connection (1.8ms),
+then peer close during status response (228ms), not a protocol mismatch, timeout
+or revoked validation. The next successful Minecraft exchange took9.976ms
+(TCP0.568/status7.826/pong1.099). Done-to-forwarding3.035s included571ms negative
+report,1379ms until the next sample and785ms positive report (Core process proof
+607.613ms). Concurrent renewal inspection timings must not be added to this path.
+
+Implementation now retries only socket_closed while waking, up to three attempts
+with100ms between attempts and the original shared timeout/abort signal. Malformed
+frames, mismatched protocol, refusal and timeout do not qualify. Successful status
+plus matching nonce remain required; no automatic wake/admission queue is added.
+Diagnostics identify each attempt. Exhaustion retains the existing negative
+observation and recovery behavior.
+
+Core readiness starts image/local launch validation alongside the same fresh
+provider request instead of waiting for it first. Host binding, remote managed
+identity, runtime image/config and final before/after process epoch remain checked.
+All asynchronous branches settle before the caller releases its DB connection.
+No cross-call authority cache or additional provider GET was introduced. This can
+remove serial local work but does not eliminate provider latency itself.
+
+Final checks: protocol suite34 passed; Gateway event-driven readiness6 passed
+(131 skipped); focused Minecraft integration11 passed (34 skipped); focused runtime
+host/identity/concurrency4 passed (54 skipped). TypeScript and focused Biome passed.
+Independent review found no must-fix. Tests include transient-close recovery,
+retry count/deadline, cancellation during backoff, mismatch rejection, delayed
+provider proof, no early readiness and foreign identity rejection.
+
+No real game-server command or infrastructure change during implementation.
+Owner has granted standing permission for necessary dev Gateway-only restarts;
+activation and a subsequent Owner-driven Start are still needed for live timing.
+Historical integration failures remain recorded; no full historical suite pass
+or new latency target is claimed.

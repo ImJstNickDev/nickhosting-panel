@@ -1071,6 +1071,50 @@ describe('host-bound Minecraft runtime image evidence', () => {
     ).rejects.toThrow('egg catalog unavailable');
     expect(egg).toHaveBeenCalledOnce();
   });
+  it.each([false, true])(
+    'overlaps image inspection with one provider proof and never grants early readiness (foreign: %s)',
+    async (foreign) => {
+      const value = await installed();
+      const readProvider = vi.mocked(value.external.adapter.getApplicationServer);
+      const remote = structuredClone(await readProvider(1));
+      if (foreign) remote.external_id = 'foreign-server';
+      let finishProvider!: (value: ApplicationServer) => void;
+      const pending = new Promise<ApplicationServer>((resolve) => {
+        finishProvider = resolve;
+      });
+      readProvider.mockClear().mockImplementation(() => pending);
+      value.observer.imageIdentity.mockClear();
+      value.observer.processStartedAt.mockClear();
+      let settled = false;
+      const observation = value.management.lifecycle.observeProcessStart(value.serverId, f.db);
+      const outcome = observation.then(
+        (result) => {
+          settled = true;
+          return { result };
+        },
+        (error: unknown) => {
+          settled = true;
+          return { error };
+        },
+      );
+      try {
+        await vi.waitFor(() => expect(value.observer.imageIdentity).toHaveBeenCalledOnce());
+        expect(readProvider).toHaveBeenCalledOnce();
+        expect(value.observer.processStartedAt).toHaveBeenCalledOnce();
+        expect(settled).toBe(false);
+      } finally {
+        finishProvider(remote);
+      }
+      if (foreign) {
+        expect(await outcome).toMatchObject({ error: { code: 'provenance_mismatch' } });
+        expect(value.observer.processStartedAt).toHaveBeenCalledOnce();
+      } else {
+        expect(await outcome).toEqual({ result: expect.any(String) });
+        expect(value.observer.processStartedAt).toHaveBeenCalledTimes(2);
+      }
+      expect(readProvider).toHaveBeenCalledOnce();
+    },
+  );
   it('checks current launch configuration across concurrent request runtimes without artifact transfers', async () => {
     const value = await installed();
     const other = await createManagementRuntime({

@@ -631,38 +631,40 @@ export async function createManagementRuntime(options: ManagementOptions) {
       const observerPreflight = verifyObservationHost(serverId, connection);
       const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
       const uuid = server.pterodactyl_uuid;
+      const remote = adapter.getApplicationServer(server.pterodactyl_id).then(async (value) => {
+        await verifyManagedIdentity(connection, server, value);
+        return value;
+      });
+      const module = gameRuntime(connection, serverId);
+      // Bind Docker inspection to the host first, but do not serialize it behind
+      // the provider round trip. The same in-flight remote proof is consumed by
+      // the module; neither an image nor an epoch alone grants readiness.
+      const before = observerPreflight.then(() => processStartedAt(uuid));
+      const verification = Promise.all([module, before]).then(([runtime, epoch]) =>
+        runtime
+          ? runtime.verifyProcessEpoch(
+              serverId,
+              connection,
+              epoch,
+              () => processStartedAt(uuid),
+              remote,
+              observerPreflight,
+            )
+          : epoch,
+      );
+      // Include every branch even if module discovery or the first epoch fails:
+      // no database/observer work may outlive the caller's connection lease.
       const proofs = await Promise.allSettled([
         observerPreflight,
-        adapter.getApplicationServer(server.pterodactyl_id).then(async (remote) => {
-          await verifyManagedIdentity(connection, server, remote);
-          return remote;
-        }),
-        gameRuntime(connection, serverId),
-        // The local host binding must be established before inspecting Docker,
-        // but this read need not wait for the remote identity round trip. Its
-        // result grants nothing until every prerequisite below has succeeded.
-        observerPreflight.then(() => processStartedAt(uuid)),
+        remote,
+        module,
+        before,
+        verification,
       ]);
       for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
-      if (
-        proofs[1].status !== 'fulfilled' ||
-        proofs[2].status !== 'fulfilled' ||
-        proofs[3].status !== 'fulfilled'
-      )
-        throw new DomainError('integration_unavailable');
-      const remote = proofs[1].value;
-      const module = proofs[2].value;
-      const before = proofs[3].value;
-      return module
-        ? module.verifyProcessEpoch(
-            serverId,
-            connection,
-            before,
-            () => processStartedAt(uuid),
-            remote,
-            observerPreflight,
-          )
-        : before;
+      const result = proofs[4];
+      if (result.status !== 'fulfilled') throw new DomainError('integration_unavailable');
+      return result.value;
     },
     adapter,
     // Recheck revocable local authority at intermediate durable/console

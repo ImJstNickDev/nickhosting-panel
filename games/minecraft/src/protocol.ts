@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import type {
   GatewayProbeDiagnostic,
   GatewayProtocolAdapter,
@@ -444,12 +445,40 @@ export function createMinecraftProtocolAdapter(
     context: GatewayProtocolContext,
   ): Promise<{ ready: boolean; playerCount?: number }> => {
     const version = selected(context.route);
-    return version
-      ? probeMinecraftStatus(context, version, {
-          timeoutMs: probeTimeoutMs,
-          maximumBytes: maxStatusBytes,
-        })
-      : { ready: false };
+    if (!version) return { ready: false };
+    const deadline = performance.now() + probeTimeoutMs;
+    // A running hint can precede Minecraft's first complete status response.
+    // Retry only peer closure while waking, never malformed/mismatched responses,
+    // and share the original deadline rather than extending the readiness budget.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let closed = false;
+      const remaining = Math.floor(deadline - performance.now());
+      if (context.signal.aborted || remaining < 1) return { ready: false };
+      const result = await probeMinecraftStatus(
+        {
+          ...context,
+          onProbeDiagnostic: (event) => {
+            if (event.stage === 'total') closed = event.reason === 'socket_closed';
+            try {
+              context.onProbeDiagnostic?.({ ...event, attempt });
+            } catch {
+              /* Diagnostics only. */
+            }
+          },
+        },
+        version,
+        { timeoutMs: remaining, maximumBytes: maxStatusBytes },
+      );
+      if (result.ready || context.route.mode !== 'waking' || !closed || attempt === 3)
+        return result;
+      if (deadline - performance.now() <= 100) return result;
+      try {
+        await delay(100, undefined, { signal: context.signal });
+      } catch {
+        return { ready: false };
+      }
+    }
+    return { ready: false };
   };
   return {
     id: 'minecraft-java',

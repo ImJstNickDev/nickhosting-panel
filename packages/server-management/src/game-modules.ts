@@ -78,7 +78,9 @@ export interface GameRuntimeHooks {
     connection: Kysely<Database>,
     before: string | null,
     readAgain: () => Promise<string | null>,
-    remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    remote?:
+      | Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>
+      | ReturnType<PterodactylAdapter['getApplicationServer']>,
     /** Same server/connection observation only; never retained across calls. */
     observerPreflight?: Promise<void>,
   ): Promise<string | null>;

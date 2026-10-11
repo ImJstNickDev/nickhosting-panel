@@ -296,11 +296,17 @@ async function statusFixture(
     silent?: boolean;
     partial?: boolean;
     onConnection?: () => void;
+    closeFirst?: number;
   } = {},
 ) {
   const clients = new Set<Socket>();
+  let connections = 0;
   const server = createServer((socket) => {
     options.onConnection?.();
+    if (++connections <= (options.closeFirst ?? 0)) {
+      socket.destroy();
+      return;
+    }
     clients.add(socket);
     socket.once('close', () => clients.delete(socket));
     socket.on('error', () => {});
@@ -341,6 +347,92 @@ async function statusFixture(
   return ctx;
 }
 describe('actual socket Minecraft status probes against isolated protocol fixtures', () => {
+  it('retries a transient waking status closure within the same observation', async () => {
+    let calls = 0;
+    const ctx = await statusFixture(
+      { version: { protocol: 766 }, players: { online: 0 } },
+      {
+        closeFirst: 1,
+        onConnection: () => {
+          calls++;
+        },
+      },
+    );
+    ctx.route = { ...ctx.route, mode: 'waking' };
+    const events: GatewayProbeDiagnostic[] = [];
+    expect(
+      await adapter.probeReadiness({ ...ctx, onProbeDiagnostic: (e) => events.push(e) }),
+    ).toEqual({ ready: true, playerCount: 0 });
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.stage === 'total').map((e) => [e.attempt, e.reason])).toEqual([
+      [1, 'socket_closed'],
+      [2, undefined],
+    ]);
+  });
+  it.each(['online', 'waking'] as const)(
+    'bounds retries for repeated closure in %s',
+    async (mode) => {
+      let calls = 0;
+      const ctx = await statusFixture(
+        {},
+        {
+          closeFirst: 10,
+          onConnection: () => {
+            calls++;
+          },
+        },
+      );
+      ctx.route = { ...ctx.route, mode };
+      expect(await adapter.probeReadiness(ctx)).toEqual({ ready: false });
+      expect(calls).toBe(mode === 'waking' ? 3 : 1);
+    },
+  );
+  it('cancels a pending retry and retains the original probe deadline', async () => {
+    let calls = 0;
+    const ctx = await statusFixture(
+      {},
+      {
+        closeFirst: 10,
+        onConnection: () => {
+          calls++;
+        },
+      },
+    );
+    ctx.route = { ...ctx.route, mode: 'waking' };
+    const abort = new AbortController();
+    expect(
+      await adapter.probeReadiness({
+        ...ctx,
+        signal: abort.signal,
+        onProbeDiagnostic: (e) => {
+          if (e.stage === 'total') setTimeout(() => abort.abort(), 10);
+        },
+      }),
+    ).toEqual({ ready: false });
+    expect(calls).toBe(1);
+    const short = createMinecraftProtocolAdapter({
+      versions,
+      supportedReleases: ['1.20.5'],
+      probeTimeoutMs: 50,
+    });
+    expect(await short.probeReadiness(ctx)).toEqual({ ready: false });
+    expect(calls).toBe(2);
+  });
+  it('does not retry a protocol mismatch while waking', async () => {
+    let calls = 0;
+    const ctx = await statusFixture(
+      { version: { protocol: 765 } },
+      {
+        onConnection: () => {
+          calls++;
+        },
+      },
+    );
+    ctx.route = { ...ctx.route, mode: 'waking' };
+    expect(await adapter.probeReadiness(ctx)).toEqual({ ready: false });
+    expect(calls).toBe(1);
+  });
+
   it('diagnoses sequential TCP/status/pong stages without payloads and isolates sink failures', async () => {
     const ctx = await statusFixture({ version: { protocol: 766 } }, { partial: true });
     const events: GatewayProbeDiagnostic[] = [];
@@ -356,7 +448,7 @@ describe('actual socket Minecraft status probes against isolated protocol fixtur
     for (const event of events) {
       expect(event.outcome).toBe('ok');
       expect(event.durationMs).toBeGreaterThanOrEqual(0);
-      expect(Object.keys(event).sort()).toEqual(['durationMs', 'outcome', 'stage']);
+      expect(Object.keys(event).sort()).toEqual(['attempt', 'durationMs', 'outcome', 'stage']);
     }
     expect(events[1]?.durationMs).toBeGreaterThanOrEqual(3);
     const total = events[3]?.durationMs ?? 0;
