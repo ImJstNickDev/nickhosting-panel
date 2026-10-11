@@ -297,9 +297,7 @@ export function Time({ value }: { value?: string | null }) {
   const t = useT();
   const format = useFormat();
   return value ? (
-    <time dateTime={value} title={format.date(value)}>
-      {format.date(value)}
-    </time>
+    <time dateTime={value}>{format.date(value)}</time>
   ) : (
     <span>{t('web.unknown')}</span>
   );

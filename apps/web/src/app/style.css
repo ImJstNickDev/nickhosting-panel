@@ -717,9 +717,41 @@
     align-items: center;
     justify-content: space-between;
   }
-  .metric-chart svg {
+  .metric-chart > svg {
     display: block;
     width: 100%;
+  }
+  .network-chart {
+    grid-column: 1 / -1;
+  }
+  .network-legend {
+    display: flex;
+    gap: 0.25rem;
+  }
+  .network-legend button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+  .network-legend button:hover {
+    background: #edf1f4;
+  }
+  .network-legend svg {
+    width: 18px;
+    height: 18px;
+  }
+  @media (min-width: 1100px) {
+    .resource-charts {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .network-chart {
+      grid-column: auto;
+    }
   }
   .settings-list {
     display: grid;

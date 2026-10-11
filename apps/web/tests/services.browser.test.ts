@@ -154,7 +154,7 @@ describe('M5 browser files, backups, console and automation', () => {
     await browserExpect(
       user.getByRole('heading', { name: 'Resource usage', exact: true }),
     ).toBeVisible();
-    await browserExpect(user.locator('figure.metric-chart')).toHaveCount(4);
+    await browserExpect(user.locator('figure.metric-chart')).toHaveCount(3);
     // SPA navigation retains the tab-scoped buffer; no provider log replay duplicates.
     await user.getByRole('link', { name: 'Files', exact: true }).click();
     await user.getByRole('link', { name: 'Console', exact: true }).click();
@@ -170,6 +170,186 @@ describe('M5 browser files, backups, console and automation', () => {
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
       .analyze();
     expect(audit.violations.map((v) => v.id)).toEqual([]);
+  });
+  it('shares network chart scales and keeps localized tooltips accessible on desktop and mobile', async () => {
+    const original = provider.adapter.getResources;
+    const observedAt = Date.now();
+    const timestamps = [90, 60, 30].map((seconds) => new Date(observedAt - seconds * 1000));
+    await harness.database.db
+      .insertInto('server_metrics')
+      .values(
+        timestamps.map((time, index) => ({
+          server_id: provider.ids.serverId,
+          observed_at: time,
+          memory_bytes: String((64 + index * 8) * 1024 ** 2),
+          cpu_percent: 2 + index,
+          disk_bytes: '1024',
+          network_rx_bytes: String((index + 1) * 4 * 1024 ** 2),
+          network_tx_bytes: String((index + 1) * 2 * 1024 ** 2),
+        })),
+      )
+      .execute();
+    provider.adapter.getResources = async (id) => {
+      const resource = await original(id);
+      return {
+        ...resource,
+        resources: {
+          ...resource.resources,
+          memory_bytes: 80 * 1024 ** 2,
+          cpu_absolute: 4,
+          network_rx_bytes: 16 * 1024 ** 2,
+          network_tx_bytes: 8 * 1024 ** 2,
+        },
+      };
+    };
+    try {
+      for (const locale of ['en', 'it'] as const) {
+        await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+        const viewport =
+          locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 };
+        await user.setViewportSize(viewport);
+        await user.goto(`${base}/console`);
+        await browserExpect(user.locator('figure.metric-chart')).toHaveCount(3);
+        const chart = user.locator('figure.network-chart');
+        await browserExpect(chart).toBeVisible();
+        await browserExpect(chart.locator('svg[role="img"]')).toHaveCount(1);
+        const lines = chart.locator('polyline');
+        await browserExpect(lines).toHaveCount(2);
+        const points = await lines.evaluateAll((elements) =>
+          [...elements].reverse().map((element) =>
+            (element.getAttribute('points') ?? '')
+              .trim()
+              .split(/\s+/)
+              .map((point) => point.split(',').map(Number)),
+          ),
+        );
+        const [inbound = [], outbound = []] = points;
+        expect(inbound.length).toBeGreaterThanOrEqual(4);
+        expect(inbound.map((point) => point[0])).toEqual(outbound.map((point) => point[0]));
+        // Historical 8 MiB received and current 8 MiB sent occupy the same vertical position.
+        const sentLatest = outbound.at(-1)?.[1];
+        if (sentLatest === undefined) throw new Error('Missing outbound chart point');
+        expect(inbound.some((point) => Math.abs((point[1] ?? Infinity) - sentLatest) < 0.005)).toBe(
+          true,
+        );
+        expect(inbound.at(-1)?.[1]).toBeLessThan(sentLatest);
+        expect(await lines.nth(0).evaluate((line) => getComputedStyle(line).stroke)).not.toBe(
+          await lines.nth(1).evaluate((line) => getComputedStyle(line).stroke),
+        );
+        await browserExpect(lines.nth(0)).toHaveAttribute('data-series', 'outbound');
+        await browserExpect(lines.nth(1)).toHaveAttribute('data-series', 'inbound');
+        for (const line of await lines.all()) {
+          await browserExpect(line).toHaveCSS('stroke-dasharray', 'none');
+        }
+        const received = chart.getByRole('button', {
+          name: locale === 'en' ? 'Network received' : 'Traffico ricevuto',
+          exact: true,
+        });
+        const sent = chart.getByRole('button', {
+          name: locale === 'en' ? 'Network sent' : 'Traffico inviato',
+          exact: true,
+        });
+        const tooltip = user.getByRole('tooltip');
+        for (const [trigger, label, value] of [
+          [received, locale === 'en' ? 'Network received' : 'Traffico ricevuto', '16 MiB'],
+          [sent, locale === 'en' ? 'Network sent' : 'Traffico inviato', '8 MiB'],
+        ] as const) {
+          await browserExpect(trigger).not.toHaveAttribute('title');
+          await trigger.hover();
+          await browserExpect(tooltip).toContainText(label);
+          await browserExpect(tooltip).toContainText(value);
+          await browserExpect(trigger).toHaveAttribute(
+            'aria-describedby',
+            (await tooltip.getAttribute('id')) ?? '',
+          );
+          await tooltip.hover();
+          await browserExpect(tooltip).toBeVisible();
+          await user.keyboard.press('Escape');
+          await browserExpect(tooltip).toHaveCount(0);
+          await user.mouse.move(0, 0);
+          await trigger.focus();
+          await browserExpect(tooltip).toContainText(value);
+          await user.keyboard.press('Escape');
+          await browserExpect(tooltip).toHaveCount(0);
+          await browserExpect(trigger).toBeFocused();
+          await trigger.blur();
+        }
+        await sent.hover();
+        await browserExpect(tooltip).toBeVisible();
+        const box = await tooltip.boundingBox();
+        if (!box) throw new Error('Tooltip has no visible bounds');
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+        expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(audit.violations.map((violation) => violation.id)).toEqual([]);
+        await sent.focus();
+        await browserExpect(sent).toBeFocused();
+        await browserExpect(tooltip).toBeVisible();
+        await user.screenshot({
+          path: resolve(
+            'docs/screenshots/m5',
+            `network-chart-${locale === 'en' ? 'desktop-en' : 'mobile-it'}.png`,
+          ),
+          // Capture the scrolled mobile viewport to avoid full-page fixed-position artifacts.
+          fullPage: locale === 'en',
+        });
+        await user.keyboard.press('Escape');
+      }
+    } finally {
+      provider.adapter.getResources = original;
+      await harness.database.db
+        .deleteFrom('server_metrics')
+        .where('server_id', '=', provider.ids.serverId)
+        .where('observed_at', 'in', timestamps)
+        .execute();
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+      await user.setViewportSize({ width: 1440, height: 1000 });
+      await user.goto(`${base}/files`);
+    }
+    expect(errors).toEqual([]);
+  });
+  it('opens network tooltips by touch and dismisses them outside the trigger', async () => {
+    const context = await harness.browser.newContext({
+      storageState: await user.context().storageState(),
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      reducedMotion: 'reduce',
+    });
+    try {
+      const touch = await context.newPage();
+      await touch.goto(`${base}/console`);
+      const trigger = touch.locator('.network-legend button').first();
+      const tooltip = touch.getByRole('tooltip');
+      await trigger.tap();
+      await browserExpect(tooltip).toBeVisible();
+      await browserExpect(tooltip).toContainText('MiB');
+      await trigger.tap();
+      await browserExpect(tooltip).toHaveCount(0);
+      await trigger.tap();
+      await browserExpect(tooltip).toBeVisible();
+      await touch.evaluate(() => window.scrollBy(0, -40));
+      await browserExpect(tooltip).toBeVisible();
+      await touch.setViewportSize({ width: 320, height: 844 });
+      await browserExpect(tooltip).toBeVisible();
+      const box = await tooltip.boundingBox();
+      if (!box) throw new Error('Touch tooltip has no visible bounds');
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(320);
+      expect(await touch.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await touch.locator('.network-chart h3').tap();
+      await browserExpect(tooltip).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
   });
   it('submits the integrated terminal prompt with Enter, retains failed drafts and prevents duplicate requests', async () => {
     const original = provider.adapter.sendCommand;
@@ -320,7 +500,7 @@ describe('M5 browser files, backups, console and automation', () => {
         await browserExpect(user.locator('.console pre')).toContainText(
           'There are 0 of a max of 20 players online',
         );
-        await browserExpect(user.locator('figure.metric-chart')).toHaveCount(4);
+        await browserExpect(user.locator('figure.metric-chart')).toHaveCount(3);
         expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
           true,
         );
@@ -386,14 +566,20 @@ describe('M5 browser files, backups, console and automation', () => {
       const checkState = async (state: keyof typeof states) => {
         await browserExpect(indicator).toHaveAttribute('data-state', state);
         await browserExpect(indicator).toHaveAccessibleName(states[state]);
-        await browserExpect(indicator).toHaveAttribute('title', states[state]);
+        await browserExpect(indicator).not.toHaveAttribute('title');
         await browserExpect(indicator.locator('span')).toHaveCSS('background-color', colors[state]);
       };
       try {
         await user.goto(`${base}/console`);
         await checkState('connecting');
+        await indicator.hover();
+        await browserExpect(user.getByRole('tooltip')).toHaveText(states.connecting);
         release();
         await checkState('connected');
+        await browserExpect(user.getByRole('tooltip')).toHaveText(states.connected);
+        await user.keyboard.press('Escape');
+        await browserExpect(user.getByRole('tooltip')).toHaveCount(0);
+        await user.mouse.move(0, 0);
         await browserExpect(indicator).toHaveText('');
         const target = await indicator.boundingBox();
         expect(target?.width).toBeGreaterThanOrEqual(40);
@@ -408,6 +594,10 @@ describe('M5 browser files, backups, console and automation', () => {
         await indicator.focus();
         await user.keyboard.press('Tab');
         await user.keyboard.press('Shift+Tab');
+        await browserExpect(indicator).toBeFocused();
+        await browserExpect(user.getByRole('tooltip')).toHaveText(states.disconnected);
+        await user.keyboard.press('Escape');
+        await browserExpect(user.getByRole('tooltip')).toHaveCount(0);
         await browserExpect(indicator).toBeFocused();
         expect(
           await indicator.evaluate((element) => getComputedStyle(element).outlineStyle),
@@ -569,7 +759,7 @@ describe('M5 browser files, backups, console and automation', () => {
       return route.continue();
     });
     await user.goto(`${base}/console`);
-    await browserExpect(user.locator('figure.metric-chart')).toHaveCount(4);
+    await browserExpect(user.locator('figure.metric-chart')).toHaveCount(3);
     await browserExpect.poll(() => failures).toBeGreaterThanOrEqual(3);
     await browserExpect(
       user.getByText('This integration is unavailable.', { exact: true }),

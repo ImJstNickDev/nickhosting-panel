@@ -132,7 +132,23 @@ Console updates use bounded SSE parsing/display (300 retained lines with a
 per-line bound); charts show timestamps, units and gaps. The resource section keeps
 the period selector and charts without a measurement table, pagination buttons or
 explanatory footer. Chart history reads remain bounded to 100 recent samples;
-backend history pagination remains available. Binary uploads use Blob/XHR progress and
+backend history pagination remains available. Network traffic shares one chart
+and scale: received is blue, sent is amber. Both lines are solid, with blue drawn last so
+coincident values show blue rather than alternating colors. Top-right arrow icons
+identify each direction and expose its current total in a localized tooltip.
+These remain cumulative MiB counters, not transfer rates.
+
+Use the shared `Tooltip` component for supplementary hover/focus descriptions,
+not native `title` attributes. It uses a compact dark popup outside clipping
+containers, follows viewport changes, remains hoverable, dismisses with Escape
+and supports touch. Triggers retain accessible names and keyboard access;
+tooltips must not contain essential instructions or interactive controls. Native
+triggers work directly; custom triggers must forward refs and event props. Current
+consumers are the console connection indicator and network legend. Redundant
+timestamp titles are removed. Modal top-layer integration needs explicit handling
+before tooltips are used inside native dialogs.
+
+Binary uploads use Blob/XHR progress and
 cancellation, and file/backup downloads use native same-origin streaming links.
 Only the text editor has its own size limit. Authority is checked server-side
 throughout transfers; the browser never sees a privileged provider URL/token.

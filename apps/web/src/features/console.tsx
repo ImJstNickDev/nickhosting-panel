@@ -4,6 +4,7 @@ import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
+import { Tooltip } from '../components/tooltip.js';
 import {
   Dialog,
   Empty,
@@ -293,16 +294,17 @@ export function ConsolePage({ serverId }: { serverId: string }) {
               ))}
             {consoleAvailable && (
               <>
-                <button
-                  type="button"
-                  className="console-connection"
-                  data-state={state}
-                  aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
-                  title={t('service.connectionAction', { state: t(`service.${state}`) })}
-                  onClick={() => setConnection((value) => value + 1)}
-                >
-                  <span className="console-connection-dot" aria-hidden="true" />
-                </button>
+                <Tooltip content={t('service.connectionAction', { state: t(`service.${state}`) })}>
+                  <button
+                    type="button"
+                    className="console-connection"
+                    data-state={state}
+                    aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
+                    onClick={() => setConnection((value) => value + 1)}
+                  >
+                    <span className="console-connection-dot" aria-hidden="true" />
+                  </button>
+                </Tooltip>
                 <span className="visually-hidden" role="status">
                   {t(`service.${state}`)}
                 </span>
@@ -358,63 +360,114 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   );
 }
 
-function Chart({
-  title,
-  values,
-  unit,
-}: {
-  title: string;
+type ChartSeries = {
+  label: string;
   values: Array<{ time: number; value: number }>;
-  unit: string;
-}) {
+  color: string;
+  direction?: 'inbound' | 'outbound';
+};
+function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; unit: string }) {
   const t = useT(),
     format = useFormat(),
     { locale } = useLocale();
-  const first = values[0],
-    last = values.at(-1);
-  if (!first || !last)
+  const values = series.flatMap((item) => item.values);
+  if (!values.length)
     return (
       <div>
         <h3>{title}</h3>
         <Empty text={t('service.noTelemetry')} />
       </div>
     );
+  const firstTime = Math.min(...values.map((value) => value.time));
+  const lastTime = Math.max(...values.map((value) => value.time));
   const maximum = Math.max(...values.map((value) => value.value), 1);
-  const range = Math.max(last.time - first.time, 1);
-  const segments: string[] = [];
-  let current = '';
-  let previous = first.time;
-  for (const sample of values) {
-    if (sample.time - previous > 120000) {
-      if (current) segments.push(current);
-      current = '';
-    }
-    current += `${current ? ' ' : ''}${12 + ((sample.time - first.time) / range) * 376},${108 - (sample.value / maximum) * 92}`;
-    previous = sample.time;
-  }
-  if (current) segments.push(current);
+  const range = Math.max(lastTime - firstTime, 1);
+  const network = series.some((item) => item.direction);
+  const summary = series
+    .map((item) => {
+      const last = item.values.at(-1);
+      return last
+        ? t('service.chartLabel', {
+            name: item.label,
+            value: format.number(last.value),
+            unit,
+            time: format.date(new Date(last.time)),
+          })
+        : `${item.label}: ${t('service.noTelemetry')}`;
+    })
+    .join('; ');
   return (
-    <figure className="metric-chart">
+    <figure className={`metric-chart${network ? ' network-chart' : ''}`}>
       <figcaption>
         <h3>{title}</h3>
-        <span>
-          {format.number(last.value)} {unit}
-        </span>
+        {network ? (
+          <div className="network-legend">
+            {series.map((item) => {
+              const last = item.values.at(-1);
+              return (
+                <Tooltip
+                  key={item.label}
+                  content={`${item.label}: ${last ? `${format.number(last.value)} ${unit}` : t('service.noTelemetry')}`}
+                >
+                  <button type="button" aria-label={item.label} style={{ color: item.color }}>
+                    <svg
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path
+                        d={
+                          item.direction === 'inbound'
+                            ? 'M12 3v12m-4-4 4 4 4-4'
+                            : 'M12 15V3m-4 4 4-4 4 4'
+                        }
+                      />
+                      <path d="M4 16v5h16v-5" />
+                    </svg>
+                  </button>
+                </Tooltip>
+              );
+            })}
+          </div>
+        ) : (
+          <span>
+            {format.number(series[0]?.values.at(-1)?.value ?? 0)} {unit}
+          </span>
+        )}
       </figcaption>
-      <svg
-        viewBox="0 0 400 135"
-        role="img"
-        aria-label={t('service.chartLabel', {
-          name: title,
-          value: format.number(last.value),
-          unit,
-          time: format.date(new Date(last.time)),
-        })}
-      >
+      <svg viewBox="0 0 400 135" role="img" aria-label={summary}>
         <path d="M12 10V109H390" fill="none" stroke="#8494a0" />
-        {segments.map((points) => (
-          <polyline key={points} points={points} fill="none" stroke="#164cb1" strokeWidth="2" />
-        ))}
+        {series
+          .slice()
+          .reverse()
+          .map((item) => {
+            const segments: string[] = [];
+            let current = '';
+            let previous = firstTime;
+            for (const sample of item.values) {
+              if (sample.time - previous > 120000) {
+                if (current) segments.push(current);
+                current = '';
+              }
+              current += `${current ? ' ' : ''}${12 + ((sample.time - firstTime) / range) * 376},${108 - (sample.value / maximum) * 92}`;
+              previous = sample.time;
+            }
+            if (current) segments.push(current);
+            return segments.map((points) => (
+              <polyline
+                key={`${item.label}-${points}`}
+                data-series={item.direction}
+                points={points}
+                fill="none"
+                stroke={item.color}
+                strokeWidth="2"
+              />
+            ));
+          })}
         <text x="16" y="22" fill="#536372" fontSize="10">
           {format.number(maximum)} {unit}
         </text>
@@ -422,13 +475,13 @@ function Chart({
           {new Intl.DateTimeFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
             hour: '2-digit',
             minute: '2-digit',
-          }).format(first.time)}
+          }).format(firstTime)}
         </text>
         <text x="389" y="130" textAnchor="end" fill="#536372" fontSize="10">
           {new Intl.DateTimeFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
             hour: '2-digit',
             minute: '2-digit',
-          }).format(last.time)}
+          }).format(lastTime)}
         </text>
       </svg>
     </figure>
@@ -508,26 +561,46 @@ export function Telemetry({ serverId }: { serverId: string }) {
         <ErrorNotice error={history.error} />
       ) : (
         <>
-          <div className="columns">
+          <div className="columns resource-charts">
             <Chart
               title={t('web.memory')}
               unit="MiB"
-              values={samples.map((s) => ({ time: s.time, value: s.memory }))}
+              series={[
+                {
+                  label: t('web.memory'),
+                  color: '#164cb1',
+                  values: samples.map((s) => ({ time: s.time, value: s.memory })),
+                },
+              ]}
             />
             <Chart
               title={t('web.cpu')}
               unit="%"
-              values={samples.map((s) => ({ time: s.time, value: s.cpu }))}
+              series={[
+                {
+                  label: t('web.cpu'),
+                  color: '#164cb1',
+                  values: samples.map((s) => ({ time: s.time, value: s.cpu })),
+                },
+              ]}
             />
             <Chart
-              title={t('service.received')}
+              title={t('service.networkTraffic')}
               unit="MiB"
-              values={samples.map((s) => ({ time: s.time, value: s.rx }))}
-            />
-            <Chart
-              title={t('service.sent')}
-              unit="MiB"
-              values={samples.map((s) => ({ time: s.time, value: s.tx }))}
+              series={[
+                {
+                  label: t('service.received'),
+                  color: '#164cb1',
+                  direction: 'inbound',
+                  values: samples.map((s) => ({ time: s.time, value: s.rx })),
+                },
+                {
+                  label: t('service.sent'),
+                  color: '#a34b08',
+                  direction: 'outbound',
+                  values: samples.map((s) => ({ time: s.time, value: s.tx })),
+                },
+              ]}
             />
           </div>
           {live.dataUpdatedAt > 0 && (

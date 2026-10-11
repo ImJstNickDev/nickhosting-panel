@@ -3551,3 +3551,54 @@ Independent review found no must-fix findings. Existing 100-sample history bound
 remains; this is not a new historical aggregation feature. Isolated fixtures
 cleaned normally; no production interactions, new assets or service restarts.
 Rollback is a source revert. PR #21 remains open/unmerged; issue #18 unchanged.
+
+## 2026-10-11 — Combined network chart and shared custom tooltips
+
+Received/sent totals now share a time range and vertical scale in one network
+chart, alongside memory/CPU. Inbound uses blue and outbound amber solid lines; blue is drawn above amber
+when values coincide, as requested in the final Owner refinement; matching download/upload icon buttons at the top right expose
+localized direction and current MiB totals. Counter semantics and API polling
+remain unchanged; these are not bandwidth rates. Missing-data segments remain
+separate for each series.
+
+A shared wrapper-free Tooltip provides fixed, viewport-constrained dark popups,
+hover persistence, keyboard focus, Escape, touch toggle/outside dismissal and
+scroll/resize handling. It also replaces the console connection dot's native
+title. Identical timestamp titles were removed rather than adding redundant
+focus stops. No new dependency. Native-dialog top-layer use remains a documented
+constraint for future consumers; current consumers are outside dialogs.
+
+Reference: reviewed upstream Pterodactyl's
+[server details icons](https://github.com/pterodactyl/panel/blob/develop/resources/scripts/components/server/console/ServerDetailsBlock.tsx)
+and [custom tooltip](https://github.com/pterodactyl/panel/blob/develop/resources/scripts/components/elements/tooltip/Tooltip.tsx)
+for interaction behavior. Independent implementation; no Pterodactyl or Blueprint
+code copied and no production installation changes.
+
+Independent source review found and resolved Escape dismissal persisting into a
+later keyboard interaction, including when Escape was pressed over the popup.
+Final source review reports no remaining must-fix finding.
+
+Validation (only affected checks):
+
+- Browser command prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t`.
+- Filter `'shares network chart scales|exposes connection indicator states|shows mediated console output|retries transient telemetry'`: **2 passed / 2 failed / 15 skipped**. New assertions incorrectly assumed a seeded sample's array offset despite additional existing fixture metrics, and hover reopening during the same focused Escape-dismissed interaction. Corrected those assertions to compare equal values and respect dismissal persistence.
+- Filter `'shares network chart scales|exposes connection indicator states|opens network tooltips by touch'`: **3 passed / 17 skipped**. Covers shared scales/line styles, current values, EN/IT labels, hover onto popup, Escape and subsequent focus, dynamic connection status, touch tap/toggle/outside dismissal, scroll/resize positioning, no overflow and Axe.
+- Final filter `'shares network chart scales'`: **1 passed / 19 skipped** after changing mobile capture to the actual viewport. Full-page capture of a scrolled mobile page included the existing offscreen skip link as a screenshot artifact; actual viewport capture avoids misrepresenting the rendered view.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm i18n:check` (1087 keys), scoped Biome and diff checks pass. Six existing reduced-motion/non-null warnings remain. An initial direct pnpm browser invocation was blocked by the shell's Node20 engine check before tests; all executed browser runs used the approved Node24 dev wrapper. No historical full-suite rerun.
+
+Reviewed screenshots: [network desktop EN](screenshots/m5/network-chart-desktop-en.png),
+[network mobile IT](screenshots/m5/network-chart-mobile-it.png), plus refreshed
+connection-indicator EN/IT screenshots linked above. Independent browser/UX review
+found no remaining blocker; coordinator inspected network layouts and tooltip.
+Axe found no violations in tested states; not a full accessibility certification.
+
+Disposable database/provider/browser fixtures only, cleaned after checks. No game
+server commands, new infrastructure, provider changes or container restarts. Vite
+HMR delivers the update. Rollback is a source revert; no migrations. PR #21 remains
+open/unmerged, and SFTPGo #18 remains a separate release blocker.
+
+Final Owner refinement before commit: both network strokes are solid, with blue
+inbound painted after amber outbound so coincident/zero values show blue.
+The same network-only browser command passed again (**1 passed / 19 skipped**),
+now asserting paint order and solid strokes; EN/IT screenshots regenerated and
+mobile inspected. Independent review confirmed legend order/data remain unchanged.
