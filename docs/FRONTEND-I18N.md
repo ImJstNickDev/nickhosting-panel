@@ -43,7 +43,7 @@ notices, tables and native dialogs. The shell owns ordinary/Owner navigation,
 identity context and common server services. Regular platform operators have a
 restricted Administration area for audit and read-only settings; Owner mutation
 controls are absent and backend checks remain authoritative. It moves focus to the page heading
-on navigation and supplies a skip link and a mobile navigation disclosure.
+on navigation and supplies a skip link and a mobile navigation disclosure. Desktop navigation stays within the viewport while the page scrolls; short windows scroll the sidebar internally so administration and account links remain reachable. Mobile retains its existing disclosure layout.
 
 Trusted first-party game modules own validated creation/management descriptors,
 handlers, namespaced catalogs and bundled artwork. The generic renderers use the

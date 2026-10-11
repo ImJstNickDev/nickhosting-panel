@@ -176,6 +176,9 @@
     flex-direction: column;
     gap: 1.8rem;
   }
+  .sidebar > * {
+    flex-shrink: 0;
+  }
   .brand {
     font-weight: 750;
     letter-spacing: -0.025em;
@@ -490,6 +493,16 @@
   .progress {
     width: 100%;
     accent-color: var(--blue);
+  }
+}
+@media (min-width: 761px) {
+  .sidebar {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
   }
 }
 @media (max-width: 760px) {

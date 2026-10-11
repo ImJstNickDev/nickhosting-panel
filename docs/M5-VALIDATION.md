@@ -3403,3 +3403,28 @@ and PR evidence updated; governance/diff checks apply. No test assets created or
 cleaned, no new restart performed, and SFTPGo #18 remains unchanged. PR #21 stays
 open/unmerged. Follow-up should target hint-to-positive-observation latency, without
 misrepresenting this successful sleep fast path as zero physical latency.
+
+
+## 2026-10-11 — Sidebar stays within the desktop viewport
+
+Desktop navigation now uses a sticky, viewport-height scrollport. Long content no
+longer stretches the sidebar or pushes Administration to the bottom of the page.
+Short windows scroll the navigation independently; children retain their natural
+height and keyboard focus scrolls links into view. Mobile keeps its existing menu
+disclosure. No routes, APIs, copy, permissions or infrastructure settings changed.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/sidebar.browser.test.ts`: **3 passed**, real Chromium with the existing isolated database and simulated provider. Disposable fixtures cleaned.
+- Covers long-page Administration access, 420px desktop height with independent wheel/Tab navigation, and 390px Italian mobile disclosure/navigation. Axe WCAG A/AA tags found no violations in the tested states; no horizontal overflow or browser errors.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- Biome checks of the changed CSS and new browser test: no errors; CSS retains three existing reduced-motion `!important` warnings.
+- Initial exploratory run used the system Node and failed one overly strict viewport assertion at a fractional 0.9953 intersection ratio. Final run used the pinned runtime via `scripts/dev.sh` and a 0.99 tolerance; no product code was changed to mask that assertion.
+- Independent browser/accessibility review and coordinator visual inspection found no blocking issue. These focused checks do not claim a full WCAG audit. No historical full-suite rerun was needed for this CSS change.
+
+Reviewed viewport screenshots (only isolated fixture identities):
+[scrolled desktop](screenshots/m5/sidebar-scrolled-desktop-en.png),
+[short desktop with keyboard focus](screenshots/m5/sidebar-short-desktop-en.png),
+[Italian mobile menu](screenshots/m5/sidebar-open-mobile-it.png).
+
+The existing Vite source mount/HMR delivers the CSS change without service restarts.
+No production/game operations or new infrastructure; no live test assets created.
+Rollback is the CSS revert. PR #21 remains open/unmerged; M6 and SFTPGo #18 unchanged.
