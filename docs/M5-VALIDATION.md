@@ -3966,3 +3966,45 @@ latency reduction is claimed before an Owner-driven interaction; tests establish
 removed calls and nonblocking acceptance, not millisecond production guarantees.
 Rollback: revert code; existing runtime data needs no migration. PR #21 remains
 open/unmerged, and SFTPGo #18 remains unchanged.
+
+### 2026-10-11 — Chart area fills and Owner-driven power timing audit
+
+Charts now fill each continuous segment to the baseline in the series color at
+12% opacity. All fills precede all opaque strokes; blue inbound retains priority
+over amber outbound. Missing samples stay gaps and offline charts have no fill.
+Actual desktop/mobile screenshots were independently reviewed with no must-fix
+findings.
+
+Validation: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-live-stats.browser.test.ts`
+passed **3/3** (26.24s), covering fill geometry/layers, offline behavior, existing
+live statistics and accessibility. Web typecheck, scoped Biome and diff checks
+passed. No historical full suite rerun.
+
+Read-only dev worker logs and two exact operation-job timestamp reads establish
+the following boundaries for the Owner-driven 15:47 UTC Start and 15:49 UTC Stop:
+
+- Start: durable creation to worker receipt **59ms**; delivery age **6ms**.
+  Worker receipt to HTTP dispatch approximately **1.150s**; HTTP acknowledgement
+  another **350ms**. Initial parallel identity/resources checks took **323ms**,
+  physical sampling **273ms**, atomic admission **19ms**, and final authorization
+  wrapper **434ms** (including overlapping identity/runtime checks). These stage
+  durations overlap and must not be blindly summed.
+- The later Start confirmation delivery is not a second delayed Start dispatch.
+  Durable completion was **5.919s** after creation; HTTP acknowledgement had
+  already arrived **1.559s** after creation.
+- Stop: durable creation to worker receipt **52ms**; delivery age **3ms**.
+  Worker receipt to HTTP dispatch approximately **1.158s**, HTTP acknowledgement
+  another **400ms**, followed by **1.039s** terminal confirmation. Durable
+  completion was **3.045s** after creation.
+
+No browser click/API-ingress timestamp or individual console-command timing was
+available for this interaction. These measurements do not establish complete
+click-to-command latency or game readiness. Power still uses the durable Client
+HTTP path; console WebSocket reuse does not change that power transport. The
+remaining pre-dispatch work is provider identity, resource admission and final
+authorization, rather than a multi-second Redis queue. No JAR download/hash is
+part of this power path. No new backend optimization is claimed from this audit.
+
+No live commands, server mutations, container restarts or infrastructure changes
+were performed. Rollback: revert chart source; no migration/data change. PR #21
+remains open/unmerged; SFTPGo #18 remains unchanged.

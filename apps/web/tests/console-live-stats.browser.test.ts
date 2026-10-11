@@ -91,6 +91,44 @@ describe('Console live resource stream', () => {
       },
     });
   }
+  async function assertAreaLayers() {
+    for (const chart of await user.locator('.metric-chart').all()) {
+      const layers = await chart.locator('polygon, polyline').evaluateAll((elements) =>
+        elements.map((element) => ({
+          tag: element.tagName,
+          points: element.getAttribute('points'),
+          series: element.getAttribute('data-series'),
+          fill: element.getAttribute('fill'),
+          stroke: element.getAttribute('stroke'),
+          fillOpacity: getComputedStyle(element).fillOpacity,
+          strokeOpacity: getComputedStyle(element).strokeOpacity,
+        })),
+      );
+      const areas = layers.filter((layer) => layer.tag === 'polygon');
+      const lines = layers.filter((layer) => layer.tag === 'polyline');
+      expect(areas.length).toBeGreaterThan(0);
+      expect(areas).toHaveLength(lines.length);
+      expect(layers.map((layer) => layer.tag)).toEqual([
+        ...areas.map(() => 'polygon'),
+        ...lines.map(() => 'polyline'),
+      ]);
+      for (const [index, line] of lines.entries()) {
+        const points = line.points?.split(' ') ?? [];
+        const area = areas[index];
+        expect(area?.points).toBe(
+          `${points[0]?.split(',')[0]},108 ${line.points} ${points.at(-1)?.split(',')[0]},108`,
+        );
+        expect(area?.fill).toBe(line.stroke);
+        expect(area?.fillOpacity).toBe('0.12');
+        expect(line.strokeOpacity).toBe('1');
+        expect(area?.points).not.toMatch(/NaN|undefined/);
+      }
+      if (lines.some((line) => line.series === 'inbound')) {
+        expect(lines.at(-1)?.series).toBe('inbound');
+        expect(areas.at(-1)?.series).toBe('inbound');
+      }
+    }
+  }
   it('updates stream metrics without per-second REST and ticks uptime using already-cached streamed disk', async () => {
     emit({ type: 'status', data: 'running' });
     stats(20);
@@ -126,10 +164,17 @@ describe('Console live resource stream', () => {
     const updatedPoints = await points();
     expect(updatedPoints).not.toEqual(beforeTick);
     expect(Number(updatedPoints.at(-1)?.split(' ').at(-1)?.split(',')[0])).toBe(388);
+    await assertAreaLayers();
     await user.screenshot({
       path: resolve('docs/screenshots/m5/console-live-stats-desktop-en.png'),
       fullPage: true,
     });
+    await user.setViewportSize({ width: 390, height: 844 });
+    await user.screenshot({
+      path: resolve('docs/screenshots/m5/console-live-stats-mobile-en.png'),
+      fullPage: true,
+    });
+    await user.setViewportSize({ width: 1440, height: 1000 });
   });
   it('does not fabricate missing stream fields and resets uptime after a new process', async () => {
     emit({ type: 'stats', data: { cpu_absolute: 22, memory_bytes: 1024, disk_bytes: 0 } });
@@ -148,6 +193,7 @@ describe('Console live resource stream', () => {
         '12,108 388,108',
       );
       await browserExpect(chart.locator('polyline:not([data-offline])')).toHaveCount(0);
+      await browserExpect(chart.locator('polygon')).toHaveCount(0);
     }
     await user.screenshot({
       path: resolve('docs/screenshots/m5/console-live-stats-offline-en.png'),

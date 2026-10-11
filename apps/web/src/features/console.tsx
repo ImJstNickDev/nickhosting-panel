@@ -565,6 +565,41 @@ function Chart({
             : `${item.label}: ${t('service.noTelemetry')}`;
         })
         .join('; ');
+  // Both layers use the same continuous segments: missing samples must stay gaps.
+  const segments = offline
+    ? []
+    : series
+        .slice()
+        .reverse()
+        .flatMap((item) => {
+          const continuous: Array<Array<[number, number]>> = [];
+          let current: Array<[number, number]> = [];
+          let previous = firstTime;
+          for (const sample of item.values) {
+            if (!Number.isFinite(sample.value)) {
+              if (current.length) continuous.push(current);
+              current = [];
+              previous = sample.time;
+              continue;
+            }
+            if (sample.time - previous > 2500) {
+              if (current.length) continuous.push(current);
+              current = [];
+            }
+            current.push([
+              12 + ((sample.time - firstTime) / range) * 376,
+              108 - (sample.value / maximum) * 92,
+            ]);
+            previous = sample.time;
+          }
+          if (current.length) continuous.push(current);
+          return continuous.map((points, index) => ({
+            key: `${item.label}-${index}`,
+            points,
+            color: item.color,
+            direction: item.direction,
+          }));
+        });
   return (
     <figure className={`metric-chart${network ? ' network-chart' : ''}`}>
       <figcaption>
@@ -615,40 +650,25 @@ function Chart({
             strokeWidth="2"
           />
         )}
-        {!offline &&
-          series
-            .slice()
-            .reverse()
-            .map((item) => {
-              const segments: string[] = [];
-              let current = '';
-              let previous = firstTime;
-              for (const sample of item.values) {
-                if (!Number.isFinite(sample.value)) {
-                  if (current) segments.push(current);
-                  current = '';
-                  previous = sample.time;
-                  continue;
-                }
-                if (sample.time - previous > 2500) {
-                  if (current) segments.push(current);
-                  current = '';
-                }
-                current += `${current ? ' ' : ''}${12 + ((sample.time - firstTime) / range) * 376},${108 - (sample.value / maximum) * 92}`;
-                previous = sample.time;
-              }
-              if (current) segments.push(current);
-              return segments.map((points) => (
-                <polyline
-                  key={`${item.label}-${points}`}
-                  data-series={item.direction}
-                  points={points}
-                  fill="none"
-                  stroke={item.color}
-                  strokeWidth="2"
-                />
-              ));
-            })}
+        {segments.map(({ key, points, color, direction }) => (
+          <polygon
+            key={key}
+            data-series={direction}
+            points={`${points[0]?.[0]},108 ${points.map((point) => point.join(',')).join(' ')} ${points.at(-1)?.[0]},108`}
+            fill={color}
+            fillOpacity="0.12"
+          />
+        ))}
+        {segments.map(({ key, points, color, direction }) => (
+          <polyline
+            key={key}
+            data-series={direction}
+            points={points.map((point) => point.join(',')).join(' ')}
+            fill="none"
+            stroke={color}
+            strokeWidth="2"
+          />
+        ))}
         <text x="16" y="22" fill="#536372" fontSize="10">
           {format.number(maximum)} {unit}
         </text>
