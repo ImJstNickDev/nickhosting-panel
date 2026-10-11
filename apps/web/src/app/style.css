@@ -503,7 +503,6 @@
     flex-shrink: 0;
   }
   .console-connection:hover {
-    background: #edf0f2;
     filter: none;
   }
   .console-connection-dot {
@@ -511,6 +510,9 @@
     height: 12px;
     border-radius: 50%;
     background: #b42318;
+  }
+  .console-connection:hover .console-connection-dot {
+    box-shadow: 0 0 0 5px #edf0f2;
   }
   .console-connection[data-state="connected"] .console-connection-dot {
     background: #16803c;

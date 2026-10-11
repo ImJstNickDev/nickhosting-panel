@@ -3486,3 +3486,15 @@ identity isolation and retry behavior are unchanged. No power effect is introduc
 Only isolated fixture services used, cleaned afterward. No real game/provider commands,
 new infrastructure or service restarts. Existing HMR delivers the UI/catalog change.
 Rollback is a source revert; PR #21 remains open/unmerged and issue #18 unchanged.
+
+
+## 2026-10-11 — Smaller connection-dot hover
+
+Reduced the hover halo from the entire40px button to a5px solid shadow around the
+12px dot (22px overall). The40px hit target, state colors and keyboard focus remain.
+A focused Chromium capture of the actual app with disposable isolated fixtures
+confirmed40×40px target, transparent button background and5px shadow; screenshot
+[desktop hover](screenshots/m5/console-indicator-hover-desktop-en.png) inspected.
+Independent CSS review found no issue. Scoped Biome/diff/governance checks pass
+with existing reduced-motion warnings; no broad tests or rebuild needed. No live
+operations, new infrastructure or service restart. Fixtures cleaned; PR #21 open.
