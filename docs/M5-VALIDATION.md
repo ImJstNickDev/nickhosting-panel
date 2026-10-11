@@ -3498,3 +3498,26 @@ confirmed40×40px target, transparent button background and5px shadow; screensho
 Independent CSS review found no issue. Scoped Biome/diff/governance checks pass
 with existing reduced-motion warnings; no broad tests or rebuild needed. No live
 operations, new infrastructure or service restart. Fixtures cleaned; PR #21 open.
+
+## 2026-10-11 — Integrated terminal prompt and automatic output following
+
+Console output follows while at the bottom, pauses when scrolled upward, and
+resumes when returning to the bottom. Removed the follow checkbox and external
+command form. An integrated `>>` prompt has a localized, subdued placeholder and
+accessible name; Enter submits through the existing API. Pending submissions are
+guarded, successful commands clear the draft, and failures retain draft/focus
+with an announced error. Manage permission and authenticated scope still gate
+the prompt. The existing bounded buffer, reconnect and authorization handling remain.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'shows mediated console output|submits the integrated terminal prompt|follows terminal output only|hides the terminal command prompt|keeps the terminal prompt accessible|records status transitions once|reconnects a failed console stream|erases console buffers'`: initially **5 passed / 3 failed / 10 skipped**. New tests assumed a Unicode ellipsis instead of the agreed ASCII placeholder and one fixture relay rather than React development duplicate attaches. These test assumptions were corrected without changing product behavior.
+- Same runner with `-t 'submits the integrated terminal prompt|follows terminal output only|keeps the terminal prompt accessible'`: **3 passed / 15 skipped**. All eight selected cases pass across the two runs. Checks include real isolated command handlers, provider failure/retry, duplicate and empty submission, retained focus, Ctrl+Home/End pause/resume, Tab/Shift+Tab, manage gating, reconnect/status and identity-buffer regression coverage.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm i18n:check` (1090 keys), scoped Biome and diff checks pass. Seven pre-existing non-null/reduced-motion warnings remain. No full historical matrix or production rebuild was run for this scoped UI change.
+- Real Chromium [desktop EN](screenshots/m5/terminal-desktop-en.png) and [mobile IT](screenshots/m5/terminal-mobile-it.png) screenshots reviewed by browser worker and coordinator. No page overflow; integrated prompt, localized placeholder and focus are visible. Axe reported zero violations in tested states; physical mobile keyboard/IME behavior was not independently certified.
+- Independent source review found no must-fix issue in submission, identity isolation, authorization or scrolling. Independent browser/UX review found no blocker.
+
+Existing isolated test services and disposable fixture schema only; harness cleanup
+completed. No real provider commands, game assets, new infrastructure or service
+restarts. Existing Vite HMR delivers the changes. Rollback: revert UI/catalog/test
+changes; no migrations. PR #21 remains open/unmerged; issue #18 unchanged.

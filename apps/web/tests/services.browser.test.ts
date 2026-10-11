@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
+import { DomainError } from '@nickhosting/core';
 import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -146,7 +147,7 @@ describe('M5 browser files, backups, console and automation', () => {
   it('shows mediated console output, sends commands and presents actual telemetry units', async () => {
     await user.goto(`${base}/console`);
     await user.getByLabel('Command', { exact: true }).fill('list');
-    await user.getByRole('button', { name: 'Send', exact: true }).click();
+    await user.getByLabel('Command', { exact: true }).press('Enter');
     await browserExpect(user.locator('.console pre')).toContainText(
       'There are 0 of a max of 20 players online',
     );
@@ -169,6 +170,177 @@ describe('M5 browser files, backups, console and automation', () => {
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
       .analyze();
     expect(audit.violations.map((v) => v.id)).toEqual([]);
+  });
+  it('submits the integrated terminal prompt with Enter, retains failed drafts and prevents duplicate requests', async () => {
+    const original = provider.adapter.sendCommand;
+    let calls = 0;
+    let fail = true;
+    let release: () => void = () => {};
+    const pending = new Promise<void>((done) => {
+      release = done;
+    });
+    provider.adapter.sendCommand = async (id, command) => {
+      calls++;
+      if (fail) throw new DomainError('integration_unavailable');
+      await pending;
+      return original(id, command);
+    };
+    try {
+      await user.goto(`${base}/console`);
+      const prompt = user.getByRole('textbox', { name: 'Command', exact: true });
+      await browserExpect(user.locator('.console-terminal .console-prompt')).toContainText('>>');
+      await browserExpect(prompt).toHaveAttribute('placeholder', 'Type a command...');
+      await browserExpect(user.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0);
+      await browserExpect(user.getByRole('checkbox')).toHaveCount(0);
+      await prompt.fill('list');
+      await prompt.press('Enter');
+      await browserExpect(user.getByRole('alert')).toBeVisible();
+      await browserExpect(prompt).toHaveValue('list');
+      await browserExpect(prompt).toBeFocused();
+      expect(calls).toBe(1);
+      fail = false;
+      await prompt.press('Enter');
+      await browserExpect.poll(() => calls).toBe(2);
+      // A held Enter key must not submit a second command while the provider is pending.
+      await user.keyboard.press('Enter');
+      await user.keyboard.press('Enter');
+      await browserExpect(prompt).toHaveValue('list');
+      release();
+      await browserExpect(prompt).toHaveValue('');
+      await browserExpect(prompt).toBeFocused();
+      await browserExpect(user.getByRole('alert')).toHaveCount(0);
+      await browserExpect(user.locator('.console pre')).toContainText(
+        'There are 0 of a max of 20 players online',
+      );
+      expect(calls).toBe(2);
+      await prompt.press('Enter');
+      expect(calls).toBe(2);
+    } finally {
+      release();
+      provider.adapter.sendCommand = original;
+      await user.goto(`${base}/files`);
+    }
+  });
+  it('follows terminal output only at the bottom and resumes after keyboard scrolling back', async () => {
+    const original = provider.adapter.relayConsole;
+    const streams = new Set<ConsoleRelayOptions>();
+    provider.adapter.relayConsole = async (id, input) => {
+      const relay = await original(id, input);
+      if (!input.signal?.aborted) {
+        streams.add(input);
+        input.signal?.addEventListener('abort', () => streams.delete(input), { once: true });
+      }
+      return relay;
+    };
+    const emit = (data: string) => {
+      expect(streams.size).toBeGreaterThan(0);
+      for (const stream of streams)
+        if (!stream.signal?.aborted) stream.onEvent({ type: 'console', data });
+    };
+    const output = user.locator('.console');
+    const bottomGap = () =>
+      output.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    try {
+      await user.goto(`${base}/console`);
+      await browserExpect.poll(() => streams.size).toBeGreaterThanOrEqual(1);
+      for (let index = 0; index < 100; index++) {
+        emit(`Terminal scrolling fixture ${index}`);
+        if (index % 20 === 19)
+          await browserExpect(output).toContainText(`Terminal scrolling fixture ${index}`);
+      }
+      await browserExpect.poll(bottomGap).toBeLessThanOrEqual(2);
+      await output.focus();
+      await user.keyboard.press('Control+Home');
+      await browserExpect.poll(() => output.evaluate((element) => element.scrollTop)).toBe(0);
+      emit('Output received while reading earlier lines');
+      await browserExpect(output).toContainText('Output received while reading earlier lines');
+      expect(await output.evaluate((element) => element.scrollTop)).toBe(0);
+      expect(await bottomGap()).toBeGreaterThan(200);
+      const prompt = user.getByRole('textbox', { name: 'Command', exact: true });
+      await user.keyboard.press('Tab');
+      await browserExpect(prompt).toBeFocused();
+      await prompt.fill('draft while reading');
+      expect(await output.evaluate((element) => element.scrollTop)).toBe(0);
+      await user.keyboard.press('Shift+Tab');
+      await browserExpect(output).toBeFocused();
+      await user.keyboard.press('Control+End');
+      await browserExpect.poll(bottomGap).toBeLessThanOrEqual(2);
+      emit('Output received after returning to bottom');
+      await browserExpect(output).toContainText('Output received after returning to bottom');
+      await browserExpect.poll(bottomGap).toBeLessThanOrEqual(2);
+    } finally {
+      await user.goto(`${base}/files`);
+      provider.adapter.relayConsole = original;
+    }
+  });
+  it('hides the terminal command prompt without manage permission while retaining readable output', async () => {
+    const endpoint = `**/v1/platform/servers/${provider.ids.serverId}`;
+    await user.route(endpoint, async (route) => {
+      const response = await route.fetch();
+      const server = await response.json();
+      server.permissions.manage = false;
+      await route.fulfill({ response, json: server });
+    });
+    try {
+      await user.goto(`${base}/console`);
+      await browserExpect(user.locator('.console pre')).toContainText(
+        'Browser provider fixture attached',
+      );
+      await browserExpect(user.getByRole('textbox', { name: 'Command', exact: true })).toHaveCount(
+        0,
+      );
+      await browserExpect(user.locator('.console-prompt')).toHaveCount(0);
+      await user.locator('.console').focus();
+      await browserExpect(user.locator('.console')).toBeFocused();
+    } finally {
+      await user.unroute(endpoint);
+      await user.goto(`${base}/files`);
+    }
+  });
+  it('keeps the terminal prompt accessible and contained in English desktop and Italian mobile', async () => {
+    try {
+      for (const locale of ['en', 'it'] as const) {
+        await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+        await user.setViewportSize(
+          locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+        );
+        await user.goto(`${base}/console`);
+        const prompt = user.getByRole('textbox', {
+          name: locale === 'en' ? 'Command' : 'Comando',
+          exact: true,
+        });
+        await browserExpect(prompt).toHaveAttribute(
+          'placeholder',
+          locale === 'en' ? 'Type a command...' : 'Digita un comando...',
+        );
+        await prompt.fill('list');
+        await prompt.press('Enter');
+        await browserExpect(prompt).toHaveValue('');
+        await browserExpect(prompt).toBeFocused();
+        await browserExpect(user.locator('.console pre')).toContainText(
+          'There are 0 of a max of 20 players online',
+        );
+        await browserExpect(user.locator('figure.metric-chart')).toHaveCount(4);
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(audit.violations.map((violation) => violation.id)).toEqual([]);
+        await user.screenshot({
+          path: resolve(
+            'docs/screenshots/m5',
+            `terminal-${locale === 'en' ? 'desktop-en' : 'mobile-it'}.png`,
+          ),
+          fullPage: true,
+        });
+      }
+    } finally {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+    expect(errors).toEqual([]);
   });
   it('exposes connection indicator states and reconnects by pointer and keyboard in both locales', async () => {
     for (const locale of ['en', 'it'] as const) {
@@ -407,7 +579,7 @@ describe('M5 browser files, backups, console and automation', () => {
   it('erases console buffers when signing out and back into the same account', async () => {
     await user.goto(`${base}/console`);
     await user.getByLabel('Command', { exact: true }).fill('private-session-marker');
-    await user.getByRole('button', { name: 'Send', exact: true }).click();
+    await user.getByLabel('Command', { exact: true }).press('Enter');
     await browserExpect(user.locator('.console pre')).toContainText('private-session-marker');
     await user.getByRole('link', { name: 'Settings', exact: true }).first().click();
     await user.getByRole('button', { name: 'Sign out', exact: true }).click();

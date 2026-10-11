@@ -520,13 +520,43 @@
   .console-connection[data-state="connecting"] .console-connection-dot {
     background: #b88700;
   }
-  .console-form {
-    display: flex;
-    gap: 0.7rem;
-    margin-top: 1rem;
+  .console-terminal {
+    background: #152432;
+    color: #e3ecf1;
   }
-  .console-form .field {
+  .console-prompt {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.4rem 1rem;
+    border-top: 1px solid #3a4b5a;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.86rem;
+  }
+  .console-prompt > span {
+    color: #a9b8c5;
+  }
+  .console-prompt input {
     flex: 1;
+    min-width: 0;
+    padding: 0.5rem 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    box-shadow: none;
+  }
+  .console-prompt input::placeholder {
+    color: #e3ecf1;
+    opacity: 0.65;
+  }
+  .console-prompt input:focus-visible {
+    outline: 2px solid #a9b8c5;
+    outline-offset: 2px;
+  }
+  .console-command-error {
+    padding: 0 1rem 1rem;
   }
   .progress {
     width: 100%;

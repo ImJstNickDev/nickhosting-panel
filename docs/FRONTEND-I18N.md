@@ -57,6 +57,11 @@ connecting, red disconnected). The 40px button reconnects the stream and exposes
 localized state/action text to assistive technology and its tooltip; it has no
 visible label. Retained output still survives navigation, without an explanatory
 paragraph. This indicator describes the console connection, not the game process.
+Output follows automatically while scrolled to the bottom; scrolling up pauses
+following, and returning to the bottom resumes it. No follow checkbox is needed.
+Authorized commands use an integrated `>>` prompt with a localized placeholder
+and accessible name. Enter submits, preserving focus; failed requests retain the
+draft and show an error, while pending requests cannot submit duplicates.
 
 Trusted first-party game modules own validated creation/management descriptors,
 handlers, namespaced catalogs and bundled artwork. The generic renderers use the

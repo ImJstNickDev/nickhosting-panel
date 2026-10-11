@@ -1,22 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import {
-  ActionForm,
   Dialog,
   Empty,
   ErrorNotice,
-  Input,
   JobNotice,
   Loading,
   Notice,
   Section,
   Select,
   Time,
-  text,
 } from '../components/ui.js';
 import { useRequestOperation } from './servers.js';
 import {
@@ -35,19 +32,76 @@ const terminalControls = /[\x00-\x08\x0b-\x1f\x7f]/g;
 function ConsoleOutput({
   output,
   lines,
+  onScroll,
 }: {
   output: React.RefObject<HTMLElement | null>;
   lines: string[];
+  onScroll: React.UIEventHandler<HTMLElement>;
 }) {
   const t = useT(),
     label = t('service.consoleOutput');
   return (
     // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users must scroll the bounded console region.
-    <section ref={output} className="console" tabIndex={0} aria-label={label}>
+    <section ref={output} className="console" tabIndex={0} aria-label={label} onScroll={onScroll}>
       <pre role="log" aria-live="off">
         {lines.length ? lines.join('\n') : t('service.noConsoleOutput')}
       </pre>
     </section>
+  );
+}
+
+function ConsoleCommand({ serverId }: { serverId: string }) {
+  const t = useT();
+  const [command, setCommand] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const submitting = useRef(false);
+  return (
+    <>
+      <form
+        className="console-prompt"
+        aria-busy={busy}
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const value = command.trim();
+          if (!value || submitting.current) return;
+          submitting.current = true;
+          setBusy(true);
+          setError(undefined);
+          try {
+            await api(`${serverPath(serverId)}/console`, { body: { command: value } });
+            setCommand('');
+          } catch (failure) {
+            setError(failure);
+          } finally {
+            submitting.current = false;
+            setBusy(false);
+          }
+        }}
+      >
+        <span aria-hidden="true">&gt;&gt;</span>
+        <input
+          aria-label={t('web.command')}
+          placeholder={t('service.commandPlaceholder')}
+          name="console-command"
+          type="text"
+          value={command}
+          onChange={(event) => setCommand(event.target.value)}
+          readOnly={busy}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          data-1p-ignore
+          data-lpignore="true"
+          maxLength={4096}
+        />
+      </form>
+      {Boolean(error) && (
+        <div className="console-command-error">
+          <ErrorNotice error={error} />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -109,7 +163,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<unknown>();
   const [connection, setConnection] = useState(0);
-  const [follow, setFollow] = useState(true);
+  const follow = useRef(true);
   const output = useRef<HTMLElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: explicit reconnect and authenticated identity delimit the stream.
   useEffect(() => {
@@ -211,10 +265,14 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       clearTimeout(timer);
     };
   }, [serverId, identity, scope, connection, consoleAvailable]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll after each new bounded batch of output.
-  useEffect(() => {
-    if (follow && output.current) output.current.scrollTop = output.current.scrollHeight;
-  }, [lines, follow]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a different server/session starts at the end of its own output.
+  useLayoutEffect(() => {
+    follow.current = true;
+  }, [scope]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: follow appended output only while the user remains at the bottom.
+  useLayoutEffect(() => {
+    if (follow.current && output.current) output.current.scrollTop = output.current.scrollHeight;
+  }, [lines]);
   return (
     <>
       <Section
@@ -270,34 +328,20 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         {consoleAvailable ? (
           <>
             {Boolean(error) && <ErrorNotice error={error} />}
-            <ConsoleOutput output={output} lines={lines} />
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={follow}
-                onChange={(event) => setFollow(event.target.checked)}
-              />
-              {t('service.followConsole')}
-            </label>
-            {server.data?.permissions.manage && (
-              <ActionForm
-                submitLabel={t('web.send')}
-                success={false}
-                onSubmit={async (data) => {
-                  await api(`${serverPath(serverId)}/console`, {
-                    body: { command: text(data, 'command') },
-                  });
+            <div className="console-terminal">
+              <ConsoleOutput
+                output={output}
+                lines={lines}
+                onScroll={(event) => {
+                  const element = event.currentTarget;
+                  follow.current =
+                    element.scrollHeight - element.clientHeight - element.scrollTop <= 2;
                 }}
-              >
-                <Input
-                  label={t('web.command')}
-                  name="command"
-                  autoComplete="off"
-                  maxLength={4096}
-                  required
-                />
-              </ActionForm>
-            )}
+              />
+              {server.data?.permissions.manage && identity && (
+                <ConsoleCommand key={scope} serverId={serverId} />
+              )}
+            </div>
           </>
         ) : (
           <Notice>{t('web.unavailable')}</Notice>

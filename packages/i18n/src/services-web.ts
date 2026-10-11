@@ -155,7 +155,7 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'service.connectionAction': ['{state} — Reconnect', '{state} — Riconnetti'],
   'service.consoleOutput': ['Server console output', 'Output della console del server'],
   'service.noConsoleOutput': ['No console output received', 'Nessun output della console ricevuto'],
-  'service.followConsole': ['Follow new output', 'Segui il nuovo output'],
+  'service.commandPlaceholder': ['Type a command...', 'Digita un comando...'],
   'service.telemetry': ['Resource usage', 'Utilizzo risorse'],
   'service.noTelemetry': ['No measurements available', 'Nessuna misurazione disponibile'],
   'service.staleTelemetry': [
