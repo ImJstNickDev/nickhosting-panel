@@ -23,6 +23,7 @@ import {
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
 import { readinessReceipt } from './readiness-receipt.js';
+import { sleepReceipt } from './sleep-receipt.js';
 
 const positive = z.number().int().positive().max(2_147_483_647);
 export const gatewayDataPlanePolicySchema = z
@@ -73,6 +74,7 @@ interface UdpSession {
 interface Listener {
   route: GatewayRoute;
   backendReady: boolean;
+  statusOnly?: boolean;
   tcp?: Server;
   udp?: DatagramSocket;
   clients: Set<Socket>;
@@ -152,6 +154,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   >();
   let pendingUdpIntents = 0;
   let pendingUdpResponseBytes = 0;
+  const sleepWatches = new Map<string, { abort: AbortController; deadline: number }>();
   const quiescence = new Map<
     string,
     { deadline: number; observedAt: number; generation: string; routes: GatewayRoute[] }
@@ -285,7 +288,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (!available) loggedRouteStates.delete(listener.route.id);
   };
   const wake = (route: GatewayRoute): Promise<GatewayMode> => {
-    if (!leased() || quiescence.has(route.serverId)) return Promise.resolve('blocked');
+    if (!leased() || quiescence.has(route.serverId) || listeners.get(route.id)?.statusOnly)
+      return Promise.resolve('blocked');
     const previous = wakeRequests.get(route.serverId);
     if (previous && (previous.inFlight || now() - previous.at < policy.wakeRetryMs)) {
       previous.coalesced++;
@@ -686,6 +690,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     for (const listener of expired) logRouteTransition(listener, 'lease_expired', false);
     listeners.clear();
     wakeRequests.clear();
+    for (const watch of sleepWatches.values()) watch.abort.abort();
+    sleepWatches.clear();
     if (expired.length) counters.leaseExpirations++;
     await Promise.all(expired.map((listener) => closeListener(listener)));
   };
@@ -766,6 +772,27 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                   : 'validation_failed',
           routeMode: route.mode,
         });
+        if (error instanceof NetworkObservationError && error.reason === 'container_churn') {
+          // A changing Docker inventory is not fresh topology authority. Retain
+          // only exact, already committed listeners as local protocol responders;
+          // never renew their original lease or permit forwarding/wake effects.
+          candidateSnapshot = snapshot;
+          for (const current of [...listeners.values()]) {
+            const candidate = next.routes.find((value) => value.id === current.route.id);
+            current.backendReady = false;
+            current.statusOnly = true;
+            for (const client of current.forwardingClients) client.destroy();
+            for (const key of current.sessions.keys()) dropSession(current, key);
+            if (leased() && isDeepStrictEqual(candidate, current.route)) {
+              logRouteTransition(current, 'observer_container_churn');
+            } else {
+              logRouteTransition(current, 'safety_rejected', false);
+              listeners.delete(current.route.id);
+              await closeListener(current);
+            }
+          }
+          throw error;
+        }
         const unsafe = listeners.get(route.id);
         if (unsafe) {
           logRouteTransition(unsafe, 'safety_rejected', false);
@@ -816,6 +843,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           clearSessions(listener);
         listener.route = route;
         listener.backendReady = readiness.get(route.id) ?? false;
+        listener.statusOnly = false;
       }
       snapshot = next;
       syncStartupWatches();
@@ -869,6 +897,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           });
         }
       }
+      syncSleepWatches();
       controlAvailable = true;
       for (const listener of listeners.values())
         logRouteTransition(
@@ -923,7 +952,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           await applySnapshot(input, fetchStartedAt);
           return;
         } catch (error) {
-          if (!(error instanceof GatewayRouteRevisionStaleError) || attempt === 1) throw error;
+          const transient =
+            error instanceof GatewayRouteRevisionStaleError ||
+            (error instanceof NetworkObservationError && error.reason === 'container_churn');
+          if (!transient || attempt === 1) throw error;
         }
       }
     })()
@@ -1013,6 +1045,99 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         });
     }
   };
+  const applySleepReceipt = (
+    input: unknown,
+    serverId: string,
+    captured: NonNullable<ReturnType<typeof quiescence.get>>,
+  ) => {
+    const work = serial.then(() => {
+      if (
+        stopping ||
+        !snapshot ||
+        !candidateSnapshot ||
+        candidateSnapshot.revision !== snapshot.revision ||
+        !isDeepStrictEqual(candidateSnapshot.routes, snapshot.routes) ||
+        quiescence.get(serverId) !== captured ||
+        [...listeners.values()].some((listener) => listener.statusOnly)
+      )
+        return false;
+      const next = sleepReceipt(snapshot, input, serverId, captured, now(), policy.maxClockSkewMs);
+      if (!next || next.routes.some((route) => !listeners.has(route.id))) return false;
+      snapshot = next;
+      candidateSnapshot = next;
+      quiescence.delete(serverId);
+      for (const route of next.routes) {
+        const listener = listeners.get(route.id);
+        if (!listener) throw new DomainError('internal_error');
+        listener.route = route;
+        if (route.serverId === serverId) {
+          clearSessions(listener);
+          listener.backendReady = false;
+          logRouteTransition(listener, 'sleep_completion_receipt');
+        }
+      }
+      logTiming('gateway.quiescence_released', {
+        serverId,
+        reason: 'sleep_completion_receipt',
+        deadline: new Date(captured.deadline).toISOString(),
+      });
+      syncStartupWatches();
+      syncIdleDeadline();
+      syncSleepWatches();
+      if (leaseTimer) clearTimeout(leaseTimer);
+      leaseTimer = setTimeout(
+        () => {
+          void expire();
+        },
+        Math.max(1, Date.parse(next.expiresAt) - now()),
+      );
+      leaseTimer.unref();
+      return true;
+    });
+    serial = work.then(
+      () => {},
+      () => {},
+    );
+    return work;
+  };
+  const syncSleepWatches = () => {
+    for (const [serverId, watch] of sleepWatches) {
+      const fence = quiescence.get(serverId);
+      if (stopping || !fence || fence.deadline !== watch.deadline || fence.deadline <= now()) {
+        watch.abort.abort();
+        sleepWatches.delete(serverId);
+      }
+    }
+    const wait = options.control.waitForSleep;
+    if (!wait || stopping || !leased()) return;
+    for (const [serverId, fence] of quiescence) {
+      const route = fence.routes[0];
+      if (!route || sleepWatches.has(serverId) || fence.deadline <= now()) continue;
+      const state = { abort: new AbortController(), deadline: fence.deadline };
+      sleepWatches.set(serverId, state);
+      // One attempt per fence: missed notifications/timeouts retain ordinary polling.
+      // This callback never creates authority; only the exact durable receipt can.
+      void wait(
+        {
+          routeId: route.id,
+          generation: fence.generation,
+          quiescenceUntil: new Date(fence.deadline).toISOString(),
+        },
+        state.abort.signal,
+      )
+        .then(async (receipt) => {
+          if (!receipt || state.abort.signal.aborted || quiescence.get(serverId) !== fence) return;
+          const applied = await applySleepReceipt(receipt, serverId, fence);
+          if (!applied && !stopping && !state.abort.signal.aborted) {
+            await refreshing?.catch(() => {});
+            if (!stopping && !state.abort.signal.aborted) await refresh().catch(() => {});
+          }
+        })
+        .catch(() => {
+          /* Durable polling remains recovery, without blind retry loops. */
+        });
+    }
+  };
   const applyReadinessReceipt = (
     input: unknown,
     captured: GatewaySnapshot,
@@ -1024,6 +1149,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         stopping ||
         !snapshot ||
         quiescence.has(serverId) ||
+        [...listeners.values()].some((listener) => listener.statusOnly) ||
         now() - Date.parse(observedAt) > policy.probeTimeoutMs ||
         !candidateSnapshot ||
         !isDeepStrictEqual(candidateSnapshot.routes, captured.routes)
@@ -1161,7 +1287,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       for (const routes of orderedServers) {
         routes.sort((a, b) => a.id.localeCompare(b.id));
         const anchor = routes[0];
-        if (!anchor || stopping) continue;
+        if (!anchor || stopping || routes.some((route) => listeners.get(route.id)?.statusOnly))
+          continue;
         if (
           routes.some(
             (route) =>
@@ -1291,6 +1418,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               generation: anchor.generation,
               routes: structuredClone(routes),
             });
+            syncSleepWatches();
             logTiming('gateway.quiescence_started', {
               ...routeIdentity(anchor),
               observedAt,
@@ -1437,6 +1565,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     stopping = true;
     for (const watch of startupWatches.values()) watch.abort.abort();
     startupWatches.clear();
+    for (const watch of sleepWatches.values()) watch.abort.abort();
+    sleepWatches.clear();
     if (pollTimer) clearTimeout(pollTimer);
     if (observationTimer) clearTimeout(observationTimer);
     if (idleDeadlineTimer) clearTimeout(idleDeadlineTimer);

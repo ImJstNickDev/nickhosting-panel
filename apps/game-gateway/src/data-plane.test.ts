@@ -1300,6 +1300,92 @@ describe('sleep protocol handling and observations', () => {
     expect(f.control.requestWake).not.toHaveBeenCalled();
     expect(f.gateway.metrics()).toMatchObject({ tcpBytesToBackend: 0, udpBytesToBackend: 0 });
   });
+  it.each(['confirmed', 'newer-candidate', 'expired', 'revoked'] as const)(
+    'applies event-driven sleep receipt without polling only with current authority: %s',
+    async (condition) => {
+      const tcp = await tcpFixture();
+      let clock = Date.now();
+      const initial = clock;
+      const first = { ...route(tcp.port), sleepEligibleAt: new Date(clock - 1000).toISOString() };
+      const completion = Promise.withResolvers<GatewaySnapshot | undefined>();
+      let subscriptionSignal: AbortSignal | undefined;
+      const waitForSleep = vi.fn(async (_request, signal: AbortSignal) => {
+        subscriptionSignal = signal;
+        return completion.promise;
+      });
+      const f = plane([first], {
+        now: () => clock,
+        lease: 15000,
+        control: { waitForSleep },
+        policy: { maxClockSkewMs: 10 },
+        protocols: [fixtureProtocol({ probeIdle: async () => ({ idle: true, playerCount: 0 }) })],
+      });
+      await f.gateway.start();
+      await f.gateway.observe();
+      expect(waitForSleep).toHaveBeenCalledWith(
+        {
+          routeId: first.id,
+          generation: first.generation,
+          quiescenceUntil: new Date(initial + 15000).toISOString(),
+        },
+        expect.any(AbortSignal),
+      );
+      expect(f.gateway.health().quiescentServers).toBe(1);
+      clock += 500;
+      const receipt = f.snapshot(
+        [
+          {
+            ...first,
+            revision: 2,
+            mode: 'sleeping',
+            completedSleep: {
+              jobId: randomUUID(),
+              generation: first.generation,
+              quiescenceUntil: new Date(initial + 15000).toISOString(),
+              completedAt: new Date(clock).toISOString(),
+            },
+          },
+        ],
+        2,
+        30000,
+      );
+      if (condition === 'newer-candidate') {
+        const occupied = await tcpFixture('127.0.0.1');
+        await expect(
+          f.gateway.applySnapshot(
+            f.snapshot(
+              [
+                { ...first, revision: 3, generation: randomUUID() },
+                { ...route(occupied.port), revision: 3 },
+              ],
+              3,
+            ),
+          ),
+        ).rejects.toThrow();
+      }
+      if (condition === 'revoked') await f.gateway.applySnapshot(f.snapshot([], 3));
+      if (condition === 'expired') clock = initial + 15000;
+      const before = vi.mocked(f.safety.validate).mock.calls.length;
+      vi.mocked(f.control.fetchSnapshot).mockRejectedValue(
+        new Error('isolated fallback unavailable'),
+      );
+      completion.resolve(receipt);
+      if (condition === 'confirmed') {
+        await vi.waitFor(() => expect(f.gateway.health().quiescentServers).toBe(0));
+        expect((await exchange(tcp.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+        expect(f.safety.validate).toHaveBeenCalledTimes(before);
+        expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(1);
+        expect(subscriptionSignal?.aborted).toBe(true);
+      } else {
+        await delay(30);
+        expect(f.gateway.health().quiescentServers).toBe(1);
+        expect(f.control.requestWake).not.toHaveBeenCalled();
+      }
+      await f.gateway.stop();
+      expect(subscriptionSignal?.aborted).toBe(true);
+    },
+  );
+
   it.each([
     'confirmed',
     'missing',
@@ -1748,6 +1834,100 @@ describe('sleep protocol handling and observations', () => {
 });
 
 describe('lease, reconciliation and shutdown safety', () => {
+  it.each(['online', 'sleeping'] as const)(
+    'permits only local status during churn in %s, then recovers after fresh validation',
+    async (mode) => {
+      const backend = await tcpFixture();
+      const r = route(backend.port, 'tcp', mode);
+      const f = plane([r]);
+      await f.gateway.start();
+      const held = mode === 'online' ? connect(backend.port, '127.0.0.1') : undefined;
+      if (held) await once(held, 'connect');
+      const closed = held ? once(held, 'close') : undefined;
+      vi.mocked(f.safety.validate).mockRejectedValue(
+        new NetworkObservationError('container_churn'),
+      );
+      await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+      if (closed) await closed;
+      expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe(
+        `${mode === 'online' ? 'blocked' : mode}\n`,
+      );
+      expect((await exchange(backend.port, 'JOIN\n')).toString()).toBe('blocked\n');
+      await f.gateway.observe();
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      vi.mocked(f.safety.validate).mockResolvedValue(undefined);
+      await f.gateway.refresh();
+      if (mode === 'online')
+        expect((await exchange(backend.port, 'forwarded')).toString()).toBe('forwarded');
+      else {
+        expect((await exchange(backend.port, 'JOIN\n')).toString()).toBe('waking\n');
+        expect(f.control.requestWake).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+  it('drops UDP forwarding sessions on churn but retains bounded local status replies', async () => {
+    const backend = await udpFixture();
+    const r = route(backend.port, 'udp');
+    const f = plane([r]);
+    await f.gateway.start();
+    expect((await datagram(backend.port, 'forward')).toString()).toBe('forward');
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    expect((await datagram(backend.port, 'STATUS\n')).toString()).toBe('blocked\n');
+    expect((await datagram(backend.port, 'JOIN\n')).toString()).toBe('blocked\n');
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    vi.mocked(f.safety.validate).mockResolvedValue(undefined);
+    await f.gateway.refresh();
+    expect((await datagram(backend.port, 'recovered')).toString()).toBe('recovered');
+  });
+  it('does not bind any first listener from transient container inventory', async () => {
+    const backend = await tcpFixture();
+    const f = plane([route(backend.port)]);
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await f.gateway.start();
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    expect(f.gateway.health().routes).toBe(0);
+    await refuses(backend.port);
+  });
+  it('expires the original status-only lease despite renewed candidates during persistent churn', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'waking');
+    const f = plane([r], { lease: 150 });
+    await f.gateway.start();
+    const expiresAt = f.gateway.health().expiresAt;
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    vi.mocked(f.control.fetchSnapshot).mockResolvedValue(f.snapshot([r], 2, 60000));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    expect(f.gateway.health().expiresAt).toBe(expiresAt);
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+    await delay(180);
+    await refuses(backend.port);
+    expect(f.gateway.metrics().leaseExpirations).toBe(1);
+  });
+  it.each(['revision', 'generation', 'backend', 'public', 'mode', 'withdrawal'] as const)(
+    'withdraws the old responder when the candidate changes %s during churn',
+    async (change) => {
+      const backend = await tcpFixture();
+      const r = route(backend.port, 'tcp', 'waking');
+      const f = plane([r]);
+      await f.gateway.start();
+      const changed = { ...r, revision: 2 };
+      if (change === 'generation') changed.generation = randomUUID();
+      if (change === 'backend') changed.backend = { ...r.backend, address: '127.0.0.3' };
+      if (change === 'public') changed.public = { ...r.public, address: '127.0.0.3' };
+      if (change === 'mode') changed.mode = 'online';
+      const candidates = change === 'withdrawal' ? [route(backend.port + 1)] : [changed];
+      vi.mocked(f.control.fetchSnapshot).mockResolvedValue(f.snapshot(candidates, 2));
+      vi.mocked(f.safety.validate).mockRejectedValue(
+        new NetworkObservationError('container_churn'),
+      );
+      await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+      expect(f.gateway.health().routes).toBe(0);
+      await refuses(backend.port);
+    },
+  );
+
   it('preserves only the original committed lease during explicit provider cooldown', async () => {
     const backend = await tcpFixture();
     const r = route(backend.port);
@@ -2137,13 +2317,16 @@ describe('transition-only Gateway diagnostics', () => {
     },
   );
 
-  it('records a safe observer reason and still withdraws an unproven listener', async () => {
+  it('keeps an unchanged waking responder on transient inventory churn without renewing its lease', async () => {
     const backend = await tcpFixture();
     const log = vi.fn();
     const r = route(backend.port, 'tcp', 'waking');
     const f = plane([r], { logger: { log } });
     await f.gateway.start();
-    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    const expiresAt = f.gateway.health().expiresAt;
+    vi.mocked(f.safety.validate)
+      .mockClear()
+      .mockRejectedValue(new NetworkObservationError('container_churn'));
     await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
     expect(log).toHaveBeenCalledWith(
       'info',
@@ -2154,7 +2337,9 @@ describe('transition-only Gateway diagnostics', () => {
         routeMode: 'waking',
       }),
     );
-    expect(f.gateway.health().routes).toBe(0);
+    expect(f.gateway.health()).toMatchObject({ routes: 1, expiresAt });
+    expect(f.safety.validate).toHaveBeenCalledTimes(2);
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
   });
 
   it('deduplicates identical snapshot renewals and records readiness and lease expiry without endpoint data', async () => {

@@ -161,5 +161,19 @@ hash, Mojang lookup or image check occurs. Capacity remains reserved until order
 terminal status, exact host exit evidence and durable completion prove the stop.
 Completion shares the same attempt’s provider/host proofs instead of repeating
 those reads, but still checks the exact process after the stop.
-Snapshot reconciliation still determines when the Gateway displays sleeping;
-these changes do not claim event-driven stop completion or instantaneous shutdown.
+After confirmed stop commits, the worker immediately invokes the existing canonical
+Gateway reconciler. Its sleeping-state transaction publishes a PostgreSQL notification.
+A bounded authenticated completion request delivers the durable snapshot proof to the
+Gateway, which can release its exact local stop fence without waiting for another
+poll or adding a timer. This does not make process-exit confirmation or communication
+instantaneous. Lost notifications and reconciliation failures retain normal recovery.
+The receipt cannot renew the original listener lease, change endpoints, or overwrite
+a newer candidate configuration. See [completion contract](M3-API.md).
+
+A transient `container_churn` during listener validation preserves only unchanged,
+previously validated listeners as local protocol responders within their original
+lease. Forwarding, wake effects and readiness receipts are suppressed until fresh
+validation succeeds. Existing local status connections remain open; backend streams
+and UDP forwarding sessions close. New/changed routes, real collisions, unknown
+safety errors and expired leases still fail closed. One immediate validation retry
+is bounded; no indefinite retry or lease extension is introduced.

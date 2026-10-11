@@ -5,7 +5,12 @@ import {
   type DomainErrorCode,
   idleTimeoutUserAccessSchema,
 } from '@nickhosting/core';
-import { type Database, type GatewayServerState, recordAudit } from '@nickhosting/database';
+import {
+  type Database,
+  type GatewayServerState,
+  notifyGatewayChange,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
@@ -942,6 +947,8 @@ async function reconcileLocked(
         })
         .where('server_id', '=', serverId)
         .execute();
+      // Delivered only on commit; the durable snapshot proof remains authority.
+      await notifyGatewayChange(tx);
     } else if (job.state === 'failed') {
       const operation = await tx
         .selectFrom('server_operations')

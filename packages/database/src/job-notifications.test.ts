@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { PoolClient } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listenForJobOutbox } from './job-notifications.js';
+import { listenForGatewayChanges, listenForJobOutbox } from './job-notifications.js';
 
 afterEach(() => vi.useRealTimers());
 describe('bounded optional outbox listener', () => {
@@ -42,5 +42,36 @@ describe('bounded optional outbox listener', () => {
     expect(client.release).toHaveBeenCalledOnce();
     expect(client.release).toHaveBeenCalledWith(true);
     expect(client.listenerCount('notification')).toBe(0);
+  });
+});
+
+describe('schema-scoped Gateway commit hints', () => {
+  it('uses a separate channel and only dispatches matching notification hints', async () => {
+    const channel = `nh_gateway_${'b'.repeat(32)}`;
+    const client = Object.assign(new EventEmitter(), {
+      release: vi.fn(),
+      query: vi.fn().mockResolvedValue({ rows: [{ channel }] }),
+    });
+    const wake = vi.fn(),
+      lost = vi.fn();
+    const subscription = await listenForGatewayChanges(
+      { connect: async () => client as unknown as PoolClient },
+      wake,
+      lost,
+    );
+    expect(client.query).toHaveBeenNthCalledWith(
+      1,
+      "select 'nh_gateway_' || md5(current_database() || ':' || current_schema()) as channel",
+    );
+    expect(client.query).toHaveBeenNthCalledWith(2, `LISTEN "${channel}"`);
+    client.emit('notification', { channel: `nh_jobs_${'b'.repeat(32)}` });
+    expect(wake).not.toHaveBeenCalled();
+    client.emit('notification', { channel });
+    expect(wake).toHaveBeenCalledOnce();
+    client.emit('error', new Error('lost'));
+    expect(lost).toHaveBeenCalledOnce();
+    expect(client.release).toHaveBeenCalledWith(true);
+    subscription.close();
+    expect(client.release).toHaveBeenCalledOnce();
   });
 });

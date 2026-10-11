@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
 import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
 import { effectiveNodeOverhead } from './configuration.js';
+import { reconcileGatewayState } from './gateway-orchestration.js';
 import {
   activateProvisionGateway,
   assertProvisionGatewayStart,
@@ -691,6 +692,14 @@ export async function processServerOperation(
         return true;
       });
       if (!completed) return wait('already_stopped_reservation_changed', 'operation_uncertain');
+      if (success && confirmedStopped && isGatewaySleep(operation)) {
+        // Reuse the canonical durable transition now rather than waiting for a
+        // worker tick. A crash/failure here is recovered by the same reconciler
+        // and cannot undo the already committed confirmed stop.
+        await reconcileGatewayState(db, server.id, { env: options.env }).catch(() => {
+          log('servers.sleep_reconciliation_deferred', {});
+        });
+      }
       return success ? 'succeeded' : 'failed';
     };
     const requireQuiescentReservation = async () => {

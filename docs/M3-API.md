@@ -522,3 +522,33 @@ or invoking readiness. Core retains the sixty-second lifetime, bounded two-event
 writer and five-second write deadline. Legacy startup clients receive no heartbeat.
 Sanitized `gateway_startup_channel_connected` / `gateway_startup_channel_closed`
 diagnostics distinguish channel establishment and closure from actual game readiness.
+
+
+### Event-driven sleep completion (M5, 2026-10-11)
+
+`POST /internal/gateway/:gatewayId/sleep-completion` accepts the strict body
+`{routeId,generation,quiescenceUntil}` under existing Gateway service authentication.
+It subscribes before reading the durable snapshot, waits at most 20 seconds and no
+later than the original quiescence deadline, and returns a matching snapshot (200)
+or no receipt (204). Credentials are rechecked around delivery. Revocation, changed
+route/generation, disconnect and listener failure do not grant a receipt.
+
+One lazy PostgreSQL LISTEN connection serves at most 128 waiting requests per API
+instance. Empty-payload notifications are scoped to the database/schema and delivered
+only after commit; no provider requests, credentials or server identifiers are sent
+in the notification. The final subscriber disconnect closes the connection. After a
+confirmed sleep-stop job commits, the worker invokes the existing reconciler at once;
+that reconciler notifies when canonical sleeping state commits. A crash between those
+commits is recovered by the normal worker reconciler.
+
+Gateway attempts one wait per local sleep fence. It applies the result serially with
+snapshot changes only when every original role, generation, endpoint and protocol
+still matches, all roles carry the same exact durable completion proof, and unrelated
+routes are unchanged. A newer unapplied candidate prevents this shortcut. Only an
+existing listener can change from online/blocked to sleeping; the receipt opens no
+socket and grants no backend forwarding. Expiry is capped at the original committed
+lease and fence deadline. This exact completion receipt requires no additional
+post-completion clock-skew delay; ordinary prefetched snapshots retain their existing
+conservative checks. Missing, timed-out or rejected receipts use normal refresh and
+reconciliation. `gateway.route_transition` and `gateway.quiescence_released` record
+`sleep_completion_receipt` for subsequent live timing verification.

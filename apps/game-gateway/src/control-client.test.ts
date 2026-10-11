@@ -26,6 +26,46 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('waits for a bounded sleep completion and accepts empty fallback without altering ordinary timeout', async () => {
+    const request = {
+      routeId: randomUUID(),
+      generation: randomUUID(),
+      quiescenceUntil: new Date(Date.now() + 5000).toISOString(),
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    expect(await client.waitForSleep?.(request, new AbortController().signal)).toBeUndefined();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('/sleep-completion');
+    client.close();
+  });
+  it('aborts a pending sleep completion on caller cancellation', async () => {
+    const begun = Promise.withResolvers<void>();
+    const fetcher = vi.fn<typeof fetch>(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+          begun.resolve();
+        }),
+    );
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    const abort = new AbortController();
+    const result = client.waitForSleep?.(
+      {
+        routeId: randomUUID(),
+        generation: randomUUID(),
+        quiescenceUntil: new Date(Date.now() + 5000).toISOString(),
+      },
+      abort.signal,
+    );
+    const rejected = expect(result).rejects.toThrow('integration_unavailable');
+    await begun.promise;
+    abort.abort();
+    await rejected;
+    client.close();
+  });
+
   it.each(['snapshot', 'inventory', 'context', 'proof-read', 'proof-write', 'observations'])(
     'recognizes explicit provider cooldown for %s',
     async (action) => {

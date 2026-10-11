@@ -3305,3 +3305,42 @@ Add corresponding targeted regression coverage before activating that change.
 Post-stop snapshot reconciliation remains a separate latency follow-up. This audit
 does not claim either issue fixed; no source changes or test-suite reruns occurred.
 PR #21 stays open/unmerged; no test assets created/cleaned and SFTPGo #18 unchanged.
+
+
+## 2026-10-11 — Preserve status during churn and notify confirmed sleep immediately
+
+This follows the preceding failed live cycle without replacing its evidence. The
+reported 3.941s listener gap is addressed by retaining unchanged validated listeners
+as local protocol responders on transient `container_churn`, within their original
+lease. Wake effects, backend forwarding and readiness shortcuts are disabled during
+that condition. Actual collisions, changed routes and expired authority still close
+listeners. Concurrent route changes can therefore still require fail-closed renewal;
+this is not a blanket availability guarantee during unknown topology.
+
+Confirmed stop now immediately invokes the existing canonical Gateway reconciliation,
+then delivers its committed proof through an authenticated bounded completion request.
+There is no artificial post-stop timer or wait for the next worker/snapshot poll in
+this fast path. It retains original lease/fence expiry, exact role/identity checks,
+and durable recovery through ordinary reconciliation if the notification is lost.
+No database migration, provider API endpoint, UI change or new infrastructure is needed.
+
+Validation on the integrated source:
+
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts apps/game-gateway/src/sleep-receipt.test.ts apps/game-gateway/src/control-client.test.ts apps/game-gateway/src/main.test.ts apps/api/src/gateway-sleep.test.ts packages/database/src/job-notifications.test.ts`: **218 passed** in six files.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/gateway-orchestration.integration.test.ts packages/server-management/src/lifecycle.integration.test.ts apps/api/src/gateway.integration.test.ts`: **274 passed** in three files, using already approved isolated PostgreSQL/Redis services, no container creation/restart.
+- The real PostgreSQL tests cover immediate canonical sleeping state and completion proof after lifecycle success, notification commit/rollback behavior, schema isolation and independence from job notifications. Provider mutations use fixtures, not the Owner's game server.
+- Unit regressions cover retained local TCP status, disabled forwarding/wake during churn, bounded retry, UDP session closure, lease expiry, changed/revoked routes, strict multi-role receipt proof, request abort, authentication recheck and subscription cleanup.
+- `scripts/dev.sh pnpm exec tsc --noEmit`: passed. `scripts/dev.sh pnpm exec biome check` on all 16 changed TypeScript files: passed. `git diff --cached --check`: passed. `python3 scripts/check-governance.py`: passed (514 text files, 106 review PNGs, 435 relative links, four TOML files and 44 ignore cases; secret scanning is heuristic).
+
+Independent review found a race where a completion receipt could overwrite a newer
+candidate whose listener bind failed. The final code requires candidate and committed
+revisions/routes to agree before applying a receipt; a failed-bind regression covers
+this. The reviewer found no remaining must-fix after that correction, including lock
+ordering, post-commit notification, auth revocation and bounded lease authority.
+
+Gateway activation and new live timing evidence remain pending a separately approved
+Gateway-only restart and an Owner-run cycle. The 5.735s historical exit-to-sleep result
+above is not relabeled as improved. No real server commands, game assets, production
+configuration or network changes were made. API/worker retain their existing source
+watch behavior. PR #21 stays open/unmerged; issue #18 is unchanged. Rollback is a code
+revert and separately approved Gateway restart; no state rollback or migration applies.

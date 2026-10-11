@@ -192,6 +192,12 @@ export const gatewayObservationSchema = z
 export type GatewayObservation = z.infer<typeof gatewayObservationSchema>;
 
 export interface GatewayControl {
+  /** Commit notification only; receipt must match the current fenced operation.
+   * No timer here grants authority or extends a listener lease. */
+  waitForSleep?(
+    request: { routeId: string; generation: string; quiescenceUntil: string },
+    signal: AbortSignal,
+  ): Promise<GatewaySnapshot | undefined>;
   fetchSnapshot(): Promise<GatewaySnapshot>;
   requestWake(request: GatewayWakeRequest): Promise<GatewayWakeResult>;
   // A receipt can advance an unchanged waking route within its ORIGINAL lease.

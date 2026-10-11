@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { authSessionId } from '@nickhosting/core';
-import { createDatabase, updateSettings } from '@nickhosting/database';
+import {
+  createDatabase,
+  listenForGatewayChanges,
+  listenForJobOutbox,
+  notifyGatewayChange,
+  notifyJobOutbox,
+  updateSettings,
+} from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type {
   ApplicationServer,
@@ -22,6 +29,7 @@ import {
   requestGatewayWake,
   setGatewayPolicy,
 } from './gateway-orchestration.js';
+import { getGatewaySnapshot, setGatewayRoute } from './gateway-registry.js';
 import {
   type LifecycleOptions,
   processServerOperation,
@@ -1255,6 +1263,92 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         .execute(),
     ).toHaveLength(0);
     expect((await wake()).state).toBe('waking');
+  });
+  it('commits the sleeping snapshot and notifies immediately when the confirmed stop finishes, without a reconciliation tick', async () => {
+    clock = new Date(Date.now() - 11000);
+    const fixture = await started();
+    const env = {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
+    };
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const route = await setGatewayRoute(
+      f.db,
+      f.owner,
+      {
+        serverId,
+        allocationId: allocation.id,
+        publicAddress: f.backendAllocationPool.gatewayBindAddresses[0],
+        publicPort: 26000,
+        transport: 'tcp',
+      },
+      env,
+    );
+    await report(fixture);
+    advance(10000);
+    const quiescenceUntil = new Date(Date.now() + 15000).toISOString();
+    const pending = await report(fixture, { quiescenceUntil });
+    expect(pending.sleepJobId).not.toBeNull();
+    fixture.lifecycle.now = () => new Date();
+    fixture.lifecycle.env = env;
+    const changed = vi.fn();
+    const subscription = await listenForGatewayChanges(database.pool, changed, vi.fn());
+    try {
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+      // Direct row and snapshot reads: neither invokes the periodic reconciler.
+      expect(
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select(['state', 'sleep_job_id'])
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ state: 'sleeping', sleep_job_id: null });
+      const snapshot = await getGatewaySnapshot(f.db, env);
+      expect(snapshot.routes.find((item) => item.id === route.id)).toMatchObject({
+        mode: 'sleeping',
+        completedSleep: {
+          jobId: pending.sleepJobId,
+          generation: pending.generation,
+          quiescenceUntil,
+        },
+      });
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+      expect(fixture.stop).toHaveBeenCalledOnce();
+    } finally {
+      subscription.close();
+    }
+  });
+  it('delivers only committed schema-scoped Gateway hints, independently from job notifications', async () => {
+    const changed = vi.fn(),
+      jobChanged = vi.fn();
+    const subscription = await listenForGatewayChanges(database.pool, changed, vi.fn());
+    const jobs = await listenForJobOutbox(database.pool, jobChanged, vi.fn());
+    const other = await createTestDatabase();
+    try {
+      await expect(
+        f.db.transaction().execute(async (tx) => {
+          await notifyGatewayChange(tx);
+          throw new Error('rollback notification fixture');
+        }),
+      ).rejects.toThrow('rollback notification fixture');
+      await notifyGatewayChange(other.db);
+      await notifyJobOutbox(f.db);
+      // Receipt of the later commit on this schema provides an ordering barrier.
+      await vi.waitFor(() => expect(jobChanged).toHaveBeenCalledOnce());
+      expect(changed).not.toHaveBeenCalled();
+      await notifyGatewayChange(f.db);
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+      expect(jobChanged).toHaveBeenCalledOnce();
+    } finally {
+      subscription.close();
+      jobs.close();
+      await other.destroy();
+    }
   });
   it('retains affirmative idle proof when a fresh observation races the prepared sleep handoff', async () => {
     const fixture = await started();

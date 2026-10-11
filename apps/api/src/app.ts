@@ -478,6 +478,7 @@ export function createApp(options: Options) {
   registerGatewayRoutes(app, {
     logger: options.logger,
     db,
+    pool,
     env,
     codec: options.codec,
     principal,

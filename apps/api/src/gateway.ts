@@ -27,6 +27,7 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { registerGatewaySleepRoutes } from './gateway-sleep.js';
 import { registerGatewayStartupRoutes } from './gateway-startup.js';
 
 const routeRequest = z
@@ -38,6 +39,7 @@ export function registerGatewayRoutes(
   options: {
     logger?: ReturnType<typeof createLogger>;
     db: ReturnType<typeof createDatabase>['db'];
+    pool?: ReturnType<typeof createDatabase>['pool'];
     env: Readonly<Record<string, string | undefined>>;
     codec: SecretCodec;
     principal: (
@@ -63,7 +65,7 @@ export function registerGatewayRoutes(
       revisionPrecondition: true,
     });
   };
-  app.use('/internal/gateway/*', async (c, next) => {
+  const authenticateGateway = async (c: Context<{ Variables: Variables }>) => {
     // Browser sessions/support tokens are never service authentication. Constant
     // length digests avoid leaking the dedicated secret; no provider key is used.
     const config = await getSettings(db, env),
@@ -82,14 +84,19 @@ export function registerGatewayRoutes(
     )
       throw new DomainError('unauthenticated');
     c.set('gatewayAuthenticated', true);
+    return match[1] ?? '';
+  };
+  app.use('/internal/gateway/*', async (c, next) => {
+    const gatewayId = await authenticateGateway(c);
     await next();
     if (c.res.status < 400) {
       // Diagnostic contact only; absence of a receipt must never invalidate a
       // completed control-plane action or manufacture listener readiness.
-      await recordGatewayContact(db, match[1] ?? '').catch(() => {});
+      await recordGatewayContact(db, gatewayId).catch(() => {});
     }
   });
   registerGatewayStartupRoutes(app, options);
+  registerGatewaySleepRoutes(app, { ...options, authenticate: authenticateGateway });
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);
