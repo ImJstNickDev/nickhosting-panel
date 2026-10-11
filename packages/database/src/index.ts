@@ -10,6 +10,7 @@ import type { JobTables } from './job-types.js';
 import type { MinecraftMetadataTables } from './minecraft-metadata-types.js';
 import type { MinecraftSourceTables } from './minecraft-source-types.js';
 import type { MinecraftTables } from './minecraft-types.js';
+import type { ProviderFeedTables } from './provider-feed-types.js';
 import type { ScheduleTables } from './schedule-types.js';
 import type { ServerTables } from './server-types.js';
 
@@ -23,7 +24,8 @@ export interface Database
     MinecraftMetadataTables,
     MinecraftSourceTables,
     ScheduleTables,
-    HealthTables {
+    HealthTables,
+    ProviderFeedTables {
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;

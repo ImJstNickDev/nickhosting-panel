@@ -36,6 +36,7 @@ import { registerHealthRoutes } from './health.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
 import { registerPlatformRoutes } from './platform.js';
+import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
 import { registerWebSessionRoutes, supportToken } from './web-session.js';
@@ -154,6 +155,7 @@ export function createApp(options: Options) {
       // Dedicated machine endpoints authenticate their own scoped bearer secret.
       // This exception grants no browser/session authority or generic CSRF bypass.
       if (/^\/internal\/gateway\/[0-9a-f-]{36}\/[a-z-]+$/.test(c.req.path)) return next();
+      if (c.req.method === 'POST' && c.req.path === PROVIDER_EVENTS_PATH) return next();
       const origin = c.req.header('origin');
       if (!origin || !(await origins()).includes(origin)) throw new DomainError('forbidden');
     }
@@ -210,6 +212,19 @@ export function createApp(options: Options) {
   app.notFound(() => {
     throw new DomainError('not_found');
   });
+  app.post(PROVIDER_EVENTS_PATH, async (c) => {
+    if (!c.req.header('content-type')?.startsWith('application/json'))
+      throw new DomainError('validation_failed');
+    return c.json(
+      await receiveProviderEvent({
+        db,
+        codec: options.codec,
+        env,
+        raw: await c.req.text(),
+        headers: c.req.raw.headers,
+      }),
+    );
+  });
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
   app.get('/readyz', async (c) => {
     try {
@@ -227,6 +242,7 @@ export function createApp(options: Options) {
     await next();
   });
   app.use('/v1/*', async (c, next) => {
+    if (c.req.method === 'POST' && c.req.path === PROVIDER_EVENTS_PATH) return next();
     const identity = await options.identity();
     c.set('identity', identity);
     const session = await identity.auth.api.getSession({ headers: c.get('authHeaders') });

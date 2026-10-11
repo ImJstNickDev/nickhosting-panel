@@ -12,14 +12,14 @@ class CapabilitiesController
         return new JsonResponse([
             'schemaVersion' => 1,
             'extension' => 'nickhosting',
-            'extensionVersion' => '0.1.0-dev',
+            'extensionVersion' => '1.0.0',
             'target' => [
                 'panel' => '1.11.11',
                 'blueprint' => 'beta-2025-09',
             ],
             'capabilities' => [
-                'clientKeyManagement' => false,
-                'serverChangeEvents' => false,
+                'clientKeyManagement' => true,
+                'serverChangeEvents' => true,
             ],
         ], 200, ['Cache-Control' => 'no-store']);
     }

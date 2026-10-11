@@ -154,6 +154,11 @@ export interface LifecycleOptions {
     jobId: string,
     connection: Kysely<Database>,
   ) => Promise<() => Promise<void>>;
+  /** Optional authenticated, identity-bound provider feed; null requires the normal provider read. */
+  cachedStartLimits?: (
+    serverId: string,
+    connection: Kysely<Database>,
+  ) => Promise<ApplicationServer['limits'] | null>;
   /** Fresh admission revalidation before a power effect, not an implicit reservation. */
   reserveStart?: (
     serverId: string,
@@ -1413,7 +1418,8 @@ export async function processServerOperation(
         return finish(true, true);
       }
       const leanPlannedStart = operation.action === 'start' && operation.phase === 'planned';
-      let remote: ApplicationServer;
+      let remote!: ApplicationServer;
+      let cachedLimits: ApplicationServer['limits'] | null = null;
       let initialResources: Resources | undefined;
       let preparedStartAdmission: (() => Promise<void>) | undefined;
       try {
@@ -1421,7 +1427,9 @@ export async function processServerOperation(
           // Keep one fresh limit snapshot: Wings does not enforce NickHosting's
           // active-resource reservations. No separate provider telemetry/inventory preflight.
           const [limits, admission] = await Promise.allSettled([
-            timed('provider_limits', () => {
+            timed('provider_limits', async () => {
+              cachedLimits = (await options.cachedStartLimits?.(server.id, db)) ?? null;
+              if (cachedLimits) return null;
               if (server.pterodactyl_id === null) throw new DomainError('conflict');
               return options.adapter.getApplicationServer(server.pterodactyl_id);
             }),
@@ -1429,7 +1437,7 @@ export async function processServerOperation(
           ]);
           if (limits.status === 'rejected') throw limits.reason;
           if (admission.status === 'rejected') throw admission.reason;
-          remote = limits.value;
+          if (limits.value) remote = limits.value;
           const node = await db
             .selectFrom('managed_nodes')
             .select('pterodactyl_node_id')
@@ -1438,10 +1446,11 @@ export async function processServerOperation(
           // The limits snapshot must describe the same stored power target; this
           // comparison requires no further provider or allocation inventory read.
           if (
-            remote.node !== node.pterodactyl_node_id ||
-            remote.id !== server.pterodactyl_id ||
-            remote.identifier !== server.pterodactyl_identifier ||
-            remote.uuid !== server.pterodactyl_uuid
+            !cachedLimits &&
+            (remote.node !== node.pterodactyl_node_id ||
+              remote.id !== server.pterodactyl_id ||
+              remote.identifier !== server.pterodactyl_identifier ||
+              remote.uuid !== server.pterodactyl_uuid)
           )
             throw new DomainError('provenance_mismatch');
           preparedStartAdmission = admission.value;
@@ -1515,7 +1524,7 @@ export async function processServerOperation(
           }
           if (action !== 'stop') {
             for (const key of ['memory', 'cpu', 'disk', 'swap', 'io'] as const) {
-              if (remote.limits[key] !== server.limits[key])
+              if ((cachedLimits ?? remote.limits)[key] !== server.limits[key])
                 throw new DomainError('provenance_mismatch');
             }
             if (!leanPlannedStart && (!installed(remote) || remote.suspended))

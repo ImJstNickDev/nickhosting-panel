@@ -38,6 +38,7 @@ import {
   verifyManagedIdentity,
 } from './lifecycle.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
+import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { authorizeScheduledEffect } from './schedules.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
@@ -437,6 +438,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
   }
   const lifecycle = {
+    cachedStartLimits: (serverId: string, connection: Kysely<Database>) =>
+      cachedProviderStartLimits(connection, serverId, values.pterodactylBaseUrl ?? ''),
     env,
     logger: options.logger,
     verifyInitialInstallation: async (context: import('./lifecycle.js').GameLifecycleContext) =>

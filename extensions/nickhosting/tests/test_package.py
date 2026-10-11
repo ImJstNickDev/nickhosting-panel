@@ -42,6 +42,12 @@ class PackageTests(unittest.TestCase):
             packager.build(self.source, missing_output)
         self.assertFalse(missing_output.exists())
 
+    def test_blueprint_expansion_preserves_key_route_parameter(self):
+        routes = (self.source / "routes/application.php").read_text().replace("{identifier}", "nickhosting")
+        self.assertIn("/keys/{keyIdentifier}/rotate", routes)
+        self.assertNotIn("/keys/nickhosting", routes)
+        self.assertIn("Route::pattern('keyIdentifier'", routes)
+
     def test_does_not_overwrite(self):
         self.output.write_text("preserve")
         with self.assertRaises(FileExistsError):

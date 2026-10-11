@@ -92,6 +92,9 @@ importers:
       hono:
         specifier: 4.13.13
         version: 4.13.13
+      kysely:
+        specifier: 0.29.6
+        version: 0.29.6
       nodemailer:
         specifier: 10.0.16
         version: 10.0.16

@@ -860,6 +860,29 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).last_observed_at).toBeNull();
     expect(guard).toHaveBeenCalledTimes(1);
   });
+  it('sends clean Start using trusted feed limits without a provider limits read', async () => {
+    const f = await fixture('start');
+    f.options.cachedStartLimits = async () => f.remote.limits;
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledExactlyOnceWith(f.remote.identifier, 'start');
+  });
+  it('falls back to provider limits when the change feed is unavailable', async () => {
+    const f = await fixture('start');
+    f.options.cachedStartLimits = async () => null;
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+  });
+  it('rejects changed feed limits before reserving or sending Start', async () => {
+    const f = await fixture('start');
+    f.options.cachedStartLimits = async () => ({
+      ...f.remote.limits,
+      memory: f.remote.limits.memory + 1,
+    });
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
   it.each(['id', 'identifier', 'uuid', 'node'] as const)(
     'rejects a limits snapshot for another power target: %s',
     async (key) => {

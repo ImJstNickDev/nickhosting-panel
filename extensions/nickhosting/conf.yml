@@ -1,8 +1,8 @@
 info:
   name: NickHosting
   identifier: nickhosting
-  description: NickHosting provider bridge capability discovery.
-  version: 0.1.0-dev
+  description: NickHosting provider bridge, change feed and scoped account keys.
+  version: 1.0.0
   target: beta-2025-09
   author: NickHosting
 admin:
@@ -11,3 +11,5 @@ requests:
   app: app
   routers:
     application: routes/application.php
+data:
+  directory: private

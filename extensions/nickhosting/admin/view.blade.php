@@ -4,9 +4,9 @@
 <div class="box box-primary">
     <div class="box-header with-border"><h3 class="box-title">NickHosting</h3></div>
     <div class="box-body">
-        <p>{{ $italian ? 'Versione di sviluppo: 0.1.0-dev.' : 'Development version: 0.1.0-dev.' }}</p>
+        <p>{{ $italian ? 'Versione: 1.0.0.' : 'Version: 1.0.0.' }}</p>
         <p>{{ $italian
-            ? 'Disponibile solo il riconoscimento dell’estensione tramite API. Gestione delle chiavi e notifiche delle modifiche non ancora disponibili.'
-            : 'Only API capability discovery is available. Key management and change notifications are not available yet.' }}</p>
+            ? 'API per account collegati, chiavi Client e notifiche dei limiti. Richiede la configurazione esplicita di NickHosting. Nessun server o account viene importato automaticamente.'
+            : 'APIs for linked accounts, Client keys and resource-limit notifications. Requires explicit NickHosting configuration. No servers or accounts are imported automatically.' }}</p>
     </div>
 </div>

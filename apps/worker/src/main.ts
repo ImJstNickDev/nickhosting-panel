@@ -12,6 +12,7 @@ import {
 } from '@nickhosting/server-management';
 import { startHostObservationLoop } from './host-observations.js';
 import { pollMinecraftMetadata } from './minecraft-metadata.js';
+import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
 import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
 
@@ -58,6 +59,22 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         await refreshHostObservations(db, env, { force: true });
       },
       () => logger.log('warn', 'host.observation_unavailable'),
+    );
+    const providerFeeds = startProviderFeedLoop(
+      async () => {
+        if (!env.NH_SECRETS_MASTER_KEY) return;
+        const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+        await refreshProviderFeeds(
+          db,
+          new SecretCodec({
+            activeKeyId: keyId,
+            keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+          }),
+          env,
+          transportCoordinator,
+        );
+      },
+      () => logger.log('warn', 'provider.feed_unavailable'),
     );
     let stopping = false;
     const workerInstanceId = randomUUID();
@@ -107,7 +124,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         stopping = true;
         if (timer) clearTimeout(timer);
         if (metadataTimer) clearTimeout(metadataTimer);
-        await Promise.all([reconciliation, metadataPoll, observations.close()]);
+        await Promise.all([
+          reconciliation,
+          metadataPoll,
+          observations.close(),
+          providerFeeds.close(),
+        ]);
         try {
           await runtime.close();
         } finally {

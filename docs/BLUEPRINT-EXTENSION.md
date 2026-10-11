@@ -219,3 +219,130 @@ route/authentication path, not future key issuance, notifications or rollback.
 Next implementation priority is the durable server-limit change feed and its
 NickHosting receiver; per-user key management follows separately. The current
 Start-path limit read remains unchanged until the new synchronization is proven.
+
+## 2026-10-11 — 1.0.0 bridge release
+
+This section supersedes the initial discovery-only capability statements above;
+the earlier installation and failed-test history is retained.
+
+The Owner authorized completing and installing the extension in one reviewed
+release. Version **1.0.0** adds exact managed-server linking, signed durable
+server-limit notifications, authoritative recovery snapshots and explicitly
+linked non-administrator account key issuance/rotation/revocation. The extension
+README documents its routes, authentication, queue recovery and deployment hooks.
+
+NickHosting stores the webhook secret encrypted with an instance-specific
+context. Its exact machine endpoint is `POST /v1/provider-events/pterodactyl`;
+only this method/path bypasses browser session/CSRF authentication, replacing it
+with bounded raw-body HMAC, timestamp, instance/provider/callback binding and
+persistent revision checks. Other browser routes retain their protections.
+
+A shared worker refreshes feed health every 15 seconds and linked snapshots
+approximately every 60 seconds, using the existing coordinated Application
+transport. Start may use projected limits only with health at most 30 seconds
+old, a snapshot at most 120 seconds old, exact managed identity and unchanged
+managed limits. Otherwise it uses the existing provider read. Admission, active
+reservations and provider command authorization remain mandatory. A local
+generation fence prevents an in-flight health reply from undoing a newer event's
+invalidation. Identity invalidation cannot be repaired by stale snapshots.
+These bounded freshness windows are not a guarantee against arbitrary direct SQL
+changes; Eloquent changes produce immediate notifications, while periodic
+snapshots cover missed events. This feed reports Panel configuration, not proof
+that Wings has applied it.
+
+Deployment uses the packaged extension migration only, a reversible marked
+service-provider entry in `config/app.php`, and an explicit local HTTPS callback
+origin allowlist in `config/nickhosting_bridge.php`. Bootstrap configuration is
+syntax-validated and replaced atomically. The standard Blueprint installer still
+performs the shared cache, queue and ownership operations documented above.
+No Panel core service or Wings code is patched.
+
+After installation and explicit database migration, run
+`node --import tsx scripts/blueprint-connect.mjs --owner-approved` from the project
+root in the configured application environment. It persists an encrypted secret
+before registration, reuses the existing instance on retry, and never prints
+credentials. It registers extension metadata only; the worker links only exact
+identities already in NickHosting's managed registry. It does not import foreign
+servers. The callback must already be present in the extension's local allowlist.
+
+The per-user key **extension API** is complete; migrating NickHosting accounts,
+assigning provider ownership and selecting a Client credential per actor remain
+tracked in issue #25. No existing account is migrated, linked by email, promoted
+or reassigned automatically. Live user/key mutation testing requires explicitly
+approved target identities; isolated tests do not count as a live migration.
+
+### Validation and independent review
+
+- PHP harness: 46 checks using the installed Composer dependencies, SQLite memory
+  databases and mocked outbound HTTP, without bootstrapping the production Panel.
+- Packaging: 7 tests; 11 expanded PHP files and both shell hooks passed syntax checks.
+- Adapter discovery/signatures/administrative calls plus worker loop: 25 tests passed.
+- Actual Hono receiver and PostgreSQL projections: 20 integration tests passed.
+- Targeted clean-Start lifecycle/projection run: 25 passed, 170 intentionally
+  filtered; later projection checks include the review fixes.
+- Root TypeScript check passed. No historical full milestone suite was repeated.
+- Independent review found and resolved reserved Blueprint route placeholder
+  expansion, non-atomic bootstrap configuration writes, and stale health-response
+  invalidation. The reviewer found no remaining must-fix before activation.
+
+The first development migration attempt refused safely because the existing
+container image contained migrations only through 019. The complete current SQL
+set was supplied in a temporary directory to the unchanged checksum-verifying
+migration runner; only 022 was applied. Existing migration checksums and data were
+preserved; the temporary files were removed. Source hot reload initially exposed
+a missing worker dependency; the feed orchestration was placed in the existing
+server-management package, restoring worker health without a container rebuild.
+
+Rollback: disable the local feed to immediately restore provider GET fallback;
+retain encrypted secrets, projections and extension audit/outbox data. Reverting
+the extension requires the preserved prior artifact and reviewed removal of its
+marked provider hook before reinstalling discovery-only code. Never drop tables,
+revoke user keys or blindly restore shared Panel files as an automatic rollback.
+Blueprint removal is not an exact rollback of global permission/cache changes.
+Issue #18 remains an independent production-release blocker.
+
+### Approved live activation evidence
+
+The standard installer selected its update workflow and completed successfully.
+Archive SHA-256:
+`b52eed7757d1dff4b50951ab0346dabb64e7aecad1de90c3497ce23b2d4887ca`.
+A private pre-update archive preserves the old extension artifact, bootstrap
+configuration and relevant Blueprint files. This scoped backup is not a full
+Panel database/filesystem backup or exact global permission rollback.
+
+- Exactly the extension's MySQL migration completed; its provider is loaded and
+  the recovery job appears in the existing minute scheduler.
+- The explicitly allowed dev callback origin was configured; configuration cache
+  and queue-worker reload completed as part of activation.
+- Live Application discovery returned HTTP 200, version 1.0.0 and both flags true;
+  anonymous access returned 401 and Client-key access returned 403.
+- One existing NickHosting-managed identity was registered as extension metadata.
+  No underlying server properties, power, files, users or ownership were changed.
+- The initial signed notification was delivered on attempt **2**, following one
+  unacknowledged attempt during activation. The exact first rejection reason was
+  not logged and is not claimed. Durable scheduled recovery marked it delivered;
+  the receiver accepted the duplicate revision safely.
+- Subsequent health was fresh and `cachedProviderStartLimits` returned an eligible
+  snapshot (approximately 29 seconds old at the check). This proves the live
+  extension → queue → HTTPS receiver → local projection path. It does not measure
+  an actual user Start or simulate a live provider resource-limit change.
+- Panel, development API and development worker health checks passed. No Gateway
+  restart, game-server creation/power command, account creation, Client-key
+  issuance or ownership reassignment was performed.
+- Final combined receiver/projection/targeted lifecycle run: **35 passed, 170
+  intentionally filtered**, approximately 28 seconds. Unit adapter/worker run:
+  **25 passed**. Existing isolated test services were reused; no new infrastructure.
+
+A normal Owner-initiated Start is the next optional latency measurement; no
+installation, secret copy or additional configuration step is required for the
+currently linked dev instance. Do not infer a sub-second timing result from the
+read-only cache check. Issue #25 stays open for the per-user account/credential
+consumer migration; SFTPGo #18 remains unchanged.
+
+Final governance checked 567 indexed text files, 138 existing review PNGs, 471
+relative links, four TOML files and 44 ignore cases successfully. Scoped Biome and
+TypeScript passed. A repository-wide `pnpm lint` was also attempted: it remains
+red on the pre-existing `games/minecraft/src/ui/assets/player-placeholder.svg`
+missing SVG title, with 32 warnings and two informational diagnostics. That
+unrelated UI asset was not changed in this extension task; this is not reported
+as a full lint pass. Private backups and built archives remain gitignored.

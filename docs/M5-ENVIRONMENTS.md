@@ -881,3 +881,16 @@ no fabricated capacity; a request attempts a coordinated fresh observation and
 rejects if no valid observation is available. The first collection uses a 250ms
 CPU window; subsequent periodic ticks use counter deltas without that delay.
 No new container, mount, service, migration or network attachment is introduced.
+
+### Blueprint bridge 1.0 (2026-10-11)
+
+The approved Blueprint extension is now connected to the existing real-provider
+development environment. `docs/BLUEPRINT-EXTENSION.md` records activation,
+rollback and validation. The webhook secret lives only in encrypted stores;
+`POST /v1/provider-events/pterodactyl` uses signed machine authentication through
+the existing same-origin ingress. No NPM, DNS, Compose or Gateway change is needed.
+The worker maintains durable limits projections; Start falls back to the normal
+provider API if synchronization is stale or invalid. No existing provider account
+has been migrated to per-user keys: that consumer work remains in issue #25.
+Rebuilding an image must include all current database migrations; starting the
+stack still does not apply them automatically.

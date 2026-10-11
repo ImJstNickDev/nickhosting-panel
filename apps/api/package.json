@@ -17,6 +17,7 @@
     "@nickhosting/server-management": "workspace:*",
     "@nickhosting/gateway-safety": "workspace:*",
     "@nickhosting/minecraft": "workspace:*",
-    "@nickhosting/content-providers": "workspace:*"
+    "@nickhosting/content-providers": "workspace:*",
+    "kysely": "0.29.6"
   }
 }
