@@ -2992,3 +2992,61 @@ startup client and receipt source hashes match the reviewed workspace. No API
 power command or server mutation was sent. The command emitted Docker's harmless
 `--time` deprecation notice; it completed successfully. New real wake-cycle timing
 still awaits the Owner's test; this restart is not a performance measurement.
+
+### 2026-10-11 — Owner cycle on `6c88f48` and startup-module correction
+
+Read-only capture after the Owner's “test finished”, independently cross-checked.
+Private raw logs remain under `.codex/local/cycle-6c88f48/`; no credentials, player
+names or infrastructure endpoints are published here. Initial capture still had
+a running server; follow-up capture includes the completed automatic sleep.
+
+| Event (UTC) | Time | Measured interval |
+| --- | --- | --- |
+| Intentional Gateway join | 10:19:46.256 | Origin |
+| Core admission/enqueue complete | 10:19:46.616 | 360 ms from join |
+| Worker delivery | 10:19:46.624 | Redis delivery age 5 ms |
+| Power API response complete | 10:19:48.071 | 1.815 s from join |
+| Docker process started | 10:19:49.051448972 | 2.795 s from join |
+| Minecraft `Done` | 10:20:20.248060819 | 31.197 s after process start |
+| Readiness observation begins | 10:20:21.297 | 1.049 s after `Done` |
+| Core commits online | 10:20:22.562 | 2.314 s after `Done` |
+| Gateway forwards (`readiness_receipt`) | 10:20:22.599 | 2.351 s after `Done`; 37 ms after Core |
+| Last player leaves | 10:21:13.827030765 | Idle origin |
+| Gateway quiescence / stopping reply | 10:22:14.646 | 60.819 s after departure |
+| Console receives `stop` | 10:22:17.136565315 | 63.310 s after departure |
+| Minecraft logs `Stopping server` | 10:22:17.199356096 | Shutdown begins |
+| Docker exits | 10:22:17.690435904 | Exit 0, no OOM |
+| Durable stop job succeeds | 10:22:18.838 | No uncertain stop left in this run |
+| Gateway sleeping reply | 10:22:22.204 | 4.514 s after Docker exit |
+
+The receipt optimization worked: `Done`→forwarding fell from 3.794 s in the prior
+cycle to 2.351 s (about 38%); Core→forwarding fell from 1.077 s to 37 ms. This is
+one observed cycle, not a guaranteed percentile. Core process verification still
+took 911.834 ms; the approximately 256 ms between observation start and Core handler
+includes probing/transport and cannot be split reliably with these logs.
+
+**The startup event did not run.** No `gateway.startup_hint` appeared. Inspection
+found the real configured `gateway-module.ts` wrapper omitted `startupHint`, although
+the inner protocol adapter declared it. Thus polling triggered this cycle's
+observation. Corrected the outer exported module to declare `provider_running`
+and added an assertion on the actual `gatewayProtocols` loader export. Existing
+`supports`/release/evidence gating is unchanged. This fixes an integration omission
+in the previous patch; the previous result must not be called an event-driven test.
+
+Targeted module test command:
+`scripts/dev.sh pnpm exec vitest run games/minecraft/src/gateway-module.test.ts`
+— **6 passed**. Scoped Biome over module/source tests and root TypeScript passed.
+Independent source/evidence review found no remaining must-fix. No historic full-suite
+rerun was needed for this declaration-only correction. Its live event behavior
+requires a separately approved Gateway restart and another Owner-driven cycle.
+
+No captured 429, lease expiry, snapshot failure or listener closure. Three stale
+API conflicts during startup (two 409 observations, one 412 context), additional
+transitional 409 observations during sleep, and offline/starting probe
+warnings remain diagnostic; they are not evidence of a client disconnect. A worker
+lock deferral happened after Docker was running and the start job succeeded.
+Minecraft also reported 2.021 s and 6.827 s tick lag; do not attribute that to Gateway
+without separate evidence. Final Docker state is exited cleanly. No test assets,
+provider mutations or manual power commands were created by this audit. Source
+watchers reloaded after the narrow code correction; no Gateway restart performed
+in this session yet. SFTPGo #18 and production boundaries are unchanged.

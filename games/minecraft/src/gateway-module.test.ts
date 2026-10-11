@@ -86,6 +86,7 @@ describe('production Minecraft Gateway module', () => {
   it('provides the existing loader contract without fetching metadata', () => {
     expect(gatewayProtocols).toHaveLength(1);
     expect(gatewayProtocols[0]?.id).toBe('minecraft-java');
+    expect(gatewayProtocols[0]?.startupHint).toBe('provider_running');
     const adapter = createMinecraftGatewayModuleAdapter({ now: () => now });
     const selected = route();
     expect(adapter.supports(selected)).toBe(true);
