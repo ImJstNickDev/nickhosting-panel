@@ -4008,3 +4008,40 @@ part of this power path. No new backend optimization is claimed from this audit.
 No live commands, server mutations, container restarts or infrastructure changes
 were performed. Rollback: revert chart source; no migration/data change. PR #21
 remains open/unmerged; SFTPGo #18 remains unchanged.
+
+### 2026-10-11 — Start critical-path overlap and request timing
+
+Planned Start now prepares its physical observation concurrently with initial
+provider identity/resources reads. The returned atomic admission is deferred
+until those identity, limits, installation and suspension checks pass. Admission
+still checks current host/node policy and observation freshness; failures settle
+all sibling work. Restart and provisioning retain their existing admission path.
+The same runtime sampling helper serves both paths.
+
+Local container image inspection now overlaps the fresh provider identity
+promise; neither proof can authorize an effect alone. Installed Start/Restart
+omit the egg catalog GET, retaining actual remote egg, image, startup/environment,
+mapping, evidence and managed allocation checks. Provisioning, content and
+standalone verification retain egg catalog validation. No JAR hash/download is
+introduced. Final identity and revocable authorization remain.
+
+API operation requests now log principal, access-check, host-sampling, enqueue
+and total handler durations with the resulting job ID. No request body, command,
+credential or provider URL is logged; logging failures cannot affect the request.
+This covers previously missing pre-enqueue time, not browser network/paint time.
+
+Validation (all via `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts`):
+
+- `packages/server-management/src/lifecycle.integration.test.ts -t 'overlaps start admission|settles start sampling|shares exactly the fresh|overlaps initial identity|rejects provider identity drift'`: **10 passed, 162 skipped**.
+- `packages/server-management/src/runtime.integration.test.ts -t 'defers start reservation|does not prepare a start reservation'`: **3 passed, 46 skipped**; sample without reservation, policy/observation invalidation before commit, failed preflight.
+- `packages/server-management/src/minecraft-queued.integration.test.ts -t 'power image proof|uses one fresh provider snapshot|shares the final provider|starts egg validation before|rejects current provider'`: **9 passed, 34 skipped**. Initial run: 4 passed, 5 fixture failures because custom admission fixtures did not disable the new preparation hook; corrected fixtures preserve their existing isolated admission implementation.
+- `apps/api/src/servers.integration.test.ts -t 'skips host sampling'`: **1 passed, 33 skipped**, including numeric timer fields and allowlisted log content. Initial assertion exposed logger redaction of the name authorizationMs; renamed to accessCheckMs without weakening redaction.
+- Root `tsc --noEmit`, scoped Biome and independent source review passed. Initial typecheck found an overly narrow test log record type; corrected the test capture. No must-fix review findings.
+
+The requested 300–400ms Start target is **not yet established**. Existing live
+evidence predates this change. API still samples CPU for 250ms before enqueue;
+worker checks retain fresh provider responses. Tests prove overlap and eliminated
+catalog calls, not a latency guarantee. No live power commands or manual
+container restarts were issued; development source watchers may reload API/worker.
+No infrastructure/data migration. Rollback: source revert. SFTPGo #18 and PR #21
+open/unmerged status remain unchanged.

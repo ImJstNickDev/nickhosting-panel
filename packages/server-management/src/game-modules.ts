@@ -52,6 +52,8 @@ export interface TrustedGameModule {
 export interface RuntimeImageContext {
   providerServer?: ApplicationServer | Promise<ApplicationServer>;
   observerPreflight?: Promise<void>;
+  /** Installed power checks validate actual launch identity, not the egg catalog. */
+  validateEggMetadata?: boolean;
 }
 export interface GameRuntimeHooks {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;

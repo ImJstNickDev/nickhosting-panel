@@ -196,7 +196,9 @@ export interface MinecraftModuleOptions {
   observedImageDigest: (
     connection: Kysely<Database>,
     serverId: string,
-    remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    remote?:
+      | Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>
+      | ReturnType<PterodactylAdapter['getApplicationServer']>,
     observerPreflight?: Promise<void>,
   ) => Promise<string | null>;
   authorizeJob: (
@@ -217,6 +219,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       | Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>
       | ReturnType<PterodactylAdapter['getApplicationServer']>,
     observerPreflight?: Promise<void>,
+    validateEggMetadata = true,
   ) {
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
@@ -245,8 +248,8 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     // Begin independent egg and provider lookups together; settle both branches
     // before returning a failed proof to the job lock's connection owner.
     const proofs = await Promise.allSettled([
-      remote.then((value) => observedImageDigest(connection, serverId, value, observerPreflight)),
-      assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter),
+      observedImageDigest(connection, serverId, remote, observerPreflight),
+      assertMinecraftRemoteLaunch(connection, serverId, remote, env, adapter, validateEggMetadata),
     ]);
     for (const result of proofs) if (result.status === 'rejected') throw result.reason;
     const observed = proofs[0].status === 'fulfilled' ? proofs[0].value : null;
@@ -347,6 +350,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         requireObserved,
         context?.providerServer,
         context?.observerPreflight,
+        context?.validateEggMetadata,
       ),
     assertFileMutation,
     async configureProvision(context: GameLifecycleContext) {

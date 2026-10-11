@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getRequestListener } from '@hono/node-server';
 import { createIdentity, type IdentityMail } from '@nickhosting/auth';
-import { authSessionId, DomainError, SecretCodec } from '@nickhosting/core';
+import { authSessionId, createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftManifest } from '@nickhosting/minecraft';
@@ -30,6 +30,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
   const password = 'Isolated-API-password-593!';
   const mails: IdentityMail[] = [],
     logs: unknown[] = [];
+  const timingRecords: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
   const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
   const providerSecret = randomBytes(32).toString('base64url');
   const instanceId = randomUUID();
@@ -327,6 +328,12 @@ describe('M2 Hono API with real invitation, password and session authentication'
       revokeCredential: async () => {},
     });
     app = createApp({
+      logger: createLogger((entry) =>
+        timingRecords.push({
+          event: entry.event,
+          data: entry.data as Readonly<Record<string, unknown>>,
+        }),
+      ),
       database,
       identity: async () => identity,
       codec,
@@ -557,6 +564,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     ]);
   });
   it('skips host sampling for stop and kill and scopes start sampling to its target', async () => {
+    timingRecords.length = 0;
     const sample = vi.spyOn(runtime, 'refreshObservations').mockResolvedValue(undefined);
     try {
       const stopped = await f.server();
@@ -583,6 +591,34 @@ describe('M2 Hono API with real invitation, password and session authentication'
       });
       expect(sample).toHaveBeenCalledOnce();
       expect(sample.mock.calls[0]?.[1]).toBe(starting);
+      const timings = timingRecords.filter((entry) => entry.event === 'servers.operation_request');
+      expect(timings).toHaveLength(3);
+      expect(timings[0]?.data).toMatchObject({
+        action: 'stop',
+        outcome: 'accepted',
+        jobId: expect.any(String),
+        principalMs: expect.any(Number),
+        accessCheckMs: expect.any(Number),
+        enqueueMs: expect.any(Number),
+        durationMs: expect.any(Number),
+      });
+      expect(timings[0]?.data).not.toHaveProperty('hostSamplingMs');
+      expect(timings[2]?.data).toHaveProperty('hostSamplingMs', expect.any(Number));
+      for (const entry of timings)
+        expect(
+          Object.keys(entry.data).every((key) =>
+            [
+              'action',
+              'jobId',
+              'outcome',
+              'principalMs',
+              'accessCheckMs',
+              'enqueueMs',
+              'hostSamplingMs',
+              'durationMs',
+            ].includes(key),
+          ),
+        ).toBe(true);
     } finally {
       sample.mockRestore();
     }

@@ -1009,6 +1009,72 @@ describe('management runtime execution-time authorization', () => {
     });
     expect(reconcileExternal).toHaveBeenCalledOnce();
   });
+  it.each(['node-disabled', 'sample-removed'] as const)(
+    'defers start reservation and rechecks atomic admission after preparation: %s',
+    async (change) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('physical_hosts')
+        .set({ local_disk_path: process.cwd() })
+        .where('id', '=', f.hostId)
+        .execute();
+      await f.db.deleteFrom('host_observations').execute();
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: { preflight: async () => {}, stopped: async () => true },
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      const reserve = await runtime.lifecycle.prepareStartAdmission?.(
+        queued.server,
+        queued.job,
+        f.db,
+      );
+      expect(reserve).toBeTypeOf('function');
+      expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+      const sample = await f.db
+        .selectFrom('host_observations')
+        .selectAll()
+        .where('host_id', '=', f.hostId)
+        .executeTakeFirstOrThrow();
+      expect(sample.observer_id).toBe('isolated-observer');
+      expect(Number(sample.snapshot.availableMemoryMiB)).toBeGreaterThan(0);
+      if (change === 'node-disabled')
+        await f.db
+          .updateTable('managed_nodes')
+          .set({ enabled: false })
+          .where('id', '=', f.nodeId)
+          .execute();
+      else await f.db.deleteFrom('host_observations').where('host_id', '=', f.hostId).execute();
+      await expect(reserve?.()).rejects.toThrow();
+      expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+    },
+  );
+  it('does not prepare a start reservation when the host observer preflight fails', async () => {
+    const queued = await stop();
+    await f.db
+      .updateTable('physical_hosts')
+      .set({ local_disk_path: process.cwd() })
+      .where('id', '=', f.hostId)
+      .execute();
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: {
+        preflight: async () => {
+          throw new Error('isolated observer unavailable');
+        },
+        stopped: async () => true,
+      },
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    await expect(
+      runtime.lifecycle.prepareStartAdmission?.(queued.server, queued.job, f.db),
+    ).rejects.toThrow('isolated observer unavailable');
+    expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+  });
   it('resolves the explicit enabled host override before selecting local observations', async () => {
     await f.db
       .updateTable('physical_hosts')

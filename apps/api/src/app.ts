@@ -465,6 +465,7 @@ export function createApp(options: Options) {
       }),
   });
   registerServerRoutes(app, {
+    logger: options.logger,
     db,
     env,
     principal,

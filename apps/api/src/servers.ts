@@ -1,4 +1,4 @@
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
 import { relativePath } from '@nickhosting/pterodactyl-adapter';
 import {
@@ -45,6 +45,7 @@ import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
 export interface ServerRouteOptions {
+  logger?: ReturnType<typeof createLogger>;
   db: ReturnType<typeof createDatabase>['db'];
   env: Readonly<Record<string, string | undefined>>;
   principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
@@ -208,12 +209,49 @@ export function registerServerRoutes(
     return c.json({ ...publicServer(server), ports });
   });
   app.post('/v1/servers/:id/operations', async (c) => {
-    const context = await principal(c);
-    const input = parse(operationSchema, await body(c));
-    await authorizeServer(db, context, c.req.param('id'), 'server:operate');
-    if (input.action !== 'kill' && input.action !== 'stop')
-      await (await management()).refreshObservations(db, c.req.param('id'));
-    return c.json(await enqueueServerOperation(db, context, c.req.param('id'), input, env), 202);
+    const started = performance.now();
+    const stages: Record<string, number> = {};
+    let action: string | undefined;
+    let jobId: string | undefined;
+    let outcome = 'failed';
+    async function stage<T>(name: string, work: () => Promise<T>) {
+      const before = performance.now();
+      try {
+        return await work();
+      } finally {
+        stages[name] = Math.round((performance.now() - before) * 1000) / 1000;
+      }
+    }
+    try {
+      const context = await stage('principalMs', () => principal(c));
+      const input = parse(operationSchema, await body(c));
+      action = input.action;
+      await stage('accessCheckMs', () =>
+        authorizeServer(db, context, c.req.param('id'), 'server:operate'),
+      );
+      if (input.action !== 'kill' && input.action !== 'stop')
+        await stage('hostSamplingMs', async () =>
+          (await management()).refreshObservations(db, c.req.param('id')),
+        );
+      const result = await stage('enqueueMs', () =>
+        enqueueServerOperation(db, context, c.req.param('id'), input, env),
+      );
+      jobId = result.jobId;
+      outcome = 'accepted';
+      return c.json(result, 202);
+    } finally {
+      try {
+        options.logger?.log('info', 'servers.operation_request', {
+          jobId,
+          action,
+          outcome,
+          ...stages,
+          durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+        });
+      } catch {
+        // Diagnostics cannot change the outcome of a durable request.
+      }
+    }
   });
   app.post('/v1/owner/servers/:id/resolve', async (c) => {
     const context = await owner(c),

@@ -350,6 +350,24 @@ export async function createManagementRuntime(options: ManagementOptions) {
       }
     }
   }
+  async function prepareStartAdmission(
+    serverId: string,
+    jobId: string,
+    connection: Kysely<Database>,
+    action: 'start' | 'restart' = 'start',
+  ) {
+    const stage = <T>(name: string, work: () => Promise<T>) =>
+      timed(jobId, serverId, `reserve_start.${name}`, work);
+    // Sampling is read-only with respect to the server. Reservation remains
+    // deferred until lifecycle has verified the provider identity and limits.
+    const checks = await Promise.allSettled([
+      stage('observer_preflight', () => verifyObservationHost(serverId, connection)),
+      stage('host_sampling', () => refreshObservations(connection, serverId)),
+    ]);
+    for (const result of checks) if (result.status === 'rejected') throw result.reason;
+    return () =>
+      stage('atomic_admission', () => reserveStart(connection, serverId, jobId, action, env));
+  }
   async function verifyObservationHost(serverId: string, connection: Kysely<Database>) {
     const row = await connection
       .selectFrom('managed_servers as server')
@@ -371,7 +389,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   async function observedImageDigest(
     connection: Kysely<Database>,
     serverId: string,
-    remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    remote?: ApplicationServer | Promise<ApplicationServer>,
     observerPreflight?: Promise<void>,
   ) {
     await (observerPreflight ?? verifyObservationHost(serverId, connection));
@@ -383,12 +401,17 @@ export async function createManagementRuntime(options: ManagementOptions) {
       .executeTakeFirst();
     if (!server?.pterodactyl_uuid || !server.pterodactyl_id || !containerObserver?.imageIdentity)
       throw new DomainError('configuration_invalid');
-    await verifyManagedIdentity(
-      connection,
-      server,
-      remote ?? (await adapter.getApplicationServer(server.pterodactyl_id)),
-    );
-    const digest = await containerObserver.imageIdentity(server.pterodactyl_uuid);
+    // Local container identity and provider identity are independent reads.
+    // Settle both before releasing the connection or accepting either proof.
+    const proofs = await Promise.allSettled([
+      Promise.resolve(remote ?? adapter.getApplicationServer(server.pterodactyl_id)).then((value) =>
+        verifyManagedIdentity(connection, server, value),
+      ),
+      containerObserver.imageIdentity(server.pterodactyl_uuid),
+    ]);
+    for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
+    if (proofs[1].status !== 'fulfilled') throw new DomainError('integration_unavailable');
+    const digest = proofs[1].value;
     if (digest !== null && !/^sha256:[a-f0-9]{64}$/.test(digest))
       throw new DomainError('integration_unavailable');
     return digest;
@@ -663,7 +686,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
         (operation.action === 'provision' && operation.phase === 'initial_start')
       ) {
         await stage('runtime_image', () =>
-          assertRuntimeImage(serverId, connection, false, { ...context, observerPreflight }),
+          assertRuntimeImage(serverId, connection, false, {
+            ...context,
+            observerPreflight,
+            validateEggMetadata: operation.action === 'provision',
+          }),
         );
         // A compiled game may have no image hook. Its provider proof must still
         // settle before reading final revocable authority.
@@ -687,22 +714,14 @@ export async function createManagementRuntime(options: ManagementOptions) {
       for (const result of checks) if (result.status === 'rejected') throw result.reason;
       await reserveInstallation(connection, serverId, jobId, env);
     },
+    prepareStartAdmission,
     reserveStart: async (
       serverId: string,
       jobId: string,
       action: 'start' | 'restart',
       connection: Kysely<Database>,
     ) => {
-      const stage = <T>(name: string, work: () => Promise<T>) =>
-        timed(jobId, serverId, `reserve_start.${name}`, work);
-      // Image/launch identity is checked once immediately before power, after
-      // durable preparation. Admission still requires a fresh physical sample.
-      const checks = await Promise.allSettled([
-        stage('observer_preflight', () => verifyObservationHost(serverId, connection)),
-        stage('host_sampling', () => refreshObservations(connection, serverId)),
-      ]);
-      for (const result of checks) if (result.status === 'rejected') throw result.reason;
-      await stage('atomic_admission', () => reserveStart(connection, serverId, jobId, action, env));
+      await (await prepareStartAdmission(serverId, jobId, connection, action))();
     },
     beforeDelete:
       options.cleanupExternal ??

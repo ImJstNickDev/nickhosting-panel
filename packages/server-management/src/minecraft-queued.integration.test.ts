@@ -570,6 +570,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       // Earlier authorizations must pass, otherwise this cannot reproduce the race.
       const processing = processServerOperation(f.db, jobId, {
         ...value.management.lifecycle,
+        prepareStartAdmission: undefined,
         reserveStart: (serverId, id, action, db) => reserveStart(db, serverId, id, action, env),
         checkpoint: async (point) => {
           if (point !== 'prepared') return;
@@ -685,6 +686,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
         ...value.management.lifecycle,
         // Admission now precedes the final launch proof. Use this fixture's
         // isolated host observation rather than its nonexistent host disk path.
+        prepareStartAdmission: undefined,
         reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action, env),
       }),
     ).toBe('failed');
@@ -724,17 +726,16 @@ describe('host-bound Minecraft runtime image evidence', () => {
       }),
     ).rejects.toThrow('provenance_mismatch');
   });
-  it('starts final-handoff egg validation while the lifecycle identity response is pending', async () => {
+  it('starts the power image proof before provider response without fetching egg metadata', async () => {
     const value = await installed();
     const remote = await value.external.adapter.getApplicationServer(17);
     const provider = Promise.withResolvers<typeof remote>();
-    const eggEntered = Promise.withResolvers<void>();
-    const originalEgg = vi.mocked(value.external.adapter.getEgg).getMockImplementation();
-    if (!originalEgg) throw new Error('Missing fixture egg implementation');
-    vi.spyOn(value.external.adapter, 'getEgg').mockImplementation(async (...args) => {
-      eggEntered.resolve();
-      return originalEgg(...args);
+    const imageEntered = Promise.withResolvers<void>();
+    value.observer.imageIdentity.mockImplementation(async () => {
+      imageEntered.resolve();
+      return imageDigest;
     });
+    const egg = vi.spyOn(value.external.adapter, 'getEgg').mockClear();
     const getServer = vi.spyOn(value.external.adapter, 'getApplicationServer').mockClear();
     const job = await enqueueServerOperation(
       f.db,
@@ -750,9 +751,9 @@ describe('host-bound Minecraft runtime image evidence', () => {
         finished = true;
       });
     try {
-      await eggEntered.promise;
+      await imageEntered.promise;
       expect(finished).toBe(false);
-      expect(value.observer.imageIdentity).not.toHaveBeenCalled();
+      expect(egg).not.toHaveBeenCalled();
     } finally {
       provider.resolve(remote);
       await authorizing;
@@ -760,6 +761,17 @@ describe('host-bound Minecraft runtime image evidence', () => {
     expect(getServer).not.toHaveBeenCalled();
     expect(value.observer.preflight).toHaveBeenCalledOnce();
     expect(value.observer.imageIdentity).toHaveBeenCalledOnce();
+    await expect(
+      value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db, {
+        providerServer: { ...remote, container: { ...remote.container, image: 'untrusted:image' } },
+      }),
+    ).rejects.toThrow('provenance_mismatch');
+    expect(egg).not.toHaveBeenCalled();
+    egg.mockRejectedValue(new Error('egg catalog unavailable'));
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
+    ).rejects.toThrow('egg catalog unavailable');
+    expect(egg).toHaveBeenCalledOnce();
   });
   it('starts egg validation before a standalone provider response and settles both on failure', async () => {
     const value = await installed();
@@ -1203,6 +1215,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     expect(
       await processServerOperation(f.db, job.jobId, {
         ...value.management.lifecycle,
+        prepareStartAdmission: undefined,
         reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action, env),
       }),
     ).toBe('failed');

@@ -178,6 +178,7 @@ export async function assertMinecraftRemoteLaunch(
   remoteInput: ApplicationServer | Promise<ApplicationServer>,
   env: Environment,
   adapter: Pick<PterodactylAdapter, 'getEgg'>,
+  validateEggMetadata = true,
 ): Promise<void> {
   const profile = await db
     .selectFrom('minecraft_server_profiles')
@@ -189,7 +190,11 @@ export async function assertMinecraftRemoteLaunch(
   const expected = await minecraftProvisionEnvironment(db, serverId, choice);
   const checks = await Promise.allSettled([
     remoteInput,
-    assertMinecraftEggEnvironment(adapter, choice, expected),
+    // Installed power operations validate the actual launch below. The egg
+    // catalog is still required for installation and explicit revalidation.
+    validateEggMetadata
+      ? assertMinecraftEggEnvironment(adapter, choice, expected)
+      : Promise.resolve(),
   ]);
   for (const result of checks) if (result.status === 'rejected') throw result.reason;
   const serverProof = checks[0];

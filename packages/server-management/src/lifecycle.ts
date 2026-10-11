@@ -145,6 +145,13 @@ export interface LifecycleOptions {
       observerPreflight?: Promise<void>;
     },
   ) => Promise<boolean>;
+  /** Read-only host sampling may overlap provider reads. The returned admission
+   * function is invoked only after provider identity/limits have been validated. */
+  prepareStartAdmission?: (
+    serverId: string,
+    jobId: string,
+    connection: Kysely<Database>,
+  ) => Promise<() => Promise<void>>;
   /** Fresh admission revalidation before a power effect, not an implicit reservation. */
   reserveStart?: (
     serverId: string,
@@ -1392,21 +1399,27 @@ export async function processServerOperation(
       }
       let remote: ApplicationServer;
       let initialResources: Resources | undefined;
+      let preparedStartAdmission: (() => Promise<void>) | undefined;
       try {
         if (
           operation.phase === 'planned' &&
           ['start', 'stop', 'restart'].includes(operation.action)
         ) {
           // Independent reads overlap, but foreign identity must never publish telemetry.
-          // Settle both promises even on failure so no rejection escapes the operation.
-          const [identity, status] = await Promise.allSettled([
+          // Settle every promise even on failure so no rejection escapes the operation.
+          const [identity, status, admission] = await Promise.allSettled([
             timed('provider_identity', () => ownedRemote(db, server, options)),
             timed('provider_resources', () =>
               options.adapter.getResources(server.pterodactyl_identifier ?? ''),
             ),
+            operation.action === 'start' && options.prepareStartAdmission
+              ? options.prepareStartAdmission(server.id, jobId, db)
+              : Promise.resolve(undefined),
           ]);
           if (identity.status === 'rejected') throw identity.reason;
           if (status.status === 'rejected') throw status.reason;
+          if (admission.status === 'rejected') throw admission.reason;
+          preparedStartAdmission = admission.value;
           remote = identity.value;
           initialResources = status.value;
           await observation(db, server, initialResources, nowOf(options));
@@ -1461,9 +1474,11 @@ export async function processServerOperation(
               if (remote.limits[key] !== server.limits[key])
                 throw new DomainError('provenance_mismatch');
             }
-            if (!installed(remote) || remote.suspended || !options.reserveStart)
+            if (!installed(remote) || remote.suspended)
               throw new DomainError('configuration_invalid');
-            await options.reserveStart(server.id, jobId, action, db);
+            if (preparedStartAdmission) await preparedStartAdmission();
+            else if (options.reserveStart) await options.reserveStart(server.id, jobId, action, db);
+            else throw new DomainError('configuration_invalid');
             const reservation = await db
               .selectFrom('resource_reservations')
               .select('server_id')

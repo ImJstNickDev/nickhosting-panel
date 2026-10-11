@@ -842,6 +842,58 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
     },
   );
+  it('overlaps start admission sampling with provider reads and reserves only after identity', async () => {
+    const f = await fixture('start');
+    const sampling = Promise.withResolvers<void>();
+    let identityValidated = false;
+    f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+      await sampling.promise;
+      identityValidated = true;
+      return f.remote;
+    });
+    const reserve = f.options.reserveStart;
+    const commitAdmission = vi.fn(async () => {
+      expect(identityValidated).toBe(true);
+      await reserve?.(f.serverId, f.jobId, 'start', f.db);
+    });
+    f.options.prepareStartAdmission = async () => {
+      sampling.resolve();
+      return commitAdmission;
+    };
+    f.options.reserveStart = vi.fn(async () => {
+      throw new Error('Prepared admission must replace sequential sampling');
+    });
+    expect(await f.run()).toBe('waiting');
+    expect(commitAdmission).toHaveBeenCalledTimes(1);
+    expect(f.options.reserveStart).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledOnce();
+  });
+  it.each(['identity', 'sampling', 'limits'] as const)(
+    'settles start sampling and rejects before reservation or power on %s failure',
+    async (failure) => {
+      const f = await fixture('start');
+      const identityStarted = Promise.withResolvers<void>();
+      const samplingFinished = Promise.withResolvers<void>();
+      const commitAdmission = vi.fn(async () => {});
+      f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+        identityStarted.resolve();
+        await samplingFinished.promise;
+        if (failure === 'identity') return { ...f.remote, uuid: randomUUID() };
+        if (failure === 'limits')
+          return { ...f.remote, limits: { ...f.remote.limits, memory: 9999 } };
+        return f.remote;
+      });
+      f.options.prepareStartAdmission = async () => {
+        await identityStarted.promise;
+        samplingFinished.resolve();
+        if (failure === 'sampling') throw new DomainError('configuration_invalid');
+        return commitAdmission;
+      };
+      expect(await f.run()).toBe('failed');
+      expect(commitAdmission).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
   it('rejects ordinary power if full authority changes after preparation', async () => {
     const f = await fixture('start');
     f.options.authorizeIntent = async () => {};
