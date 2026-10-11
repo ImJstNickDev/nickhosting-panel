@@ -439,7 +439,7 @@ function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; 
     <figure className={`metric-chart${network ? ' network-chart' : ''}`}>
       <figcaption>
         <h3>{title}</h3>
-        {network ? (
+        {network && (
           <div className="network-legend">
             {series.map((item) => {
               const last = item.values.at(-1);
@@ -472,10 +472,6 @@ function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; 
               );
             })}
           </div>
-        ) : (
-          <span>
-            {format.number(series[0]?.values.at(-1)?.value ?? 0)} {unit}
-          </span>
         )}
       </figcaption>
       <svg viewBox="0 0 400 135" role="img" aria-label={summary}>
@@ -585,17 +581,6 @@ function Telemetry({
       ) : (
         <div className="columns resource-charts">
           <Chart
-            title={t('web.memory')}
-            unit="MiB"
-            series={[
-              {
-                label: t('web.memory'),
-                color: '#164cb1',
-                values: samples.map((s) => ({ time: s.time, value: s.memory })),
-              },
-            ]}
-          />
-          <Chart
             title={t('web.cpu')}
             unit="%"
             series={[
@@ -603,6 +588,17 @@ function Telemetry({
                 label: t('web.cpu'),
                 color: '#164cb1',
                 values: samples.map((s) => ({ time: s.time, value: s.cpu })),
+              },
+            ]}
+          />
+          <Chart
+            title={t('web.memory')}
+            unit="MiB"
+            series={[
+              {
+                label: t('web.memory'),
+                color: '#164cb1',
+                values: samples.map((s) => ({ time: s.time, value: s.memory })),
               },
             ]}
           />

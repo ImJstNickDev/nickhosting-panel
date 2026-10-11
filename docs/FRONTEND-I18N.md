@@ -144,7 +144,8 @@ creation or automatically started again.
 Console updates use bounded SSE parsing/display (300 retained lines with a
 per-line bound); charts show timestamps, units and gaps. The resource section keeps
 last-hour charts without a period selector, measurement table, pagination buttons or
-explanatory footer. Chart history reads remain bounded to 100 recent samples;
+explanatory footer. Charts appear in CPU, Memory, Network order. Memory and CPU headers omit duplicate current values already
+shown in the resource cards; chart scale labels and accessible summaries remain. Chart history reads remain bounded to 100 recent samples;
 backend history pagination remains available. Network traffic shares one chart
 and scale: received is blue, sent is amber. Both lines are solid, with blue drawn last so
 coincident values show blue rather than alternating colors. Top-right arrow icons

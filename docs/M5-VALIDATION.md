@@ -3715,3 +3715,20 @@ No backend changes, container restarts or production interactions. Rollback:
 revert the source change. No historical full-suite rerun was needed.
 Final focused browser check also passed active-tab focus after direct reload
 (1/1); the temporary test was removed and disposable fixtures cleaned.
+
+### 2026-10-11 — Compact resource-chart headers and CPU-first order
+
+Removed duplicate current values beside Memory/CPU chart titles; the resource
+cards remain authoritative for the visible live totals. Chart scales, times,
+accessible summaries and the network legend remain unchanged. The Owner then
+requested CPU before Memory: the chart order is now CPU, Memory, Network.
+
+Web typecheck and scoped Biome passed for the header change; scoped Biome passed
+again after the JSX-only reorder. Independent review found no issues in the
+header removal. An isolated one-off browser check passed (1/1, Axe zero), proving
+sidebar values remain while chart headers omit duplicate values and network
+legend controls remain. No full historical suite was run; no production
+interactions or container restarts. Rollback is a source revert.
+A final narrow browser capture after the reorder passed (1/1), confirmed CPU →
+Memory → Network and refreshed/reviewed the existing running-desktop screenshot.
+Temporary checks were removed; disposable fixtures were cleaned.
