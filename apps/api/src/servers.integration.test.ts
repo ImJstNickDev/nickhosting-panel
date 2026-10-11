@@ -155,6 +155,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     database = await createTestDatabase();
     f = await managementFixture(database.db);
     // Replace only the disposable fixture Owner with the real first-run/auth pipeline.
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', f.owner.actorUserId).execute();
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
     const identity = createIdentity({
@@ -356,6 +357,13 @@ describe('M2 Hono API with real invitation, password and session authentication'
     userId = await invited(user, 'servers-user@example.test');
     peerId = await invited(peer, 'servers-peer@example.test');
     outsiderId = await invited(outsider, 'servers-outsider@example.test');
+    // Move only the synthetic provider fixture binding to the real invited test identity.
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', userId).execute();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ user_id: userId })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
     f.context.actorUserId = userId;
     f.context.subjectUserId = userId;
   });
@@ -524,10 +532,13 @@ describe('M2 Hono API with real invitation, password and session authentication'
           backendAllocationPoolLocked: true,
         }),
       ]);
+      const before = await f.db.selectFrom('managed_servers').select('id').orderBy('id').execute();
       const create = await request(user, '/v1/servers', f.input());
       expect(create.status).toBe(409);
       expect((await create.json()).error.code).toBe('allocation_unavailable');
-      expect(await f.db.selectFrom('managed_servers').select('id').execute()).toEqual([]);
+      expect(await f.db.selectFrom('managed_servers').select('id').orderBy('id').execute()).toEqual(
+        before,
+      );
       expect(
         (
           await request(
@@ -626,11 +637,14 @@ describe('M2 Hono API with real invitation, password and session authentication'
 
   it('creates durable operations over HTTP, validates confirmation and origin, and exposes safe history', async () => {
     const input = f.input();
+    const before = await f.db.selectFrom('managed_servers').select('id').orderBy('id').execute();
     const rejected = await request(user, '/v1/servers', input, {
       headers: { origin: 'https://attacker.example.test' },
     });
     expect(rejected.status).toBe(403);
-    expect(await f.db.selectFrom('managed_servers').select('id').execute()).toEqual([]);
+    expect(await f.db.selectFrom('managed_servers').select('id').orderBy('id').execute()).toEqual(
+      before,
+    );
     const created = await request(user, '/v1/servers', input);
     expect(created.status).toBe(202);
     const result = await created.json();
@@ -1673,6 +1687,106 @@ describe('M2 Hono API with real invitation, password and session authentication'
       expect(sendCommand).toHaveBeenCalledTimes(2);
     } finally {
       await reader.cancel();
+    }
+  });
+
+  it('closes a console relay when its provider credential rotates during connection', async () => {
+    const serverId = await f.server();
+    let binding = 'credential-before-connect';
+    const bindingSpy = vi
+      .spyOn(runtime, 'consoleBindingForServer')
+      .mockImplementation(async () => binding);
+    const close = vi.fn();
+    const dispatch = vi.fn(async () => {});
+    const history = vi.fn(async () => {});
+    vi.mocked(f.adapter.relayConsole).mockImplementationOnce(async () => {
+      binding = 'credential-after-connect';
+      return { close, sendCommand: dispatch, requestLogs: history, requestStats: async () => {} };
+    });
+    try {
+      const response = await request(user, `/v1/servers/${serverId}/console`);
+      const events = await response.text();
+      expect(events).toContain('integration_unavailable');
+      expect(events).not.toContain('event: connected');
+      expect(close).toHaveBeenCalledOnce();
+      expect(history).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      sendCommand.mockClear();
+      expect(
+        (await request(user, `/v1/servers/${serverId}/console`, { command: 'list' })).status,
+      ).toBe(204);
+      expect(sendCommand).toHaveBeenCalledOnce();
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      bindingSpy.mockRestore();
+    }
+  });
+
+  it('closes a newly opened console if credential lookup becomes unavailable', async () => {
+    const serverId = await f.server();
+    const bindingSpy = vi
+      .spyOn(runtime, 'consoleBindingForServer')
+      .mockResolvedValueOnce('credential-before-connect')
+      .mockRejectedValue(new DomainError('integration_unavailable'));
+    const close = vi.fn();
+    const history = vi.fn(async () => {});
+    vi.mocked(f.adapter.relayConsole).mockImplementationOnce(async () => ({
+      close,
+      sendCommand: async () => {},
+      requestLogs: history,
+      requestStats: async () => {},
+    }));
+    try {
+      const response = await request(user, `/v1/servers/${serverId}/console`);
+      const events = await response.text();
+      expect(events).toContain('integration_unavailable');
+      expect(events).not.toContain('event: connected');
+      expect(close).toHaveBeenCalledOnce();
+      expect(history).not.toHaveBeenCalled();
+    } finally {
+      bindingSpy.mockRestore();
+    }
+  });
+
+  it('rejects retained console authorization and command reuse after provider key rotation', async () => {
+    const serverId = await f.server();
+    let binding = 'credential-current';
+    const bindingSpy = vi
+      .spyOn(runtime, 'consoleBindingForServer')
+      .mockImplementation(async () => binding);
+    let input: ConsoleRelayOptions | undefined;
+    const dispatch = vi.fn(async () => {});
+    vi.mocked(f.adapter.relayConsole).mockImplementationOnce(async (_id, options) => {
+      input = options;
+      return {
+        close: vi.fn(),
+        sendCommand: dispatch,
+        requestLogs: async () => {},
+        requestStats: async () => {},
+      };
+    });
+    const response = await request(user, `/v1/servers/${serverId}/console`);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Missing console stream');
+    try {
+      let events = '';
+      while (!events.includes('event: connected'))
+        events += new TextDecoder().decode((await reader.read()).value);
+      expect(await input?.authorize()).toBe(true);
+      expect(await input?.authorizeCommand?.()).toBe(true);
+      binding = 'credential-rotated';
+      expect(await input?.authorize()).toBe(false);
+      expect(await input?.authorizeCommand?.()).toBe(false);
+      sendCommand.mockClear();
+      expect(
+        (await request(user, `/v1/servers/${serverId}/console`, { command: 'list' })).status,
+      ).toBe(204);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(sendCommand).toHaveBeenCalledOnce();
+    } finally {
+      input?.onEvent({ type: 'closed' });
+      await reader.cancel();
+      bindingSpy.mockRestore();
     }
   });
 

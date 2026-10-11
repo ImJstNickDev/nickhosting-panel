@@ -13,7 +13,11 @@ export const nickHostingExtensionSchema = z
       .object({ panel: z.string().min(1).max(64), blueprint: z.string().min(1).max(64) })
       .strict(),
     capabilities: z
-      .object({ clientKeyManagement: z.boolean(), serverChangeEvents: z.boolean() })
+      .object({
+        clientKeyManagement: z.boolean(),
+        serverChangeEvents: z.boolean(),
+        technicalAccounts: z.boolean().optional(),
+      })
       .strict(),
   })
   .strict();
@@ -117,14 +121,23 @@ export function createNickHostingBridge(options: TransportOptions) {
         { callbackUrl: url.href, webhookSecret },
       );
     },
-    linkServer(instanceId: string, identity: z.infer<typeof providerIdentitySchema>) {
+    linkServer(
+      instanceId: string,
+      identity: z.infer<typeof providerIdentitySchema>,
+      expectedOwnerId?: number,
+    ) {
       const input = providerIdentitySchema.parse(identity);
       return transport.json(
         'application',
         `${instancePath(instanceId)}/servers/${input.providerUuid}`,
         providerChangeSchema,
         'PUT',
-        input,
+        {
+          ...input,
+          ...(expectedOwnerId === undefined
+            ? {}
+            : { expectedOwnerId: z.number().int().positive().parse(expectedOwnerId) }),
+        },
       );
     },
     getServer(instanceId: string, serverUuid: string) {
@@ -139,6 +152,15 @@ export function createNickHostingBridge(options: TransportOptions) {
         'application',
         `${instancePath(instanceId)}/health`,
         providerHealthSchema,
+      );
+    },
+    provisionUser(instanceId: string, userId: string) {
+      return transport.json(
+        'application',
+        `${userPath(instanceId, userId)}/provision`,
+        linkedUserSchema,
+        'POST',
+        {},
       );
     },
     linkUser(instanceId: string, userId: string, input: z.infer<typeof linkedUserSchema>) {

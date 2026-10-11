@@ -301,6 +301,7 @@ async function fixture(
   await db
     .insertInto('managed_servers')
     .values({
+      provider_user_id: 1,
       id: serverId,
       owner_id: ownerId,
       project_id: null,

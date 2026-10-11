@@ -17,3 +17,5 @@ Route::put('/instances/{instance}/users/{nickUser}', [BridgeController::class, '
 Route::post('/instances/{instance}/users/{nickUser}/keys', [BridgeController::class, 'issueKey']);
 Route::post('/instances/{instance}/users/{nickUser}/keys/{keyIdentifier}/rotate', [BridgeController::class, 'issueKey']);
 Route::delete('/instances/{instance}/users/{nickUser}/keys/{keyIdentifier}', [BridgeController::class, 'revokeKey']);
+
+Route::post('/instances/{instance}/users/{nickUser}/provision', [BridgeController::class, 'provisionUser']);

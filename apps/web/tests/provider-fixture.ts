@@ -67,6 +67,7 @@ export async function installBrowserFixtures(
   const observerId = `browser-fixture-${randomUUID()}`;
   Object.assign(env, {
     NH_OBSERVER_ID: observerId,
+    NH_PTERODACTYL_BASE_URL: 'https://panel.example.test',
     NH_STATIC_GAME_HOSTNAME: 'games.example.test',
     NH_SFTPGO_BASE_URL: 'https://sftp-api.example.test',
     NH_SFTPGO_DATA_ROOT: '/isolated-browser-fixture',
@@ -76,6 +77,42 @@ export async function installBrowserFixtures(
     NH_SFTP_PUBLIC_PORT: '2022',
     NH_PTERODACTYL_UPLOAD_ORIGINS: '["https://uploads.example.test"]',
   });
+  const providerUrl = 'https://panel.example.test';
+  await db
+    .insertInto('provider_change_feeds')
+    .values({
+      instance_id: instanceId,
+      provider_url: providerUrl,
+      callback_url: 'https://web.example.test/v1/provider-events/pterodactyl',
+      enabled: true,
+      healthy_at: null,
+      generation: '1',
+    })
+    .execute();
+  for (const [localId, providerId] of [
+    [userId, 1],
+    [ownerId, 2],
+  ] as const) {
+    const operationId = randomUUID();
+    await db
+      .updateTable('provider_accounts')
+      .set({
+        instance_id: instanceId,
+        provider_url: providerUrl,
+        provider_id: providerId,
+        provider_uuid: randomUUID(),
+        external_id: `nh-browser-${localId}`,
+        status: 'ready',
+        key_operation_id: operationId,
+        key_identifier: `fixture-${providerId}`,
+        key_envelope: codec.encrypt(
+          `browser-provider-${providerId}`,
+          `provider-client:${instanceId}:${localId}:${operationId}`,
+        ),
+      })
+      .where('user_id', '=', localId)
+      .execute();
+  }
   const localPath = resolve('mountdata/m2-tests');
   const memoryLimit = Math.ceil(totalmem() / 1048576);
   const cpuLimit = availableParallelism() * 100;

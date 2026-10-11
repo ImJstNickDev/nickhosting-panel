@@ -232,3 +232,15 @@ provides generic fixed/range/requirement matching and integrations supply versio
 semantics/metadata. Resolved images are bound to compatibility evidence and durable
 provision plans. Existing static evidence and server identities remain unchanged.
 See [integration-owned image selection](GAME-INTEGRATIONS.md#integration-owned-container-image-selection).
+
+### Individual provider credentials
+
+[ADR 0015](decisions/0015-provider-technical-accounts.md) introduces durable
+per-user Pterodactyl technical identities. Invite/Owner creation enqueues work
+transactionally; an independent worker provisions native accounts and encrypted
+Client credentials through Blueprint. Application authority stays centralized.
+The existing adapter routes Client requests by managed-resource owner after
+NickHosting actor authorization. No frontend credential, shared Client fallback
+or automatic foreign-server import is introduced. Existing server ownership
+changes require a scoped, audited handoff; Gateway reachability proof remains
+bound to its current provider identity.

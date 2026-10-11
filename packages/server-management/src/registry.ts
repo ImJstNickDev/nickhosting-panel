@@ -298,6 +298,20 @@ export async function createManagedServer(
     if (previous) return previous;
     await lockResources(tx);
     const { values: config } = await getSettings(tx, env);
+    const providerOwner = await tx
+      .selectFrom('provider_accounts as account')
+      .innerJoin('provider_change_feeds as feed', 'feed.instance_id', 'account.instance_id')
+      .select(['account.provider_id', 'account.provider_url', 'account.status'])
+      .where('feed.enabled', '=', true)
+      .where('feed.provider_url', '=', config.pterodactylBaseUrl?.replace(/\/$/, '') ?? '')
+      .where('account.user_id', '=', context.subjectUserId)
+      .executeTakeFirst();
+    if (
+      !providerOwner?.provider_id ||
+      providerOwner.status !== 'ready' ||
+      providerOwner.provider_url !== config.pterodactylBaseUrl?.replace(/\/$/, '')
+    )
+      throw new DomainError('integration_unavailable');
     if (request.limits.disk === undefined && config.storagePolicy !== 'GLOBAL_POOL')
       throw new DomainError('validation_failed');
     const value = {
@@ -487,6 +501,7 @@ export async function createManagedServer(
       .values({
         id: serverId,
         owner_id: context.subjectUserId,
+        provider_user_id: providerOwner.provider_id,
         project_id: value.projectId ?? null,
         mapping_id: mapping.id,
         node_id: node.id,
@@ -548,7 +563,7 @@ export async function createManagedServer(
     const provision: ProvisionPlan = {
       name: value.name,
       externalId,
-      userId: node.provision_user_id,
+      userId: providerOwner.provider_id,
       eggId: mapping.egg_id,
       dockerImage: mappingProvisionImage(mapping, minecraft?.row.binding),
       startup: mapping.startup,

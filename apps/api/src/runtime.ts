@@ -103,7 +103,6 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
           await validateConnection({
             baseURL: env.NH_PTERODACTYL_BASE_URL ?? input.pterodactylBaseURL,
             applicationKey: env.NH_PTERODACTYL_APPLICATION_KEY ?? input.pterodactylApplicationKey,
-            clientKey: env.NH_PTERODACTYL_CLIENT_KEY ?? input.pterodactylClientKey,
           });
           await saveBootstrapConfiguration(tx, codec, input, actorUserId, env);
         },

@@ -938,7 +938,7 @@ export async function getPlatformTransfers(
   env: Environment = {},
 ) {
   const server = await scopedServer(db, context, serverId);
-  const [host, settings, secrets, info, pending] = await Promise.all([
+  const [host, settings, secrets, info, pending, providerAccount] = await Promise.all([
     db
       .selectFrom('managed_nodes as node')
       .innerJoin('physical_hosts as host', 'host.id', 'node.physical_host_id')
@@ -953,11 +953,20 @@ export async function getPlatformTransfers(
       .select('id')
       .where('server_id', '=', serverId)
       .executeTakeFirst(),
+    db
+      .selectFrom('provider_accounts as account')
+      .innerJoin('provider_change_feeds as feed', 'feed.instance_id', 'account.instance_id')
+      .select(['account.status', 'account.provider_id', 'account.provider_url'])
+      .where('feed.enabled', '=', true)
+      .whereRef('feed.provider_url', '=', 'account.provider_url')
+      .where('account.user_id', '=', server.owner_id)
+      .executeTakeFirst(),
   ]);
   const policy = effectiveUploadPolicy(host, env),
     configured =
-      secrets.some((s) => s.name === 'pterodactylClientKey' && s.configured) &&
-      !!settings.values.pterodactylBaseUrl;
+      providerAccount?.status === 'ready' &&
+      providerAccount.provider_id === server.provider_user_id &&
+      providerAccount.provider_url === settings.values.pterodactylBaseUrl?.replace(/\/$/, '');
   const reason = !info.permissions.manage
     ? 'forbidden'
     : server.active_operation_id || pending

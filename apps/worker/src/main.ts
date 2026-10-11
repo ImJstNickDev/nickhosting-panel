@@ -7,6 +7,7 @@ import { processJob, startJobWorker } from '@nickhosting/jobs';
 import {
   createManagementRuntime,
   createManagementTransportCoordinator,
+  ensureProviderAccounts,
   recordWorkerHeartbeat,
   refreshHostObservations,
 } from '@nickhosting/server-management';
@@ -60,19 +61,27 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       },
       () => logger.log('warn', 'host.observation_unavailable'),
     );
+    const providerAccounts = startProviderFeedLoop(
+      async () => {
+        if (!env.NH_SECRETS_MASTER_KEY) return;
+        const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+        const codec = new SecretCodec({
+          activeKeyId: keyId,
+          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+        });
+        await ensureProviderAccounts(db, codec, env, { coordinator: transportCoordinator });
+      },
+      () => logger.log('warn', 'provider.enrollment_unavailable'),
+    );
     const providerFeeds = startProviderFeedLoop(
       async () => {
         if (!env.NH_SECRETS_MASTER_KEY) return;
         const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
-        await refreshProviderFeeds(
-          db,
-          new SecretCodec({
-            activeKeyId: keyId,
-            keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
-          }),
-          env,
-          transportCoordinator,
-        );
+        const codec = new SecretCodec({
+          activeKeyId: keyId,
+          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+        });
+        await refreshProviderFeeds(db, codec, env, transportCoordinator);
       },
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
@@ -129,6 +138,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           metadataPoll,
           observations.close(),
           providerFeeds.close(),
+          providerAccounts.close(),
         ]);
         try {
           await runtime.close();

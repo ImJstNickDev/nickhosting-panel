@@ -43,6 +43,35 @@ function mappingInput() {
 }
 
 describe('managed registry, projects, runtime mapping and allocation ownership', () => {
+  it('pins provisioning to the linked account rather than the node default and refuses pending accounts', async () => {
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ provider_id: 99999 })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    const created = await createManagedServer(f.db, f.adapter, f.context, f.input());
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', created.serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.provider_user_id).toBe(99999);
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', created.jobId)
+      .executeTakeFirstOrThrow();
+    expect(operation.plan.provision).toMatchObject({ userId: 99999 });
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ status: 'pending' })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    await expect(createManagedServer(f.db, f.adapter, f.context, f.input())).rejects.toThrow(
+      'integration_unavailable',
+    );
+  });
+
   it('assigns the Owner disk default in shared storage and freezes idempotent retries', async () => {
     const input = f.input();
     const { disk: _disk, ...limits } = input.limits;
@@ -415,6 +444,70 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
         idempotencyKey: randomUUID(),
       }),
     ).toMatchObject({ serverId: failed });
+  });
+  it('configures nodes without a provider-user selector and preserves deprecated values', async () => {
+    const input = { physicalHostId: f.hostId, pterodactylNodeId: f.providerNodeId };
+    await setManagedNode(f.db, f.adapter, f.owner, { ...input, id: f.nodeId });
+    expect(f.adapter.listUsers).not.toHaveBeenCalled();
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_nodes')
+          .select('provision_user_id')
+          .where('id', '=', f.nodeId)
+          .executeTakeFirstOrThrow()
+      ).provision_user_id,
+    ).toBe(1);
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({
+        instance_id: account.instance_id,
+        provider_url: account.provider_url,
+        provider_id: 500000,
+        provider_uuid: randomUUID(),
+        external_id: 'isolated-owner',
+        key_identifier: 'isolated-key',
+        key_envelope: account.key_envelope,
+        status: 'ready',
+      })
+      .where('user_id', '=', f.owner.subjectUserId)
+      .execute();
+    const providerNodeId = 999999;
+    vi.mocked(f.adapter.getNode).mockResolvedValue({ id: providerNodeId } as never);
+    const created = await setManagedNode(f.db, f.adapter, f.owner, {
+      ...input,
+      pterodactylNodeId: providerNodeId,
+    });
+    expect(
+      (
+        await f.db
+          .selectFrom('managed_nodes')
+          .select('provision_user_id')
+          .where('id', '=', created.id)
+          .executeTakeFirstOrThrow()
+      ).provision_user_id,
+    ).toBe(500000);
+    expect(f.adapter.listUsers).not.toHaveBeenCalled();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ status: 'pending' })
+      .where('user_id', '=', f.owner.subjectUserId)
+      .execute();
+    await expect(
+      setManagedNode(f.db, f.adapter, f.owner, { ...input, pterodactylNodeId: providerNodeId }),
+    ).rejects.toThrow('integration_unavailable');
+    await expect(
+      setManagedNode(f.db, f.adapter, f.owner, {
+        ...input,
+        pterodactylNodeId: providerNodeId,
+        provisionUserId: 987654,
+      }),
+    ).rejects.toThrow('validation_failed');
   });
   it('allows Owner disabling mappings and nodes while preserving live identity mappings', async () => {
     await f.server();

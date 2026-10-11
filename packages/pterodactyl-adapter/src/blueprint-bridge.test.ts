@@ -77,6 +77,38 @@ describe('Blueprint administrative transport', () => {
     expect(init?.redirect).toBe('error');
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer fixture-app');
   });
+  it('provisions opaque user identities through Application authority and validates the result', async () => {
+    const userId = randomUUID();
+    const identity = {
+      providerId: 9,
+      providerUuid: randomUUID(),
+      externalId: `nh:${instanceId}:${userId}`,
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(identity));
+    expect(
+      await createNickHostingBridge({ ...options, fetcher }).provisionUser(instanceId, userId),
+    ).toEqual(identity);
+    const call = fetcher.mock.calls[0];
+    if (!call) throw new Error('Missing request');
+    const [url, init] = call;
+    expect(String(url)).toContain(`/users/${userId}/provision`);
+    expect(init?.body).toBe('{}');
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer fixture-app');
+    await expect(
+      createNickHostingBridge({
+        ...options,
+        fetcher: async () => Response.json({ ...identity, providerId: -1 }),
+      }).provisionUser(instanceId, userId),
+    ).rejects.toMatchObject({ reason: 'invalid_response' });
+  });
+  it('sends an explicit owner pin only on a reviewed relink', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(event));
+    await createNickHostingBridge({ ...options, fetcher }).linkServer(instanceId, event.server, 9);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      ...event.server,
+      expectedOwnerId: 9,
+    });
+  });
   it('refuses invalid callback or identity before a request', () => {
     const fetcher = vi.fn<typeof fetch>();
     const bridge = createNickHostingBridge({ ...options, fetcher });

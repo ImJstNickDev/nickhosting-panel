@@ -64,26 +64,36 @@ final class BridgeController
         $identity = $request->isMethod('put') ? $request->validate([
             'providerId' => 'required|integer|min:1', 'providerUuid' => 'required|uuid',
             'identifier' => 'required|string|max:16', 'externalId' => 'required|string|max:191',
-            'nodeId' => 'required|integer|min:1',
+            'nodeId' => 'required|integer|min:1', 'expectedOwnerId' => 'sometimes|integer|min:1',
         ]) : null;
+        $expectedOwnerId = $identity['expectedOwnerId'] ?? null;
+        if ($identity !== null) { unset($identity['expectedOwnerId']); }
         $feed = app(ChangeFeed::class);
-        $payload = DB::transaction(function () use ($instance, $uuid, $identity, $feed) {
+        $payload = DB::transaction(function () use ($instance, $uuid, $identity, $feed, $expectedOwnerId) {
             // Same lock order as Panel updates: server, then extension link.
             $server = Server::query()->withoutEagerLoads()->where('uuid', $uuid)->lockForUpdate()->first();
             $link = DB::table('nickhosting_servers')->where('uuid', $uuid)->lockForUpdate()->first();
             abort_if($link && $link->instance_id !== $instance, 403);
             if ($identity !== null) {
                 abort_unless($server && $identity === Protocol::identity($server), 409);
+                abort_if($expectedOwnerId !== null && $server->owner_id !== $expectedOwnerId, 409);
                 if (!$link) {
                     DB::table('nickhosting_servers')->insert(['uuid' => $uuid, 'instance_id' => $instance,
-                        'server_id' => $server->id, 'identity' => json_encode($identity, JSON_THROW_ON_ERROR),
+                        'server_id' => $server->id, 'owner_id' => $server->owner_id, 'identity' => json_encode($identity, JSON_THROW_ON_ERROR),
                         'limits' => json_encode(Protocol::limits($server), JSON_THROW_ON_ERROR),
                         'revision' => 1, 'valid' => true, 'created_at' => now(), 'updated_at' => now()]);
                     $this->audit($instance, 'server.linked', $uuid);
                     $feed->enqueue(DB::table('nickhosting_servers')->where('uuid', $uuid)->first(), 'limits.updated');
                 } else {
-                    // Identity drift is never repaired implicitly by retrying registration.
-                    abort_unless($link->valid && json_decode($link->identity, true) === $identity, 409);
+                    // Explicit, identity-checked owner handoff only. No GET/ordinary PUT repair.
+                    abort_unless(json_decode($link->identity, true) === $identity, 409);
+                    if ($expectedOwnerId !== null && $link->owner_id !== $expectedOwnerId) {
+                        DB::table('nickhosting_servers')->where('uuid', $uuid)->update([
+                            'owner_id'=>$expectedOwnerId, 'valid'=>true, 'revision'=>$link->revision + 1,
+                            'limits'=>json_encode(Protocol::limits($server), JSON_THROW_ON_ERROR), 'updated_at'=>now()]);
+                        $this->audit($instance, 'server.owner_relinked', $uuid);
+                        $feed->enqueue(DB::table('nickhosting_servers')->where('uuid', $uuid)->first(), 'limits.updated');
+                    } else { abort_unless($link->valid && $link->owner_id === $server->owner_id, 409); }
                 }
             }
             $link = DB::table('nickhosting_servers')->where('uuid', $uuid)->first();
@@ -107,6 +117,13 @@ final class BridgeController
             'lastDeliveredAt' => ($date = DB::table('nickhosting_outbox')->where('instance_id', $instance)->max('delivered_at'))
                 ? \Illuminate\Support\Carbon::parse($date)->toIso8601String() : null,
             'checkedAt' => now()->toIso8601String()]);
+    }
+
+    public function provisionUser(Request $request, string $instance, string $nickUser): JsonResponse
+    {
+        $this->instance($request, $instance, 'users');
+        abort_if(count($request->all()) !== 0, 422);
+        return $this->reply(app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\TechnicalAccounts::class)->provision($instance, $nickUser));
     }
 
     public function linkUser(Request $request, string $instance, string $nickUser): JsonResponse

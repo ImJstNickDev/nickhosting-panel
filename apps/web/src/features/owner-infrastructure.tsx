@@ -566,11 +566,6 @@ function NodeForm({
     queryKey: ['owner-hosts'],
     queryFn: () => api<Host[]>(path('resource-hosts')),
   });
-  const users = useQuery({
-    queryKey: ['owner-provider-users'],
-    queryFn: () =>
-      api<Array<{ id: number; uuid: string; username: string }>>(path('provider-users')),
-  });
   const allocations = useQuery({
     queryKey: ['owner-provider-allocations', providerNode],
     queryFn: () => api<Allocation[]>(path(`nodes/${encodeURIComponent(providerNode)}/allocations`)),
@@ -600,7 +595,6 @@ function NodeForm({
             ...(initial ? { id: initial.id } : {}),
             physicalHostId: text(data, 'host'),
             pterodactylNodeId: Number(providerNode),
-            provisionUserId: number(data, 'provisionUser'),
             installerMemoryMiB: number(data, 'installerMemory'),
             installerCpuPercent: number(data, 'installerCpu'),
             memoryOverheadPercent: initial?.memoryOverheadLocked
@@ -670,23 +664,6 @@ function NodeForm({
             {value.nodes.map((node) => (
               <option key={node.id} value={node.id}>
                 {node.name} · {node.id}
-              </option>
-            ))}
-          </Select>
-        )}
-      </QueryContent>
-      <QueryContent query={users}>
-        {(rows) => (
-          <Select
-            label={t('infra.provisionUser')}
-            name="provisionUser"
-            defaultValue={initial?.provision_user_id ?? ''}
-            required
-          >
-            <option value="">{t('infra.select')}</option>
-            {rows.map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.username} · {user.id}
               </option>
             ))}
           </Select>

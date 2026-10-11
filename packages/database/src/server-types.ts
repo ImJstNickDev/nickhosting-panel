@@ -123,6 +123,7 @@ export interface ServerTables {
   project_members: { project_id: string; user_id: string; role: 'manager' | 'operator' | 'viewer' };
   managed_servers: {
     id: string;
+    provider_user_id: Generated<number | null>;
     owner_id: string;
     project_id: string | null;
     mapping_id: string;

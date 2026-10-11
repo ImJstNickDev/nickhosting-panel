@@ -25,3 +25,5 @@ status and amendment before applying historical milestone numbers.
 - [0013 — Minecraft evidence and recoverable content](0013-minecraft-evidence-and-content.md)
 
 - [0014 — WebPanel and common platform contracts](0014-webpanel-and-common-contracts.md)
+
+- [0015 — Per-user provider technical accounts](0015-provider-technical-accounts.md)

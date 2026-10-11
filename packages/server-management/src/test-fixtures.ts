@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type Database, getSettings } from '@nickhosting/database';
 import type { GameManifest } from '@nickhosting/game-sdk';
 import type { Allocation, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
@@ -74,6 +74,50 @@ export async function managementFixture(
     on conflict(key) do update set value = jsonb_set(platform_settings.value, '{idleTimeoutUserAccess}', '"editable"'::jsonb)`.execute(
     db,
   );
+  await sql`update platform_settings set value = jsonb_set(value, '{pterodactylBaseUrl}', coalesce(value->'pterodactylBaseUrl', '"https://panel.example.test"'::jsonb)) where key='platform'`.execute(
+    db,
+  );
+  const providerUrl = (await getSettings(db, {})).values.pterodactylBaseUrl?.replace(/\/$/, '');
+  if (!providerUrl) throw new Error('fixture provider URL missing');
+  const feed = await db
+    .insertInto('provider_change_feeds')
+    .values({
+      instance_id: randomUUID(),
+      healthy_at: null,
+      generation: '1',
+      enabled: true,
+      provider_url: providerUrl,
+      callback_url: 'https://nickhosting.example.test/v1/provider-events/pterodactyl',
+    })
+    .onConflict((c) => c.column('provider_url').doUpdateSet({ enabled: true }))
+    .returning('instance_id')
+    .executeTakeFirstOrThrow();
+  const linkedAccounts = await db
+    .selectFrom('provider_accounts')
+    .select('provider_id')
+    .where('provider_url', '=', providerUrl)
+    .execute();
+  const providerUserId = Math.max(0, ...linkedAccounts.map((row) => row.provider_id ?? 0)) + 1;
+  await db
+    .updateTable('provider_accounts')
+    .set({
+      instance_id: feed.instance_id,
+      provider_url: providerUrl,
+      provider_id: providerUserId,
+      provider_uuid: randomUUID(),
+      external_id: `nh-user-${userId}`,
+      status: 'ready',
+      key_identifier: 'isolated-key',
+      key_envelope: {
+        version: 1,
+        keyId: 'fixture',
+        iv: 'fixture',
+        ciphertext: 'fixture',
+        tag: 'fixture',
+      },
+    })
+    .where('user_id', '=', userId)
+    .execute();
   const hostId = randomUUID(),
     nodeId = randomUUID(),
     mappingId = randomUUID(),

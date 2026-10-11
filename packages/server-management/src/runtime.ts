@@ -38,9 +38,11 @@ import {
   verifyManagedIdentity,
 } from './lifecycle.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
+import { resolveProviderCredential } from './provider-accounts.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { authorizeScheduledEffect } from './schedules.js';
+import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
@@ -264,14 +266,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   const { db } = options;
   const env = options.env ?? {};
-  const [{ values }, applicationKey, clientKey] = await Promise.all([
+  const [{ values }, applicationKey] = await Promise.all([
     getSettings(db, env),
     options.adapter
       ? Promise.resolve(undefined)
       : getSecret(db, options.codec, 'pterodactylApplicationKey', env),
-    options.adapter
-      ? Promise.resolve(undefined)
-      : getSecret(db, options.codec, 'pterodactylClientKey', env),
   ]);
   // Internal reuse fence only: never expose or log a credential-derived binding.
   let consoleProviderBinding: string;
@@ -284,31 +283,64 @@ export async function createManagementRuntime(options: ManagementOptions) {
         JSON.stringify([
           values.pterodactylBaseUrl,
           applicationKey,
-          clientKey,
           values.pterodactylWebSocketOrigins,
         ]),
       )
       .digest('hex');
   }
-  if (!options.adapter && (!values.pterodactylBaseUrl || !applicationKey || !clientKey))
+  if (!options.adapter && (!values.pterodactylBaseUrl || !applicationKey))
     throw new DomainError('integration_unavailable');
   const containerObserver =
     options.containerObserver ??
     (values.dockerObserverSocket
       ? createContainerObserver(values.dockerObserverSocket)
       : undefined);
+  const adapterOptions = {
+    coordinator: options.transportCoordinator,
+    baseURL: values.pterodactylBaseUrl ?? '',
+    applicationKey: applicationKey ?? '',
+    webSocketOrigins: values.pterodactylWebSocketOrigins,
+    downloadOrigins: values.pterodactylDownloadOrigins,
+    uploadOrigins: values.pterodactylUploadOrigins,
+    containerObserver,
+  };
   const adapter =
     options.adapter ??
-    createPterodactylAdapter({
-      coordinator: options.transportCoordinator,
-      baseURL: values.pterodactylBaseUrl ?? '',
-      applicationKey: applicationKey ?? '',
-      clientKey,
-      webSocketOrigins: values.pterodactylWebSocketOrigins,
-      downloadOrigins: values.pterodactylDownloadOrigins,
-      uploadOrigins: values.pterodactylUploadOrigins,
-      containerObserver,
+    createScopedProviderAdapter(createPterodactylAdapter(adapterOptions), async (identifier) => {
+      const server = await db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('pterodactyl_identifier', '=', identifier)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+      if (!server) throw new DomainError('provenance_mismatch');
+      const credential = await resolveProviderCredential(
+        db,
+        options.codec,
+        { serverId: server.id },
+        adapterOptions.baseURL,
+      );
+      return createPterodactylAdapter({ ...adapterOptions, clientKey: credential.clientApiKey });
     });
+  async function consoleBindingForServer(serverId: string) {
+    if (options.adapter) return consoleProviderBinding;
+    const credential = await resolveProviderCredential(
+      db,
+      options.codec,
+      { serverId },
+      adapterOptions.baseURL,
+    );
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          consoleProviderBinding,
+          credential.userId,
+          credential.providerUserId,
+          credential.credentialRevision,
+        ]),
+      )
+      .digest('hex');
+  }
   const externalOptions: ExternalServiceOptions = {
     codec: options.codec,
     env,
@@ -840,6 +872,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   return {
     adapter,
     consoleProviderBinding,
+    consoleBindingForServer,
     containerObserver,
     refreshObservations,
     process,

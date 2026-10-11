@@ -446,7 +446,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       return createConsoleRelay(transport, options, identifier, server.uuid, input);
     },
     /** Read scopes only. Write permissions cannot be proven by these probes. */
-    async discoverCapabilities() {
+    async discoverCapabilities(includeClient = true) {
       const checks = {
         nodes: () => transport.list('application', 'nodes', nodeSchema),
         nests: () => transport.list('application', 'nests', nestSchema),
@@ -461,18 +461,20 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       };
       const result: Record<string, { available: boolean; reason?: string; scope?: string }> = {};
       await Promise.all(
-        Object.entries(checks).map(async ([name, probe]) => {
-          try {
-            await probe();
-            result[name] = { available: true };
-          } catch (error) {
-            result[name] = {
-              available: false,
-              reason: error instanceof PterodactylError ? error.reason : 'unavailable',
-              scope: error instanceof PterodactylError ? error.scope : undefined,
-            };
-          }
-        }),
+        Object.entries(checks)
+          .filter(([name]) => includeClient || name !== 'client')
+          .map(async ([name, probe]) => {
+            try {
+              await probe();
+              result[name] = { available: true };
+            } catch (error) {
+              result[name] = {
+                available: false,
+                reason: error instanceof PterodactylError ? error.reason : 'unavailable',
+                scope: error instanceof PterodactylError ? error.scope : undefined,
+              };
+            }
+          }),
       );
       return result;
     },

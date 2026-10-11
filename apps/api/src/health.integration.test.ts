@@ -45,6 +45,7 @@ describe('Owner health HTTP evidence boundaries', () => {
         root_admin: false,
       },
     ];
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', f.owner.actorUserId).execute();
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
     const identity = createIdentity({

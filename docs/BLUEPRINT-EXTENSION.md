@@ -416,3 +416,119 @@ that its sole origin matched the migrated setting. It is no longer present under
 specific backed-up file before activating the old artifact. Normal 1.0.1 settings
 edits need neither file changes nor cache rebuilds. Governance passed for 570
 indexed text files, 140 PNGs, 473 relative links, four TOML files and 44 ignore cases.
+
+## 2026-10-11 — 1.1.0 per-user technical identities
+
+This supersedes the historical 1.0 rollout's deferred per-user integration.
+[ADR 0015](decisions/0015-provider-technical-accounts.md) records the decision.
+The extension adds idempotent technical-user provisioning, durable technical
+markers, browser/reset/mail restrictions and owner-change invalidation. Its
+Application-authorized endpoint creates native non-admin Pterodactyl users;
+existing administrators are never adopted. Explicit `expectedOwnerId` relinking
+is required to acknowledge a managed server's reviewed owner handoff.
+
+The NickHosting runtime routes Client operations by the registered resource
+owner, including console, files, backups, game content and background jobs.
+Enrollment is durable and separate from feed-health polling. Setup/settings no
+longer advertise the shared Client credential. Existing encrypted secrets are
+retained privately for a reviewed rollback, never used as a runtime fallback.
+
+Activation and live migration evidence must be recorded separately from fixture
+results. Do not interpret account creation tests as proof of a live server owner
+transfer, MySQL concurrency or complete live HTTP middleware behavior.
+
+### 1.1.0 validation and approved live migration
+
+- PHP vendor-backed in-memory harness: **104 checks passed**; package tests:
+  **9 passed**. This covers native user creation, rollback/retry, mail suppression,
+  browser/reset restrictions, key scoping and explicit owner relinking.
+- Adapter discovery/signature/transport and scoped Client dispatch: **50 passed**.
+- PostgreSQL enrollment: **8 passed**, including leases/concurrency, registration
+  rollback, Owner backfill, lost key response, identity drift and encrypted context.
+- Lifecycle: **185 passed**. Registry: **20 passed**, plus the new account ownership
+  regression passed. Transfer readiness/disabled-feed regression passed.
+- Auth, settings, health and schedules: **40 passed**. Initial API fixture failures
+  were caused by replacing fixture users without their new enrollment records;
+  fixtures were corrected, not production enrollment requirements.
+- Combined API-server/runtime run: **94 passed, 1 failed** because a historical
+  assertion assumed an empty database after new console tests had added fixtures.
+  Corrected to compare before/after IDs; affected test and three console rotation
+  regressions: **4 passed**. Platform API: **6 passed** after fixture correction.
+- Real Chromium first-run flow: **1 passed, 5 intentionally skipped**. The removed
+  shared Client-key field is asserted absent; actual setup/auth handlers complete.
+  [Sanitized setup screenshot](screenshots/m5/setup-provider-individual-keys-desktop-en.png).
+- Typecheck, formatting and focused changed-file lint passed. Whole-repository
+  lint still reports the pre-existing missing SVG title in
+  `games/minecraft/src/ui/assets/player-placeholder.svg`; unrelated warnings were
+  not rewritten as part of this account migration.
+
+Commands used include `scripts/dev.sh pnpm typecheck`, `pnpm format:check`,
+`pnpm lint`, targeted `pnpm exec vitest run`, and
+`pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config
+vitest.integration.config.ts` with the named affected suites. Browser validation
+uses `vitest.browser.config.ts` and the first-run test filter. PHP validation uses
+`python3 extensions/nickhosting/tests/run_php_tests.py --container <existing-panel>`
+without bootstrapping the production database; packaging uses unittest discovery.
+No historical full M1–M5 matrix was repeated.
+
+Independent reviews found and resolved feed polling blocked behind enrollment,
+console credential rotation during/after connection, relay cleanup on credential
+lookup failure, transfer readiness with a disabled feed, and equal-revision
+recovery after an explicit handoff lost local confirmation. Ordinary projection
+invalidation remains strict. MySQL concurrency and fault-injected execution of
+the entire handoff are not claimed by the SQLite/helper tests.
+
+The approved existing Blueprint installation was updated to 1.1.0 using its
+standard installer. Artifact SHA-256:
+`8ce755e7d13da04b561bc4b5722a982448896c18bc315eb0e5af01065609b475`.
+Private backups preserve 1.0.1 and scoped pre-update files. Live Application
+capability discovery returned 200; anonymous and Client-key requests to the
+administrative endpoint returned 401/403. Only application migration 023 was
+applied by the unchanged checksum-verifying runner; no database reset occurred.
+
+The existing NickHosting Owner received a separate non-admin provider account
+(ID 7). Its Client key initially listed zero servers. After the Owner's separate
+explicit approval, only server 53 was reassigned from provider administrator 1
+to technical account 7 through the regular Application details endpoint. Exact
+UUID/external identity and unchanged name/description were verified. The local
+owner pin, fresh projection and durable audit were committed; no pending jobs
+existed. The original provider administrator remains administrator, without an
+`nh-` prefix. The new Client key now lists only the transferred server. Read-only
+runtime checks succeeded for server details, offline resources, files and backups.
+The first file-list smoke used `/` instead of the adapter's empty-root input and
+failed local validation; corrected input passed, without a provider mutation.
+
+No game start/stop, file edit, egg/node/allocation/network change or additional
+server creation was performed. API and worker are healthy. Gateway reported
+`backend_active_binding` while the server was sleeping: its reachability proof
+includes provider-owner identity and cannot be reused after the handoff. A normal
+Owner-initiated Start is required to establish fresh actual backend proof; no
+proof was forged and no automatic game start or Gateway restart was performed.
+Do not claim post-migration sleep/wake validation until that test is completed.
+Issue #18 remains the independent SFTPGo production-release gate.
+
+The node editor no longer asks for a shared Pterodactyl user. Existing node rows
+retain their legacy metadata; new rows derive that metadata from the ready Owner
+technical account. New server creation always selects the individual server
+owner's account. Two focused PostgreSQL checks cover omission, pending enrollment,
+legacy validation and preserved existing-node identity. Explicit handoff helper
+checks add three tests for approval, exact identity and stale/equal revisions.
+
+For future approved migrations, run `node --import tsx
+scripts/provider-account-handoff.mjs --owner-approved --server <local-uuid>
+--expected-provider-id <id> --expected-provider-uuid <uuid>
+--expected-owner-id <old-owner>` in the configured application environment. It
+records intent before the remote effect, rejects active/uncertain operations,
+verifies the technical target, preserves server details and checks remote state
+before committing local ownership. A lost response is read back, not blindly
+replayed. Review the durable plan before retrying. This is not automatic import
+or a bulk reassignment tool. Rollback requires an explicitly reviewed reverse
+handoff and matching credential deployment, not deletion of provider accounts.
+
+The changed Owner node dialog was also exercised in Chromium: **1 passed, 2
+intentionally skipped**, including the existing 2,000-allocation save flow and
+an assertion that the provider-user selector is absent. Its
+[sanitized desktop screenshot](screenshots/m5/owner-node-individual-account-desktop-en.png)
+was inspected alongside the setup screenshot; no clipping or spacing regression
+was found. These desktop images do not claim fresh mobile/Italian coverage.
+The development HTTPS ingress returned 200 after migration.

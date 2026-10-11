@@ -14,7 +14,7 @@ final class ChangeFeed
         DB::transaction(function () use ($server, $deleted) {
             $link = DB::table('nickhosting_servers')->where('server_id', $server->id)->lockForUpdate()->first();
             if (!$link || !$link->valid) { return; }
-            $valid = !$deleted && json_decode($link->identity, true) === Protocol::identity($server);
+            $valid = !$deleted && $link->owner_id === $server->owner_id && json_decode($link->identity, true) === Protocol::identity($server);
             $limits = Protocol::limits($server);
             if ($valid && json_decode($link->limits, true) === $limits) { return; }
             DB::table('nickhosting_servers')->where('uuid', $link->uuid)->update([

@@ -7,6 +7,9 @@ import zipfile
 
 FILES = (
     'conf.yml',
+    'app/Services/TechnicalAccounts.php',
+    'app/Http/Middleware/TechnicalAccountAccess.php',
+    'private/migrations/2026_10_12_000003_nickhosting_technical_users.php',
     'admin/view.blade.php',
     'admin/controller.php',
     'app/Http/Controllers/BridgeController.php',
@@ -65,6 +68,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.0.1/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.1.0/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

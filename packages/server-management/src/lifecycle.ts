@@ -275,7 +275,7 @@ export async function verifyManagedIdentity(
     ) ||
     remote.external_id !== server.external_id ||
     remote.node !== node.pterodactyl_node_id ||
-    remote.user !== node.provision_user_id ||
+    remote.user !== server.provider_user_id ||
     remote.allocation !== primary.pterodactyl_allocation_id ||
     (!provisioning &&
       (remote.id !== server.pterodactyl_id ||

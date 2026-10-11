@@ -136,9 +136,7 @@ export async function getOwnerHealth(
   const configured = (name: string) =>
     secrets.some((secret) => secret.name === name && secret.configured);
   const providerConfigured = Boolean(
-    config.pterodactylBaseUrl &&
-      configured('pterodactylApplicationKey') &&
-      configured('pterodactylClientKey'),
+    config.pterodactylBaseUrl && configured('pterodactylApplicationKey'),
   );
   const provider = async () => {
     if (!providerConfigured)
@@ -150,7 +148,7 @@ export async function getOwnerHealth(
       };
     try {
       const result = await (await options.management()).adapter.discoverCapabilities();
-      const readScopes = ['nodes', 'nests', 'servers', 'users', 'client'].map((scope) => {
+      const readScopes = ['nodes', 'nests', 'servers', 'users'].map((scope) => {
         const value = result[scope];
         const reason = reasonSchema.safeParse(value?.reason);
         return {

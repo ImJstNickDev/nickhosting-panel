@@ -80,6 +80,8 @@ describe('Owner allocation range selection', () => {
     await owner.getByRole('button', { name: 'Managed nodes', exact: true }).click();
     await owner.getByRole('button', { name: 'Edit', exact: true }).click();
     const dialog = owner.getByRole('dialog');
+    await browserExpect(dialog.locator('[name="provisionUser"]')).toHaveCount(0);
+    await fixture.screenshot(owner, 'owner-node-individual-account-desktop-en');
     const editor = dialog.getByTestId('allocation-pool-editor');
     await browserExpect(editor.locator('tbody tr')).toHaveCount(25);
     await editor

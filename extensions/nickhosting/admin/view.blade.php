@@ -2,7 +2,7 @@
     $italian = str_starts_with(app()->getLocale(), 'it');
 @endphp
 <div class="box box-primary">
-    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.0.1</small></h3></div>
+    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.1.0</small></h3></div>
     <div class="box-body">
         @if (session('nickhosting_saved'))
             <div class="alert alert-success" role="status">{{ $italian ? 'Impostazione salvata.' : 'Setting saved.' }}</div>

@@ -562,7 +562,7 @@ export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {
       's.pterodactyl_id',
       's.pterodactyl_uuid',
       's.external_id',
-      'n.provision_user_id',
+      's.provider_user_id',
       'n.pterodactyl_node_id',
       'a.pterodactyl_allocation_id',
       'm.nest_id',
@@ -573,12 +573,13 @@ export async function gatewaySafetyContext(db: DB, route: GatewayRoute) {
     .where('s.connection_mode', '=', 'gateway')
     .where('a.id', '=', route.allocationId)
     .executeTakeFirst();
-  if (!row?.pterodactyl_id || !row.pterodactyl_uuid) throw new DomainError('not_found');
+  if (!row?.pterodactyl_id || !row.pterodactyl_uuid || !row.provider_user_id)
+    throw new DomainError('not_found');
   return {
     providerServerId: row.pterodactyl_id,
     providerServerUuid: row.pterodactyl_uuid,
     externalId: row.external_id,
-    providerUserId: row.provision_user_id,
+    providerUserId: row.provider_user_id,
     providerNodeId: row.pterodactyl_node_id,
     providerAllocationId: row.pterodactyl_allocation_id,
     nestId: row.nest_id,

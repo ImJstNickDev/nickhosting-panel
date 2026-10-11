@@ -901,3 +901,18 @@ subsequent saves use Blueprint database settings, not PHP configuration files or
 worker restarts. Registered callback destinations are not automatically retargeted
 when this field changes. The administration page displays actual pending events
 and the last acknowledged delivery; saving a URL alone does not prove connection.
+
+### Per-user provider credentials
+
+See [ADR 0015](decisions/0015-provider-technical-accounts.md). The real-provider
+runtime uses individual encrypted Client keys provisioned by Blueprint 1.1.0;
+Owner settings retain the Application key but no longer request a shared Client
+key. Only Pterodactyl technical usernames carry `nh-`; NickHosting profiles stay
+unchanged. Apply migration 023 before activating the changed runtime. Enrollment
+is recoverable and independent of the provider change-feed health loop.
+
+An existing server is not automatically reassigned: its pinned previous provider
+owner deliberately blocks use with a different technical identity until a scoped
+handoff is approved and verified. Keep the old artifact and encrypted legacy
+credential for reviewed recovery; do not reset development data or remove the
+Blueprint browser/mail guards as a shortcut.

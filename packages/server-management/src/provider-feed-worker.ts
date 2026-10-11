@@ -57,6 +57,7 @@ export async function refreshProviderFeeds(
             's.pterodactyl_id',
             's.pterodactyl_uuid',
             's.pterodactyl_identifier',
+            's.provider_user_id',
             's.external_id',
             'n.pterodactyl_node_id',
             'p.synchronized_at',
@@ -71,13 +72,17 @@ export async function refreshProviderFeeds(
             continue;
           const snapshot = server.synchronized_at
             ? await bridge.getServer(feed.instance_id, server.pterodactyl_uuid)
-            : await bridge.linkServer(feed.instance_id, {
-                providerId: server.pterodactyl_id,
-                providerUuid: server.pterodactyl_uuid,
-                identifier: server.pterodactyl_identifier,
-                externalId: server.external_id,
-                nodeId: server.pterodactyl_node_id,
-              });
+            : await bridge.linkServer(
+                feed.instance_id,
+                {
+                  providerId: server.pterodactyl_id,
+                  providerUuid: server.pterodactyl_uuid,
+                  identifier: server.pterodactyl_identifier,
+                  externalId: server.external_id,
+                  nodeId: server.pterodactyl_node_id,
+                },
+                server.provider_user_id ?? undefined,
+              );
           // Projection updates own short transaction so receiver deliveries are not blocked by network I/O.
           await linkProviderFeedServer(db, feed.instance_id, server.id, snapshot);
         }

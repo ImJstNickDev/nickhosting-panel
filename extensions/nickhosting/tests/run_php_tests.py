@@ -15,6 +15,8 @@ sources.append("eval(base64_decode('"+base64.b64encode((root/'admin/controller.p
 migration=root/'private/migrations/2026_10_11_000001_nickhosting_bridge.php'
 script="<?php require '/app/vendor/autoload.php';\n"+'\n'.join(sources)
 script+="\n$schemaMigration=eval(base64_decode('"+base64.b64encode(migration.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
+technical=root/'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'
+script+="\n$technicalMigration=eval(base64_decode('"+base64.b64encode(technical.read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\ndefine('NICKHOSTING_TEST_CONFIGURE', true); eval(base64_decode('"+base64.b64encode((root/'private/configure.php').read_bytes().removeprefix(b'<?php')).decode()+"'));\n"
 script+="\n$settingsView=base64_decode('"+base64.b64encode((root/'admin/view.blade.php').read_bytes()).decode()+"');\n"
 script+=(root/'tests/php_harness.php').read_text().removeprefix('<?php')

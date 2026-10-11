@@ -848,6 +848,10 @@ describe('M5 platform browser queries and metadata', () => {
       .execute();
     const result = await getPlatformTransfers(f.db, f.context, id, env);
     expect(result.upload).toMatchObject({ available: true, providerMaxFileBytes: 5_000_000_000 });
+    await f.db.updateTable('provider_change_feeds').set({ enabled: false }).execute();
+    expect((await getPlatformTransfers(f.db, f.context, id, env)).upload.available).toBe(false);
+    await f.db.updateTable('provider_change_feeds').set({ enabled: true }).execute();
+
     expect(JSON.stringify(result)).not.toMatch(/isolated-secret|isolated-private-path/);
     expect(
       (

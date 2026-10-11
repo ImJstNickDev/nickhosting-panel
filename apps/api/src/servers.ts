@@ -585,7 +585,7 @@ export function registerServerRoutes(
           current,
           c.req.param('id'),
           JSON.stringify([id, server.pterodactyl_id, server.pterodactyl_uuid, server.external_id]),
-          service.consoleProviderBinding,
+          await service.consoleBindingForServer(c.req.param('id')),
         );
         // Choose transport before dispatch. A WS error may follow a sent frame: never replay it.
         if (relay) await relay.sendCommand(input.command);
@@ -643,12 +643,13 @@ export function registerServerRoutes(
       let authorizationDenied = false;
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
+        const providerBinding = await service.consoleBindingForServer(c.req.param('id'));
         const relay = await service.adapter.relayConsole(identifier, {
           canSendCommands,
           authorizeCommand: async () => {
             try {
               await authorizeServer(db, await principal(c), c.req.param('id'), 'server:manage');
-              return true;
+              return providerBinding === (await service.consoleBindingForServer(c.req.param('id')));
             } catch {
               return false;
             }
@@ -657,7 +658,7 @@ export function registerServerRoutes(
           authorize: async () => {
             try {
               await authorizeServer(db, await principal(c), c.req.param('id'));
-              return true;
+              return providerBinding === (await service.consoleBindingForServer(c.req.param('id')));
             } catch {
               authorizationDenied = true;
               return false;
@@ -677,15 +678,18 @@ export function registerServerRoutes(
             }
           },
         });
-        if (canSendCommands && !relayClosed && !controller.signal.aborted)
-          unregister = commandRelays.register(
-            context,
-            c.req.param('id'),
-            identity,
-            service.consoleProviderBinding,
-            relay,
-          );
         try {
+          if (providerBinding !== (await service.consoleBindingForServer(c.req.param('id')))) {
+            throw new DomainError('integration_unavailable');
+          }
+          if (canSendCommands && !relayClosed && !controller.signal.aborted)
+            unregister = commandRelays.register(
+              context,
+              c.req.param('id'),
+              identity,
+              providerBinding,
+              relay,
+            );
           if (c.req.query('history') !== '0') await relay.requestLogs();
           output.send({ event: 'connected', data: JSON.stringify({ type: 'connected' }) });
           // Offline Wings can remain silent. Keep the HTTP stream active without

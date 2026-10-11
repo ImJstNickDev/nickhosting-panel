@@ -416,7 +416,6 @@ export function Setup() {
                 instanceName: text(data, 'instanceName'),
                 pterodactylBaseURL: text(data, 'url'),
                 pterodactylApplicationKey: String(data.get('applicationKey')),
-                pterodactylClientKey: String(data.get('clientKey')) || undefined,
               },
             });
             await queryClient.invalidateQueries({ queryKey: ['setup'] });
@@ -432,7 +431,6 @@ export function Setup() {
             autoComplete="off"
             required
           />
-          <Input label={t('web.clientKey')} name="clientKey" type="password" autoComplete="off" />
         </ActionForm>
       ) : (
         <>

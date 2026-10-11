@@ -43,7 +43,8 @@ describe('M5 real browser identity and Owner setup', () => {
     await owner.getByLabel('Instance name', { exact: true }).fill('NickHosting');
     await owner.getByLabel('Pterodactyl URL').fill('https://panel.example.test');
     await owner.getByLabel('Application API key').fill('browser-fixture-application');
-    await owner.getByLabel('Client API key').fill('browser-fixture-client');
+    await browserExpect(owner.getByLabel('Client API key')).toHaveCount(0);
+    await fixture.screenshot(owner, 'setup-provider-individual-keys-desktop-en');
     await owner.getByRole('button', { name: 'Validate and finish setup' }).click();
     await browserExpect(owner).toHaveURL(`${fixture.origin}/owner`);
     expect(

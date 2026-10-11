@@ -171,12 +171,14 @@ export async function getSecret(
 /** Only presence/source can be returned to HTTP clients. */
 export async function secretStatus(db: DB, env: Environment = {}) {
   const rows = await db.selectFrom('encrypted_secrets').select('name').execute();
-  return secretNames.map((name) => ({
-    name,
-    configured: env[secretEnv[name]] !== undefined || rows.some((r) => r.name === name),
-    source: env[secretEnv[name]] !== undefined ? 'environment' : 'database',
-    locked: env[secretEnv[name]] !== undefined,
-  }));
+  return secretNames
+    .filter((name) => name !== 'pterodactylClientKey')
+    .map((name) => ({
+      name,
+      configured: env[secretEnv[name]] !== undefined || rows.some((r) => r.name === name),
+      source: env[secretEnv[name]] !== undefined ? 'environment' : 'database',
+      locked: env[secretEnv[name]] !== undefined,
+    }));
 }
 
 export async function storeSecret(
@@ -237,7 +239,6 @@ export async function saveBootstrapConfiguration(
   );
   const entries: [SecretName, string | undefined][] = [
     ['pterodactylApplicationKey', input.pterodactylApplicationKey],
-    ['pterodactylClientKey', input.pterodactylClientKey],
   ];
   for (const [name, value] of entries) {
     if (value && env[secretEnv[name]] === undefined)

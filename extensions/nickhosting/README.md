@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.0.1**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.1.0**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
@@ -19,6 +19,7 @@ All responses use `Cache-Control: no-store`.
 | GET `/instances/{instance}/health` | servers READ | Pending delivery count, last delivery and checked time |
 | PUT `/instances/{instance}/servers/{uuid}` | servers WRITE | Explicit exact-identity link and authoritative snapshot |
 | GET `/instances/{instance}/servers/{uuid}` | servers READ | Fresh authoritative snapshot, detect bypassed model events |
+| POST `/instances/{instance}/users/{nickUser}/provision` | users WRITE | Idempotent nonadministrator technical-account creation |
 | PUT `/instances/{instance}/users/{nickUser}` | users WRITE | Explicit nonadministrator account link |
 | POST `/instances/{instance}/users/{nickUser}/keys` | users WRITE | Idempotent native Client key issuance |
 | POST `/instances/{instance}/users/{nickUser}/keys/{identifier}/rotate` | users WRITE | Issue replacement, retain original until explicit acknowledgement/revoke |
@@ -48,8 +49,11 @@ not silently retarget identities.
 Server link identity: `{providerId, providerUuid, identifier, externalId, nodeId}`.
 Every field must match the live Panel model. A name/prefix is never proof.
 One server cannot be linked to another instance. Identity drift invalidates the
-link permanently until a deliberate administrative migration; retrying PUT does
-not silently repair or retarget it. Only limits are synchronized; allocation
+link until a deliberate administrative migration; retrying ordinary PUT does
+not silently repair or retarget it. Provider owner changes also invalidate the link.
+An explicit PUT with `expectedOwnerId` can revalidate an owner handoff only when
+all original immutable fields still match and the live owner equals that exact ID.
+It advances the revision and audits the handoff; GET never repairs ownership. Only limits are synchronized; allocation
 inventory, ownership/admission and Gateway topology checks remain independent.
 
 Events/snapshots: `{schemaVersion:1,eventId,instanceId,server,revision,type,limits,occurredAt}`.
@@ -83,11 +87,41 @@ bypass that guarantee. Periodic authoritative snapshots are mandatory recovery;
 no claim of instantaneous consistency is made. Delivered events and audit rows
 are retained; operators must plan explicit retention before high-volume deployment.
 
+## Technical accounts
+
+`POST /instances/{instance}/users/{nickUser}/provision` accepts an empty JSON
+object and returns `{providerId,providerUuid,externalId}`. It invokes the installed
+native `UserCreationService` with a random password that is never returned or
+retained. Username is `nh-` plus a deterministic 29-character digest; the opaque
+email is under `accounts.nickhosting.invalid` and never uses the person's email.
+The external ID includes the instance and NickHosting UUID. No email/username
+matching adopts an existing account. Any unlinked identity collision fails closed.
+
+The existing instance row is locked before creation; the native account and exact
+technical link commit together. A lost response can be retried without a second
+account. The technical marker is separate from legacy explicit user links, so
+existing users do not acquire browser restrictions merely by linking a key.
+
+Middleware on the web/Blueprint and authenticated API groups blocks technical
+browser sessions, login, password recovery/reset and pending 2FA checkpoints.
+A login event guard provides additional coverage. Only actual account API tokens
+on Client API paths pass; cookie-based Sanctum tokens do not. Notifications and
+direct mail addressed to exact technical accounts are suppressed. During native
+creation an in-process exact external-ID scope covers synchronous mail before
+the durable link is inserted. Queued mail checks the committed link when sent.
+Neither an `nh-` name nor the email domain alone establishes managed identity.
+Unrelated users, including existing Panel administrators, remain unaffected.
+
+Keep these guards installed while technical accounts exist: uninstalling or
+rolling back to 1.0 removes their browser/mail protection. Retire accounts/keys
+or plan equivalent restrictions before removing the extension. The extension
+does not automatically move existing servers or migrate ordinary linked accounts.
+
 ## Account keys
 
 Link body `{providerId,providerUuid,externalId}` identifies an account explicitly
-selected by authorized NickHosting administration. No email matching, account
-creation, ownership reassignment or migration occurs automatically. Root admins,
+selected by authorized NickHosting administration. This legacy link endpoint performs no email matching, account
+creation, ownership reassignment or migration. Root admins,
 identity changes and cross-instance reuse are rejected. Mint/rotate bodies use
 `{operationId,allowedIps?}` (UUID idempotency key, optional IP/CIDR restrictions).
 Responses `{operationId,identifier,key}` are backend-only. Native Pterodactyl
@@ -134,7 +168,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.0.1/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.1.0/nickhosting.blueprint`.
 
 ## Upstream reference / licensing
 

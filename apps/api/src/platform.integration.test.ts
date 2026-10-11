@@ -74,6 +74,7 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
   beforeAll(async () => {
     database = await createTestDatabase();
     f = await managementFixture(database.db);
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', f.owner.actorUserId).execute();
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
     const identity = createIdentity({
@@ -107,6 +108,14 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     f.owner.actorUserId = ownerId;
     f.owner.subjectUserId = ownerId;
     const userId = await invited(user, 'platform-user@example.test');
+    // Transport is injected in these tests; move the isolated ready provider identity
+    // to the actual invite-created principal without altering the auth pipeline.
+    await f.db.deleteFrom('provider_accounts').where('user_id', '=', userId).execute();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ user_id: userId })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
     f.context.actorUserId = userId;
     f.context.subjectUserId = userId;
     peerId = await invited(peer, 'platform-peer@example.test');

@@ -294,7 +294,7 @@ describe('management runtime execution-time authorization', () => {
     expect(first.consoleProviderBinding).toBe(same.consoleProviderBinding);
     expect(changed.consoleProviderBinding).not.toBe(first.consoleProviderBinding);
   });
-  it('invalidates console binding when real provider URL or either credential changes', async () => {
+  it('invalidates console base binding on provider changes and ignores obsolete global Client credentials', async () => {
     const env = {
       NH_PTERODACTYL_BASE_URL: 'https://provider.example.test',
       NH_PTERODACTYL_APPLICATION_KEY: 'fixture-application',
@@ -308,11 +308,55 @@ describe('management runtime execution-time authorization', () => {
     for (const patch of [
       { NH_PTERODACTYL_BASE_URL: 'https://other.example.test' },
       { NH_PTERODACTYL_APPLICATION_KEY: 'rotated-application' },
-      { NH_PTERODACTYL_CLIENT_KEY: 'rotated-client' },
       { NH_PTERODACTYL_WEBSOCKET_ORIGINS: '["wss://other.example.test"]' },
     ])
       expect(await binding(patch)).not.toBe(initial);
+    expect(await binding({ NH_PTERODACTYL_CLIENT_KEY: 'ignored-legacy' })).toBe(initial);
     expect(initial).not.toContain('fixture');
+  });
+  it('fences console reuse when the managed owner Client credential rotates', async () => {
+    const serverId = await f.server();
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    const seal = (operationId: string, token: string) =>
+      codec.encrypt(
+        token,
+        `provider-client:${account.instance_id}:${account.user_id}:${operationId}`,
+      );
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ key_envelope: seal(account.key_operation_id, 'isolated-client-a') })
+      .where('user_id', '=', account.user_id)
+      .execute();
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      env: { NH_PTERODACTYL_APPLICATION_KEY: 'fixture-application' },
+    });
+    const first = await runtime.consoleBindingForServer(serverId);
+    expect(await runtime.consoleBindingForServer(serverId)).toBe(first);
+    const operation = randomUUID();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({
+        key_operation_id: operation,
+        key_identifier: 'rotated',
+        key_envelope: seal(operation, 'isolated-client-b'),
+      })
+      .where('user_id', '=', account.user_id)
+      .execute();
+    expect(await runtime.consoleBindingForServer(serverId)).not.toBe(first);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ provider_user_id: 999 })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(runtime.consoleBindingForServer(serverId)).rejects.toThrow(
+      'integration_unavailable',
+    );
   });
   it('binds restart process evidence to the host and current provider identity', async () => {
     const serverId = await f.server();

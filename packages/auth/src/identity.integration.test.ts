@@ -518,6 +518,9 @@ describe('real PostgreSQL identity boundaries', () => {
   });
 
   it('rolls invitation consumption back if credential insertion fails after user creation', async () => {
+    const beforeEnrollment = await database.pool.query(
+      'SELECT user_id FROM provider_accounts ORDER BY user_id',
+    );
     const invite = await invitation();
     await database.pool.query(`CREATE FUNCTION fixture_reject_account() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
@@ -545,6 +548,9 @@ describe('real PostgreSQL identity boundaries', () => {
           ])
         ).rowCount,
       ).toBe(0);
+      expect(
+        (await database.pool.query('SELECT user_id FROM provider_accounts ORDER BY user_id')).rows,
+      ).toEqual(beforeEnrollment.rows);
     } finally {
       await database.pool.query(
         'DROP TRIGGER fixture_reject ON account; DROP FUNCTION fixture_reject_account()',
