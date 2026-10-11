@@ -109,7 +109,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<unknown>();
   const [connection, setConnection] = useState(0);
-  const [retained, setRetained] = useState(false);
   const [follow, setFollow] = useState(true);
   const output = useRef<HTMLElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: explicit reconnect and authenticated identity delimit the stream.
@@ -129,7 +128,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     let current = cached?.lines ?? [];
     let lastStatus = cached?.lastStatus;
     setBuffer({ scope, lines: current });
-    setRetained(current.length > 0);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
@@ -191,7 +189,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         );
         if (!controller.signal.aborted) {
           setState('disconnected');
-          setRetained(current.length > 0);
           retry();
         }
       } catch (failure) {
@@ -199,7 +196,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           setError(failure);
           setState('disconnected');
           if (transientFailure(failure)) {
-            setRetained(current.length > 0);
             retry();
           } else {
             current = [];
@@ -239,14 +235,19 @@ export function ConsolePage({ serverId }: { serverId: string }) {
               ))}
             {consoleAvailable && (
               <>
-                <span role="status">{t(`service.${state}`)}</span>
                 <button
                   type="button"
-                  className="secondary"
+                  className="console-connection"
+                  data-state={state}
+                  aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
+                  title={t('service.connectionAction', { state: t(`service.${state}`) })}
                   onClick={() => setConnection((value) => value + 1)}
                 >
-                  {t('service.reconnect')}
+                  <span className="console-connection-dot" aria-hidden="true" />
                 </button>
+                <span className="visually-hidden" role="status">
+                  {t(`service.${state}`)}
+                </span>
               </>
             )}
           </div>
@@ -270,7 +271,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           <>
             {Boolean(error) && <ErrorNotice error={error} />}
             <ConsoleOutput output={output} lines={lines} />
-            {retained && <p className="muted">{t('service.consoleRetained')}</p>}
             <label className="check">
               <input
                 type="checkbox"

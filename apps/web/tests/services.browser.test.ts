@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
 import type { ConsoleRelayOptions } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page } from '@playwright/test';
@@ -161,14 +162,119 @@ describe('M5 browser files, backups, console and automation', () => {
     );
     await browserExpect(
       user.getByText('Output retained in this tab.', { exact: false }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     const contents = await user.locator('.console pre').innerText();
     expect(contents.match(/There are 0 of a max of 20 players online/g)).toHaveLength(1);
-    await harness.screenshot(user, 'console-telemetry-desktop-en');
     const audit = await new AxeBuilder({ page: user })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
       .analyze();
     expect(audit.violations.map((v) => v.id)).toEqual([]);
+  });
+  it('exposes connection indicator states and reconnects by pointer and keyboard in both locales', async () => {
+    for (const locale of ['en', 'it'] as const) {
+      await user.goto(`${base}/files`);
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+      await user.setViewportSize(
+        locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+      );
+      let attempts = 0;
+      let denyConnection = false;
+      let powerRequests = 0;
+      let release: () => void = () => {};
+      const pending = new Promise<void>((done) => {
+        release = done;
+      });
+      const onRequest = (request: import('@playwright/test').Request) => {
+        if (request.method() === 'POST' && request.url().endsWith('/operations')) powerRequests++;
+      };
+      user.on('request', onRequest);
+      await user.route('**/v1/servers/*/console*', async (route) => {
+        if (route.request().method() !== 'GET') return route.continue();
+        attempts++;
+        await pending;
+        if (denyConnection)
+          return route.fulfill({
+            status: 403,
+            contentType: 'application/json',
+            body: '{"error":{"code":"forbidden","messageKey":"errors.forbidden"}}',
+          });
+        return route.continue();
+      });
+      const indicator = user.locator('.console-connection');
+      const states = {
+        connecting: locale === 'en' ? 'Connecting… — Reconnect' : 'Connessione… — Riconnetti',
+        connected: locale === 'en' ? 'Connected — Reconnect' : 'Connesso — Riconnetti',
+        disconnected: locale === 'en' ? 'Disconnected — Reconnect' : 'Disconnesso — Riconnetti',
+      };
+      const colors = {
+        connecting: 'rgb(184, 135, 0)',
+        connected: 'rgb(22, 128, 60)',
+        disconnected: 'rgb(180, 35, 24)',
+      };
+      const checkState = async (state: keyof typeof states) => {
+        await browserExpect(indicator).toHaveAttribute('data-state', state);
+        await browserExpect(indicator).toHaveAccessibleName(states[state]);
+        await browserExpect(indicator).toHaveAttribute('title', states[state]);
+        await browserExpect(indicator.locator('span')).toHaveCSS('background-color', colors[state]);
+      };
+      try {
+        await user.goto(`${base}/console`);
+        await checkState('connecting');
+        release();
+        await checkState('connected');
+        await browserExpect(indicator).toHaveText('');
+        const target = await indicator.boundingBox();
+        expect(target?.width).toBeGreaterThanOrEqual(40);
+        expect(target?.height).toBeGreaterThanOrEqual(40);
+        await browserExpect(indicator.locator('span')).toHaveCSS('width', '12px');
+        await browserExpect(indicator.locator('span')).toHaveCSS('height', '12px');
+        let previousAttempts = attempts;
+        denyConnection = true;
+        await indicator.click();
+        await checkState('disconnected');
+        expect(attempts).toBeGreaterThan(previousAttempts);
+        await indicator.focus();
+        await user.keyboard.press('Tab');
+        await user.keyboard.press('Shift+Tab');
+        await browserExpect(indicator).toBeFocused();
+        expect(
+          await indicator.evaluate((element) => getComputedStyle(element).outlineStyle),
+        ).not.toBe('none');
+        denyConnection = false;
+        previousAttempts = attempts;
+        await user.keyboard.press('Enter');
+        await checkState('connected');
+        expect(attempts).toBeGreaterThan(previousAttempts);
+        await browserExpect(indicator).toBeFocused();
+        previousAttempts = attempts;
+        await user.keyboard.press('Space');
+        await browserExpect.poll(() => attempts).toBeGreaterThan(previousAttempts);
+        await checkState('connected');
+        expect(powerRequests).toBe(0);
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(audit.violations.map((violation) => violation.id)).toEqual([]);
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await user.screenshot({
+          path: resolve(
+            'docs/screenshots/m5',
+            `console-indicator-${locale === 'en' ? 'desktop-en' : 'mobile-it'}.png`,
+          ),
+          fullPage: true,
+        });
+      } finally {
+        release();
+        user.off('request', onRequest);
+        await user.goto(`${base}/files`);
+        await user.unrouteAll({ behavior: 'wait' });
+      }
+    }
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    expect(errors).toEqual([]);
   });
   it('records status transitions once across repeated snapshots, reconnects and retained navigation', async () => {
     const original = provider.adapter.relayConsole;
@@ -194,17 +300,17 @@ describe('M5 browser files, backups, console and automation', () => {
     try {
       await user.goto(`${base}/console`);
       await browserExpect.poll(() => connections).toBeGreaterThanOrEqual(1);
-      await browserExpect(
-        user.getByRole('status', { name: '', exact: true }).filter({ hasText: /^Connected$/ }),
-      ).toBeVisible();
       const connected = () =>
-        browserExpect(user.getByRole('status').filter({ hasText: /^Connected$/ })).toBeVisible();
+        browserExpect(
+          user.getByRole('button', { name: 'Connected — Reconnect', exact: true }),
+        ).toHaveAttribute('data-state', 'connected');
+      await connected();
       let previousConnections = connections;
       emit('status', 'offline');
       emit('console', 'A real log between status snapshots');
       emit('status', 'offline');
       await browserExpect.poll(offlineCount).toBe(1);
-      await user.getByRole('button', { name: 'Reconnect', exact: true }).click();
+      await user.getByRole('button', { name: 'Connected — Reconnect', exact: true }).click();
       await browserExpect.poll(() => connections).toBeGreaterThan(previousConnections);
       await connected();
       previousConnections = connections;
@@ -221,7 +327,6 @@ describe('M5 browser files, backups, console and automation', () => {
       emit('console', 'Navigation marker');
       await browserExpect(user.locator('.console pre')).toContainText('Navigation marker');
       expect(await offlineCount()).toBe(1);
-      await harness.screenshot(user, 'console-status-deduplicated-en');
       // The last observed state survives eviction of its original line from the bounded buffer.
       for (let index = 0; index < 305; index++) {
         emit('console', `Fixture log ${index}`);
@@ -231,7 +336,7 @@ describe('M5 browser files, backups, console and automation', () => {
       }
       await browserExpect(user.locator('.console pre')).toContainText('Fixture log 304');
       expect(await offlineCount()).toBe(0);
-      await user.getByRole('button', { name: 'Reconnect', exact: true }).click();
+      await user.getByRole('button', { name: 'Connected — Reconnect', exact: true }).click();
       await browserExpect.poll(() => connections).toBeGreaterThan(previousConnections);
       await connected();
       emit('status', 'offline');

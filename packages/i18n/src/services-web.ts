@@ -6,10 +6,6 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Processo del server in esecuzione.',
   ],
   'service.consoleStatus.stopping': ['Server stopping…', 'Arresto del server…'],
-  'service.consoleRetained': [
-    'Output retained in this tab. Messages while disconnected may be missing.',
-    'Output conservato in questa scheda. Potrebbero mancare messaggi ricevuti durante la disconnessione.',
-  ],
   'service.consoleUnavailable': [
     'Console connection lost. Reconnecting…',
     'Connessione alla console interrotta. Riconnessione…',
@@ -156,7 +152,7 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'service.connecting': ['Connecting…', 'Connessione…'],
   'service.connected': ['Connected', 'Connesso'],
   'service.disconnected': ['Disconnected', 'Disconnesso'],
-  'service.reconnect': ['Reconnect', 'Riconnetti'],
+  'service.connectionAction': ['{state} — Reconnect', '{state} — Riconnetti'],
   'service.consoleOutput': ['Server console output', 'Output della console del server'],
   'service.noConsoleOutput': ['No console output received', 'Nessun output della console ricevuto'],
   'service.followConsole': ['Follow new output', 'Segui il nuovo output'],

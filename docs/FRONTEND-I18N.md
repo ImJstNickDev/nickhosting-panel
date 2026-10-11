@@ -52,6 +52,11 @@ The server root replaces history with `/console` when console capability or oper
 permission is available. An operator without console capability retains lifecycle
 controls without an unsupported stream; a viewer with neither falls back to Status.
 Focused tabs scroll into view in the horizontal navigation on keyboard traversal.
+Console connection state uses a compact clickable dot (green connected, yellow
+connecting, red disconnected). The 40px button reconnects the stream and exposes
+localized state/action text to assistive technology and its tooltip; it has no
+visible label. Retained output still survives navigation, without an explanatory
+paragraph. This indicator describes the console connection, not the game process.
 
 Trusted first-party game modules own validated creation/management descriptors,
 handlers, namespaced catalogs and bundled artwork. The generic renderers use the

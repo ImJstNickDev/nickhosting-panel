@@ -3468,3 +3468,21 @@ All browser operations use disposable isolated schemas and provider fixtures, cl
 afterward. No live game commands, service restart, new infrastructure or provider
 changes. Existing Vite HMR serves the update. Rollback: revert UI/catalog changes;
 no migrations. PR #21 remains open/unmerged; SFTPGo #18 unchanged.
+
+
+## 2026-10-11 — Compact console connection indicator
+
+Connected text and Reconnect button are replaced by one 12px state dot on a 40px
+clickable target: green connected, yellow connecting, red disconnected. Clicking
+or keyboard activation uses the same stream reconnection path. Localized tooltip,
+accessible action name, focus outline and screen-reader status remain. The retained
+output paragraph and its display-only state/catalog key are removed; buffer history,
+identity isolation and retry behavior are unchanged. No power effect is introduced.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'shows mediated console output|exposes connection indicator states|records status transitions once|reconnects a failed console stream'`: **4 passed / 10 skipped**. Checks all three states/computed colors, EN/IT tooltip/name, click/Enter/Space reconnect, zero power POSTs, retained output and authorization-denial clearing. Two initial attempts failed only the new test's assumption about one initial stream attach; fixture gating was corrected for development React duplicate attach/abort behavior before the passing run.
+- Web typecheck, i18n check (1090 keys), scoped Biome and diff checks pass. Seven pre-existing non-null/reduced-motion lint warnings remain across checked files. No full test matrix or production rebuild needed for this presentation change.
+- Independent browser/UX review and coordinator inspection of [desktop EN](screenshots/m5/console-indicator-desktop-en.png) and [mobile IT](screenshots/m5/console-indicator-mobile-it.png): controls fit, no horizontal overflow, keyboard focus visible, removed paragraph absent. Axe WCAG A/AA tags found no violations in tested states; not a full accessibility certification.
+
+Only isolated fixture services used, cleaned afterward. No real game/provider commands,
+new infrastructure or service restarts. Existing HMR delivers the UI/catalog change.
+Rollback is a source revert; PR #21 remains open/unmerged and issue #18 unchanged.
