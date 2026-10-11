@@ -711,25 +711,33 @@ function Telemetry({
       ),
     );
   }, [sampleAt, stale, cpu, memory, rx, tx, offline]);
-  const end = Date.now();
+  const now = Date.now();
   const rows = (history.data?.items ?? []).slice().reverse();
-  const samples = offline
-    ? []
-    : rollingTelemetry(
-        [
-          ...rows
-            .filter((row) => Date.parse(row.observed_at) > processBoundary)
-            .map((row) => ({
-              time: Date.parse(row.observed_at),
-              memory: Number(row.memory_bytes) / 1048576,
-              cpu: row.cpu_percent,
-              rx: Number(row.network_rx_bytes) / 1048576,
-              tx: Number(row.network_tx_bytes) / 1048576,
-            })),
-          ...observations.filter((sample) => sample.time > processBoundary),
-        ],
-        end,
-      );
+  // Render the incoming sample and its time domain together, before the effect
+  // retains it. The uptime clock must not advance the graph ahead of Wings.
+  const candidates = [
+    ...rows.map((row) => ({
+      time: Date.parse(row.observed_at),
+      memory: Number(row.memory_bytes) / 1048576,
+      cpu: row.cpu_percent,
+      rx: Number(row.network_rx_bytes) / 1048576,
+      tx: Number(row.network_tx_bytes) / 1048576,
+    })),
+    ...observations,
+    ...(sampleAt && !stale
+      ? [
+          {
+            time: sampleAt,
+            cpu: cpu ?? NaN,
+            memory: memory === undefined ? NaN : memory / 1048576,
+            rx: rx === undefined ? NaN : rx / 1048576,
+            tx: tx === undefined ? NaN : tx / 1048576,
+          },
+        ]
+      : []),
+  ].filter((sample) => sample.time > processBoundary && sample.time <= now);
+  const end = candidates.length ? Math.max(...candidates.map((sample) => sample.time)) : now;
+  const samples = offline || now - end >= 30000 ? [] : rollingTelemetry(candidates, end);
   return (
     <Section title={t('service.telemetry')}>
       {live.error && !sampleAt && (

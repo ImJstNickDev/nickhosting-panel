@@ -3905,3 +3905,21 @@ handlers with isolated provider events and disposable schemas, cleaned afterward
 No real server mutations, provider credentials, container restarts, infrastructure
 changes or production interactions. No live game test was repeated. Rollback is
 a source revert. SFTPGo #18 remains an independent release gate; PR #21 stays open.
+
+### 2026-10-11 — Synchronize graph movement with samples
+
+The previous render advanced the chart domain on the one-second uptime clock,
+while an effect retained incoming statistics afterward. This could leave a brief
+right-edge gap before the sample appeared. Chart end time now follows the newest
+real observation, and the current sample is included in the same render. Uptime
+continues independently. Silence still expires after 30 seconds; no interpolated
+or invented measurements are added.
+
+Targeted browser runner (same command above, file
+`apps/web/tests/console-live-stats.browser.test.ts`, filter
+`-t 'updates stream metrics'`): **1 passed, 2 intentionally skipped** (14.54s).
+The test proves unchanged SVG points across an uptime tick, followed by changed
+points and a new measurement at the right edge (x=388) on receipt. Refreshed the
+live screenshot. Web typecheck, scoped Biome and independent review passed; no
+must-fix findings. No provider/infrastructure interactions or restart. Rollback:
+source revert. Earlier offline/expiry checks were not unnecessarily rerun.

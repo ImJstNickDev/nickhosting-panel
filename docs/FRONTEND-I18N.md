@@ -76,7 +76,9 @@ advances locally every second only from a fresh running-process baseline. Disk
 uses the cached value already included in Wings statistics, without requesting
 additional scans. REST resource polling pauses while live measurements are fresh
 and resumes at the existing 10-second fallback cadence on missing/stale streams.
-Charts use a sliding 30-second window with at most one real sample per second;
+Charts use a sliding 30-second window anchored to the latest real sample, with
+at most one real sample per second. The axis and incoming sample update together;
+the uptime clock does not move the graph ahead of measurements;
 missing values and delivery gaps break the line. Start/end time labels are omitted
 from the visible charts; measured timestamps remain in accessible summaries.
 Confirmed offline state immediately resets the graph display to a flat zero line,

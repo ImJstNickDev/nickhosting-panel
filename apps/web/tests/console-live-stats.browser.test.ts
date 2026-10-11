@@ -113,6 +113,19 @@ describe('Console live resource stream', () => {
     await browserExpect(chart.locator('polyline').first()).toBeVisible();
     await browserExpect(chart.locator('text[y="130"]')).toHaveCount(0);
     expect(await chart.locator('polyline').first().getAttribute('points')).not.toContain('NaN');
+    const points = () =>
+      chart
+        .locator('polyline')
+        .evaluateAll((lines) => lines.map((line) => line.getAttribute('points')));
+    const beforeTick = await points();
+    const beforeUptime = await card('Uptime').innerText();
+    await browserExpect(card('Uptime')).not.toHaveText(beforeUptime, { timeout: 2500 });
+    expect(await points()).toEqual(beforeTick);
+    stats(19, 3663000);
+    await browserExpect(card('CPU Load')).toHaveText('19%');
+    const updatedPoints = await points();
+    expect(updatedPoints).not.toEqual(beforeTick);
+    expect(Number(updatedPoints.at(-1)?.split(' ').at(-1)?.split(',')[0])).toBe(388);
     await user.screenshot({
       path: resolve('docs/screenshots/m5/console-live-stats-desktop-en.png'),
       fullPage: true,
