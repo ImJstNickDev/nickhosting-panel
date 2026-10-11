@@ -115,8 +115,9 @@ File, backup, console, metrics and DNS actions reuse M2 endpoints. Browser uploa
 send `Blob` through XHR with declared `X-NH-Upload-Length`, observable byte progress
 and cancellation; server admission/stream verification remains authoritative.
 Downloads use a native same-origin link, without creating a whole-file browser
-JavaScript blob. The text editor alone caps input at 60,000 characters and bounds
-its streaming read to 240,000 bytes. Binary transfers have no such editor cap.
+JavaScript blob. The CodeMirror editor alone caps UTF-8 content at 1 MiB, including
+its provider read. Binary transfers have no such editor cap. Legacy text routes
+retain their original limits; the new revision-aware editor uses separate routes.
 Console display retains at most 300 lines, each truncated to 8,192 characters;
 the API independently bounds outstanding SSE output (256 KiB/64 events with a
 five-second slow-consumer timeout). Reconnecting does not promise replay of missed
@@ -484,3 +485,50 @@ remote identity/image/launch validation. Provider refusals and uncertain results
 remain durable operation outcomes. Existing reservation, recovery and readiness
 rules remain authoritative; UI acceptance must not manufacture completion. See
 ADR 0011's dated amendment for the explicit boundary and external-change caveat.
+
+
+### File manager contracts (2026-10-12)
+
+All routes below are under `/v1/servers/:id/files`. They reuse managed-server
+identity, project permissions, active-operation locks, protected-runtime-path
+checks, the existing adapter and live transfer authorization. No provider URL or
+credential is returned to the browser.
+
+| Route | Request/result |
+| --- | --- |
+| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; symlinks and binary content rejected. |
+| `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
+| `GET /archive?root=...&files=...` | JSON array of selected basenames; actual streamed ZIP, including folders/empty directories. At most100 selected roots,10,000 enumerated entries,64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
+| `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
+| `POST /copy` | `{root,files,destination}`; copies selections recursively into an existing directory. Preflight rejects collisions, symlinks, self-descendants and protected targets. No overwrite. |
+| `POST /extract` | `{root,file,destination,confirm:true}`; destination is one new child directory. Validate/stage the entire archive before remote writes, then use existing upload admission and adapter streams. |
+
+The editor serializes NickHosting writes and rechecks authorization before writing.
+Wings does not expose atomic compare-and-swap against external Panel/game writes:
+a write in the comparison/write interval remains possible. A post-write mismatch
+is a conflict, not a claim of rollback. Browser drafts remain available on failure.
+JSON,YAML,TOML validation is local; scripts are highlighted, never executed.
+
+Copy/extraction failures after effects may leave partial files. They record
+`server.files.incomplete` and return `operation_uncertain`; inspect the destination
+before retrying. No automatic deletion, rollback or overwrite is claimed.
+Extraction rejects traversal, links, duplicate/case-conflicting paths, invalid
+sizes/checksums and expansion bombs. Budgets:8GiB source archive,16GiB expanded,
+20,000 entries,64 levels and500:1 expansion; TAR accounting includes raw padding
+and metadata. Recursive copies also cap planned content at16GiB/20,000 entries.
+RAR/7z and encrypted archives are not advertised as supported.
+
+Temporary staging uses typed `fileOperationsRoot` (`./mountdata/file-operations`),
+`fileOperationsFreeBytes` (512MiB) and `fileOperationsFreePercent` (0), following
+normal defaults/Owner/environment precedence. Environment names are
+`NH_FILE_OPERATIONS_ROOT`, `NH_FILE_OPERATIONS_FREE_BYTES` and
+`NH_FILE_OPERATIONS_FREE_PERCENT`. Staging is cleaned in `finally`, including
+cancel/failure. A process crash can leave a staging directory; never indiscriminately
+prune persistent storage. Headroom is checked per staged file, not atomically
+reserved across simultaneous extraction requests; existing global upload slots
+bound concurrency. Remote upload admission remains authoritative.
+
+Transfer availability now distinguishes `upload_policy_missing`,
+`provider_account_unavailable` and `upload_observer_unavailable` from an active
+operation/provider failure. The UI explains the applicable reason. Configuration
+remains an Owner action; rendering Files never creates an upload policy.

@@ -41,6 +41,8 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { Variables } from './app.js';
 import { createConsoleCommandRelays } from './console-command-relays.js';
+import { registerFileBrowsingRoutes } from './file-browsing.js';
+import { registerFileOperationRoutes, validateFileMoves } from './file-operations.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -67,6 +69,8 @@ export function registerServerRoutes(
 ) {
   const { db, env, principal, management } = options;
   const commandRelays = createConsoleCommandRelays();
+  registerFileBrowsingRoutes(app, options);
+  registerFileOperationRoutes(app, options);
   const owner = async (c: C) => {
     const context = await principal(c, true);
     ownerOnly(context);
@@ -522,7 +526,11 @@ export function registerServerRoutes(
         await service.adapter.createDirectory(id, input.root, input.name);
       else if (input.action === 'delete')
         await service.adapter.deleteFiles(id, input.root, input.files);
-      else await service.adapter.renameFiles(id, input.root, input.files);
+      else {
+        await validateFileMoves(service.adapter, id, input.root, input.files);
+        await service.authorizeTransfer(current, c.req.param('id'), true, connection);
+        await service.adapter.renameFiles(id, input.root, input.files);
+      }
     });
     return c.body(null, 204);
   });

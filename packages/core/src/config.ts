@@ -112,6 +112,9 @@ export const platformConfigSchema = z
       .max(256)
       .refine((value) => !/[\r\n]/.test(value))
       .optional(),
+    fileOperationsFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    fileOperationsFreePercent: z.number().min(0).max(95),
+    fileOperationsRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
     minecraftSourceRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
     minecraftSourceGlobalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     minecraftSourceUserBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -185,6 +188,9 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   gatewayDataPolicy: defaultGatewayDataPolicy,
   minecraftMetadataUserAgent:
     'NickHostingPanel/0.1 (+https://github.com/ImJstNickDev/nickhosting-panel)',
+  fileOperationsFreeBytes: 512 * 1024 ** 2,
+  fileOperationsFreePercent: 0,
+  fileOperationsRoot: './mountdata/file-operations',
   minecraftContentRoot: './mountdata/minecraft-content',
   minecraftSourceRoot: './mountdata/minecraft-sources',
   minecraftSourceGlobalBytes: 20 * 1024 ** 3,
@@ -241,6 +247,9 @@ export const configEnvironmentKeys = {
   dnsTarget: 'NH_DNS_TARGET',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
   minecraftMetadataUserAgent: 'NH_MINECRAFT_METADATA_USER_AGENT',
+  fileOperationsFreeBytes: 'NH_FILE_OPERATIONS_FREE_BYTES',
+  fileOperationsFreePercent: 'NH_FILE_OPERATIONS_FREE_PERCENT',
+  fileOperationsRoot: 'NH_FILE_OPERATIONS_ROOT',
   minecraftContentRoot: 'NH_MINECRAFT_CONTENT_ROOT',
   minecraftSourceRoot: 'NH_MINECRAFT_SOURCE_ROOT',
   minecraftSourceGlobalBytes: 'NH_MINECRAFT_SOURCE_GLOBAL_BYTES',

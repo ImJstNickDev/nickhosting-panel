@@ -916,3 +916,42 @@ owner deliberately blocks use with a different technical identity until a scoped
 handoff is approved and verified. Keep the old artifact and encrypted legacy
 credential for reviewed recovery; do not reset development data or remove the
 Blueprint browser/mail guards as a shortcut.
+
+### Files editor dependency activation (2026-10-12)
+
+The Files redesign adds CodeMirror dependencies to Web and `tar-stream`/`yazl`
+to API. Source watchers do not install packages into existing development images.
+A scoped development image rebuild and recreation of **only API and Vite** is
+required for the complete editor/extractor. No migration, secret change, new
+network/mount, upload policy or game-server operation is part of this change.
+
+After operation-specific Owner approval, preserve each service's existing image
+as separate local rollback tags, build the existing development target, then:
+
+```sh
+docker compose --env-file .env.dev.local config --quiet
+docker image tag "$(docker inspect --format '{{.Image}}' nickhosting-dev-api-1)" nickhosting-dev-app:before-files-api
+docker image tag "$(docker inspect --format '{{.Image}}' nickhosting-dev-vite-1)" nickhosting-dev-app:before-files-vite
+docker compose --env-file .env.dev.local build api
+docker compose --env-file .env.dev.local up -d --no-deps --wait api vite
+```
+
+Use the existing private Compose chain without dropping real-provider, observer
+or Gateway overlays. `--no-deps` leaves worker, Gateway, web, PostgreSQL and Redis
+running. The web ingress keeps its existing external network attachment. Expect
+brief API/HMR disruption; game connections can be affected if Core is unavailable
+long enough for Gateway leases to expire, although no power commands are sent.
+Inspect API/Vite health, ingress HTTPS and dependency resolution after activation.
+Do not use `down`, volume deletion, orphan removal or pruning.
+
+Rollback requires restoring the previous source revision and recreating only
+API/Vite with an ignored local override selecting their respective saved image
+tags (API and Vite may have different old images). This is a scoped rollback,
+not a database or provider rollback. Preserve private environment and all data.
+Until approved and executed, report this activation as pending rather than
+claiming the new dependencies are available in the running containers.
+
+The Owner approved and completed this scoped activation on2026-10-12. API/Vite
+are healthy; HTTPS and HMR were verified. Existing web/Gateway/worker/data-service
+containers and network attachments were preserved. See the dated Files section
+in [M5 validation](M5-VALIDATION.md) for results and remaining upload configuration.

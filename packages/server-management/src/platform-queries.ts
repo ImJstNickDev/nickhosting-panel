@@ -971,14 +971,19 @@ export async function getPlatformTransfers(
     ? 'forbidden'
     : server.active_operation_id || pending
       ? 'conflict'
-      : !configured || !policy || host.observer_id !== env.NH_OBSERVER_ID
-        ? 'configuration_invalid'
-        : !info.availableActions.files
-          ? 'integration_unavailable'
-          : null;
+      : !configured
+        ? 'provider_account_unavailable'
+        : !policy
+          ? 'upload_policy_missing'
+          : host.observer_id !== env.NH_OBSERVER_ID
+            ? 'upload_observer_unavailable'
+            : !info.availableActions.files
+              ? 'integration_unavailable'
+              : null;
   return {
     files: info.capabilities?.files === true,
-    textEditMaxCharacters: 60000,
+    textEditMaxCharacters: 1048576,
+    textEditMaxBytes: 1048576,
     upload: {
       available: reason === null,
       reason,

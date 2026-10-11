@@ -4505,3 +4505,99 @@ This verification inspected logs and container health only: no code change, game
 command, provider mutation, restart or new test asset. No test suite was repeated
 for this evidence-only update. Sleep timing remains the previously documented cycle;
 this requested check specifically validates the corrected Start readiness path.
+
+### 2026-10-12 — Files manager, editor and safe batch operations
+
+This pass replaces the old Files forms with breadcrumbs/direct path entry,
+search/sort with folders first, list/grid views, keyboard/right-click overflow
+menus, range selection and batch actions. Uploads use one inline queue with
+per-file progress/speed/cancel/error and explicit replacement confirmation.
+CodeMirror is lazy-loaded; JSON/YAML/TOML syntax validation, highlighting for
+properties/scripts, search/undo/redo, keyboard save and revision conflict handling
+are available without remote language services. No game integration was added.
+
+API additions and safety limits are documented in [M5 API contracts](M5-API-CONTRACTS.md#file-manager-contracts-2026-10-12).
+Real streamed ZIP download, recursive copy and validated ZIP/TAR extraction use
+existing managed-server access, adapter streams and upload admission. File moves
+now preflight every destination before invoking the provider; existing files,
+symlink ancestors, duplicate/overlapping sources and self-descendant destinations
+are rejected. External writers still prevent an atomic no-overwrite/CAS guarantee.
+Partial copy/extraction failures are audited and remain explicit, not rolled back.
+
+The live upload investigation was read-only: the physical host has no upload
+policy; no environment override supplies it. The technical provider account and
+observer identity are available. The installed Wings per-file upload ceiling is
+500MiB. No policy, provider settings or existing game files were changed. Owner
+must configure the host's upload policy (provider limit plus observed temporary
+filesystem/budget) in Infrastructure. Missing policy is now reported specifically.
+
+Focused verification, rather than rerunning the historical M1–M5 matrix:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts apps/api/src/file-operations.test.ts apps/web/src/features/file-editor-model.test.ts apps/web/src/features/file-manager-model.test.ts apps/web/src/app/i18n.test.ts`: **60 passed** on the integrated source. Includes streamed ZIP cancellation/lazy reads, editor revision/auth revocation, recursive operations, archive integrity/expansion/path checks and EN/IT/config labels.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run apps/api/src/file-operations.integration.test.ts`: **9 passed** against isolated PostgreSQL with provider fixtures. Actual routes/claims/audit cover copy, extraction, insufficient capacity, partial upload failure, foreign server denial, missing policy and rename authorization/conflict guards. Existing transfer-descriptor regression also passed.
+- Core unit suite: **47 passed**. Production frontend build and runtime packaging passed; no services or migrations started by those build commands. Vite reports its bundle-size advisory; editor is a separate lazy chunk.
+- The first combined targeted unit run caught missing labels for three new settings; labels were added and the final60-test run above passed.
+- Existing services browser suite: **17 passed / 3 failed**. Files journeys,12MiB upload/download, stale editor response isolation and mobile Files checks passed. Remaining failures concern unchanged console expectations (offline network line count, unavailable telemetry tooltip and previously changed indicator color); they are not reported as passing or rewritten in this Files change.
+- Shared content-provider suite: **60 passed / 3 failed** at the existing staging disk-headroom guard. Host filesystem is92% occupied, below that suite's default10% free-space requirement; archive callback regressions passed. No unrelated files were deleted and that policy was not weakened.
+- Whole-repository lint exposes an existing missing-title SVG diagnostic in `games/minecraft/src/ui/assets/player-placeholder.svg`, outside this change. Changed production files pass Biome. Formatting/diff checks and final governance results are recorded below.
+
+Independent review found and resolved nested database connection acquisition during
+ZIP enumeration, stale write authorization, archive ancestor checks, TAR raw
+expansion accounting, empty-folder preservation, move overwrites, and editor
+interaction races during saving. RAR/7z extraction remains unsupported; binary
+and oversized files use downloads rather than the bounded text editor. Source
+code contains no new production credentials or provider URLs. SFTPGo issue18 is
+unchanged.
+
+Before the separately approved activation below, no live game-server mutation,
+Docker resource creation/recreation, Gateway restart, provider credential change
+or production deployment was performed.
+Tests used the existing approved isolated services and temporary test schemas.
+Complete development dependency activation requires the scoped API/Vite rebuild
+in [M5 environments](M5-ENVIRONMENTS.md#files-editor-dependency-activation-2026-10-12);
+source watching alone cannot install packages into already running images.
+
+
+Final browser/review evidence:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts`: **7 passed**. Actual application handlers with isolated provider fixtures: breadcrumbs/path entry/search/grid, keyboard/range selection and ZIP download, safe copy/move conflicts, editor save/concurrent changes, multiple uploads/replacement, archive extraction plus folder/breadcrumb drag/drop, pending-save interaction guards and EN desktop/IT mobile accessibility.
+- Final `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build`, `scripts/dev.sh pnpm build:runtime`, `scripts/dev.sh pnpm i18n:check`, changed-file Biome and `git diff --check` passed. Whole-repository lint limitation remains the unrelated SVG noted above.
+- The initial browser ZIP attempt exposed an incorrect fixture: every listing generated a fresh modification timestamp. Fixture metadata now remains stable until file bytes change; production stale-file checks were retained. Extraction fixtures use their own scoped staging directory under test assets, cleaned after the suite. Upload tests now wait for availability rather than bypassing the disabled toolbar through the hidden input.
+- Independent backend, interaction and visual review: no remaining must-fix findings in the changed scope. Automated axe checks passed for desktop/mobile; keyboard menus, selection, editor save and dialog state were exercised. This is focused Files evidence, not a claim of full application WCAG certification.
+- Index governance passed:596 text files,146 review PNGs,492 relative links,4 TOML files and44 ignore cases. Secret scanning remains heuristic; screenshots were visually inspected and contain fixture data only.
+
+Reviewed screenshots: [desktop list](screenshots/m5/file-manager-desktop-en.png),
+[desktop grid](screenshots/m5/file-manager-grid-desktop-en.png),
+[Italian mobile](screenshots/m5/file-manager-mobile-it.png),
+[editor conflict](screenshots/m5/file-manager-editor-conflict-desktop-en.png).
+
+Development activation: the Owner explicitly approved the scoped image build,
+API/Vite recreation and rollback. Existing images are retained under local
+`before-files-api` and `before-files-vite` tags. Source watcher restarts during
+implementation encountered missing `tar-stream` before its import was made lazy;
+later API shutdown remained waiting and health became unavailable. These are
+recorded development interruptions, not successful uptime checks. The approved
+recreation is intended to install the final dependencies and restore service;
+its actual outcome is recorded below after verification.
+
+Approved activation completed:
+
+- Built the existing development target with the frozen lockfile, then ran
+  `docker compose --env-file .env.dev.local up -d --no-deps --wait api vite`.
+  Both API and Vite are healthy. The configured90second shutdown grace was
+  needed for the previous stuck API process.
+- Container-ID comparison confirms **only API and Vite changed**; no container
+  was removed outside that recreation. PostgreSQL, Redis, worker, web, Gateway,
+  node probe and mail retain their previous identities. No new host ports or
+  networks; web retains the existing external frontend attachment.
+- HTTPS login returns200. Live Vite requests for Files and CodeMirror modules
+  return200. A fresh real Chromium session reports `[vite] connected`, no page
+  errors, and the unauthenticated protected server list correctly returns401.
+  This public smoke does not claim authenticated editing of a real server.
+- Gateway control-plane health recovered automatically after Core returned;
+  no Gateway restart or game command was sent. Offline backend-binding probe
+  diagnostics are not evidence of a tested game connection.
+- Existing database/accounts/configuration were preserved; no migrations, resets
+  or upload-policy changes. Images for scoped rollback remain local. No live
+  provider file mutation was performed; interactive upload still requires the
+  Owner's missing host policy.

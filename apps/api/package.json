@@ -3,21 +3,26 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@hono/node-server": "2.1.4",
     "@nickhosting/auth": "workspace:*",
+    "@nickhosting/content-providers": "workspace:*",
     "@nickhosting/core": "workspace:*",
     "@nickhosting/database": "workspace:*",
     "@nickhosting/game-sdk": "workspace:*",
+    "@nickhosting/gateway-safety": "workspace:*",
     "@nickhosting/i18n": "workspace:*",
     "@nickhosting/jobs": "workspace:*",
-    "hono": "4.13.13",
-    "@hono/node-server": "2.1.4",
-    "zod": "4.6.5",
-    "nodemailer": "10.0.16",
+    "@nickhosting/minecraft": "workspace:*",
     "@nickhosting/pterodactyl-adapter": "workspace:*",
     "@nickhosting/server-management": "workspace:*",
-    "@nickhosting/gateway-safety": "workspace:*",
-    "@nickhosting/minecraft": "workspace:*",
-    "@nickhosting/content-providers": "workspace:*",
-    "kysely": "0.29.6"
+    "hono": "4.13.13",
+    "kysely": "0.29.6",
+    "nodemailer": "10.0.16",
+    "tar-stream": "3.2.2",
+    "yazl": "3.3.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/tar-stream": "3.1.5"
   }
 }

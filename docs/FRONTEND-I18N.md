@@ -455,3 +455,23 @@ as mutation authorization. Catalog filters/order must remain consistent after
 failed requests and retry. Owner paging/filtering is server-side, with full evidence
 loaded only when details are opened. Display missing/stale local metadata honestly;
 reading a list must not wait for an upstream manifest request.
+
+
+### Files interaction contract (2026-10-12)
+
+Files uses breadcrumbs rather than an always-visible path form. The direct-path
+button is available on touch; Ctrl/Cmd+L is intercepted only while focus is inside
+the file manager (browser-reserved shortcuts may still take precedence). Names
+open directories or the editor. Each row has an accessible overflow menu and a
+desktop context menu; destructive actions require confirmation. Checkbox range
+selection, focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and
+explicit Move/Copy dialogs provide equivalent pointer and keyboard paths.
+Folders precede files for every sort; search filters the current directory only.
+List is default; Grid is optional. External file drops use the same upload queue
+as the toolbar, with per-file progress, speed, cancellation and errors. Directory
+uploads are not silently flattened.
+
+The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
+unsaved-change protection; EN/IT includes editor search/validation controls.
+Editor content remains local while a conflict is resolved. Availability reasons
+are contextual; no empty full-size Upload panel is rendered.

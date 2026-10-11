@@ -187,6 +187,9 @@ export async function installBrowserFixtures(
     .execute();
   const choiceId = await installMinecraftBrowserChoice(database, mappingId, env);
   const remotes = new Map<number, Remote>();
+  const fixtureCreatedAt = new Date().toISOString();
+  // Listings observe metadata; they must not invent a modification on every read.
+  const fileModifiedAt = new WeakMap<Buffer, string>();
   let nextId = 1;
   let available = true;
   const activeRelays = new Set<() => void>();
@@ -540,12 +543,16 @@ export async function installBrowserFixtures(
         root = path(directory, true),
         prefix = root ? `${root}/` : '';
       const files: ServerFile[] = [];
-      const now = new Date().toISOString();
       for (const name of new Set([...r.files.keys(), ...r.directories])) {
         if (!name.startsWith(prefix)) continue;
         const short = name.slice(prefix.length);
         if (!short || short.includes('/')) continue;
         const bytes = r.files.get(name);
+        if (bytes && !fileModifiedAt.has(bytes))
+          fileModifiedAt.set(bytes, new Date().toISOString());
+        const modifiedAt = bytes
+          ? (fileModifiedAt.get(bytes) ?? fixtureCreatedAt)
+          : fixtureCreatedAt;
         files.push({
           name: short,
           mode: bytes ? '-rw-r--r--' : 'drwxr-xr-x',
@@ -553,8 +560,8 @@ export async function installBrowserFixtures(
           is_file: !!bytes,
           is_symlink: false,
           mimetype: bytes ? 'application/octet-stream' : 'inode/directory',
-          created_at: now,
-          modified_at: now,
+          created_at: fixtureCreatedAt,
+          modified_at: modifiedAt,
         });
       }
       return files.sort((a, b) => a.name.localeCompare(b.name));

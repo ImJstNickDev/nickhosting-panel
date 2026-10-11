@@ -138,7 +138,15 @@ export function createApp(options: Options) {
       throw new DomainError('validation_failed', 413);
     },
   });
+  const editorBodyLimit = bodyLimit({
+    maxSize: 6 * 1048576 + 8192,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
   app.use('*', async (c, next) => {
+    if (c.req.method === 'PUT' && /^\/v1\/servers\/[^/]+\/files\/editor$/.test(c.req.path))
+      return editorBodyLimit(c, next);
     // Only this authenticated binary route streams its body. Its handler checks
     // exact declared size, server storage, live authorization and actual bytes.
     if (

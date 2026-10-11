@@ -37,7 +37,9 @@ describe('M5 browser files, backups, console and automation', () => {
     await harness?.close();
   });
   function row(name: string) {
-    return user.getByRole('row').filter({ has: user.getByRole('cell', { name, exact: true }) });
+    return user
+      .locator('.fm-entry')
+      .filter({ has: user.getByRole('button', { name, exact: true }) });
   }
   it('creates, edits, renames and deletes files with explicit consequences and restores keyboard focus', async () => {
     await user.goto(`${base}/files`);
@@ -49,25 +51,31 @@ describe('M5 browser files, backups, console and automation', () => {
     await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
     await browserExpect(row('notes.txt')).toBeVisible();
     expect((await provider.files()).get('notes.txt')?.toString()).toBe('Original world notes');
-    await row('notes.txt').getByRole('button', { name: 'Edit', exact: true }).click();
+    await row('notes.txt').getByRole('button', { name: 'notes.txt', exact: true }).click();
     await dialog.getByLabel('Contents', { exact: true }).fill('Updated notes');
     user.once('dialog', (confirmation) => confirmation.dismiss());
     await user.keyboard.press('Escape');
-    await browserExpect(dialog.getByLabel('Contents', { exact: true })).toHaveValue(
-      'Updated notes',
-    );
+    await browserExpect(dialog.getByLabel('Contents', { exact: true })).toHaveText('Updated notes');
     await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
     await browserExpect(dialog).not.toBeVisible();
     expect((await provider.files()).get('notes.txt')?.toString()).toBe('Updated notes');
-    await row('notes.txt').getByRole('button', { name: 'Rename', exact: true }).click();
+    await row('notes.txt')
+      .getByRole('button', { name: 'Actions for notes.txt', exact: true })
+      .click();
+    await user.getByRole('menuitem', { name: 'Rename', exact: true }).click();
     await dialog.getByLabel('Name', { exact: true }).fill('readme.txt');
     await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
     await browserExpect(row('readme.txt')).toBeVisible();
-    await row('readme.txt').getByRole('button', { name: 'Delete', exact: true }).click();
+    await row('readme.txt')
+      .getByRole('button', { name: 'Actions for readme.txt', exact: true })
+      .click();
+    await user.getByRole('menuitem', { name: 'Delete', exact: true }).click();
     await browserExpect(dialog).toContainText('readme.txt');
     await user.keyboard.press('Escape');
     await browserExpect(dialog).not.toBeVisible();
-    expect(await user.evaluate(() => document.activeElement?.textContent)).toBe('Delete');
+    await browserExpect(
+      row('readme.txt').getByRole('button', { name: 'Actions for readme.txt', exact: true }),
+    ).toBeFocused();
     await harness.screenshot(user, 'files-desktop-en');
     const audit = await new AxeBuilder({ page: user })
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
@@ -83,15 +91,17 @@ describe('M5 browser files, backups, console and automation', () => {
       mimeType: 'application/octet-stream',
       buffer: bytes,
     });
-    await user.getByRole('button', { name: 'Upload', exact: true }).click();
-    await browserExpect(user.getByText('Upload completed', { exact: true })).toBeVisible();
+    await browserExpect(user.getByText('Completed', { exact: true })).toBeVisible();
     expect(
       createHash('sha256')
         .update((await provider.files()).get('world-export.bin')!)
         .digest('hex'),
     ).toBe(createHash('sha256').update(bytes).digest('hex'));
     const waiting = user.waitForEvent('download');
-    await row('world-export.bin').getByRole('button', { name: 'Download', exact: true }).click();
+    await row('world-export.bin')
+      .getByRole('button', { name: 'Actions for world-export.bin', exact: true })
+      .click();
+    await user.getByRole('menuitem', { name: 'Download', exact: true }).click();
     const result = await waiting;
     expect(result.url()).toContain('/v1/servers/');
     const file = await result.path();
@@ -109,7 +119,7 @@ describe('M5 browser files, backups, console and automation', () => {
     const files = await provider.files();
     files.set('first.txt', Buffer.from('First file'));
     files.set('second.txt', Buffer.from('Second file'));
-    const original = provider.adapter.downloadFile;
+    const original = provider.adapter.readFile;
     let release: () => void = () => {};
     let started: () => void = () => {};
     const pending = new Promise<void>((resolve) => {
@@ -118,7 +128,7 @@ describe('M5 browser files, backups, console and automation', () => {
     const began = new Promise<void>((resolve) => {
       started = resolve;
     });
-    provider.adapter.downloadFile = async (id, name, input) => {
+    provider.adapter.readFile = async (id, name, input) => {
       if (name === 'first.txt') {
         started();
         await pending;
@@ -127,21 +137,21 @@ describe('M5 browser files, backups, console and automation', () => {
     };
     try {
       await user.reload();
-      await row('first.txt').getByRole('button', { name: 'Edit', exact: true }).click();
+      await row('first.txt').getByRole('button', { name: 'first.txt', exact: true }).click();
       await began;
       await user.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
-      await row('second.txt').getByRole('button', { name: 'Edit', exact: true }).click();
+      await row('second.txt').getByRole('button', { name: 'second.txt', exact: true }).click();
       await browserExpect(
         user.getByRole('dialog').getByLabel('Contents', { exact: true }),
-      ).toHaveValue('Second file');
+      ).toHaveText('Second file');
       release();
       await browserExpect(
         user.getByRole('dialog').getByLabel('Contents', { exact: true }),
-      ).toHaveValue('Second file');
+      ).toHaveText('Second file');
       await user.keyboard.press('Escape');
     } finally {
       release();
-      provider.adapter.downloadFile = original;
+      provider.adapter.readFile = original;
     }
   });
   it('shows mediated console output, sends commands and presents actual telemetry units', async () => {
@@ -933,7 +943,7 @@ describe('M5 browser files, backups, console and automation', () => {
     await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'it' });
     await user.setViewportSize({ width: 390, height: 844 });
     for (const [tab, label] of [
-      ['files', 'Scegli file'],
+      ['files', 'Cerca in questa cartella'],
       ['backups', 'Crea backup'],
       ['console', 'Comando'],
     ] as const) {
@@ -953,27 +963,16 @@ describe('M5 browser files, backups, console and automation', () => {
     const pseudo = await harness.page('pseudo', true);
     await pseudo.context().addCookies(await user.context().cookies());
     await pseudo.goto(`${base}/files`);
-    await browserExpect(
-      pseudo.getByRole('heading', { name: 'Survival', exact: true }),
-    ).toBeVisible();
+    await browserExpect(pseudo.locator('.file-manager')).toBeVisible();
     await browserExpect(pseudo.locator('main')).toContainText('［');
-    await browserExpect(pseudo.locator('input[type="file"]')).toBeVisible();
+    await browserExpect(pseudo.locator('.fm-filterbar input[type="search"]')).toBeVisible();
     await pseudo.setViewportSize({ width: 320, height: 800 });
-    const tableRegion = pseudo.locator('section.table-scroll');
-    await tableRegion.focus();
     expect(
       await pseudo
-        .locator('.file-table tbody tr')
+        .locator('.fm-entry')
         .first()
         .evaluate((row) => row.getBoundingClientRect().height),
     ).toBeLessThan(110);
-    await pseudo.keyboard.press('ArrowRight');
-    await browserExpect
-      .poll(() => tableRegion.evaluate((region) => region.scrollLeft))
-      .toBeGreaterThan(0);
-    await tableRegion.evaluate((region) => {
-      region.scrollLeft = 0;
-    });
     expect(await pseudo.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
