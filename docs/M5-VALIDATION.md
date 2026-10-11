@@ -4474,3 +4474,34 @@ change, credentials mutation, game command or new game test asset was needed.
 Corrected live receipt latency remains pending the next Owner cycle. The above
 3.282s result is retained as a failure of the previous implementation, not a
 successful measurement of the correction. PR remains open; issue18 unchanged.
+
+
+### 2026-10-12 — Live provider readiness receipt succeeds
+
+Owner-driven Start on application commit `9ca9272`, UTC2026-10-11:
+
+| Event | Timestamp / interval |
+| --- | --- |
+| Minecraft Done | 22:04:41.454950216 |
+| Core live-running observedAt | 22:04:41.525;70ms after Done |
+| Durable readiness snapshot complete | 22:04:41.783;258ms after event, including158.615ms commit/snapshot work |
+| Startup event sent | 22:04:41.784;channel closes with `hint_sent` |
+| Gateway forwards via readiness receipt | 22:04:41.787;**332ms after Done**,262ms after Core event |
+| Receipt application queue | **0ms** |
+
+The corrected transaction path delivered the receipt; periodic fallback was not
+needed to mark this start online. This replaces the previous3.282second live result
+with one successful332ms measurement, not a universal latency guarantee.
+
+Container churn at22:04:12.949 retained the existing waking responder under its
+original lease (expiry23.228); full waking snapshot applied15.623. A
+`snapshot_unavailable` diagnostic appeared12.950, but no unavailable,
+safety-rejected or expired-lease route transition was recorded in this cycle.
+This proves recorded listener-state continuity, not packet-level client availability.
+API, worker and Gateway health were healthy. Independent read-only review confirmed
+timing arithmetic and the bounded continuity interpretation.
+
+This verification inspected logs and container health only: no code change, game
+command, provider mutation, restart or new test asset. No test suite was repeated
+for this evidence-only update. Sleep timing remains the previously documented cycle;
+this requested check specifically validates the corrected Start readiness path.
