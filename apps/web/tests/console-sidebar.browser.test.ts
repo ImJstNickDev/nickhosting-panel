@@ -58,6 +58,18 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     });
   }
 
+  async function terminalConnection() {
+    const indicator = user.locator('.console-terminal .console-connection');
+    await browserExpect(indicator).toHaveCount(1);
+    const terminal = await user.locator('.console-terminal').boundingBox();
+    const connection = await indicator.boundingBox();
+    if (!terminal || !connection) throw new Error('Console connection control is not visible');
+    expect(connection.y).toBeGreaterThanOrEqual(terminal.y);
+    expect(connection.y - terminal.y).toBeLessThanOrEqual(16);
+    expect(connection.x + connection.width).toBeLessThanOrEqual(terminal.x + terminal.width);
+    expect(terminal.x + terminal.width - connection.x - connection.width).toBeLessThanOrEqual(16);
+  }
+
   async function screenshot(name: string) {
     await user.screenshot({
       path: resolve('docs/screenshots/m5', `console-sidebar-${name}.png`),
@@ -112,10 +124,26 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     const terminal = await user.locator('.console-terminal').boundingBox();
     const first = await user.locator('.console-summary-card').first().boundingBox();
     const controls = await user.locator('.console-actions').boundingBox();
-    if (!terminal || !first || !controls) throw new Error('Console layout is not visible');
+    const last = await user.locator('.console-summary-card').last().boundingBox();
+    const name = user.getByRole('heading', { name: 'Survival', exact: true });
+    await browserExpect(name).toHaveCount(1);
+    await browserExpect(
+      user.locator('.console-heading').getByRole('heading', { name: 'Survival', exact: true }),
+    ).toBeVisible();
+    const heading = await name.boundingBox();
+    const tabs = await user.locator('.tabs').boundingBox();
+    if (!terminal || !first || !last || !controls || !heading || !tabs)
+      throw new Error('Console layout is not visible');
     expect(Math.abs(first.y - terminal.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(last.y + last.height - terminal.y - terminal.height)).toBeLessThanOrEqual(1);
     expect(first.x).toBeGreaterThanOrEqual(terminal.x + terminal.width);
     expect(controls.y + controls.height).toBeLessThanOrEqual(first.y);
+    expect(Math.abs(heading.x - terminal.x)).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(heading.y + heading.height / 2 - controls.y - controls.height / 2),
+    ).toBeLessThanOrEqual(1);
+    expect(heading.y).toBeGreaterThanOrEqual(tabs.y + tabs.height);
+    await terminalConnection();
     await screenshot('offline-desktop-en');
     // Connection metadata, not a conventional role name or an auxiliary port,
     // determines the displayed game endpoint. The authenticated API remains real.
@@ -236,6 +264,10 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     if (!terminal || !first || !controls) throw new Error('Console layout is not visible');
     expect(controls.y + controls.height).toBeLessThanOrEqual(terminal.y);
     expect(first.y).toBeGreaterThanOrEqual(terminal.y + terminal.height);
+    await browserExpect(user.getByRole('heading', { name: 'Survival', exact: true })).toHaveCount(
+      1,
+    );
+    await terminalConnection();
     await screenshot('running-mobile-it');
     const project = await journeyRequest<{ id: string }>(fixture, user, '/v1/projects', {
       name: 'Sidebar viewers',

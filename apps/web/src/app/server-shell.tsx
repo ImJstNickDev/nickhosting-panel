@@ -39,8 +39,8 @@ export function ServerShell() {
     ...(value.permissions.manage ? [['settings', 'web.settings']] : []),
   ];
   const game = gameUiRegistry.get(value.gameId);
-  return (
-    <Page title={value.name}>
+  const content = (
+    <>
       <nav
         ref={tabsElement}
         className="tabs"
@@ -65,7 +65,12 @@ export function ServerShell() {
         </NavLink>
       </nav>
       <Outlet />
-    </Page>
+    </>
+  );
+  return location.pathname.replace(/\/$/, '') === `${base}/console` ? (
+    content
+  ) : (
+    <Page title={value.name}>{content}</Page>
   );
 }
 export function ServerGameSection() {

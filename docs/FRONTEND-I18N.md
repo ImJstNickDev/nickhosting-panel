@@ -55,12 +55,14 @@ Focused tabs scroll into view in the horizontal navigation on keyboard traversal
 Console connection state uses a compact clickable dot (green connected, yellow
 connecting, red disconnected). The 40px button reconnects the stream and exposes
 localized state/action text to assistive technology and its tooltip; it has no
-visible label. Retained output still survives navigation, without an explanatory
+visible label and sits inside the terminal at its top-right corner, clear of output. Retained output still survives navigation, without an explanatory
 paragraph. This indicator describes the console connection, not the game process.
 The terminal is not wrapped in a Console card or visible heading. On desktop it
 sits beside seven compact resource cards: Address, Uptime, CPU Load, Memory, Disk,
 Network (Inbound) and Network (Outbound). The three power buttons sit above that
-column, and its first card aligns with the terminal's top. On narrow screens the
+column; the card column and terminal share both top and bottom edges. The server
+name appears below the tabs, left-aligned with the terminal and vertically centered
+with the power controls. Other server tabs retain their existing page heading. On narrow screens the
 controls precede the terminal and resource cards follow it. Uptime uses measured
 provider milliseconds; only confirmed offline state gets an Offline value and red
 icon background. Failed, missing or expired readings remain unavailable. Cards and

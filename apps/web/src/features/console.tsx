@@ -142,6 +142,10 @@ function useResourceStaleness(updatedAt: number) {
 export function ConsolePage({ serverId }: { serverId: string }) {
   const t = useT();
   const server = useServer(serverId);
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus({ preventScroll: true });
+  }, []);
   const live = useLiveResources(serverId);
   const resourceStale = useResourceStaleness(live.dataUpdatedAt);
   const session = useSession();
@@ -318,25 +322,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       {consoleAvailable && Boolean(error) && <ErrorNotice error={error} />}
       <div className="console-workspace">
         <div className="console-heading">
-          <h2 className="visually-hidden">{t('web.console')}</h2>
-          {consoleAvailable && (
-            <>
-              <Tooltip content={t('service.connectionAction', { state: t(`service.${state}`) })}>
-                <button
-                  type="button"
-                  className="console-connection"
-                  data-state={state}
-                  aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
-                  onClick={() => setConnection((value) => value + 1)}
-                >
-                  <span className="console-connection-dot" aria-hidden="true" />
-                </button>
-              </Tooltip>
-              <span className="visually-hidden" role="status">
-                {t(`service.${state}`)}
-              </span>
-            </>
-          )}
+          <h1 ref={heading} tabIndex={-1}>
+            {server.data?.name}
+          </h1>
         </div>
         <div className="console-actions">
           {server.data?.permissions.operate &&
@@ -355,6 +343,22 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         <div className="console-terminal-slot">
           {consoleAvailable ? (
             <div className="console-terminal">
+              <div className="console-connection-slot">
+                <Tooltip content={t('service.connectionAction', { state: t(`service.${state}`) })}>
+                  <button
+                    type="button"
+                    className="console-connection"
+                    data-state={state}
+                    aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
+                    onClick={() => setConnection((value) => value + 1)}
+                  >
+                    <span className="console-connection-dot" aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <span className="visually-hidden" role="status">
+                  {t(`service.${state}`)}
+                </span>
+              </div>
               <ConsoleOutput
                 output={output}
                 lines={lines}

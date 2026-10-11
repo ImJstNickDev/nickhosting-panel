@@ -3672,3 +3672,28 @@ Browser tests use real isolated app handlers with fixture provider readings and
 disposable schemas; cleanup completed. No live servers, new infrastructure or
 container restarts. Existing HMR delivers the changes. Rollback: source revert;
 no migrations. PR #21 remains open/unmerged; SFTPGo #18 unchanged.
+
+### 2026-10-11 — Align console columns and move server heading
+
+The resource column now shares the terminal's top and bottom edges on desktop.
+The server name moves below the tabs into the power-control row, aligned with the
+terminal's left edge. Other server pages keep their existing heading. The
+reconnect indicator is inside the terminal's upper-right corner, with output
+padding preventing overlap; narrow screens retain name, controls, terminal, cards
+in that order. No provider, permission or stream contracts changed.
+
+Validation on this follow-up:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-sidebar.browser.test.ts`: **4/4 passed**, including top/bottom alignment within 1px, heading alignment and uniqueness, indicator containment, existing telemetry/permissions checks and four Axe scans.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed**.
+- Scoped `pnpm exec biome check` and `git diff --check`: **passed**, with four existing warnings (three reduced-motion declarations and the server navigation's non-null assertion).
+- The four console-sidebar screenshots linked above were refreshed and visually reviewed on desktop EN/mobile IT. Fixtures and disposable test schema were cleaned by the existing harness; no new infrastructure, provider mutations or container restarts occurred.
+
+Independent review found that moving the connection button onto a dark background
+reduced disconnected-dot and keyboard-focus contrast. Both colors were corrected
+with terminal-scoped styles; this was a color-only correction after the browser
+suite, not another full-suite run. All other established telemetry and lifecycle
+behavior is preserved. Rollback is a source revert; no migration is required.
+Final independent review confirmed contrast ratios of 5.28:1 for the disconnected
+dot and 10.38:1 for its focus ring against the terminal, reviewed the updated
+screenshots and found no remaining must-fix findings. Indexed governance passed.

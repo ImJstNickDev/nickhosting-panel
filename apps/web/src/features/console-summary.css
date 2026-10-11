@@ -8,8 +8,11 @@
   }
   .console-summary-card {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
     min-width: 0;
-    padding: 1rem 0.8rem 1rem 3.8rem;
+    padding: 0.65rem 0.8rem 0.65rem 3.8rem;
     border: 1px solid var(--line);
     border-radius: 5px;
     background: var(--surface);

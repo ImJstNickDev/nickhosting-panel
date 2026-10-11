@@ -492,8 +492,14 @@
   .console-heading {
     grid-area: heading;
     display: flex;
-    justify-content: end;
+    align-items: center;
+    min-width: 0;
     min-height: 40px;
+    align-self: stretch;
+  }
+  .console-heading h1 {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
   .console-actions {
     grid-area: actions;
@@ -507,15 +513,19 @@
   .console-terminal-slot {
     grid-area: terminal;
     min-width: 0;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
   }
   .console-workspace > .console-summary {
     grid-area: summary;
     min-width: 0;
+    align-self: stretch;
   }
   @media (max-width: 1099px) {
     .console-workspace {
-      grid-template-columns: minmax(0, 1fr) 40px;
-      grid-template-areas: "actions heading" "terminal terminal" "summary summary";
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-areas: "heading" "actions" "terminal" "summary";
       gap: 0.75rem;
     }
   }
@@ -558,8 +568,32 @@
     background: #b88700;
   }
   .console-terminal {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
     background: #152432;
     color: #e3ecf1;
+  }
+  .console-terminal .console {
+    flex: 1;
+    height: 0;
+    min-height: clamp(360px, 55svh, 680px);
+    padding-right: 3rem;
+  }
+  .console-connection-slot {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.25rem;
+    background: #152432;
+    border-radius: 50%;
+    z-index: 1;
+  }
+  .console-connection-slot .console-connection[data-state="disconnected"] .console-connection-dot {
+    background: #f06c62;
+  }
+  .console-connection-slot .console-connection:focus-visible {
+    outline-color: #b9d5ed;
   }
   .console-prompt {
     display: flex;
