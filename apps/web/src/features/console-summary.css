@@ -49,6 +49,9 @@
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }
+  .console-summary dd.is-offline {
+    color: var(--muted);
+  }
   .console-summary-address {
     font-family: ui-monospace, monospace;
     font-size: 0.85rem;

@@ -3856,3 +3856,52 @@ Browser Axe checks passed. Existing approved isolated services were reused,
 disposable fixtures cleaned. No production interactions, real server commands,
 container restarts or configuration changes. Rollback is a source revert.
 SFTPGo #18 remains unchanged; PR #21 stays open and unmerged.
+
+### 2026-10-11 — Live resources, running uptime and 30-second charts
+
+The browser previously ignored existing console SSE `stats` events and polled
+REST resources every ten seconds. It now validates and shares stream CPU, memory,
+network, uptime and disk between cards and charts. Healthy statistics pause that
+REST polling; missing/stale streams retain the ten-second fallback. No new
+provider endpoint, per-second HTTP polling or disk scan was introduced.
+
+Upstream [Wings v1.11.13 resources](https://github.com/pterodactyl/wings/blob/v1.11.13/server/resources.go)
+uses `Filesystem().CachedUsage()` in `Proc()`; disk already accompanies its
+statistics stream. The [Docker statistics reader](https://github.com/pterodactyl/wings/blob/v1.11.13/environment/docker/stats.go)
+provides the live process measurements. Runtime cadence remains provider-driven;
+NickHosting displays received samples immediately rather than inventing values.
+Uptime advances locally each second from a fresh running-process measurement,
+including seconds after the first hour. Missing optional fields stay unavailable.
+
+Charts retain at most 31 second buckets in a sliding 30-second window. Only actual
+observations enter the buffer; missing/nonfinite values and delivery gaps split
+traces. Visible start/end time labels are removed. Confirmed offline state clears
+previous live traces immediately and displays a zero baseline without persisting
+fake samples. CPU, memory and network cards show localized muted Offline; disk
+keeps its independently fresh occupied-space reading. Restart does not resurrect
+the preceding process's trace.
+
+Independent review identified and resolved two freshness problems: cached REST
+responses must not override connected-stream power state or restore old-process
+uptime after a transition; status-only data must not hide measurement errors.
+Final source review found no must-fix issues. The stream retains existing session
+and managed-server authorization; no lifecycle/admission or provider logic changed.
+
+Validation (targeted, not a full historical suite):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/console-resources.test.ts`: **5/5 passed**, validated counters/optional fields and bounded real-sample window.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-live-stats.browser.test.ts apps/web/tests/console-sidebar.browser.test.ts`: **6/6 passed** (71.98s) for initial streaming/sidebar behavior. First attempt had three fixture expectation failures: offline SSE contradicted a mocked running REST snapshot, and expected Starting lacked its existing ellipsis. Fixtures/expectations corrected; failed attempts are not counted as passes.
+- After the requested 30-second/offline/label changes, the same browser runner with only `apps/web/tests/console-live-stats.browser.test.ts`: **3/3 passed** (26.00s). Covers live CPU/RAM/network/cached disk, ticking uptime without per-second REST, missing counters, stale cached REST after offline, new-process uptime reset, immediate offline cards/flat graphs, missing axis labels, silent-stream expiry and visible fallback errors. Axe passed; mobile overflow check passed.
+- Web source/test typecheck and scoped Biome passed. No API, worker or full integration-suite rerun was needed for frontend-only changes.
+
+Sanitized actual browser captures:
+
+- [Live measurements](screenshots/m5/console-live-stats-desktop-en.png)
+- [Offline desktop](screenshots/m5/console-live-stats-offline-en.png)
+- [Offline mobile](screenshots/m5/console-live-stats-offline-mobile-en.png)
+
+Offline desktop/mobile rendering reviewed. Tests used real application/auth/API
+handlers with isolated provider events and disposable schemas, cleaned afterwards.
+No real server mutations, provider credentials, container restarts, infrastructure
+changes or production interactions. No live game test was repeated. Rollback is
+a source revert. SFTPGo #18 remains an independent release gate; PR #21 stays open.

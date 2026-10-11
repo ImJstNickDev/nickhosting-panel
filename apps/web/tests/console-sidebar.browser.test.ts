@@ -14,6 +14,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
   let identities: Awaited<ReturnType<typeof prepareJourneyIdentities>>;
   let user: Page;
   let base: string;
+  let fixtureState: Resources['current_state'] = 'offline';
   let originalResources: typeof provider.adapter.getResources;
   const errors: string[] = [];
   const running: Resources = {
@@ -43,6 +44,13 @@ describe('M5 Console sidebar resources and responsive controls', () => {
     );
     fixture.setManagement(provider.management);
     originalResources = provider.adapter.getResources;
+    const originalRelay = provider.adapter.relayConsole;
+    provider.adapter.relayConsole = (id, input) =>
+      originalRelay(id, {
+        ...input,
+        onEvent: (event) =>
+          input.onEvent(event.type === 'status' ? { ...event, data: fixtureState } : event),
+      });
     base = `${fixture.origin}/servers/${provider.ids.serverId}/console`;
   });
 
@@ -183,6 +191,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
   });
 
   it('renders provider milliseconds, CPU and binary bytes using one shared resource request', async () => {
+    fixtureState = 'running';
     provider.adapter.getResources = async () => running;
     let requests = 0;
     const count = (request: { url(): string }) => {
@@ -196,7 +205,7 @@ describe('M5 Console sidebar resources and responsive controls', () => {
       await browserExpect(card('Disk').locator('dd')).toHaveText('1 GiB');
       await browserExpect(card('Network (Inbound)').locator('dd')).toHaveText('2 MiB');
       await browserExpect(card('Network (Outbound)').locator('dd')).toHaveText('3 MiB');
-      await browserExpect(card('Uptime').locator('dd')).toHaveText('1 hr 1 min');
+      await browserExpect(card('Uptime').locator('dd')).toHaveText(/^1 hr 1 min [0-9]+ secs?$/);
       await browserExpect(user.locator('.console-summary-icon.is-offline')).toHaveCount(0);
       await browserExpect(user.locator('.resource-charts')).toBeVisible();
       expect(requests).toBe(1);

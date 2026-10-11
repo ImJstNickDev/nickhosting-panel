@@ -3,7 +3,8 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
-import { type Connections, platformPath, type Resources } from './service-contracts.js';
+import type { DisplayResources } from './console-resources.js';
+import { type Connections, platformPath } from './service-contracts.js';
 import './console-summary.css';
 
 const iconPaths = {
@@ -21,11 +22,13 @@ function SummaryCard({
   label,
   children,
   offline = false,
+  muted = false,
 }: {
   icon: keyof typeof iconPaths;
   label: string;
   children: ReactNode;
   offline?: boolean;
+  muted?: boolean;
 }) {
   return (
     <div className="console-summary-card">
@@ -43,7 +46,7 @@ function SummaryCard({
         </span>
         {label}
       </dt>
-      <dd>{children}</dd>
+      <dd className={muted ? 'is-offline' : undefined}>{children}</dd>
     </div>
   );
 }
@@ -70,7 +73,6 @@ function uptimeLabel(milliseconds: number, locale: string) {
         }).format(value),
       );
     }
-    if (parts.length === 2) break;
   }
   return parts.join(' ');
 }
@@ -81,7 +83,7 @@ export function ConsoleSummary({
   availability,
 }: {
   serverId: string;
-  resources?: Resources;
+  resources?: DisplayResources;
   availability: 'loading' | 'unavailable' | 'ready';
 }) {
   const t = useT(),
@@ -148,25 +150,41 @@ export function ConsoleSummary({
       <SummaryCard icon="uptime" label={t('service.summary.uptime')} offline={offline}>
         {duration}
       </SummaryCard>
-      <SummaryCard icon="cpu" label={t('service.summary.cpu')}>
-        {current
-          ? new Intl.NumberFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
-              style: 'percent',
-              maximumFractionDigits: 1,
-            }).format(current.resources.cpu_absolute / 100)
-          : fallback}
+      <SummaryCard muted={offline} icon="cpu" label={t('service.summary.cpu')}>
+        {offline
+          ? t('web.offline')
+          : current?.resources.cpu_absolute !== undefined
+            ? new Intl.NumberFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
+                style: 'percent',
+                maximumFractionDigits: 1,
+              }).format(current.resources.cpu_absolute / 100)
+            : fallback}
       </SummaryCard>
-      <SummaryCard icon="memory" label={t('web.memory')}>
-        {current ? format.bytes(current.resources.memory_bytes) : fallback}
+      <SummaryCard muted={offline} icon="memory" label={t('web.memory')}>
+        {offline
+          ? t('web.offline')
+          : current?.resources.memory_bytes !== undefined
+            ? format.bytes(current.resources.memory_bytes)
+            : fallback}
       </SummaryCard>
       <SummaryCard icon="disk" label={t('service.summary.disk')}>
-        {current ? format.bytes(current.resources.disk_bytes) : fallback}
+        {current?.resources.disk_bytes !== undefined
+          ? format.bytes(current.resources.disk_bytes)
+          : fallback}
       </SummaryCard>
-      <SummaryCard icon="inbound" label={t('service.summary.inbound')}>
-        {current ? format.bytes(current.resources.network_rx_bytes) : fallback}
+      <SummaryCard muted={offline} icon="inbound" label={t('service.summary.inbound')}>
+        {offline
+          ? t('web.offline')
+          : current?.resources.network_rx_bytes !== undefined
+            ? format.bytes(current.resources.network_rx_bytes)
+            : fallback}
       </SummaryCard>
-      <SummaryCard icon="outbound" label={t('service.summary.outbound')}>
-        {current ? format.bytes(current.resources.network_tx_bytes) : fallback}
+      <SummaryCard muted={offline} icon="outbound" label={t('service.summary.outbound')}>
+        {offline
+          ? t('web.offline')
+          : current?.resources.network_tx_bytes !== undefined
+            ? format.bytes(current.resources.network_tx_bytes)
+            : fallback}
       </SummaryCard>
     </dl>
   );

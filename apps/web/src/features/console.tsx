@@ -1,10 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
-import { useFormat, useLocale, useT } from '../app/i18n.js';
+import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Dialog, Empty, ErrorNotice, Loading, Notice, Section, Time } from '../components/ui.js';
+import {
+  type DisplayResources,
+  parseConsoleResources,
+  rollingTelemetry,
+  type TelemetrySample,
+} from './console-resources.js';
 import { ConsoleSummary } from './console-summary.js';
 import { useRequestOperation } from './servers.js';
 import {
@@ -106,11 +112,11 @@ function transientFailure(error: unknown) {
     failure.status >= 500
   );
 }
-function useLiveResources(serverId: string) {
+function useLiveResources(serverId: string, streaming: boolean) {
   return useQuery({
     queryKey: ['resources', serverId],
     queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
-    refetchInterval: 10000,
+    refetchInterval: streaming ? false : 10000,
     retry: (attempt, error) => attempt < 2 && transientFailure(error),
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
@@ -136,8 +142,18 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   useEffect(() => {
     heading.current?.focus({ preventScroll: true });
   }, []);
-  const live = useLiveResources(serverId);
-  const resourceStale = useResourceStaleness(live.dataUpdatedAt);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const [stats, setStats] = useState<{
+    scope: string;
+    at: number;
+    resources: DisplayResources['resources'];
+  }>();
+  const [disk, setDisk] = useState<{ scope: string; bytes: number; at: number }>();
+  const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const session = useSession();
   const consoleAvailable = Boolean(server.data?.capabilities?.console);
   const request = useRequestOperation(serverId);
@@ -176,28 +192,69 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     lines: [],
   });
   const scope = `${identity}:${serverId}`;
+  const live = useLiveResources(
+    serverId,
+    state === 'connected' && Boolean(stats?.scope === scope && now - stats.at < 30000),
+  );
+  const resourceStale = useResourceStaleness(live.dataUpdatedAt);
   const lines =
     buffer.scope === scope && identity
       ? buffer.lines.map((line) =>
           line.type === 'status' ? t(`service.consoleStatus.${line.data}`) : line.data,
         )
       : [];
-  const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<unknown>();
   const [runtime, setRuntime] = useState<{
     scope: string;
     value: Resources['current_state'];
     at: number;
+    changedAt?: number;
   }>();
   const [connection, setConnection] = useState(0);
   const follow = useRef(true);
   const output = useRef<HTMLElement>(null);
   const resourceState = !live.error && !resourceStale ? live.data?.current_state : undefined;
   const streamState = runtime?.scope === scope && state === 'connected' ? runtime : undefined;
-  const powerState =
-    streamState && (!resourceState || streamState.at >= live.dataUpdatedAt)
-      ? streamState.value
-      : (resourceState ?? server.data?.runtimeState);
+  const powerState = streamState?.value ?? resourceState ?? server.data?.runtimeState;
+  const freshStats =
+    stats?.scope === scope && state === 'connected' && now - stats.at < 30000 ? stats : undefined;
+  // REST resources can be provider-cached. A later HTTP response cannot prove a
+  // new process baseline after a stream transition, even if its state matches.
+  const transitionAt = runtime?.scope === scope ? runtime.changedAt : undefined;
+  const freshRest =
+    !live.error &&
+    !resourceStale &&
+    (!streamState || live.data?.current_state === streamState.value) &&
+    (!transitionAt || live.dataUpdatedAt > transitionAt + 30000)
+      ? live.data
+      : undefined;
+  const measured =
+    freshStats ??
+    (freshRest ? { resources: freshRest.resources, at: live.dataUpdatedAt } : undefined);
+  const diskBytes =
+    disk?.scope === scope && now - disk.at < 30000
+      ? disk.bytes
+      : !live.error && !resourceStale
+        ? live.data?.resources.disk_bytes
+        : undefined;
+  const confirmedState = streamState?.value ?? resourceState;
+  const resources: DisplayResources | undefined =
+    measured && powerState
+      ? {
+          current_state: confirmedState ?? 'unknown',
+          resources: {
+            ...measured.resources,
+            disk_bytes: diskBytes,
+            uptime:
+              confirmedState === 'running' && measured.resources.uptime !== undefined
+                ? measured.resources.uptime + Math.max(0, now - measured.at)
+                : undefined,
+          },
+        }
+      : powerState && streamState
+        ? { current_state: powerState, resources: { disk_bytes: diskBytes } }
+        : undefined;
+  const sampleAt = measured?.at ?? 0;
   const killAvailable = Boolean(server.data?.availableActions.kill && powerState === 'stopping');
   useEffect(() => {
     if (powerState !== 'stopping' || server.data?.activeOperationId !== killTarget)
@@ -232,6 +289,8 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     };
     async function connect() {
       setRuntime(undefined);
+      setStats(undefined);
+      observedStatus = undefined;
       setState('connecting');
       setError(undefined);
       try {
@@ -252,11 +311,21 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                   payload.code === 'forbidden' ? 'errors.forbidden' : 'service.consoleUnavailable',
                 );
               if (type === 'closed') {
+                setStats(undefined);
                 setState('disconnected');
                 return;
               }
               setState('connected');
               attempts = 0;
+              if (type === 'stats') {
+                const resources = parseConsoleResources(payload.data);
+                if (resources) {
+                  const at = Date.now();
+                  setStats({ scope, at, resources });
+                  if (resources.disk_bytes !== undefined)
+                    setDisk({ scope, at, bytes: resources.disk_bytes });
+                }
+              }
               if ((type === 'console' || type === 'status') && typeof payload.data === 'string') {
                 if (
                   type === 'status' &&
@@ -266,12 +335,20 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                 // Status snapshots recur on provider stats/reconnects. Preserve transitions,
                 // including across navigation or after the original status scrolls out.
                 if (type === 'status') {
-                  setRuntime({
+                  const at = Date.now();
+                  const changedAt =
+                    observedStatus !== undefined && payload.data !== observedStatus
+                      ? at
+                      : undefined;
+                  setRuntime((previous) => ({
                     scope,
                     value: payload.data as Resources['current_state'],
-                    at: Date.now(),
-                  });
+                    at,
+                    changedAt:
+                      changedAt ?? (previous?.scope === scope ? previous.changedAt : undefined),
+                  }));
                   if (payload.data !== observedStatus) {
+                    setStats(undefined);
                     observedStatus = payload.data;
                     void queryClient.invalidateQueries({ queryKey: ['server', serverId] });
                   }
@@ -401,14 +478,8 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         </div>
         <ConsoleSummary
           serverId={serverId}
-          resources={live.data}
-          availability={
-            live.isPending
-              ? 'loading'
-              : live.error || !live.data || resourceStale
-                ? 'unavailable'
-                : 'ready'
-          }
+          resources={resources}
+          availability={resources ? 'ready' : live.isPending ? 'loading' : 'unavailable'}
         />
       </div>
       <Dialog open={restart} title={t('web.restart')} onClose={() => setRestart(false)}>
@@ -431,7 +502,14 @@ export function ConsolePage({ serverId }: { serverId: string }) {
           {t('service.kill')}
         </button>
       </Dialog>
-      <Telemetry serverId={serverId} live={live} stale={resourceStale} />
+      <Telemetry
+        key={scope}
+        serverId={serverId}
+        live={live}
+        resources={resources}
+        sampleAt={sampleAt}
+        stale={!measured && resourceStale}
+      />
     </>
   );
 }
@@ -442,36 +520,51 @@ type ChartSeries = {
   color: string;
   direction?: 'inbound' | 'outbound';
 };
-function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; unit: string }) {
+function Chart({
+  title,
+  series,
+  unit,
+  end,
+  offline,
+}: {
+  title: string;
+  series: ChartSeries[];
+  unit: string;
+  end: number;
+  offline: boolean;
+}) {
   const t = useT(),
-    format = useFormat(),
-    { locale } = useLocale();
-  const values = series.flatMap((item) => item.values);
-  if (!values.length)
+    format = useFormat();
+  const values = series
+    .flatMap((item) => item.values)
+    .filter((sample) => Number.isFinite(sample.value));
+  if (!values.length && !offline)
     return (
       <div>
         <h3>{title}</h3>
         <Empty text={t('service.noTelemetry')} />
       </div>
     );
-  const firstTime = Math.min(...values.map((value) => value.time));
-  const lastTime = Math.max(...values.map((value) => value.time));
+  const firstTime = end - 30000;
+  const lastTime = end;
   const maximum = Math.max(...values.map((value) => value.value), 1);
   const range = Math.max(lastTime - firstTime, 1);
   const network = series.some((item) => item.direction);
-  const summary = series
-    .map((item) => {
-      const last = item.values.at(-1);
-      return last
-        ? t('service.chartLabel', {
-            name: item.label,
-            value: format.number(last.value),
-            unit,
-            time: format.date(new Date(last.time)),
-          })
-        : `${item.label}: ${t('service.noTelemetry')}`;
-    })
-    .join('; ');
+  const summary = offline
+    ? t('web.offline')
+    : series
+        .map((item) => {
+          const last = item.values.at(-1);
+          return last && Number.isFinite(last.value)
+            ? t('service.chartLabel', {
+                name: item.label,
+                value: format.number(last.value),
+                unit,
+                time: format.date(new Date(last.time)),
+              })
+            : `${item.label}: ${t('service.noTelemetry')}`;
+        })
+        .join('; ');
   return (
     <figure className={`metric-chart${network ? ' network-chart' : ''}`}>
       <figcaption>
@@ -483,7 +576,7 @@ function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; 
               return (
                 <Tooltip
                   key={item.label}
-                  content={`${item.label}: ${last ? `${format.number(last.value)} ${unit}` : t('service.noTelemetry')}`}
+                  content={`${item.label}: ${last && Number.isFinite(last.value) ? `${format.number(last.value)} ${unit}` : t('service.noTelemetry')}`}
                 >
                   <button type="button" aria-label={item.label} style={{ color: item.color }}>
                     <svg
@@ -511,49 +604,53 @@ function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; 
           </div>
         )}
       </figcaption>
-      <svg viewBox="0 0 400 135" role="img" aria-label={summary}>
+      <svg viewBox="0 0 400 115" role="img" aria-label={summary}>
         <path d="M12 10V109H390" fill="none" stroke="#8494a0" />
-        {series
-          .slice()
-          .reverse()
-          .map((item) => {
-            const segments: string[] = [];
-            let current = '';
-            let previous = firstTime;
-            for (const sample of item.values) {
-              if (sample.time - previous > 120000) {
-                if (current) segments.push(current);
-                current = '';
+        {offline && (
+          <polyline
+            data-offline="true"
+            points="12,108 388,108"
+            fill="none"
+            stroke={series[0]?.color}
+            strokeWidth="2"
+          />
+        )}
+        {!offline &&
+          series
+            .slice()
+            .reverse()
+            .map((item) => {
+              const segments: string[] = [];
+              let current = '';
+              let previous = firstTime;
+              for (const sample of item.values) {
+                if (!Number.isFinite(sample.value)) {
+                  if (current) segments.push(current);
+                  current = '';
+                  previous = sample.time;
+                  continue;
+                }
+                if (sample.time - previous > 2500) {
+                  if (current) segments.push(current);
+                  current = '';
+                }
+                current += `${current ? ' ' : ''}${12 + ((sample.time - firstTime) / range) * 376},${108 - (sample.value / maximum) * 92}`;
+                previous = sample.time;
               }
-              current += `${current ? ' ' : ''}${12 + ((sample.time - firstTime) / range) * 376},${108 - (sample.value / maximum) * 92}`;
-              previous = sample.time;
-            }
-            if (current) segments.push(current);
-            return segments.map((points) => (
-              <polyline
-                key={`${item.label}-${points}`}
-                data-series={item.direction}
-                points={points}
-                fill="none"
-                stroke={item.color}
-                strokeWidth="2"
-              />
-            ));
-          })}
+              if (current) segments.push(current);
+              return segments.map((points) => (
+                <polyline
+                  key={`${item.label}-${points}`}
+                  data-series={item.direction}
+                  points={points}
+                  fill="none"
+                  stroke={item.color}
+                  strokeWidth="2"
+                />
+              ));
+            })}
         <text x="16" y="22" fill="#536372" fontSize="10">
           {format.number(maximum)} {unit}
-        </text>
-        <text x="12" y="130" fill="#536372" fontSize="10">
-          {new Intl.DateTimeFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
-            hour: '2-digit',
-            minute: '2-digit',
-          }).format(firstTime)}
-        </text>
-        <text x="389" y="130" textAnchor="end" fill="#536372" fontSize="10">
-          {new Intl.DateTimeFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
-            hour: '2-digit',
-            minute: '2-digit',
-          }).format(lastTime)}
         </text>
       </svg>
     </figure>
@@ -563,44 +660,79 @@ function Telemetry({
   serverId,
   live,
   stale,
+  resources,
+  sampleAt,
 }: {
   serverId: string;
   live: ReturnType<typeof useLiveResources>;
   stale: boolean;
+  resources?: DisplayResources;
+  sampleAt: number;
 }) {
   const t = useT();
   const history = useQuery({
-    queryKey: ['metrics', serverId, 1],
+    queryKey: ['metrics', serverId, '30s'],
     queryFn: () => {
       const query = new URLSearchParams({
         limit: '100',
-        from: new Date(Date.now() - 3600000).toISOString(),
+        from: new Date(Date.now() - 30000).toISOString(),
       });
       return api<Metrics>(`${platformPath(serverId)}/metrics?${query}`);
     },
     refetchInterval: 30000,
   });
+  const offline = resources?.current_state === 'offline';
+  const [processBoundary, setProcessBoundary] = useState(0);
+  const [observations, setObservations] = useState<TelemetrySample[]>([]);
+  const cpu = resources?.resources.cpu_absolute;
+  const memory = resources?.resources.memory_bytes;
+  const rx = resources?.resources.network_rx_bytes;
+  const tx = resources?.resources.network_tx_bytes;
+  useEffect(() => {
+    if (offline) {
+      setObservations([]);
+      setProcessBoundary(Date.now());
+      return;
+    }
+    if (!sampleAt || stale) return;
+    setObservations((previous) =>
+      rollingTelemetry(
+        [
+          ...previous,
+          {
+            time: sampleAt,
+            cpu: cpu ?? NaN,
+            memory: memory === undefined ? NaN : memory / 1048576,
+            rx: rx === undefined ? NaN : rx / 1048576,
+            tx: tx === undefined ? NaN : tx / 1048576,
+          },
+        ],
+        Date.now(),
+      ),
+    );
+  }, [sampleAt, stale, cpu, memory, rx, tx, offline]);
+  const end = Date.now();
   const rows = (history.data?.items ?? []).slice().reverse();
-  const samples = rows.map((row) => ({
-    time: Date.parse(row.observed_at),
-    memory: Number(row.memory_bytes) / 1048576,
-    cpu: row.cpu_percent,
-    rx: Number(row.network_rx_bytes) / 1048576,
-    tx: Number(row.network_tx_bytes) / 1048576,
-  }));
-  if (live.data && !live.error && !stale) {
-    const r = live.data.resources;
-    samples.push({
-      time: live.dataUpdatedAt,
-      memory: r.memory_bytes / 1048576,
-      cpu: r.cpu_absolute,
-      rx: r.network_rx_bytes / 1048576,
-      tx: r.network_tx_bytes / 1048576,
-    });
-  }
+  const samples = offline
+    ? []
+    : rollingTelemetry(
+        [
+          ...rows
+            .filter((row) => Date.parse(row.observed_at) > processBoundary)
+            .map((row) => ({
+              time: Date.parse(row.observed_at),
+              memory: Number(row.memory_bytes) / 1048576,
+              cpu: row.cpu_percent,
+              rx: Number(row.network_rx_bytes) / 1048576,
+              tx: Number(row.network_tx_bytes) / 1048576,
+            })),
+          ...observations.filter((sample) => sample.time > processBoundary),
+        ],
+        end,
+      );
   return (
     <Section title={t('service.telemetry')}>
-      {live.error && (
+      {live.error && !sampleAt && (
         <ErrorNotice
           error={
             transientFailure(live.error)
@@ -611,13 +743,15 @@ function Telemetry({
         />
       )}
       {Boolean(stale) && <Notice>{t('service.staleTelemetry')}</Notice>}
-      {history.isPending ? (
+      {history.isPending && !samples.length && !offline ? (
         <Loading />
-      ) : history.error ? (
+      ) : history.error && !samples.length && !offline ? (
         <ErrorNotice error={history.error} />
       ) : (
         <div className="columns resource-charts">
           <Chart
+            offline={offline}
+            end={end}
             title={t('web.cpu')}
             unit="%"
             series={[
@@ -629,6 +763,8 @@ function Telemetry({
             ]}
           />
           <Chart
+            offline={offline}
+            end={end}
             title={t('web.memory')}
             unit="MiB"
             series={[
@@ -640,6 +776,8 @@ function Telemetry({
             ]}
           />
           <Chart
+            offline={offline}
+            end={end}
             title={t('service.networkTraffic')}
             unit="MiB"
             series={[

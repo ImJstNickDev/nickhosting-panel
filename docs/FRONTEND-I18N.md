@@ -70,7 +70,19 @@ with the power controls. Other server tabs omit the repeated server-name heading
 controls precede the terminal and resource cards follow it. Uptime uses measured
 provider milliseconds; only confirmed offline state gets an Offline value and red
 icon background. Failed, missing or expired readings remain unavailable. Cards and
-graphs share one resource query and a 30-second freshness deadline; connection
+graphs share validated provider stream measurements with a 30-second freshness
+deadline. CPU, memory and network update as Wings sends measurements; uptime
+advances locally every second only from a fresh running-process baseline. Disk
+uses the cached value already included in Wings statistics, without requesting
+additional scans. REST resource polling pauses while live measurements are fresh
+and resumes at the existing 10-second fallback cadence on missing/stale streams.
+Charts use a sliding 30-second window with at most one real sample per second;
+missing values and delivery gaps break the line. Start/end time labels are omitted
+from the visible charts; measured timestamps remain in accessible summaries.
+Confirmed offline state immediately resets the graph display to a flat zero line,
+without storing those display zeros as measurements. CPU, memory and network cards
+show a muted localized Offline label; disk keeps its latest fresh occupied-space
+reading. Previous-process live traces do not return on the next start. Connection
 addresses use the authorized primary endpoint, never an auxiliary/backend port.
 Output follows automatically while scrolled to the bottom; scrolling up pauses
 following, and returning to the bottom resumes it. No follow checkbox is needed.
