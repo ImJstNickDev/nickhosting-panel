@@ -727,6 +727,24 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
         });
     },
   );
+  it('runs one final local guard after the shared slow proof, without nested full authorization', async () => {
+    const f = await fixture('start');
+    let proofSettled = false;
+    let finalGuards = 0;
+    f.options.authorizeIntent = async () => {
+      if (proofSettled) finalGuards++;
+    };
+    const authorizeEffect = vi.fn(async (_jobId, _serverId, _db, context) => {
+      expect(context.deferFinalIntentCheck).toBe(true);
+      await context.providerServer;
+      proofSettled = true;
+    });
+    f.options.authorizeEffect = authorizeEffect;
+    expect(await f.run()).toBe('waiting');
+    expect(authorizeEffect).toHaveBeenCalledTimes(1);
+    expect(finalGuards).toBe(1);
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
   it.each([false, true])(
     'rejects authority revoked during final identity after early authorization: local guard=%s',
     async (localGuard) => {
@@ -750,7 +768,9 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
         if (revoked) throw new DomainError('forbidden');
       };
       if (localGuard) f.options.authorizeIntent = guard;
-      f.options.authorizeEffect = async () => {
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        if (prepared && context?.providerServer instanceof Promise)
+          expect(context.deferFinalIntentCheck).toBe(localGuard ? true : undefined);
         await guard();
         if (prepared) releaseIdentity();
         // Intentionally does not await the supplied provider promise.

@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import {
   type AuthContext,
   assertAuthContext,
@@ -236,6 +237,8 @@ export interface ManagementOptions {
   ) => Promise<{ recovered: number; failed: number }>;
 }
 
+const injectedAdapterBindings = new WeakMap<PterodactylAdapter, string>();
+
 export async function createManagementRuntime(options: ManagementOptions) {
   async function timed<T>(
     jobId: string,
@@ -264,13 +267,32 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   const { db } = options;
   const env = options.env ?? {};
-  const { values } = await getSettings(db, env);
-  const applicationKey = options.adapter
-    ? undefined
-    : await getSecret(db, options.codec, 'pterodactylApplicationKey', env);
-  const clientKey = options.adapter
-    ? undefined
-    : await getSecret(db, options.codec, 'pterodactylClientKey', env);
+  const [{ values }, applicationKey, clientKey] = await Promise.all([
+    getSettings(db, env),
+    options.adapter
+      ? Promise.resolve(undefined)
+      : getSecret(db, options.codec, 'pterodactylApplicationKey', env),
+    options.adapter
+      ? Promise.resolve(undefined)
+      : getSecret(db, options.codec, 'pterodactylClientKey', env),
+  ]);
+  // Internal reuse fence only: never expose or log a credential-derived binding.
+  let consoleProviderBinding: string;
+  if (options.adapter) {
+    consoleProviderBinding = injectedAdapterBindings.get(options.adapter) ?? randomUUID();
+    injectedAdapterBindings.set(options.adapter, consoleProviderBinding);
+  } else {
+    consoleProviderBinding = createHash('sha256')
+      .update(
+        JSON.stringify([
+          values.pterodactylBaseUrl,
+          applicationKey,
+          clientKey,
+          values.pterodactylWebSocketOrigins,
+        ]),
+      )
+      .digest('hex');
+  }
   if (!options.adapter && (!values.pterodactylBaseUrl || !applicationKey || !clientKey))
     throw new DomainError('integration_unavailable');
   const containerObserver =
@@ -616,7 +638,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
       jobId: string,
       serverId: string,
       connection: Kysely<Database>,
-      context?: { providerServer?: ApplicationServer | Promise<ApplicationServer> },
+      context?: {
+        providerServer?: ApplicationServer | Promise<ApplicationServer>;
+        deferFinalIntentCheck?: true;
+      },
     ) => {
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `authorize_effect.${name}`, work);
@@ -646,9 +671,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
         // Observer/provider proofs can outlive an automation grant. Re-read the
         // current actor, schedule revision, consent and Gateway generation only
         // after those slow proofs, at the final handoff to a new remote effect.
-        await stage('final_authorization', () =>
-          authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
-        );
+        // Lifecycle can own this exact final guard after all proofs settle.
+        // Standalone callers still receive the complete authorization contract.
+        if (!context?.deferFinalIntentCheck)
+          await stage('final_authorization', () =>
+            authorizeQueuedEffect(connection, jobId, serverId, env, adapter),
+          );
       }
     },
     reserveInstallation: async (serverId: string, jobId: string, connection: Kysely<Database>) => {
@@ -735,7 +763,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
     context: AuthContext,
     serverId: string,
     write: boolean,
-    work: (identifier: string, connection: Kysely<Database>, current: AuthContext) => Promise<T>,
+    work: (
+      identifier: string,
+      connection: Kysely<Database>,
+      current: AuthContext,
+      server: Awaited<ReturnType<typeof authorizeServer>>,
+    ) => Promise<T>,
   ) {
     return db.connection().execute(async (connection) => {
       if (write) {
@@ -772,7 +805,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
           serverId,
           write ? 'server:manage' : 'server:read',
         );
-        return await work(server.pterodactyl_identifier, connection, refreshed);
+        return await work(server.pterodactyl_identifier, connection, refreshed, server);
       } finally {
         if (write)
           await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`.execute(
@@ -783,6 +816,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   return {
     adapter,
+    consoleProviderBinding,
     containerObserver,
     refreshObservations,
     process,

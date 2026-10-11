@@ -556,6 +556,38 @@ describe('M2 Hono API with real invitation, password and session authentication'
       }),
     ]);
   });
+  it('skips host sampling for stop and kill and scopes start sampling to its target', async () => {
+    const sample = vi.spyOn(runtime, 'refreshObservations').mockResolvedValue(undefined);
+    try {
+      const stopped = await f.server();
+      expect(
+        (
+          await request(user, `/v1/servers/${stopped}/operations`, {
+            action: 'stop',
+            idempotencyKey: randomUUID(),
+          })
+        ).status,
+      ).toBe(202);
+      expect(sample).not.toHaveBeenCalled();
+      await request(user, `/v1/servers/${stopped}/operations`, {
+        action: 'kill',
+        confirm: true,
+        operationId: randomUUID(),
+        idempotencyKey: randomUUID(),
+      });
+      expect(sample).not.toHaveBeenCalled();
+      const starting = await f.server();
+      await request(user, `/v1/servers/${starting}/operations`, {
+        action: 'start',
+        idempotencyKey: randomUUID(),
+      });
+      expect(sample).toHaveBeenCalledOnce();
+      expect(sample.mock.calls[0]?.[1]).toBe(starting);
+    } finally {
+      sample.mockRestore();
+    }
+  });
+
   it('creates durable operations over HTTP, validates confirmation and origin, and exposes safe history', async () => {
     const input = f.input();
     const rejected = await request(user, '/v1/servers', input, {
@@ -1539,6 +1571,72 @@ describe('M2 Hono API with real invitation, password and session authentication'
         await small.db.deleteFrom('session').where('id', '=', current.sessionId).execute();
       await inProgress;
       await small.db.destroy();
+    }
+  });
+
+  it('reuses only the current session console relay and never replays uncertain dispatch', async () => {
+    sendCommand.mockClear();
+    const serverId = await f.server();
+    let input: ConsoleRelayOptions | undefined;
+    const dispatched = vi.fn(async () => {
+      if (!(await input?.authorizeCommand?.())) throw new DomainError('forbidden');
+    });
+    vi.mocked(f.adapter.relayConsole).mockImplementationOnce(async (_id, options) => {
+      input = options;
+      options.onEvent({ type: 'status', data: 'running' });
+      return {
+        close: vi.fn(),
+        sendCommand: dispatched,
+        requestLogs: async () => {},
+        requestStats: async () => {},
+      };
+    });
+    const response = await request(user, `/v1/servers/${serverId}/console`);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Missing console stream');
+    try {
+      let events = '';
+      while (!events.includes('event: connected'))
+        events += new TextDecoder().decode((await reader.read()).value);
+      expect(input?.canSendCommands).toBe(true);
+      expect(
+        (await request(user, `/v1/servers/${serverId}/console`, { command: 'list' })).status,
+      ).toBe(204);
+      expect(dispatched).toHaveBeenCalledWith('list');
+      expect(sendCommand).not.toHaveBeenCalled();
+      // Another authorized identity must never borrow this user's authenticated transport.
+      expect(
+        (await request(owner, `/v1/servers/${serverId}/console`, { command: 'list' })).status,
+      ).toBe(204);
+      expect(sendCommand).toHaveBeenCalledOnce();
+      dispatched.mockRejectedValueOnce(new DomainError('integration_unavailable'));
+      expect(
+        (await request(user, `/v1/servers/${serverId}/console`, { command: 'say fixture' })).status,
+      ).toBe(503);
+      expect(sendCommand).toHaveBeenCalledOnce();
+      // Current ownership is still checked before any send, including through a retained socket.
+      await f.db
+        .updateTable('managed_servers')
+        .set({ owner_id: outsiderId })
+        .where('id', '=', serverId)
+        .execute();
+      expect(
+        (await request(user, `/v1/servers/${serverId}/console`, { command: 'list' })).status,
+      ).toBe(403);
+      expect(dispatched).toHaveBeenCalledTimes(2);
+      await f.db
+        .updateTable('managed_servers')
+        .set({ owner_id: userId })
+        .where('id', '=', serverId)
+        .execute();
+      input?.onEvent({ type: 'closed' });
+      while (!(await reader.read()).done) {}
+      expect(
+        (await request(user, `/v1/servers/${serverId}/console`, { command: 'list' })).status,
+      ).toBe(204);
+      expect(sendCommand).toHaveBeenCalledTimes(2);
+    } finally {
+      await reader.cancel();
     }
   });
 

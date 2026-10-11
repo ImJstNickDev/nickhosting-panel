@@ -381,7 +381,28 @@ export function useRequestOperation(serverId: string) {
       { body: { ...body, idempotencyKey: key } },
     );
     intents.current.delete(fingerprint);
-    await Promise.all([
+    // Acceptance is not completion. Disable conflicting actions immediately,
+    // without making the control wait for unrelated background refreshes.
+    await queryClient.cancelQueries({ queryKey: ['server', serverId], exact: true });
+    queryClient.setQueryData<ServerInfo>(['server', serverId], (current) =>
+      current
+        ? {
+            ...current,
+            activeOperationId: result.jobId,
+            availableActions: {
+              ...current.availableActions,
+              start: false,
+              stop: false,
+              restart: false,
+              kill: false,
+              backup: false,
+              configure: false,
+              delete: false,
+            },
+          }
+        : current,
+    );
+    void Promise.allSettled([
       queryClient.invalidateQueries({ queryKey: ['server', serverId] }),
       queryClient.invalidateQueries({ queryKey: ['servers'] }),
       queryClient.invalidateQueries({ queryKey: ['activity'] }),

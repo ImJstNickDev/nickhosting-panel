@@ -121,6 +121,16 @@ Console display retains at most 300 lines, each truncated to 8,192 characters;
 the API independently bounds outstanding SSE output (256 KiB/64 events with a
 five-second slow-consumer timeout). Reconnecting does not promise replay of missed
 console output. Authorization remains live; stale data is not current telemetry.
+Console command POST reuses a matching API-local authenticated Wings relay when
+available. The bounded registry binds the exact session/actor/subject/support
+context, full managed provider identity and effective provider URL/credentials.
+Fresh write authorization, managed identity, lifecycle locking and audit still
+precede dispatch. Closed or unmatched sessions select the existing REST path
+before dispatch; an attempted WebSocket send is never replayed over REST. HTTP
+204 acknowledges dispatch, not game execution. Multi-instance deployments can
+fall back to REST when the POST reaches a different API process; no browser
+provider token or cross-session relay reuse is introduced.
+
 
 ## Durable schedules and explicit automation consent
 

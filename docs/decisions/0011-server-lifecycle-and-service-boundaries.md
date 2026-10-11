@@ -247,3 +247,23 @@ stopped proof. An HTTP acknowledgement is not evidence of a stopped container.
 A stop performed only in Pterodactyl has no NickHosting parent operation to
 escalate through this endpoint. No direct-server import or unrestricted force
 power API is introduced.
+
+
+### 2026-10-11 amendment — Reuse interactive console transport
+
+Interactive commands may reuse the authenticated API-owned Wings WebSocket
+already serving that exact session and managed server. Credentials never enter
+the browser. Keep live write authorization, full managed identity verification,
+lifecycle locking, pending-operation exclusion and audit before dispatch.
+Choose REST only before any WebSocket send if no matching handle exists; never
+replay a potentially delivered command. Dispatch does not establish execution.
+The registry is bounded and process-local, with complete identity and provider
+configuration fences and disconnect cleanup.
+
+Stop/Kill enqueue does not sample host capacity: it does not acquire new compute.
+Other operation sampling targets the affected server's host. Admission and final
+worker proofs remain authoritative. Lifecycle may explicitly own the final
+local authorization after all slow proofs, avoiding a duplicate nested guard;
+standalone authorizers keep their final check. Durable power effects remain on
+the existing supported Client HTTP API in this amendment. No direct browser
+power channel or bypass of durable jobs/admission is introduced.

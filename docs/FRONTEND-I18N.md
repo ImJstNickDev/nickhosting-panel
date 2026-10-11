@@ -98,6 +98,11 @@ and accessible name. Enter submits, preserving focus; failed requests retain the
 draft and show an error, while pending requests cannot submit duplicates. Focus
 underlines the prompt symbol instead of drawing a rectangle around the input.
 
+Accepted lifecycle requests immediately disable conflicting actions and close
+confirmation dialogs. Descriptor/list/Activity/quota refreshes run in the
+background; acceptance is never presented as completion, and refresh errors
+remain with their owning queries.
+
 Generic operation-accepted and operation-in-progress banners are omitted throughout
 the application. Pending/disabled controls and Activity provide operation state;
 actual errors, uncertainty and destructive confirmations remain visible. Retried

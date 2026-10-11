@@ -139,9 +139,31 @@ describe('M5 server Console entry and informational Status navigation', () => {
         response.request().method() === 'POST' &&
         response.url().endsWith(`/v1/servers/${provider.ids.serverId}/operations`),
     );
-    await dialog.getByRole('button', { name: 'Restart', exact: true }).click();
-    expect((await restarted).status()).toBe(202);
-    await browserExpect(dialog).not.toBeVisible();
+    // A slow descriptor refresh must not keep an accepted action/dialog busy.
+    const descriptorPath = `**/v1/platform/servers/${provider.ids.serverId}`;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pendingRoutes: Promise<void>[] = [];
+    await user.route(descriptorPath, (route) => {
+      const pending = held.then(() => route.continue());
+      pendingRoutes.push(pending);
+      return pending;
+    });
+    try {
+      await dialog.getByRole('button', { name: 'Restart', exact: true }).click();
+      expect((await restarted).status()).toBe(202);
+      await browserExpect(dialog).not.toBeVisible();
+      for (const action of ['Start', 'Restart', 'Stop'])
+        await browserExpect(
+          user.locator('.console-actions').getByRole('button', { name: action, exact: true }),
+        ).toBeDisabled();
+    } finally {
+      release();
+      await Promise.all(pendingRoutes);
+      await user.unroute(descriptorPath);
+    }
     await provider.processPending();
   });
 

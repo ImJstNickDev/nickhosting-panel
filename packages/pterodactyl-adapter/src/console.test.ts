@@ -125,6 +125,24 @@ describe('backend console mediation over a real isolated WebSocket', () => {
     expect(onConfirmed).toHaveBeenCalledTimes(1);
     expect(observer.stopped).toHaveBeenCalledWith(uuid, 'server');
   });
+  it('rechecks command permission independently from read-only stream permission', async () => {
+    const fixture = await setup();
+    let writable = true;
+    const relay = await fixture.adapter.relayConsole('f729c8a1', {
+      authorize: async () => true,
+      canSendCommands: true,
+      authorizeCommand: async () => writable,
+      onEvent: () => {},
+    });
+    relays.push(relay);
+    await relay.sendCommand('list');
+    await vi.waitFor(() => expect(fixture.incoming).toHaveLength(2));
+    writable = false;
+    await expect(relay.sendCommand('stop')).rejects.toMatchObject({ code: 'forbidden' });
+    expect(fixture.incoming).toHaveLength(2);
+    await relay.requestStats();
+    await vi.waitFor(() => expect(fixture.incoming.at(-1)?.event).toBe('send stats'));
+  });
   it('sets the Panel Origin, authenticates internally, filters events and redacts tokens', async () => {
     const fixture = await setup();
     const events: ConsoleEvent[] = [];

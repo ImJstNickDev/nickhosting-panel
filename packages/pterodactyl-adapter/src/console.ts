@@ -33,6 +33,8 @@ export interface ConsoleRelayOptions {
   /** The API must recheck the current NickHosting session/server authorization. */
   authorize(): Promise<boolean>;
   canSendCommands?: boolean;
+  /** Separate current write permission, in addition to stream read authorization. */
+  authorizeCommand?(): Promise<boolean>;
   signal?: AbortSignal;
   maxDurationMs?: number;
 }
@@ -263,6 +265,8 @@ export async function createConsoleRelay(
         command,
       );
       await assertAuthorized();
+      if (input.authorizeCommand && !(await input.authorizeCommand()))
+        throw new DomainError('forbidden');
       send('send command', [value]);
     },
     async requestLogs() {

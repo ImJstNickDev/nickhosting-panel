@@ -40,6 +40,7 @@ import type { Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { createConsoleCommandRelays } from './console-command-relays.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -64,6 +65,7 @@ export function registerServerRoutes(
   options: ServerRouteOptions,
 ) {
   const { db, env, principal, management } = options;
+  const commandRelays = createConsoleCommandRelays();
   const owner = async (c: C) => {
     const context = await principal(c, true);
     ownerOnly(context);
@@ -209,7 +211,8 @@ export function registerServerRoutes(
     const context = await principal(c);
     const input = parse(operationSchema, await body(c));
     await authorizeServer(db, context, c.req.param('id'), 'server:operate');
-    if (input.action !== 'kill') await (await management()).refreshObservations();
+    if (input.action !== 'kill' && input.action !== 'stop')
+      await (await management()).refreshObservations(db, c.req.param('id'));
     return c.json(await enqueueServerOperation(db, context, c.req.param('id'), input, env), 202);
   });
   app.post('/v1/owner/servers/:id/resolve', async (c) => {
@@ -532,25 +535,62 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     const input = parse(z.object({ command: z.string().min(1).max(4096) }).strict(), await body(c));
-    await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
-      await recordAudit(connection, current, 'server.console.command', {
-        serverId: c.req.param('id'),
-      });
-      await service.adapter.sendCommand(id, input.command);
-    });
+    await service.access(
+      context,
+      c.req.param('id'),
+      true,
+      async (id, connection, current, server) => {
+        await recordAudit(connection, current, 'server.console.command', {
+          serverId: c.req.param('id'),
+        });
+        const relay = commandRelays.find(
+          current,
+          c.req.param('id'),
+          JSON.stringify([id, server.pterodactyl_id, server.pterodactyl_uuid, server.external_id]),
+          service.consoleProviderBinding,
+        );
+        // Choose transport before dispatch. A WS error may follow a sent frame: never replay it.
+        if (relay) await relay.sendCommand(input.command);
+        else await service.adapter.sendCommand(id, input.command);
+      },
+    );
     return c.body(null, 204);
   });
   app.get('/v1/servers/:id/console', async (c) => {
     const context = await principal(c),
       service = await management();
-    const identifier = await service.access(context, c.req.param('id'), false, async (id) => id);
+    const { identifier, identity } = await service.access(
+      context,
+      c.req.param('id'),
+      false,
+      async (id, _connection, _current, server) => ({
+        identifier: id,
+        identity: JSON.stringify([
+          id,
+          server.pterodactyl_id,
+          server.pterodactyl_uuid,
+          server.external_id,
+        ]),
+      }),
+    );
+    let canSendCommands = false;
+    try {
+      await authorizeServer(db, context, c.req.param('id'), 'server:manage');
+      canSendCommands = true;
+    } catch (error) {
+      if (!(error instanceof DomainError) || error.code !== 'forbidden') throw error;
+    }
     return streamSSE(c, async (stream) => {
+      let unregister = () => {};
+      let relayClosed = false;
       let done!: () => void;
       const closed = new Promise<void>((resolve) => {
         done = resolve;
       });
       const controller = new AbortController();
       stream.onAbort(() => {
+        relayClosed = true;
+        unregister();
         controller.abort();
         done();
       });
@@ -566,6 +606,15 @@ export function registerServerRoutes(
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
         const relay = await service.adapter.relayConsole(identifier, {
+          canSendCommands,
+          authorizeCommand: async () => {
+            try {
+              await authorizeServer(db, await principal(c), c.req.param('id'), 'server:manage');
+              return true;
+            } catch {
+              return false;
+            }
+          },
           signal: controller.signal,
           authorize: async () => {
             try {
@@ -583,9 +632,21 @@ export function registerServerRoutes(
                 data: JSON.stringify({ type: 'error', code: 'forbidden' }),
               });
             else output.send({ event: event.type, data: JSON.stringify(event) });
-            if (event.type === 'closed') void output.drain().then(done);
+            if (event.type === 'closed') {
+              relayClosed = true;
+              unregister();
+              void output.drain().then(done);
+            }
           },
         });
+        if (canSendCommands && !relayClosed && !controller.signal.aborted)
+          unregister = commandRelays.register(
+            context,
+            c.req.param('id'),
+            identity,
+            service.consoleProviderBinding,
+            relay,
+          );
         try {
           if (c.req.query('history') !== '0') await relay.requestLogs();
           output.send({ event: 'connected', data: JSON.stringify({ type: 'connected' }) });
@@ -598,6 +659,7 @@ export function registerServerRoutes(
           heartbeat.unref();
           await closed;
         } finally {
+          unregister();
           relay.close();
         }
       } catch (error) {

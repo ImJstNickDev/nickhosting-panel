@@ -131,6 +131,67 @@ describe('management runtime execution-time authorization', () => {
     await correct.lifecycle.authorizeEffect(queued.job, queued.server, f.db);
     expect(observer.preflight).toHaveBeenCalledTimes(1);
   });
+  it.each([false, true])(
+    'keeps standalone final authorization, delegates it only to the lifecycle guard: %s',
+    async (defer) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('server_operations')
+        .set({ action: 'start' })
+        .where('job_id', '=', queued.job)
+        .execute();
+      const stages: string[] = [];
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: {
+          preflight: async () => {},
+          stopped: async () => true,
+          processStartedAt: async () => null,
+        },
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+        logger: createLogger((event) => {
+          if (event.event === 'server.runtime_stage')
+            stages.push(String((event.data as { stage?: string } | undefined)?.stage));
+        }),
+      });
+      await runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db, {
+        ...(defer ? { deferFinalIntentCheck: true } : {}),
+      });
+      expect(stages.filter((stage) => stage === 'authorize_effect.authorization')).toHaveLength(1);
+      expect(
+        stages.filter((stage) => stage === 'authorize_effect.final_authorization'),
+      ).toHaveLength(defer ? 0 : 1);
+    },
+  );
+  it('binds internal console reuse to the exact injected provider instance', async () => {
+    const first = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    const same = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    const changed = await createManagementRuntime({ db: f.db, codec, adapter: { ...f.adapter } });
+    expect(first.consoleProviderBinding).toBe(same.consoleProviderBinding);
+    expect(changed.consoleProviderBinding).not.toBe(first.consoleProviderBinding);
+  });
+  it('invalidates console binding when real provider URL or either credential changes', async () => {
+    const env = {
+      NH_PTERODACTYL_BASE_URL: 'https://provider.example.test',
+      NH_PTERODACTYL_APPLICATION_KEY: 'fixture-application',
+      NH_PTERODACTYL_CLIENT_KEY: 'fixture-client',
+    };
+    const binding = async (patch = {}) =>
+      (await createManagementRuntime({ db: f.db, codec, env: { ...env, ...patch } }))
+        .consoleProviderBinding;
+    const initial = await binding();
+    expect(await binding()).toBe(initial);
+    for (const patch of [
+      { NH_PTERODACTYL_BASE_URL: 'https://other.example.test' },
+      { NH_PTERODACTYL_APPLICATION_KEY: 'rotated-application' },
+      { NH_PTERODACTYL_CLIENT_KEY: 'rotated-client' },
+      { NH_PTERODACTYL_WEBSOCKET_ORIGINS: '["wss://other.example.test"]' },
+    ])
+      expect(await binding(patch)).not.toBe(initial);
+    expect(initial).not.toContain('fixture');
+  });
   it('binds restart process evidence to the host and current provider identity', async () => {
     const serverId = await f.server();
     const server = await f.db

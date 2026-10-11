@@ -3923,3 +3923,46 @@ points and a new measurement at the right edge (x=388) on receipt. Refreshed the
 live screenshot. Web typecheck, scoped Biome and independent review passed; no
 must-fix findings. No provider/infrastructure interactions or restart. Rollback:
 source revert. Earlier offline/expiry checks were not unnecessarily rerun.
+
+### 2026-10-11 — Console dispatch and lifecycle latency cleanup
+
+Console POST now reuses its existing API-owned authenticated Wings WebSocket.
+The bounded process-local registry includes session, actor/subject/support,
+elevation, full managed provider identity, provider URL/credentials and WebSocket
+origin policy. Fresh access/identity/write checks, lifecycle exclusion and audit
+remain. REST is selected only when no matching handle exists before dispatch;
+an attempted WebSocket send never falls back or replays. 204 means dispatched,
+not proof the game executed the command. Closed sessions unregister safely.
+
+Stop/Kill no longer sample host capacity before enqueue. Other operations sample
+only their server's host; Start admission and worker physical checks remain.
+Independent settings/secret reads run concurrently. The lifecycle final power
+handoff explicitly owns one final local authorization after slow proofs, avoiding
+an immediately duplicated nested check. Standalone callers keep the full guard.
+Power operations still use durable jobs and the supported Client HTTP power API;
+this change does not expose a direct browser power channel or replace that
+transport with a fire-and-forget socket send.
+
+On HTTP acceptance, the UI marks conflicting actions unavailable and refreshes
+server/list/Activity/quota queries in the background. A slow refresh no longer
+holds confirmation dialogs open. This does not claim operation completion.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/console-command-relays.test.ts packages/pterodactyl-adapter/src/console.test.ts`: **10/10 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'reuses only the current session console relay|skips host sampling|applies current project viewer|streams safe bytes/events'`: **4 passed, 30 intentionally skipped**. Real app authentication covers same-session reuse, foreign-session/no-handle REST selection, uncertain-send no replay, revocation/identity boundaries, cleanup and sampling scope.
+- Integration runner with `packages/server-management/src/runtime.integration.test.ts packages/server-management/src/lifecycle.integration.test.ts -t 'standalone final authorization|internal console reuse|one final local guard|rejects authority revoked during final identity|overlaps final identity'`: **7 passed, 2 failed, 204 skipped** initially. All six lifecycle tests passed; new runtime test assertions misread logger records. A premature targeted rerun had the same assertion failure; this was corrected to read `record.data`.
+- Integration runner with `packages/server-management/src/runtime.integration.test.ts -t 'standalone final authorization|internal console reuse|awaits.*provider|revok'`: **9 passed, 36 skipped** after the test correction.
+- Integration runner with `packages/server-management/src/runtime.integration.test.ts -t 'invalidates console binding'`: **1 passed, 45 skipped**, including URL, either credential and WebSocket-origin policy changes.
+- Browser runner with `apps/web/tests/server-navigation.browser.test.ts -t 'keeps lifecycle admission'`: **1 passed, 4 skipped**, including deliberately stalled post-acceptance descriptor refresh. Initial assertions passed but fixture cleanup raced an intercepted request, producing an unhandled error; after awaiting route cleanup the clean run passed (14.15s).
+- Browser runner with `apps/web/tests/console-power.browser.test.ts apps/web/tests/services.browser.test.ts -t 'disables offline|shows mediated console output|retries transient telemetry'`: **3 passed, 20 skipped** (32.58s), including command relay behavior and unchanged Stop/Kill confirmation. Existing Console power screenshots refreshed.
+- `scripts/dev.sh pnpm exec tsc --noEmit`, `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, scoped Biome and independent security/durability review: **passed**. No must-fix findings remain. No historical full suite rerun.
+
+Evidence boundary: real app/auth/database handlers with isolated provider effects;
+fixtures cleaned. Existing dev API/worker source watchers load code changes, and
+dev containers remain healthy. No manual container restart, production mutation,
+live power/console command or credential access was performed. No real post-fix
+latency reduction is claimed before an Owner-driven interaction; tests establish
+removed calls and nonblocking acceptance, not millisecond production guarantees.
+Rollback: revert code; existing runtime data needs no migration. PR #21 remains
+open/unmerged, and SFTPGo #18 remains unchanged.

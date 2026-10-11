@@ -103,7 +103,12 @@ export interface LifecycleOptions {
     jobId: string,
     serverId: string,
     connection: Kysely<Database>,
-    context?: { providerServer?: ApplicationServer | Promise<ApplicationServer> },
+    context?: {
+      providerServer?: ApplicationServer | Promise<ApplicationServer>;
+      /** This caller performs authorizeIntent after every slow proof settles.
+       * Only the lifecycle final power handoff may opt out of the nested guard. */
+      deferFinalIntentCheck?: true;
+    },
   ) => Promise<void>;
   /** Current DB permission/policy only. External effects still require authorizeEffect
    * at the final handoff; internal stop-console checks may use this scoped guard. */
@@ -823,7 +828,10 @@ export async function processServerOperation(
             const [ownership, authorization] = await Promise.allSettled([
               identity,
               timed('authorization', () =>
-                options.authorizeEffect(jobId, server.id, db, { providerServer: identity }),
+                options.authorizeEffect(jobId, server.id, db, {
+                  providerServer: identity,
+                  ...(options.authorizeIntent ? { deferFinalIntentCheck: true as const } : {}),
+                }),
               ),
             ]);
             if (ownership.status === 'rejected') throw ownership.reason;
