@@ -59,6 +59,8 @@ visible label. Retained output still survives navigation, without an explanatory
 paragraph. This indicator describes the console connection, not the game process.
 Output follows automatically while scrolled to the bottom; scrolling up pauses
 following, and returning to the bottom resumes it. No follow checkbox is needed.
+The output pane uses 55% of the small viewport height, bounded to 360–680px,
+with internal scrolling and a separately visible command prompt.
 Authorized commands use an integrated `»` prompt with a localized placeholder
 and accessible name. Enter submits, preserving focus; failed requests retain the
 draft and show an error, while pending requests cannot submit duplicates. Focus

@@ -3618,3 +3618,19 @@ captions now share a 32px minimum height.
 Independent review found no remaining must-fix. No production interactions,
 container restarts or new infrastructure. Isolated fixtures cleaned normally;
 Vite HMR delivers the update. Rollback: source revert; PR #21 stays open/unmerged.
+
+## 2026-10-11 — Taller terminal and no standalone measurement timestamp
+
+Console output now uses `height: clamp(360px, 55svh, 680px)` instead of growing
+between 280–480px with content. It keeps internal scrolling and a separate command
+prompt. Removed the standalone date/time below resource charts at the Owner's
+follow-up request; chart axis times and first-start-denial timestamps remain.
+
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'keeps the terminal prompt accessible'`
+passed **1 / 19 skipped** after the height change, then **1 / 19 skipped** after
+the requested timestamp removal. EN desktop/IT mobile screenshots refreshed and
+inspected; Enter/focus, no overflow and Axe checks pass. Scoped Biome/diff/governance
+pass with existing CSS warnings only. No broad suite or production rebuild.
+Independent review found no blocker. No production changes, new infrastructure
+or restarts; disposable fixtures cleaned. Existing HMR delivers changes. Rollback:
+source revert; PR #21 remains open/unmerged.

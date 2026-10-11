@@ -543,55 +543,48 @@ export function Telemetry({ serverId }: { serverId: string }) {
       ) : history.error ? (
         <ErrorNotice error={history.error} />
       ) : (
-        <>
-          <div className="columns resource-charts">
-            <Chart
-              title={t('web.memory')}
-              unit="MiB"
-              series={[
-                {
-                  label: t('web.memory'),
-                  color: '#164cb1',
-                  values: samples.map((s) => ({ time: s.time, value: s.memory })),
-                },
-              ]}
-            />
-            <Chart
-              title={t('web.cpu')}
-              unit="%"
-              series={[
-                {
-                  label: t('web.cpu'),
-                  color: '#164cb1',
-                  values: samples.map((s) => ({ time: s.time, value: s.cpu })),
-                },
-              ]}
-            />
-            <Chart
-              title={t('service.networkTraffic')}
-              unit="MiB"
-              series={[
-                {
-                  label: t('service.received'),
-                  color: '#164cb1',
-                  direction: 'inbound',
-                  values: samples.map((s) => ({ time: s.time, value: s.rx })),
-                },
-                {
-                  label: t('service.sent'),
-                  color: '#a34b08',
-                  direction: 'outbound',
-                  values: samples.map((s) => ({ time: s.time, value: s.tx })),
-                },
-              ]}
-            />
-          </div>
-          {live.dataUpdatedAt > 0 && (
-            <p>
-              <Time value={new Date(live.dataUpdatedAt).toISOString()} />
-            </p>
-          )}
-        </>
+        <div className="columns resource-charts">
+          <Chart
+            title={t('web.memory')}
+            unit="MiB"
+            series={[
+              {
+                label: t('web.memory'),
+                color: '#164cb1',
+                values: samples.map((s) => ({ time: s.time, value: s.memory })),
+              },
+            ]}
+          />
+          <Chart
+            title={t('web.cpu')}
+            unit="%"
+            series={[
+              {
+                label: t('web.cpu'),
+                color: '#164cb1',
+                values: samples.map((s) => ({ time: s.time, value: s.cpu })),
+              },
+            ]}
+          />
+          <Chart
+            title={t('service.networkTraffic')}
+            unit="MiB"
+            series={[
+              {
+                label: t('service.received'),
+                color: '#164cb1',
+                direction: 'inbound',
+                values: samples.map((s) => ({ time: s.time, value: s.rx })),
+              },
+              {
+                label: t('service.sent'),
+                color: '#a34b08',
+                direction: 'outbound',
+                values: samples.map((s) => ({ time: s.time, value: s.tx })),
+              },
+            ]}
+          />
+        </div>
       )}
     </Section>
   );

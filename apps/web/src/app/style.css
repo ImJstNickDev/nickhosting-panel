@@ -473,8 +473,7 @@
   .console {
     background: #152432;
     color: #e3ecf1;
-    min-height: 280px;
-    max-height: 480px;
+    height: clamp(360px, 55svh, 680px);
     overflow: auto;
     padding: 1rem;
     white-space: pre-wrap;
