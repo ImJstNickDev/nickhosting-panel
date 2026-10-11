@@ -2980,3 +2980,15 @@ restart. Actual event-to-forwarding timing is **not yet measured** on this patch
 Historical evidence above remains intact; SFTPGo #18 remains a release gate.
 Rollback is a source revert plus an approved Gateway restart; no migration or data
 rollback is involved. PR #21 remains open/unmerged; no M6 work.
+
+Activation follow-up: Owner explicitly approved the single
+`docker restart --time 20 nickhosting-dev-gateway-1`. Verified the exact source
+HEAD `6c88f4887a83f66497f41201d3cfd1a34661a3ef`, clean worktree and Compose labels
+(`nickhosting-dev` / `gateway`) before executing. Container started at
+`2026-10-11T10:15:27.438533638Z`; after the existing old-lease drain, route recovery
+logged at `10:16:01.485Z`. Docker health is healthy and authenticated Unix `/readyz`
+returned HTTP 200, `ready=true`, `controlAvailable=true`, one route. Data-plane,
+startup client and receipt source hashes match the reviewed workspace. No API
+power command or server mutation was sent. The command emitted Docker's harmless
+`--time` deprecation notice; it completed successfully. New real wake-cycle timing
+still awaits the Owner's test; this restart is not a performance measurement.
