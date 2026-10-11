@@ -1335,6 +1335,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             continue;
           }
           let readinessConfirmed = false;
+          let probeStage = 'safety';
           const probeStarted = performance.now();
           try {
             const validated: GatewayProtocolObservation & { coherent: boolean } = await bounded(
@@ -1346,10 +1347,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                   listener &&
                   isDeepStrictEqual(listener.route, route) &&
                   options.safety.probeLeasedBackend;
+                probeStage = leasedProbe ? 'leased_backend' : 'full_backend';
                 const sample = leasedProbe
                   ? await leasedProbe.call(options.safety, route)
                   : await options.safety.validateBackend(route);
                 if (sample) return { ...sample, coherent: true };
+                probeStage = 'protocol';
                 if (handler.observe)
                   return { ...(await handler.observe({ route, signal })), coherent: true };
                 return { ...(await handler.probeReadiness({ route, signal })), coherent: false };
@@ -1363,6 +1366,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               players.push(undefined);
               continue;
             }
+            probeStage = 'idle';
             const observation = validated.coherent
               ? validated
               : probeIdle
@@ -1388,6 +1392,21 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             idle = false;
             players.push(undefined);
             counters.observationErrors++;
+            logTiming('gateway.observation_failure', {
+              ...routeIdentity(route),
+              probeStage,
+              detail: error instanceof GatewaySafetyError ? error.observationFailure : undefined,
+              trigger: priorityServerId ? 'startup_hint' : 'periodic',
+              durationMs: Math.round(performance.now() - probeStarted),
+              reason:
+                error instanceof GatewaySafetyError
+                  ? error.reason
+                  : error instanceof NetworkObservationError
+                    ? `observer_${error.reason}`
+                    : error instanceof GatewayRouteRevisionStaleError
+                      ? 'route_revision_stale'
+                      : 'unclassified',
+            });
             options.logger?.log('warn', 'gateway.observation_unavailable', { routeId: route.id });
           } finally {
             probeDuration += performance.now() - probeStarted;

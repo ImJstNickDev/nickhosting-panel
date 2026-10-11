@@ -4210,3 +4210,32 @@ Gateway activation requires a separately approved dev Gateway restart; the new
 live latency and responder behavior remain unverified until an Owner-driven test.
 API/worker development watchers may already load their source change. Historical
 failures above remain recorded. PR21 remains open; no milestone merge or release.
+
+### 2026-10-11 — Post-activation timing and diagnostic gap
+
+Owner-driven test after approved Gateway-only restart of4623f83: no unavailable
+route transition during Start/sleep. Done20:46:09.655UTC to forwarding12.470 was
+2.815s:33ms running hint,345ms failed probe,666ms negative report,1018ms until
+next sample,approximately22ms successful probe/request transport,665ms Core
+handling,65ms response/application (including36ms receipt queue). First probe
+failure was logged only as observation_unavailable; its precise exception was
+not retained and cannot be reconstructed conclusively from these logs.
+
+Read-only source review found a possible concurrent grant-invalidation path:
+full validation deletes/replaces the fast probe grant, and an in-flight leased
+probe rejects if that grant changed. This is a candidate, not a proven cause in
+this test. Protocol failure and expired observations remain distinguishable only
+with better diagnostics. No fixed five-second timer was identified.
+
+Added diagnostic-only observation_failure events: typed safety reason, probe
+stage, startup/periodic trigger and duration. Raw exception messages/provider
+payloads are excluded. No readiness, retry, lease or authorization behavior
+changed. Two focused regression tests pass (135 unrelated tests skipped); Biome
+passes. New diagnostics need a separately approved Gateway restart before another
+Owner-driven sample; prior live evidence does not validate this new diagnostic.
+The leased probe now includes a fixed diagnostic detail distinguishing grant
+replacement from evidence expiry without changing its rejection semantics.
+Validator suite:121 passed, including revoked-grant diagnostic assertion.
+Typecheck passed on the final diagnostic source.
+Independent read-only review confirmed the diagnostic gap and candidate race;
+no claim is made that the race caused this historical sample.

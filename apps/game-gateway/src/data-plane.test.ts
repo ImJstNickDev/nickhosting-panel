@@ -2392,6 +2392,36 @@ describe('transition-only Gateway diagnostics', () => {
 });
 
 describe('event-driven within-lease readiness', () => {
+  it.each(['backend_protocol', 'observation_stale'] as const)(
+    'records the exact %s safety failure without error payloads or changing readiness',
+    async (reason) => {
+      const backend = await tcpFixture();
+      const r = route(backend.port, 'tcp', 'waking');
+      const log = vi.fn();
+      const error = new GatewaySafetyError(reason);
+      error.message = 'private provider response';
+      const p = plane([r], {
+        logger: { log },
+        safety: {
+          probeLeasedBackend: vi.fn(async () => {
+            throw error;
+          }),
+        },
+      });
+      await p.gateway.refresh();
+      await p.gateway.observe();
+      expect(log).toHaveBeenCalledWith(
+        'info',
+        'gateway.observation_failure',
+        expect.objectContaining({ reason, probeStage: 'leased_backend', trigger: 'periodic' }),
+      );
+      expect(JSON.stringify(log.mock.calls)).not.toContain('private provider response');
+      expect(p.control.reportObservation).toHaveBeenCalledWith(
+        expect.objectContaining({ ready: false }),
+      );
+    },
+  );
+
   it('advances a freshly probed waking route without a second full validation or longer lease', async () => {
     const backend = await tcpFixture();
     const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };

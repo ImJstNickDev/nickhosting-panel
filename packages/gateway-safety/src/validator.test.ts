@@ -519,7 +519,10 @@ describe('Gateway pre-bind and forwarding safety', () => {
     f.server.suspended = true;
     await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
     resolveProbe?.(true);
-    await expect(pending).rejects.toMatchObject({ reason: 'observation_stale' });
+    await expect(pending).rejects.toMatchObject({
+      reason: 'observation_stale',
+      observationFailure: 'lease_grant_replaced',
+    });
     await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
     expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
   });

@@ -184,7 +184,10 @@ export type GatewaySafetyReason =
   | 'node_challenge'
   | 'retained_proof_mismatch';
 export class GatewaySafetyError extends DomainError {
-  constructor(readonly reason: GatewaySafetyReason) {
+  constructor(
+    readonly reason: GatewaySafetyReason,
+    readonly observationFailure?: 'lease_grant_replaced' | 'lease_evidence_expired',
+  ) {
     super('allocation_unavailable');
   }
 }
@@ -738,7 +741,13 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       const result = await options.probeBackend(route);
       if (!(typeof result === 'boolean' ? result : result.ready === true))
         unavailable('backend_protocol');
-      if (!fresh()) unavailable('observation_stale');
+      if (!fresh())
+        throw new GatewaySafetyError(
+          'observation_stale',
+          validatedProvider.get(route.id) !== previous
+            ? 'lease_grant_replaced'
+            : 'lease_evidence_expired',
+        );
       return typeof result === 'boolean' ? undefined : result;
     },
   };
