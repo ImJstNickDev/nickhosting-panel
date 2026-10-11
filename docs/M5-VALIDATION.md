@@ -3240,3 +3240,68 @@ Final checks after the optional shared-context/fallback refinement:
 - Read-only Docker inspection: dev Gateway, API and worker all running/healthy.
   No container operation was performed. Gateway still needs the approved restart
   before its new timer/sampling code is active.
+
+
+## 2026-10-11 — Owner cycle after `ec89809`: transient listener outage confirmed
+
+Read-only capture after the explicitly approved Gateway-only restart; source and
+branch remain `ec89809` during this test. No agent power commands or service
+mutations occurred in this audit. Raw logs remain private and untracked.
+
+| Event (UTC) | Time | Measured interval |
+| --- | --- | --- |
+| Intentional join | 11:10:13.620 | Start of wake |
+| Start HTTP response complete | 11:10:15.463 | 1.843s after join |
+| Docker process start | 11:10:16.482647 | 2.863s after join |
+| Listener rejected: `observer_container_churn` | 11:10:16.653 | 170ms after Docker start |
+| Waking listener restored | 11:10:20.594 | 3.941s listener gap |
+| Minecraft `Done` | 11:10:50.942789 | Actual game log |
+| Startup hint | 11:10:51.026 | 83ms after Done |
+| Core online committed | 11:10:52.969 | 2.026s after Done |
+| Gateway forwards | 11:10:53.381 | 2.438s after Done |
+| Idle observation begins | 11:11:51.204 | Fresh sample |
+| Gateway stopping/quiescence | 11:11:51.862 | 658ms after sample begins |
+| Console receives stop | 11:11:53.592548 | 1.731s after quiescence |
+| Docker exits | 11:11:54.049314 | 457ms after command |
+| Durable stop succeeds | 11:11:54.992 | 943ms after exit |
+| Gateway sleeping response | 11:11:59.784 | 5.735s after exit |
+
+The brief reported “can't connect” is explained by the explicit listener closure,
+not delayed start dispatch. `network-observer.ts` takes before/after Docker
+inventories, retries one incoherent container sample, then throws
+`container_churn`. `data-plane.ts` currently closes the existing listener for that
+error. The capture proves this category, but not which container IDs changed;
+Wings replacing the game container is consistent with timing, not independently
+proven. No actual allocation/collision conflict was logged. No client packet
+capture was taken. Existing test coverage explicitly expects withdrawal on churn;
+this is a behavior/design problem, not an unexplained client-side error.
+
+The first positive readiness observation started at11:10:51.201; adding60s gives
+11:11:51.201, with the final idle sample starting3ms later. This deadline is derived
+from captured observations, not an explicitly logged `sleepEligibleAt`. No player
+join/disconnect appears in this cycle, so no disconnect-based idle latency is
+claimed. Minecraft's own empty-for60s pause log was11:11:51.191663; stop followed
+2.401s later, but that pause is not the authoritative NickHosting deadline.
+
+Parallelism is visible: preflight86ms overlaps console preparation353ms; final
+handoff242ms includes identity232ms overlapping host/authorization82ms. No egg
+lookup stage occurs. Quiescence-to-stop improves from2.444s in the preceding cycle
+to1.731s here. Post-exit response delay does **not** improve: snapshot fetch starts
+11:11:58.682 after job success11:11:54.992, then validation/application ends59.784.
+Startup readiness likewise takes2.438s this run versus0.968s previously; hint
+transport remains83ms, with time spent in observation and snapshot coordination.
+
+Both jobs were independently queried read-only and are `succeeded`; final game
+state exited0, noOOM. Full capture includes103 unavailable observation warnings
+(mostly the long offline period), one snapshot failure, two API412 conflicts and
+one409; no429 or worker warnings/errors. Independent researcher reproduced the
+outage and timings; its20 observation warnings count only the active-cycle window.
+
+Required follow-up: distinguish transient container churn from a proven collision.
+For an unchanged previously validated listener, retain local status only within
+its original lease; no new bind, renewal or unproven backend forwarding. Expired
+leases, identity/topology conflicts and actual collisions must still fail closed.
+Add corresponding targeted regression coverage before activating that change.
+Post-stop snapshot reconciliation remains a separate latency follow-up. This audit
+does not claim either issue fixed; no source changes or test-suite reruns occurred.
+PR #21 stays open/unmerged; no test assets created/cleaned and SFTPGo #18 unchanged.
