@@ -210,9 +210,25 @@ export interface GatewayControl {
   ): Promise<void>;
 }
 
+export interface GatewayProbeDiagnostic {
+  stage: 'tcp_connect' | 'status_response' | 'pong' | 'total';
+  durationMs: number;
+  outcome: 'ok' | 'failed';
+  reason?:
+    | 'aborted'
+    | 'unsupported'
+    | 'connection_refused'
+    | 'socket_error'
+    | 'socket_closed'
+    | 'timeout'
+    | 'invalid_frame'
+    | 'protocol_mismatch';
+}
 export interface GatewayProtocolContext {
   route: Readonly<GatewayRoute>;
   signal: AbortSignal;
+  /** Optional trusted diagnostics; implementations must isolate sink failures. */
+  onProbeDiagnostic?: (event: GatewayProbeDiagnostic) => void;
 }
 export type GatewayIntent = { kind: 'need-more' | 'status' | 'ignore' | 'join' | 'unsupported' };
 

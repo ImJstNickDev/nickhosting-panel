@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
 import {
@@ -161,10 +161,21 @@ export interface GatewaySafetyOptions {
   loadProof(route: GatewayRoute): Promise<GatewayReachabilityProof | null>;
   saveProof(route: GatewayRoute, proof: GatewayReachabilityProof): Promise<void>;
   /** Actual game-protocol challenge/readiness response from the Gateway process namespace. */
-  probeBackend(route: GatewayRoute): Promise<boolean | GatewayProtocolObservation>;
+  probeBackend(
+    route: GatewayRoute,
+    validationId?: string,
+  ): Promise<boolean | GatewayProtocolObservation>;
   /** Fresh nonce challenge response from a configured persistent probe at EXACT backend.address. */
   probeNode(route: GatewayRoute, context?: GatewaySafetyContext): Promise<boolean>;
   now?: () => number;
+  onTiming?: (event: {
+    routeId: string;
+    generation: string;
+    validationId: string;
+    stage: string;
+    durationMs: number;
+    outcome: 'completed' | 'rejected';
+  }) => void;
 }
 
 export type GatewaySafetyReason =
@@ -328,6 +339,36 @@ function identityDigest(
 export function createGatewaySafetyValidator(options: GatewaySafetyOptions): GatewaySafety {
   const policy = gatewayNetworkPolicySchema.parse(options.policy);
   const now = options.now ?? Date.now;
+  async function timed<T>(
+    route: GatewayRoute,
+    validationId: string,
+    stage: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const started = performance.now();
+    let outcome: 'completed' | 'rejected' = 'rejected';
+    try {
+      const value = await action();
+      outcome = 'completed';
+      return value;
+    } finally {
+      if (route.mode === 'waking') {
+        try {
+          options.onTiming?.({
+            routeId: route.id,
+            generation: route.generation,
+            validationId,
+            stage,
+            durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+            outcome,
+          });
+        } catch {
+          /* Diagnostics cannot change safety decisions. */
+        }
+      }
+    }
+  }
+
   // A prior successful listener validation retains only its proven backend
   // shape. Every listener use re-reads provider, sockets, topology and durable proof;
   // this is not cached permission or cached inventory. New listeners cannot use it.
@@ -368,36 +409,58 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   >();
   const evidenceKey = (route: GatewayRoute, context: GatewaySafetyContext) =>
     JSON.stringify({ route, context });
-  async function inspect(
+  function inspect(
+    route: GatewayRoute,
+    ownedBindings: readonly GatewayEndpoint[],
+    listener: boolean,
+  ) {
+    const validationId = randomUUID();
+    return timed(route, validationId, 'inspect_total', () =>
+      inspectDetails(route, ownedBindings, listener, validationId),
+    );
+  }
+  async function inspectDetails(
     routeValue: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
     listener: boolean,
+    validationId: string,
   ) {
     const route = gatewayRouteSchema.parse(routeValue);
     if (!exactBindableAddress(route.public.address) || !privateBackend(route.backend.address))
       unavailable();
-    const context = gatewaySafetyContextSchema.parse(await options.resolveContext(route));
+    const context = gatewaySafetyContextSchema.parse(
+      await timed(route, validationId, 'context', () => options.resolveContext(route)),
+    );
     const started = now();
     const previous = listener ? undefined : validatedProvider.get(route.id);
     const share =
       previous?.key === evidenceKey(route, context) &&
       previous.evidence.started <= started &&
       started - previous.evidence.started < policy.maximumObservationAgeMs;
-    const providerRead = share
-      ? Promise.resolve(previous.evidence)
-      : Promise.all([
-          options.provider.listNodes(),
-          options.provider.getApplicationServer(context.providerServerId),
-          inventories(),
-        ]).then(([nodes, server, nodeInventories]) => ({
-          started,
-          nodes,
-          server,
-          nodeInventories,
-        }));
+    const providerRead = timed(
+      route,
+      validationId,
+      share ? 'provider_reuse' : 'provider_inventory',
+      () =>
+        share
+          ? Promise.resolve(previous.evidence)
+          : Promise.all([
+              options.provider.listNodes(),
+              options.provider.getApplicationServer(context.providerServerId),
+              inventories(),
+            ]).then(([nodes, server, nodeInventories]) => ({
+              started,
+              nodes,
+              server,
+              nodeInventories,
+            })),
+    );
     // Actual sockets/Docker topology and local context are still fresh on every
     // probe. Settle both branches before abandoning a failed inspection.
-    const results = await Promise.allSettled([options.observer.observe(), providerRead]);
+    const results = await Promise.allSettled([
+      timed(route, validationId, 'host_observation', () => options.observer.observe()),
+      providerRead,
+    ]);
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     const [observed, provider] = results;
     if (observed.status !== 'fulfilled' || provider.status !== 'fulfilled') unavailable();
@@ -554,6 +617,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     )
       unavailable('observation_stale');
     return {
+      validationId,
       route,
       context,
       observation,
@@ -595,7 +659,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   async function proveBackend(state: Awaited<ReturnType<typeof inspect>>) {
     if (!state.container?.running || !state.backendBindingsComplete)
       unavailable('backend_active_binding');
-    const result = await options.probeBackend(state.route);
+    const result = await timed(state.route, state.validationId, 'backend_protocol', () =>
+      options.probeBackend(state.route, state.validationId),
+    );
     if (!(typeof result === 'boolean' ? result : result.ready === true))
       unavailable('backend_protocol');
     if (
@@ -613,7 +679,9 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       digest: state.digest,
       verifiedAt: now(),
     };
-    await options.saveProof(state.route, proof);
+    await timed(state.route, state.validationId, 'proof_write', () =>
+      options.saveProof(state.route, proof),
+    );
     if (
       now() - state.observation.observedAt > policy.maximumObservationAgeMs ||
       now() - state.providerEvidence.started > policy.maximumObservationAgeMs
@@ -738,7 +806,10 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         !fresh()
       )
         return validateBackend(route);
-      const result = await options.probeBackend(route);
+      const validationId = randomUUID();
+      const result = await timed(route, validationId, 'leased_backend_protocol', () =>
+        options.probeBackend(route, validationId),
+      );
       if (!(typeof result === 'boolean' ? result : result.ready === true))
         unavailable('backend_protocol');
       if (!fresh())

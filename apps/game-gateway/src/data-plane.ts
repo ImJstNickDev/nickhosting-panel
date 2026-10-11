@@ -1491,7 +1491,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               activeSessions,
             })
             .finally(() => {
-              reportDuration += performance.now() - reportStarted;
+              const durationMs = performance.now() - reportStarted;
+              reportDuration += durationMs;
+              if (anchor.mode === 'waking')
+                logTiming('gateway.observation_report', {
+                  ...routeIdentity(anchor),
+                  observedAt,
+                  ready,
+                  trigger: priorityServerId ? 'startup_hint' : 'periodic',
+                  durationMs: Math.round(durationMs),
+                });
             });
           if (ready && anchor.mode === 'waking') {
             const applied =

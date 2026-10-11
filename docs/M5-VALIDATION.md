@@ -4239,3 +4239,39 @@ Validator suite:121 passed, including revoked-grant diagnostic assertion.
 Typecheck passed on the final diagnostic source.
 Independent read-only review confirmed the diagnostic gap and candidate race;
 no claim is made that the race caused this historical sample.
+
+### 2026-10-11 — Separate startup validation and Minecraft wire timings
+
+Diagnostic-only follow-up separates previously aggregated readiness costs:
+
+- `gateway.safety_stage`: context, provider inventory/reuse, host observation,
+  complete inspection, backend protocol and proof write. A validationId links
+  concurrent work; completed/rejected means promise outcome, not readiness.
+- `gateway.protocol_stage`: TCP connect, status response, pong and total, with
+  validationId and unique probeId. Failure enums distinguish connection refusal,
+  socket close/error, timeout/abort, malformed frame and protocol mismatch.
+- `gateway.observation_report`: request-through-response duration, readiness value,
+  observedAt and startup/periodic trigger. Existing Core process/commit timings
+  and receipt queue timings allow separating this from backend probing.
+
+Detailed protocol/safety/report logs are limited to waking routes. No packet
+payload, address, key or raw error is included; diagnostic sink exceptions cannot
+change readiness. No additional network probes or relaxed checks were introduced.
+Totals are nested: protocol total contains TCP/status/pong; inspect_total contains
+context and parallel provider/host work. Do not sum parallel branches or add Core
+processing again to the report round-trip duration. Measurements use monotonic
+local clocks; cross-service wall-clock differences remain approximate.
+
+Validation: combined targeted command
+`scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts games/minecraft/src/protocol.test.ts apps/game-gateway/src/data-plane.test.ts -t 'Gateway pre-bind|Minecraft|event-driven within-lease readiness'`
+passed148 tests, skipped140 unrelated cases. Earlier combined run exposed four
+assertions expecting the old one-argument callback; these now assert the new
+correlation argument and pass. Protocol suite independently passed29/29.
+Independent source review found no remaining must-fix after correcting ambiguous
+promise outcome labels and linking protocol/safety correlation IDs.
+
+This change does not establish the cause of the historical4ms protocol failure
+or improve measured latency. A new specifically approved Gateway restart and
+Owner-driven Start are needed to obtain the finer trace. No production commands,
+new test assets or infrastructure operations occurred during implementation.
+Final source TypeScript check and focused seven-file Biome check passed.

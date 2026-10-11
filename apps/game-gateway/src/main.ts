@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { isAbsolute, resolve } from 'node:path';
@@ -105,6 +105,9 @@ export async function createGatewayRuntime(
       serverRoutes.set(result.providerServerId, route.id);
       return result;
     };
+    const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
+      level: settings.logLevel,
+    });
     const policy = settings.gatewayDataPolicy;
     const probe = async (
       route: Parameters<typeof createGatewaySafetyValidator>[0]['probeBackend'] extends (
@@ -112,6 +115,7 @@ export async function createGatewayRuntime(
       ) => unknown
         ? T
         : never,
+      validationId?: string,
     ) => {
       const handler = protocols.find(
         (p) => p.id === route.protocol?.handlerId && p.supports(route),
@@ -119,13 +123,31 @@ export async function createGatewayRuntime(
       if (!handler) return false;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), policy.probeTimeoutMs);
+      const probeId = randomUUID();
+      const probeContext = {
+        route,
+        signal: controller.signal,
+        ...(route.mode === 'waking'
+          ? {
+              onProbeDiagnostic: (
+                event: import('@nickhosting/game-sdk').GatewayProbeDiagnostic,
+              ) => {
+                logger.log('info', 'gateway.protocol_stage', {
+                  routeId: route.id,
+                  generation: route.generation,
+                  probeId,
+                  validationId,
+                  ...event,
+                });
+              },
+            }
+          : {}),
+      };
       try {
         return await Promise.race([
           handler.observe
-            ? handler.observe({ route, signal: controller.signal })
-            : handler
-                .probeReadiness({ route, signal: controller.signal })
-                .then((r) => r.ready === true),
+            ? handler.observe(probeContext)
+            : handler.probeReadiness(probeContext).then((r) => r.ready === true),
           new Promise<false>((resolve) =>
             controller.signal.addEventListener('abort', () => resolve(false), { once: true }),
           ),
@@ -140,6 +162,7 @@ export async function createGatewayRuntime(
     const safety = createGatewaySafetyValidator({
       policy: networkPolicy,
       observer,
+      onTiming: (event) => logger.log('info', 'gateway.safety_stage', event),
       provider: {
         listNodes: async () =>
           z
@@ -192,9 +215,6 @@ export async function createGatewayRuntime(
     });
     const initial = fingerprint(owner);
     let changed = false;
-    const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
-      level: settings.logLevel,
-    });
     const gateway = createGatewayDataPlane({
       gatewayId: bootstrap.gatewayId,
       protocols,

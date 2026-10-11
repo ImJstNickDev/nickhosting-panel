@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import type {
+  GatewayProbeDiagnostic,
   GatewayProtocolAdapter,
   GatewayProtocolContext,
   GatewayProtocolSession,
@@ -157,7 +158,31 @@ export async function probeMinecraftStatus(
   version: MinecraftProtocolVersion,
   options: { timeoutMs?: number; maximumBytes?: number } = {},
 ): Promise<{ ready: boolean; playerCount?: number }> {
-  if (context.signal.aborted || context.route.public.transport !== 'tcp') return { ready: false };
+  const started = performance.now();
+  let stageStarted = started;
+  let stage: Exclude<GatewayProbeDiagnostic['stage'], 'total'> = 'tcp_connect';
+  const diagnostic = (event: GatewayProbeDiagnostic) => {
+    try {
+      context.onProbeDiagnostic?.(event);
+    } catch {
+      /* Diagnostics never affect readiness. */
+    }
+  };
+  const emit = (
+    name: GatewayProbeDiagnostic['stage'],
+    since: number,
+    reason?: GatewayProbeDiagnostic['reason'],
+  ) =>
+    diagnostic({
+      stage: name,
+      durationMs: performance.now() - since,
+      outcome: reason ? 'failed' : 'ok',
+      ...(reason ? { reason } : {}),
+    });
+  if (context.signal.aborted || context.route.public.transport !== 'tcp') {
+    emit('total', started, context.signal.aborted ? 'aborted' : 'unsupported');
+    return { ready: false };
+  }
   const maximum = options.maximumBytes ?? 262144;
   const timeout = options.timeoutMs ?? 3000;
   if (
@@ -169,8 +194,10 @@ export async function probeMinecraftStatus(
     timeout > 30000 ||
     version.family !== 'netty' ||
     version.release !== context.route.protocol?.gameVersion
-  )
+  ) {
+    emit('total', started, 'unsupported');
     return { ready: false };
+  }
   return new Promise((resolve) => {
     const socket = connect({
       host: context.route.backend.address,
@@ -182,9 +209,11 @@ export async function probeMinecraftStatus(
     let receivedStatus = false;
     let count: number | undefined;
     let done = false;
-    const finish = (ready: boolean) => {
+    const finish = (ready: boolean, reason?: GatewayProbeDiagnostic['reason']) => {
       if (done) return;
       done = true;
+      emit(stage, stageStarted, reason);
+      emit('total', started, reason);
       clearTimeout(timer);
       context.signal.removeEventListener('abort', abort);
       socket.destroy();
@@ -194,14 +223,20 @@ export async function probeMinecraftStatus(
           : { ready: false },
       );
     };
-    const abort = () => finish(false);
-    const timer = setTimeout(abort, timeout);
+    const abort = () => finish(false, 'aborted');
+    const invalid = () => finish(false, 'invalid_frame');
+    const timer = setTimeout(() => finish(false, 'timeout'), timeout);
     timer.unref();
     context.signal.addEventListener('abort', abort, { once: true });
-    socket.once('error', abort);
-    socket.once('close', abort);
+    socket.once('error', (error: NodeJS.ErrnoException) =>
+      finish(false, error.code === 'ECONNREFUSED' ? 'connection_refused' : 'socket_error'),
+    );
+    socket.once('close', () => finish(false, 'socket_closed'));
     socket.once('connect', () => {
       if (context.signal.aborted) return abort();
+      emit('tcp_connect', stageStarted);
+      stage = 'status_response';
+      stageStarted = performance.now();
       socket.write(
         Buffer.concat([
           handshake(version.protocolId, context.route.backend.address, context.route.backend.port),
@@ -212,14 +247,14 @@ export async function probeMinecraftStatus(
     socket.on('data', (chunk: Buffer) => {
       try {
         total += chunk.length;
-        if (total > maximum + 32) return abort();
+        if (total > maximum + 32) return invalid();
         buffered = Buffer.concat([buffered, chunk]);
         while (buffered.length) {
           const frame = readMinecraftFrame(buffered, maximum);
           if (!frame) return;
           buffered = buffered.subarray(frame.bytes);
           const packet = varInt(frame.body);
-          if (!packet) return abort();
+          if (!packet) return invalid();
           if (receivedStatus) {
             if (
               frame.body.length !== packet.bytes + 8 ||
@@ -227,16 +262,17 @@ export async function probeMinecraftStatus(
               !frame.body.subarray(packet.bytes).equals(nonce) ||
               buffered.length
             )
-              return abort();
+              return invalid();
             return finish(true);
           }
-          if (packet.value !== 0) return abort();
+          if (packet.value !== 0) return invalid();
           const size = varInt(frame.body, packet.bytes);
-          if (!size || packet.bytes + size.bytes + size.value !== frame.body.length) return abort();
+          if (!size || packet.bytes + size.bytes + size.value !== frame.body.length)
+            return invalid();
           const status: unknown = JSON.parse(
             decoder.decode(frame.body.subarray(packet.bytes + size.bytes)),
           );
-          if (!status || typeof status !== 'object' || !('version' in status)) return abort();
+          if (!status || typeof status !== 'object' || !('version' in status)) return invalid();
           const remote = status.version;
           if (
             !remote ||
@@ -244,7 +280,7 @@ export async function probeMinecraftStatus(
             !('protocol' in remote) ||
             remote.protocol !== version.protocolId
           )
-            return abort();
+            return finish(false, 'protocol_mismatch');
           if (
             'players' in status &&
             status.players &&
@@ -263,11 +299,14 @@ export async function probeMinecraftStatus(
           receivedStatus = true;
           // Challenge is sent only AFTER the status frame, so an unsolicited
           // precomputed echo cannot establish readiness.
-          if (buffered.length) return abort();
+          if (buffered.length) return invalid();
+          emit('status_response', stageStarted);
+          stage = 'pong';
+          stageStarted = performance.now();
           socket.write(frameMinecraftPacket(1, nonce));
         }
       } catch {
-        abort();
+        invalid();
       }
     });
   });

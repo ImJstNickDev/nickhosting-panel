@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type Socket } from 'node:net';
-import type { GatewayProtocolContext, GatewayProtocolSession } from '@nickhosting/game-sdk';
+import type {
+  GatewayProbeDiagnostic,
+  GatewayProtocolContext,
+  GatewayProtocolSession,
+} from '@nickhosting/game-sdk';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMinecraftGatewayModuleAdapter } from './gateway-module.js';
 import {
@@ -337,6 +341,78 @@ async function statusFixture(
   return ctx;
 }
 describe('actual socket Minecraft status probes against isolated protocol fixtures', () => {
+  it('diagnoses sequential TCP/status/pong stages without payloads and isolates sink failures', async () => {
+    const ctx = await statusFixture({ version: { protocol: 766 } }, { partial: true });
+    const events: GatewayProbeDiagnostic[] = [];
+    expect(
+      await adapter.probeReadiness({ ...ctx, onProbeDiagnostic: (event) => events.push(event) }),
+    ).toEqual({ ready: true });
+    expect(events.map((event) => event.stage)).toEqual([
+      'tcp_connect',
+      'status_response',
+      'pong',
+      'total',
+    ]);
+    for (const event of events) {
+      expect(event.outcome).toBe('ok');
+      expect(event.durationMs).toBeGreaterThanOrEqual(0);
+      expect(Object.keys(event).sort()).toEqual(['durationMs', 'outcome', 'stage']);
+    }
+    expect(events[1]?.durationMs).toBeGreaterThanOrEqual(3);
+    const total = events[3]?.durationMs ?? 0;
+    expect(total).toBeGreaterThanOrEqual(
+      events.slice(0, 3).reduce((sum, event) => sum + event.durationMs, 0),
+    );
+    expect(
+      await adapter.probeReadiness({
+        ...ctx,
+        onProbeDiagnostic: () => {
+          throw new Error('sink');
+        },
+      }),
+    ).toEqual({ ready: true });
+  });
+  it.each(['socket_closed', 'connection_refused'] as const)(
+    'distinguishes %s at connection setup',
+    async (reason) => {
+      const server = createServer((socket) => socket.destroy());
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('fixture');
+      if (reason === 'connection_refused')
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      else cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+      const ctx = context();
+      ctx.route.backend.port = address.port;
+      const events: GatewayProbeDiagnostic[] = [];
+      expect(
+        await adapter.probeReadiness({ ...ctx, onProbeDiagnostic: (event) => events.push(event) }),
+      ).toEqual({ ready: false });
+      expect(events.at(-1)).toMatchObject({ stage: 'total', outcome: 'failed', reason });
+    },
+  );
+  it.each([
+    ['protocol_mismatch', { version: { protocol: 765 } }, {}],
+    ['invalid_frame', { version: { protocol: 766 } }, { badPing: true }],
+    ['timeout', { version: { protocol: 766 } }, { silent: true }],
+  ] as const)(
+    'distinguishes %s without changing failed readiness',
+    async (reason, status, options) => {
+      const ctx = await statusFixture(status, options);
+      const events: GatewayProbeDiagnostic[] = [];
+      expect(
+        await probeMinecraftStatus(
+          { ...ctx, onProbeDiagnostic: (event) => events.push(event) },
+          versions[3] as MinecraftProtocolVersion,
+          { timeoutMs: 50 },
+        ),
+      ).toEqual({ ready: false });
+      expect(events.at(-1)).toMatchObject({ stage: 'total', outcome: 'failed', reason });
+      expect(events.at(-2)).toMatchObject({ outcome: 'failed', reason });
+    },
+  );
+
   it('the deployed trusted module exposes a single coherent observation with its evidence gate', async () => {
     let connections = 0;
     const ctx = await statusFixture(

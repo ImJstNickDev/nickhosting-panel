@@ -160,6 +160,35 @@ describe('Gateway address collision semantics', () => {
 });
 
 describe('Gateway pre-bind and forwarding safety', () => {
+  it('separates waking validation timings without leaking context or changing safety on sink failure', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const events: Parameters<NonNullable<GatewaySafetyOptions['onTiming']>>[0][] = [];
+    f.options.onTiming = (event) => {
+      events.push(event);
+    };
+    await f.validator().validateBackend(f.route);
+    expect(events.map((e) => e.stage)).toEqual(
+      expect.arrayContaining([
+        'context',
+        'provider_inventory',
+        'host_observation',
+        'inspect_total',
+        'backend_protocol',
+        'proof_write',
+      ]),
+    );
+    expect(new Set(events.map((e) => e.validationId)).size).toBe(1);
+    expect(events.every((e) => e.durationMs >= 0 && e.outcome === 'completed')).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('nh-owned-server');
+    f.options.onTiming = () => {
+      throw new Error('private sink failure');
+    };
+    await expect(f.validator().validateBackend(f.route)).resolves.toBeUndefined();
+    f.server.suspended = true;
+    await expect(f.validator().validateBackend(f.route)).rejects.toThrow();
+  });
+
   it.each([
     ['missing-container', 'waking'],
     ['active-bindings', 'waking'],
@@ -298,7 +327,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
     const probeBackend = vi.fn(async () => sample);
     const validator = createGatewaySafetyValidator({ ...f.options, probeBackend });
     expect(await validator.validateBackend(f.route)).toBe(sample);
-    expect(probeBackend).toHaveBeenCalledExactlyOnceWith(f.route);
+    expect(probeBackend).toHaveBeenCalledExactlyOnceWith(f.route, expect.any(String));
     expect(f.options.observer.observe).toHaveBeenCalledOnce();
     expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
     expect(f.proof()).toMatchObject({ version: 2, routeId: f.route.id });
@@ -316,7 +345,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
   it('proves loopback provider remap, both real Docker bindings and readiness from current namespace', async () => {
     const f = fixture();
     await f.validator().validate(f.route, []);
-    expect(f.options.probeBackend).toHaveBeenCalledWith(f.route);
+    expect(f.options.probeBackend).toHaveBeenCalledWith(f.route, expect.any(String));
     expect(f.proof()).toMatchObject({
       version: 2,
       serverId: f.route.serverId,
@@ -419,7 +448,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
       const sample = { ready: true, idle: false, playerCount: 2 };
       f.options.probeBackend = vi.fn(async () => sample);
       expect(await safety.probeLeasedBackend?.(f.route)).toBe(sample);
-      expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route);
+      expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route, expect.any(String));
       expect(f.options.observer.observe).toHaveBeenCalledOnce();
       expect(f.options.resolveContext).toHaveBeenCalledOnce();
       expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
