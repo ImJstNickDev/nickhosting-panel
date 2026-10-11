@@ -46,6 +46,7 @@ import {
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
+import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
@@ -75,6 +76,7 @@ export const createServerSchema = z
   })
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
+  killRequestSchema,
   z
     .object({
       action: z.literal('minecraft-content'),
@@ -678,6 +680,7 @@ export async function enqueueLockedServerOperation(
   } = {},
 ) {
   const value = parse(operationSchema, input);
+  if (value.action === 'kill') throw new DomainError('conflict');
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   const server = await authorizeServer(
     tx,
@@ -881,6 +884,7 @@ export async function enqueueServerOperation(
   } = {},
 ) {
   const value = parse(operationSchema, input);
+  if (value.action === 'kill') return requestStopEscalation(db, context, serverId, value, env);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   if (value.action === 'stop') {
     // A manual stop immediately revokes wake consent, even if a previously queued

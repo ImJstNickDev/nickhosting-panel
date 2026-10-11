@@ -3732,3 +3732,57 @@ interactions or container restarts. Rollback is a source revert.
 A final narrow browser capture after the reorder passed (1/1), confirmed CPU →
 Memory → Network and refreshed/reviewed the existing running-desktop screenshot.
 Temporary checks were removed; disposable fixtures were cleaned.
+
+### 2026-10-11 — Offline Stop and confirmed Kill escalation
+
+Console disables Stop when offline and changes it to Kill during a current
+stopping observation. EN/IT confirmation states the risk of unsaved/corrupted
+data. The dialog targets the exact active stop job and closes on changed process
+state or operation. Status transitions refresh the shared server descriptor;
+repeated identical snapshots do not create repeated descriptor requests.
+
+Verified the official Panel v1.11.11 power controller/request/UI and Wings
+v1.11.13 power route. The existing adapter sends native Client API
+`POST /api/client/servers/{identifier}/power` with `{signal:"kill"}`; the
+permission is `control.stop`. Wings accepts the request asynchronously. Research
+references are recorded in ADR 0011's amendment; no upstream code was copied.
+
+The implementation uses a private durable escalation receipt on the original
+stop job, rather than a second job blocked behind its server lock. Acceptance
+atomically withdraws wake consent. The worker rechecks requester/session,
+identity, stopping state and the original physical process epoch, and never
+replays prepared/unknown effects. A definitively rejected pre-effect receipt
+allows a new explicit request while retaining old-key replay protection. No
+reservation is released from an HTTP acknowledgement alone. Legacy stop jobs
+without a recorded process epoch, and stops initiated only outside NickHosting,
+are not eligible for this escalation. No database migration is needed.
+
+Executed checks (targeted to the changed paths):
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/power.test.ts`: **40/40 passed**, including serialized cooperative callbacks, unknown/rejected stop responses, timeout/closure cleanup and final stream invalidation guards.
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/adapter.test.ts -t 'sends native kill'`: **1 passed, 48 skipped**; exact URL, Client credential boundary, method and native signal verified with an isolated transport fixture.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/stop-escalation.integration.test.ts packages/server-management/src/lifecycle.integration.test.ts`: **177/177 passed** (167 lifecycle + the initial 10 escalation cases).
+- The same integration command with only `packages/server-management/src/stop-escalation.integration.test.ts` on the final expanded implementation: **12/12 passed**. Covers concurrent/repeated requests, confirmation/target/session checks, revoked authority, rejected-request retry, durable consent, process-change races including cached resource responses, crash/nonreplay recovery and physical proof before release.
+- The integration runner with `packages/server-management/src/platform-queries.integration.test.ts apps/api/src/servers.integration.test.ts -t 'derives viewer|creates durable operations|isolates unrelated|current project viewer|current role changes|remote identity drift|scopes Activity|support discovery|safe history'`: **8 passed, 46 skipped**.
+- The integration runner with `packages/server-management/src/platform-queries.integration.test.ts -t 'offers stop only online'`: **1 passed, 22 skipped**; Stop/Kill eligibility and private receipt exclusion verified.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-power.browser.test.ts`: three independent cases verified across initial/targeted reruns. Initial fixture provisioning encountered `resources_unavailable`; a fixture job replacement also lacked its required completion timestamp. The test fixture was corrected and the two affected cases passed; the viewer/403 case had already passed. The final baseline-aware HTTP acceptance case was rerun with `-t 'disables offline'`: **1 passed, 2 skipped**. No real provider commands were sent.
+- The browser runner with `apps/web/tests/server-navigation.browser.test.ts -t 'keeps lifecycle admission'`: **1 passed, 4 skipped**. Three outdated heading expectations were corrected to the existing server-name Console heading.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check` (**1097 keys**), scoped Biome and diff checks: **passed**. No historical full-suite rerun.
+
+Independent review found and resolved final state/process handoff races, consent
+withdrawal on crash/graceful completion, retry after definite pre-effect rejection,
+and authorization ordering. Final review reports no remaining must-fix findings.
+Three browser Axe scans passed; desktop EN/mobile IT screenshots were reviewed:
+
+- [Stopping control](screenshots/m5/console-power-stopping-desktop-en.png)
+- [Force-stop confirmation, desktop EN](screenshots/m5/console-power-confirmation-desktop-en.png)
+- [Force-stop confirmation, mobile IT](screenshots/m5/console-power-confirmation-mobile-it.png)
+
+Evidence boundary: real application/auth handlers and PostgreSQL with isolated
+provider/socket/host fixtures. Existing approved test services were reused and
+disposable schemas/fixtures cleaned. No live server Kill/Stop, infrastructure
+mutation, container restart, production credential access or schema migration.
+SFTPGo #18 remains unchanged. Rollback is a source revert; never clear a live
+uncertain stop or its reservation as part of rollback. PR #21 remains open/unmerged.
+Final indexed governance passed: 524 text files, 132 screenshots, 461 relative
+links, four TOML files and 44 ignore cases (heuristic secret scan).

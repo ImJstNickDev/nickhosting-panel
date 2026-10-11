@@ -155,14 +155,18 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const [powerBusy, setPowerBusy] = useState(false);
   const [jobId, setJobId] = useState<string>();
   const [restart, setRestart] = useState(false);
-  async function power(action: 'start' | 'stop' | 'restart') {
+  const [killTarget, setKillTarget] = useState<string>();
+  async function power(action: 'start' | 'stop' | 'restart' | 'kill') {
     if (powerBusy) return;
     setPowerBusy(true);
     setPowerError(undefined);
     try {
-      const job = await request({ action });
+      const job = await request(
+        action === 'kill' ? { action, confirm: true, operationId: killTarget } : { action },
+      );
       setJobId(job.jobId);
       setRestart(false);
+      setKillTarget(undefined);
     } catch (failure) {
       setPowerError(failure);
     } finally {
@@ -192,9 +196,25 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       : [];
   const [state, setState] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const [error, setError] = useState<unknown>();
+  const [runtime, setRuntime] = useState<{
+    scope: string;
+    value: Resources['current_state'];
+    at: number;
+  }>();
   const [connection, setConnection] = useState(0);
   const follow = useRef(true);
   const output = useRef<HTMLElement>(null);
+  const resourceState = !live.error && !resourceStale ? live.data?.current_state : undefined;
+  const streamState = runtime?.scope === scope && state === 'connected' ? runtime : undefined;
+  const powerState =
+    streamState && (!resourceState || streamState.at >= live.dataUpdatedAt)
+      ? streamState.value
+      : (resourceState ?? server.data?.runtimeState);
+  const killAvailable = Boolean(server.data?.availableActions.kill && powerState === 'stopping');
+  useEffect(() => {
+    if (powerState !== 'stopping' || server.data?.activeOperationId !== killTarget)
+      setKillTarget(undefined);
+  }, [powerState, server.data?.activeOperationId, killTarget]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: explicit reconnect and authenticated identity delimit the stream.
   useEffect(() => {
     if (!identity || !consoleAvailable) return;
@@ -211,6 +231,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     const cached = queryClient.getQueryData<ConsoleBuffer>(key);
     let current = cached?.lines ?? [];
     let lastStatus = cached?.lastStatus;
+    let observedStatus: string | undefined;
     setBuffer({ scope, lines: current });
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -222,6 +243,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       );
     };
     async function connect() {
+      setRuntime(undefined);
       setState('connecting');
       setError(undefined);
       try {
@@ -256,6 +278,15 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                 // Status snapshots recur on provider stats/reconnects. Preserve transitions,
                 // including across navigation or after the original status scrolls out.
                 if (type === 'status') {
+                  setRuntime({
+                    scope,
+                    value: payload.data as Resources['current_state'],
+                    at: Date.now(),
+                  });
+                  if (payload.data !== observedStatus) {
+                    observedStatus = payload.data;
+                    void queryClient.invalidateQueries({ queryKey: ['server', serverId] });
+                  }
                   if (payload.data === lastStatus) return;
                   lastStatus = payload.data;
                 }
@@ -328,17 +359,29 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         </div>
         <div className="console-actions">
           {server.data?.permissions.operate &&
-            (['start', 'restart', 'stop'] as const).map((action) => (
-              <button
-                type="button"
-                key={action}
-                className={action === 'start' ? '' : 'secondary'}
-                disabled={powerBusy || !server.data.availableActions[action]}
-                onClick={() => (action === 'restart' ? setRestart(true) : void power(action))}
-              >
-                {t(`web.${action}`)}
-              </button>
-            ))}
+            (['start', 'restart', powerState === 'stopping' ? 'kill' : 'stop'] as const).map(
+              (action) => (
+                <button
+                  type="button"
+                  key={action}
+                  className={action === 'start' ? '' : 'secondary'}
+                  disabled={
+                    powerBusy ||
+                    !server.data.availableActions[action] ||
+                    (action === 'stop' && powerState === 'offline') ||
+                    (action === 'kill' && !killAvailable)
+                  }
+                  onClick={() => {
+                    if (action === 'restart') setRestart(true);
+                    else if (action === 'kill')
+                      setKillTarget(server.data?.activeOperationId ?? undefined);
+                    else void power(action);
+                  }}
+                >
+                  {t(action === 'kill' ? 'service.kill' : `web.${action}`)}
+                </button>
+              ),
+            )}
         </div>
         <div className="console-terminal-slot">
           {consoleAvailable ? (
@@ -392,6 +435,20 @@ export function ConsolePage({ serverId }: { serverId: string }) {
         <p>{t('platform.restartWarning', { name: server.data?.name ?? '' })}</p>
         <button type="button" disabled={powerBusy} onClick={() => void power('restart')}>
           {t('web.restart')}
+        </button>
+      </Dialog>
+      <Dialog
+        open={Boolean(killTarget)}
+        title={t('service.killTitle')}
+        onClose={() => setKillTarget(undefined)}
+      >
+        <p>{t('service.killWarning')}</p>
+        <button
+          type="button"
+          disabled={powerBusy || !killAvailable || server.data?.activeOperationId !== killTarget}
+          onClick={() => void power('kill')}
+        >
+          {t('service.kill')}
         </button>
       </Dialog>
       <Telemetry serverId={serverId} live={live} stale={resourceStale} />

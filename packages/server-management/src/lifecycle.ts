@@ -32,6 +32,7 @@ import {
 import { currentInteractiveContext } from './interactive-context.js';
 import { assertGatewaySleepFence, revokeGatewayRoutesForDeletion } from './registry.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
+import { consumeStopEscalation, stopEscalation } from './stop-escalation.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 type Server = Selectable<Database['managed_servers']>;
@@ -1152,6 +1153,27 @@ export async function processServerOperation(
       });
       return finish(true);
     };
+    const consumeKill = (stillStopping: () => boolean = () => true) =>
+      consumeStopEscalation(db, server.id, jobId, options.env ?? {}, {
+        verify: async () => {
+          const remote = await ownedRemote(db, server, options);
+          const observe = options.observeReconciliationProcessStart;
+          const baseline = operation.plan.stopProcessStartedAt;
+          if (!observe || typeof baseline !== 'string' || !stillStopping()) return false;
+          if (
+            (await options.adapter.getResources(server.pterodactyl_identifier ?? ''))
+              .current_state !== 'stopping'
+          )
+            return false;
+          // Panel resource responses may be cached. Read the physical process epoch
+          // last so a replacement during that request cannot inherit the old stop.
+          return (await observe(server.id, db, remote)) === baseline && stillStopping();
+        },
+        power: () => {
+          if (!stillStopping()) throw new DomainError('conflict');
+          return options.adapter.power(server.pterodactyl_identifier ?? '', 'kill');
+        },
+      });
     const completeObservedStop = async (): Promise<Result | null> => {
       if (
         operation.action !== 'stop' ||
@@ -1487,8 +1509,14 @@ export async function processServerOperation(
                         const providerServer = timed('provider_identity', () =>
                           ownedRemote(db, server, options),
                         );
+                        const processBaseline = options.observeReconciliationProcessStart
+                          ? providerServer.then((remote) =>
+                              options.observeReconciliationProcessStart?.(server.id, db, remote),
+                            )
+                          : Promise.resolve(undefined);
                         const proofs = await Promise.allSettled([
                           providerServer,
+                          processBaseline,
                           timed('authorization', async () => {
                             if (!options.effectAuthorizationVerifiesHost)
                               await options.verifyObservationHost?.(server.id, db);
@@ -1499,6 +1527,11 @@ export async function processServerOperation(
                         ]);
                         for (const proof of proofs)
                           if (proof.status === 'rejected') throw proof.reason;
+                        const startedAt = await processBaseline;
+                        if (startedAt !== undefined)
+                          await update({
+                            plan: { ...operation.plan, stopProcessStartedAt: startedAt },
+                          });
                         // Generic authorizers need not consume the shared promise.
                         // Always re-read revocable local authority after both proofs.
                         if (!isGatewaySleep(operation))
@@ -1549,6 +1582,7 @@ export async function processServerOperation(
                         return false;
                       }
                     },
+                    onStoppingWait: consumeKill,
                     onConfirmed: async () => {
                       await update({
                         plan: {
@@ -1575,6 +1609,32 @@ export async function processServerOperation(
           const stopped = await completeObservedStop();
           if (stopped) return stopped;
           return wait('power_confirmation');
+        }
+        if (action === 'stop' && operation.phase === 'power') {
+          await consumeKill();
+          const latest = await db
+            .selectFrom('operation_jobs')
+            .select('policy_snapshot')
+            .where('id', '=', jobId)
+            .executeTakeFirstOrThrow();
+          const escalation = stopEscalation(latest.policy_snapshot);
+          if (
+            escalation &&
+            escalation.state !== 'requested' &&
+            escalation.state !== 'rejected' &&
+            options.confirmAlreadyStopped &&
+            (await options.confirmAlreadyStopped(server.id, db))
+          ) {
+            await update({
+              plan: {
+                ...operation.plan,
+                stopConfirmed: true,
+                stopConfirmedAt: nowOf(options).toISOString(),
+              },
+            });
+            const completed = await completeObservedStop();
+            if (completed) return completed;
+          }
         }
         if (!settled()) return wait('resource_cache_expiry');
         if (action === 'stop' && current.current_state === 'offline') {

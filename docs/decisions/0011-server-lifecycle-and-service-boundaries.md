@@ -220,3 +220,30 @@ Production mounts, networking and external-service changes still require exact
 Owner approval. A draft implementation or documented design is not evidence that
 all acceptance checks passed; the milestone remains subject to independent
 review and the coordinator's validation report.
+
+## M5 amendment — 2026-10-11: force-stop escalation
+
+The Console follows Pterodactyl's stopping-state affordance: Stop is disabled
+offline and becomes Kill during stopping, with an explicit data-loss warning.
+Use the existing adapter's Client power endpoint and native `kill` signal;
+Pterodactyl grants it through `control.stop`. References are the official
+[v1.11.11 UI](https://github.com/pterodactyl/panel/blob/v1.11.11/resources/scripts/components/server/console/PowerButtons.tsx)
+and [request permissions](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Http/Requests/Api/Client/Servers/SendPowerRequest.php).
+
+NickHosting escalates its existing stop operation rather than creating a second
+job behind the server lock. A private `policy_snapshot.stopEscalation` receipt
+binds the requester, current session, idempotency key and exact parent operation;
+it is separate from the lifecycle's replaceable plan. The session ID is an internal
+revocation binding, never a bearer token or public API field. Current permission,
+managed identity and stopping/process evidence are required again at dispatch.
+The cooperative stop-confirmation callback checks for requests every 500ms without
+additional provider polling when none exists. Recovery consumes only a still
+requested effect; prepared/unknown effects cannot be replayed automatically.
+This amendment introduces no new database schema or provider integration.
+
+Kill acceptance withdraws automatic-wake consent. The original stop remains the
+single active operation and retains resource reservations until actual physical
+stopped proof. An HTTP acknowledgement is not evidence of a stopped container.
+A stop performed only in Pterodactyl has no NickHosting parent operation to
+escalate through this endpoint. No direct-server import or unrestricted force
+power API is introduced.

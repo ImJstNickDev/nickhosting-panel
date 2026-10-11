@@ -17,6 +17,7 @@ import {
   listServers,
   listSftpCredentials,
   type ManagementRuntime,
+  operationSchema,
   ownerOnly,
   parse,
   previewServerDns,
@@ -206,9 +207,9 @@ export function registerServerRoutes(
   });
   app.post('/v1/servers/:id/operations', async (c) => {
     const context = await principal(c);
-    const input = await body(c);
+    const input = parse(operationSchema, await body(c));
     await authorizeServer(db, context, c.req.param('id'), 'server:operate');
-    await (await management()).refreshObservations();
+    if (input.action !== 'kill') await (await management()).refreshObservations();
     return c.json(await enqueueServerOperation(db, context, c.req.param('id'), input, env), 202);
   });
   app.post('/v1/owner/servers/:id/resolve', async (c) => {

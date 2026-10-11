@@ -18,7 +18,7 @@ SSE and binary download routes are the exceptions to JSON response bodies.
 `:id` is a NickHosting server UUID, never an arbitrary Pterodactyl identifier.
 Only the managed registry can resolve it into a remote identity. Ordinary users
 can read their own servers and project memberships; project viewers can read,
-operators can operate, and managers can manage. `start`, `stop`, `restart` and
+operators can operate, and managers can manage. `start`, `stop`, `kill`, `restart` and
 `backup` require `server:operate`; configuration, destructive operations, file
 mutations, console commands, SFTP and DNS changes require `server:manage`.
 Platform operator status alone grants no access to somebody else's server.
@@ -69,9 +69,23 @@ POST `/v1/servers/:id/operations` returns `202 {serverId,jobId}`. Accepted bodie
 | Action | Fields in addition to `action` and `idempotencyKey` |
 | --- | --- |
 | `start`, `stop`, `restart`, `backup` | None. |
+| `kill` | `confirm:true`, `operationId` UUID of the active stop job. Escalates that stop; returns the same job ID. |
 | `reinstall`, `wipe`, `delete` | `confirm:true`, optional `backupBefore` (default `false`). |
 | `restore` | `confirm:true`, `backupId` UUID, optional `truncate` (default `true`). |
 | `configure` | Complete `limits` object. Disk shrinking is rejected. |
+
+Kill is a confirmed escalation of an active stop in its power phase, not a second
+lifecycle job or an unrestricted force-stop endpoint. The browser offers it only
+on a current `stopping` observation; the worker independently checks current
+managed identity, requester permissions/session and provider state before using
+Client API `POST /api/client/servers/{identifier}/power` with `{signal:"kill"}`.
+The stop permission also covers Kill in Pterodactyl. Kill request keys are scoped
+to the actor and exact parent stop operation. A safely rejected pre-effect request
+can be replaced explicitly; prior keys do not revive it. The original stop keeps its
+reservation and operation lock until physical stopped confirmation. A provider
+acknowledgement alone never releases resources. Prepared/unknown force-stop
+requests are never automatically replayed. No Kill escalation is offered for
+unrelated start/install/restore work or a stop initiated only outside NickHosting.
 
 Only one active lifecycle operation is allowed per server. Destructive/configure
 operations require an offline server; the worker verifies remote state as well.

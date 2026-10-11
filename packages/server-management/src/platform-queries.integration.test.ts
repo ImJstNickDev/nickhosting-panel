@@ -357,6 +357,66 @@ describe('M5 platform browser queries and metadata', () => {
     });
     await expect(getPlatformServer(f.db, other.context, id)).rejects.toThrow('not_found');
   });
+  it('offers stop only online and Kill only for an eligible active stop with a process baseline', async () => {
+    const id = await f.server();
+    expect((await getPlatformServer(f.db, f.context, id)).availableActions).toMatchObject({
+      stop: false,
+      kill: false,
+    });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running' })
+      .where('id', '=', id)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id)).availableActions).toMatchObject({
+      stop: true,
+      kill: false,
+    });
+    const queued = await enqueueServerOperation(f.db, f.context, id, {
+      action: 'stop',
+      idempotencyKey: randomUUID(),
+    });
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'power', effect_started_at: new Date() })
+      .where('job_id', '=', queued.jobId)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id)).availableActions).toMatchObject({
+      stop: false,
+      kill: false,
+    });
+    await f.db
+      .updateTable('server_operations')
+      .set({ plan: JSON.stringify({ stopProcessStartedAt: new Date().toISOString() }) })
+      .where('job_id', '=', queued.jobId)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id)).availableActions.kill).toBe(true);
+    const receipt = {
+      key: 'fixture',
+      actorId: f.context.actorUserId,
+      subjectId: f.context.subjectUserId,
+      sessionId: 'private',
+      supportId: null,
+      state: 'requested',
+    };
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ policy_snapshot: JSON.stringify({ stopEscalation: receipt }) })
+      .where('id', '=', queued.jobId)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id)).availableActions.kill).toBe(false);
+    await f.db
+      .updateTable('operation_jobs')
+      .set({
+        policy_snapshot: JSON.stringify({ stopEscalation: { ...receipt, state: 'rejected' } }),
+      })
+      .where('id', '=', queued.jobId)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id)).availableActions.kill).toBe(true);
+    const publicJob = await getPlatformJob(f.db, f.context, queued.jobId);
+    expect(JSON.stringify(publicJob)).not.toContain('private');
+    expect(JSON.stringify(publicJob)).not.toContain('stopEscalation');
+  });
   it('permits safe names, limits project regrouping to owner-controlled boundaries, and never edits provider identity', async () => {
     const other = await peer(),
       project = await createProject(f.db, f.context, { name: 'Shared' }),

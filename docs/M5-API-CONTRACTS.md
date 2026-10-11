@@ -70,6 +70,17 @@ Server `permissions` separates `read`, `operate`, `manage` and `sharing`.
 `availableActions` additionally considers installation, process state, pending
 operation/upload, provider identity and resource reservations. It is advisory:
 lifecycle handlers recheck permissions, configuration, declared capabilities, immutable runtime identity and admission; undeclared runtime profiles retain their evidence gates.
+`availableActions.stop` is false while offline. `availableActions.kill` is a
+permission/configuration hint for an active stop with a valid physical-process
+baseline and no pending/uncertain escalation. The Console additionally requires
+current stopping state, closes obsolete confirmation dialogs, and sends
+`{action:'kill',confirm:true,operationId,idempotencyKey}` through M2's operations
+endpoint. Status transitions refresh the shared server descriptor; repeated
+identical status samples do not trigger repeated descriptor requests. Kill keys
+are scoped to the actor and exact parent stop operation; old rejected receipts
+remain replay-safe, while a new explicit authorized request may replace them.
+Prepared/unknown effects cannot be replayed. Old in-flight stop jobs without a
+process baseline cannot be force-stopped through this new control.
 Readiness, process state and sleep state must not be collapsed into one badge.
 `firstStart` reports the historical durable `denied` event/message/timestamp when
 creation succeeded but initial compute admission failed. It is not a new start

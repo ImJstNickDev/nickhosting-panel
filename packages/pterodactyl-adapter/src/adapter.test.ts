@@ -274,6 +274,17 @@ describe('typed Pterodactyl boundary', () => {
       outcome: 'rejected',
     });
   });
+  it('sends native kill through the Client power endpoint without a console command', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const adapter = createPterodactylAdapter({ ...config, fetcher });
+    await adapter.power('f729c8a1', 'kill');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(String(url)).toBe(`${config.baseURL}/api/client/servers/f729c8a1/power`);
+    expect(init?.method).toBe('POST');
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer client-fixture-secret' });
+    expect(JSON.parse(String(init?.body))).toEqual({ signal: 'kill' });
+  });
   it('uses separate Client credentials and checks effective permissions, not a static permission catalog', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

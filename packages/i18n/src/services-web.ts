@@ -1,4 +1,10 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'service.kill': ['Kill', 'Kill'],
+  'service.killTitle': ['Force stop server', 'Arresto forzato del server'],
+  'service.killWarning': [
+    'Force stopping interrupts the process immediately. Unsaved data may be lost or corrupted.',
+    'L’arresto forzato interrompe subito il processo. I dati non salvati potrebbero andare persi o danneggiarsi.',
+  ],
   'service.summary.title': ['Server resources', 'Risorse del server'],
   'service.summary.uptime': ['Uptime', 'Tempo di attività'],
   'service.summary.cpu': ['CPU Load', 'Carico CPU'],

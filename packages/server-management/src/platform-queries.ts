@@ -25,6 +25,7 @@ import {
   publicServer,
 } from './registry.js';
 import { publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
+import { hasStopProcessBaseline, stopEscalation } from './stop-escalation.js';
 import { effectiveUploadPolicy } from './upload-policy.js';
 
 const pageSchema = z.object({
@@ -134,44 +135,59 @@ async function describeServer(
   context: AuthContext,
   row: Awaited<ReturnType<typeof authorizeServer>>,
 ) {
-  const [mapping, member, policy, initialDenied, upload, reservation] = await Promise.all([
-    db
-      .selectFrom('runtime_egg_mappings as mapping')
-      .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
-      .select(['mapping.game_id', 'mapping.runtime_id', 'game.manifest'])
-      .where('mapping.id', '=', row.mapping_id)
-      .executeTakeFirstOrThrow(),
-    row.project_id
-      ? db
-          .selectFrom('project_members')
-          .select('role')
-          .where('project_id', '=', row.project_id)
-          .where('user_id', '=', context.subjectUserId)
-          .executeTakeFirst()
-      : undefined,
-    db
-      .selectFrom('gateway_server_states')
-      .select(['state', 'enabled'])
-      .where('server_id', '=', row.id)
-      .executeTakeFirst(),
-    db
-      .selectFrom('server_events')
-      .select(['id', 'created_at', 'message_key'])
-      .where('server_id', '=', row.id)
-      .where('message_key', '=', 'servers.operation.initial_start_denied')
-      .orderBy('id', 'desc')
-      .executeTakeFirst(),
-    db
-      .selectFrom('upload_ingestion_claims')
-      .select('id')
-      .where('server_id', '=', row.id)
-      .executeTakeFirst(),
-    db
-      .selectFrom('resource_reservations')
-      .select('state')
-      .where('server_id', '=', row.id)
-      .executeTakeFirst(),
-  ]);
+  const [mapping, member, policy, initialDenied, upload, reservation, activeStop] =
+    await Promise.all([
+      db
+        .selectFrom('runtime_egg_mappings as mapping')
+        .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
+        .select(['mapping.game_id', 'mapping.runtime_id', 'game.manifest'])
+        .where('mapping.id', '=', row.mapping_id)
+        .executeTakeFirstOrThrow(),
+      row.project_id
+        ? db
+            .selectFrom('project_members')
+            .select('role')
+            .where('project_id', '=', row.project_id)
+            .where('user_id', '=', context.subjectUserId)
+            .executeTakeFirst()
+        : undefined,
+      db
+        .selectFrom('gateway_server_states')
+        .select(['state', 'enabled'])
+        .where('server_id', '=', row.id)
+        .executeTakeFirst(),
+      db
+        .selectFrom('server_events')
+        .select(['id', 'created_at', 'message_key'])
+        .where('server_id', '=', row.id)
+        .where('message_key', '=', 'servers.operation.initial_start_denied')
+        .orderBy('id', 'desc')
+        .executeTakeFirst(),
+      db
+        .selectFrom('upload_ingestion_claims')
+        .select('id')
+        .where('server_id', '=', row.id)
+        .executeTakeFirst(),
+      db
+        .selectFrom('resource_reservations')
+        .select('state')
+        .where('server_id', '=', row.id)
+        .executeTakeFirst(),
+      row.active_operation_id
+        ? db
+            .selectFrom('server_operations as operation')
+            .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+            .select([
+              'operation.action',
+              'operation.phase',
+              'operation.effect_started_at',
+              'operation.plan',
+              'job.policy_snapshot',
+            ])
+            .where('job.id', '=', row.active_operation_id)
+            .executeTakeFirst()
+        : undefined,
+    ]);
   const manifest = gameManifestSchema.safeParse(mapping.manifest);
   const scope = { ownerUserId: row.owner_id, memberRole: member?.role };
   const manage = hasPermission(context, 'server:manage', scope),
@@ -212,7 +228,17 @@ async function describeServer(
         installed &&
         row.runtime_state === 'offline' &&
         !reservation,
-      stop: operate && idle && configured && installed,
+      stop: operate && idle && configured && installed && row.runtime_state !== 'offline',
+      kill:
+        operate &&
+        configured &&
+        installed &&
+        activeStop?.action === 'stop' &&
+        activeStop.phase === 'power' &&
+        hasStopProcessBaseline(activeStop.plan) &&
+        !!activeStop.effect_started_at &&
+        (!stopEscalation(activeStop.policy_snapshot) ||
+          stopEscalation(activeStop.policy_snapshot)?.state === 'rejected'),
       restart: operate && idle && configured && installed && row.runtime_state === 'running',
       backup: operate && idle && configured && installed && capabilities?.backups === true,
       configure: manage && idle && row.runtime_state === 'offline' && !reservation,

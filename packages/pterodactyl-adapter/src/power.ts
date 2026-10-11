@@ -32,6 +32,10 @@ export interface StopConfirmationOptions {
   /** Final permission fence immediately before a new power request. Ongoing
    * console authorization must not confuse its expiry with proof invalidation. */
   beforePower?(): Promise<void>;
+  /** Cooperative work while an acknowledged/uncertain stop is still stopping.
+   * Runs serially, after the initial HTTP request settles. Must perform its own
+   * fresh authority/state checks before effects; failures do not cancel stop proof. */
+  onStoppingWait?(isStillStopping: () => boolean): Promise<void>;
   /** Durably persist the proof before this method can report confirmed. */
   onConfirmed(): Promise<void>;
 }
@@ -79,6 +83,21 @@ export async function stopWithConfirmation(
     stopping = false,
     ended = false,
     proof: Promise<void> | undefined;
+  let waitingWork: Promise<void> | undefined;
+  let waitingTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleWaitingWork = () => {
+    if (ended || !options.onStoppingWait) return;
+    waitingTimer = setTimeout(() => {
+      if (ended) return;
+      // There is at most one callback in flight. No provider polling is added here.
+      waitingWork = Promise.resolve()
+        .then(async () => {
+          if (!ended && stopping) await options.onStoppingWait?.(() => armed && stopping && !ended);
+        })
+        .catch(() => {});
+      void waitingWork.then(scheduleWaitingWork);
+    }, 500);
+  };
   let confirmed = false;
   let finish!: () => void;
   const complete = new Promise<void>((resolve) => {
@@ -96,6 +115,7 @@ export async function stopWithConfirmation(
     else if (event.data === 'offline' && stopping) {
       ended = true;
       proof = (async () => {
+        await waitingWork;
         if (!(await observer.stopped(server.uuid, 'server'))) return;
         await options.onConfirmed();
         confirmed = true;
@@ -145,6 +165,7 @@ export async function stopWithConfirmation(
       powerError = error;
       if (error instanceof PterodactylError && error.outcome === 'rejected') throw error;
     }
+    scheduleWaitingWork();
     await timed('terminal_confirmation', () => complete);
     if (proof) {
       await proof;
@@ -155,6 +176,11 @@ export async function stopWithConfirmation(
   } finally {
     ended = true;
     clearTimeout(timer);
-    relay?.close();
+    clearTimeout(waitingTimer);
+    try {
+      relay?.close();
+    } finally {
+      await waitingWork;
+    }
   }
 }

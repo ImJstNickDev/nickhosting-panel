@@ -46,7 +46,11 @@ controls are absent and backend checks remain authoritative. It moves focus to t
 on navigation and supplies a skip link and a mobile navigation disclosure. Desktop navigation stays within the viewport while the page scrolls; short windows scroll the sidebar internally so administration and account links remain reachable. Mobile retains its existing disclosure layout.
 
 Server entry opens Console by default, with Start/Restart/Stop and their durable
-operation feedback and restart confirmation. Status is an informational tab after
+operation feedback and restart confirmation. Stop is disabled when offline.
+During a provider-confirmed stopping state it becomes Kill, enabled only for an
+eligible current NickHosting stop operation. Force-stop confirmation explains the
+risk of unsaved/corrupted data and binds to that exact operation; a changed state
+or operation closes it. Status is an informational tab after
 all game sections (after Content for Minecraft); its URL is `/servers/:id/status`.
 The server root replaces history with `/console` when console capability or operate
 permission is available. An operator without console capability retains lifecycle

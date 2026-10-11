@@ -53,7 +53,7 @@ describe('M5 server Console entry and informational Status navigation', () => {
     await user.goto(`${fixture.origin}/servers`);
     await user.getByRole('link', { name: 'Survival', exact: true }).click();
     await browserExpect(user).toHaveURL(`${base}/console`);
-    await browserExpect(user.getByRole('heading', { name: 'Console', exact: true })).toBeVisible();
+    await browserExpect(user.getByRole('heading', { name: 'Survival', exact: true })).toBeVisible();
     await browserExpect(user.locator('.tabs a[aria-current="page"]')).toHaveText('Console');
     await user.goBack();
     await browserExpect(user).toHaveURL(`${fixture.origin}/servers`);
@@ -157,7 +157,7 @@ describe('M5 server Console entry and informational Status navigation', () => {
           await user.goto(`${base}/${tab}`);
           await browserExpect(
             user.getByRole('heading', {
-              name: tab === 'console' ? 'Console' : 'Status',
+              name: tab === 'console' ? 'Survival' : 'Status',
               exact: true,
             }),
           ).toBeVisible();
@@ -199,7 +199,7 @@ describe('M5 server Console entry and informational Status navigation', () => {
     await viewer.goto(base);
     await browserExpect(viewer).toHaveURL(`${base}/console`);
     await browserExpect(
-      viewer.getByRole('heading', { name: 'Console', exact: true }),
+      viewer.getByRole('heading', { name: 'Survival', exact: true }),
     ).toBeVisible();
     for (const name of ['Start', 'Stop', 'Restart']) {
       await browserExpect(viewer.getByRole('button', { name, exact: true })).toHaveCount(0);

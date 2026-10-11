@@ -331,3 +331,232 @@ describe('stop confirmation from verified stop semantics', () => {
     ).rejects.toThrow('isolated persistence failure');
   });
 });
+
+describe('cooperative stop escalation', () => {
+  it('waits for the stop response, serializes callbacks and drains before confirming', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const power = Promise.withResolvers<void>();
+      const work = Promise.withResolvers<void>();
+      f.adapter.power.mockImplementation(async () => {
+        f.emit('stopping');
+        await power.promise;
+      });
+      const onStoppingWait = vi.fn(async () => work.promise);
+      const result = stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        { ...f.options, onStoppingWait },
+        10000,
+        f.observer,
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(onStoppingWait).not.toHaveBeenCalled();
+      power.resolve();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(onStoppingWait).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(onStoppingWait).toHaveBeenCalledTimes(1);
+      f.emit('offline');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.options.onConfirmed).not.toHaveBeenCalled();
+      work.resolve();
+      await expect(result).resolves.toEqual({ confirmed: true });
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(onStoppingWait).toHaveBeenCalledTimes(1);
+      expect(f.close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('drains even when a callback synchronously reports offline before its work finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const work = Promise.withResolvers<void>();
+      f.adapter.power.mockImplementation(async () => {
+        f.emit('stopping');
+      });
+      const result = stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        {
+          ...f.options,
+          onStoppingWait: async () => {
+            f.emit('offline');
+            await work.promise;
+          },
+        },
+        2000,
+        f.observer,
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      expect(f.observer.stopped).not.toHaveBeenCalled();
+      work.resolve();
+      await expect(result).resolves.toEqual({ confirmed: true });
+      expect(f.options.onConfirmed).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each(['running', 'offline'] as const)('does not escalate a %s server', async (state) => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      f.adapter.power.mockImplementation(async () => {
+        f.emit(state);
+      });
+      const onStoppingWait = vi.fn(async () => {});
+      const result = stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        { ...f.options, onStoppingWait },
+        2000,
+        f.observer,
+      );
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(result).resolves.toEqual({ confirmed: false });
+      expect(onStoppingWait).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('continues after unknown power response and callback failures without losing stop proof', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      f.adapter.power.mockImplementation(async () => {
+        f.emit('stopping');
+        throw new PterodactylError('unavailable', 'client', 'unknown');
+      });
+      const onStoppingWait = vi.fn(async () => {
+        throw new Error('journal unavailable');
+      });
+      const result = stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        { ...f.options, onStoppingWait },
+        3000,
+        f.observer,
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(onStoppingWait).toHaveBeenCalledTimes(2);
+      f.emit('offline');
+      await expect(result).resolves.toEqual({ confirmed: true });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(onStoppingWait).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('does not run callbacks after a rejected stop', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      f.adapter.power.mockImplementation(async () => {
+        f.emit('stopping');
+        throw new PterodactylError('permission_denied', 'client', 'rejected');
+      });
+      const onStoppingWait = vi.fn(async () => {});
+      const result = stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        { ...f.options, onStoppingWait },
+        3000,
+        f.observer,
+      );
+      await expect(result).rejects.toMatchObject({ outcome: 'rejected' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(onStoppingWait).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each(['timeout', 'closed'] as const)(
+    'drains active callbacks on %s and never schedules late work',
+    async (end) => {
+      vi.useFakeTimers();
+      try {
+        const f = fixture();
+        const work = Promise.withResolvers<void>();
+        f.adapter.power.mockImplementation(async () => {
+          f.emit('stopping');
+        });
+        const onStoppingWait = vi.fn(async () => work.promise);
+        let settled = false;
+        const result = stopWithConfirmation(
+          f.adapter,
+          1,
+          'fixture',
+          { ...f.options, onStoppingWait },
+          2000,
+          f.observer,
+        ).then((value) => {
+          settled = true;
+          return value;
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        expect(onStoppingWait).toHaveBeenCalledTimes(1);
+        if (end === 'closed') f.adapter.relayConsole.mock.calls[0]?.[1].onEvent({ type: 'closed' });
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(settled).toBe(false);
+        work.resolve();
+        await expect(result).resolves.toEqual({ confirmed: false });
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(onStoppingWait).toHaveBeenCalledTimes(1);
+        expect(f.options.onConfirmed).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
+describe('stop escalation final stream fence', () => {
+  it.each(['offline', 'running', 'closed', 'timeout'] as const)(
+    'invalidates a pending callback when the stream becomes %s',
+    async (end) => {
+      vi.useFakeTimers();
+      try {
+        const f = fixture();
+        f.adapter.power.mockImplementation(async () => {
+          f.emit('stopping');
+        });
+        const gate = Promise.withResolvers<void>();
+        let stillStopping: (() => boolean) | undefined;
+        const result = stopWithConfirmation(
+          f.adapter,
+          1,
+          'fixture',
+          {
+            ...f.options,
+            onStoppingWait: async (guard) => {
+              stillStopping = guard;
+              await gate.promise;
+            },
+          },
+          2000,
+          f.observer,
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        expect(stillStopping?.()).toBe(true);
+        if (end === 'timeout') await vi.advanceTimersByTimeAsync(2000);
+        else if (end === 'closed')
+          f.adapter.relayConsole.mock.calls[0]?.[1].onEvent({ type: 'closed' });
+        else f.emit(end);
+        expect(stillStopping?.()).toBe(false);
+        gate.resolve();
+        await vi.advanceTimersByTimeAsync(2500);
+        await result;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+});
