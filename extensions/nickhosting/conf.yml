@@ -1,0 +1,11 @@
+info:
+  name: NickHosting
+  identifier: nickhosting
+  description: NickHosting provider bridge capability discovery.
+  version: 0.1.0-dev
+  target: beta-2025-09
+  author: NickHosting
+requests:
+  app: app
+  routers:
+    application: routes/application.php

@@ -92,3 +92,7 @@ Persistent review development and separate immutable production configuration ar
 prepared in [M5 environments](docs/M5-ENVIRONMENTS.md). Activation, the external
 network attachment and the Owner-managed NPM proxy host require the explicit
 proposal approval; production remains undeployed.
+
+The [NickHosting Blueprint extension](docs/BLUEPRINT-EXTENSION.md) is developed in
+this monorepo. Its initial discovery/packaging foundation is not installed on the
+Panel; per-user API keys and durable server-change notifications remain in development.
