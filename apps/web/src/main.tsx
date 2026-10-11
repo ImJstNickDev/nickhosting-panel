@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router';
 import { queryClient } from './api/client.js';
 import { LocaleProvider, useT } from './app/i18n.js';
-import { ServerGameSection, ServerShell } from './app/server-shell.js';
+import { ServerGameSection, ServerIndex, ServerShell } from './app/server-shell.js';
 import { AuthCallback, Shell } from './app/shell.js';
 import { Page } from './components/ui.js';
 import { AccountPage } from './features/account.js';
@@ -67,7 +67,8 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/activity/:jobId" element={<JobPage />} />
               <Route path="/settings" element={<AccountPage />} />
               <Route path="/servers/:serverId" element={<ServerShell />}>
-                <Route index element={<ServerPage component={ServerOverview} />} />
+                <Route index element={<ServerIndex />} />
+                <Route path="status" element={<ServerPage component={ServerOverview} />} />
                 <Route path="console" element={<ServerPage component={ConsolePage} />} />
                 <Route path="files" element={<ServerPage component={FilesPage} />} />
                 <Route path="sftp" element={<ServerPage component={SftpPage} />} />

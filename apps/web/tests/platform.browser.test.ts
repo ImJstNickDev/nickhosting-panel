@@ -59,9 +59,9 @@ describe('M5 real browser platform and Owner journeys', () => {
       'PUT',
     );
   }
-  async function overview() {
-    await user.goto(`${fixture.origin}/servers/${provider.ids.serverId}`);
-    await browserExpect(user.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
+  async function consolePage() {
+    await user.goto(`${fixture.origin}/servers/${provider.ids.serverId}/console`);
+    await browserExpect(user.getByRole('heading', { name: 'Console', exact: true })).toBeVisible();
   }
 
   it('shows scoped server artwork, resource units, useful empty filters and accessible Home', async () => {
@@ -205,7 +205,7 @@ describe('M5 real browser platform and Owner journeys', () => {
       `/v1/platform/jobs/${createdJobId}`,
     );
     expect(job.state).toBe('succeeded');
-    await user.goto(`${fixture.origin}/servers/${createdServerId}`);
+    await user.goto(`${fixture.origin}/servers/${createdServerId}/console`);
     await browserExpect(
       user.getByText(
         'Created, but the initial start was refused because capacity was unavailable. You can try Start again when resources are available.',
@@ -264,7 +264,7 @@ describe('M5 real browser platform and Owner journeys', () => {
 
   it('rejects insufficient physical capacity then reports genuinely completed lifecycle jobs and Activity', async () => {
     await provider.setResourcesAvailable(false);
-    await overview();
+    await consolePage();
     await user.getByRole('button', { name: 'Start', exact: true }).click();
     await browserExpect(
       user.getByText('There is not enough available capacity to start this server.', {
@@ -290,7 +290,7 @@ describe('M5 real browser platform and Owner journeys', () => {
       ).toBeVisible();
       await browserExpect(user.locator('.badge').filter({ hasText: 'Completed' })).toBeVisible();
       if (action === 'Start') await fixture.screenshot(user, 'activity-completed-desktop-en');
-      await overview();
+      await consolePage();
     }
     await user.goto(`${fixture.origin}/activity`);
     await user.getByLabel('Status', { exact: true }).selectOption('succeeded');

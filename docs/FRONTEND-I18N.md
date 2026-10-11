@@ -45,6 +45,14 @@ restricted Administration area for audit and read-only settings; Owner mutation
 controls are absent and backend checks remain authoritative. It moves focus to the page heading
 on navigation and supplies a skip link and a mobile navigation disclosure. Desktop navigation stays within the viewport while the page scrolls; short windows scroll the sidebar internally so administration and account links remain reachable. Mobile retains its existing disclosure layout.
 
+Server entry opens Console by default, with Start/Stop/Restart and their durable
+operation feedback and restart confirmation. Status is an informational tab after
+all game sections (after Content for Minecraft); its URL is `/servers/:id/status`.
+The server root replaces history with `/console` when console capability or operate
+permission is available. An operator without console capability retains lifecycle
+controls without an unsupported stream; a viewer with neither falls back to Status.
+Focused tabs scroll into view in the horizontal navigation on keyboard traversal.
+
 Trusted first-party game modules own validated creation/management descriptors,
 handlers, namespaced catalogs and bundled artwork. The generic renderers use the
 browser-safe Game SDK; API JSON cannot install executable UI, remote imports or

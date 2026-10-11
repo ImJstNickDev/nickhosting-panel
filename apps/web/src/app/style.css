@@ -519,6 +519,13 @@
   .mobile-menu {
     display: inline-flex;
   }
+  .section-heading:has(> .console-actions) {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .console-actions {
+    width: 100%;
+  }
   .topbar {
     padding: 0.7rem 1rem;
   }

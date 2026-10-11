@@ -228,7 +228,7 @@ export function CreateServerPage() {
       <Page title={t('web.createServer')}>
         <Section>
           <JobNotice jobId={result.jobId} />
-          <Link to={`/servers/${result.serverId}`}>{t('web.overview')}</Link>
+          <Link to={`/servers/${result.serverId}`}>{t('web.openServer')}</Link>
         </Section>
       </Page>
     );

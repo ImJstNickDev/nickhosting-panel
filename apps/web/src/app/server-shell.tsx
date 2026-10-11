@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { NavLink, Outlet, useLocation, useParams } from 'react-router';
+import { Navigate, NavLink, Outlet, useLocation, useParams } from 'react-router';
 import { ErrorNotice, Loading, Page } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
 import { gameUiRegistry } from '../features/integrations.js';
@@ -23,8 +23,9 @@ export function ServerShell() {
   const value = server.data,
     base = `/servers/${serverId}`;
   const tabs = [
-    ['', 'web.overview'],
-    ...(value.capabilities?.console ? [['console', 'web.console']] : []),
+    ...(value.capabilities?.console || value.permissions.operate
+      ? [['console', 'web.console']]
+      : []),
     ...(value.capabilities?.files
       ? [
           ['files', 'web.files'],
@@ -40,7 +41,15 @@ export function ServerShell() {
   const game = gameUiRegistry.get(value.gameId);
   return (
     <Page title={value.name}>
-      <nav ref={tabsElement} className="tabs" aria-label={t('web.servers')}>
+      <nav
+        ref={tabsElement}
+        className="tabs"
+        aria-label={t('web.servers')}
+        onFocusCapture={(event) => {
+          if (event.target instanceof HTMLAnchorElement)
+            event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }}
+      >
         {tabs.map(([slug, key]) => (
           <NavLink key={slug} to={`${base}/${slug}`} end>
             {key === 'SFTP' ? key : t(key!)}
@@ -51,6 +60,9 @@ export function ServerShell() {
             {t(section.titleKey)}
           </NavLink>
         ))}
+        <NavLink to={`${base}/status`} end>
+          {t('web.serverStatus')}
+        </NavLink>
       </nav>
       <Outlet />
     </Page>
@@ -62,4 +74,19 @@ export function ServerGameSection() {
   if (server.isPending) return <Loading />;
   if (server.error) return <ErrorNotice error={server.error} />;
   return <GameSections serverId={serverId} sectionId={sectionId} gameId={server.data.gameId} />;
+}
+
+export function ServerIndex() {
+  const { serverId = '' } = useParams();
+  const server = useServer(serverId);
+  if (server.isPending) return <Loading />;
+  if (server.error) return <ErrorNotice error={server.error} />;
+  return (
+    <Navigate
+      to={
+        server.data.capabilities?.console || server.data.permissions.operate ? 'console' : 'status'
+      }
+      replace
+    />
+  );
 }

@@ -1,13 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import {
   ActionForm,
+  Dialog,
   Empty,
   ErrorNotice,
   Input,
+  JobNotice,
   Loading,
   Notice,
   Section,
@@ -15,6 +18,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { useRequestOperation } from './servers.js';
 import {
   type Metrics,
   platformPath,
@@ -61,6 +65,26 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const t = useT();
   const server = useServer(serverId);
   const session = useSession();
+  const consoleAvailable = Boolean(server.data?.capabilities?.console);
+  const request = useRequestOperation(serverId);
+  const [powerError, setPowerError] = useState<unknown>();
+  const [powerBusy, setPowerBusy] = useState(false);
+  const [jobId, setJobId] = useState<string>();
+  const [restart, setRestart] = useState(false);
+  async function power(action: 'start' | 'stop' | 'restart') {
+    if (powerBusy) return;
+    setPowerBusy(true);
+    setPowerError(undefined);
+    try {
+      const job = await request({ action });
+      setJobId(job.jobId);
+      setRestart(false);
+    } catch (failure) {
+      setPowerError(failure);
+    } finally {
+      setPowerBusy(false);
+    }
+  }
   const context = session.data?.context;
   const identity =
     !session.error && context
@@ -90,7 +114,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const output = useRef<HTMLElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: explicit reconnect and authenticated identity delimit the stream.
   useEffect(() => {
-    if (!identity) return;
+    if (!identity || !consoleAvailable) return;
     const key = ['console-buffer', identity, serverId];
     // These inactive query entries are erased by the existing sign-out/support identity reset.
     // Keep at most five server buffers in this tab, never persistent browser storage.
@@ -190,7 +214,7 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [serverId, identity, scope, connection]);
+  }, [serverId, identity, scope, connection, consoleAvailable]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll after each new bounded batch of output.
   useEffect(() => {
     if (follow && output.current) output.current.scrollTop = output.current.scrollHeight;
@@ -200,49 +224,91 @@ export function ConsolePage({ serverId }: { serverId: string }) {
       <Section
         title={t('web.console')}
         actions={
-          <div className="actions">
-            <span role="status">{t(`service.${state}`)}</span>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setConnection((value) => value + 1)}
-            >
-              {t('service.reconnect')}
-            </button>
+          <div className="actions console-actions">
+            {server.data?.permissions.operate &&
+              (['start', 'stop', 'restart'] as const).map((action) => (
+                <button
+                  type="button"
+                  key={action}
+                  className={action === 'start' ? '' : 'secondary'}
+                  disabled={powerBusy || !server.data.availableActions[action]}
+                  onClick={() => (action === 'restart' ? setRestart(true) : void power(action))}
+                >
+                  {t(`web.${action}`)}
+                </button>
+              ))}
+            {consoleAvailable && (
+              <>
+                <span role="status">{t(`service.${state}`)}</span>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setConnection((value) => value + 1)}
+                >
+                  {t('service.reconnect')}
+                </button>
+              </>
+            )}
           </div>
         }
       >
-        {Boolean(error) && <ErrorNotice error={error} />}
-        <ConsoleOutput output={output} lines={lines} />
-        {retained && <p className="muted">{t('service.consoleRetained')}</p>}
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={follow}
-            onChange={(event) => setFollow(event.target.checked)}
-          />
-          {t('service.followConsole')}
-        </label>
-        {server.data?.permissions.manage && (
-          <ActionForm
-            submitLabel={t('web.send')}
-            success={false}
-            onSubmit={async (data) => {
-              await api(`${serverPath(serverId)}/console`, {
-                body: { command: text(data, 'command') },
-              });
-            }}
-          >
-            <Input
-              label={t('web.command')}
-              name="command"
-              autoComplete="off"
-              maxLength={4096}
-              required
-            />
-          </ActionForm>
+        {Boolean(powerError) && <ErrorNotice error={powerError} />}
+        <JobNotice jobId={jobId} />
+        {server.data?.activeOperationId && (
+          <Notice>
+            <Link to={`/activity/${server.data.activeOperationId}`}>
+              {t('platform.operationBlocksActions')}
+            </Link>
+          </Notice>
+        )}
+        {server.data?.firstStart && server.data.runtimeState === 'offline' && (
+          <Notice>
+            {t('platform.initialStartDenied')} <Time value={server.data.firstStart.occurredAt} />
+          </Notice>
+        )}
+        {consoleAvailable ? (
+          <>
+            {Boolean(error) && <ErrorNotice error={error} />}
+            <ConsoleOutput output={output} lines={lines} />
+            {retained && <p className="muted">{t('service.consoleRetained')}</p>}
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={follow}
+                onChange={(event) => setFollow(event.target.checked)}
+              />
+              {t('service.followConsole')}
+            </label>
+            {server.data?.permissions.manage && (
+              <ActionForm
+                submitLabel={t('web.send')}
+                success={false}
+                onSubmit={async (data) => {
+                  await api(`${serverPath(serverId)}/console`, {
+                    body: { command: text(data, 'command') },
+                  });
+                }}
+              >
+                <Input
+                  label={t('web.command')}
+                  name="command"
+                  autoComplete="off"
+                  maxLength={4096}
+                  required
+                />
+              </ActionForm>
+            )}
+          </>
+        ) : (
+          <Notice>{t('web.unavailable')}</Notice>
         )}
       </Section>
+      <Dialog open={restart} title={t('web.restart')} onClose={() => setRestart(false)}>
+        <p>{t('platform.restartWarning', { name: server.data?.name ?? '' })}</p>
+        <button type="button" disabled={powerBusy} onClick={() => void power('restart')}>
+          {t('web.restart')}
+        </button>
+      </Dialog>
       <Telemetry serverId={serverId} />
     </>
   );

@@ -3428,3 +3428,43 @@ Reviewed viewport screenshots (only isolated fixture identities):
 The existing Vite source mount/HMR delivers the CSS change without service restarts.
 No production/game operations or new infrastructure; no live test assets created.
 Rollback is the CSS revert. PR #21 remains open/unmerged; M6 and SFTPGo #18 unchanged.
+
+
+## 2026-10-11 — Console entry and controls; Status last
+
+The server root now replaces its history entry with Console. Status (literal label
+in EN/IT) moves after integration sections, including Minecraft Content, and is
+informational at `/servers/:id/status`. Start/Stop/Restart, restart confirmation,
+job feedback, active-operation and first-start-denied notices move to Console.
+The existing operation hook is reused; admission, permissions and intent keys are
+unchanged. Operators without console capability retain power controls without a
+stream; viewers with neither capability nor operate permission fall back to Status.
+Creation success links say Open server; direct-connection help points to Console.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/server-navigation.browser.test.ts`: **5 passed**, covering default/trailing-slash URLs and history, order, keyboard access, real isolated lifecycle handlers, admission failure, restart confirmation, viewer permissions and capability fallback.
+- After mobile header layout refinement, the same command with `-t 'renders Console and Status'`: **1 passed / 4 skipped**, recreating EN/IT desktop/mobile screenshots and accessibility evidence. No horizontal overflow or browser errors; Axe reports no violations for the tested states.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/platform.browser.test.ts apps/web/tests/services.browser.test.ts -t 'rejects insufficient physical capacity|console'`: **13 passed / 10 skipped / 1 failed** initially. The expression also matched the services suite title, so all its services cases ran. Failure was a stale network expectation: fixture commit `277be4e` already configures a direct endpoint; the test still expected Not configured. Independent review confirmed the unchanged fixture/API/Network behavior. The test now verifies the explicit fixture hostname, Configured and unverified-external-reachability notice, preserving exclusion of the unrelated static hostname.
+- Targeted rerun of `apps/web/tests/services.browser.test.ts -t 'persists schedules and explicit automation consent'` with the same runner: **1 passed / 12 skipped**. No full historical suite rerun.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm i18n:check`, and `scripts/dev.sh pnpm build`: passed. Build retains its >500kB bundle warning; scoped Biome has no errors, with nine existing non-null/reduced-motion warnings. Initial typecheck caught an unexported reused hook; export corrected before final checks.
+
+Independent review found no permission/idempotency or route blocker. Browser review
+found clipped keyboard focus on the final tab and crowded mobile Console controls;
+focus now reveals the anchor, and the mobile header stacks above full-width actions.
+Initial test assumptions about disabled offline Stop and no-console operator fallback
+were corrected against API availableActions and the intended lifecycle-only Console.
+
+Reviewed screenshots: [Console desktop EN](screenshots/m5/server-navigation-console-desktop-en.png),
+[Console mobile IT](screenshots/m5/server-navigation-console-mobile-it.png),
+[Status desktop EN](screenshots/m5/server-navigation-status-desktop-en.png),
+[Status mobile IT](screenshots/m5/server-navigation-status-mobile-it.png),
+[Console desktop IT](screenshots/m5/server-navigation-console-desktop-it.png),
+[Console mobile EN](screenshots/m5/server-navigation-console-mobile-en.png),
+[Status desktop IT](screenshots/m5/server-navigation-status-desktop-it.png),
+[Status mobile EN](screenshots/m5/server-navigation-status-mobile-en.png).
+
+All browser operations use disposable isolated schemas and provider fixtures, cleaned
+afterward. No live game commands, service restart, new infrastructure or provider
+changes. Existing Vite HMR serves the update. Rollback: revert UI/catalog changes;
+no migrations. PR #21 remains open/unmerged; SFTPGo #18 unchanged.

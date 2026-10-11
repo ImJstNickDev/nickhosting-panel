@@ -374,7 +374,7 @@ describe('M5 browser files, backups, console and automation', () => {
     await browserExpect(user.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
     await harness.screenshot(user, 'sftp-desktop-en');
   });
-  it('persists schedules and explicit automation consent, and presents unavailable routing truthfully', async () => {
+  it('persists schedules and explicit automation consent, and presents configured direct routing truthfully', async () => {
     await user.goto(`${base}/automation`);
     await user.getByRole('button', { name: 'Add schedule', exact: true }).click();
     const dialog = user.getByRole('dialog');
@@ -386,10 +386,19 @@ describe('M5 browser files, backups, console and automation', () => {
     await harness.screenshot(user, 'automation-desktop-en');
     await user.goto(`${base}/network`);
     await browserExpect(
-      user.getByRole('cell', { name: 'Not configured', exact: true }).first(),
+      user.getByRole('cell', { name: `${provider.ids.nodeId}.example.test`, exact: false }).first(),
+    ).toBeVisible();
+    await browserExpect(
+      user.getByRole('cell', { name: 'Configured', exact: true }).first(),
+    ).toBeVisible();
+    await browserExpect(
+      user.getByText(
+        'Direct connection. This address is configured by the Owner; external reachability has not been verified.',
+        { exact: true },
+      ),
     ).toBeVisible();
     await browserExpect(user.getByText('games.example.test', { exact: false })).toHaveCount(0);
-    await harness.screenshot(user, 'network-unavailable-desktop-en');
+    await harness.screenshot(user, 'network-direct-desktop-en');
     provider.setProviderAvailable(false);
     await user.goto(`${base}/files`);
     await browserExpect(user.getByRole('alert').first()).toBeVisible();

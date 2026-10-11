@@ -368,7 +368,7 @@ export function ServersPage() {
 }
 /** Keep the intent key through a lost response. Retrying the same form must not
  * create a duplicate external operation; a changed payload is a new intent. */
-function useRequestOperation(serverId: string) {
+export function useRequestOperation(serverId: string) {
   const intents = useRef(new Map<string, string>());
   return async (body: Record<string, unknown>) => {
     const fingerprint = JSON.stringify(body);
@@ -394,109 +394,46 @@ function useRequestOperation(serverId: string) {
 export function ServerOverview({ serverId }: { serverId: string }) {
   const t = useT(),
     format = useFormat(),
-    server = useServer(serverId),
-    request = useRequestOperation(serverId);
-  const [error, setError] = useState<unknown>(),
-    [busy, setBusy] = useState(false),
-    [jobId, setJobId] = useState<string>(),
-    [restart, setRestart] = useState(false);
-  async function power(action: 'start' | 'stop' | 'restart') {
-    if (busy) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      const job = await request({ action });
-      setJobId(job.jobId);
-      setRestart(false);
-    } catch (failure) {
-      setError(failure);
-    } finally {
-      setBusy(false);
-    }
-  }
+    server = useServer(serverId);
+
   if (server.isPending) return <Loading />;
   if (server.error) return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
   const data = server.data;
   if (!data) return null;
   return (
-    <>
-      <Section
-        title={t('web.overview')}
-        actions={
-          data.permissions.operate && (
-            <div className="actions">
-              {(['start', 'stop', 'restart'] as const).map((action) => (
-                <button
-                  type="button"
-                  key={action}
-                  className={action === 'start' ? '' : 'secondary'}
-                  disabled={busy || !data.availableActions[action]}
-                  onClick={() => (action === 'restart' ? setRestart(true) : void power(action))}
-                >
-                  {t(`web.${action}`)}
-                </button>
-              ))}
-            </div>
-          )
-        }
-      >
-        {Boolean(error) && <ErrorNotice error={error} />}
-        <JobNotice jobId={jobId} />
-        {data.activeOperationId && (
-          <Notice>
-            <Link to={`/activity/${data.activeOperationId}`}>
-              {t('platform.operationBlocksActions')}
-            </Link>
-          </Notice>
-        )}
-        {data.firstStart && data.runtimeState === 'offline' && (
-          <Notice>
-            {t('platform.initialStartDenied')} <Time value={data.firstStart.occurredAt} />
-          </Notice>
-        )}
-        <Details
-          values={[
-            [t('platform.game'), data.gameNameKey ? t(data.gameNameKey) : data.gameId],
-            [t('platform.runtime'), data.runtimeId],
-            [
-              t('platform.process'),
-              <Badge
-                key="process"
-                value={data.runtimeState}
-                label={t(statusKey(data.runtimeState))}
-              />,
-            ],
-            [
-              t('platform.readiness'),
-              data.capabilities?.readiness === false ? (
-                t('web.unavailable')
-              ) : (
-                <Badge
-                  key="readiness"
-                  value={data.readiness}
-                  label={t(statusKey(data.readiness))}
-                />
-              ),
-            ],
-            [t('platform.installation'), t(statusKey(data.installationState))],
-            [
-              t('platform.sleepState'),
-              data.sleepState ? t(statusKey(data.sleepState)) : t('web.unconfigured'),
-            ],
-            [t('web.memory'), `${format.number(data.limits.memory)} MiB`],
-            [t('web.cpu'), `${format.number(data.limits.cpu)}%`],
-            [t('web.disk'), `${format.number(data.limits.disk)} MiB`],
-            [t('platform.lastObserved'), <Time key="observed" value={data.lastObservedAt} />],
-          ]}
-        />
-      </Section>
-      <Dialog open={restart} title={t('web.restart')} onClose={() => setRestart(false)}>
-        <p>{t('platform.restartWarning', { name: data.name })}</p>
-        <button type="button" disabled={busy} onClick={() => void power('restart')}>
-          {t('web.restart')}
-        </button>
-      </Dialog>
-    </>
+    <Section title={t('web.serverStatus')}>
+      <Details
+        values={[
+          [t('platform.game'), data.gameNameKey ? t(data.gameNameKey) : data.gameId],
+          [t('platform.runtime'), data.runtimeId],
+          [
+            t('platform.process'),
+            <Badge
+              key="process"
+              value={data.runtimeState}
+              label={t(statusKey(data.runtimeState))}
+            />,
+          ],
+          [
+            t('platform.readiness'),
+            data.capabilities?.readiness === false ? (
+              t('web.unavailable')
+            ) : (
+              <Badge key="readiness" value={data.readiness} label={t(statusKey(data.readiness))} />
+            ),
+          ],
+          [t('platform.installation'), t(statusKey(data.installationState))],
+          [
+            t('platform.sleepState'),
+            data.sleepState ? t(statusKey(data.sleepState)) : t('web.unconfigured'),
+          ],
+          [t('web.memory'), `${format.number(data.limits.memory)} MiB`],
+          [t('web.cpu'), `${format.number(data.limits.cpu)}%`],
+          [t('web.disk'), `${format.number(data.limits.disk)} MiB`],
+          [t('platform.lastObserved'), <Time key="observed" value={data.lastObservedAt} />],
+        ]}
+      />
+    </Section>
   );
 }
 function ProjectChoice({ server }: { server: ServerInfo }) {

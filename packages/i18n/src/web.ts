@@ -6,6 +6,8 @@ export const webMessages: Record<string, readonly [string, string]> = {
   'web.settings': ['Settings', 'Impostazioni'],
   'web.owner': ['Administration', 'Amministrazione'],
   'web.overview': ['Overview', 'Panoramica'],
+  'web.serverStatus': ['Status', 'Status'],
+  'web.openServer': ['Open server', 'Apri server'],
   'web.users': ['Users', 'Utenti'],
   'web.infrastructure': ['Infrastructure', 'Infrastruttura'],
   'web.integrations': ['Integrations', 'Integrazioni'],
