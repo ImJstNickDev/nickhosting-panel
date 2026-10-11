@@ -129,8 +129,10 @@ distinct. A created/offline capacity-denied server is not presented as a failed
 creation or automatically started again.
 
 Console updates use bounded SSE parsing/display (300 retained lines with a
-per-line bound); charts show timestamps, units and gaps. Historical reads paginate
-instead of accumulating unbounded data. Binary uploads use Blob/XHR progress and
+per-line bound); charts show timestamps, units and gaps. The resource section keeps
+the period selector and charts without a measurement table, pagination buttons or
+explanatory footer. Chart history reads remain bounded to 100 recent samples;
+backend history pagination remains available. Binary uploads use Blob/XHR progress and
 cancellation, and file/backup downloads use native same-origin streaming links.
 Only the text editor has its own size limit. Authority is checked server-side
 throughout transfers; the browser never sees a privileged provider URL/token.

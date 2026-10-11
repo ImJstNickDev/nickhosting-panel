@@ -3534,3 +3534,20 @@ prompt underline visible. Forced-colors mode was not separately tested. Scoped
 Biome passes with seven existing warnings. Independent source review found no
 must-fix issue. No full suite, production operations or restarts; isolated harness
 cleanup completed. Rollback is a source revert; PR #21 remains open/unmerged.
+
+## 2026-10-11 — Compact resource graphs
+
+Removed the network-counter explanatory paragraph, measurement table and
+Older/Latest measurement buttons, including unused cursor state and four catalog
+keys. Charts, period selection, bounded history fetches, live polling, freshness
+and failure states remain. Backend history pagination is unchanged.
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm exec biome check --write apps/web/src/features/console.tsx packages/i18n/src/services-web.ts`: passed, no warnings.
+- `scripts/dev.sh pnpm i18n:compile`: 1086 EN/IT/pseudolocale keys compiled.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'keeps the terminal prompt accessible'`: **1 passed / 17 skipped**, including four charts, EN desktop/IT mobile, Axe and overflow checks. Updated terminal screenshots linked above inspected: requested footer/table/controls absent. No full suite rerun.
+
+Independent review found no must-fix findings. Existing 100-sample history bound
+remains; this is not a new historical aggregation feature. Isolated fixtures
+cleaned normally; no production interactions, new assets or service restarts.
+Rollback is a source revert. PR #21 remains open/unmerged; issue #18 unchanged.

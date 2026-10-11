@@ -435,10 +435,8 @@ function Chart({
   );
 }
 export function Telemetry({ serverId }: { serverId: string }) {
-  const t = useT(),
-    format = useFormat();
-  const [hours, setHours] = useState(1),
-    [before, setBefore] = useState<string>();
+  const t = useT();
+  const [hours, setHours] = useState(1);
   const live = useQuery({
     queryKey: ['resources', serverId],
     queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
@@ -447,16 +445,15 @@ export function Telemetry({ serverId }: { serverId: string }) {
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
   const history = useQuery({
-    queryKey: ['metrics', serverId, hours, before],
+    queryKey: ['metrics', serverId, hours],
     queryFn: () => {
       const query = new URLSearchParams({
         limit: '100',
         from: new Date(Date.now() - hours * 3600000).toISOString(),
       });
-      if (before) query.set('before', before);
       return api<Metrics>(`${platformPath(serverId)}/metrics?${query}`);
     },
-    refetchInterval: before ? false : 30000,
+    refetchInterval: 30000,
   });
   const rows = (history.data?.items ?? []).slice().reverse();
   const samples = rows.map((row) => ({
@@ -466,7 +463,7 @@ export function Telemetry({ serverId }: { serverId: string }) {
     rx: Number(row.network_rx_bytes) / 1048576,
     tx: Number(row.network_tx_bytes) / 1048576,
   }));
-  if (!before && live.data && !live.error) {
+  if (live.data && !live.error) {
     const r = live.data.resources;
     samples.push({
       time: live.dataUpdatedAt,
@@ -496,7 +493,6 @@ export function Telemetry({ serverId }: { serverId: string }) {
           value={hours}
           onChange={(event) => {
             setHours(Number(event.target.value));
-            setBefore(undefined);
           }}
         >
           {[1, 6, 24, 168].map((value) => (
@@ -505,11 +501,6 @@ export function Telemetry({ serverId }: { serverId: string }) {
             </option>
           ))}
         </Select>
-        {before && (
-          <button type="button" className="secondary" onClick={() => setBefore(undefined)}>
-            {t('service.latest')}
-          </button>
-        )}
       </div>
       {history.isPending ? (
         <Loading />
@@ -539,52 +530,10 @@ export function Telemetry({ serverId }: { serverId: string }) {
               values={samples.map((s) => ({ time: s.time, value: s.tx }))}
             />
           </div>
-          <p className="muted">{t('service.networkCounters')}</p>
           {live.dataUpdatedAt > 0 && (
             <p>
               <Time value={new Date(live.dataUpdatedAt).toISOString()} />
             </p>
-          )}
-          <details>
-            <summary>{t('service.measurements')}</summary>
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t('web.updated')}</th>
-                    <th>{t('web.memory')}</th>
-                    <th>{t('web.cpu')}</th>
-                    <th>{t('service.received')}</th>
-                    <th>{t('service.sent')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {samples
-                    .slice()
-                    .reverse()
-                    .map((row) => (
-                      <tr key={row.time}>
-                        <td>
-                          <Time value={new Date(row.time).toISOString()} />
-                        </td>
-                        <td>{format.number(row.memory)} MiB</td>
-                        <td>{format.number(row.cpu)}%</td>
-                        <td>{format.number(row.rx)} MiB</td>
-                        <td>{format.number(row.tx)} MiB</td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
-          {history.data?.nextBefore && (
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setBefore(history.data.nextBefore!)}
-            >
-              {t('service.olderMeasurements')}
-            </button>
           )}
         </>
       )}
