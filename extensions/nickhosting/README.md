@@ -46,7 +46,7 @@ python3 extensions/nickhosting/package.py
 ```
 
 The packager writes only an allowlisted ZIP named
-`mountdata/build/blueprint/0.1.0-dev/nickhosting.blueprint`. It rejects existing
+`build/blueprint/0.1.0-dev/nickhosting.blueprint`. It rejects existing
 output and symlinks, excludes tests, documentation and arbitrary additional files,
 and never executes PHP, Blueprint or an installation hook. An alternate new
 artifact path may be supplied with `--output`; only use private build directories.

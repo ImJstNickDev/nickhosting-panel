@@ -30,6 +30,18 @@ class PackageTests(unittest.TestCase):
         packager.build(self.source, other)
         self.assertEqual(self.output.read_bytes(), other.read_bytes())
 
+    def test_required_admin_view_is_declared_and_packaged(self):
+        config = (self.source / "conf.yml").read_text()
+        self.assertIn("admin:\n  view: admin/view.blade.php\n", config)
+        packager.build(self.source, self.output)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertIn("admin/view.blade.php", archive.namelist())
+        (self.source / "admin/view.blade.php").unlink()
+        missing_output = self.root / "missing.blueprint"
+        with self.assertRaises(FileNotFoundError):
+            packager.build(self.source, missing_output)
+        self.assertFalse(missing_output.exists())
+
     def test_does_not_overwrite(self):
         self.output.write_text("preserve")
         with self.assertRaises(FileExistsError):

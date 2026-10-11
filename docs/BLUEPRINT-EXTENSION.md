@@ -134,3 +134,25 @@ reuse must carry its own license review and applicable notices.
   the installed Application request/ACL and Blueprint route-provider signatures,
   explicit rejection of browser/Client tokens, archive safety and honest feature
   declarations. Runtime installation/authentication evidence remains outstanding.
+
+### Manifest correction and first artifact
+
+A subsequent direct check of the beta-2025-09 installer's required-field checks
+found a defect missed by the initial review: `admin.view` is mandatory. The
+initial manifest lacked it and must not be considered installable as written.
+Added an EN/IT informational Blade view, its manifest binding and archive entry;
+a regression checks that the view is declared, packaged and required by the build.
+The six packaging tests pass. The independent follow-up review checked the other
+mandatory manifest fields and paths; no further missing requirements were found.
+
+The first default build attempt under `mountdata/build/` failed because the
+existing mountdata parent is not writable. No permission/ownership changes were
+made. Build artifacts now default to the already ignored `build/blueprint/`
+directory, separate from application persistence.
+
+Created `build/blueprint/0.1.0-dev/nickhosting.blueprint` (2,117 bytes, five
+allowlisted entries), ZIP CRC validation passed. SHA-256:
+`871280a46b8c7481b5d0fa84d7d9ffb44013a8ecce0f8fb0f560cf580653cb5e`.
+This is a development foundation archive, not the completed key-management or
+notification extension. No installer was executed; Blade rendering and actual
+installation remain unverified.

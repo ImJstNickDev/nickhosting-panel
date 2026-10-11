@@ -7,6 +7,7 @@ import zipfile
 
 FILES = (
     "conf.yml",
+    "admin/view.blade.php",
     "app/Http/Controllers/CapabilitiesController.php",
     "app/Http/Requests/CapabilitiesRequest.php",
     "routes/application.php",
@@ -52,6 +53,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "mountdata/build/blueprint/0.1.0-dev/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/0.1.0-dev/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

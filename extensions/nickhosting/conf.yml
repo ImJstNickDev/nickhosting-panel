@@ -5,6 +5,8 @@ info:
   version: 0.1.0-dev
   target: beta-2025-09
   author: NickHosting
+admin:
+  view: admin/view.blade.php
 requests:
   app: app
   routers:
