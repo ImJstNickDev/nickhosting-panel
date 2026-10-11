@@ -3816,3 +3816,20 @@ existing approved test services. Disposable fixtures were cleaned. No production
 interactions, container restarts or infrastructure changes. No historical full
 suite was rerun for this CSS correction. Rollback is a source revert. SFTPGo #18
 and the open/unmerged status of PR #21 are unchanged.
+
+### 2026-10-11 — Console word wrapping
+
+Follow-up to the viewport correction: horizontal scrolling is replaced by word
+wrapping, including unbroken tokens. The nested `pre` now explicitly uses
+`white-space: pre-wrap` and `overflow-wrap: anywhere`; explicit log newlines and
+spacing remain intact. The prior horizontal-scroll evidence above records the
+previous behavior, superseded by this requirement.
+
+Re-ran only `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-overflow.browser.test.ts`:
+**2/2 passed** (17.48s). Desktop/mobile now assert `scrollWidth <= clientWidth`
+with the 8,000-character token, while retaining stable geometry, vertical scroll,
+keyboard/focus, follow/pause and Axe checks. Existing screenshots above refreshed;
+mobile wrapping visually inspected. Scoped Biome passed with the same three
+pre-existing warnings; independent review found no issues. No production or
+infrastructure changes, no restart. Isolated fixtures cleaned. Rollback: revert
+this scoped CSS/test change.

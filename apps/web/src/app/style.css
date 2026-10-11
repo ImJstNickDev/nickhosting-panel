@@ -481,6 +481,10 @@
     font-size: 0.86rem;
     line-height: 1.5;
   }
+  .console pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
   .console-workspace {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 280px;

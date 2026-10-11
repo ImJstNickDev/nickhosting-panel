@@ -109,7 +109,7 @@ describe('M5 Console bounded output', () => {
       expect(Math.abs(after.bodyHeight - before.bodyHeight)).toBeLessThanOrEqual(1);
       expect(after.bodyWidth).toBeLessThanOrEqual(after.viewportWidth);
       expect(after.scrollHeight).toBeGreaterThan(after.clientHeight + 1000);
-      expect(after.scrollWidth).toBeGreaterThan(after.clientWidth);
+      expect(after.scrollWidth).toBeLessThanOrEqual(after.clientWidth);
       expect(after.prompt.y).toBeGreaterThanOrEqual(after.output.y + after.output.height - 1);
       expect(after.prompt.y + after.prompt.height).toBeLessThanOrEqual(
         after.terminal.y + after.terminal.height + 1,
