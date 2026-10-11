@@ -473,3 +473,14 @@ A stale initialization cannot overwrite another manager's policy or reset its
 observations. Ordinary policy editing retains its existing contract. Regular-session
 `server:manage` authorization, CSRF and resource safety remain mandatory. Merely
 configuring a disabled policy does not register a listener or start a server.
+
+### Clean Start dispatch (2026-10-11)
+
+The operations API still returns acceptance, not successful process startup. A
+new Start uses the stored managed target, local authorization, one remote limits
+snapshot and atomic physical admission. Wings decides whether its current state
+permits power. The dispatch path no longer pre-reads Client resources or repeats
+remote identity/image/launch validation. Provider refusals and uncertain results
+remain durable operation outcomes. Existing reservation, recovery and readiness
+rules remain authoritative; UI acceptance must not manufacture completion. See
+ADR 0011's dated amendment for the explicit boundary and external-change caveat.

@@ -267,3 +267,37 @@ local authorization after all slow proofs, avoiding a duplicate nested guard;
 standalone authorizers keep their final check. Durable power effects remain on
 the existing supported Client HTTP API in this amendment. No direct browser
 power channel or bypass of durable jobs/admission is introduced.
+
+## 2026-10-11 amendment — Delegate clean Start preflight to Wings
+
+Owner approved removing repeated remote ownership and runtime validation from
+the command-dispatch path of an existing server's fresh Start. The backend still
+resolves the power target exclusively from its managed registry and rechecks
+current NickHosting authorization; frontend visibility is not an access boundary.
+
+A planned Start reads one Application server snapshot, in parallel with physical
+sampling, to compare actual limits with the atomic reservation's configured
+limits. Stored ID/UUID/client identifier and configured provider node are compared
+against that same response and the local registry; no separate ownership/allocation inventory query is performed. A limit
+mismatch rejects rather than silently under-reserving resources.
+
+The initial Client resources GET, repeated final Application identity GET and
+per-Start image/launch/egg validation are removed. Wings is authoritative for its
+current process state, suspension/install restrictions and actual configured
+launch. NickHosting retains durable preparation, final local revocation and
+Gateway/schedule fences. The local-only final authorization is accepted only for
+a prepared Start with its own active operation and starting reservation.
+
+Consequences: remote runtime/launch changes are not proactively detected before
+a clean Start. Provisioning/configuration validation and strict recovery/
+confirmation remain; readiness can still fail independently of successful power
+dispatch. Allocation/user/external-ID drift checks remain in recovery: such
+external edits may allow dispatch but block completion with reservations retained.
+A fresh limits snapshot cannot prevent an out-of-band change after that
+snapshot (neither could the preceding final-read design); concurrent external
+limit edits are not an atomic contract with NickHosting admission.
+
+Restart, provisioning initial_start, stop/kill, destructive operations and
+prepared/uncertain recovery keep their existing proofs. No blind replay or
+synthetic offline telemetry is introduced. This amendment changes dispatch
+validation, not the persistence/recovery guarantees or production-release gates.

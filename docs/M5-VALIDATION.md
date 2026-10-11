@@ -4045,3 +4045,35 @@ catalog calls, not a latency guarantee. No live power commands or manual
 container restarts were issued; development source watchers may reload API/worker.
 No infrastructure/data migration. Rollback: source revert. SFTPGo #18 and PR #21
 open/unmerged status remain unchanged.
+
+### 2026-10-11 — Owner-approved clean Start provider delegation
+
+A fresh planned Start now performs one Application API limits read in parallel
+with host sampling, no Client resources GET, no second remote identity read, and
+no pre-dispatch runtime/image/egg validation. The retained response must match
+the stored ID, UUID, client identifier and configured provider node; limits must
+match admission. Node binding was added after independent review identified that
+a transferred same-UUID server otherwise reserves the wrong host. No additional
+provider request is needed for these comparisons.
+
+Wings decides current power-state/install/suspension validity. Local backend
+permissions/managed registry remain mandatory. The local final handoff requires
+a prepared Start with its own active operation and starting reservation. Final
+revocable authority runs after durable preparation. Recovery/confirmation,
+restart, initial provisioning and stop/kill remain unchanged. No synthetic
+offline measurement or blind replay is introduced. See ADR 0011 amendment for
+externally edited runtime/allocation behavior and snapshot limitations.
+
+Validation:
+
+- Initial full `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts`: **176 passed, 1 failed**. New unavailable-provider case expected failed instead of the existing conservative waiting outcome; corrected expectation, retaining no-power assertions.
+- Final targeted same runner/file with `-t 'clean Start|limits snapshot|settles start sampling|ordinary power|start admission|final full authorization'`: **19 passed, 163 skipped**. Covers one provider read/no telemetry read, target/node/limit mismatch, preparation overlap, revocation after preparation, crash and lost-response no replay. Existing full-final-identity tests now explicitly cover Restart, which retains that contract.
+- Same runner with `packages/server-management/src/runtime.integration.test.ts -t 'admitted Start handoff'`: **8 passed, 49 skipped**. Actual prepared reservation, wrong/missing reservation, wrong action/phase/active operation and project-permission revocation, with no observer/provider calls in local authorization.
+- Root typecheck and scoped Biome passed after correcting intermediate new timer-name union and fixture-call typing errors. Independent reviewer verified node fix and reported no remaining must-fix findings. No unrelated historical suites rerun.
+
+No post-change live latency claim: the earlier Start's 408ms API handler and
+683ms worker-before-send are baseline only. The separate 250ms pre-enqueue CPU
+sample remains, so 300–400ms end-to-end is not established. No live commands,
+manual restarts or new infrastructure/test assets. Development source watchers
+may reload API/worker. Rollback: source revert, no migrations. PR #21 stays open
+and unmerged; SFTPGo #18 remains a production-release gate.

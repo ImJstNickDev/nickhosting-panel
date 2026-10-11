@@ -105,6 +105,8 @@ export interface LifecycleOptions {
     connection: Kysely<Database>,
     context?: {
       providerServer?: ApplicationServer | Promise<ApplicationServer>;
+      /** Clean Start has matched fresh provider limits and reserved local resources. */
+      startAdmissionValidated?: true;
       /** This caller performs authorizeIntent after every slow proof settles.
        * Only the lifecycle final power handoff may opt out of the nested guard. */
       deferFinalIntentCheck?: true;
@@ -355,6 +357,7 @@ export async function processServerOperation(
       | 'authorization'
       | 'provider_identity'
       | 'provider_resources'
+      | 'provider_limits'
       | 'process_observation'
       | 'provider_effect',
     work: () => Promise<T>,
@@ -763,6 +766,8 @@ export async function processServerOperation(
         .parse(operation.plan.effectAttempts ?? {});
       const attempt = (attempts[phase] ?? 0) + 1;
       if (attempt > job.max_attempts) throw new DomainError('operation_uncertain');
+      const leanStart =
+        phase === 'power' && operation.action === 'start' && operation.phase === 'planned';
       const finalPowerIdentity =
         phase === 'initial_start' ||
         (phase === 'power' && ['start', 'restart'].includes(operation.action));
@@ -817,7 +822,17 @@ export async function processServerOperation(
         try {
           if (operation.plan.gatewayAutomation !== undefined)
             assertGatewaySleepFence(operation.plan, nowOf(options));
-          if (finalPowerIdentity) {
+          if (leanStart) {
+            await timed('authorization', () =>
+              options.authorizeEffect(jobId, server.id, db, {
+                startAdmissionValidated: true,
+                ...(options.authorizeIntent ? { deferFinalIntentCheck: true as const } : {}),
+              }),
+            );
+            const authorizeIntent = options.authorizeIntent;
+            if (authorizeIntent)
+              await timed('authorization', () => authorizeIntent(jobId, server.id, db));
+          } else if (finalPowerIdentity) {
             // Launch one fresh identity read and let independent runtime metadata
             // checks overlap it. Both proofs settle before any effect, including
             // for generic authorizers that do not consume the shared promise.
@@ -1397,11 +1412,40 @@ export async function processServerOperation(
         // Durable pre-effect failure or definite rejection plus corroborated absence proves no remote asset.
         return finish(true, true);
       }
+      const leanPlannedStart = operation.action === 'start' && operation.phase === 'planned';
       let remote: ApplicationServer;
       let initialResources: Resources | undefined;
       let preparedStartAdmission: (() => Promise<void>) | undefined;
       try {
-        if (
+        if (leanPlannedStart) {
+          // Keep one fresh limit snapshot: Wings does not enforce NickHosting's
+          // active-resource reservations. No separate provider telemetry/inventory preflight.
+          const [limits, admission] = await Promise.allSettled([
+            timed('provider_limits', () => {
+              if (server.pterodactyl_id === null) throw new DomainError('conflict');
+              return options.adapter.getApplicationServer(server.pterodactyl_id);
+            }),
+            options.prepareStartAdmission?.(server.id, jobId, db) ?? Promise.resolve(undefined),
+          ]);
+          if (limits.status === 'rejected') throw limits.reason;
+          if (admission.status === 'rejected') throw admission.reason;
+          remote = limits.value;
+          const node = await db
+            .selectFrom('managed_nodes')
+            .select('pterodactyl_node_id')
+            .where('id', '=', server.node_id)
+            .executeTakeFirstOrThrow();
+          // The limits snapshot must describe the same stored power target; this
+          // comparison requires no further provider or allocation inventory read.
+          if (
+            remote.node !== node.pterodactyl_node_id ||
+            remote.id !== server.pterodactyl_id ||
+            remote.identifier !== server.pterodactyl_identifier ||
+            remote.uuid !== server.pterodactyl_uuid
+          )
+            throw new DomainError('provenance_mismatch');
+          preparedStartAdmission = admission.value;
+        } else if (
           operation.phase === 'planned' &&
           ['start', 'stop', 'restart'].includes(operation.action)
         ) {
@@ -1446,11 +1490,11 @@ export async function processServerOperation(
         if (externalStop) return externalStop;
         const observedStart = await completeObservedStart();
         if (observedStart) return observedStart;
-        const current = initialResources ?? (await resources());
+        const current = leanPlannedStart ? undefined : (initialResources ?? (await resources()));
         if (operation.phase === 'planned') {
           if (
             action === 'stop' &&
-            current.current_state === 'offline' &&
+            current?.current_state === 'offline' &&
             options.confirmAlreadyStopped
           ) {
             const reservation = await db
@@ -1474,7 +1518,7 @@ export async function processServerOperation(
               if (remote.limits[key] !== server.limits[key])
                 throw new DomainError('provenance_mismatch');
             }
-            if (!installed(remote) || remote.suspended)
+            if (!leanPlannedStart && (!installed(remote) || remote.suspended))
               throw new DomainError('configuration_invalid');
             if (preparedStartAdmission) await preparedStartAdmission();
             else if (options.reserveStart) await options.reserveStart(server.id, jobId, action, db);
@@ -1507,7 +1551,7 @@ export async function processServerOperation(
           await update({
             plan: {
               ...operation.plan,
-              previousUptime: current.resources.uptime ?? null,
+              previousUptime: current?.resources.uptime ?? null,
               ...(action === 'restart' && options.observeProcessStart
                 ? { previousProcessStartedAt }
                 : {}),
@@ -1633,6 +1677,7 @@ export async function processServerOperation(
           if (stopped) return stopped;
           return wait('power_confirmation');
         }
+        if (!current) throw new DomainError('operation_uncertain');
         if (action === 'stop' && operation.phase === 'power') {
           await consumeKill();
           const latest = await db

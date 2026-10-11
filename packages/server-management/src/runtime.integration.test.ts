@@ -165,6 +165,128 @@ describe('management runtime execution-time authorization', () => {
       ).toHaveLength(defer ? 0 : 1);
     },
   );
+  async function preparedStart(context: AuthContext = f.context, serverId?: string) {
+    const queued = await stop(context, serverId);
+    await f.db
+      .updateTable('server_operations')
+      .set({ action: 'start', phase: 'power', effect_state: 'prepared' })
+      .where('job_id', '=', queued.job)
+      .execute();
+    await f.db
+      .insertInto('resource_reservations')
+      .values({
+        server_id: queued.server,
+        owner_id: f.context.subjectUserId,
+        physical_host_id: f.hostId,
+        memory_mib: 128,
+        physical_memory_mib: 148,
+        cpu_percent: 10,
+        operation_id: queued.job,
+        state: 'starting',
+      })
+      .execute();
+    return queued;
+  }
+  it('authorizes admitted Start handoff locally without repeated observer or provider calls', async () => {
+    const queued = await preparedStart();
+    const preflight = vi.fn(async () => {
+      throw new Error('unexpected observer call');
+    });
+    const getApplicationServer = vi.fn(async (): Promise<ApplicationServer> => {
+      throw new Error('unexpected provider call');
+    });
+    const getResources = vi.fn(async () => {
+      throw new Error('unexpected resources call');
+    });
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: { ...f.adapter, getApplicationServer, getResources },
+      containerObserver: { preflight, stopped: async () => true },
+    });
+    await runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db, {
+      startAdmissionValidated: true,
+    });
+    expect(preflight).not.toHaveBeenCalled();
+    expect(getApplicationServer).not.toHaveBeenCalled();
+    expect(getResources).not.toHaveBeenCalled();
+  });
+  it.each(['absent', 'wrong-job', 'wrong-state', 'nonstart', 'unprepared', 'inactive'] as const)(
+    'rejects admitted Start handoff with %s durable admission',
+    async (reason) => {
+      const queued = await preparedStart();
+      if (reason === 'absent')
+        await f.db
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', queued.server)
+          .execute();
+      if (reason === 'wrong-job') {
+        const other = await f.db
+          .selectFrom('operation_jobs')
+          .select('id')
+          .where('id', '!=', queued.job)
+          .executeTakeFirstOrThrow();
+        await f.db
+          .updateTable('resource_reservations')
+          .set({ operation_id: other.id })
+          .where('server_id', '=', queued.server)
+          .execute();
+      }
+      if (reason === 'wrong-state')
+        await f.db
+          .updateTable('resource_reservations')
+          .set({ state: 'running' })
+          .where('server_id', '=', queued.server)
+          .execute();
+      if (reason === 'nonstart')
+        await f.db
+          .updateTable('server_operations')
+          .set({ action: 'stop' })
+          .where('job_id', '=', queued.job)
+          .execute();
+      if (reason === 'unprepared')
+        await f.db
+          .updateTable('server_operations')
+          .set({ effect_state: 'none' })
+          .where('job_id', '=', queued.job)
+          .execute();
+      if (reason === 'inactive')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: null })
+          .where('id', '=', queued.server)
+          .execute();
+      const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+      await expect(
+        runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db, {
+          startAdmissionValidated: true,
+        }),
+      ).rejects.toThrow('conflict');
+    },
+  );
+  it('rejects admitted Start handoff after project permission is revoked', async () => {
+    const peer = await managementFixture(f.db);
+    const project = await createProject(f.db, f.context, { name: 'Start permission test' });
+    const server = await f.server({ projectId: project.id });
+    await setProjectMember(f.db, f.context, project.id, {
+      userId: peer.context.subjectUserId,
+      role: 'operator',
+    });
+    const queued = await preparedStart(peer.context, server);
+    const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    await runtime.lifecycle.authorizeEffect(queued.job, server, f.db, {
+      startAdmissionValidated: true,
+    });
+    await setProjectMember(f.db, f.context, project.id, {
+      userId: peer.context.subjectUserId,
+      role: 'viewer',
+    });
+    await expect(
+      runtime.lifecycle.authorizeEffect(queued.job, server, f.db, {
+        startAdmissionValidated: true,
+      }),
+    ).rejects.toThrow('forbidden');
+  });
   it('binds internal console reuse to the exact injected provider instance', async () => {
     const first = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
     const same = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });

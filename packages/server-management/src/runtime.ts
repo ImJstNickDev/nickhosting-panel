@@ -664,8 +664,30 @@ export async function createManagementRuntime(options: ManagementOptions) {
       context?: {
         providerServer?: ApplicationServer | Promise<ApplicationServer>;
         deferFinalIntentCheck?: true;
+        startAdmissionValidated?: true;
       },
     ) => {
+      if (context?.startAdmissionValidated) {
+        // Only a prepared clean Start with its own atomic reservation may use
+        // local handoff authorization. Provision/recovery keep full proofs.
+        const prepared = await connection
+          .selectFrom('server_operations as operation')
+          .innerJoin('managed_servers as server', 'server.id', 'operation.server_id')
+          .innerJoin('resource_reservations as reservation', 'reservation.server_id', 'server.id')
+          .select('operation.job_id')
+          .where('operation.job_id', '=', jobId)
+          .where('operation.server_id', '=', serverId)
+          .where('operation.action', '=', 'start')
+          .where('operation.phase', '=', 'power')
+          .where('operation.effect_state', '=', 'prepared')
+          .where('server.active_operation_id', '=', jobId)
+          .where('reservation.operation_id', '=', jobId)
+          .where('reservation.state', '=', 'starting')
+          .executeTakeFirst();
+        if (!prepared) throw new DomainError('conflict');
+        await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);
+        return;
+      }
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `authorize_effect.${name}`, work);
       const observerPreflight = stage('observer_preflight', () =>

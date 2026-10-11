@@ -660,11 +660,11 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       expect(await f.run()).toBe('waiting');
       expect(intent).toHaveBeenCalledTimes(2);
       expect(effect).toHaveBeenCalledTimes(1);
-      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(action === 'start' ? 1 : 2);
       expect(f.adapter.power).toHaveBeenCalledTimes(1);
     },
   );
-  it.each(['start', 'restart'] as const)(
+  it.each(['restart'] as const)(
     'shares exactly the fresh post-preparation provider identity with final %s authorization',
     async (action) => {
       const f = await fixture(action);
@@ -691,7 +691,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
   it.each(['none', 'identity', 'authorization'] as const)(
     'overlaps final identity and authorization but awaits both proofs before power: rejection=%s',
     async (rejection) => {
-      const f = await fixture('start');
+      const f = await fixture('restart');
       f.options.authorizeIntent = async () => {};
       let identityStarted!: () => void;
       const started = new Promise<void>((resolve) => {
@@ -728,7 +728,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     },
   );
   it('runs one final local guard after the shared slow proof, without nested full authorization', async () => {
-    const f = await fixture('start');
+    const f = await fixture('restart');
     let proofSettled = false;
     let finalGuards = 0;
     f.options.authorizeIntent = async () => {
@@ -748,7 +748,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
   it.each([false, true])(
     'rejects authority revoked during final identity after early authorization: local guard=%s',
     async (localGuard) => {
-      const f = await fixture('start');
+      const f = await fixture('restart');
       let revoked = false;
       let releaseIdentity!: () => void;
       const released = new Promise<void>((resolve) => {
@@ -787,7 +787,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
   it.each(['limits', 'suspended', 'installation'] as const)(
     'rejects %s drift after durable preparation against the same final snapshot',
     async (change) => {
-      const f = await fixture('start');
+      const f = await fixture('restart');
       f.options.authorizeIntent = async () => {};
       f.options.checkpoint = async (point) => {
         if (point !== 'prepared') return;
@@ -805,7 +805,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     },
   );
   it('rejects provider identity drift after durable power preparation without uncertain effects', async () => {
-    const f = await fixture('start');
+    const f = await fixture('restart');
     f.options.authorizeIntent = async () => {};
     f.options.checkpoint = async (point) => {
       if (point === 'prepared') f.remote.uuid = randomUUID();
@@ -817,7 +817,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       plan: { rejected: true, rejectionCode: 'provenance_mismatch' },
     });
   });
-  it.each(['start', 'stop', 'restart'] as const)(
+  it.each(['stop', 'restart'] as const)(
     'overlaps initial identity and resource reads for planned %s without publishing unverified telemetry',
     async (action) => {
       const f = await fixture(action);
@@ -842,6 +842,73 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
     },
   );
+  it('sends clean Start with one limits read, no state preflight or runtime validation', async () => {
+    const f = await fixture('start');
+    f.remote.suspended = true;
+    f.remote.status = 'installing';
+    f.remote.container.image = 'fixture/provider-owned:2';
+    const guard = vi.fn(async (_jobId, _serverId, _db, context) => {
+      if (context) expect(context.startAdmissionValidated).toBe(true);
+    });
+    f.options.authorizeEffect = guard;
+    f.options.authorizeIntent = async () => {};
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledExactlyOnceWith(f.remote.identifier, 'start');
+    expect((await f.operation()).plan.previousUptime).toBeNull();
+    expect((await f.server()).last_observed_at).toBeNull();
+    expect(guard).toHaveBeenCalledTimes(1);
+  });
+  it.each(['id', 'identifier', 'uuid', 'node'] as const)(
+    'rejects a limits snapshot for another power target: %s',
+    async (key) => {
+      const f = await fixture('start');
+      if (key === 'id' || key === 'node') f.remote[key]++;
+      else f.remote[key] = randomUUID();
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['memory', 'cpu', 'disk', 'swap', 'io'] as const)(
+    'rejects clean Start when actual %s differs from reserved limits',
+    async (key) => {
+      const f = await fixture('start');
+      f.remote.limits[key] += 1;
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+    },
+  );
+  it('never replays clean Start after a crash at durable preparation', async () => {
+    const f = await fixture('start');
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') throw new Error('simulated worker exit');
+    };
+    expect(await f.run()).toBe('waiting');
+    expect(await f.operation()).toMatchObject({ phase: 'power', effect_state: 'prepared' });
+    f.options.checkpoint = undefined;
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.reservation()).toBeDefined();
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+  });
+  it('does not replay clean Start after a lost response and retains recovery identity checks', async () => {
+    const f = await fixture('start');
+    f.adapter.power.mockImplementationOnce(async () => {
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).effect_state).toBe('uncertain');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    f.remote.uuid = randomUUID();
+    f.tick();
+    await f.run();
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+  });
   it('overlaps start admission sampling with provider reads and reserves only after identity', async () => {
     const f = await fixture('start');
     const sampling = Promise.withResolvers<void>();
@@ -868,7 +935,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.options.reserveStart).not.toHaveBeenCalled();
     expect(f.adapter.power).toHaveBeenCalledOnce();
   });
-  it.each(['identity', 'sampling', 'limits'] as const)(
+  it.each(['provider', 'sampling', 'limits'] as const)(
     'settles start sampling and rejects before reservation or power on %s failure',
     async (failure) => {
       const f = await fixture('start');
@@ -878,7 +945,8 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       f.adapter.getApplicationServer.mockImplementationOnce(async () => {
         identityStarted.resolve();
         await samplingFinished.promise;
-        if (failure === 'identity') return { ...f.remote, uuid: randomUUID() };
+        if (failure === 'provider')
+          throw new PterodactylError('unavailable', 'application', 'unknown');
         if (failure === 'limits')
           return { ...f.remote, limits: { ...f.remote.limits, memory: 9999 } };
         return f.remote;
@@ -889,7 +957,7 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
         if (failure === 'sampling') throw new DomainError('configuration_invalid');
         return commitAdmission;
       };
-      expect(await f.run()).toBe('failed');
+      expect(await f.run()).toBe(failure === 'provider' ? 'waiting' : 'failed');
       expect(commitAdmission).not.toHaveBeenCalled();
       expect(f.adapter.power).not.toHaveBeenCalled();
     },
