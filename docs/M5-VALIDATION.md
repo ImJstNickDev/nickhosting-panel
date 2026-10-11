@@ -3050,3 +3050,74 @@ without separate evidence. Final Docker state is exited cleanly. No test assets,
 provider mutations or manual power commands were created by this audit. Source
 watchers reloaded after the narrow code correction; no Gateway restart performed
 in this session yet. SFTPGo #18 and production boundaries are unchanged.
+
+### 2026-10-11 — Owner cycle on `0989da9`, HTTP idle timeout investigation
+
+Read-only correlated logs and exact Docker state were independently reviewed.
+Raw evidence is ignored under `.codex/local/cycle-0989da9/`.
+
+| Event (UTC) | Time | Interval |
+| --- | --- | --- |
+| Intentional join | 10:26:51.068 | Origin |
+| Start power response | 10:26:52.829 | 1.761 s after join |
+| Docker process start | 10:26:53.837645265 | 2.770 s after join |
+| Minecraft `Done` | 10:27:29.332037911 | Actual game startup log |
+| Core commits online | 10:27:30.644 | 1.312 s after `Done` |
+| Gateway forwards via readiness receipt | 10:27:30.961 | 1.629 s after `Done`; 317 ms after Core |
+| Player disconnect | 10:30:30.597075056 | Idle origin |
+| Gateway stopping/quiescence reply | 10:31:33.662 | 63.065 s after disconnect |
+| Console `stop` command | 10:31:35.565070466 | 64.968 s after disconnect |
+| Docker exit | 10:31:36.066370248 | Clean exit 0, no OOM |
+| Stop job succeeds | 10:31:37.148 | Terminal successful operation |
+| Gateway sleeping reply | 10:31:40.090 | 4.024 s after Docker exit |
+
+The receipt path worked again. `Done`→forwarding improved from 2.351 s in the
+preceding cycle to 1.629 s; this single-cycle comparison is not a guaranteed
+latency. Observation `observedAt=10:27:28.449` predates `Done` by 883 ms: it is the
+start of sampling, not the time a successful protocol reply arrived. Core process
+verification was 555.303 ms and transaction commit 271.212 ms in this cycle.
+
+**Still no startup-hint event in this capture.** Investigation found the actual
+API HTTP server closes inactive sockets at 30 seconds, whereas startup SSE sent
+nothing until the running event. This start lasted approximately 36 seconds after
+the waking route was installed. The ten-second subscription retry can then miss
+the running event before polling finishes. Independent reproduction used real
+Hono, its Node adapter and the project's HTTP server on isolated ephemeral
+loopback: idle150ms/event400ms without heartbeat terminated at222ms; with a
+50ms heartbeat the event arrived at414ms. These scaled fixture timings establish
+the HTTP failure mechanism, not a captured live subscription-close timestamp.
+
+Corrective change: negotiate `startup-keepalive-v1`, emit a canonical empty
+keepalive immediately and every10s, and consume it without invoking readiness.
+This preserves the global30s idle timeout, absolute60s subscription/65s client
+bounds, 1KiB/two-event writer limit with5s backpressure deadline, and8KiB client
+budget. Partial/coalesced frames remain bounded. Legacy clients receive no new
+frames during Core-first deployment. Keepalive cannot renew route authority.
+Opening/closing diagnostics contain only correlated identities, canonical reasons
+and elapsed time, never provider credentials or console content.
+
+No429, lease expiry, listener closure, snapshot failure or error-level event was
+captured. Six412 stale conflicts, one409 conflict, one409 uncertain-stop observation
+and49 unavailable observations are retained as diagnostic limitations, not
+reported as security passes or client disconnects. Both jobs succeeded. Minecraft
+reported2.137s and5.545s tick lag; that is not attributed to Gateway without evidence.
+No live server mutation, manual power command, new Docker resource or cleanup was
+performed by this audit. The heartbeat correction requires separately approved
+Gateway activation and another Owner cycle to establish live event delivery.
+
+Heartbeat validation on final changed source:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/gateway-startup.test.ts apps/game-gateway/src/startup-client.test.ts apps/api/src/http-server.test.ts`
+  — **41 passed**. Real HTTP regressions use the actual project server/Hono adapter
+  with a200ms inactivity timeout and provider-running event after700ms: suppressed
+  heartbeat reproduces failure, negotiated heartbeat delivers the correlated event.
+  Other coverage includes legacy negotiation, partial/coalesced frames, excess
+  heartbeat bytes, unchanged absolute deadline, revocation and slow-consumer cleanup.
+- Root `scripts/dev.sh pnpm exec tsc --noEmit` and scoped Biome over four changed
+  TypeScript files passed. Independent review found no remaining must-fix.
+- No historical full test matrix was rerun. The previous live cycle remains a
+  receipt/polling result; fixture success is not claimed as live event delivery.
+
+Rollback: revert this source change and perform a separately approved dev Gateway
+restart; no migration or data reset. PR #21 remains open/unmerged; SFTPGo #18 and
+M5 boundaries unchanged.

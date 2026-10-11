@@ -66,6 +66,7 @@ export async function watchGatewayStartup(
         Authorization: `Bearer ${options.token}`,
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
+        'X-NickHosting-Gateway-Features': 'startup-keepalive-v1',
       },
       body: JSON.stringify(request),
       redirect: 'error',
@@ -90,23 +91,29 @@ export async function watchGatewayStartup(
       if (bytes > 8192) throw new DomainError('integration_unavailable');
       text += decoder.decode(chunk.value, { stream: true });
       text = text.replace(/\r\n/g, '\n');
-      const end = text.indexOf('\n\n');
-      if (end < 0) continue;
-      const frame = text.slice(0, end);
-      const lines = frame.split('\n');
-      if (lines.length !== 2 || lines[0] !== 'event: startup' || !lines[1]?.startsWith('data: '))
-        throw new DomainError('integration_unavailable');
-      const hint = hintSchema.safeParse(JSON.parse(lines[1].slice(6)));
-      if (
-        !hint.success ||
-        hint.data.routeId !== request.routeId ||
-        hint.data.routeRevision !== request.routeRevision ||
-        hint.data.generation !== request.generation ||
-        hint.data.wakeJobId !== request.wakeJobId
-      )
-        throw new DomainError('integration_unavailable');
-      if (!controller.signal.aborted) await onHint(hint.data);
-      return;
+      for (;;) {
+        const end = text.indexOf('\n\n');
+        if (end < 0) break;
+        const frame = text.slice(0, end);
+        text = text.slice(end + 2);
+        // Canonical keepalive frames maintain HTTP liveness only. They never
+        // reset the absolute duration/byte budget or invoke readiness handling.
+        if (frame === 'event: keepalive\ndata: {}') continue;
+        const lines = frame.split('\n');
+        if (lines.length !== 2 || lines[0] !== 'event: startup' || !lines[1]?.startsWith('data: '))
+          throw new DomainError('integration_unavailable');
+        const hint = hintSchema.safeParse(JSON.parse(lines[1].slice(6)));
+        if (
+          !hint.success ||
+          hint.data.routeId !== request.routeId ||
+          hint.data.routeRevision !== request.routeRevision ||
+          hint.data.generation !== request.generation ||
+          hint.data.wakeJobId !== request.wakeJobId
+        )
+          throw new DomainError('integration_unavailable');
+        if (!controller.signal.aborted) await onHint(hint.data);
+        return;
+      }
     }
   } catch {
     if (!signal.aborted && !controller.signal.aborted)

@@ -22,7 +22,14 @@ describe('startup client', () => {
     expect(receive).toHaveBeenCalledExactlyOnceWith(hint);
     expect(fetcher.mock.calls[0]).toMatchObject([
       expect.any(URL),
-      { method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${options.token}` } },
+      {
+        method: 'POST',
+        redirect: 'error',
+        headers: {
+          Authorization: `Bearer ${options.token}`,
+          'X-NickHosting-Gateway-Features': 'startup-keepalive-v1',
+        },
+      },
     ]);
   });
   it.each([
@@ -30,6 +37,8 @@ describe('startup client', () => {
     `event: startup\ndata: ${JSON.stringify({ ...hint, token: 'secret' })}\n\n`,
     'x'.repeat(8193),
     'event: console\ndata: secret\n\n',
+    'event: keepalive\ndata: {"ready":true}\n\n',
+    'event: keepalive\ndata: {}\n\n'.repeat(400),
   ])('rejects malformed, oversized or mismatched payload', async (text) => {
     const receive = vi.fn();
     await expect(
@@ -130,4 +139,65 @@ describe('startup client', () => {
       ),
     ).rejects.not.toThrow('secret');
   });
+});
+
+it.each(['coalesced', 'fragmented'])(
+  'consumes %s keepalive frames before one real hint',
+  async (shape) => {
+    const text = `event: keepalive\ndata: {}\n\nevent: keepalive\ndata: {}\n\nevent: startup\ndata: ${JSON.stringify(hint)}\n\n`;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        const chunks = shape === 'coalesced' ? [text] : [...text];
+        for (const part of chunks) c.enqueue(new TextEncoder().encode(part));
+        c.close();
+      },
+    });
+    const receive = vi.fn();
+    await watchGatewayStartup(
+      {
+        ...options,
+        fetcher: async () =>
+          new Response(body, { headers: { 'content-type': 'text/event-stream' } }),
+      },
+      hint,
+      receive,
+      new AbortController().signal,
+    );
+    expect(receive).toHaveBeenCalledExactlyOnceWith(hint);
+  },
+);
+it('keepalives neither grant readiness nor extend the absolute stream deadline', async () => {
+  vi.useFakeTimers();
+  try {
+    const receive = vi.fn(),
+      cancel = vi.fn();
+    let writer!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        writer = c;
+      },
+      cancel,
+    });
+    const pending = watchGatewayStartup(
+      {
+        ...options,
+        requestTimeoutMs: 50,
+        fetcher: async () =>
+          new Response(body, { headers: { 'content-type': 'text/event-stream' } }),
+      },
+      hint,
+      receive,
+      new AbortController().signal,
+    );
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(10);
+      writer.enqueue(new TextEncoder().encode('event: keepalive\ndata: {}\n\n'));
+    }
+    await vi.advanceTimersByTimeAsync(10);
+    await pending;
+    expect(receive).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
 });

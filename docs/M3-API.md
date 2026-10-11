@@ -513,3 +513,12 @@ from these regression tests.
   opening/renewal safety is unchanged. Core independently confirms current process.
 - `gateway.startup_hint` and `gateway.route_transition` with reason
   `readiness_receipt` distinguish the event and forwarding commit for live timing.
+
+Startup subscriptions additionally negotiate `startup-keepalive-v1`. Core sends
+only a canonical `event: keepalive` / `data: {}` immediately and every ten seconds,
+so its existing HTTP idle timeout does not truncate long game startups. The
+client consumes keepalives without resetting its absolute deadline/byte budget
+or invoking readiness. Core retains the sixty-second lifetime, bounded two-event
+writer and five-second write deadline. Legacy startup clients receive no heartbeat.
+Sanitized `gateway_startup_channel_connected` / `gateway_startup_channel_closed`
+diagnostics distinguish channel establishment and closure from actual game readiness.

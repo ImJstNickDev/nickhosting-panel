@@ -1,4 +1,4 @@
-import { DomainError } from '@nickhosting/core';
+import { type createLogger, DomainError } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
 import {
   type ManagementRuntime,
@@ -25,6 +25,7 @@ const requestSchema = z
 export function registerGatewayStartupRoutes(
   app: Hono<{ Variables: Variables }>,
   options: {
+    logger?: ReturnType<typeof createLogger>;
     db: ReturnType<typeof createDatabase>['db'];
     env: Readonly<Record<string, string | undefined>>;
     body: (c: Context) => Promise<unknown>;
@@ -69,29 +70,75 @@ export function registerGatewayStartupRoutes(
       throw error;
     }
     return streamSSE(c, async (stream) => {
+      const startedAt = Date.now();
+      const log = (event: string, data: Record<string, unknown> = {}) => {
+        try {
+          options.logger?.log('info', event, {
+            routeId: input.routeId,
+            generation: input.generation,
+            wakeJobId: input.wakeJobId,
+            ...data,
+          });
+        } catch {
+          // Diagnostics cannot change the subscription or expose provider errors.
+        }
+      };
+      type CloseReason =
+        | 'closed'
+        | 'client_disconnected'
+        | 'output_failed'
+        | 'deadline'
+        | 'relay_closed'
+        | 'relay_error'
+        | 'revoked'
+        | 'hint_sent';
+      let reason: CloseReason = 'closed';
       const controller = new AbortController();
       let finish!: () => void;
       const closed = new Promise<void>((resolve) => {
         finish = resolve;
       });
-      const stop = () => {
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const stop = (nextReason: CloseReason = 'closed') => {
+        if (!controller.signal.aborted) reason = nextReason;
+        if (heartbeat) clearInterval(heartbeat);
         controller.abort();
         finish();
       };
-      const disconnect = () => {
+      const disconnect = (nextReason: CloseReason = 'client_disconnected') => {
+        stop(nextReason);
         stream.abort();
-        stop();
       };
-      const output = boundedEventWriter((event) => stream.writeSSE(event), disconnect, {
-        bytes: 1024,
-        events: 1,
-        timeoutMs: 5000,
-      });
-      stream.onAbort(stop);
-      c.req.raw.signal.addEventListener('abort', disconnect, { once: true });
+      const output = boundedEventWriter(
+        (event) => stream.writeSSE(event),
+        () => disconnect('output_failed'),
+        {
+          bytes: 1024,
+          events: 2,
+          timeoutMs: 5000,
+        },
+      );
+      const clientDisconnected = () => disconnect();
+      stream.onAbort(() => stop('client_disconnected'));
+      c.req.raw.signal.addEventListener('abort', clientDisconnected, { once: true });
       if (c.req.raw.signal.aborted) disconnect();
-      const timeout = setTimeout(disconnect, 60000);
+      const timeout = setTimeout(() => disconnect('deadline'), 60000);
       timeout.unref();
+      // Flush headers and keep Node's HTTP socket active while Wings starts the
+      // process. These frames convey no readiness or renewed route authority.
+      const keepalives =
+        c.req
+          .header('X-NickHosting-Gateway-Features')
+          ?.split(',')
+          .map((value) => value.trim())
+          .includes('startup-keepalive-v1') === true;
+      if (keepalives && !controller.signal.aborted) {
+        output.send({ event: 'keepalive', data: '{}' });
+        heartbeat = setInterval(() => {
+          output.send({ event: 'keepalive', data: '{}' });
+        }, 10000);
+        heartbeat.unref();
+      }
       let hintPending = false;
       const authorized = async () => {
         if (controller.signal.aborted) return false;
@@ -116,7 +163,7 @@ export function registerGatewayStartupRoutes(
           authorize: authorized,
           onEvent: (event) => {
             if (event.type === 'closed' || event.type === 'error') {
-              stop();
+              stop(event.type === 'closed' ? 'relay_closed' : 'relay_error');
               return;
             }
             if (
@@ -131,12 +178,16 @@ export function registerGatewayStartupRoutes(
               if (await authorized()) {
                 output.send({ event: 'startup', data: JSON.stringify(input) });
                 await output.drain();
+                stop('hint_sent');
+              } else {
+                stop('revoked');
               }
             })()
               .catch(() => {})
-              .finally(stop);
+              .finally(() => stop());
           },
         });
+        log('gateway_startup_channel_connected', { keepalives });
         try {
           // Never wait for an unbounded downstream write after cancellation.
           await closed;
@@ -145,12 +196,14 @@ export function registerGatewayStartupRoutes(
         }
       } catch {
         // Stream failure is deliberately content-free; polling remains the fallback.
+        stop('relay_error');
       } finally {
         stop();
         output.close();
         clearTimeout(timeout);
-        c.req.raw.signal.removeEventListener('abort', disconnect);
+        c.req.raw.signal.removeEventListener('abort', clientDisconnected);
         active.delete(selected.serverId);
+        log('gateway_startup_channel_closed', { reason, elapsedMs: Date.now() - startedAt });
       }
     });
   });
