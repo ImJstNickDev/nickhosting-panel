@@ -3521,3 +3521,16 @@ Existing isolated test services and disposable fixture schema only; harness clea
 completed. No real provider commands, game assets, new infrastructure or service
 restarts. Existing Vite HMR delivers the changes. Rollback: revert UI/catalog/test
 changes; no migrations. PR #21 remains open/unmerged; issue #18 unchanged.
+
+## 2026-10-11 — Terminal prompt glyph and unobtrusive focus
+
+Replaced `>>` with `»`. The command input no longer draws a focus rectangle;
+focus instead underlines the adjacent prompt symbol, retaining a non-color cue.
+The existing terminal browser case was rerun with
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'keeps the terminal prompt accessible'`:
+**1 passed / 17 skipped**, including Enter/focus, EN desktop/IT mobile, no overflow
+and Axe checks. Updated terminal screenshots above were inspected; no rectangle,
+prompt underline visible. Forced-colors mode was not separately tested. Scoped
+Biome passes with seven existing warnings. Independent source review found no
+must-fix issue. No full suite, production operations or restarts; isolated harness
+cleanup completed. Rollback is a source revert; PR #21 remains open/unmerged.

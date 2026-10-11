@@ -552,8 +552,13 @@
     opacity: 0.65;
   }
   .console-prompt input:focus-visible {
-    outline: 2px solid #a9b8c5;
-    outline-offset: 2px;
+    outline: none;
+  }
+  .console-prompt:has(input:focus-visible) > span {
+    color: #e3ecf1;
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 4px;
   }
   .console-command-error {
     padding: 0 1rem 1rem;

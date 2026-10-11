@@ -79,7 +79,7 @@ function ConsoleCommand({ serverId }: { serverId: string }) {
           }
         }}
       >
-        <span aria-hidden="true">&gt;&gt;</span>
+        <span aria-hidden="true">»</span>
         <input
           aria-label={t('web.command')}
           placeholder={t('service.commandPlaceholder')}

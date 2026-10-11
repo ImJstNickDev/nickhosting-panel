@@ -188,7 +188,7 @@ describe('M5 browser files, backups, console and automation', () => {
     try {
       await user.goto(`${base}/console`);
       const prompt = user.getByRole('textbox', { name: 'Command', exact: true });
-      await browserExpect(user.locator('.console-terminal .console-prompt')).toContainText('>>');
+      await browserExpect(user.locator('.console-terminal .console-prompt')).toContainText('»');
       await browserExpect(prompt).toHaveAttribute('placeholder', 'Type a command...');
       await browserExpect(user.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0);
       await browserExpect(user.getByRole('checkbox')).toHaveCount(0);
