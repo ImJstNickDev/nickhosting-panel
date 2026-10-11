@@ -199,3 +199,23 @@ If installation fails partway, preserve its logs and assess partial state before
 removal/retry. Restore the pre-installation snapshot and original metadata if a
 full rollback is needed; do not claim that removal undoes shared permission
 changes. Neither installation nor removal was executed during this audit.
+
+### Owner installation and authenticated HTTP smoke
+
+The Owner ran the standard installer and reported success, then confirmed the
+NickHosting information page was visible. A subsequent read-only HTTP check from
+the existing development worker, using configured credentials through the normal
+secret store, verified:
+
+- Application credential: HTTP 200; the adapter accepted schema version 1,
+  extension version 0.1.0-dev and both capabilities false.
+- No credential: HTTP 401.
+- Existing Client credential on this Application endpoint: HTTP 403.
+
+Exactly three GET requests were made; credentials and provider response errors
+were not printed. No users, keys, servers or settings were changed, and no
+installer/restart was run by the agent. This establishes the initial installed
+route/authentication path, not future key issuance, notifications or rollback.
+Next implementation priority is the durable server-limit change feed and its
+NickHosting receiver; per-user key management follows separately. The current
+Start-path limit read remains unchanged until the new synchronization is proven.
