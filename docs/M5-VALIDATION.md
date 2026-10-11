@@ -4125,3 +4125,38 @@ A recurring route-level gateway.observation_unavailable warning remains (also
 present before restart); its code path is backend protocol probing, not host
 capacity sampling. Its precise cause was not established and a real wake cycle
 was not exercised. No game-server commands or other infrastructure changes.
+
+### 2026-10-11 — Owner-driven periodic-sampling Start/sleep/wake check
+
+Read-only API/worker/Gateway logs and durable job records show all three operations
+succeeded (manual Start, automatic sleep Stop, join-triggered Start). No commands
+were issued by Codex. No source/runtime changes during this observation.
+
+- Manual Start at17:03UTC: API handler80.537ms (cached observation18.973ms),
+  worker pickup13ms after handler completion, worker-to-send346ms. API handler
+  entry to power send approximately439.537ms; provider reply another339ms.
+- Join wake at17:05:25.191UTC: API wake89.447ms, Gateway request completion104ms;
+  power send17:05:25.655UTC, **464ms from Gateway wake request**, response372ms
+  later. Worker observation reuse7.188ms; retained limits read275ms.
+- Idle quiescence17:05:16.355UTC; stop send18.257UTC (**1.902s**); confirmed stopped
+  approximately19.742–19.751UTC; sleeping responder20.472UTC (**~0.73s after
+  terminal proof**,4.117s after quiescence). Exact player-disconnect/idle-timeout
+  overshoot was not established: old game-container logs were replaced by the
+  second launch, so do not equate quiescence with the exact configured deadline.
+- Second launch actual Minecraft Done from timestamped current container log:
+  17:06:00.319UTC. Gateway startup hint00.371UTC, online forwarding03.028UTC:
+  **2.709s from actual Done**, followed by an actual player join17:06:17.639UTC.
+
+Remaining defect: during wake, observer_container_churn at17:05:27.220UTC produced
+a safety-rejected unavailable route until17:05:31.202UTC (**3.982s**). No such
+transition was logged during the first manual Start. Source review confirms
+coherent-inventory failure can close the responder when the candidate route
+differs from the previously committed route; normal container replacement is a
+possible trigger, not a proven identification of the changed container.
+
+Recurring route-level observation_unavailable warnings also remain. Sleeping
+backend probes can produce these without closing listeners; generic logs lack
+the precise failure reason, so not every event can be attributed conclusively.
+Host sampling is now reused successfully, but the full cycle is not a clean
+acceptance pass and the300–400ms end-to-end target is not met in these samples.
+No new assets, restarts, mutations or test suites in this read-only check.
