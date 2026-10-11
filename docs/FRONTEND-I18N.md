@@ -75,7 +75,10 @@ addresses use the authorized primary endpoint, never an auxiliary/backend port.
 Output follows automatically while scrolled to the bottom; scrolling up pauses
 following, and returning to the bottom resumes it. No follow checkbox is needed.
 The output pane uses 55% of the small viewport height, bounded to 360–680px,
-with internal scrolling and a separately visible command prompt.
+with internal scrolling and a separately visible command prompt. Appended output
+does not resize the terminal or the page; long lines scroll horizontally inside
+the output pane. Explicit zero-length flex sizing keeps this true inside the
+auto-sized desktop grid and mobile layout.
 Authorized commands use an integrated `»` prompt with a localized placeholder
 and accessible name. Enter submits, preserving focus; failed requests retain the
 draft and show an error, while pending requests cannot submit duplicates. Focus

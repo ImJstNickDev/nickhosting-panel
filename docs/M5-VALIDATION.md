@@ -3786,3 +3786,33 @@ SFTPGo #18 remains unchanged. Rollback is a source revert; never clear a live
 uncertain stop or its reservation as part of rollback. PR #21 remains open/unmerged.
 Final indexed governance passed: 524 text files, 132 screenshots, 461 relative
 links, four TOML files and 44 ignore cases (heuristic secret scan).
+
+### 2026-10-11 — Console output stays inside its viewport
+
+Reproduced with 280 streamed lines and one 8,000-character unbroken line: before
+this correction the terminal grew from 605 to approximately 4,928 pixels on
+desktop and from 519 to approximately 4,928 pixels on mobile. Both new regression
+cases failed before the fix. The content-dependent percentage flex basis allowed
+the output to enlarge its ancestors instead of scrolling.
+
+The output now uses an explicit zero-length flex basis, with shrinkable terminal
+ancestors. Existing responsive minimum height and desktop sidebar alignment are
+preserved. Appended lines do not resize the terminal or document; long lines
+scroll horizontally inside the output pane.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-overflow.browser.test.ts`: **2/2 passed** (18.19 seconds), desktop 1440×1000 and mobile 390×844. Terminal/output/document heights remain within one pixel of their initial values; both overflow axes stay internal. Automatic following, keyboard pause/resume, command draft/focus and desktop sidebar alignment pass. Both Axe scans report zero violations.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed**, including browser test types.
+- Scoped Biome: **passed**, with only the three existing reduced-motion `!important` warnings in the stylesheet. Independent source review found no issues.
+
+Reviewed actual browser screenshots:
+
+- [Desktop console overflow](screenshots/m5/console-overflow-desktop.png)
+- [Mobile console overflow](screenshots/m5/console-overflow-mobile.png)
+
+Tests used real application/auth handlers with isolated provider streams and the
+existing approved test services. Disposable fixtures were cleaned. No production
+interactions, container restarts or infrastructure changes. No historical full
+suite was rerun for this CSS correction. Rollback is a source revert. SFTPGo #18
+and the open/unmerged status of PR #21 are unchanged.
