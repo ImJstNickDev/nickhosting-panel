@@ -157,6 +157,26 @@ describe('Gateway startup hints', () => {
     );
     expect(mocks.snapshot).not.toHaveBeenCalled();
   });
+  it('reports unexpected readiness failure without leaking private exception content', async () => {
+    const f = fixture();
+    mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+    mocks.running.mockRejectedValue(new Error('private database/provider payload'));
+    const response = await f.call(input, undefined, true, true);
+    const relay = await f.ready();
+    relay.onEvent({ type: 'status', data: 'running' });
+    expect(await response.text()).not.toContain('readinessSnapshot');
+    expect(f.log).toHaveBeenCalledWith(
+      'info',
+      'gateway_provider_readiness_failed',
+      expect.objectContaining({ code: 'internal_error' }),
+    );
+    expect(f.log).toHaveBeenCalledWith(
+      'info',
+      'gateway_startup_channel_closed',
+      expect.objectContaining({ reason: 'readiness_failed' }),
+    );
+    expect(JSON.stringify(f.log.mock.calls)).not.toContain('private database/provider payload');
+  });
   it('does not send a ready receipt after the live provider reports stopping', async () => {
     const f = fixture();
     mocks.module.mockReturnValue({ readinessSource: 'provider_running' });

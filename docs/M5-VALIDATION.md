@@ -4416,3 +4416,61 @@ The final Unix health check reported ready/control available; the route returned
 to sleeping at21:52:03.393UTC after the normal restart lease-drain period. Restart
 shutdown/control-unavailable logs are retained and are not classified as a game
 startup test. No game power/file commands or new test assets were created.
+
+
+### 2026-10-12 — Owner cycle exposes nested readiness transaction
+
+Owner-driven `23a0664` cycle, timestamps UTC2026-10-11:
+
+| Event | Time / measured interval |
+| --- | --- |
+| API Start accepted | 21:55:23.275; handler31.603ms |
+| Provider Start request | 21:55:23.370–23.630;260ms; about387ms after API entry |
+| Docker process start | 21:55:24.639636461 |
+| Minecraft Done | 21:55:54.941640273 |
+| Startup stream closed unexpectedly | 21:55:54.970; reason `closed` |
+| Gateway forwarding enabled by periodic fallback | 21:55:58.224; **3.282s after Done** |
+| Last player disconnected | 21:56:19.134177514 |
+| Gateway quiescence/status stopping | 21:57:20.506;1.372s beyond60seconds after disconnect |
+| Minecraft receives stop | 21:57:21.777600051;2.643s beyond that60second interval |
+| Process exit | 21:57:22.208171536 |
+| Gateway sleeping via completion receipt | 21:57:23.084;**876ms after process exit** |
+
+No listener-unavailable transition appeared between this cycle's waking and
+completed sleeping transitions. This is Gateway log evidence, not an independently
+captured client/network availability trace. A read-only query confirmed the Start
+job succeeded with the exact process epoch; no real game operation was issued by
+Codex. Expected inactive-backend probe failures still occur while sleeping and do
+not close the listener; they are not falsely reported as a clean error-free log.
+
+The new provider-ready path did **not** deliver its receipt in this cycle.
+Investigation found `reportGatewayProviderRunning` opens a transaction and invokes
+`requireGatewayRoute(tx)`; `getGatewaySnapshot` then attempted another transaction.
+Kysely rejected it with `calling the transaction method for a Transaction is not
+supported`. The SSE callback swallowed this non-domain error, leaving periodic
+fallback to establish readiness. This was an implementation defect, not evidence
+that the provider event itself was slow.
+
+Correction: snapshot generation reuses an existing transaction and its resource
+lock; root callers retain the original transaction wrapper. Revision/lease writes
+participate in caller rollback and SSE authority is emitted only after commit.
+Unexpected readiness exceptions now log fixed `internal_error` and close reason
+`readiness_failed`, without exposing database/provider exception contents.
+
+Validation:
+
+- New genuine route-callback/database regression reproduced the exact nested
+  transaction failure before the fix (the previous API unit test mocked this call).
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/gateway-orchestration.integration.test.ts packages/server-management/src/gateway-registry.integration.test.ts -t 'provider running|route registry'`: **29 passed,104 intentionally skipped** after correction.
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/gateway-startup.test.ts`: **18 passed**, including sanitized unexpected-error diagnostics.
+- Root `scripts/dev.sh pnpm exec tsc --noEmit`, Biome on the four changed TypeScript
+  files and diff checks passed. No historical full-suite rerun.
+- Independent review found no must-fix: resource locking/rollback intact, no
+  uncommitted snapshot published, failure diagnostics do not reveal payloads.
+
+Core/worker loaded changes through existing development source watchers. API,
+worker and Gateway health checked healthy; no container restart, infrastructure
+change, credentials mutation, game command or new game test asset was needed.
+Corrected live receipt latency remains pending the next Owner cycle. The above
+3.282s result is retained as a failure of the previous implementation, not a
+successful measurement of the correction. PR remains open; issue18 unchanged.

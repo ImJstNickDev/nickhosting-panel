@@ -108,7 +108,8 @@ export function registerGatewayStartupRoutes(
         | 'relay_closed'
         | 'relay_error'
         | 'revoked'
-        | 'hint_sent';
+        | 'hint_sent'
+        | 'readiness_failed';
       let reason: CloseReason = 'closed';
       const controller = new AbortController();
       let finish!: () => void;
@@ -266,7 +267,12 @@ export function registerGatewayStartupRoutes(
                 stop('revoked');
               }
             })()
-              .catch(() => {})
+              .catch(() => {
+                // Never serialize database/provider exceptions: they may contain
+                // private payloads. Preserve a distinct failure signal instead.
+                log('gateway_provider_readiness_failed', { code: 'internal_error' });
+                stop('readiness_failed');
+              })
               .finally(() => stop());
           },
         });

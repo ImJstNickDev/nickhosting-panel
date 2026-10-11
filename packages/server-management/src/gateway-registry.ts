@@ -322,7 +322,7 @@ export async function listGatewayRoutes(db: DB, context: AuthContext) {
 }
 /** One serialized full snapshot, with persisted monotonic content revisions. */
 export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment = {}) {
-  return db.transaction().execute(async (tx) => {
+  const snapshot = async (tx: Kysely<Database>) => {
     await lockResources(tx);
     const config = await gatewayConfiguration(tx, env),
       gatewayId = config.gatewayId;
@@ -533,7 +533,10 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       ).toISOString(),
       routes,
     });
-  });
+  };
+  // Readiness revalidates routes under its existing resource transaction. Keep
+  // snapshot revision writes in that transaction instead of nesting a new one.
+  return db.isTransaction ? snapshot(db) : db.transaction().execute(snapshot);
 }
 export async function requireGatewayRoute(
   db: Kysely<Database>,

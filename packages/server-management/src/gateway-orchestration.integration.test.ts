@@ -30,7 +30,7 @@ import {
   requestGatewayWake,
   setGatewayPolicy,
 } from './gateway-orchestration.js';
-import { getGatewaySnapshot, setGatewayRoute } from './gateway-registry.js';
+import { getGatewaySnapshot, requireGatewayRoute, setGatewayRoute } from './gateway-registry.js';
 import {
   type LifecycleOptions,
   processServerOperation,
@@ -1146,6 +1146,70 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         options,
       ),
     ).rejects.toThrow('conflict');
+  });
+  it('provider running commits with real route revalidation inside its existing transaction', async () => {
+    clock = new Date(Date.now() - 2000);
+    const fixture = await started();
+    const server = await row();
+    const env = {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
+    };
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const route = await setGatewayRoute(
+      f.db,
+      f.owner,
+      {
+        serverId,
+        allocationId: allocation.id,
+        publicAddress: f.backendAllocationPool.gatewayBindAddresses[0],
+        publicPort: 26000,
+        transport: 'tcp',
+      },
+      env,
+    );
+    const selected = await requireGatewayRoute(f.db, route.id, undefined, env);
+    expect(selected.mode).toBe('waking');
+    const result = await reportGatewayProviderRunning(
+      f.db,
+      serverId,
+      {
+        generation: fixture.state.generation,
+        wakeJobId: fixture.state.wakeJobId as string,
+        observedAt: clock.toISOString(),
+        providerIdentity: {
+          pterodactyl_id: server.pterodactyl_id,
+          pterodactyl_uuid: server.pterodactyl_uuid,
+          provider_user_id: server.provider_user_id,
+          external_id: server.external_id,
+          node_id: server.node_id,
+        },
+      },
+      {
+        ...options,
+        env,
+        validateObservation: async (tx) => {
+          // Match the startup SSE handler, including the real registry callback.
+          expect(tx.isTransaction).toBe(true);
+          const current = await requireGatewayRoute(tx, selected.id, selected.revision, env);
+          expect(current).toMatchObject({
+            mode: 'waking',
+            generation: fixture.state.generation,
+            wakeJobId: fixture.state.wakeJobId,
+          });
+        },
+      },
+    );
+    expect(result.state).toBe('online');
+    expect(result.sleepEligibleAt).toBeNull();
+    expect((await getGatewaySnapshot(f.db, env)).routes).toEqual([
+      expect.objectContaining({ id: selected.id, mode: 'online' }),
+    ]);
   });
   it.each(['pending', 'unconfirmed', 'missing-reservation', 'changed-epoch', 'provider-stopped'])(
     'provider running cannot bypass %s durable start proof',
