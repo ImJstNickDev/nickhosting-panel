@@ -4715,3 +4715,48 @@ and prior unrelated Console fixture failures are not waived or counted as passes
 Final index governance and whitespace checks passed; only project code, catalogs,
 documentation, fixture tests and sanitized screenshots are staged. No secret,
 local environment, persistence tree or live infrastructure data is included.
+
+
+### Files focus and stationary cursor tooltips (2026-10-12)
+
+Owner feedback after the preceding commit removes the extra focus outline/shadow
+from Files search and direct-path inputs. Their existing1px border becomes darker
+without changing dimensions; forced-colors uses the system Highlight color.
+The scoped existing browser command
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'platform-specific search'`
+passed **1 selected case /9 skipped**, exercising search/path keyboard focus,
+dialog exclusions and listener cleanup across three simulated platform identities.
+Scoped Biome passed. Independent source and rendered-focus review found no
+must-fix; [search focus](screenshots/m5/file-manager-search-focused-en.png) and
+[path focus](screenshots/m5/file-manager-path-focused-en.png) show the running
+fixture application. No new test was added for this CSS change.
+
+The Owner also chose stationary cursor-positioned hints instead of following
+pointer motion. Files tooltips now open at the pointer's entry position and stay
+there until leaving the trigger; subsequent pointer movement causes no positioning
+work. Default anchored tooltips, keyboard/touch behavior, singleton dismissal and
+viewport clamping remain. This explicitly supersedes the prior moving-tooltip
+UX without rewriting its historical test results. The already documented manual
+hoverability limitation remains. No live provider, infrastructure or dependency
+changes; rollback is a frontend revert. Existing approved isolated services are
+reused, and fixture schemas are cleaned by the browser harness.
+
+
+The stationary-tooltip suite initially passed6 of7 cases. Its remaining assertion
+incorrectly expected no tooltip anywhere after the pointer crossed into an
+adjacent toolbar icon. The original tooltip did close; the adjacent icon properly
+opened its own. The assertion now checks the original identity is gone, followed
+by no tooltip once the pointer leaves all controls. Product code was unchanged;
+only that focused case was rerun. Other cases verify frozen entry coordinates,
+zero layout/style changes on pointer movement, fresh coordinates on reentry,
+keyboard/touch behavior and viewport clamping. Final focused result follows.
+
+
+The isolated tooltip browser command with
+`-t 'places Files hints at pointer entry'` passed **1 selected case /6 skipped**.
+Together with the preceding6passing cases this covers the final tooltip source;
+there was no unnecessary full-suite repetition. Changed-file Biome/diff checks
+passed. Independent review found no must-fix. Reviewed
+[stationary tooltip screenshot](screenshots/m5/file-manager-tooltip-desktop-en.png)
+contains only sanitized running-app fixture data. No live service restart or
+provider mutation occurred.

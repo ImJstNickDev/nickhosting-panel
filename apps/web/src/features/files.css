@@ -97,6 +97,18 @@
 .fm-search input {
   padding-right: 82px;
 }
+.fm-search input:focus,
+.fm-path-form input:focus {
+  outline: none;
+  box-shadow: none;
+  border-color: #36556a;
+}
+@media (forced-colors: active) {
+  .fm-search input:focus,
+  .fm-path-form input:focus {
+    border-color: Highlight;
+  }
+}
 .fm-search kbd {
   position: absolute;
   right: 12px;

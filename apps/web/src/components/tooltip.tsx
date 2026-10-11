@@ -27,7 +27,7 @@ export function Tooltip({
 }: {
   content: string;
   children: ReactElement<TriggerProps>;
-  /** Cursor labels dismiss on trigger leave; keyboard and touch stay anchored. */
+  /** Cursor labels stay at entry coordinates; keyboard and touch stay anchored. */
   placement?: 'anchor' | 'cursor';
 }) {
   const id = useId();
@@ -35,7 +35,7 @@ export function Tooltip({
   const popup = useRef<HTMLDivElement | null>(null);
   const active = useRef({ trigger: false, focus: false, touch: false });
   const pointerFocus = useRef(false);
-  const cursor = useRef<{ x: number; y: number } | null>(null);
+  const cursorEntry = useRef<{ x: number; y: number } | null>(null);
   const updatePosition = useRef<(() => void) | undefined>(undefined);
   const positionMode = useRef<'anchor' | 'cursor'>('anchor');
   const [open, setOpen] = useState(false);
@@ -90,8 +90,8 @@ export function Tooltip({
     const writePosition = (left: number, top: number, side: 'top' | 'bottom') => {
       const element = popup.current;
       if (!element) return;
-      // This style is intentionally not managed by React: pointer movement must
-      // update in the current event, without rendering or repeated layout reads.
+      // Keep measured positioning out of React state. Ordinary rerenders must not
+      // overwrite it, and pointer movement deliberately performs no updates.
       element.style.transform = `translate3d(${left}px, ${top}px, 0)`;
       element.style.visibility = 'visible';
       element.dataset.side = side;
@@ -110,8 +110,8 @@ export function Tooltip({
         return;
       }
       const margin = 8;
-      if (positionMode.current === 'cursor' && cursor.current) {
-        const { x, y } = cursor.current;
+      if (positionMode.current === 'cursor' && cursorEntry.current) {
+        const { x, y } = cursorEntry.current;
         const offset = 12;
         const side = y + offset + box.height <= top + height - margin ? 'bottom' : 'top';
         writePosition(
@@ -221,23 +221,10 @@ export function Tooltip({
           if (event.pointerType === 'touch') return;
           active.current.trigger = true;
           if (placement === 'cursor' && !active.current.focus) {
-            cursor.current = { x: event.clientX, y: event.clientY };
+            cursorEntry.current = { x: event.clientX, y: event.clientY };
             positionMode.current = 'cursor';
           }
           show();
-        },
-        onPointerMove: (event) => {
-          children.props.onPointerMove?.(event);
-          if (
-            placement !== 'cursor' ||
-            event.pointerType === 'touch' ||
-            active.current.focus ||
-            active.current.touch
-          )
-            return;
-          cursor.current = { x: event.clientX, y: event.clientY };
-          positionMode.current = 'cursor';
-          updatePosition.current?.();
         },
         onPointerLeave: (event) => {
           children.props.onPointerLeave?.(event);
@@ -250,7 +237,7 @@ export function Tooltip({
           // keeps a tooltip open after the pointer has left its target.
           if (pointerFocus.current) return;
           active.current.focus = true;
-          cursor.current = null;
+          cursorEntry.current = null;
           positionMode.current = 'anchor';
           show();
         },
@@ -266,7 +253,7 @@ export function Tooltip({
           pointerFocus.current = true;
           active.current.focus = false;
           if (event.pointerType !== 'touch') return;
-          cursor.current = null;
+          cursorEntry.current = null;
           positionMode.current = 'anchor';
           if (active.current.touch) dismiss();
           else {

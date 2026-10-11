@@ -323,6 +323,8 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await browserExpect(page.locator('.fm-search kbd')).toHaveText(mac ? '⌘ + K' : 'CTRL + K');
         await page.keyboard.press(keys);
         await browserExpect(search).toBeFocused();
+        if (platform === 'Linux x86_64')
+          await harness.screenshot(page, 'file-manager-search-focused-en');
         await search.fill('alpha');
         await page.keyboard.press(keys);
         expect(
@@ -335,6 +337,8 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         const path = page.getByRole('textbox', { name: 'Path', exact: true });
         await browserExpect(path).toBeFocused();
         await browserExpect(path).toHaveValue('/');
+        if (platform === 'Linux x86_64')
+          await harness.screenshot(page, 'file-manager-path-focused-en');
         await path.press('Escape');
         await page.getByRole('button', { name: 'New folder', exact: true }).click();
         const input = page.getByRole('dialog').getByRole('textbox').first();

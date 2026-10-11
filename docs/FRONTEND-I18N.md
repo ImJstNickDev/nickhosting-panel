@@ -189,9 +189,10 @@ containers, follows viewport changes, dismisses with Escape
 and supports touch. Only one tooltip is open at a time. Popups ignore pointer
 input: leaving the trigger closes a hover-only hint immediately, including when
 crossing over the popup. Keyboard focus or an explicit touch toggle can keep it
-open; mouse-click focus alone never pins it. Files opts into positioning near the
-cursor using direct positioning with cached geometry, without per-move React
-state updates or layout measurements; keyboard/touch descriptions stay anchored to their controls. Triggers retain accessible names and keyboard access;
+open; mouse-click focus alone never pins it. Files positions its tooltip near the
+cursor's entry point and keeps it there until the trigger is left. There is no
+pointer-following animation or per-move positioning; viewport changes still clamp
+the popup within the screen. Keyboard/touch descriptions stay anchored to their controls. Triggers retain accessible names and keyboard access;
 tooltips must not contain essential instructions or interactive controls. Native
 triggers work directly; custom triggers must forward refs and event props. Current
 consumers include the console connection indicator, network legend and Files controls. Redundant
@@ -499,6 +500,8 @@ parentheses; the shortcut focuses/selects the current-folder search. It is activ
 only while Files is mounted and yields to open dialogs/editor shortcuts. The
 input also declares its platform-specific `aria-keyshortcuts`. Direct-path entry
 uses a small borderless pencil, with ALT + G or ⌥ + G in its localized tooltip.
+Search and direct-path inputs indicate focus through their existing border color,
+without an extra outline or shadow. Forced-colors mode uses the system highlight.
 
 The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.

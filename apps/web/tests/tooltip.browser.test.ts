@@ -83,7 +83,7 @@ describe('shared tooltips in the real Files and Console screens', () => {
     expect(await tooltip.count()).toBe(0);
   });
 
-  it('follows the cursor in Files, stays inside the viewport and does not capture pointer input', async () => {
+  it('places Files hints at pointer entry and keeps them fixed until leaving the trigger', async () => {
     await user.goto(`${base}/files`);
     const trigger = user.getByRole('button', { name: 'New folder', exact: true });
     await browserExpect(trigger).toBeEnabled();
@@ -99,16 +99,27 @@ describe('shared tooltips in the real Files and Console screens', () => {
     expect(before.y).toBeCloseTo(firstPoint.y + 12, 0);
     await user.mouse.move(firstPoint.x + 10, firstPoint.y + 10);
     const after = await tooltip.boundingBox();
-    if (!after) throw new Error('Files cursor tooltip did not follow the pointer');
-    expect(after.x - before.x).toBeCloseTo(10, 0);
-    expect(after.y - before.y).toBeCloseTo(10, 0);
+    if (!after) throw new Error('Files cursor tooltip disappeared inside its trigger');
+    expect(after.x).toBe(before.x);
+    expect(after.y).toBe(before.y);
     const viewport = user.viewportSize();
     if (!viewport) throw new Error('Missing browser viewport');
     expect(after.x).toBeGreaterThanOrEqual(8);
     expect(after.x + after.width).toBeLessThanOrEqual(viewport.width - 8);
     expect(after.y + after.height).toBeLessThanOrEqual(viewport.height - 8);
+    const originalId = await tooltip.getAttribute('id');
     await user.mouse.move(after.x + after.width / 2, after.y + after.height / 2);
+    // Another toolbar icon can sit below this pointer-transparent popup; its own
+    // hint may open, but the original hint must disappear immediately.
+    expect(await user.locator(`[role="tooltip"][id="${originalId}"]`).count()).toBe(0);
+    await user.mouse.move(0, 0);
     expect(await tooltip.count()).toBe(0);
+    await user.mouse.move(firstPoint.x + 10, firstPoint.y + 10);
+    await browserExpect(tooltip).toBeVisible();
+    const reentered = await tooltip.boundingBox();
+    expect(reentered?.y).toBeCloseTo(firstPoint.y + 10 + 12, 0);
+    await harness.screenshot(user, 'file-manager-tooltip-desktop-en');
+    await user.mouse.move(0, 0);
 
     // A long right-edge unavailable hint must clamp/flip without horizontal overflow.
     await user.setViewportSize({ width: 390, height: 844 });
@@ -141,7 +152,7 @@ describe('shared tooltips in the real Files and Console screens', () => {
     await browserExpect(trigger).toBeFocused();
   });
 
-  it('positions cursor hints synchronously without measuring layout or waiting for a React render', async () => {
+  it('performs no positioning or layout work on pointer movement and preserves entry position on rerender', async () => {
     await user.goto(`${base}/files`);
     const trigger = user.getByRole('button', { name: 'New folder', exact: true });
     await trigger.hover();
@@ -151,6 +162,10 @@ describe('shared tooltips in the real Files and Console screens', () => {
       const anchor = element.getBoundingClientRect();
       const originalTriggerMeasure = element.getBoundingClientRect;
       const originalPopupMeasure = tooltip.getBoundingClientRect;
+      const originalBox = originalPopupMeasure.call(tooltip);
+      const originalTransform = tooltip.style.transform;
+      const mutations = new MutationObserver(() => {});
+      mutations.observe(tooltip, { attributes: true });
       let measurements = 0;
       element.getBoundingClientRect = () => {
         measurements++;
@@ -170,22 +185,26 @@ describe('shared tooltips in the real Files and Console screens', () => {
             clientY: point.y,
           }),
         );
-        // No await, animation frame or React flush between the event and this read.
+        // No await, animation frame or React flush between movement and this read.
         const box = originalPopupMeasure.call(tooltip);
         return {
           top: box.top,
-          expectedTop: point.y + 12,
+          originalTop: originalBox.top,
           transform: tooltip.style.transform,
+          originalTransform,
           measurements,
+          mutations: mutations.takeRecords().length,
         };
       } finally {
+        mutations.disconnect();
         element.getBoundingClientRect = originalTriggerMeasure;
         tooltip.getBoundingClientRect = originalPopupMeasure;
       }
     });
-    expect(result.top).toBeCloseTo(result.expectedTop, 0);
-    expect(result.transform).toMatch(/^translate3d\(/);
+    expect(result.top).toBe(result.originalTop);
+    expect(result.transform).toBe(result.originalTransform);
     expect(result.measurements).toBe(0);
+    expect(result.mutations).toBe(0);
 
     // A separate state update rerenders Files without moving the real pointer.
     // React must not restore a stale position from its previous render.
