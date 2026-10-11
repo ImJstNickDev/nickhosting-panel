@@ -42,6 +42,15 @@ export function serverPath(id: string) {
 export function platformPath(id: string) {
   return `/v1/platform/servers/${encodeURIComponent(id)}`;
 }
+export function fileDirectoryQuery(id: string, directory: string) {
+  return {
+    queryKey: ['files', id, directory] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      api<ServerFile[]>(`${serverPath(id)}/files?path=${encodeURIComponent(directory)}`, {
+        signal,
+      }),
+  };
+}
 export function useServer(id: string) {
   return useQuery({
     queryKey: ['server', id],

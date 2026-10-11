@@ -308,6 +308,137 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.getByRole('alert')).toContainText('folder name already exists');
     expect(remote.get('client-pack/notes.txt')?.toString()).toBe('folder notes');
   });
+  it('completes actual folders and files with arrows, Space and Enter without per-character listing requests', async () => {
+    const remote = await provider.files();
+    remote.set('world/path notes.txt', Buffer.from('Nested original'));
+    remote.set('path notes.txt', Buffer.from('Root untouched'));
+    await user.goto(base);
+    await browserExpect(row('world')).toBeVisible();
+    const path = user.getByRole('combobox', { name: 'Path', exact: true });
+    const listings: string[] = [];
+    const track = (request: import('@playwright/test').Request) => {
+      const url = new URL(request.url());
+      if (url.pathname.endsWith('/files') && request.method() === 'GET') listings.push(url.search);
+    };
+    user.on('request', track);
+    try {
+      await user.keyboard.press('Alt+g');
+      await browserExpect(
+        user.getByRole('button', { name: 'Open folder', exact: true }),
+      ).toHaveCount(0);
+      await path.fill('/w');
+      await browserExpect(user.getByRole('option', { name: 'world/', exact: true })).toBeVisible();
+      await path.press('o');
+      await path.press('r');
+      await path.press('ArrowDown');
+      await path.press('Space');
+      await browserExpect(path).toHaveValue('/world/');
+      await browserExpect(
+        user.getByRole('option', { name: 'path notes.txt', exact: true }),
+      ).toBeVisible();
+      await path.fill('/world/path');
+      await path.press('Space');
+      await browserExpect(path).toHaveValue('/world/path ');
+      await path.press('n');
+      await browserExpect(
+        user.getByRole('option', { name: 'path notes.txt', exact: true }),
+      ).toBeVisible();
+      await path.press('ArrowDown');
+      await path.press('Enter');
+      const editor = dialog().getByRole('textbox', { name: 'Contents', exact: true });
+      await browserExpect(editor).toContainText('Nested original');
+      await editor.fill('Nested saved');
+      await editor.press('Control+s');
+      await browserExpect(dialog()).not.toBeVisible();
+      expect(remote.get('world/path notes.txt')?.toString()).toBe('Nested saved');
+      expect(remote.get('path notes.txt')?.toString()).toBe('Root untouched');
+      // Current folder and autocomplete share a cache; only entering world needs a listing.
+      expect(listings.filter((query) => query === '?path=')).toHaveLength(0);
+      // Saving refetches the active listing; there is still no listing per typed character.
+      expect(listings.filter((query) => query === '?path=world').length).toBeLessThanOrEqual(2);
+      await user.keyboard.press('Alt+g');
+      await path.fill('/world');
+      await path.press('Enter');
+      await browserExpect(path).toHaveCount(0);
+      await browserExpect(user.getByRole('navigation', { name: 'File location' })).toContainText(
+        'world',
+      );
+    } finally {
+      user.off('request', track);
+    }
+  });
+  it('keeps path errors visible and never commits a stale candidate after editing the prefix', async () => {
+    await user.goto(base);
+    await browserExpect(user.locator('.fm-tools')).toBeVisible();
+    await user.keyboard.press('Alt+g');
+    const path = user.getByRole('combobox', { name: 'Path', exact: true });
+    await path.fill('/wo');
+    await browserExpect(user.getByRole('option', { name: 'world/', exact: true })).toBeVisible();
+    await path.press('ArrowDown');
+    await path.fill('/missing-folder');
+    await path.press('Enter');
+    await browserExpect(path).toBeVisible();
+    await browserExpect(user.getByText('File or folder not found.', { exact: true })).toBeVisible();
+    await browserExpect(dialog()).toHaveCount(0);
+    await path.fill('/../world');
+    await path.press('Enter');
+    await browserExpect(path).toBeVisible();
+    await browserExpect(user.getByRole('option')).toHaveCount(0);
+    await path.press('Escape');
+    await browserExpect(path).toHaveCount(0);
+    await browserExpect(row('world')).toBeVisible();
+  });
+  it('renders bounded path suggestions on desktop and Italian mobile with accessible keyboard selection', async () => {
+    for (const locale of ['en', 'it'] as const) {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+      await user.setViewportSize(
+        locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+      );
+      await user.goto(base);
+      await browserExpect(user.locator('.fm-tools')).toBeVisible();
+      await user.keyboard.press('Alt+g');
+      const path = user.getByRole('combobox', {
+        name: locale === 'en' ? 'Path' : 'Percorso',
+        exact: true,
+      });
+      await path.fill('/');
+      await browserExpect(user.getByRole('option', { name: 'world/', exact: true })).toBeVisible();
+      await path.press('ArrowUp');
+      await browserExpect
+        .poll(() => user.getByRole('listbox').evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
+      await path.press('ArrowDown');
+      await browserExpect(path).toBeFocused();
+      expect(await path.getAttribute('aria-activedescendant')).toBeTruthy();
+      expect(
+        await user.getByRole('listbox').evaluate((element) => {
+          const list = element.getBoundingClientRect();
+          const panel = element.parentElement?.getBoundingClientRect();
+          return Boolean(panel && list.bottom <= panel.bottom - 4);
+        }),
+      ).toBe(true);
+      expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      const audit = await new AxeBuilder({ page: user })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze();
+      expect(
+        audit.violations.map(({ id, nodes }) => ({
+          id,
+          targets: nodes.map((node) => node.target),
+        })),
+      ).toEqual([]);
+      await harness.screenshot(
+        user,
+        `file-path-picker-${locale === 'en' ? 'desktop-en' : 'mobile-it'}`,
+      );
+      await path.press('Escape');
+    }
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    expect(errors).toEqual([]);
+  });
   it('shows platform-specific search shortcuts and scopes them to Files outside dialogs', async () => {
     for (const platform of ['Win32', 'Linux x86_64', 'MacIntel']) {
       const page = await user.context().newPage();
@@ -334,11 +465,28 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           ]),
         ).toEqual([0, 5]);
         await page.keyboard.press('Alt+g');
-        const path = page.getByRole('textbox', { name: 'Path', exact: true });
+        const path = page.getByRole('combobox', { name: 'Path', exact: true });
         await browserExpect(path).toBeFocused();
         await browserExpect(path).toHaveValue('/');
         if (platform === 'Linux x86_64')
           await harness.screenshot(page, 'file-manager-path-focused-en');
+        await page.keyboard.press(keys);
+        await browserExpect(search).toBeFocused();
+        await browserExpect(path).toHaveCount(0);
+        await page.keyboard.press('Alt+g');
+        await browserExpect(path).toBeFocused();
+        await path.fill('/wo');
+        await page.keyboard.press('Alt+g');
+        expect(
+          await path.evaluate((input: HTMLInputElement) => [
+            input.selectionStart,
+            input.selectionEnd,
+          ]),
+        ).toEqual([0, 3]);
+        await search.click();
+        await browserExpect(path).toHaveCount(0);
+        await page.keyboard.press('Alt+g');
+        await browserExpect(path).toBeFocused();
         await path.press('Escape');
         await page.getByRole('button', { name: 'New folder', exact: true }).click();
         const input = page.getByRole('dialog').getByRole('textbox').first();

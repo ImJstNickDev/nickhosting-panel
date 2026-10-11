@@ -4760,3 +4760,88 @@ passed. Independent review found no must-fix. Reviewed
 [stationary tooltip screenshot](screenshots/m5/file-manager-tooltip-desktop-en.png)
 contains only sanitized running-app fixture data. No live service restart or
 provider mutation occurred.
+
+
+### Files path completion and shortcut handoff (2026-10-12)
+
+The Owner requested actual file/folder suggestions in direct-path entry and removal
+of its redundant Open folder button. A compact portaled combobox now filters the
+current parent listing locally, with folders first and a bounded scrolling popup.
+Files and completion share the same cancellable React Query directory contract;
+typing another character in a basename does not request another directory. Changing
+the parent queries that parent through the existing authorized endpoint. This is
+not recursive filesystem search. No provider credential or endpoint is exposed.
+
+Up/Down selects a candidate; Enter or Space confirms that explicit selection.
+Space without selection remains text, including names containing spaces. A folder
+candidate completes the path for further traversal; Enter on its exact path opens
+it. File candidates use the existing revision-protected editor, with the captured
+parent used for both reading and saving. Pending writes block navigation, previous
+reads remain abort/sequence-fenced, and revision state resets on a new read.
+Symlink suggestions and malformed/traversal paths are excluded; this does not claim
+new ancestor-symlink guarantees beyond the existing directory API.
+
+Search focus closes path entry. ALT+G/⌥+G always opens and selects it again, even
+when already mounted; dialogs retain their own shortcuts. Loading, no matches,
+missing paths and listing failures are localized inside the popup. No layout space
+is added for suggestions. Existing input focus styling remains.
+
+Scope: frontend component/model, shared frontend query factory, EN/IT catalogs,
+focused tests and documentation only. No API mutation contract, dependency,
+infrastructure, live game file or provider configuration changed. Browser tests
+reuse approved isolated services with real application handlers and a fixture
+provider; their disposable schemas/data are cleaned by the harness. No Docker
+operation or service restart. Rollback: revert this frontend change. Issue#18 and
+prior release/accessibility limitations remain unchanged.
+
+Validation performed for this change:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-path-model.test.ts`:
+  **15/15 passed** (bounded parsing, spaces/Unicode, local prefix filtering,
+  ordering and unsafe/symlink exclusion).
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-manager-model.test.ts packages/i18n/src/i18n.test.ts`:
+  **10/10 passed**.
+- `scripts/dev.sh pnpm i18n:compile`: **1203 keys**, EN/IT/pseudolocale.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed**.
+- `scripts/dev.sh pnpm exec biome check` on the eight changed TS/TSX/CSS source/test
+  files: **passed**.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts`.
+  Initial selection with
+  `-t 'navigates breadcrumbs|edits JSON|completes actual|keeps path errors|renders bounded path|platform-specific search'`
+  passed **4/6 selected** (7 skipped). The two new failed tests pressed ALT+G
+  before Files mounted; tests now wait for its toolbar. Product behavior was unchanged.
+- Rerun `-t 'keeps path errors|renders bounded path'`: **1/2 selected passed**
+  (11 skipped). Missing/invalid paths and stale selection passed. The rendered audit
+  identified `scrollable-region-focusable`: scrolling was on the wrapper rather
+  than its controlled listbox. Overflow now belongs to that listbox, keeping focus
+  in the combobox and arrow-driven visibility. Screenshot review also corrected
+  inherited centered button layout to left-aligned file/folder names.
+- Final `-t 'renders bounded path'`: **1/1 selected passed** (12 skipped),
+  desktop English and mobile Italian, no horizontal page overflow and **zero axe
+  violations** in the selected WCAG tags. Screenshots:
+  [desktop](screenshots/m5/file-path-picker-desktop-en.png),
+  [mobile](screenshots/m5/file-path-picker-mobile-it.png).
+
+Passed behavioral cases prove Enter/Space selection versus literal filename spaces,
+exact-folder navigation, nested read/save without touching the same basename at
+root, no per-character listing requests, existing editor revision conflicts,
+and repeated path/search shortcuts on simulated Windows/Linux/macOS identities.
+These are Chromium fixture-browser results, not native Firefox/Safari certification
+or new live provider tests. Only affected checks were rerun; the historical full
+suite was not repeated. Earlier failure records above are retained as failures.
+
+Independent rendered review subsequently caught a small popup-boundary defect:
+the inherited inner max-height did not subtract the outer padding/border, letting
+the last row extend below the surface. A flex-column popup with a shrinking
+scrollable listbox fixes that. Only `-t 'renders bounded path'` was repeated:
+**1/1 passed**, including an explicit listbox-within-popup bounds assertion, last
+option keyboard scrolling, EN/IT desktop/mobile screenshots and axe. The screenshots
+linked above now show this final correction. No broader suite was rerun.
+
+Independent final source and rendered UX/accessibility review found **no remaining
+must-fix** after that correction. Final scoped Biome and catalog freshness checks
+passed. Staged-content inspection confirmed exactly four new message keys in each
+of EN/IT/pseudo and only the intended source/test/docs/sanitized screenshots.
+Governance passed:603 indexed text files,151 review PNGs,501 relative links,
+4 TOML files and44 ignore cases; the secret scan remains heuristic. No persistent
+dev review data, live servers or existing infrastructure were changed.

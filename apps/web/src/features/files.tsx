@@ -46,8 +46,15 @@ function loadEditor() {
 }
 const FileTextEditor = lazy(loadEditor);
 
-import { type ServerFile, serverPath, useServer, useTransfers } from './service-contracts.js';
+import {
+  fileDirectoryQuery,
+  type ServerFile,
+  serverPath,
+  useServer,
+  useTransfers,
+} from './service-contracts.js';
 import './files.css';
+import { FilePathPicker } from './file-path-picker.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 
 type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'move' | 'copy' | 'extract';
@@ -139,6 +146,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [descending, setDescending] = useState(false);
   const [view, setView] = useState<'list' | 'grid'>('list');
   const [pathEditing, setPathEditing] = useState(false);
+  const [pathFocusSignal, setPathFocusSignal] = useState(0);
+  const editPath = useCallback(() => {
+    setPathEditing(true);
+    setPathFocusSignal((value) => value + 1);
+  }, []);
   const [mode, setMode] = useState<Mode>();
   const [targets, setTargets] = useState<string[]>([]);
   const [destination, setDestination] = useState('');
@@ -164,21 +176,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const uploadQueue = useRef<UploadItem[]>([]);
   const mounted = useRef(true);
   const folderInput = useRef<HTMLInputElement>(null);
-  const fileInput = useRef<HTMLInputElement>(null),
-    pathInput = useRef<HTMLInputElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTrigger = useRef<HTMLElement | null>(null);
   const editorForm = useRef<HTMLDivElement>(null);
   const mutationRunning = useRef(false);
   const readAbort = useRef<AbortController | undefined>(undefined),
     readSequence = useRef(0);
-  const files = useQuery({
-    queryKey: ['files', serverId, directory],
-    queryFn: ({ signal }) =>
-      api<ServerFile[]>(`${serverPath(serverId)}/files?path=${encodeURIComponent(directory)}`, {
-        signal,
-      }),
-  });
+  const files = useQuery(fileDirectoryQuery(serverId, directory));
   const rows = useMemo(
     () => visibleFiles(files.data ?? [], search, order, descending),
     [files.data, search, order, descending],
@@ -225,12 +230,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
   }, []);
   useEffect(() => {
-    if (pathEditing) {
-      pathInput.current?.focus();
-      pathInput.current?.select();
-    }
-  }, [pathEditing]);
-  useEffect(() => {
     const focusSearch = (event: globalThis.KeyboardEvent) => {
       const modifier = macKeyboard
         ? event.metaKey && !event.ctrlKey
@@ -246,15 +245,16 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         return;
       event.preventDefault();
       setMenu(undefined);
-      if (pathRequest) setPathEditing(true);
+      if (pathRequest) editPath();
       else {
+        setPathEditing(false);
         searchInput.current?.focus();
         searchInput.current?.select();
       }
     };
     document.addEventListener('keydown', focusSearch);
     return () => document.removeEventListener('keydown', focusSearch);
-  }, [macKeyboard]);
+  }, [macKeyboard, editPath]);
   useEffect(() => {
     if (!menu) return;
     menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -287,7 +287,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           new Set([...previous].filter((name) => files.data.some((entry) => entry.name === name))),
       );
   }, [files.data]);
-  function navigate(path: string) {
+  function navigate(path: string, preserveName = false) {
+    if (mutationRunning.current) return;
     const normalized = normalizeFilePath(path);
     if (normalized === undefined) {
       setError({ messageKey: 'file.invalidPath' });
@@ -297,7 +298,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     cancelRead();
     setMode(undefined);
     setDirty(false);
-    setDirectory(normalized);
+    setDirectory(preserveName ? path : normalized);
     setSelected(new Set());
     setAnchor(undefined);
     setSearch('');
@@ -329,14 +330,22 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setDirty(false);
     }
   }
-  async function open(entry: ServerFile) {
+  async function open(entry: ServerFile, folder = directory) {
+    if (mutationRunning.current) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     if (entry.is_symlink) return;
     if (!entry.is_file) {
-      navigate(join(directory, entry.name));
+      navigate(join(folder, entry.name), true);
       return;
     }
     if (dirty && !window.confirm(t('service.discardEdits'))) return;
+    setPathEditing(false);
+    if (folder !== directory) {
+      setDirectory(folder);
+      setSearch('');
+      setSelected(new Set());
+      setAnchor(undefined);
+    }
     cancelRead();
     const sequence = ++readSequence.current,
       controller = new AbortController();
@@ -344,12 +353,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setTargets([entry.name]);
     setMode('edit');
     setContent('');
+    setRevision(null);
     setDirty(false);
     setReading(true);
     setReadError(undefined);
     try {
       const value = await api<{ content: string; revision: string }>(
-        `${serverPath(serverId)}/files/editor?path=${encodeURIComponent(join(directory, entry.name))}`,
+        `${serverPath(serverId)}/files/editor?path=${encodeURIComponent(join(folder, entry.name))}`,
         { signal: controller.signal },
       );
       if (sequence === readSequence.current && !controller.signal.aborted) {
@@ -672,26 +682,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     >
       <div className="fm-toolbar">
         {pathEditing ? (
-          <form
-            className="fm-path-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              navigate(text(new FormData(event.currentTarget), 'path'));
-            }}
-          >
-            <input
-              ref={pathInput}
-              aria-label={t('web.path')}
-              name="path"
-              defaultValue={`/${directory}`}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') setPathEditing(false);
-              }}
-            />
-            <button type="submit" className="secondary">
-              {t('service.openFolder')}
-            </button>
-          </form>
+          <FilePathPicker
+            serverId={serverId}
+            directory={directory}
+            focusSignal={pathFocusSignal}
+            onNavigate={(path) => navigate(path, true)}
+            onOpenFile={(entry, folder) => void open(entry, folder)}
+            onClose={() => setPathEditing(false)}
+          />
         ) : (
           <nav aria-label={t('file.breadcrumb')} className="fm-breadcrumb">
             <ol>
@@ -716,7 +714,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 className="fm-tool fm-path-edit"
                 aria-keyshortcuts="Alt+G"
                 aria-label={t('file.editPath', { shortcut: pathShortcut })}
-                onClick={() => setPathEditing(true)}
+                onClick={editPath}
               >
                 <ToolbarIcon kind="path" />
               </button>
@@ -731,6 +729,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             aria-keyshortcuts={macKeyboard ? 'Meta+K' : 'Control+K'}
             placeholder={t('file.searchLabel')}
             value={search}
+            onFocus={() => setPathEditing(false)}
             onChange={(event) => setSearch(event.target.value)}
           />
           <span aria-hidden="true">

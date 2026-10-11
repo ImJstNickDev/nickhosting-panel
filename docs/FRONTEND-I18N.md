@@ -503,6 +503,19 @@ uses a small borderless pencil, with ALT + G or ⌥ + G in its localized tooltip
 Search and direct-path inputs indicate focus through their existing border color,
 without an extra outline or shadow. Forced-colors mode uses the system highlight.
 
+Direct-path entry is a compact autocomplete combobox, without an Open folder
+button. Suggestions list actual folders and files from the authorized directory
+listing; filename typing filters that list locally, and changing the parent path
+loads its listing through the same query cache as Files. Up/Down selects a
+candidate; Enter or Space confirms an explicitly selected candidate. Space remains
+ordinary text when no candidate is selected. Selecting a folder completes the path
+and exposes its children; Enter on an exact folder opens it in Files. Selecting a
+file opens the existing editor at that file's actual parent path. Suggestions stay
+within a scrollable popup without pushing page content, with accessible active
+selection and honest loading, empty and error states. Escape returns to breadcrumbs.
+Focusing Search closes path entry; its shortcut always reopens and focuses/selects
+the path, including when the field is already open. These shortcuts yield to dialogs.
+
 The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.
 Entering Files preloads the lazy editor module once; subsequent editor opens use

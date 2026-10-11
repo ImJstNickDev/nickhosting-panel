@@ -1,4 +1,8 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'file.pathCandidates': ['Matching files and folders', 'File e cartelle corrispondenti'],
+  'file.pathNoMatches': ['No matches', 'Nessun risultato'],
+  'file.pathUnavailable': ['Could not load this folder.', 'Impossibile caricare questa cartella.'],
+  'file.pathNotFound': ['File or folder not found.', 'File o cartella non trovato.'],
   'file.sortColumn': ['Sort by {name}', 'Ordina per {name}'],
   'file.folderFileExists': [
     'A file appeared at this destination. It has not been replaced.',
