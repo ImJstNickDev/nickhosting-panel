@@ -130,7 +130,7 @@ creation or automatically started again.
 
 Console updates use bounded SSE parsing/display (300 retained lines with a
 per-line bound); charts show timestamps, units and gaps. The resource section keeps
-the period selector and charts without a measurement table, pagination buttons or
+last-hour charts without a period selector, measurement table, pagination buttons or
 explanatory footer. Chart history reads remain bounded to 100 recent samples;
 backend history pagination remains available. Network traffic shares one chart
 and scale: received is blue, sent is amber. Both lines are solid, with blue drawn last so

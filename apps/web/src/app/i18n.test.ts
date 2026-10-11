@@ -9,19 +9,25 @@ it('ships matching complete catalogs and labels for every configurable setting',
   expect(Object.keys(messages.it).sort()).toEqual(Object.keys(messages.en).sort());
   expect(Object.keys(messages.pseudo).sort()).toEqual(Object.keys(messages.en).sort());
   const keys = new Set(Object.keys(messages.en));
+  // These settings use dedicated sleep controls instead of generic Owner fields.
+  const dedicatedLabels: Record<string, string> = {
+    defaultIdleTimeoutSeconds: 'sleepTiming.timeout',
+    idleTimeoutUserAccess: 'sleepTiming.userAccess',
+    gameIdleTimeouts: 'sleepTiming.game',
+  };
   for (const key of Object.keys(platformConfigSchema.shape))
-    expect(keys.has(`owner.config.${key}`), key).toBe(true);
+    expect(keys.has(dedicatedLabels[key] ?? `owner.config.${key}`), key).toBe(true);
 });
 it('renders actual plurals in English/Italian and expands pseudolocale', () => {
   const i18n = setupI18n({
     locale: 'en',
     messages: messages as unknown as Record<string, Messages>,
   });
-  expect(i18n._('service.hours', { count: 1 })).toBe('Last hour');
-  expect(i18n._('service.hours', { count: 2 })).toBe('Last 2 hours');
+  expect(i18n._('owner.reconcileSummary', { count: 1 })).toBe('1 server checked');
+  expect(i18n._('owner.reconcileSummary', { count: 2 })).toBe('2 servers checked');
   i18n.activate('it');
-  expect(i18n._('service.hours', { count: 1 })).toBe('Ultima ora');
-  expect(i18n._('service.hours', { count: 2 })).toBe('Ultime 2 ore');
+  expect(i18n._('owner.reconcileSummary', { count: 1 })).toBe('1 server controllato');
+  expect(i18n._('owner.reconcileSummary', { count: 2 })).toBe('2 server controllati');
   i18n.activate('pseudo');
   expect(i18n._('web.settings')).toContain('［');
 });

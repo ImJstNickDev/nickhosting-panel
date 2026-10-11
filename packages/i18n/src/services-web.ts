@@ -166,11 +166,6 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     '{name}: {value} {unit}, measured {time}',
     '{name}: {value} {unit}, misurato il {time}',
   ],
-  'service.period': ['Period', 'Periodo'],
-  'service.hours': [
-    '{count, plural, one {Last hour} other {Last # hours}}',
-    '{count, plural, one {Ultima ora} other {Ultime # ore}}',
-  ],
   'service.networkTraffic': ['Network traffic', 'Traffico di rete'],
   'service.received': ['Network received', 'Traffico ricevuto'],
   'service.sent': ['Network sent', 'Traffico inviato'],

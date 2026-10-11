@@ -13,7 +13,6 @@ import {
   Loading,
   Notice,
   Section,
-  Select,
   Time,
 } from '../components/ui.js';
 import { useRequestOperation } from './servers.js';
@@ -489,7 +488,6 @@ function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; 
 }
 export function Telemetry({ serverId }: { serverId: string }) {
   const t = useT();
-  const [hours, setHours] = useState(1);
   const live = useQuery({
     queryKey: ['resources', serverId],
     queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
@@ -498,11 +496,11 @@ export function Telemetry({ serverId }: { serverId: string }) {
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
   });
   const history = useQuery({
-    queryKey: ['metrics', serverId, hours],
+    queryKey: ['metrics', serverId, 1],
     queryFn: () => {
       const query = new URLSearchParams({
         limit: '100',
-        from: new Date(Date.now() - hours * 3600000).toISOString(),
+        from: new Date(Date.now() - 3600000).toISOString(),
       });
       return api<Metrics>(`${platformPath(serverId)}/metrics?${query}`);
     },
@@ -540,21 +538,6 @@ export function Telemetry({ serverId }: { serverId: string }) {
         />
       )}
       {Boolean(stale) && <Notice>{t('service.staleTelemetry')}</Notice>}
-      <div className="toolbar">
-        <Select
-          label={t('service.period')}
-          value={hours}
-          onChange={(event) => {
-            setHours(Number(event.target.value));
-          }}
-        >
-          {[1, 6, 24, 168].map((value) => (
-            <option value={value} key={value}>
-              {t('service.hours', { count: value })}
-            </option>
-          ))}
-        </Select>
-      </div>
       {history.isPending ? (
         <Loading />
       ) : history.error ? (

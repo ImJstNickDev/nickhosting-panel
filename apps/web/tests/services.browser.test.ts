@@ -210,6 +210,22 @@ describe('M5 browser files, backups, console and automation', () => {
         await user.setViewportSize(viewport);
         await user.goto(`${base}/console`);
         await browserExpect(user.locator('figure.metric-chart')).toHaveCount(3);
+        await browserExpect(user.getByRole('combobox')).toHaveCount(0);
+        if (locale === 'en') {
+          const positions = await user.locator('figure.metric-chart').evaluateAll((charts) =>
+            charts.map((chart) => ({
+              heading: chart.querySelector('h3')?.getBoundingClientRect().y,
+              graph: chart.querySelector(':scope > svg')?.getBoundingClientRect().y,
+              axis: chart.querySelector(':scope > svg text')?.getBoundingClientRect().y,
+              time: chart.querySelector(':scope > svg text:last-child')?.getBoundingClientRect().y,
+            })),
+          );
+          for (const key of ['heading', 'graph', 'axis', 'time'] as const) {
+            const first = positions[0]?.[key];
+            if (first === undefined) throw new Error(`Missing chart ${key}`);
+            for (const position of positions) expect(position[key]).toBeCloseTo(first, 0);
+          }
+        }
         const chart = user.locator('figure.network-chart');
         await browserExpect(chart).toBeVisible();
         await browserExpect(chart.locator('svg[role="img"]')).toHaveCount(1);

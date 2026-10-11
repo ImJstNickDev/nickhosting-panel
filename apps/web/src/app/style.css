@@ -712,6 +712,7 @@
     min-width: 0;
   }
   .metric-chart figcaption {
+    min-height: 32px;
     display: flex;
     gap: 0.5rem;
     align-items: center;

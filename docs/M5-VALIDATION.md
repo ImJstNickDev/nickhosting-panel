@@ -3602,3 +3602,19 @@ inbound painted after amber outbound so coincident/zero values show blue.
 The same network-only browser command passed again (**1 passed / 19 skipped**),
 now asserting paint order and solid strokes; EN/IT screenshots regenerated and
 mobile inspected. Independent review confirmed legend order/data remain unchanged.
+
+## 2026-10-11 — Fixed last-hour view and aligned chart headers
+
+Removed Period/selector, its state and unused labels; metrics requests keep a
+rolling one-hour `from` bound with the existing 100-sample limit. Network legend
+buttons made that caption 32px high while text-only memory/CPU captions were
+shorter, shifting the network title/SVG/unit/time labels downward. All chart
+captions now share a 32px minimum height.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'shares network chart scales'`: **1 passed / 19 skipped**; now checks no selector and equal desktop heading, SVG, axis-unit and time-label Y coordinates. EN/IT screenshots regenerated and desktop inspected; existing tooltip/Axe/mobile checks pass.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, scoped Biome, `scripts/dev.sh pnpm i18n:check` (1085 keys), diff/governance checks pass. Existing lint warnings only.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/app/i18n.test.ts`: initially **3 passed / 1 failed** on a pre-existing generic Owner-label assumption for dedicated sleep controls. Independent review confirmed those fields already use `sleepTiming.*` labels. The assertion now checks their actual dedicated labels, retaining coverage; plural coverage uses an existing Owner reconciliation message after removing the unused hours message. Targeted plural run passed, then the corrected complete file passed **4/4**. No unrelated product changes or broad suite rerun.
+
+Independent review found no remaining must-fix. No production interactions,
+container restarts or new infrastructure. Isolated fixtures cleaned normally;
+Vite HMR delivers the update. Rollback: source revert; PR #21 stays open/unmerged.
