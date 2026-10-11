@@ -156,3 +156,46 @@ allowlisted entries), ZIP CRC validation passed. SHA-256:
 This is a development foundation archive, not the completed key-management or
 notification extension. No installer was executed; Blade rendering and actual
 installation remain unverified.
+
+### Pre-installation source audit
+
+The actual archive was rechecked byte-for-byte against all five source files.
+No NickHosting extension directory, Application route or application namespace
+collision was found in the current Panel (read-only check). Independent review
+found no further package/source blocker for a trial of this minimal foundation.
+
+Ten in-memory PHP checks using the installed vendor libraries passed: absent,
+anonymous, browser-session and Client-token denial; Application-token servers
+ACL denial/acceptance; controller response; EN/IT Blade compilation and rendering.
+Only the Composer autoloader was loaded, not the Panel application/bootstrap or
+HTTP kernel. Unsaved token attributes were supplied in memory without database
+access. An initial harness attempt to construct a normal Eloquent model failed
+because its validation service was intentionally not bootstrapped; the harness
+was corrected to supply an unpersisted model without running its constructor.
+These checks do not replace real HTTP middleware testing after installation.
+
+**Standard Blueprint installer effects must be included in rollout approval:**
+installed beta-2025-09 runs `storage:link`, rebuilds view/config/Blueprint caches,
+clears route/application caches, signals `queue:restart`, recursively adjusts
+ownership across the Panel directory excluding node_modules, and adds executable
+permissions across extension files. These are framework actions even though our
+archive has no install hooks, migrations, schedules or frontend assets. Standard
+removal also rebuilds caches/restarts queues/adjusts ownership; it is not an exact
+rollback of pre-installation permissions.
+
+For an Owner-managed trial, place the exact reviewed `nickhosting.blueprint` in
+the Panel root, then run `blueprint -install nickhosting` there. Use a maintenance
+window and retain a restorable pre-installation Panel/Blueprint file and metadata
+backup; do not overwrite another development workspace or extension. Verify the
+admin information page, then the capabilities endpoint with the existing private
+Application credential and servers READ permission. It should return HTTP 200
+with both feature flags false; unauthenticated/Client-key requests must be denied.
+Do not include credentials in chat or diagnostic output. If successful, record
+the installed package hash and HTTP evidence before enabling any NickHosting
+caller. This foundation adds no automatic calls or Start-path behavior.
+
+Normal removal is `blueprint -remove nickhosting`, from the same Panel root.
+If installation fails partway, preserve its logs and assess partial state before
+removal/retry. Restore the pre-installation snapshot and original metadata if a
+full rollback is needed; do not claim that removal undoes shared permission
+changes. Neither installation nor removal was executed during this audit.
