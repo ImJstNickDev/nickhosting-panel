@@ -123,7 +123,7 @@ describe('M5 server Console entry and informational Status navigation', () => {
     expect((await accepted).status()).toBe(202);
     await browserExpect(
       user.getByRole('link', { name: 'View operation', exact: true }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await provider.processPending();
     await user.reload();
     await user.getByRole('button', { name: 'Restart', exact: true }).click();

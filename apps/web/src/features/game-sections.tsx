@@ -22,7 +22,6 @@ import {
   Empty,
   ErrorNotice,
   Input,
-  JobNotice,
   Loading,
   Notice,
   Section,
@@ -737,8 +736,6 @@ function GameActionForm({
         <form className="form" onSubmit={(event) => void submit(event)} aria-busy={busy}>
           {!canManage ? (
             <Notice>{t('gameUi.noPermission')}</Notice>
-          ) : activeOperation ? (
-            <Notice>{t('gameUi.operationBusy')}</Notice>
           ) : form.action?.requiresStopped && state !== 'offline' ? (
             <Notice>{t('gameUi.stopFirst')}</Notice>
           ) : null}
@@ -769,7 +766,6 @@ function GameActionForm({
           )}
         </form>
       )}
-      <JobNotice jobId={job} />
       <Dialog
         open={confirm}
         title={t('gameUi.confirmAction')}

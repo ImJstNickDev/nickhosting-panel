@@ -84,6 +84,11 @@ and accessible name. Enter submits, preserving focus; failed requests retain the
 draft and show an error, while pending requests cannot submit duplicates. Focus
 underlines the prompt symbol instead of drawing a rectangle around the input.
 
+Generic operation-accepted and operation-in-progress banners are omitted throughout
+the application. Pending/disabled controls and Activity provide operation state;
+actual errors, uncertainty and destructive confirmations remain visible. Retried
+operations retain a plain link to their new Activity record.
+
 Trusted first-party game modules own validated creation/management descriptors,
 handlers, namespaced catalogs and bundled artwork. The generic renderers use the
 browser-safe Game SDK; API JSON cannot install executable UI, remote imports or

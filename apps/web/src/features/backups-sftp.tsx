@@ -11,7 +11,6 @@ import {
   Empty,
   ErrorNotice,
   Input,
-  JobNotice,
   Loading,
   Notice,
   Section,
@@ -37,21 +36,18 @@ export function BackupsPage({ serverId }: { serverId: string }) {
     refetchInterval: 15000,
   });
   const [selected, setSelected] = useState<{ backup: Backup; action: 'restore' | 'delete' }>();
-  const [jobId, setJobId] = useState<string>();
   const [key, setKey] = useState(idempotencyKey);
   return (
     <Section title={t('web.backups')}>
-      <JobNotice jobId={jobId} />
       {transfers.error && <ErrorNotice error={transfers.error} />}
       {transfers.data?.backups.canCreate && (
         <ActionForm
           submitLabel={t('service.createBackup')}
           success={false}
           onSubmit={async () => {
-            const result = await api<{ jobId: string }>(`${serverPath(serverId)}/operations`, {
+            await api<{ jobId: string }>(`${serverPath(serverId)}/operations`, {
               body: { action: 'backup', idempotencyKey: key },
             });
-            setJobId(result.jobId);
             setKey(idempotencyKey());
             await server.refetch();
           }}
@@ -154,7 +150,7 @@ export function BackupsPage({ serverId }: { serverId: string }) {
             submitLabel={t(selected.action === 'restore' ? 'service.restore' : 'web.delete')}
             onSubmit={async (data) => {
               if (selected.action === 'restore') {
-                const result = await api<{ jobId: string }>(`${serverPath(serverId)}/operations`, {
+                await api<{ jobId: string }>(`${serverPath(serverId)}/operations`, {
                   body: {
                     action: 'restore',
                     idempotencyKey: key,
@@ -163,7 +159,6 @@ export function BackupsPage({ serverId }: { serverId: string }) {
                     truncate: data.has('truncate'),
                   },
                 });
-                setJobId(result.jobId);
               } else
                 await api(`${serverPath(serverId)}/backups/${selected.backup.uuid}`, {
                   method: 'DELETE',

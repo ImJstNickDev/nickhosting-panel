@@ -1,5 +1,4 @@
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
-import { Link } from 'react-router';
 import { ApiError, apiError } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 
@@ -283,15 +282,6 @@ export function Dialog({
       {children}
     </dialog>
   );
-}
-export function JobNotice({ jobId }: { jobId?: string }) {
-  const t = useT();
-  return jobId ? (
-    <Notice>
-      <span>{t('web.accepted')} </span>
-      <Link to={`/activity/${jobId}`}>{t('web.viewActivity')}</Link>
-    </Notice>
-  ) : null;
 }
 export function Time({ value }: { value?: string | null }) {
   const t = useT();

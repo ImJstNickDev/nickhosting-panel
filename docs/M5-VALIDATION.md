@@ -3833,3 +3833,26 @@ mobile wrapping visually inspected. Scoped Biome passed with the same three
 pre-existing warnings; independent review found no issues. No production or
 infrastructure changes, no restart. Isolated fixtures cleaned. Rollback: revert
 this scoped CSS/test change.
+
+### 2026-10-11 — Remove generic operation banners
+
+Removed the shared “Operation requested / View operation” notice from Console,
+server settings, creation, backups, game forms and Activity retry. Removed the
+generic in-progress warning from Console and game forms. Activity retry retains
+a plain link to the new operation. Actual errors, uncertain outcomes, destructive
+confirmation, job polling, idempotency and disabled-action guards remain intact;
+only notice-only state was deleted. Independent review found no must-fix issues.
+
+Checks:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-power.browser.test.ts apps/web/tests/server-navigation.browser.test.ts apps/web/tests/services.browser.test.ts -t 'disables offline|keeps lifecycle admission|creates a durable backup'`: **3 passed, 25 intentionally skipped** (42.94s). Real handlers with isolated fixtures verify capacity errors, start/stop and confirmed Kill, restart confirmation, durable backup/restore, and absence of the removed notices.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed**.
+- Scoped Biome passed after formatting the edited test; three existing non-null-assertion warnings remain in services.browser.test.ts. No full historical suite rerun. The creation test expectation was updated and typechecked, not rerun in this narrow pass.
+
+[Stopping Console](screenshots/m5/console-power-stopping-desktop-en.png) and
+[Kill confirmation](screenshots/m5/console-power-confirmation-desktop-en.png)
+were refreshed by the passing browser test; stopping layout visually reviewed.
+Browser Axe checks passed. Existing approved isolated services were reused,
+disposable fixtures cleaned. No production interactions, real server commands,
+container restarts or configuration changes. Rollback is a source revert.
+SFTPGo #18 remains unchanged; PR #21 stays open and unmerged.

@@ -114,7 +114,10 @@ describe('M5 Console Stop and confirmed force-stop escalation', () => {
     const accepted = await response;
     expect(accepted.status()).toBe(202);
     const result = (await accepted.json()) as { jobId: string; serverId: string };
-    await browserExpect(user.locator(`a[href="/activity/${result.jobId}"]`).first()).toBeVisible();
+    await browserExpect(user.getByText('Operation requested', { exact: true })).toHaveCount(0);
+    await browserExpect(
+      user.getByText('An operation is in progress. Check its result before requesting another.'),
+    ).toHaveCount(0);
     return result;
   }
 

@@ -195,7 +195,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     createdJobId = operation.jobId;
     await browserExpect(
       user.getByRole('link', { name: 'View operation', exact: true }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await quota(64);
     await provider.processPending();
     await quota(4096);

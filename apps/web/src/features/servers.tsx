@@ -19,7 +19,6 @@ import {
   Empty,
   ErrorNotice,
   Input,
-  JobNotice,
   Loading,
   Notice,
   number,
@@ -496,8 +495,7 @@ export function ServerSettings({ serverId }: { serverId: string }) {
   const t = useT(),
     server = useServer(serverId),
     request = useRequestOperation(serverId);
-  const [jobId, setJobId] = useState<string>(),
-    [destructive, setDestructive] = useState<'reinstall' | 'wipe' | 'delete' | null>(null);
+  const [destructive, setDestructive] = useState<'reinstall' | 'wipe' | 'delete' | null>(null);
   if (server.isPending) return <Loading />;
   if (server.error) return <ErrorNotice error={server.error} />;
   const data = server.data;
@@ -505,7 +503,6 @@ export function ServerSettings({ serverId }: { serverId: string }) {
   if (!data.permissions.manage) return <Notice>{t('errors.forbidden')}</Notice>;
   return (
     <>
-      <JobNotice jobId={jobId} />
       <Section title={t('platform.metadata')}>
         <ActionForm
           key={data.id}
@@ -547,7 +544,7 @@ export function ServerSettings({ serverId }: { serverId: string }) {
             submitLabel={t('web.save')}
             success={false}
             onSubmit={async (form) => {
-              const job = await request({
+              await request({
                 action: 'configure',
                 limits: {
                   ...data.limits,
@@ -556,7 +553,6 @@ export function ServerSettings({ serverId }: { serverId: string }) {
                   disk: number(form, 'disk'),
                 },
               });
-              setJobId(job.jobId);
             }}
           >
             <Input
@@ -624,12 +620,11 @@ export function ServerSettings({ serverId }: { serverId: string }) {
             submitLabel={t('web.confirm')}
             success={false}
             onSubmit={async (form) => {
-              const job = await request({
+              await request({
                 action: destructive,
                 confirm: true,
                 backupBefore: form.get('backupBefore') === 'on',
               });
-              setJobId(job.jobId);
               setDestructive(null);
             }}
           >

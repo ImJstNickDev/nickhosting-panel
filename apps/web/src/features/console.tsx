@@ -1,20 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link } from 'react-router';
 import { ApiError, api, apiError, consumeEvents, queryClient } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
-import {
-  Dialog,
-  Empty,
-  ErrorNotice,
-  JobNotice,
-  Loading,
-  Notice,
-  Section,
-  Time,
-} from '../components/ui.js';
+import { Dialog, Empty, ErrorNotice, Loading, Notice, Section, Time } from '../components/ui.js';
 import { ConsoleSummary } from './console-summary.js';
 import { useRequestOperation } from './servers.js';
 import {
@@ -153,7 +143,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   const request = useRequestOperation(serverId);
   const [powerError, setPowerError] = useState<unknown>();
   const [powerBusy, setPowerBusy] = useState(false);
-  const [jobId, setJobId] = useState<string>();
   const [restart, setRestart] = useState(false);
   const [killTarget, setKillTarget] = useState<string>();
   async function power(action: 'start' | 'stop' | 'restart' | 'kill') {
@@ -161,10 +150,9 @@ export function ConsolePage({ serverId }: { serverId: string }) {
     setPowerBusy(true);
     setPowerError(undefined);
     try {
-      const job = await request(
+      await request(
         action === 'kill' ? { action, confirm: true, operationId: killTarget } : { action },
       );
-      setJobId(job.jobId);
       setRestart(false);
       setKillTarget(undefined);
     } catch (failure) {
@@ -337,14 +325,6 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   return (
     <>
       {Boolean(powerError) && <ErrorNotice error={powerError} />}
-      <JobNotice jobId={jobId} />
-      {server.data?.activeOperationId && (
-        <Notice>
-          <Link to={`/activity/${server.data.activeOperationId}`}>
-            {t('platform.operationBlocksActions')}
-          </Link>
-        </Notice>
-      )}
       {server.data?.firstStart && server.data.runtimeState === 'offline' && (
         <Notice>
           {t('platform.initialStartDenied')} <Time value={server.data.firstStart.occurredAt} />

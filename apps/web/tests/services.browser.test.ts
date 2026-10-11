@@ -814,8 +814,13 @@ describe('M5 browser files, backups, console and automation', () => {
     const files = await provider.files();
     files.set('restore-proof.txt', Buffer.from('Before backup'));
     await user.goto(`${base}/backups`);
+    const accepted = user.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' && response.url().endsWith('/operations'),
+    );
     await user.getByRole('button', { name: 'Create backup', exact: true }).click();
-    await browserExpect(user.getByText('Operation requested', { exact: false })).toBeVisible();
+    expect((await accepted).status()).toBe(202);
+    await browserExpect(user.getByText('Operation requested', { exact: false })).toHaveCount(0);
     const progress = await provider.processPending();
     expect(
       progress.every((p) => p.result !== 'failed'),

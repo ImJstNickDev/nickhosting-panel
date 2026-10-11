@@ -16,7 +16,6 @@ import {
   Dialog,
   Empty,
   ErrorNotice,
-  JobNotice,
   Loading,
   Notice,
   Page,
@@ -248,7 +247,7 @@ export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
         {data.state === 'failed' && !data.retry.allowed && !uncertain && (
           <Notice>{t('platform.noRetry')}</Notice>
         )}
-        <JobNotice jobId={newJob} />
+        {newJob && <Link to={`/activity/${newJob}`}>{t('web.viewActivity')}</Link>}
         {data.retry.allowed && !newJob && (
           <ActionForm
             submitLabel={t('platform.retryOperation')}

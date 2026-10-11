@@ -12,7 +12,6 @@ import {
   Empty,
   ErrorNotice,
   Input,
-  JobNotice,
   Loading,
   Page,
   Section,
@@ -227,7 +226,6 @@ export function CreateServerPage() {
     return (
       <Page title={t('web.createServer')}>
         <Section>
-          <JobNotice jobId={result.jobId} />
           <Link to={`/servers/${result.serverId}`}>{t('web.openServer')}</Link>
         </Section>
       </Page>
