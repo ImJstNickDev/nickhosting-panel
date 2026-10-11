@@ -8,6 +8,7 @@ import zipfile
 FILES = (
     'conf.yml',
     'admin/view.blade.php',
+    'admin/controller.php',
     'app/Http/Controllers/BridgeController.php',
     'app/Http/Controllers/CapabilitiesController.php',
     'app/Http/Requests/CapabilitiesRequest.php',
@@ -15,10 +16,12 @@ FILES = (
     'app/Providers/BridgeServiceProvider.php',
     'app/Services/ChangeFeed.php',
     'app/Services/Protocol.php',
+    'app/Services/Settings.php',
     'private/configure.php',
     'private/install.sh',
     'private/migrations/2026_10_11_000001_nickhosting_bridge.php',
     'private/remove.sh',
+    'private/migrations/2026_10_11_000002_nickhosting_settings.php',
     'routes/application.php',
 )
 ROOT = Path(__file__).absolute().parent
@@ -62,6 +65,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.0.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.0.1/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

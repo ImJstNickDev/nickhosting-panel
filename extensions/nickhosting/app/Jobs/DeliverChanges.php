@@ -33,7 +33,7 @@ final class DeliverChanges implements ShouldQueue
             $instance = DB::table('nickhosting_instances')->where('id', $row->instance_id)->first();
             if (!$instance) { continue; }
             try {
-                $origins = config('nickhosting_bridge.callback_origins', []);
+                $origins = app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\Settings::class)->origins();
                 if (!Protocol::callbackAllowed($instance->callback_url, $origins)) { throw new \RuntimeException('Destination not allowed'); }
                 $timestamp = (string) time();
                 $response = Http::connectTimeout(2)->timeout(4)->withoutRedirecting()->withHeaders([

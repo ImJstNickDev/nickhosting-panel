@@ -32,6 +32,9 @@ $validator->setPresenceVerifier($presence);
 Request::macro('validate', function (array $rules) use ($validator) { return $validator->make($this->all(), $rules)->validate(); });
 \Laravel\Sanctum\Sanctum::usePersonalAccessTokenModel(\Pterodactyl\Models\ApiKey::class);
 $schemaMigration->up();
+Schema::create('settings', function ($t) { $t->string('key')->primary(); $t->text('value'); });
+$settings = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Settings();
+$settings->save('https://review.example');
 Schema::create('servers', function ($t) {
     $t->increments('id'); $t->string('uuid'); $t->string('uuidShort'); $t->string('external_id'); $t->integer('node_id');
     foreach (['memory','swap','disk','io','cpu'] as $field) { $t->integer($field); }
@@ -151,4 +154,70 @@ try {
     try { nickhostingWriteConfig($temporary,$configuration,$registered); throw new LogicException('not rejected'); }
     catch (RuntimeException $e) { check(file_get_contents($temporary)===$registered,'concurrent edit rejected without truncation'); }
 } finally { unlink($temporary); }
+
+$settingsClass = Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Settings::class;
+check($settingsClass::normalizeOrigin(' https://EXAMPLE.test:443/ ') === 'https://example.test', 'canonical HTTPS origin');
+foreach (['http://example.test', 'https://user:pass@example.test', 'https://example.test/a', 'https://example.test?x=1', 'https://example.test#x', 'https://example.test\\evil', 'not-url'] as $invalid) {
+    check($settingsClass::normalizeOrigin($invalid) === null, 'reject invalid origin ' . $invalid);
+}
+$settings->save('');
+check($settings->origins() === [], 'blank disables delivery origins');
+$settings->migrateLegacy(['https://review.example']);
+check($settings->origin() === '', 'migration preserves explicitly disabled setting');
+DB::table('settings')->delete();
+$settings->migrateLegacy(['https://one.example', 'https://two.example']);
+check($settings->origin() === '', 'ambiguous legacy origins not silently selected');
+$settings->migrateLegacy(['https://review.example']);
+check($settings->origin() === 'https://review.example', 'legacy origin migration');
+$settings->save('https://other.example');
+check(!Protocol::callbackAllowed($registration['callbackUrl'], $settings->origins()), 'old callback immediately blocked');
+DB::table('nickhosting_outbox')->update(['delivered_at'=>null,'available_at'=>now()->subSecond()]);
+$attemptedRequests=0;
+$http = new Illuminate\Http\Client\Factory(); Illuminate\Support\Facades\Http::swap($http);
+$http->fake(function () use (&$attemptedRequests) { $attemptedRequests++; return Illuminate\Support\Facades\Http::response('',204); });
+(new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Jobs\DeliverChanges())->handle();
+check($attemptedRequests===0 && DB::table('nickhosting_outbox')->whereNull('delivered_at')->count()>0,'changed origin prevents actual outbound delivery and preserves pending events');
+
+$settings->migrateLegacy(['https://review.example']);
+check($settings->origin() === 'https://other.example', 'migration preserves Owner update');
+denied(fn () => $controller->register(req($registration),$instance),422,'registration uses changed origin immediately');
+$adminClass = Pterodactyl\Http\Controllers\Admin\Extensions\nickhosting\nickhostingExtensionController::class;
+$admin = (new ReflectionClass($adminClass))->newInstanceWithoutConstructor();
+$property = new ReflectionProperty($adminClass, 'settings'); $property->setValue($admin, $settings);
+$anonymous = Request::create('/', 'PATCH', ['origin' => 'https://evil.example']);
+denied(fn () => $admin->update($anonymous),403,'anonymous admin save rejected');
+$ordinary = clone $anonymous; $ordinary->setUserResolver(fn () => (object)['root_admin'=>false]);
+denied(fn () => $admin->update($ordinary),403,'ordinary user admin save rejected');
+$owner = clone $anonymous; $owner->setUserResolver(fn () => (object)['root_admin'=>true]);
+$owner->replace(['origin'=>'https://example.test/path']);
+$app->instance('translator', $translator); $app->setLocale('en');
+try { $admin->update($owner); throw new LogicException('not rejected'); }
+catch (Illuminate\Validation\ValidationException $e) { check($settings->origin()==='https://other.example','invalid admin URL leaves stored origin unchanged'); }
+$router = new Illuminate\Routing\Router(new Illuminate\Events\Dispatcher($app), $app);
+$url = new Illuminate\Routing\UrlGenerator($router->getRoutes(), Request::create('https://panel.example'));
+$redirector = new Illuminate\Routing\Redirector($url); $redirector->setSession(new Illuminate\Session\Store('admin-save', new Illuminate\Session\ArraySessionHandler(120)));
+$app->instance('redirect', $redirector);
+$owner->replace(['origin'=>'https://NEW.example/']);
+$redirect = $admin->update($owner);
+check($settings->origin()==='https://new.example' && $redirect->getStatusCode()===302,'administrator saves canonical origin');
+// Compile/render the actual Blade with framework directives, escaped input and both locales.
+$files = new Illuminate\Filesystem\Filesystem();
+$compiler = new Illuminate\View\Compilers\BladeCompiler($files, sys_get_temp_dir());
+$engine = new Illuminate\View\Engines\EngineResolver();
+$finder = new Illuminate\View\FileViewFinder($files, []);
+$views = new Illuminate\View\Factory($engine, $finder, new Illuminate\Events\Dispatcher($app));
+$session = new Illuminate\Session\Store('test', new Illuminate\Session\ArraySessionHandler(120));
+$app->instance('session', $session); $session->start();
+$renderRequest = Request::create('/'); $renderRequest->setLaravelSession($session); $app->instance('request', $renderRequest);
+$errors = new Illuminate\Support\ViewErrorBag();
+$origin = 'https://review.example'; $root = '/admin/extensions/nickhosting';
+$instances = collect([['callback'=>'https://review.example/v1/events','allowed'=>true,'pending'=>2,'lastDelivered'=>null]]);
+$__env = $views;
+foreach (['en','it'] as $locale) {
+    $app->setLocale($locale);
+    ob_start(); eval('?>' . $compiler->compileString($settingsView)); $html=ob_get_clean();
+    check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
+    check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
+    check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
+}
 echo "$count checks passed\n";

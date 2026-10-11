@@ -42,6 +42,14 @@ class PackageTests(unittest.TestCase):
             packager.build(self.source, missing_output)
         self.assertFalse(missing_output.exists())
 
+    def test_settings_controller_and_migration_packaged(self):
+        self.assertIn('  controller: admin/controller.php', (self.source / 'conf.yml').read_text())
+        packager.build(self.source, self.output)
+        with zipfile.ZipFile(self.output) as archive:
+            for name in ('admin/controller.php', 'app/Services/Settings.php', 'private/migrations/2026_10_11_000002_nickhosting_settings.php'):
+                self.assertIn(name, archive.namelist())
+        self.assertNotIn('config/nickhosting_bridge.php', packager.FILES)
+
     def test_blueprint_expansion_preserves_key_route_parameter(self):
         routes = (self.source / "routes/application.php").read_text().replace("{identifier}", "nickhosting")
         self.assertIn("/keys/{keyIdentifier}/rotate", routes)

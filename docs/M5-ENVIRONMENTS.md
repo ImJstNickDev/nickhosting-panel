@@ -894,3 +894,10 @@ provider API if synchronization is stale or invalid. No existing provider accoun
 has been migrated to per-user keys: that consumer work remains in issue #25.
 Rebuilding an image must include all current database migrations; starting the
 stack still does not apply them automatically.
+
+Blueprint 1.0.1 exposes the allowed NickHosting HTTPS origin under **Panel Admin →
+Extensions → NickHosting**. Existing dev configuration migrates without re-entry;
+subsequent saves use Blueprint database settings, not PHP configuration files or
+worker restarts. Registered callback destinations are not automatically retargeted
+when this field changes. The administration page displays actual pending events
+and the last acknowledged delivery; saving a URL alone does not prove connection.

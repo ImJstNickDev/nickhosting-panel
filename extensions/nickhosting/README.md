@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.0.0**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.0.1**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
@@ -29,11 +29,21 @@ is pinned to the registering Application token's database ID. Changing that
 Application key requires a deliberate bridge migration, not silent takeover.
 Registration body: `{callbackUrl, webhookSecret}`; secret is 64 lowercase hex
 characters, used as its **literal string** in HMAC (not hex-decoded). Only HTTPS
-origins explicitly listed in the deployment-owned `config/nickhosting_bridge.php`
-`callback_origins` array are accepted. No userinfo, query, fragment or redirects.
-No origin is allowed by default. The config file is not shipped in the archive
-and install never overwrites an existing copy. A permitted origin remains a
-trusted administrative destination; this is not arbitrary-user URL fetching.
+origin selected in the extension's administrator page is accepted. Blueprint
+stores it in the namespaced `nickhosting::origin` setting; registration and each
+delivery read it dynamically. No userinfo, query, fragment or redirects.
+Blank disables registrations and delivery. Saving an origin does not retarget
+existing instance callbacks or prove connectivity; the page shows actual pending
+notifications and last acknowledged delivery. The approved origin is a trusted
+administrative destination, not an arbitrary-user URL.
+
+The update migrates a single valid legacy `config/nickhosting_bridge.php` origin
+only when the setting is absent. Existing values, including blank, are preserved;
+multiple legacy origins require explicit Owner selection. The legacy file becomes
+inert and may be removed after backup and migration verification. A rollback to
+1.0.0 requires restoring that configuration. Hostname changes also require a
+separately planned NickHosting instance migration; saving the new URL alone does
+not silently retarget identities.
 
 Server link identity: `{providerId, providerUuid, identifier, externalId, nodeId}`.
 Every field must match the live Panel model. A name/prefix is never proof.
@@ -95,8 +105,7 @@ The standard Blueprint install command also updates an existing extension. The
 new package's `private/install.sh` runs on install/update. It migrates **only** the
 extension-owned migration path, then adds a marked provider entry in `config/app.php`.
 The hook refuses unknown layouts and keeps a permission-restricted source backup
-under `storage/app`. Installation creates an empty callback allowlist only if none
-exists. No Panel core migration, account mutation or server operation is invoked.
+under `storage/app`. Installation migrates the legacy callback origin without overwriting Owner settings. No Panel core migration, account mutation or server operation is invoked.
 
 The provider must load in HTTP, CLI and queue contexts even with route caching.
 Standard Blueprint finalization rebuilds config/cache and signals queue restart;
@@ -105,7 +114,7 @@ back up the Panel before an approved install. Hook exit failures must be checked
 in output: do not assume Blueprint's final success banner proves migration success.
 
 Uninstall removes only the exact marked provider entry. It deliberately retains
-outbox, audit, instance links, callback config and issued keys for recovery and
+outbox, audit, instance links, Blueprint settings and issued keys for recovery and
 accountability. Revoke keys explicitly before uninstall if intended. The migration
 refuses destructive down: data retirement requires a separately reviewed backup
 and scoped operation. Rolling back code is not rollback of Panel permissions or
@@ -125,7 +134,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.0.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.0.1/nickhosting.blueprint`.
 
 ## Upstream reference / licensing
 

@@ -12,7 +12,7 @@ class CapabilitiesController
         return new JsonResponse([
             'schemaVersion' => 1,
             'extension' => 'nickhosting',
-            'extensionVersion' => '1.0.0',
+            'extensionVersion' => '1.0.1',
             'target' => [
                 'panel' => '1.11.11',
                 'blueprint' => 'beta-2025-09',

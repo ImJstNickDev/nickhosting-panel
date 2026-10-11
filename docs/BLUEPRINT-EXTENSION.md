@@ -346,3 +346,73 @@ red on the pre-existing `games/minecraft/src/ui/assets/player-placeholder.svg`
 missing SVG title, with 32 warnings and two informational diagnostics. That
 unrelated UI asset was not changed in this extension task; this is not reported
 as a full lint pass. Private backups and built archives remain gitignored.
+
+## 2026-10-11 — 1.0.1 administration settings
+
+The callback destination moves from a manually maintained PHP configuration file
+into the extension administration page. Blueprint beta-2025-09 already provides
+custom admin controllers and namespaced `dbGet`/`dbSet` settings; this mechanism is
+used for the NickHosting HTTPS origin. The existing admin session and CSRF
+middleware remain responsible for browser access, with explicit administrator
+checks on configuration writes. No Application or Client credential is exposed.
+
+The configured origin authorizes delivery; it does not silently rewrite existing
+registered callbacks, rotate webhook secrets or import servers. NickHosting's
+configured public URL must agree with it. A blank origin disables delivery.
+Status reflects actual registered instances and delivery records, not an assumed
+successful connection merely because the URL was saved. Changes are read by the
+extension without restarting the Panel or manually editing PHP files.
+
+The original single managed provider registration in `config/app.php` remains:
+installed Blueprint has no service-provider manifest binding. `requests.app`
+loads classes but does not boot listeners; registering them from a route file is
+unsafe because Laravel can skip route-file execution when routes are cached.
+The registration remains installation-managed and reversible. The standard
+Blueprint installer still performs its documented shared cache/queue/ownership
+operations. These are separate from ordinary URL edits in the administration UI.
+
+Upgrade must preserve the existing allowed origin, avoid overwriting already
+saved settings, and retain an ignored backup before retiring the old extension
+configuration file. This does not authorize edits to provider accounts, servers,
+eggs, networks or Wings. Historical 1.0.0 configuration and test evidence above
+remains unchanged.
+
+### Settings validation
+
+- `python3 extensions/nickhosting/tests/run_php_tests.py --container <panel>`:
+  **72 checks passed**, using SQLite memory fixtures and the installed Composer
+  libraries without bootstrapping the production application. Includes actual
+  authorized save, anonymous/non-admin rejection, invalid-input nonmutation,
+  legacy-value preservation, changed-origin delivery blocking, and EN/IT Blade
+  compile/render with CSRF fields.
+- `python3 -m unittest discover -s extensions/nickhosting/tests -p 'test_*.py'`:
+  **8 passed**. Expanded PHP syntax and shell hook syntax passed.
+- Chromium screenshots of the actual rendered Blade with native Bootstrap/AdminLTE
+  styles: [English desktop](screenshots/m5/blueprint-settings-desktop-en.png) and
+  [Italian mobile](screenshots/m5/blueprint-settings-mobile-it.png). No horizontal
+  overflow at 1100/390 pixels; independent UX/content inspection found no must-fix.
+  These are isolated template fixtures, not a logged-in production browser flow.
+  Initial browser launch lacked libatk; the existing user-local browser library
+  path resolved it without any system installation.
+- Independent security/configuration review found no remaining must-fix. No
+  historical TypeScript, game-server or full milestone suite was repeated for
+  this PHP-only change.
+
+The 1.0.1 package SHA-256 is
+`e4edef6d88202edde06244f89a451bfd285edec16863cd3f03b2e389c26f29c9`.
+A private pre-update backup retains the 1.0.0 artifact and relevant extension and
+Panel configuration. The scoped settings migration ran successfully and a
+read-only comparison confirmed that the configured origin was preserved exactly.
+Live discovery returned 1.0.1 with HTTP 200; anonymous and Client-key requests
+remained rejected with 401/403. No existing server/account settings were modified.
+
+The approved Blueprint update completed successfully. A duplicate-revision
+notification probe, enqueued only in the extension's own outbox after verifying
+the existing linked identity, was acknowledged on its **first attempt**. No server
+model, power state, file or account was changed by this probe. The legacy PHP
+configuration was then moved to a private `storage/app` backup after verifying
+that its sole origin matched the migrated setting. It is no longer present under
+`config/`; configuration cache was refreshed. For a 1.0.0 rollback restore that
+specific backed-up file before activating the old artifact. Normal 1.0.1 settings
+edits need neither file changes nor cache rebuilds. Governance passed for 570
+indexed text files, 140 PNGs, 473 relative links, four TOML files and 44 ignore cases.

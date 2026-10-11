@@ -46,7 +46,7 @@ final class BridgeController
         $key = $this->authorize($request, 'servers');
         $input = $request->validate(['callbackUrl' => 'required|string|max:2048',
             'webhookSecret' => ['required','string','regex:/^[a-f0-9]{64}$/']]);
-        abort_unless(Protocol::callbackAllowed($input['callbackUrl'], config('nickhosting_bridge.callback_origins', [])), 422);
+        abort_unless(Protocol::callbackAllowed($input['callbackUrl'], app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\Settings::class)->origins()), 422);
         DB::transaction(function () use ($instance, $key, $input) {
             $old = DB::table('nickhosting_instances')->where('id', $instance)->lockForUpdate()->first();
             abort_if($old && $old->api_key_id !== $key->id, 403);
