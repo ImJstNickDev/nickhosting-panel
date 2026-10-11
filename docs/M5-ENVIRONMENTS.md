@@ -870,3 +870,14 @@ identity, topology, reachability and game-readiness checks to registrations. A s
 route or delivered snapshot is reported as configured, not proof of external reachability.
 No migrations, container recreation, network edits, DNS writes or Owner setting
 changes are needed for this source update in the existing watched dev API/worker.
+
+### Physical observation cadence (2026-10-11)
+
+The worker independently collects configured observer-owned hosts with a
+one-second target cadence. Fresh database samples are shared by API/worker
+admission, with a hard four-second age ceiling. No configured host is created
+automatically. The collector does not require provider credentials. Failure leaves
+no fabricated capacity; a request attempts a coordinated fresh observation and
+rejects if no valid observation is available. The first collection uses a 250ms
+CPU window; subsequent periodic ticks use counter deltas without that delay.
+No new container, mount, service, migration or network attachment is introduced.

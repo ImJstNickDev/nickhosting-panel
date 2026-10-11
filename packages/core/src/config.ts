@@ -174,7 +174,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   defaultServerStorageMiB: 4096,
   maxServersPerUser: null,
   maxConcurrentProvisionsPerUser: 4,
-  observationMaxAgeSeconds: 15,
+  observationMaxAgeSeconds: 4,
   sftpCredentialTtlSeconds: 3600,
   gameIdleTimeouts: {},
   defaultIdleTimeoutSeconds: -1,

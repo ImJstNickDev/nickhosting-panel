@@ -8,7 +8,9 @@ import {
   createManagementRuntime,
   createManagementTransportCoordinator,
   recordWorkerHeartbeat,
+  refreshHostObservations,
 } from '@nickhosting/server-management';
+import { startHostObservationLoop } from './host-observations.js';
 import { pollMinecraftMetadata } from './minecraft-metadata.js';
 import { reconcileServers } from './reconcile.js';
 import { pollSchedules } from './schedules.js';
@@ -51,6 +53,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         return row ? (await management()).process(jobId) : processJob(db, jobId);
       },
     });
+    const observations = startHostObservationLoop(
+      async () => {
+        await refreshHostObservations(db, env, { force: true });
+      },
+      () => logger.log('warn', 'host.observation_unavailable'),
+    );
     let stopping = false;
     const workerInstanceId = randomUUID();
     const heartbeat = async (state: 'running' | 'degraded' | 'stopped') => {
@@ -99,7 +107,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         stopping = true;
         if (timer) clearTimeout(timer);
         if (metadataTimer) clearTimeout(metadataTimer);
-        await Promise.all([reconciliation, metadataPoll]);
+        await Promise.all([reconciliation, metadataPoll, observations.close()]);
         try {
           await runtime.close();
         } finally {

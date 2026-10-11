@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
 import { type Database, getSettings, type HostSnapshot, recordAudit } from '@nickhosting/database';
 import { type Kysely, sql, type Transaction } from 'kysely';
@@ -93,8 +93,19 @@ export const hostSnapshotSchema = z
     availableDiskMiB: quantity,
     managed: z.record(z.uuid(), z.object({ memoryMiB: quantity, cpuPercent: quantity }).strict()),
     observedAt: z.iso.datetime(),
+    sourceFingerprint: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
   })
   .strict();
+
+/** Private binding prevents reuse after an effective observation path change. */
+export function hostObservationFingerprint(hostId: string, observerId: string, path: string) {
+  return createHash('sha256')
+    .update(JSON.stringify([hostId, observerId, path]))
+    .digest('hex');
+}
 
 /** Host and user locks have one global order across creation/admission/policy updates. */
 export async function lockResources(tx: DB) {
@@ -124,11 +135,14 @@ export async function checkedObservation(tx: DB, hostId: string, env: Environmen
     observation.observer_id !== host.observer_id ||
     !parsed.success ||
     age < 0 ||
-    age > config.observationMaxAgeSeconds * 1000
+    age > Math.min(config.observationMaxAgeSeconds, 4) * 1000
   )
     throw new DomainError('resources_unavailable');
   if (
     parsed.data.availableMemoryMiB > parsed.data.totalMemoryMiB ||
+    (parsed.data.sourceFingerprint !== undefined &&
+      parsed.data.sourceFingerprint !==
+        hostObservationFingerprint(hostId, host.observer_id, host.local_disk_path)) ||
     new Date(parsed.data.observedAt).getTime() !== observation.observed_at.getTime()
   )
     throw new DomainError('resources_unavailable');
@@ -501,6 +515,7 @@ export async function observeLocalHost(
   observerId: string,
   managed: HostSnapshot['managed'],
   env: Environment = {},
+  sample: typeof sampleLocalResources = sampleLocalResources,
 ) {
   const host = resolveHostOverride(
     await db
@@ -511,8 +526,12 @@ export async function observeLocalHost(
     env,
   );
   if (host.observer_id !== observerId) throw new DomainError('configuration_invalid');
-  const measured = await sampleLocalResources(host.local_disk_path);
-  const snapshot = hostSnapshotSchema.parse({ ...measured, managed });
+  const measured = await sample(host.local_disk_path);
+  const snapshot = hostSnapshotSchema.parse({
+    ...measured,
+    managed,
+    sourceFingerprint: hostObservationFingerprint(hostId, observerId, host.local_disk_path),
+  });
   const now = new Date(snapshot.observedAt);
   await db
     .insertInto('host_observations')
@@ -523,11 +542,14 @@ export async function observeLocalHost(
       observed_at: now,
     })
     .onConflict((c) =>
-      c.column('host_id').doUpdateSet({
-        snapshot: JSON.stringify(snapshot),
-        observed_at: now,
-        observer_id: observerId,
-      }),
+      c
+        .column('host_id')
+        .doUpdateSet({
+          snapshot: JSON.stringify(snapshot),
+          observed_at: now,
+          observer_id: observerId,
+        })
+        .where('host_observations.observed_at', '<', now),
     )
     .execute();
   return snapshot;

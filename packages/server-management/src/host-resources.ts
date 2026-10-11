@@ -3,11 +3,54 @@ import { cpus } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DomainError } from '@nickhosting/core';
 
+type CpuCounters = ReturnType<typeof cpus>[number]['times'][];
+
+export type HostResourceSample = Awaited<ReturnType<typeof readResources>>;
+
+/** Per-observer baseline: no shared global state or cached filesystem observations. */
+export function createHostResourceSampler() {
+  let baseline: { counters: CpuCounters; at: number } | undefined;
+  let tail: Promise<unknown> = Promise.resolve();
+  const pending = new Map<string, Promise<HostResourceSample>>();
+  const collect = async (path: string): Promise<HostResourceSample> => {
+    try {
+      const now = performance.now();
+      const elapsed = baseline ? now - baseline.at : 0;
+      const warm = baseline && elapsed >= 250 && elapsed <= 4000;
+      const before = warm && baseline ? baseline.counters : cpus().map((cpu) => ({ ...cpu.times }));
+      if (!warm) await delay(250);
+      const after = cpus().map((cpu) => ({ ...cpu.times }));
+      const at = performance.now();
+      const result = await readResources(path, before, after);
+      baseline = { counters: after, at };
+      return result;
+    } catch (error) {
+      baseline = undefined;
+      throw error;
+    }
+  };
+  return {
+    sample(path: string): Promise<HostResourceSample> {
+      const existing = pending.get(path);
+      if (existing) return existing;
+      const result = tail.then(() => collect(path));
+      pending.set(path, result);
+      tail = result.then(
+        () => pending.delete(path),
+        () => pending.delete(path),
+      );
+      return result;
+    },
+  };
+}
+
+/** Compatibility one-shot collector; periodic observers should retain a sampler. */
+export function sampleLocalResources(path: string) {
+  return createHostResourceSampler().sample(path);
+}
+
 /** The host counters, not the application's cgroup CPU quota, define physical capacity. */
-export async function sampleLocalResources(path: string) {
-  const before = cpus().map((cpu) => cpu.times);
-  await delay(250);
-  const after = cpus().map((cpu) => cpu.times);
+async function readResources(path: string, before: CpuCounters, after: CpuCounters) {
   if (!before.length || before.length !== after.length)
     throw new DomainError('integration_unavailable');
   let idle = 0;
@@ -25,12 +68,12 @@ export async function sampleLocalResources(path: string) {
     }
   }
   if (!Number.isFinite(total) || total <= 0) throw new DomainError('integration_unavailable');
-  const info = await readFile('/proc/meminfo', 'utf8');
+  const observedAt = new Date().toISOString();
+  const [info, disk] = await Promise.all([readFile('/proc/meminfo', 'utf8'), statfs(path)]);
   const amount = (name: string) =>
     Number(new RegExp(`^${name}:\\s+(\\d+)\\s+kB$`, 'm').exec(info)?.[1]) / 1024;
   const totalMemoryMiB = amount('MemTotal');
   const availableMemoryMiB = amount('MemAvailable');
-  const disk = await statfs(path);
   const availableDiskMiB = (disk.bavail * disk.bsize) / 1048576;
   if (
     !Number.isFinite(totalMemoryMiB) ||
@@ -50,6 +93,6 @@ export async function sampleLocalResources(path: string) {
     cpuCapacityPercent,
     cpuBusyPercent: (1 - idle / total) * cpuCapacityPercent,
     availableDiskMiB,
-    observedAt: new Date().toISOString(),
+    observedAt,
   };
 }

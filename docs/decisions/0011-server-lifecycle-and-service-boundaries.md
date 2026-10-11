@@ -301,3 +301,31 @@ Restart, provisioning initial_start, stop/kill, destructive operations and
 prepared/uncertain recovery keep their existing proofs. No blind replay or
 synthetic offline telemetry is introduced. This amendment changes dispatch
 validation, not the persistence/recovery guarantees or production-release gates.
+
+## 2026-10-11 amendment — Periodic physical observations
+
+The worker runs a provider-independent observation loop on a one-second target
+cadence, without overlapping ticks. API/worker admission reads reuse PostgreSQL
+observations no older than four seconds (or a stricter configured age). Legacy
+settings above four seconds cannot extend this cap. A missing/stale sample causes
+a coordinated fresh collection; unavailable observations continue to reject
+admission. Stop/Kill still do not sample capacity.
+
+A retained collector computes physical CPU deltas between ticks; first/stale
+baselines warm up for 250ms. Memory and filesystem reads run concurrently. CPU
+capacity is host-wide, not the application container quota. Disk remains statfs,
+never recursive filesystem scanning. Sample timestamps conservatively precede
+the asynchronous reads.
+
+Per-host PostgreSQL advisory try-locks deduplicate producers across processes.
+Requests wait at most 600ms for a competing producer; periodic ticks skip locked
+hosts. Samples bind host/observer/effective disk path and host edits are fenced
+with a row lock. Newer observations cannot be overwritten by late older results;
+invalid future observations are replaced transactionally or retained on failure.
+No sample is granted permanent freshness. Shutdown awaits in-flight collection.
+
+Admission retains its existing serialized conservative accounting of game and
+installer commitments. Reusing a measurement does not reuse already-reserved
+capacity. This change does not add credits based on asynchronously observed
+managed-server usage or redefine the accounting policy. No schema migration,
+provider credentials or Docker/network configuration changes are required.

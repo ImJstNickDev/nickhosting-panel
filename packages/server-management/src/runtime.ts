@@ -17,12 +17,7 @@ import {
   type PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
-import {
-  type Environment,
-  observeLocalHost,
-  reserveInstallation,
-  reserveStart,
-} from './admission.js';
+import { type Environment, reserveInstallation, reserveStart } from './admission.js';
 import { resolveHostOverride } from './configuration.js';
 import {
   cleanupServerExternalServices,
@@ -34,6 +29,7 @@ import {
   type RuntimeImageContext,
   trustedGameModules,
 } from './game-modules.js';
+import { refreshHostObservations } from './host-observations.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
   createLifecycleProcessor,
@@ -332,23 +328,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
   };
 
   async function refreshObservations(connection: Kysely<Database> = db, serverId?: string) {
-    const hosts = serverId
-      ? await connection
-          .selectFrom('physical_hosts as host')
-          .innerJoin('managed_nodes as node', 'node.physical_host_id', 'host.id')
-          .innerJoin('managed_servers as server', 'server.node_id', 'node.id')
-          .selectAll('host')
-          .where('server.id', '=', serverId)
-          .execute()
-      : await connection.selectFrom('physical_hosts').selectAll().execute();
-    for (const stored of hosts) {
-      const host = resolveHostOverride(stored, env);
-      if (host.enabled && env.NH_OBSERVER_ID === host.observer_id) {
-        // Conservative admission does not credit cached managed telemetry against
-        // a newer host sample. All direct servers and other workloads stay counted.
-        await observeLocalHost(connection, host.id, env.NH_OBSERVER_ID, {}, env);
-      }
-    }
+    await refreshHostObservations(connection, env, { serverId });
   }
   async function prepareStartAdmission(
     serverId: string,
@@ -767,7 +747,6 @@ export async function createManagementRuntime(options: ManagementOptions) {
         failures.push(server.id);
       }
     }
-    await refreshObservations();
     const external = options.reconcileExternal
       ? await options.reconcileExternal(db)
       : await reconcileExternalServices(db, externalOptions);

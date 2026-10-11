@@ -4077,3 +4077,40 @@ sample remains, so 300–400ms end-to-end is not established. No live commands,
 manual restarts or new infrastructure/test assets. Development source watchers
 may reload API/worker. Rollback: source revert, no migrations. PR #21 stays open
 and unmerged; SFTPGo #18 remains a production-release gate.
+
+### 2026-10-11 — Periodic host sampling and four-second freshness
+
+Implemented retained CPU-counter sampler, parallel RAM/statfs reads, independent
+worker one-second loop, shared fresh PostgreSQL observations and coordinated stale
+fallback. Freshness is capped at four seconds even if a legacy Owner/environment
+setting is larger. Cross-process per-host producer locks, effective-source
+fingerprints, monotonic publication, future-timestamp recovery and graceful loop
+shutdown protect reuse. Existing conservative atomic admission is unchanged.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/host-resources.test.ts`: **18/18 passed**. Independent reviewer also ran this with `apps/worker/src/host-observations.test.ts`: **21/21 passed**.
+- `scripts/dev.sh pnpm exec vitest run apps/worker/src/main.test.ts packages/core/src/config.test.ts`: **2 passed** in the existing worker test file; the supplied config filename did not identify an additional suite.
+- Integration runner `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts` with `packages/server-management/src/admission.integration.test.ts packages/server-management/src/restart-admission.integration.test.ts packages/server-management/src/installation-admission.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'admission|reservation|sampling|observation|host'`: **72 passed, 42 skipped**,143.35s.
+- Same integration runner with `packages/server-management/src/host-observations.integration.test.ts`: **9/9 passed** after future-row/fingerprint review corrections; subsequently added effective disk-path regression **1 passed, 9 skipped**. Covers cross-connection producer deduplication, freshness cap, failures, observer/future data, periodic cadence and late-publication protection.
+- Root typecheck and scoped Biome passed. Review identified future-row recovery and effective-path binding; both were corrected and independently rechecked. Independent final observation integration run: **10/10 passed**.
+
+Read-only microbenchmark inside the existing dev worker: new sampler cold call
+**255.288ms**; four warm calls at one-second intervals **1.992,1.331,1.527,2.074ms**.
+This excludes DB coordination and is not Start end-to-end evidence. Read-only DB
+inspection showed a source-bound observation **0.237s old**; API/worker were healthy.
+No manual container restart, game-server command, provider mutation or new
+infrastructure was performed. Source watchers load the development changes.
+Existing dev observation rows are updated by the authorized collector. Isolated
+DB fixtures were used; no production/game data was changed.
+
+No post-change Start latency guarantee. Rollback: revert source (optional metadata
+is stored in existing JSON, no migration); no persistent state deletion. PR #21
+remains open/unmerged and SFTPGo #18 unchanged.
+
+Activation caveat: existing Gateway processes retain the old strict observation
+JSON schema until restarted. The added optional sourceFingerprint is accepted by
+new code but can be rejected by an already running old Gateway during wake. A
+scoped dev Gateway restart was requested for approval; no restart has been
+performed as part of the checks above. API/worker hot reload does not establish
+Gateway activation.

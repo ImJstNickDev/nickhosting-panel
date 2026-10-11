@@ -495,7 +495,7 @@ optional overrides; do not seed its example values into PostgreSQL.
 | `defaultUserStorageMiB` | `NH_DEFAULT_USER_STORAGE_MIB` | `32768` |
 | `maxServersPerUser` | `NH_MAX_SERVERS_PER_USER` | `null` (no total-count cap); positive integer enables it, literal `null` overrides a stored cap |
 | `maxConcurrentProvisionsPerUser` | `NH_MAX_CONCURRENT_PROVISIONS_PER_USER` | `4`; limits pending provisioning only, range 1–100 |
-| `observationMaxAgeSeconds` | `NH_OBSERVATION_MAX_AGE_SECONDS` | `15` (maximum `30`) |
+| `observationMaxAgeSeconds` | `NH_OBSERVATION_MAX_AGE_SECONDS` | `4`; admission caps effective age at `4` seconds (smaller configured values still apply) |
 | `pterodactylWebSocketOrigins` | `NH_PTERODACTYL_WEBSOCKET_ORIGINS` | `[]`, JSON array of exact `ws`/`wss` origins |
 | `pterodactylDownloadOrigins` | `NH_PTERODACTYL_DOWNLOAD_ORIGINS` | `[]`, JSON array of exact HTTP(S) origins |
 | `pterodactylUploadOrigins` | `NH_PTERODACTYL_UPLOAD_ORIGINS` | `[]`, separate exact HTTP(S) Wings upload origins |

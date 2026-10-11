@@ -45,6 +45,7 @@ export interface ServerLimits {
   threads?: string;
 }
 export interface HostSnapshot {
+  sourceFingerprint?: string;
   totalMemoryMiB: number;
   availableMemoryMiB: number;
   cpuCapacityPercent: number;
