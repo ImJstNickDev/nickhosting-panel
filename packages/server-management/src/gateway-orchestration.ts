@@ -49,6 +49,8 @@ export interface GatewayOrchestrationOptions {
   /** Trusted Core route/revision revalidation, inside the observation's global
    * resource transaction lock. Required by the HTTP ingress integration. */
   validateObservation?: (tx: Transaction<Database>) => Promise<void>;
+  /** In-process provider stream fence, rechecked immediately before readiness writes. */
+  validateLiveReadiness?: () => void;
   /** Isolated deterministic tests only; production uses the actual clock. */
   now?: () => Date;
 }
@@ -607,6 +609,101 @@ function assertQuiescenceDeadline(value: GatewayObservation, now: Date): void {
     throw new DomainError('validation_failed');
 }
 
+/** Private service boundary, never an HTTP request body. The Core obtains this
+ * identity from its authenticated provider console subscription. */
+export type GatewayProviderIdentity = Pick<
+  Server,
+  'pterodactyl_id' | 'pterodactyl_uuid' | 'provider_user_id' | 'external_id' | 'node_id'
+>;
+
+/** A live authenticated provider-running event can establish readiness only for
+ * a completed admitted start. Reuse its durable process proof; do not ask Panel,
+ * Docker, egg metadata and the game protocol to confirm the same start again.
+ * The caller must check the compiled integration readiness policy. */
+export async function reportGatewayProviderRunning(
+  db: Kysely<Database>,
+  serverId: string,
+  input: {
+    generation: string;
+    wakeJobId: string;
+    observedAt: string;
+    providerIdentity: GatewayProviderIdentity;
+  },
+  options: GatewayOrchestrationOptions = {},
+): Promise<GatewayState> {
+  const confirmedProcess = async (connection: DB) => {
+    const operation = await connection
+      .selectFrom('server_operations as operation')
+      .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+      .select([
+        'operation.action',
+        'operation.phase',
+        'operation.effect_state',
+        'operation.plan',
+        'job.state',
+      ])
+      .where('operation.job_id', '=', input.wakeJobId)
+      .where('operation.server_id', '=', serverId)
+      .executeTakeFirst();
+    const restart = operation?.action === 'restart';
+    const epoch = restart
+      ? operation?.plan.restartProcessStartedAt
+      : operation?.plan.startProcessStartedAt;
+    const confirmed = restart ? operation?.plan.restartConfirmed : operation?.plan.startConfirmed;
+    if (
+      !operation ||
+      !['start', 'restart', 'provision'].includes(operation.action) ||
+      operation.phase !== 'complete' ||
+      operation.effect_state !== 'confirmed' ||
+      operation.state !== 'succeeded' ||
+      confirmed !== true ||
+      typeof epoch !== 'string'
+    )
+      throw new DomainError('operation_uncertain');
+    return epoch;
+  };
+  const epoch = await confirmedProcess(db);
+  return reportGatewayObservation(
+    db,
+    serverId,
+    {
+      generation: input.generation,
+      wakeJobId: input.wakeJobId,
+      observedAt: input.observedAt,
+      processStartedAt: epoch,
+      ready: true,
+      // Readiness is not proof of zero players; the first protocol sample owns idle.
+      activeSessions: 0,
+    },
+    {
+      ...options,
+      validateObservation: async (tx) => {
+        await options.validateObservation?.(tx);
+        const server = await tx
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', serverId)
+          .where('deleted_at', 'is', null)
+          .executeTakeFirst();
+        if (
+          !server ||
+          Object.entries(input.providerIdentity).some(
+            ([key, value]) => server[key as keyof GatewayProviderIdentity] !== value,
+          )
+        )
+          throw new DomainError('conflict');
+        const reservation = await tx
+          .selectFrom('resource_reservations')
+          .select('state')
+          .where('server_id', '=', serverId)
+          .executeTakeFirst();
+        if (reservation?.state !== 'running' || (await confirmedProcess(tx)) !== epoch)
+          throw new DomainError('operation_uncertain');
+      },
+    },
+  );
+}
+
 /** Accept only trusted Core corroboration of the exact process identity. The
  * HTTP Gateway report cannot supply its own processStartedAt to bypass this. */
 export async function reportGatewayObservation(
@@ -807,6 +904,7 @@ export async function reportGatewayObservation(
           ? (state.idle_since ?? observed)
           : observed
         : null;
+    options.validateLiveReadiness?.();
     await tx
       .updateTable('gateway_server_states')
       .set({

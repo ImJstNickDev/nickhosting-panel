@@ -26,6 +26,8 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Compiled game policy: authenticated provider running may establish readiness. */
+  readinessSource?: 'provider_running';
   /** Read-only binding for initial automation configuration; compiled modules only. */
   gatewayPolicyBinding?(
     db: DB,

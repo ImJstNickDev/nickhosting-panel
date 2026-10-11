@@ -73,7 +73,7 @@ Never store raw game console output, auth secrets, Cloudflare tokens or SFTP pas
 
 **First creation:** parse plugin manifest → wizard plan → validate runtime/egg mapping → check disk/ports/nodes → reserve durable resources/allocations and automatic Gateway route intent for supported modules → idempotent Pterodactyl create → verify identity/installation → configure game → activate pinned routes and initialize protocol policy → attempt first start via admission → complete/persist failure with meaningful status. If first start has no RAM, server remains created/offline.
 
-**Start/wake:** inspect desired vs actual state → atomic budget + capacity admission → reserve RAM/CPU → BullMQ job → Pterodactyl power API → game-specific readiness probe → mark online/route gateway → release on confirmed final stop or failed startup. Restart retains reservation.
+**Start/wake:** inspect desired vs actual state → atomic budget + capacity admission → reserve RAM/CPU → BullMQ job → Pterodactyl power API → trusted integration readiness (authenticated provider-running for Minecraft, protocol fallback otherwise; ADR 0016) → mark online/route gateway → release on confirmed final stop or failed startup. Restart retains reservation.
 
 **Sleep:** game idle observer meets policy → graceful save/stop → Wings confirms process stopped → release reservation → gateway marks sleeping; wake only on game-specific intentional join.
 

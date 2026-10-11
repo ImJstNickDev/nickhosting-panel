@@ -22,6 +22,7 @@ import {
   requireGatewayRoute,
   setGatewayPolicy,
   setGatewayRoute,
+  trustedGameModules,
   verifyManagedIdentity,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
@@ -200,7 +201,19 @@ export function registerGatewayRoutes(
     const validationCompleted = performance.now();
     const management = await options.management();
     const configured = performance.now();
-    const started = await management.lifecycle.observeProcessStart(selected.serverId, db);
+    const managed = await db
+      .selectFrom('managed_servers as server')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+      .select('mapping.game_id')
+      .where('server.id', '=', selected.serverId)
+      .where('server.deleted_at', 'is', null)
+      .executeTakeFirstOrThrow();
+    const providerReady =
+      selected.mode === 'online' &&
+      trustedGameModules.get(managed.game_id)?.readinessSource === 'provider_running';
+    const started = await (providerReady && management.lifecycle.observeProviderProcessStart
+      ? management.lifecycle.observeProviderProcessStart(selected.serverId, db)
+      : management.lifecycle.observeProcessStart(selected.serverId, db));
     const processVerified = performance.now();
     const result = await reportGatewayObservation(
       db,

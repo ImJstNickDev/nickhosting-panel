@@ -114,7 +114,8 @@ beforeEach(async () => {
     !first ||
     !server.pterodactyl_id ||
     !server.pterodactyl_uuid ||
-    !server.pterodactyl_identifier
+    !server.pterodactyl_identifier ||
+    server.provider_user_id === null
   )
     throw new Error('Incomplete isolated fixture');
   route = first;
@@ -128,7 +129,7 @@ beforeEach(async () => {
     suspended: false,
     limits: f.limits,
     feature_limits: { databases: 0, allocations: 1, backups: 1 },
-    user: 1,
+    user: server.provider_user_id,
     node: f.providerNodeId,
     allocation: claim.pterodactyl_allocation_id,
     nest: 1,

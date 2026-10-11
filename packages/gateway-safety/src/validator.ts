@@ -167,6 +167,8 @@ export interface GatewaySafetyOptions {
   ): Promise<boolean | GatewayProtocolObservation>;
   /** Fresh nonce challenge response from a configured persistent probe at EXACT backend.address. */
   probeNode(route: GatewayRoute, context?: GatewaySafetyContext): Promise<boolean>;
+  /** Trusted compiled integration declares Core provider-running readiness authority. */
+  providerReady?: (route: GatewayRoute) => boolean;
   now?: () => number;
   onTiming?: (event: {
     routeId: string;
@@ -779,7 +781,17 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         retainBinding();
         return accepted(true);
       }
-    } else if (route.mode === 'online' && state.container.running) {
+    } else if (
+      route.mode === 'online' &&
+      state.container.running &&
+      state.backendBindingsComplete
+    ) {
+      if (options.providerReady?.(route)) {
+        if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+          unavailable('observation_stale');
+        retainBinding();
+        return accepted(true);
+      }
       // A failed game probe revokes forwarding, not an independently proven
       // public binding. Ownership/collision/topology failures above still throw.
       const result = await options.probeBackend(route).catch(() => false);

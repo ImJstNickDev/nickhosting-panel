@@ -74,7 +74,7 @@ lease are not evidence of successful listener binding or external connectivity.
 4. `blocked`: when admission rejects for insufficient compute, return immediate in-game explanation if supported; otherwise provide a stable failure behavior and actionable panel diagnostics.
 5. `maintenance` or `manual-off`: do not auto-wake on join unless owner explicitly changes mode.
 
-Backend readiness is game-specific (Pterodactyl process running alone is insufficient). Wake time estimate derived from recent measured times until **actual readiness**, rejecting stale/unrepresentative samples. If no reliable estimate exists, don't fabricate one.
+Backend readiness follows the trusted integration contract. Minecraft accepts authenticated live Wings `running` for the exact admitted start and process; raw Docker `running` is insufficient. Initial network reachability proof remains mandatory (ADR 0016). Wake time estimate derived from recent measured times until **actual readiness**, rejecting stale/unrepresentative samples. If no reliable estimate exists, don't fabricate one.
 
 ## Future-only extension
 
@@ -106,9 +106,10 @@ compatibility or production Gateway listener is claimed by M3.
 
 Power confirmation uses fresh host-bound process identity where available, without
 waiting for Panel's cached resource state. Startup estimates use the last ten
-eligible measured cycles (minimum five) and never gate power or routing. Actual
-protocol readiness remains the forwarding gate; an egg's startup signal or a
-running container alone does not prove reachability from the Gateway namespace.
+eligible measured cycles (minimum five) and never gate power or routing. Under the
+2026-10-11 Owner amendment, compiled Minecraft opts into live provider-running
+readiness; it does not repeat the game status probe after that authenticated event.
+Raw container state is not readiness and cannot establish network reachability.
 
 Idle quiescence fences gameplay and wake effects, not bounded protocol status/ping
 or login-disconnect replies. A safe public listener can remain available while its
@@ -123,21 +124,25 @@ process epoch and its reservation is retained. Missing, changed or unavailable
 process evidence stays conservative; external stops and manual suppression still
 win. This reconciliation proof does not grant game readiness.
 
-Minecraft supplies one coherent protocol sample for readiness and idle per probe.
+Minecraft supplies protocol samples for player counts and idle detection; failed
+samples leave player count unknown and cannot authorize sleep.
 The response-only `stopping` mode keeps status/login-disconnect replies available
 through quiescence without allowing gameplay or wake. It is not a persisted state
 and does not promise a fabricated fixed shutdown duration. Ordinary power and
 Gateway observations do not download the JAR (Owner amendment, 2026-10-10);
 installation/content/restore integrity checks remain. See [API details](M3-API.md).
 
-Live provider-running events can prompt Minecraft readiness probes immediately.
-They are bounded, authenticated hints tied to a waking route and operation, never
-readiness authority or historical console matches. Within an unchanged original
-listener lease, fresh topology evidence plus a positive protocol sample and Core
-current-process confirmation can advance to online without repeating the full
-listener validation. Opening/renewing listeners still performs that validation;
-event loss uses normal polling. See [ADR 0012](decisions/0012-gateway-leases-and-sleep.md).
-
+Live provider-running events may establish readiness only for integrations that
+explicitly declare the compiled `readinessSource: provider_running` capability.
+Core commits the event against the exact successful admitted start/restart,
+reservation, process epoch, route and generation. The receipt switches existing
+listeners within their original lease without another Panel/image/status request.
+Opening and renewal still validate identity, bindings, topology and collisions;
+initial backend reachability still needs a genuine proof. Online player polling
+uses lightweight local process confirmation instead of repeating image validation.
+Lost events, unavailable streams or missing committed start evidence use the legacy
+protocol fallback; fallback can wait until the bounded startup stream closes.
+See [ADR 0016](decisions/0016-provider-readiness.md).
 
 ## Idle deadline and stop dispatch (M5 optimization)
 
@@ -170,9 +175,11 @@ instantaneous. Lost notifications and reconciliation failures retain normal reco
 The receipt cannot renew the original listener lease, change endpoints, or overwrite
 a newer candidate configuration. See [completion contract](M3-API.md).
 
-A transient `container_churn` during listener validation preserves only unchanged,
-previously validated listeners as local protocol responders within their original
-lease. Forwarding, wake effects and readiness receipts are suppressed until fresh
+A transient `container_churn` during listener validation preserves previously
+validated listeners as local protocol responders within their original lease.
+A new waking generation may change only the response text when server, node,
+allocation, endpoints, protocol and locale remain identical; it does not adopt
+the candidate route or extend authority. Forwarding, wake effects and readiness receipts are suppressed until fresh
 validation succeeds. Existing local status connections remain open; backend streams
 and UDP forwarding sessions close. New/changed routes, real collisions, unknown
 safety errors and expired leases still fail closed. One immediate validation retry

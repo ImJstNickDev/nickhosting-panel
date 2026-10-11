@@ -12,10 +12,19 @@ import { createApiHttpServer } from './http-server.js';
 
 const keepalive = 'event: keepalive\ndata: {}\n\n';
 
-const mocks = vi.hoisted(() => ({ route: vi.fn(), identity: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  route: vi.fn(),
+  identity: vi.fn(),
+  module: vi.fn(),
+  running: vi.fn(),
+  snapshot: vi.fn(),
+}));
 vi.mock('@nickhosting/server-management', () => ({
   requireGatewayRoute: mocks.route,
   verifyManagedIdentity: mocks.identity,
+  trustedGameModules: { get: mocks.module },
+  reportGatewayProviderRunning: mocks.running,
+  getGatewaySnapshot: mocks.snapshot,
 }));
 const input = {
   routeId: randomUUID(),
@@ -35,6 +44,7 @@ function fixture(authenticated = true) {
   };
   mocks.route.mockResolvedValue(current);
   mocks.identity.mockResolvedValue(undefined);
+  mocks.module.mockReturnValue(undefined);
   let relayInput: ConsoleRelayOptions | undefined;
   const close = vi.fn(),
     requestLogs = vi.fn();
@@ -47,6 +57,8 @@ function fixture(authenticated = true) {
   };
   const row = { id: serverId, pterodactyl_id: 1 };
   const query = {
+    innerJoin: () => query,
+    select: () => query,
     selectAll: () => query,
     where: () => query,
     executeTakeFirstOrThrow: async () => row,
@@ -67,12 +79,26 @@ function fixture(authenticated = true) {
     body: (c) => c.req.json(),
     management: async () => ({ adapter }) as never,
   });
-  const call = (body: unknown = input, signal?: AbortSignal, keepalives = true) =>
+  const call = (
+    body: unknown = input,
+    signal?: AbortSignal,
+    keepalives = true,
+    providerReadiness = false,
+  ) =>
     app.request(`/internal/gateway/${gatewayId}/startup-events`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        ...(keepalives ? { 'X-NickHosting-Gateway-Features': 'startup-keepalive-v1' } : {}),
+        ...(keepalives || providerReadiness
+          ? {
+              'X-NickHosting-Gateway-Features': [
+                keepalives ? 'startup-keepalive-v1' : '',
+                providerReadiness ? 'provider-readiness-v1' : '',
+              ]
+                .filter(Boolean)
+                .join(','),
+            }
+          : {}),
       },
       body: JSON.stringify(body),
       signal,
@@ -85,6 +111,99 @@ function fixture(authenticated = true) {
 }
 beforeEach(() => vi.clearAllMocks());
 describe('Gateway startup hints', () => {
+  it('sends a durable readiness snapshot only for negotiated compiled provider readiness', async () => {
+    const f = fixture();
+    mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+    mocks.running.mockResolvedValue({ state: 'online' });
+    const snapshot = { routes: [{ id: input.routeId, mode: 'online' }] };
+    mocks.snapshot.mockResolvedValue(snapshot);
+    const response = await f.call(input, undefined, true, true);
+    const relay = await f.ready();
+    relay.onEvent({ type: 'status', data: 'starting' });
+    expect(mocks.running).not.toHaveBeenCalled();
+    relay.onEvent({ type: 'status', data: 'running' });
+    const text = await response.text();
+    expect(text).toContain('"readinessSnapshot":');
+    expect(text).toContain('"observedAt":');
+    expect(mocks.running).toHaveBeenCalledWith(
+      expect.anything(),
+      serverId,
+      expect.objectContaining({ generation: input.generation, wakeJobId: input.wakeJobId }),
+      expect.anything(),
+    );
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])(
+    'keeps unnegotiated or undeclared provider readiness as a hint (%s)',
+    async (declared) => {
+      const f = fixture();
+      if (declared) mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+      const response = await f.call(input, undefined, true, !declared);
+      const relay = await f.ready();
+      relay.onEvent({ type: 'status', data: 'running' });
+      expect(await response.text()).not.toContain('readinessSnapshot');
+      expect(mocks.running).not.toHaveBeenCalled();
+    },
+  );
+  it('falls back to a hint when the durable start is not yet confirmed', async () => {
+    const f = fixture();
+    mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+    mocks.running.mockRejectedValue(new DomainError('operation_uncertain'));
+    const response = await f.call(input, undefined, true, true);
+    const relay = await f.ready();
+    relay.onEvent({ type: 'status', data: 'running' });
+    expect(await response.text()).toBe(
+      `${keepalive}event: startup\ndata: ${JSON.stringify(input)}\n\n`,
+    );
+    expect(mocks.snapshot).not.toHaveBeenCalled();
+  });
+  it('does not send a ready receipt after the live provider reports stopping', async () => {
+    const f = fixture();
+    mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+    let finish!: (value: { state: string }) => void;
+    mocks.running.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const response = await f.call(input, undefined, true, true);
+    const relay = await f.ready();
+    relay.onEvent({ type: 'status', data: 'running' });
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    relay.onEvent({ type: 'status', data: 'stopping' });
+    finish({ state: 'online' });
+    expect(await response.text()).not.toContain('readinessSnapshot');
+  });
+  it('rejects a stop arriving during asynchronous route revalidation before readiness commit', async () => {
+    const f = fixture();
+    mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let routeCalls = 0;
+    mocks.route.mockImplementation(async () => {
+      routeCalls += 1;
+      if (routeCalls === 3) await blocked;
+      return f.current;
+    });
+    let committed = false;
+    mocks.running.mockImplementation(async (_db, _server, _input, options) => {
+      await options.validateObservation({});
+      options.validateLiveReadiness();
+      committed = true;
+      return { state: 'online' };
+    });
+    const response = await f.call(input, undefined, true, true);
+    const relay = await f.ready();
+    relay.onEvent({ type: 'status', data: 'running' });
+    await vi.waitFor(() => expect(routeCalls).toBe(3));
+    relay.onEvent({ type: 'status', data: 'offline' });
+    release();
+    expect(await response.text()).not.toContain('readinessSnapshot');
+    expect(committed).toBe(false);
+  });
   it('preserves the startup-only wire contract for legacy Gateway clients', async () => {
     const f = fixture();
     const response = await f.call(input, undefined, false);

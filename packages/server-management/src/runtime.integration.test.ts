@@ -427,6 +427,45 @@ describe('management runtime execution-time authorization', () => {
     // mismatched provider identity, even when its Docker epoch is available.
     expect(observer.processStartedAt).toHaveBeenCalledWith(server.pterodactyl_uuid);
   });
+  it('provider-ready refresh reads only the current host-bound managed process epoch', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    const provider = vi.fn(async () => {
+      throw new Error('must not repeat provider verification');
+    });
+    Object.assign(f.adapter, { getApplicationServer: provider });
+    const epoch = new Date().toISOString();
+    const observer = {
+      preflight: vi.fn(async () => {}),
+      stopped: vi.fn(async () => false),
+      processStartedAt: vi.fn(async (): Promise<string | null> => epoch),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    expect(await runtime.lifecycle.observeProviderProcessStart(serverId, f.db)).toBe(epoch);
+    expect(observer.processStartedAt).toHaveBeenCalledWith(remote.uuid);
+    expect(provider).not.toHaveBeenCalled();
+    observer.processStartedAt.mockResolvedValue(null);
+    expect(await runtime.lifecycle.observeProviderProcessStart(serverId, f.db)).toBeNull();
+    const wrong = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'wrong-host' },
+    });
+    observer.processStartedAt.mockClear();
+    await expect(wrong.lifecycle.observeProviderProcessStart(serverId, f.db)).rejects.toThrow(
+      'configuration_invalid',
+    );
+    expect(observer.processStartedAt).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+  });
   it('overlaps the host-bound process read with provider verification without granting early evidence', async () => {
     const serverId = await f.server();
     const remote = await providerIdentity(serverId);

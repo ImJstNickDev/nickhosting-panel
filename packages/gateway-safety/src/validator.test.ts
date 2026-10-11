@@ -160,6 +160,64 @@ describe('Gateway address collision semantics', () => {
 });
 
 describe('Gateway pre-bind and forwarding safety', () => {
+  it('uses declared provider readiness only with existing matching network proof and running bindings', async () => {
+    const f = fixture();
+    f.options.providerReady = () => true;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.route.mode = 'online';
+    vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+    expect(await safety.validate(f.route, [f.route.public])).toEqual({ backendReady: true });
+    expect(f.options.probeBackend).not.toHaveBeenCalled();
+    f.server.suspended = true;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+    f.server.suspended = false;
+    f.options.loadProof = async () => null;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+  });
+
+  it.each(['identity', 'collision', 'stale', 'bindings'] as const)(
+    'provider readiness cannot bypass %s validation',
+    async (failure) => {
+      const f = fixture();
+      f.options.providerReady = () => true;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+      if (failure === 'identity') f.server.uuid = 'foreign';
+      if (failure === 'collision')
+        f.observation.sockets.push({ ...f.route.public, processOwned: false, inode: 'foreign' });
+      if (failure === 'stale') f.observation.observedAt -= 5001;
+      if (failure === 'bindings')
+        Object.assign(f.observation.containers[0] ?? {}, { activeBindings: [] });
+      await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+    },
+  );
+
+  it('provider readiness rejects observation expiry while loading the network proof', async () => {
+    const f = fixture();
+    f.options.providerReady = () => true;
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.loadProof = async () => {
+      clock += 5001;
+      return f.proof();
+    };
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+  });
+
+  it('provider readiness cannot forward a stopped backend', async () => {
+    const f = fixture();
+    f.options.providerReady = () => true;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    Object.assign(f.observation.containers[0] ?? {}, { running: false, activeBindings: [] });
+    expect(await safety.validate(f.route, [f.route.public])).toEqual({ backendReady: false });
+  });
+
   it('separates waking validation timings without leaking context or changing safety on sink failure', async () => {
     const f = fixture();
     f.route.mode = 'waking';

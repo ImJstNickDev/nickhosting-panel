@@ -163,6 +163,13 @@ export async function createGatewayRuntime(
       policy: networkPolicy,
       observer,
       onTiming: (event) => logger.log('info', 'gateway.safety_stage', event),
+      providerReady: (route) =>
+        protocols.some(
+          (p) =>
+            p.id === route.protocol?.handlerId &&
+            p.supports(route) &&
+            p.readinessSource === 'provider_running',
+        ),
       provider: {
         listNodes: async () =>
           z
@@ -223,7 +230,17 @@ export async function createGatewayRuntime(
       control: {
         ...client,
         watchStartup: (request, onHint, signal) =>
-          watchGatewayStartup(startupOptions, request, onHint, signal),
+          watchGatewayStartup(
+            startupOptions,
+            request,
+            (event) =>
+              onHint(
+                event.readinessSnapshot && event.observedAt
+                  ? { snapshot: event.readinessSnapshot, observedAt: event.observedAt }
+                  : undefined,
+              ),
+            signal,
+          ),
         async fetchSnapshot() {
           const current = await client.requestJson('configuration');
           if (fingerprint(current) !== initial) {

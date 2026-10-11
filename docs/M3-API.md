@@ -112,8 +112,9 @@ prevents readiness reports and reconciliation from alternating between online an
 blocked around the same failed operation.
 
 State is `sleeping`, `waking`, `online`, `blocked`, `maintenance` or
-`manually_stopped`. `online` requires fresh game-protocol readiness correlated
-with the exact running Docker process, not just a Panel running status. State
+`manually_stopped`. `online` requires readiness correlated with the exact admitted
+process. Compiled Minecraft accepts authenticated live provider-running receipts
+under ADR 0016; other integrations retain fresh game-protocol readiness. State
 includes `sleepEligibleAt` only when an enabled idle window is progressing.
 English/Italian `gateway.states.*` message keys are provided.
 
@@ -488,6 +489,9 @@ from these regression tests.
 
 ### Event-prompted readiness and bounded receipts (M5, 2026-10-11)
 
+The following describes the original hint-only contract. The later provider
+readiness amendment below supersedes it for explicitly opted-in integrations.
+
 - Trusted `GatewayProtocolAdapter.startupHint = provider_running` opts into hints.
   `POST /internal/gateway/:gatewayId/startup-events` takes the exact `routeId`,
   `routeRevision`, `generation`, `wakeJobId`. Existing Gateway service authentication
@@ -552,3 +556,35 @@ post-completion clock-skew delay; ordinary prefetched snapshots retain their exi
 conservative checks. Missing, timed-out or rejected receipts use normal refresh and
 reconciliation. `gateway.route_transition` and `gateway.quiescence_released` record
 `sleep_completion_receipt` for subsequent live timing verification.
+
+
+### Compiled provider readiness (Owner amendment, 2026-10-11)
+
+`GatewayProtocolAdapter.readinessSource = provider_running` and the matching
+trusted Core module opt Minecraft into authenticated Wings readiness. The startup
+client negotiates `provider-readiness-v1` alongside `startup-keepalive-v1`. A
+`startup` event may then include paired `observedAt` and `readinessSnapshot` fields.
+Core emits them only after a live running event is committed against the exact
+successful, confirmed admitted job, process record, reservation, provider identity,
+route revision and generation. Current live status is rechecked after asynchronous
+validation and immediately before the write. No browser setting or console replay
+can mint this authority. Missing job proof returns the legacy hint.
+
+The client parses a strict snapshot, caps total input at 1 MiB and keepalives at
+8 KiB, and retains its absolute deadline. Core's writer is bounded to two queued
+events/1 MiB and five seconds; the subscription remains at most sixty seconds.
+The receipt uses existing serialized all-route application and original lease,
+endpoint and generation fences. It cannot open or renew a listener.
+
+Online Minecraft player samples no longer repeat a full backend inspection or
+revoke readiness merely because one status exchange fails. Unknown players
+prevent idle stop. Core confirms the host-bound Docker process epoch without a
+Panel/image/egg read on each sample; external stops and changed epochs still
+invalidate the observation. Initial reachability proof and full listener renewal
+checks remain mandatory. An online renewal with matching network proof, live
+bindings and declared provider readiness needs no additional Minecraft ping.
+
+An active startup stream suppresses redundant waking probes. Event loss or stream
+failure returns to the existing protocol fallback; an otherwise silent stream may
+hold that fallback until its sixty-second deadline. This is outage recovery, not
+a guaranteed event-delivery latency. See [ADR 0016](decisions/0016-provider-readiness.md).

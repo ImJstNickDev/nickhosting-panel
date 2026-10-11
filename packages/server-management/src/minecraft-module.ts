@@ -3,7 +3,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
-import { minecraftManifest, minecraftRuntimeMappingSchema } from '@nickhosting/minecraft';
+import {
+  minecraftManifest,
+  minecraftReadinessSource,
+  minecraftRuntimeMappingSchema,
+} from '@nickhosting/minecraft';
 import { type PterodactylAdapter, provisionPlanSchema } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import type { Environment } from './admission.js';
@@ -122,6 +126,7 @@ export const minecraftModule: TrustedGameModule = {
   id: 'minecraft-java',
   manifest: minecraftManifest,
   provisionAsResourceOwner: true,
+  readinessSource: minecraftReadinessSource,
   async gatewayPolicyBinding(db, server, env) {
     const profile = await db
       .selectFrom('minecraft_server_profiles')

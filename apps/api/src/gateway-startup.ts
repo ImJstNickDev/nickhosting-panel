@@ -1,8 +1,12 @@
 import { type createLogger, DomainError } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
 import {
+  type GatewayProviderIdentity,
+  getGatewaySnapshot,
   type ManagementRuntime,
+  reportGatewayProviderRunning,
   requireGatewayRoute,
+  trustedGameModules,
   verifyManagedIdentity,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
@@ -20,8 +24,8 @@ const requestSchema = z
   })
   .strict();
 
-/** Register after the Gateway service-auth middleware. Startup events are hints,
- * never readiness evidence or authority to forward traffic. */
+/** Only the authenticated live provider stream can mint negotiated readiness.
+ * Legacy consumers continue to receive hints and run their existing fallback. */
 export function registerGatewayStartupRoutes(
   app: Hono<{ Variables: Variables }>,
   options: {
@@ -53,18 +57,31 @@ export function registerGatewayStartupRoutes(
     active.add(selected.serverId);
     let service: ManagementRuntime;
     let identifier: string;
+    let providerIdentity: GatewayProviderIdentity;
+    let providerReadiness = false;
     try {
       service = await options.management();
       const server = await options.db
-        .selectFrom('managed_servers')
-        .selectAll()
-        .where('id', '=', selected.serverId)
-        .where('deleted_at', 'is', null)
+        .selectFrom('managed_servers as server')
+        .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+        .selectAll('server')
+        .select('mapping.game_id')
+        .where('server.id', '=', selected.serverId)
+        .where('server.deleted_at', 'is', null)
         .executeTakeFirstOrThrow();
       if (!server.pterodactyl_id) throw new DomainError('not_found');
       const remote = await service.adapter.getApplicationServer(server.pterodactyl_id);
       await verifyManagedIdentity(options.db, server, remote);
       identifier = remote.identifier;
+      providerIdentity = {
+        pterodactyl_id: server.pterodactyl_id,
+        pterodactyl_uuid: server.pterodactyl_uuid,
+        provider_user_id: server.provider_user_id,
+        external_id: server.external_id,
+        node_id: server.node_id,
+      };
+      providerReadiness =
+        trustedGameModules.get(server.game_id)?.readinessSource === 'provider_running';
     } catch (error) {
       active.delete(selected.serverId);
       throw error;
@@ -113,7 +130,7 @@ export function registerGatewayStartupRoutes(
         (event) => stream.writeSSE(event),
         () => disconnect('output_failed'),
         {
-          bytes: 1024,
+          bytes: 1024 * 1024,
           events: 2,
           timeoutMs: 5000,
         },
@@ -139,7 +156,14 @@ export function registerGatewayStartupRoutes(
         }, 10000);
         heartbeat.unref();
       }
+      const providerReceipts =
+        c.req
+          .header('X-NickHosting-Gateway-Features')
+          ?.split(',')
+          .map((value) => value.trim())
+          .includes('provider-readiness-v1') === true;
       let hintPending = false;
+      let liveStatus = '';
       const authorized = async () => {
         if (controller.signal.aborted) return false;
         try {
@@ -166,6 +190,7 @@ export function registerGatewayStartupRoutes(
               stop(event.type === 'closed' ? 'relay_closed' : 'relay_error');
               return;
             }
+            if (event.type === 'status') liveStatus = event.data;
             if (
               event.type !== 'status' ||
               event.data !== 'running' ||
@@ -175,8 +200,66 @@ export function registerGatewayStartupRoutes(
               return;
             hintPending = true;
             void (async () => {
+              const observedAt = new Date().toISOString();
               if (await authorized()) {
-                output.send({ event: 'startup', data: JSON.stringify(input) });
+                let readinessSnapshot: Awaited<ReturnType<typeof getGatewaySnapshot>> | undefined;
+                if (providerReceipts && providerReadiness) {
+                  try {
+                    const commitStarted = performance.now();
+                    const result = await reportGatewayProviderRunning(
+                      options.db,
+                      selected.serverId,
+                      {
+                        generation: input.generation,
+                        wakeJobId: input.wakeJobId,
+                        observedAt,
+                        providerIdentity,
+                      },
+                      {
+                        env: options.env,
+                        validateLiveReadiness: () => {
+                          if (controller.signal.aborted || liveStatus !== 'running')
+                            throw new DomainError('conflict');
+                        },
+                        validateObservation: async (tx) => {
+                          if (controller.signal.aborted || liveStatus !== 'running')
+                            throw new DomainError('conflict');
+                          const current = await requireGatewayRoute(
+                            tx,
+                            input.routeId,
+                            input.routeRevision,
+                            options.env,
+                          );
+                          if (
+                            !matches(current) ||
+                            controller.signal.aborted ||
+                            liveStatus !== 'running'
+                          )
+                            throw new DomainError('conflict');
+                        },
+                      },
+                    );
+                    if (result.state === 'online') {
+                      readinessSnapshot = await getGatewaySnapshot(options.db, options.env);
+                      log('gateway_provider_readiness_committed', {
+                        durationMs: Math.round((performance.now() - commitStarted) * 1000) / 1000,
+                        observedAt,
+                      });
+                    }
+                  } catch (error) {
+                    if (!(error instanceof DomainError)) throw error;
+                    // A start still awaiting its durable confirmation retains the
+                    // legacy probe path. Never invent a process epoch or receipt.
+                    log('gateway_provider_readiness_deferred', { code: error.code });
+                  }
+                }
+                if (controller.signal.aborted || liveStatus !== 'running') return;
+                output.send({
+                  event: 'startup',
+                  data: JSON.stringify(
+                    readinessSnapshot ? { ...input, observedAt, readinessSnapshot } : input,
+                  ),
+                });
                 await output.drain();
                 stop('hint_sent');
               } else {

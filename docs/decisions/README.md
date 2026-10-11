@@ -27,3 +27,5 @@ status and amendment before applying historical milestone numbers.
 - [0014 — WebPanel and common platform contracts](0014-webpanel-and-common-contracts.md)
 
 - [0015 — Per-user provider technical accounts](0015-provider-technical-accounts.md)
+
+- [0016 — Declared provider readiness and responder continuity](0016-provider-readiness.md)

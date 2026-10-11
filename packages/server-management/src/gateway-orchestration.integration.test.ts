@@ -26,6 +26,7 @@ import {
   getGatewayState,
   reconcileGatewayState,
   reportGatewayObservation,
+  reportGatewayProviderRunning,
   requestGatewayWake,
   setGatewayPolicy,
 } from './gateway-orchestration.js';
@@ -92,6 +93,7 @@ async function row() {
 }
 async function lifecycleFixture() {
   const server = await row();
+  if (server.provider_user_id === null) throw new Error('Missing fixture provider account');
   const allocations = await f.db
     .selectFrom('server_allocations')
     .selectAll()
@@ -109,7 +111,7 @@ async function lifecycleFixture() {
     suspended: false,
     limits: server.limits,
     feature_limits: { databases: 0, allocations: 3, backups: 1 },
-    user: 1,
+    user: server.provider_user_id,
     node: f.providerNodeId,
     allocation: allocations.find((a) => a.is_primary)?.pterodactyl_allocation_id ?? 0,
     nest: 1,
@@ -1111,6 +1113,104 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
         .execute(),
     ).toHaveLength(0);
   });
+  it('trusted provider running reuses the admitted successful start without inventing idle evidence', async () => {
+    const fixture = await started();
+    const server = await row();
+    const input = {
+      generation: fixture.state.generation,
+      wakeJobId: fixture.state.wakeJobId as string,
+      observedAt: clock.toISOString(),
+      providerIdentity: {
+        pterodactyl_id: server.pterodactyl_id,
+        pterodactyl_uuid: server.pterodactyl_uuid,
+        provider_user_id: server.provider_user_id,
+        external_id: server.external_id,
+        node_id: server.node_id,
+      },
+    };
+    const result = await reportGatewayProviderRunning(f.db, serverId, input, options);
+    expect(result.state).toBe('online');
+    expect(result.sleepEligibleAt).toBeNull();
+    expect(result.processStartedAt).toBe(fixture.processStartedAt());
+    await expect(
+      reportGatewayProviderRunning(f.db, serverId, { ...input, generation: randomUUID() }, options),
+    ).rejects.toThrow('conflict');
+    await expect(
+      reportGatewayProviderRunning(
+        f.db,
+        serverId,
+        {
+          ...input,
+          providerIdentity: { ...input.providerIdentity, provider_user_id: -1 },
+        },
+        options,
+      ),
+    ).rejects.toThrow('conflict');
+  });
+  it.each(['pending', 'unconfirmed', 'missing-reservation', 'changed-epoch', 'provider-stopped'])(
+    'provider running cannot bypass %s durable start proof',
+    async (failure) => {
+      const fixture = await started();
+      const server = await row();
+      if (failure === 'pending')
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'queued', completed_at: null })
+          .where('id', '=', fixture.state.wakeJobId as string)
+          .execute();
+      if (failure === 'unconfirmed')
+        await f.db
+          .updateTable('server_operations')
+          .set({ effect_state: 'prepared' })
+          .where('job_id', '=', fixture.state.wakeJobId as string)
+          .execute();
+      if (failure === 'missing-reservation')
+        await f.db.deleteFrom('resource_reservations').where('server_id', '=', serverId).execute();
+      const operation = await f.db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', fixture.state.wakeJobId as string)
+        .executeTakeFirstOrThrow();
+      await expect(
+        reportGatewayProviderRunning(
+          f.db,
+          serverId,
+          {
+            generation: fixture.state.generation,
+            wakeJobId: fixture.state.wakeJobId as string,
+            observedAt: clock.toISOString(),
+            providerIdentity: {
+              pterodactyl_id: server.pterodactyl_id,
+              pterodactyl_uuid: server.pterodactyl_uuid,
+              provider_user_id: server.provider_user_id,
+              external_id: server.external_id,
+              node_id: server.node_id,
+            },
+          },
+          {
+            ...options,
+            validateLiveReadiness: () => {
+              if (failure === 'provider-stopped') throw new Error('operation_uncertain');
+            },
+            validateObservation: async (tx) => {
+              if (failure === 'changed-epoch')
+                await tx
+                  .updateTable('server_operations')
+                  .set({
+                    plan: JSON.stringify({
+                      ...operation.plan,
+                      startProcessStartedAt: new Date().toISOString(),
+                    }),
+                  })
+                  .where('job_id', '=', fixture.state.wakeJobId as string)
+                  .execute();
+            },
+          },
+        ),
+      ).rejects.toThrow('operation_uncertain');
+      expect((await getGatewayState(f.db, serverId, options)).state).not.toBe('online');
+    },
+  );
   it('container running is insufficient; correlated game readiness records the real duration once', async () => {
     const fixture = await started();
     expect((await row()).runtime_state).toBe('running');

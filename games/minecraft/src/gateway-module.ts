@@ -5,7 +5,7 @@ import {
   gatewayMinecraftProtocolSchema,
 } from '@nickhosting/game-sdk';
 import { minecraftCapabilityDeclaration, minecraftGatewaySupported } from './compatibility.js';
-import { createMinecraftProtocolAdapter } from './protocol.js';
+import { createMinecraftProtocolAdapter, minecraftReadinessSource } from './protocol.js';
 
 /** Local trusted module for NH_GATEWAY_PROTOCOL_MODULES. No registry/network reads or provider keys. */
 export function createMinecraftGatewayModuleAdapter(
@@ -60,6 +60,7 @@ export function createMinecraftGatewayModuleAdapter(
   return {
     id: 'minecraft-java',
     startupHint: 'provider_running',
+    readinessSource: minecraftReadinessSource,
     supports: (route) => !!select(route),
     classify: () => ({ kind: 'unsupported' }),
     response: () => undefined,

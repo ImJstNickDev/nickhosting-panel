@@ -75,6 +75,8 @@ interface Listener {
   route: GatewayRoute;
   backendReady: boolean;
   statusOnly?: boolean;
+  // Presentation only: never replaces the committed route or its lease authority.
+  statusMode?: GatewayResponseMode;
   tcp?: Server;
   udp?: DatagramSocket;
   clients: Set<Socket>;
@@ -257,9 +259,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const responseMode = (listener: Listener, mode = listener.route.mode): GatewayResponseMode =>
     quiescence.has(listener.route.serverId)
       ? 'stopping'
-      : !listener.backendReady && listener.route.mode === 'online'
-        ? 'blocked'
-        : mode;
+      : listener.statusOnly && listener.statusMode
+        ? listener.statusMode
+        : !listener.backendReady && listener.route.mode === 'online'
+          ? 'blocked'
+          : mode;
   const logRouteTransition = (
     listener: Listener,
     reason: string,
@@ -785,7 +789,22 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             current.statusOnly = true;
             for (const client of current.forwardingClients) client.destroy();
             for (const key of current.sessions.keys()) dropSession(current, key);
-            if (leased() && isDeepStrictEqual(candidate, current.route)) {
+            // Container recreation may change generation/revision before Docker
+            // inventory settles. An authenticated waking intent for the exact
+            // same endpoint can change only the local response text. It grants
+            // no new route, forwarding, wake authority or lease extension.
+            const sameWakingTarget =
+              candidate?.mode === 'waking' &&
+              candidate.id === current.route.id &&
+              candidate.serverId === current.route.serverId &&
+              candidate.nodeId === current.route.nodeId &&
+              candidate.allocationId === current.route.allocationId &&
+              candidate.locale === current.route.locale &&
+              isDeepStrictEqual(candidate.public, current.route.public) &&
+              isDeepStrictEqual(candidate.backend, current.route.backend) &&
+              isDeepStrictEqual(candidate.protocol, current.route.protocol);
+            if (leased() && (isDeepStrictEqual(candidate, current.route) || sameWakingTarget)) {
+              if (sameWakingTarget) current.statusMode = 'waking';
               logRouteTransition(current, 'observer_container_churn');
             } else {
               logRouteTransition(current, 'safety_rejected', false);
@@ -846,6 +865,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         listener.route = route;
         listener.backendReady = readiness.get(route.id) ?? false;
         listener.statusOnly = false;
+        listener.statusMode = undefined;
       }
       snapshot = next;
       syncStartupWatches();
@@ -1018,7 +1038,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           generation: route.generation,
           wakeJobId: route.wakeJobId,
         },
-        async () => {
+        async (receipt) => {
           const current = () =>
             !stopping &&
             !state.abort.signal.aborted &&
@@ -1033,6 +1053,17 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             );
           if (!current()) return;
           logTiming('gateway.startup_hint', routeIdentity(route));
+          if (receipt && protocol(route)?.readinessSource === 'provider_running' && snapshot) {
+            const captured = snapshot;
+            observationEpochs.set(serverId, {});
+            if (
+              await applyReadinessReceipt(receipt.snapshot, captured, serverId, receipt.observedAt)
+            )
+              return;
+            // Lost/racing receipt uses the already committed durable snapshot.
+            if (current()) await refresh().catch(() => {});
+            return;
+          }
           // Supersede only this server: an old negative probe must neither delay
           // the running event nor report after its fresh observation.
           if (current()) await observe(serverId);
@@ -1316,6 +1347,14 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           });
           continue;
         }
+        if (
+          anchor.mode === 'waking' &&
+          protocol(anchor)?.readinessSource === 'provider_running' &&
+          startupWatches.get(anchor.serverId) &&
+          !startupWatches.get(anchor.serverId)?.done &&
+          !priorityServerId
+        )
+          continue;
         let ready = true;
         let idle = true;
         const observedAt = new Date(now()).toISOString();
@@ -1334,12 +1373,30 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             players.push(undefined);
             continue;
           }
-          let readinessConfirmed = false;
+          const providerOnline =
+            route.mode === 'online' &&
+            handler.readinessSource === 'provider_running' &&
+            leased() &&
+            listeners.get(route.id)?.backendReady === true &&
+            isDeepStrictEqual(listeners.get(route.id)?.route, route);
+          let readinessConfirmed = !!providerOnline;
           let probeStage = 'safety';
           const probeStarted = performance.now();
           try {
             const validated: GatewayProtocolObservation & { coherent: boolean } = await bounded(
               async (signal) => {
+                if (providerOnline) {
+                  probeStage = 'idle';
+                  const sample = handler.observe
+                    ? await handler.observe({ route, signal })
+                    : { ...(await handler.probeReadiness({ route, signal })), idle: false };
+                  return {
+                    ready: true,
+                    coherent: true,
+                    idle: sample.ready && sample.idle === true,
+                    playerCount: sample.ready ? sample.playerCount : undefined,
+                  };
+                }
                 const listener = listeners.get(route.id);
                 const leasedProbe =
                   (route.mode === 'waking' || route.mode === 'online') &&

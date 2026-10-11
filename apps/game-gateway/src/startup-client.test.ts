@@ -27,15 +27,50 @@ describe('startup client', () => {
         redirect: 'error',
         headers: {
           Authorization: `Bearer ${options.token}`,
-          'X-NickHosting-Gateway-Features': 'startup-keepalive-v1',
+          'X-NickHosting-Gateway-Features': 'startup-keepalive-v1,provider-readiness-v1',
         },
       },
     ]);
   });
+  it('accepts a bounded durable readiness receipt only with its event timestamp', async () => {
+    const snapshot = {
+      gatewayId: options.gatewayId,
+      revision: 5,
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 5000).toISOString(),
+      routes: [],
+    };
+    const event = { ...hint, readinessSnapshot: snapshot, observedAt: new Date().toISOString() };
+    const receive = vi.fn();
+    await watchGatewayStartup(
+      {
+        ...options,
+        fetcher: async () => response(`event: startup\ndata: ${JSON.stringify(event)}\n\n`),
+      },
+      hint,
+      receive,
+      new AbortController().signal,
+    );
+    expect(receive).toHaveBeenCalledWith(event);
+    await expect(
+      watchGatewayStartup(
+        {
+          ...options,
+          fetcher: async () =>
+            response(
+              `event: startup\ndata: ${JSON.stringify({ ...hint, readinessSnapshot: snapshot })}\n\n`,
+            ),
+        },
+        hint,
+        receive,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow();
+  });
   it.each([
     `event: startup\ndata: ${JSON.stringify({ ...hint, generation: randomUUID() })}\n\n`,
     `event: startup\ndata: ${JSON.stringify({ ...hint, token: 'secret' })}\n\n`,
-    'x'.repeat(8193),
+    'x'.repeat(1048577),
     'event: console\ndata: secret\n\n',
     'event: keepalive\ndata: {"ready":true}\n\n',
     'event: keepalive\ndata: {}\n\n'.repeat(400),

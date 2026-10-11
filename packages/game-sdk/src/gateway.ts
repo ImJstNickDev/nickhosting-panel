@@ -205,7 +205,7 @@ export interface GatewayControl {
   reportObservation(observation: GatewayObservation): Promise<void | GatewaySnapshot>;
   watchStartup?(
     request: { routeId: string; routeRevision: number; generation: string; wakeJobId: string },
-    onHint: () => void | Promise<void>,
+    onHint: (ready?: { snapshot: GatewaySnapshot; observedAt: string }) => void | Promise<void>,
     signal: AbortSignal,
   ): Promise<void>;
 }
@@ -248,8 +248,9 @@ export interface GatewayProtocolSession {
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayProtocolAdapter {
   readonly id: string;
-  /** Live provider state is only a prompt to probe, never readiness authority. */
+  /** Authenticated provider events may deliver durable readiness receipts for opted-in integrations. */
   readonly startupHint?: 'provider_running';
+  readonly readinessSource?: 'provider_running';
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
   response(context: GatewayProtocolContext, state: GatewayResponseMode): Uint8Array | undefined;

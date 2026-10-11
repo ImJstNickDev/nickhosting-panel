@@ -4344,3 +4344,75 @@ failed-then-successful recovery);6 Gateway event-driven tests passed (131 skippe
 Independent review found no must-fix; focused Biome passed. Initial TypeScript
 errors in new promise annotations were corrected before final delivery.
 Final root TypeScript check passed on the corrected source. Index governance passed.
+
+
+### 2026-10-11 — Provider readiness authority and startup responder continuity
+
+Owner-driven `50fc85f` cycle (UTC): Minecraft Done21:34:24.949, Wings hint25.339,
+full inspection693ms (context135ms, host555ms, reused provider0.2ms), protocol17.62ms,
+proof write46.6ms; probe760ms. Core report672ms including process550.8ms, then
+serialized receipt wait335ms. Forwarding27.108: **2.159s after Done**. The first
+probe succeeded; this cycle did not reproduce the previous renewal rejection.
+Startup nevertheless had an independently observed `observer_container_churn`
+unavailable interval21:33:53.777–58.057 (**4.280s**). Sleep quiescence21:35:25.353,
+Minecraft stop27.248, Docker exit27.613, sleeping28.959. These are historical
+measurements, not results for the following correction.
+
+The Owner requested trusting Pterodactyl readiness and removing redundant work.
+[ADR 0016](decisions/0016-provider-readiness.md) records the resulting contract:
+compiled Minecraft accepts authenticated live Wings running against the exact
+successful admitted operation/process/reservation. Core returns a bounded durable
+readiness snapshot; the Gateway applies it within the original lease without a
+second Panel/image/game-status verification. Initial reachability and full listener
+renewal safety remain. Player counts remain protocol evidence; unknown counts
+prevent idle stop. Periodic online observations use local host process confirmation.
+Container churn can retain an already authorized status responder across a new
+waking generation only for the identical endpoint/identity, without adopting that
+candidate or extending authority. No arbitrary readiness delay is added.
+
+Validation commands and actual outcomes:
+
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/startup-client.test.ts apps/game-gateway/src/data-plane.test.ts packages/gateway-safety/src/validator.test.ts apps/game-gateway/src/main.test.ts games/minecraft/src/protocol.test.ts`: **335 passed**, five complete test files.
+- After adding further safety regressions: `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts -t 'provider readiness|declared provider'`: **6 passed, 131 skipped**. Covers matching proof, no proof, identity, collision, stale observation, missing bindings and stopped backend.
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/gateway-startup.test.ts`: **17 passed** (including live stop racing the readiness commit).
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/gateway-orchestration.integration.test.ts`: **88 passed, one fixture failed**. The fixture still hardcoded provider user1 after technical-account migration; corrected to its assigned user. A pending-job fixture also required a valid queued state under existing DB constraints. Targeted `-t 'provider running'`: **6 passed**; no claim of a second full-file run.
+- Same isolated integration runner, `packages/server-management/src/runtime.integration.test.ts -t 'provider-ready refresh'`: **1 passed**, proving local host/process refresh without Panel/image reads.
+- Same runner, `apps/api/src/gateway.integration.test.ts`: **22 passed, one stale identity fixture failed**. Corrected its hardcoded provider user1; `-t 'narrows provider inventory'`: **1 passed**. Existing failures are recorded rather than relabeled full-suite passes.
+
+Independent review found one live-status race across awaited route validation;
+Core now rechecks after the await and immediately before readiness write. No code
+must-fix findings remain. Review confirmed unchanged lease/identity fences,
+bounded streams, unknown-idle behavior and external-stop process recovery.
+The first final typecheck exposed nullable IDs in the corrected fixtures; explicit
+non-null fixture guards fix those errors. Final static/governance outcomes and
+activation are recorded below.
+
+No complete historical M1–M5 suite or live game-server scenario was repeated.
+Tests used isolated fixtures/database services, not the Owner's game server.
+No production settings/resources, credentials, eggs, ports or networks changed.
+New running-driven live latency and continuity require the next Owner-driven cycle;
+passing regressions do not establish a latency guarantee. SFTPGo #18 is unchanged.
+
+
+Final static checks: root `scripts/dev.sh pnpm exec tsc --noEmit` passed;
+Biome passed on the changed TypeScript files; `git diff --check` passed.
+Index governance checked584text files,142review PNGs,485relative links,4TOML
+files and44ignore cases, passing its heuristic content scan.
+
+A final parent review added a local age check after asynchronous network-proof
+loading on the new provider-ready path. It adds no I/O. Its new regression initially
+failed because the test injected its clock after validator construction; moving
+clock injection before construction corrected the fixture. The same targeted
+validator command then passed **7 tests,131 skipped**. Independent review approved
+this final guard. This targeted result supersedes the earlier six-case run only;
+the complete five-file result remains the earlier335-test run.
+
+
+Activation: verified the existing container's exact `nickhosting-dev` project and
+`gateway` service labels, then restarted only `nickhosting-dev-gateway-1` under the
+Owner's standing authorization. A second scoped restart loaded the final freshness
+guard. API/worker used their existing source watchers and remained healthy.
+The final Unix health check reported ready/control available; the route returned
+to sleeping at21:52:03.393UTC after the normal restart lease-drain period. Restart
+shutdown/control-unavailable logs are retained and are not classified as a game
+startup test. No game power/file commands or new test assets were created.

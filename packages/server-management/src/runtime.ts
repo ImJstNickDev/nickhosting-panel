@@ -613,6 +613,18 @@ export async function createManagementRuntime(options: ManagementOptions) {
       );
       return containerObserver.processStartedAt(server.pterodactyl_uuid);
     },
+    observeProviderProcessStart: async (serverId: string, connection: Kysely<Database>) => {
+      await verifyObservationHost(serverId, connection);
+      const server = await connection
+        .selectFrom('managed_servers')
+        .select('pterodactyl_uuid')
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+      if (!server?.pterodactyl_uuid || !containerObserver?.processStartedAt)
+        throw new DomainError('configuration_invalid');
+      return containerObserver.processStartedAt(server.pterodactyl_uuid);
+    },
     observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
       const server = await connection
         .selectFrom('managed_servers')

@@ -110,3 +110,10 @@ with fabricated passing reports. Service-only Gateway DTOs explicitly distinguis
 compiled declarations from legacy evidence, and existing lease/safety checks remain.
 External direct reachability remains unverified until tested; no public binding,
 firewall/NAT change or production mutation is implied.
+
+
+## 2026-10-11 amendment — Declared provider readiness
+
+[ADR 0016](0016-provider-readiness.md) supersedes the requirement to repeat a
+game-protocol readiness probe after authenticated live provider-running for the
+compiled Minecraft integration. Original decisions and test history remain above.

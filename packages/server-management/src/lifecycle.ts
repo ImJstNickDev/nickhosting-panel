@@ -126,6 +126,12 @@ export interface LifecycleOptions {
   /** Trusted host-bound running process start. Null proves non-running/absent;
    * unavailability must throw. Production always supplies this observer. */
   observeProcessStart?: (serverId: string, connection: Kysely<Database>) => Promise<string | null>;
+  /** Provider-ready integrations may refresh an already admitted process epoch
+   * locally; remote identity/drift stays with subscription setup/reconciliation. */
+  observeProviderProcessStart?: (
+    serverId: string,
+    connection: Kysely<Database>,
+  ) => Promise<string | null>;
   /** Fresh host/registry-bound process epoch only, without re-attesting game files.
    * Reconciliation may use it only to corroborate a durable successful power receipt. */
   observeReconciliationProcessStart?: (

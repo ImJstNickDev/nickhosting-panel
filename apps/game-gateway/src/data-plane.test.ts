@@ -1905,7 +1905,16 @@ describe('lease, reconciliation and shutdown safety', () => {
     await refuses(backend.port);
     expect(f.gateway.metrics().leaseExpirations).toBe(1);
   });
-  it.each(['revision', 'generation', 'backend', 'public', 'mode', 'withdrawal'] as const)(
+  it.each([
+    'server',
+    'node',
+    'allocation',
+    'protocol',
+    'backend',
+    'public',
+    'mode',
+    'withdrawal',
+  ] as const)(
     'withdraws the old responder when the candidate changes %s during churn',
     async (change) => {
       const backend = await tcpFixture();
@@ -1913,7 +1922,11 @@ describe('lease, reconciliation and shutdown safety', () => {
       const f = plane([r]);
       await f.gateway.start();
       const changed = { ...r, revision: 2 };
-      if (change === 'generation') changed.generation = randomUUID();
+      if (change === 'server') changed.serverId = randomUUID();
+      if (change === 'node') changed.nodeId = randomUUID();
+      if (change === 'allocation') changed.allocationId = randomUUID();
+      if (change === 'protocol')
+        changed.protocol = { handlerId: 'fixture', role: 'game', gameVersion: '2' };
       if (change === 'backend') changed.backend = { ...r.backend, address: '127.0.0.3' };
       if (change === 'public') changed.public = { ...r.public, address: '127.0.0.3' };
       if (change === 'mode') changed.mode = 'online';
@@ -1927,6 +1940,56 @@ describe('lease, reconciliation and shutdown safety', () => {
       await refuses(backend.port);
     },
   );
+
+  it.each(['sleeping', 'online', 'waking'] as const)(
+    'keeps the existing %s listener responding during a new waking generation without authority renewal',
+    async (mode) => {
+      const backend = await tcpFixture();
+      let clock = Date.now();
+      const r = route(backend.port, 'tcp', mode);
+      const f = plane([r], { now: () => clock, lease: 1000 });
+      await f.gateway.start();
+      const expiresAt = f.gateway.health().expiresAt;
+      const changed = {
+        ...r,
+        revision: 2,
+        generation: randomUUID(),
+        wakeJobId: randomUUID(),
+        mode: 'waking' as const,
+      };
+      vi.mocked(f.control.fetchSnapshot).mockResolvedValue(f.snapshot([changed], 2, 60000));
+      vi.mocked(f.safety.validate).mockRejectedValue(
+        new NetworkObservationError('container_churn'),
+      );
+      await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+      expect(f.gateway.health()).toMatchObject({ revision: 1, expiresAt, routes: 1 });
+      expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+      expect((await exchange(backend.port, 'JOIN\n')).toString()).toBe('waking\n');
+      await f.gateway.observe();
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      clock += 1001;
+      await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+      expect(f.gateway.health().routes).toBe(0);
+      await refuses(backend.port);
+    },
+  );
+
+  it('closes a retained starting responder when fresh validation subsequently rejects identity', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'sleeping');
+    const f = plane([r]);
+    await f.gateway.start();
+    const changed = { ...r, revision: 2, generation: randomUUID(), mode: 'waking' as const };
+    vi.mocked(f.control.fetchSnapshot).mockResolvedValue(f.snapshot([changed], 2));
+    vi.mocked(f.safety.validate).mockRejectedValue(new NetworkObservationError('container_churn'));
+    await expect(f.gateway.refresh()).rejects.toThrow('integration_unavailable');
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+    vi.mocked(f.safety.validate).mockRejectedValue(new GatewaySafetyError('provider_identity'));
+    await expect(f.gateway.refresh()).rejects.toThrow('allocation_unavailable');
+    expect(f.gateway.health().routes).toBe(0);
+    await refuses(backend.port);
+  });
 
   it('preserves only the original committed lease during explicit provider cooldown', async () => {
     const backend = await tcpFixture();
@@ -2392,6 +2455,63 @@ describe('transition-only Gateway diagnostics', () => {
 });
 
 describe('event-driven within-lease readiness', () => {
+  it('applies an authenticated provider readiness receipt without a protocol probe or lease extension', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    let receive: Parameters<NonNullable<GatewayControl['watchStartup']>>[1] | undefined;
+    const probe = vi.fn(async () => ({ ready: false }));
+    const p = plane([r], {
+      control: {
+        watchStartup: async (_request, cb, abort) => {
+          receive = cb;
+          await new Promise<void>((resolve) =>
+            abort.addEventListener('abort', () => resolve(), { once: true }),
+          );
+        },
+      },
+      protocols: [
+        fixtureProtocol({
+          startupHint: 'provider_running',
+          readinessSource: 'provider_running',
+          probeReadiness: probe,
+        }),
+      ],
+    });
+    await p.gateway.refresh();
+    const expiry = p.gateway.health().expiresAt;
+    await p.gateway.observe();
+    expect(probe).not.toHaveBeenCalled();
+    await receive?.({
+      snapshot: p.snapshot([{ ...r, mode: 'online', revision: 2 }], 2),
+      observedAt: new Date().toISOString(),
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(p.control.reportObservation).not.toHaveBeenCalled();
+    expect(p.gateway.health().expiresAt).toBe(expiry);
+    expect((await exchange(backend.port, 'hello')).toString()).toBe('hello');
+  });
+  it('keeps provider-ready routing but prevents sleep when player observation fails', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'online');
+    const p = plane([r], {
+      protocols: [
+        fixtureProtocol({
+          readinessSource: 'provider_running',
+          observe: async () => {
+            throw new Error('status temporarily unavailable');
+          },
+        }),
+      ],
+    });
+    await p.gateway.refresh();
+    await p.gateway.observe();
+    expect(p.safety.validateBackend).not.toHaveBeenCalled();
+    expect(p.control.reportObservation).toHaveBeenCalledWith(
+      expect.objectContaining({ ready: true, idle: false }),
+    );
+    expect((await exchange(backend.port, 'hello')).toString()).toBe('hello');
+  });
+
   it.each(['backend_protocol', 'observation_stale'] as const)(
     'records the exact %s safety failure without error payloads or changing readiness',
     async (reason) => {

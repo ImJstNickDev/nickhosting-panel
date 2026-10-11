@@ -140,3 +140,10 @@ Core retains image/egg/process verification: durable start confirmation stores n
 configuration fingerprint sufficient to substitute for those proofs. Its initial
 host-gated Docker epoch read now overlaps provider identity/module discovery,
 with all branches settled before returning. No JAR or Mojang download is added.
+
+
+## 2026-10-11 amendment — Declared provider readiness
+
+[ADR 0016](0016-provider-readiness.md) supersedes the requirement to repeat a
+game-protocol readiness probe after authenticated live provider-running for the
+compiled Minecraft integration. Original decisions and test history remain above.

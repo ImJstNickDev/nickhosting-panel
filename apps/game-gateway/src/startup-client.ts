@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
+import { gatewaySnapshotSchema } from '@nickhosting/game-sdk';
 import { z } from 'zod';
 
 const hintSchema = z
@@ -11,8 +12,15 @@ const hintSchema = z
   })
   .strict();
 export type GatewayStartupHint = z.infer<typeof hintSchema>;
+const eventSchema = hintSchema
+  .extend({
+    readinessSnapshot: gatewaySnapshotSchema.optional(),
+    observedAt: z.iso.datetime().optional(),
+  })
+  .refine((value) => (value.readinessSnapshot === undefined) === (value.observedAt === undefined));
+export type GatewayStartupEvent = z.infer<typeof eventSchema>;
 
-/** A bounded, abortable hint subscription. A hint cannot authorize routing. */
+/** Authenticated, bounded subscription. Only a fenced durable receipt may advance readiness. */
 export async function watchGatewayStartup(
   options: {
     baseUrl: string;
@@ -22,7 +30,7 @@ export async function watchGatewayStartup(
     fetcher?: typeof fetch;
   },
   request: GatewayStartupHint,
-  onHint: (hint: GatewayStartupHint) => void | Promise<void>,
+  onHint: (hint: GatewayStartupEvent) => void | Promise<void>,
   signal: AbortSignal,
 ): Promise<void> {
   let base: URL;
@@ -66,7 +74,7 @@ export async function watchGatewayStartup(
         Authorization: `Bearer ${options.token}`,
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
-        'X-NickHosting-Gateway-Features': 'startup-keepalive-v1',
+        'X-NickHosting-Gateway-Features': 'startup-keepalive-v1,provider-readiness-v1',
       },
       body: JSON.stringify(request),
       redirect: 'error',
@@ -83,12 +91,13 @@ export async function watchGatewayStartup(
     reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8', { fatal: true });
     let text = '',
-      bytes = 0;
+      bytes = 0,
+      keepaliveBytes = 0;
     while (!controller.signal.aborted) {
       const chunk = await reader.read();
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
-      if (bytes > 8192) throw new DomainError('integration_unavailable');
+      if (bytes > 1048576) throw new DomainError('integration_unavailable');
       text += decoder.decode(chunk.value, { stream: true });
       text = text.replace(/\r\n/g, '\n');
       for (;;) {
@@ -98,11 +107,15 @@ export async function watchGatewayStartup(
         text = text.slice(end + 2);
         // Canonical keepalive frames maintain HTTP liveness only. They never
         // reset the absolute duration/byte budget or invoke readiness handling.
-        if (frame === 'event: keepalive\ndata: {}') continue;
+        if (frame === 'event: keepalive\ndata: {}') {
+          keepaliveBytes += frame.length + 2;
+          if (keepaliveBytes > 8192) throw new DomainError('integration_unavailable');
+          continue;
+        }
         const lines = frame.split('\n');
         if (lines.length !== 2 || lines[0] !== 'event: startup' || !lines[1]?.startsWith('data: '))
           throw new DomainError('integration_unavailable');
-        const hint = hintSchema.safeParse(JSON.parse(lines[1].slice(6)));
+        const hint = eventSchema.safeParse(JSON.parse(lines[1].slice(6)));
         if (
           !hint.success ||
           hint.data.routeId !== request.routeId ||

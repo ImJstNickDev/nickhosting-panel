@@ -10,6 +10,9 @@ import type {
   GatewayRoute,
 } from '@nickhosting/game-sdk';
 
+/** Owner-approved lifecycle source; actual idle counts still come from protocol status. */
+export const minecraftReadinessSource = 'provider_running' as const;
+
 /** Release labels, wire IDs and loader/runtime metadata are separate. These
  * entries come from the reviewed registry, never from client input. Registry
  * membership is recognition evidence, not a claim of real-client verification. */
@@ -483,6 +486,7 @@ export function createMinecraftProtocolAdapter(
   return {
     id: 'minecraft-java',
     startupHint: 'provider_running',
+    readinessSource: minecraftReadinessSource,
     supports: (route) => !!selected(route),
     createSession,
     // Minecraft is TCP-only and requires a per-connection status/ping dialogue.
