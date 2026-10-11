@@ -34,18 +34,29 @@ import {
   visibleFiles,
 } from './file-manager-model.js';
 
-const FileTextEditor = lazy(() =>
-  import('./file-text-editor.js').then((module) => ({ default: module.FileTextEditor })),
-);
+const importEditor = () =>
+  import('./file-text-editor.js').then((module) => ({ default: module.FileTextEditor }));
+let editorModule: ReturnType<typeof importEditor> | undefined;
+function loadEditor() {
+  editorModule ??= importEditor().catch((error) => {
+    editorModule = undefined;
+    throw error;
+  });
+  return editorModule;
+}
+const FileTextEditor = lazy(loadEditor);
 
 import { type ServerFile, serverPath, useServer, useTransfers } from './service-contracts.js';
 import './files.css';
+import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 
 type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'move' | 'copy' | 'extract';
 type UploadItem = {
   id: number;
   file: File;
   directory: string;
+  path: string;
+  exclusive: boolean;
   sent: number;
   speed: number;
   status: 'queued' | 'uploading' | 'confirming' | 'complete' | 'cancelled' | 'failed';
@@ -74,12 +85,50 @@ function FileIcon({ folder, archive = false }: { folder: boolean; archive?: bool
     </svg>
   );
 }
+function ToolbarIcon({
+  kind,
+}: {
+  kind: 'folder' | 'file' | 'upload' | 'uploadFolder' | 'refresh' | 'path';
+}) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {kind === 'path' ? (
+        <path d="m15 5 4 4M4 20l5-1L20 8a2.8 2.8 0 0 0-4-4L5 15l-1 5Z" />
+      ) : kind === 'refresh' ? (
+        <path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
+      ) : kind === 'upload' ? (
+        <path d="M12 16V3m-4 4 4-4 4 4M4 15v5h16v-5" />
+      ) : kind === 'file' ? (
+        <>
+          <path d="M14 3H5v18h14V8l-5-5v5h5" />
+          <path d="M12 12v6m-3-3h6" />
+        </>
+      ) : (
+        <>
+          <path d="M3 7V5h7l2 3h9v12H3V7Z" />
+          {kind === 'folder' ? <path d="M12 11v6m-3-3h6" /> : <path d="M12 18v-7m-3 3 3-3 3 3" />}
+        </>
+      )}
+    </svg>
+  );
+}
 export function FilesPage({ serverId }: { serverId: string }) {
   return <FilesWorkspace key={serverId} serverId={serverId} />;
 }
 function FilesWorkspace({ serverId }: { serverId: string }) {
   const t = useT(),
     format = useFormat();
+  const macKeyboard = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+  const pathShortcut = `${macKeyboard ? '⌥' : 'ALT'} + G`;
+  const searchInput = useRef<HTMLInputElement>(null);
   const server = useServer(serverId),
     transfers = useTransfers(serverId);
   const [directory, setDirectory] = useState('');
@@ -105,6 +154,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [menu, setMenu] = useState<{ entry: ServerFile; left: number; top: number }>();
   const [dropActive, setDropActive] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [preparingFolder, setPreparingFolder] = useState(false);
+  const folderPreparation = useRef<AbortController | undefined>(undefined);
   const [pendingUploads, setPendingUploads] = useState<File[]>([]);
   const uploadId = useRef(0),
     uploadRunning = useRef(false);
@@ -112,6 +163,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const cancelledUploads = useRef(new Set<number>());
   const uploadQueue = useRef<UploadItem[]>([]);
   const mounted = useRef(true);
+  const folderInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null),
     pathInput = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -162,10 +214,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setReading(false);
   }, []);
   useEffect(() => {
+    // Start fetching on tab entry, sharing the same promise with React.lazy.
+    void loadEditor().catch(() => {});
     mounted.current = true;
     return () => {
       mounted.current = false;
       uploadAbort.current?.abort();
+      folderPreparation.current?.abort();
       readAbort.current?.abort();
     };
   }, []);
@@ -175,6 +230,31 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       pathInput.current?.select();
     }
   }, [pathEditing]);
+  useEffect(() => {
+    const focusSearch = (event: globalThis.KeyboardEvent) => {
+      const modifier = macKeyboard
+        ? event.metaKey && !event.ctrlKey
+        : event.ctrlKey && !event.metaKey;
+      const pathRequest = event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyG';
+      const searchRequest = modifier && !event.altKey && event.key.toLowerCase() === 'k';
+      if (
+        event.defaultPrevented ||
+        event.shiftKey ||
+        (!pathRequest && !searchRequest) ||
+        document.querySelector('dialog[open]')
+      )
+        return;
+      event.preventDefault();
+      setMenu(undefined);
+      if (pathRequest) setPathEditing(true);
+      else {
+        searchInput.current?.focus();
+        searchInput.current?.select();
+      }
+    };
+    document.addEventListener('keydown', focusSearch);
+    return () => document.removeEventListener('keydown', focusSearch);
+  }, [macKeyboard]);
   useEffect(() => {
     if (!menu) return;
     menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -191,7 +271,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }, [menu]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (dirty || uploadRunning.current || mutationRunning.current) {
+      if (dirty || uploadRunning.current || mutationRunning.current || folderPreparation.current) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -343,10 +423,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       event.preventDefault();
       setSelected(new Set(rows.filter((entry) => !entry.is_symlink).map((entry) => entry.name)));
     }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'l') {
-      event.preventDefault();
-      setPathEditing(true);
-    }
     if (event.key === 'Escape') {
       setSelected(new Set());
       setMenu(undefined);
@@ -405,8 +481,21 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       const start = performance.now();
       updateUpload(item.id, { status: 'uploading' });
       try {
+        if (item.exclusive) {
+          const parent = item.path.split('/').slice(0, -1).join('/');
+          const listing = await api<ServerFile[]>(
+            `${serverPath(serverId)}/files?path=${encodeURIComponent(parent)}`,
+            { signal: controller.signal },
+          );
+          if (
+            listing.some(
+              (entry) => entry.name.toLocaleLowerCase() === item.file.name.toLocaleLowerCase(),
+            )
+          )
+            throw { messageKey: 'file.folderFileExists' };
+        }
         await upload(
-          `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(join(item.directory, item.file.name))}`,
+          `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}`,
           item.file,
           {
             signal: controller.signal,
@@ -431,11 +520,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
     uploadRunning.current = false;
   }
-  function queueUploads(incoming: File[]) {
-    const items = incoming.map((file) => ({
+  function queueUploads(incoming: File[], target = directory, paths?: string[]) {
+    const items = incoming.map((file, index) => ({
       id: ++uploadId.current,
       file,
-      directory,
+      directory: target,
+      path: paths?.[index] ?? join(target, file.name),
+      exclusive: Boolean(paths),
       sent: 0,
       speed: 0,
       status: 'queued' as const,
@@ -446,6 +537,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     void runUploads();
   }
   function acceptUploads(incoming: File[]) {
+    if (folderPreparation.current) {
+      setError({ messageKey: 'file.folderPreparing' });
+      return;
+    }
     if (!uploadAvailable) {
       setError({ messageKey: uploadReason });
       return;
@@ -460,8 +555,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           files.data?.some((entry) => entry.name === file.name) ||
           uploads.some(
             (item) =>
-              item.directory === directory &&
-              item.file.name === file.name &&
+              item.path === join(directory, file.name) &&
               item.status !== 'cancelled' &&
               item.status !== 'failed',
           ),
@@ -472,6 +566,66 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
     queueUploads(incoming);
   }
+  async function acceptFolder(incoming: File[]) {
+    if (!incoming.length) {
+      setError({ messageKey: 'file.folderError.empty_selection' });
+      return;
+    }
+    if (!uploadAvailable) {
+      setError({ messageKey: uploadReason });
+      return;
+    }
+    if (uploadRunning.current || folderPreparation.current) {
+      setError({ messageKey: 'file.waitUploads' });
+      return;
+    }
+    const controller = new AbortController();
+    folderPreparation.current = controller;
+    setPreparingFolder(true);
+    setError(undefined);
+    const target = directory;
+    try {
+      const plan = planFolderUpload(incoming, target);
+      await prepareFolderUpload(
+        plan,
+        {
+          list: (path, signal) =>
+            api<ServerFile[]>(`${serverPath(serverId)}/files?path=${encodeURIComponent(path)}`, {
+              signal,
+            }),
+          mkdir: (root, name, signal) =>
+            api(`${serverPath(serverId)}/files`, {
+              method: 'POST',
+              body: { action: 'mkdir', root, name },
+              signal,
+            }),
+        },
+        controller.signal,
+      );
+      if (mounted.current && !controller.signal.aborted)
+        queueUploads(
+          plan.entries.map((entry) => entry.file),
+          target,
+          plan.entries.map((entry) => entry.path),
+        );
+    } catch (failure) {
+      if (mounted.current)
+        setError({
+          messageKey:
+            failure instanceof FolderUploadError
+              ? failure.createdDirectories.length || failure.uncertainDirectory
+                ? 'file.folderPartial'
+                : `file.folderError.${failure.code}`
+              : 'web.errors.request',
+        });
+    } finally {
+      folderPreparation.current = undefined;
+      if (mounted.current) {
+        setPreparingFolder(false);
+        void files.refetch();
+      }
+    }
+  }
   function cancelUpload(item: UploadItem) {
     if (item.status === 'queued') {
       cancelledUploads.current.add(item.id);
@@ -479,6 +633,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     } else uploadAbort.current?.abort();
   }
   const totalSelected = selected.size;
+  const uploadsBusy = uploads.some((item) =>
+    ['queued', 'uploading', 'confirming'].includes(item.status),
+  );
   return (
     <section
       className="file-manager"
@@ -503,6 +660,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         if (event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(false);
+          if (
+            [...event.dataTransfer.items].some((item) => item.webkitGetAsEntry?.()?.isDirectory)
+          ) {
+            setError({ messageKey: 'file.useFolderUpload' });
+            return;
+          }
           acceptUploads([...event.dataTransfer.files]);
         }
       }}
@@ -547,58 +710,120 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 </li>
               ))}
             </ol>
-            <Tooltip content={t('file.editPath')}>
+            <Tooltip placement="cursor" content={t('file.editPath', { shortcut: pathShortcut })}>
               <button
                 type="button"
-                className="fm-icon-button secondary"
-                aria-label={t('file.editPath')}
+                className="fm-tool fm-path-edit"
+                aria-keyshortcuts="Alt+G"
+                aria-label={t('file.editPath', { shortcut: pathShortcut })}
                 onClick={() => setPathEditing(true)}
               >
-                ⌁
+                <ToolbarIcon kind="path" />
               </button>
             </Tooltip>
           </nav>
         )}
+        <div className="fm-search">
+          <input
+            ref={searchInput}
+            type="search"
+            aria-label={t('file.search')}
+            aria-keyshortcuts={macKeyboard ? 'Meta+K' : 'Control+K'}
+            placeholder={t('file.searchLabel')}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <span aria-hidden="true">
+            <kbd>{macKeyboard ? '⌘ + K' : 'CTRL + K'}</kbd>
+          </span>
+        </div>
         <div className="fm-tools">
-          <Tooltip content={t('file.refresh')}>
+          <Tooltip placement="cursor" content={t('file.refresh')}>
             <button
               type="button"
-              className="secondary fm-icon-button"
+              className="fm-tool"
               aria-label={t('file.refresh')}
               disabled={files.isFetching}
               onClick={() => void files.refetch()}
             >
-              ↻
+              <ToolbarIcon kind="refresh" />
             </button>
           </Tooltip>
           {canManage && (
             <>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!canMutate}
-                onClick={() => chooseMode('mkdir', [])}
-              >
-                {t('service.newFolder')}
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!canMutate}
-                onClick={() => chooseMode('new', [])}
-              >
-                {t('service.newFile')}
-              </button>
-              <Tooltip content={uploadAvailable ? t('web.upload') : t(uploadReason)}>
+              <Tooltip placement="cursor" content={t('service.newFolder')}>
                 <button
                   type="button"
-                  aria-disabled={!uploadAvailable}
+                  className="fm-tool"
+                  aria-label={t('service.newFolder')}
+                  disabled={!canMutate || preparingFolder}
+                  onClick={() => chooseMode('mkdir', [])}
+                >
+                  <ToolbarIcon kind="folder" />
+                </button>
+              </Tooltip>
+              <Tooltip placement="cursor" content={t('service.newFile')}>
+                <button
+                  type="button"
+                  className="fm-tool"
+                  aria-label={t('service.newFile')}
+                  disabled={!canMutate || preparingFolder}
+                  onClick={() => chooseMode('new', [])}
+                >
+                  <ToolbarIcon kind="file" />
+                </button>
+              </Tooltip>
+              <Tooltip
+                placement="cursor"
+                content={
+                  !uploadAvailable
+                    ? t(uploadReason)
+                    : preparingFolder
+                      ? t('file.folderPreparing')
+                      : t('web.upload')
+                }
+              >
+                <button
+                  type="button"
+                  className="fm-tool"
+                  aria-label={t('web.upload')}
+                  aria-disabled={!uploadAvailable || preparingFolder}
                   onClick={() => {
-                    if (uploadAvailable) fileInput.current?.click();
-                    else setError({ messageKey: uploadReason });
+                    if (uploadAvailable && !preparingFolder) fileInput.current?.click();
+                    else
+                      setError({
+                        messageKey: preparingFolder ? 'file.folderPreparing' : uploadReason,
+                      });
                   }}
                 >
-                  {t('web.upload')}
+                  <ToolbarIcon kind="upload" />
+                </button>
+              </Tooltip>
+              <Tooltip
+                placement="cursor"
+                content={
+                  !uploadAvailable
+                    ? t(uploadReason)
+                    : preparingFolder || uploadsBusy
+                      ? t('file.waitUploads')
+                      : t('file.uploadFolder')
+                }
+              >
+                <button
+                  type="button"
+                  className="fm-tool"
+                  aria-label={t('file.uploadFolder')}
+                  aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
+                  onClick={() => {
+                    if (uploadAvailable && !preparingFolder && !uploadRunning.current)
+                      folderInput.current?.click();
+                    else
+                      setError({
+                        messageKey: !uploadAvailable ? uploadReason : 'file.waitUploads',
+                      });
+                  }}
+                >
+                  <ToolbarIcon kind="uploadFolder" />
                 </button>
               </Tooltip>
               <input
@@ -612,38 +837,20 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   event.target.value = '';
                 }}
               />
+              <input
+                ref={folderInput}
+                type="file"
+                multiple
+                {...{ webkitdirectory: '' }}
+                className="fm-file-input"
+                aria-label={t('file.uploadFolder')}
+                onChange={(event) => {
+                  void acceptFolder([...(event.target.files ?? [])]);
+                  event.target.value = '';
+                }}
+              />
             </>
           )}
-        </div>
-      </div>
-      <div className="fm-filterbar">
-        <input
-          type="search"
-          aria-label={t('file.search')}
-          placeholder={t('file.search')}
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
-        <div className="fm-sort">
-          <select
-            aria-label={t('file.sort')}
-            value={order}
-            onChange={(event) => setOrder(event.target.value as FileOrder)}
-          >
-            <option value="name">{t('web.name')}</option>
-            <option value="size">{t('web.size')}</option>
-            <option value="date">{t('web.updated')}</option>
-          </select>
-          <Tooltip content={t(descending ? 'file.descending' : 'file.ascending')}>
-            <button
-              type="button"
-              className="secondary fm-icon-button"
-              aria-label={t(descending ? 'file.descending' : 'file.ascending')}
-              onClick={() => setDescending((value) => !value)}
-            >
-              {descending ? '↓' : '↑'}
-            </button>
-          </Tooltip>
         </div>
         <fieldset className="fm-view" aria-label={t('file.view')}>
           <button
@@ -751,9 +958,51 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   )
                 }
               />
-              <span>{t('web.name')}</span>
-              <span>{t('web.size')}</span>
-              <span>{t('web.updated')}</span>
+              {(['name', 'size', 'date'] as const).map((field) => {
+                const key = field === 'date' ? 'file.modified' : `web.${field}`;
+                const active = order === field;
+                const arrow = active && (order !== 'name' || descending);
+                return (
+                  <Tooltip
+                    placement="cursor"
+                    key={field}
+                    content={
+                      active
+                        ? t(descending ? 'file.descending' : 'file.ascending')
+                        : t('file.sortColumn', { name: t(key) })
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="fm-column-button"
+                      aria-label={t(key)}
+                      aria-pressed={active}
+                      onClick={() => {
+                        if (active) setDescending((value) => !value);
+                        else {
+                          setOrder(field);
+                          setDescending(false);
+                        }
+                      }}
+                    >
+                      {t(key)}
+                      {arrow && (
+                        <svg
+                          className="fm-sort-arrow"
+                          data-order={descending ? 'descending' : 'ascending'}
+                          viewBox="0 0 16 16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          aria-hidden="true"
+                        >
+                          <path d={descending ? 'M8 2v12m-4-4 4 4 4-4' : 'M8 14V2m-4 4 4-4 4 4'} />
+                        </svg>
+                      )}
+                    </button>
+                  </Tooltip>
+                );
+              })}
               <span className="sr-only">{t('web.actions')}</span>
             </div>
             {directory && (
@@ -984,6 +1233,18 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           )}
         </div>
       )}
+      {preparingFolder && (
+        <div className="fm-folder-progress" role="status">
+          <span>{t('file.folderPreparing')}</span>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => folderPreparation.current?.abort()}
+          >
+            {t('web.cancel')}
+          </button>
+        </div>
+      )}
       {uploads.length > 0 && (
         <section className="fm-uploads" aria-label={t('web.upload')}>
           <header>
@@ -1006,7 +1267,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             {uploads.map((item) => (
               <li key={item.id}>
                 <div className="fm-upload-name">
-                  <span>{item.file.name}</span>
+                  <span>{item.path.slice(item.directory ? item.directory.length + 1 : 0)}</span>
                   <span>{t(`file.upload.${item.status}`)}</span>
                   {['queued', 'uploading', 'confirming'].includes(item.status) && (
                     <button

@@ -1,4 +1,56 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'file.sortColumn': ['Sort by {name}', 'Ordina per {name}'],
+  'file.folderFileExists': [
+    'A file appeared at this destination. It has not been replaced.',
+    'Un file è comparso nella destinazione. Non è stato sostituito.',
+  ],
+  'file.modified': ['Modified', 'Modificato'],
+  'file.useFolderUpload': [
+    'Use Upload folder to choose a folder.',
+    'Usa Carica cartella per scegliere una cartella.',
+  ],
+  'file.uploadFolder': ['Upload folder', 'Carica cartella'],
+  'file.folderPreparing': ['Preparing folders…', 'Preparazione delle cartelle…'],
+  'file.waitUploads': [
+    'Wait for the current uploads to finish.',
+    'Attendi la fine dei caricamenti in corso.',
+  ],
+  'file.folderPartial': [
+    'Folder preparation did not finish. Check the destination before retrying; some folders may have been created.',
+    'La preparazione non è terminata. Controlla la destinazione prima di riprovare: alcune cartelle potrebbero essere state create.',
+  ],
+  'file.folderError.empty_selection': [
+    'The selected folder contains no files.',
+    'La cartella selezionata non contiene file.',
+  ],
+  'file.folderError.invalid_path': [
+    'The folder contains an invalid file path.',
+    'La cartella contiene un percorso non valido.',
+  ],
+  'file.folderError.multiple_roots': [
+    'Choose one folder at a time.',
+    'Scegli una cartella alla volta.',
+  ],
+  'file.folderError.collision': [
+    'This folder name already exists. Rename the local folder or choose another destination.',
+    'Questo nome di cartella esiste già. Rinomina la cartella locale o scegli un’altra destinazione.',
+  ],
+  'file.folderError.unsafe_destination': [
+    'This destination cannot receive the folder. Choose another folder.',
+    'Questa destinazione non può ricevere la cartella. Scegline un’altra.',
+  ],
+  'file.folderError.limit_exceeded': [
+    'The folder contains too many files or paths that are too long. Split the upload into smaller folders.',
+    'La cartella contiene troppi file o percorsi troppo lunghi. Suddividi il caricamento in cartelle più piccole.',
+  ],
+  'file.folderError.preparation_failed': [
+    'Could not prepare the destination. Refresh and try again.',
+    'Impossibile preparare la destinazione. Aggiorna e riprova.',
+  ],
+  'file.folderError.cancelled': [
+    'Folder upload cancelled.',
+    'Caricamento della cartella annullato.',
+  ],
   'file.selectionLimit': [
     'Select up to 100 items per operation. Download a folder to include all its contents.',
     'Seleziona fino a 100 elementi per operazione. Scarica una cartella per includere tutti i suoi contenuti.',
@@ -31,7 +83,8 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
 
   'file.breadcrumb': ['File location', 'Percorso dei file'],
   'file.root': ['root', 'root'],
-  'file.editPath': ['Enter path (Ctrl+L)', 'Inserisci percorso (Ctrl+L)'],
+  'file.editPath': ['Enter path ({shortcut})', 'Inserisci percorso ({shortcut})'],
+  'file.searchLabel': ['Search', 'Cerca'],
   'file.refresh': ['Refresh files', 'Aggiorna file'],
   'file.search': ['Search this folder', 'Cerca in questa cartella'],
   'file.sort': ['Sort by', 'Ordina per'],

@@ -1,5 +1,8 @@
 .tooltip {
   position: fixed;
+  top: 0;
+  left: 0;
+  visibility: hidden;
   z-index: 1000;
   width: max-content;
   max-width: min(22rem, calc(100vw - 1rem));
@@ -17,23 +20,8 @@
   white-space: pre-line;
   overflow-wrap: anywhere;
   cursor: default;
-}
-
-/* Keep the hover target continuous across the visual gap. */
-.tooltip::before {
-  position: absolute;
-  right: 0;
-  left: 0;
-  height: 9px;
-  content: "";
-}
-
-.tooltip[data-side="top"]::before {
-  top: 100%;
-}
-
-.tooltip[data-side="bottom"]::before {
-  bottom: 100%;
+  /* Supplementary labels never capture clicks or extend their trigger's hit area. */
+  pointer-events: none;
 }
 
 @media (forced-colors: active) {

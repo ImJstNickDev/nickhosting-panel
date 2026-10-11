@@ -185,13 +185,22 @@ These remain cumulative MiB counters, not transfer rates.
 
 Use the shared `Tooltip` component for supplementary hover/focus descriptions,
 not native `title` attributes. It uses a compact dark popup outside clipping
-containers, follows viewport changes, remains hoverable, dismisses with Escape
-and supports touch. Triggers retain accessible names and keyboard access;
+containers, follows viewport changes, dismisses with Escape
+and supports touch. Only one tooltip is open at a time. Popups ignore pointer
+input: leaving the trigger closes a hover-only hint immediately, including when
+crossing over the popup. Keyboard focus or an explicit touch toggle can keep it
+open; mouse-click focus alone never pins it. Files opts into positioning near the
+cursor using direct positioning with cached geometry, without per-move React
+state updates or layout measurements; keyboard/touch descriptions stay anchored to their controls. Triggers retain accessible names and keyboard access;
 tooltips must not contain essential instructions or interactive controls. Native
 triggers work directly; custom triggers must forward refs and event props. Current
-consumers are the console connection indicator and network legend. Redundant
+consumers include the console connection indicator, network legend and Files controls. Redundant
 timestamp titles are removed. Modal top-layer integration needs explicit handling
 before tooltips are used inside native dialogs.
+The Owner explicitly requested this transient pointer behavior on 2026-10-12.
+Popup hoverability under WCAG 1.4.13 is not claimed for this mode; essential
+instructions must remain visible independently of tooltips, and automated axe
+results do not establish that manual criterion.
 
 Binary uploads use Blob/XHR progress and
 cancellation, and file/backup downloads use native same-origin streaming links.
@@ -460,18 +469,44 @@ reading a list must not wait for an upstream manifest request.
 ### Files interaction contract (2026-10-12)
 
 Files uses breadcrumbs rather than an always-visible path form. The direct-path
-button is available on touch; Ctrl/Cmd+L is intercepted only while focus is inside
-the file manager (browser-reserved shortcuts may still take precedence). Names
+button is available on touch; ALT + G (⌥ + G on macOS) opens direct-path entry while
+Files is mounted, outside dialogs. Ctrl+L remains the browser address-bar shortcut. Names
 open directories or the editor. Each row has an accessible overflow menu and a
 desktop context menu; destructive actions require confirmation. Checkbox range
 selection, focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and
 explicit Move/Copy dialogs provide equivalent pointer and keyboard paths.
 Folders precede files for every sort; search filters the current directory only.
+Name, Size and Modified headers are sorting buttons in both list and grid views.
+The active non-default ordering has an up/down arrow; default Name ascending has
+no arrow. Header controls remain keyboard accessible on mobile.
 List is default; Grid is optional. External file drops use the same upload queue
 as the toolbar, with per-file progress, speed, cancellation and errors. Directory
 uploads are not silently flattened.
 
+The compact icon toolbar provides Refresh, New folder, New text file, Upload and
+Upload folder with localized accessible names and shared tooltips. Folder selection
+preserves the chosen root and descendant file paths. Preparation creates a new
+tree only, refuses existing destination names, and reports partial/cancelled
+preparation without deleting data. Browser directory selection does not expose
+empty folders; these cannot be preserved by that picker. Use Upload folder for
+directories rather than treating an external directory drop as a file. External
+provider writes can still race preflight checks; this is not an atomic filesystem
+transaction. The existing server-side upload policy and admission remain required.
+Search sits to the left of the action icons, with List/Grid at the far right in
+the same desktop toolbar; small screens wrap these controls without overflow.
+The search field displays CTRL + K on Windows/Linux and ⌘ + K on macOS, without
+parentheses; the shortcut focuses/selects the current-folder search. It is active
+only while Files is mounted and yields to open dialogs/editor shortcuts. The
+input also declares its platform-specific `aria-keyshortcuts`. Direct-path entry
+uses a small borderless pencil, with ALT + G or ⌥ + G in its localized tooltip.
+
 The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.
+Entering Files preloads the lazy editor module once; subsequent editor opens use
+the same cached import. A failed preload can retry when the editor is opened.
 Editor content remains local while a conflict is resolved. Availability reasons
 are contextual; no empty full-size Upload panel is rendered.
+
+Server tabs retain their active underline without programmatically focusing the
+active link on load or reload. Native keyboard focus remains visible; pointer
+navigation must not add a persistent focus outline.

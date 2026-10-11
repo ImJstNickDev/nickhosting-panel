@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,6 +14,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   let user: Page;
   let base: string;
   const errors: string[] = [];
+  let editorRequests = 0;
   const stage = `./mountdata/test-assets/file-browser-${randomUUID()}`;
   beforeAll(async () => {
     harness = await browserHarness();
@@ -20,6 +22,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     const identities = await prepareJourneyIdentities(harness);
     user = identities.user;
     user.on('pageerror', (error) => errors.push(error.message));
+    user.on('request', (request) => {
+      if (new URL(request.url()).pathname.endsWith('/file-text-editor.tsx')) editorRequests++;
+    });
     provider = await installBrowserFixtures(
       harness.database,
       identities.ownerId,
@@ -49,12 +54,17 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   }
   it('navigates breadcrumbs and direct paths, searches/sorts folders first, and switches grid without changing inventory', async () => {
     await user.goto(base);
+    await browserExpect.poll(() => editorRequests).toBe(1);
+    await browserExpect(user.locator('.fm-sort-arrow')).toHaveCount(0);
+    await browserExpect(
+      user.locator('.fm-column-button').getByText('Modified', { exact: true }),
+    ).toBeVisible();
     await row('world').getByRole('button', { name: 'world', exact: true }).click();
     await browserExpect(user.getByRole('navigation', { name: 'File location' })).toContainText(
       'world',
     );
     await user.getByRole('button', { name: 'root', exact: true }).click();
-    await user.getByRole('button', { name: 'Enter path (Ctrl+L)', exact: true }).click();
+    await user.getByRole('button', { name: 'Enter path (ALT + G)', exact: true }).click();
     await user.getByLabel('Path', { exact: true }).fill('/world');
     await user.getByLabel('Path', { exact: true }).press('Enter');
     await browserExpect(row('level.dat')).toBeVisible();
@@ -63,8 +73,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.locator('.fm-entry')).toHaveCount(1);
     await browserExpect(row('beta.json')).toBeVisible();
     await user.getByLabel('Search this folder', { exact: true }).fill('');
-    await user.getByLabel('Sort by', { exact: true }).selectOption('size');
-    await user.getByRole('button', { name: 'Ascending order', exact: true }).click();
+    await user.getByRole('button', { name: 'Size', exact: true }).click();
+    await browserExpect(user.locator('.fm-sort-arrow')).toHaveAttribute('data-order', 'ascending');
+    await user.getByRole('button', { name: 'Size', exact: true }).click();
+    await browserExpect(user.locator('.fm-sort-arrow')).toHaveAttribute('data-order', 'descending');
     await browserExpect(user.locator('.fm-entry').first()).toContainText('world');
     const count = await user.locator('.fm-entry').count();
     await user.getByRole('button', { name: 'Grid', exact: true }).click();
@@ -72,8 +84,33 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.locator('.fm-entry')).toHaveCount(count);
     await harness.screenshot(user, 'file-manager-grid-desktop-en');
     await user.getByRole('button', { name: 'List', exact: true }).click();
-    await user.getByLabel('Sort by', { exact: true }).selectOption('name');
-    await user.getByRole('button', { name: 'Descending order', exact: true }).click();
+    await user.getByRole('button', { name: 'Name', exact: true }).click();
+    await browserExpect(user.locator('.fm-sort-arrow')).toHaveCount(0);
+    await user.getByRole('button', { name: 'Modified', exact: true }).focus();
+    await user.keyboard.press('Enter');
+    await browserExpect(user.locator('.fm-sort-arrow')).toHaveAttribute('data-order', 'ascending');
+    await user.getByRole('button', { name: 'Name', exact: true }).click();
+  });
+  it('does not force tab focus after click or reload, while keeping keyboard navigation visible', async () => {
+    await user.goto(base);
+    const tabs = user.locator('.tabs');
+    const filesTab = tabs.getByRole('link', { name: 'Files', exact: true });
+    await tabs.getByRole('link', { name: 'Connection', exact: true }).click();
+    await filesTab.click();
+    await browserExpect(user.locator('.fm-tools')).toBeVisible();
+    expect(await filesTab.evaluate((link) => link.matches(':focus-visible'))).toBe(false);
+    await user.reload();
+    await browserExpect(user.locator('.fm-tools')).toBeVisible();
+    await browserExpect(filesTab).toHaveAttribute('aria-current', 'page');
+    await browserExpect(filesTab).not.toBeFocused();
+    expect(await filesTab.evaluate((link) => getComputedStyle(link).outlineStyle)).toBe('none');
+    // Tab/Shift+Tab retain the native focus indicator without activating another route.
+    await filesTab.click();
+    await user.keyboard.press('Tab');
+    await user.keyboard.press('Shift+Tab');
+    await browserExpect(filesTab).toBeFocused();
+    expect(await filesTab.evaluate((link) => link.matches(':focus-visible'))).toBe(true);
+    expect(await filesTab.evaluate((link) => getComputedStyle(link).outlineStyle)).toBe('solid');
   });
   it('supports keyboard context menus, range selection, batch copy/move and streamed ZIP download', async () => {
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).focus();
@@ -160,7 +197,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.getByRole('button', { name: 'root', exact: true }).click();
   });
   it('edits JSON with keyboard save and refuses concurrent overwrite while retaining the draft', async () => {
+    const beforeNavigation = editorRequests;
     await user.goto(base);
+    await browserExpect.poll(() => editorRequests).toBe(beforeNavigation + 1);
+    const beforeEditor = editorRequests;
     await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
     const editor = dialog().getByRole('textbox', { name: 'Contents', exact: true });
     await editor.fill('{"enabled":false}');
@@ -174,6 +214,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(dialog().getByRole('alert')).toContainText('changed after you opened');
     await browserExpect(editor).toContainText('"local":true');
     expect((await provider.files()).get('beta.json')?.toString()).toBe('{"remote":true}');
+    expect(editorRequests).toBe(beforeEditor);
     await harness.screenshot(user, 'file-manager-editor-conflict-desktop-en');
     user.once('dialog', (confirmation) => confirmation.accept());
     await dialog().getByRole('button', { name: 'Close', exact: true }).click();
@@ -240,6 +281,87 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.getByText('Completed', { exact: true })).toHaveCount(3);
     expect((await provider.files()).get('upload-a.txt')?.toString()).toBe('replacement');
     await user.getByRole('button', { name: 'Clear finished uploads', exact: true }).click();
+  });
+  it('uploads a whole folder with nested paths and rejects an existing folder without overwriting', async () => {
+    await user.goto(base);
+    const local = resolve(stage, 'client-pack');
+    await mkdir(`${local}/nested/地図`, { recursive: true });
+    await writeFile(`${local}/notes.txt`, 'folder notes');
+    await writeFile(`${local}/nested/地図/data.bin`, Buffer.from([0, 255, 12, 7]));
+    await writeFile(`${local}/empty.txt`, '');
+    const picker = user.locator('input[webkitdirectory]');
+    await browserExpect(
+      user.getByRole('button', { name: 'Upload folder', exact: true }),
+    ).toHaveAttribute('aria-disabled', 'false');
+    await picker.setInputFiles(local);
+    await browserExpect(user.getByText('Completed', { exact: true })).toHaveCount(3);
+    const remote = await provider.files();
+    expect(remote.get('client-pack/notes.txt')?.toString()).toBe('folder notes');
+    expect(remote.get('client-pack/nested/地図/data.bin')).toEqual(Buffer.from([0, 255, 12, 7]));
+    expect(remote.get('client-pack/empty.txt')).toEqual(Buffer.alloc(0));
+    expect(remote.has('data.bin')).toBe(false);
+    await browserExpect(
+      user.getByRole('button', { name: 'Upload folder', exact: true }),
+    ).toHaveAttribute('aria-disabled', 'false');
+    await writeFile(`${local}/notes.txt`, 'must not overwrite');
+    await picker.setInputFiles(local);
+    await browserExpect(user.getByRole('alert')).toContainText('folder name already exists');
+    expect(remote.get('client-pack/notes.txt')?.toString()).toBe('folder notes');
+  });
+  it('shows platform-specific search shortcuts and scopes them to Files outside dialogs', async () => {
+    for (const platform of ['Win32', 'Linux x86_64', 'MacIntel']) {
+      const page = await user.context().newPage();
+      try {
+        await page.addInitScript((value) => {
+          Object.defineProperty(navigator, 'platform', { get: () => value });
+        }, platform);
+        await page.goto(base);
+        const search = page.getByRole('searchbox', { name: 'Search this folder' });
+        const mac = platform === 'MacIntel';
+        const keys = mac ? 'Meta+k' : 'Control+k';
+        await browserExpect(search).toHaveAttribute('placeholder', 'Search');
+        await browserExpect(page.locator('.fm-search kbd')).toHaveText(mac ? '⌘ + K' : 'CTRL + K');
+        await page.keyboard.press(keys);
+        await browserExpect(search).toBeFocused();
+        await search.fill('alpha');
+        await page.keyboard.press(keys);
+        expect(
+          await search.evaluate((input: HTMLInputElement) => [
+            input.selectionStart,
+            input.selectionEnd,
+          ]),
+        ).toEqual([0, 5]);
+        await page.keyboard.press('Alt+g');
+        const path = page.getByRole('textbox', { name: 'Path', exact: true });
+        await browserExpect(path).toBeFocused();
+        await browserExpect(path).toHaveValue('/');
+        await path.press('Escape');
+        await page.getByRole('button', { name: 'New folder', exact: true }).click();
+        const input = page.getByRole('dialog').getByRole('textbox').first();
+        await input.focus();
+        await page.keyboard.press(keys);
+        await browserExpect(input).toBeFocused();
+        await page.keyboard.press('Alt+g');
+        await browserExpect(input).toBeFocused();
+        await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+        await page.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
+        await browserExpect(page.locator('.file-manager')).toHaveCount(0);
+        expect(
+          await page.evaluate((isMac) => {
+            const event = new KeyboardEvent('keydown', {
+              key: 'k',
+              ctrlKey: !isMac,
+              metaKey: isMac,
+              bubbles: true,
+              cancelable: true,
+            });
+            return document.dispatchEvent(event);
+          }, mac),
+        ).toBe(true);
+      } finally {
+        await page.close();
+      }
+    }
   });
   it('renders compact desktop and Italian mobile layouts with keyboard accessible controls and no axe violations', async () => {
     for (const locale of ['en', 'it'] as const) {

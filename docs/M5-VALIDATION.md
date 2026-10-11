@@ -4601,3 +4601,117 @@ Approved activation completed:
   or upload-policy changes. Images for scoped rollback remain local. No live
   provider file mutation was performed; interactive upload still requires the
   Owner's missing host policy.
+
+
+### Files toolbar, folder upload and shared focus/tooltip follow-up (2026-10-12)
+
+The Files timestamp heading now reads Modified/Modificato. New folder, New text
+file, Upload and Upload folder use compact icon controls with localized accessible
+names. Search precedes the action icons; List/Grid sits at the far right of the
+same desktop toolbar, eliminating the separate filter row. Small screens wrap
+without page overflow. Sorting is on the Name/Size/Modified headers: ascending or
+descending arrows appear on the selected non-default ordering; default Name
+ascending has no arrow. Folders remain first.
+
+Entering Files preloads the lazy CodeMirror import, shared with subsequent editor
+opens. No new dependency, provider operation or API contract was introduced.
+Folder selection preserves its root, nested Unicode paths, binary bytes and
+zero-byte files through existing authenticated list/mkdir/upload APIs. New-tree
+preparation refuses collisions and symlink ancestors, can be cancelled, and
+reports partial or uncertain directory creation honestly. It never deletes
+partial data. Browser directory pickers omit empty directories; these are not
+claimed as uploaded. External directory drops direct users to Upload folder
+instead of silently flattening them. Existing upload policy/admission remains
+mandatory; no Owner policy was populated or changed.
+
+Shared tooltip investigation found independent popup states, a150ms dismissal
+timer and mouse-click focus that kept popups pinned. A single active popup now
+switches/closes immediately, preserves its hover bridge, keyboard focus/Escape
+and touch behavior, and does not remain pinned by mouse-click focus. This applies
+to Files and Console. Server-tab reload outlines had a separate cause:
+ServerShell explicitly focused the current tab whenever no main h1 existed,
+explaining why Console was unaffected. Removing that forced focus preserves
+native visible keyboard focus, active underlines and tab scrolling.
+
+Focused evidence (historical full suites were not repeated):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/folder-upload.test.ts apps/web/src/features/file-manager-model.test.ts apps/web/src/app/i18n.test.ts`: **40 passed**, including32 directory planning/preparation/collision/cancellation cases.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts`: **8 passed /1 failed**. The failure was the new reload-focus test looking for nonexistent English tab label Network (actual Connection), before exercising the changed behavior. After correcting that selector, the same command with `-t 'does not force tab focus|renders desktop'` passed **1 selected test /8 skipped** (the second filter matched no test). Click/reload adds no outline; Tab/Shift+Tab retains visible native focus. The eight passing cases include actual API folder transfer, collision rejection, binary/zero-byte files, editor reuse/concurrent-edit rejection, menus/ZIP/extraction, header sorting and EN desktop/IT mobile axe checks.
+- An earlier8-case Files run passed7 and failed1 because its import-count assertion counted a full document navigation as another editor open. The assertion now measures the preload per document and verifies that opening/reopening the editor adds no module request. The editor case passed in the later run; this was not hidden as a product success.
+- New `apps/web/tests/tooltip.browser.test.ts` through the same isolated browser command: **4 passed**, covering immediate adjacent switching and leave, click-focus dismissal, keyboard/Escape, hover bridge, singleton interaction and touch dismissal. Immediate assertions specifically detect the old delay.
+- Two additional existing Console tooltip tests were attempted with `services.browser.test.ts -t 'shares network chart|opens network tooltips'`: **both fail on previously documented offline telemetry assumptions** (one vs two polylines; unavailable measurements vs MiB), before the relevant tooltip behavior. They remain unchanged and are not counted as passing.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` and `scripts/dev.sh pnpm i18n:check`: **passed** (1198 EN/IT/pseudolocale keys). Changed-file Biome passed with the existing non-null assertion warning in ServerShell; no unrelated cleanup was performed.
+
+Tests use existing approved isolated services, real application handlers and
+provider fixtures; their temporary schemas and scoped directory-upload assets
+are cleaned by their harnesses. No real provider mutation, test game-server
+creation, Docker recreation, restart or new infrastructure operation occurred.
+Existing development source/HMR mounts serve these frontend changes. Issue18 and
+all production-release boundaries remain unchanged. Folder preflight is not an
+atomic external filesystem transaction and does not promise rollback.
+
+
+Final layout follow-up verification: the isolated Files browser command with
+`-t 'navigates breadcrumbs|edits JSON|renders compact'` passed **3 selected tests /
+6 skipped** after toolbar consolidation. This rechecked header sorting/grid,
+editor preload reuse/conflicts, compact EN desktop/IT mobile layout and axe.
+The separate reload-focus regression passed as noted above; expensive historical
+suites were not repeated. Web typecheck and changed-file Biome passed after this
+last layout change. Independent implementation/accessibility/content review and
+all four regenerated screenshots found **no remaining must-fix** in this scope.
+
+Current sanitized screenshots: [desktop list](screenshots/m5/file-manager-desktop-en.png),
+[desktop grid](screenshots/m5/file-manager-grid-desktop-en.png),
+[Italian mobile](screenshots/m5/file-manager-mobile-it.png), and
+[editor conflict](screenshots/m5/file-manager-editor-conflict-desktop-en.png).
+These are running-application fixtures, not live production data or generated
+mockups. Rollback is a revert of this frontend change; no migration or provider
+rollback is necessary. Previously documented backend/test limitations remain.
+
+
+Subsequent Owner feedback in this same follow-up changed shortcut and tooltip
+behavior. Search now displays **CTRL + K** on Windows/Linux or **⌘ + K** on
+macOS, without parentheses, and selects the existing search text. The borderless
+pencil opens direct-path entry. Its shortcut is **ALT + G** (⌥ + G on macOS),
+using the letter-key code so macOS Option characters do not prevent activation.
+The initial Ctrl+L choice conflicted with Firefox's reserved address-bar command;
+Ctrl+/ was then rejected by the Owner because slash requires Shift+7 on their
+Italian keyboard. Neither remains registered. See Mozilla's
+[keyboard-shortcut reference](https://support.mozilla.org/en-US/kb/keyboard-shortcuts-perform-firefox-tasks-quickly).
+Shortcuts are removed on Files unmount and yield to open dialogs.
+
+The same isolated Files browser command with
+`-t 'navigates breadcrumbs|platform-specific search|renders compact'` passed
+**3 selected cases /7 skipped** on the final ALT+G implementation. It exercises
+Windows/Linux/macOS platform hints, actual keyboard focus/selection, path entry,
+dialog exclusion, listener cleanup and EN desktop/IT mobile layout/axe. These
+are Chromium runs with simulated platform identity, not native macOS or Firefox
+certification; Firefox is not installed in this environment. The i18n test alone
+was rerun for new catalog copy: **4 passed**, and compilation/checks passed with
+**1199 keys**. Web typecheck and changed-file Biome passed.
+
+Tooltip popup hover retention was initially intentional and tested. The Owner
+subsequently requested immediate closure when leaving the original trigger, even
+when crossing the popup. Shared popups are now pointer-transparent; Files opts
+into cursor-relative positioning while keyboard/touch hints remain anchored.
+This explicitly supersedes the earlier hover-bridge assertion. Popup hoverability
+under manual WCAG1.4.13 is not claimed; accessible trigger names and keyboard
+access remain, and no essential interactive content belongs inside a tooltip.
+The focused tooltip suite passed **6 cases** after this behavior change. The
+Owner then observed cursor lag; investigation found per-move React position state
+and repeated layout measurements. Its final correction/evidence is recorded below.
+
+
+Final cursor-lag correction: popup position is written directly with translate3d
+in the pointer event. Geometry is cached and refreshed on open/content/resize/
+scroll; pointer movement causes neither React position-state updates nor layout
+measurements. The final isolated `tooltip.browser.test.ts` run passed **7/7**.
+Its synchronous regression checks the changed transform before React/rAF,
+zero geometry reads on movement, and no stale overwrite after an unrelated
+Files rerender. Web typecheck and scoped Biome passed again for this change.
+Independent final source/interaction/visual review found **no remaining must-fix**
+within the requested behavior; the explicitly documented hoverability limitation
+and prior unrelated Console fixture failures are not waived or counted as passes.
+Final index governance and whitespace checks passed; only project code, catalogs,
+documentation, fixture tests and sanitized screenshots are staged. No secret,
+local environment, persistence tree or live infrastructure data is included.

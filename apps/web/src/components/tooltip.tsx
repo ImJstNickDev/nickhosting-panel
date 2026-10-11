@@ -14,24 +14,31 @@ import { createPortal } from 'react-dom';
 import './tooltip.css';
 
 type TriggerProps = HTMLAttributes<HTMLElement> & { ref?: Ref<HTMLElement> };
-type Position = { left: number; top: number; side: 'top' | 'bottom' };
+
+// Tooltips share one transient surface, including when a keyboard-focused trigger
+// remains focused while the pointer moves to a different control.
+let closeActiveTooltip: (() => void) | undefined;
 
 /** The child must forward its DOM ref and event props (native button/time work directly). */
 export function Tooltip({
   content,
   children,
+  placement = 'anchor',
 }: {
   content: string;
   children: ReactElement<TriggerProps>;
+  /** Cursor labels dismiss on trigger leave; keyboard and touch stay anchored. */
+  placement?: 'anchor' | 'cursor';
 }) {
   const id = useId();
   const trigger = useRef<HTMLElement | null>(null);
   const popup = useRef<HTMLDivElement | null>(null);
-  const active = useRef({ trigger: false, popup: false, focus: false, touch: false });
-  const dismissed = useRef(false);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const active = useRef({ trigger: false, focus: false, touch: false });
+  const pointerFocus = useRef(false);
+  const cursor = useRef<{ x: number; y: number } | null>(null);
+  const updatePosition = useRef<(() => void) | undefined>(undefined);
+  const positionMode = useRef<'anchor' | 'cursor'>('anchor');
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<Position | null>(null);
   const childRef = children.props.ref;
   const attachTrigger = useCallback(
     (element: HTMLElement | null) => {
@@ -47,52 +54,52 @@ export function Tooltip({
     },
     [childRef],
   );
-  const cancelHide = useCallback(() => {
-    clearTimeout(hideTimer.current);
-    hideTimer.current = undefined;
+  const dismiss = useCallback(() => {
+    active.current = { trigger: false, focus: false, touch: false };
+    if (closeActiveTooltip === dismiss) closeActiveTooltip = undefined;
+    setOpen(false);
   }, []);
   const show = () => {
-    cancelHide();
-    dismissed.current = false;
+    if (closeActiveTooltip !== dismiss) closeActiveTooltip?.();
+    closeActiveTooltip = dismiss;
+    updatePosition.current?.();
     setOpen(true);
   };
   const hideWhenInactive = () => {
-    cancelHide();
-    // Escape lasts for the current interaction; a later hover/focus may open again.
-    if (!Object.values(active.current).some(Boolean)) dismissed.current = false;
-    // Allows a pointer to cross the space between the trigger and the popup.
-    hideTimer.current = setTimeout(() => {
-      if (!Object.values(active.current).some(Boolean)) setOpen(false);
-    }, 150);
+    if (!Object.values(active.current).some(Boolean)) dismiss();
   };
-  const dismiss = useCallback(
-    (awaitingTouchFocus = false) => {
-      cancelHide();
-      active.current.popup = false;
-      active.current.touch = false;
-      // Removing a hovered popup ends that interaction without a pointerleave.
-      // Touch toggles still suppress the focus event their pointerdown may cause.
-      dismissed.current = awaitingTouchFocus || active.current.trigger || active.current.focus;
-      setOpen(false);
-    },
-    [cancelHide],
-  );
 
-  useEffect(() => cancelHide, [cancelHide]);
+  useEffect(
+    () => () => {
+      if (closeActiveTooltip === dismiss) closeActiveTooltip = undefined;
+    },
+    [dismiss],
+  );
   useLayoutEffect(() => {
-    if (!open || !content) {
-      setPosition(null);
-      return;
-    }
+    if (!open || !content) return;
+    let geometry:
+      | {
+          anchor: DOMRect;
+          box: DOMRect;
+          left: number;
+          top: number;
+          width: number;
+          height: number;
+        }
+      | undefined;
+    const writePosition = (left: number, top: number, side: 'top' | 'bottom') => {
+      const element = popup.current;
+      if (!element) return;
+      // This style is intentionally not managed by React: pointer movement must
+      // update in the current event, without rendering or repeated layout reads.
+      element.style.transform = `translate3d(${left}px, ${top}px, 0)`;
+      element.style.visibility = 'visible';
+      element.dataset.side = side;
+      element.dataset.placement = positionMode.current;
+    };
     const update = () => {
-      if (!trigger.current || !popup.current) return;
-      const anchor = trigger.current.getBoundingClientRect();
-      const box = popup.current.getBoundingClientRect();
-      const viewport = window.visualViewport;
-      const left = viewport?.offsetLeft ?? 0;
-      const top = viewport?.offsetTop ?? 0;
-      const width = viewport?.width ?? document.documentElement.clientWidth;
-      const height = viewport?.height ?? window.innerHeight;
+      if (!popup.current || !geometry) return;
+      const { anchor, box, left, top, width, height } = geometry;
       if (
         anchor.bottom < top ||
         anchor.top > top + height ||
@@ -103,15 +110,38 @@ export function Tooltip({
         return;
       }
       const margin = 8;
+      if (positionMode.current === 'cursor' && cursor.current) {
+        const { x, y } = cursor.current;
+        const offset = 12;
+        const side = y + offset + box.height <= top + height - margin ? 'bottom' : 'top';
+        writePosition(
+          Math.max(
+            left + margin,
+            Math.min(
+              x + offset + box.width <= left + width - margin ? x + offset : x - offset - box.width,
+              left + width - box.width - margin,
+            ),
+          ),
+          Math.max(
+            top + margin,
+            Math.min(
+              side === 'bottom' ? y + offset : y - offset - box.height,
+              top + height - box.height - margin,
+            ),
+          ),
+          side,
+        );
+        return;
+      }
       const above = anchor.top - top;
       const below = top + height - anchor.bottom;
       const side = above >= box.height + margin * 2 || above > below ? 'top' : 'bottom';
-      setPosition({
-        left: Math.max(
+      writePosition(
+        Math.max(
           left + margin,
           Math.min(anchor.left + (anchor.width - box.width) / 2, left + width - box.width - margin),
         ),
-        top: Math.max(
+        Math.max(
           top + margin,
           Math.min(
             side === 'top' ? anchor.top - box.height - margin : anchor.bottom + margin,
@@ -119,22 +149,37 @@ export function Tooltip({
           ),
         ),
         side,
-      });
+      );
     };
-    update();
-    const observer = new ResizeObserver(update);
+    const measure = () => {
+      if (!trigger.current || !popup.current) return;
+      const viewport = window.visualViewport;
+      geometry = {
+        anchor: trigger.current.getBoundingClientRect(),
+        box: popup.current.getBoundingClientRect(),
+        left: viewport?.offsetLeft ?? 0,
+        top: viewport?.offsetTop ?? 0,
+        width: viewport?.width ?? document.documentElement.clientWidth,
+        height: viewport?.height ?? window.innerHeight,
+      };
+      update();
+    };
+    updatePosition.current = update;
+    measure();
+    const observer = new ResizeObserver(measure);
     if (trigger.current) observer.observe(trigger.current);
     if (popup.current) observer.observe(popup.current);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    window.visualViewport?.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('scroll', update);
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    window.visualViewport?.addEventListener('resize', measure);
+    window.visualViewport?.addEventListener('scroll', measure);
     return () => {
+      updatePosition.current = undefined;
       observer.disconnect();
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      window.visualViewport?.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('scroll', update);
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+      window.visualViewport?.removeEventListener('resize', measure);
+      window.visualViewport?.removeEventListener('scroll', measure);
     };
   }, [open, content, dismiss]);
 
@@ -175,7 +220,24 @@ export function Tooltip({
           children.props.onPointerEnter?.(event);
           if (event.pointerType === 'touch') return;
           active.current.trigger = true;
-          if (!dismissed.current) show();
+          if (placement === 'cursor' && !active.current.focus) {
+            cursor.current = { x: event.clientX, y: event.clientY };
+            positionMode.current = 'cursor';
+          }
+          show();
+        },
+        onPointerMove: (event) => {
+          children.props.onPointerMove?.(event);
+          if (
+            placement !== 'cursor' ||
+            event.pointerType === 'touch' ||
+            active.current.focus ||
+            active.current.touch
+          )
+            return;
+          cursor.current = { x: event.clientX, y: event.clientY };
+          positionMode.current = 'cursor';
+          updatePosition.current?.();
         },
         onPointerLeave: (event) => {
           children.props.onPointerLeave?.(event);
@@ -184,20 +246,29 @@ export function Tooltip({
         },
         onFocus: (event) => {
           children.props.onFocus?.(event);
+          // Pointer clicks focus buttons too. Only keyboard/programmatic focus
+          // keeps a tooltip open after the pointer has left its target.
+          if (pointerFocus.current) return;
           active.current.focus = true;
-          // A touch toggle can dismiss before its ensuing focus event arrives.
-          if (!dismissed.current) show();
+          cursor.current = null;
+          positionMode.current = 'anchor';
+          show();
         },
         onBlur: (event) => {
           children.props.onBlur?.(event);
+          pointerFocus.current = false;
           active.current.focus = false;
           active.current.touch = false;
           hideWhenInactive();
         },
         onPointerDown: (event) => {
           children.props.onPointerDown?.(event);
+          pointerFocus.current = true;
+          active.current.focus = false;
           if (event.pointerType !== 'touch') return;
-          if (active.current.touch) dismiss(true);
+          cursor.current = null;
+          positionMode.current = 'anchor';
+          if (active.current.touch) dismiss();
           else {
             active.current.touch = true;
             show();
@@ -207,26 +278,7 @@ export function Tooltip({
       {open &&
         content &&
         createPortal(
-          <div
-            ref={popup}
-            id={id}
-            role="tooltip"
-            className="tooltip"
-            data-side={position?.side ?? 'top'}
-            style={{
-              left: position?.left ?? 0,
-              top: position?.top ?? 0,
-              visibility: position ? 'visible' : 'hidden',
-            }}
-            onPointerEnter={() => {
-              active.current.popup = true;
-              cancelHide();
-            }}
-            onPointerLeave={() => {
-              active.current.popup = false;
-              hideWhenInactive();
-            }}
-          >
+          <div ref={popup} id={id} role="tooltip" className="tooltip">
             {content}
           </div>,
           document.body,

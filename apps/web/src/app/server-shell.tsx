@@ -16,7 +16,6 @@ export function ServerShell() {
   useEffect(() => {
     const active = tabsElement.current?.querySelector<HTMLAnchorElement>('[aria-current="page"]');
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    if (!document.querySelector('main h1')) active?.focus({ preventScroll: true });
   }, [location.pathname, server.data?.id]);
   if (server.isPending) return <Loading />;
   if (server.error) return <ErrorNotice error={server.error} />;
