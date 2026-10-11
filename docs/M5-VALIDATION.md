@@ -4114,3 +4114,14 @@ new code but can be rejected by an already running old Gateway during wake. A
 scoped dev Gateway restart was requested for approval; no restart has been
 performed as part of the checks above. API/worker hot reload does not establish
 Gateway activation.
+
+Owner subsequently approved and executed scoped activation via
+`docker restart --time 20 nickhosting-dev-gateway-1` on 2026-10-11 at16:55UTC.
+Verified Compose labels project nickhosting-dev/service gateway before restart.
+Post-restart Docker health healthy; private readyz HTTP200, ready=true,
+controlAvailable=true, stopping=false, one route loaded. Host observation age
+0.937s; managed server state sleeping/offline with no active operation.
+A recurring route-level gateway.observation_unavailable warning remains (also
+present before restart); its code path is backend protocol probing, not host
+capacity sampling. Its precise cause was not established and a real wake cycle
+was not exercised. No game-server commands or other infrastructure changes.
