@@ -4311,3 +4311,36 @@ Owner has granted standing permission for necessary dev Gateway-only restarts;
 activation and a subsequent Owner-driven Start are still needed for live timing.
 Historical integration failures remain recorded; no full historical suite pass
 or new latency target is claimed.
+
+### 2026-10-11 — Retry works; concurrent renewal race reproduced
+
+Owner-driven50bbed0 test (UTC): Done21:28:09.554, running hint09.589.
+Attempt1 connected0.700ms then peer closed after356.595ms; after100ms backoff,
+attempt2 completed status/pong successfully at10.134 (85.407ms). The whole probe
+was545.501ms. Thus transient-close recovery worked without waiting for polling.
+However, a concurrent renewal started during the probe; the result was rejected
+at10.135 with observation_stale/detail lease_grant_replaced. Renewal inspection
+completed10.550. This confirms the previously hypothetical grant race for this
+sample, not retroactively for earlier failures.
+
+Negative report539ms, next periodic sample12.626, protocol3.651ms, positive
+report425ms, forwarding13.056: total3.502s after Done. Core process verification
+356.452ms versus607.613ms in the prior sample; full Core401.889ms. This single-run
+comparison is evidence of observed timing, not a controlled latency guarantee.
+No unavailable route transition during this Start in inspected logs.
+
+The correction waits for in-flight listener renewals rather than discarding a
+successful leased protocol sample solely because its grant object was replaced.
+It accepts only identical route/context, backend identity digest and Docker
+container ID, with both original and current evidence still fresh. Failed full
+inspections rotate an identity token; even a subsequent successful recovery
+cannot revive a pre-failure sample. Token storage is bounded and eviction fails
+closed. Per-route renewals are serialized so older success cannot overwrite a
+newer failure. No stale grant is used while renewal is pending. Existing outer
+probe deadline still prevents late results from being reported as readiness.
+The new renewal_wait timing identifies this bounded wait separately.
+Validation:131 validator tests passed (including pending renewal deadline and
+failed-then-successful recovery);6 Gateway event-driven tests passed (131 skipped).
+Independent review found no must-fix; focused Biome passed. Initial TypeScript
+errors in new promise annotations were corrected before final delivery.
+Final root TypeScript check passed on the corrected source. Index governance passed.

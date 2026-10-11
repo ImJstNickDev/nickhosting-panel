@@ -537,6 +537,154 @@ describe('Gateway pre-bind and forwarding safety', () => {
     });
     expect(f.options.saveProof).toHaveBeenCalledOnce();
   });
+  it.each([
+    'unchanged',
+    'owner',
+    'container',
+    'revision',
+    'expired',
+    'failure',
+    'overlap-failure',
+  ] as const)('coordinates an in-flight leased sample with a %s renewal', async (change) => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const sample = { ready: true, idle: false, playerCount: 1 };
+    let finishProbe!: () => void;
+    f.options.probeBackend = vi.fn(
+      () =>
+        new Promise<typeof sample>((resolve) => {
+          finishProbe = () => resolve(sample);
+        }),
+    );
+    const pending = safety.probeLeasedBackend?.(f.route);
+    if (!pending) throw new Error('Missing leased probe');
+    let finishRenewal!: () => void;
+    let renewalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    let renewalCalls = 0;
+    f.options.provider.listNodes = vi.fn(async () => {
+      if (++renewalCalls > 1) throw new Error('Concurrent renewal failed');
+      renewalStarted();
+      await new Promise<void>((resolve) => {
+        finishRenewal = resolve;
+      });
+      return [f.node];
+    });
+    if (change === 'owner') {
+      f.server.user = 3;
+      const context = await f.options.resolveContext(f.route);
+      f.options.resolveContext = async () => ({ ...context, providerUserId: 3 });
+    }
+    if (change === 'container') {
+      const container = f.observation.containers[0];
+      if (!container) throw new Error('Missing container');
+      container.id = 'c'.repeat(64);
+    }
+    const renewedRoute = {
+      ...f.route,
+      revision: f.route.revision + (change === 'revision' ? 1 : 0),
+    };
+    const renewal = safety.validate(renewedRoute, [f.route.public]);
+    await started;
+    let settled = false;
+    const outcome = pending.then(
+      (value) => {
+        settled = true;
+        return value;
+      },
+      (error) => {
+        settled = true;
+        return error;
+      },
+    );
+    finishProbe();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    // Renewal proof reads must not perform a second deferred protocol call.
+    f.options.probeBackend = vi.fn(async () => sample);
+    if (change === 'expired') now += 5000;
+    if (change === 'failure') f.server.suspended = true;
+    let overlapping: Promise<unknown> | undefined;
+    if (change === 'overlap-failure') {
+      overlapping = safety.validate(f.route, [f.route.public]).catch((error) => error);
+    }
+    finishRenewal();
+    await renewal.catch(() => undefined);
+    if (overlapping) {
+      // The queued renewal runs after the first and must not restore its grant.
+      f.server.suspended = true;
+      finishRenewal();
+      await overlapping;
+    }
+    const result = await outcome;
+    if (change === 'unchanged') expect(result).toBe(sample);
+    else expect(result).toMatchObject({ reason: 'observation_stale' });
+  });
+  it('bounds waiting for an unfinished renewal by the original evidence deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      f.route.mode = 'waking';
+      let now = f.observation.observedAt;
+      f.options.now = () => now;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      let finishProbe!: (value: boolean) => void;
+      f.options.probeBackend = () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        });
+      const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+      let finishRenewal!: () => void;
+      let renewalStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        renewalStarted = resolve;
+      });
+      f.options.provider.listNodes = async () => {
+        renewalStarted();
+        await new Promise<void>((resolve) => {
+          finishRenewal = resolve;
+        });
+        return [f.node];
+      };
+      const renewal = safety.validate(f.route, [f.route.public]).catch((error) => error);
+      await started;
+      finishProbe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      now += 5000;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await pending).toMatchObject({ reason: 'observation_stale' });
+      finishRenewal();
+      await renewal;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('does not salvage a pre-failure sample after a later successful renewal', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    let finishProbe!: (value: boolean) => void;
+    f.options.probeBackend = () =>
+      new Promise((resolve) => {
+        finishProbe = resolve;
+      });
+    const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+    f.server.suspended = true;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+    f.server.suspended = false;
+    f.options.probeBackend = async () => true;
+    await safety.validate(f.route, [f.route.public]);
+    finishProbe(true);
+    expect(await pending).toMatchObject({ reason: 'observation_stale' });
+  });
   it('revokes fast evidence immediately when a renewal fails during a leased probe', async () => {
     const f = fixture();
     f.route.mode = 'waking';

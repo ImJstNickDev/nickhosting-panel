@@ -404,9 +404,23 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     {
       key: string;
       evidence: ProviderEvidence;
-      leasedProbe?: { routeKey: string; observedAt: number };
+      leasedProbe?: { routeKey: string; observedAt: number; identity: string; failures: object };
     }
   >();
+  const renewals = new Map<string, Promise<{ backendReady: boolean }>>();
+  const failures = new Map<string, object>();
+  function failureToken(routeId: string, revoke = false) {
+    let token = failures.get(routeId);
+    if (!token || revoke) {
+      token = {};
+      failures.set(routeId, token);
+      if (failures.size > 10000) {
+        const oldest = failures.keys().next().value;
+        if (oldest) failures.delete(oldest);
+      }
+    }
+    return token;
+  }
   const evidenceKey = (route: GatewayRoute, context: GatewaySafetyContext) =>
     JSON.stringify({ route, context });
   function inspect(
@@ -698,89 +712,113 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     } catch (error) {
       // A later failed full inspection must not leave a fast-path grant behind.
       validatedProvider.delete(route.id);
+      failureToken(route.id, true);
       throw error;
     }
   }
-  return {
-    async validate(route, ownedBindings) {
-      validatedProvider.delete(route.id);
-      const state = await inspect(route, ownedBindings, true);
-      const accepted = (backendReady: boolean) => {
-        validatedProvider.set(route.id, {
-          key: evidenceKey(state.route, state.context),
-          evidence: structuredClone(state.providerEvidence),
-          ...(state.container?.running && state.backendBindingsComplete
-            ? {
-                leasedProbe: {
-                  routeKey: JSON.stringify(state.route),
-                  observedAt: state.observation.observedAt,
-                },
-              }
-            : {}),
-        });
-        if (validatedProvider.size > 10000) {
-          const oldest = validatedProvider.keys().next().value;
-          if (oldest) validatedProvider.delete(oldest);
-        }
-        return { backendReady };
-      };
-      const raw = await options.loadProof(route);
-      const proof = gatewayReachabilityProofSchema.safeParse(raw);
-      const matches =
-        proof.success &&
-        proof.data.routeId === route.id &&
-        proof.data.serverId === route.serverId &&
-        proof.data.allocationId === route.allocationId &&
-        proof.data.namespaceId === state.observation.namespaceId &&
-        proof.data.dockerDaemonId === state.observation.dockerDaemonId &&
-        proof.data.digest === (proof.data.version === 1 ? state.legacyDigest : state.digest) &&
-        proof.data.verifiedAt <= now();
-      if (!state.container || (state.container.running && !state.backendBindingsComplete)) {
-        if (!state.mayRetainStatus || !matches || !proof.success || proof.data.version !== 2)
-          unavailable('retained_proof_mismatch');
-        if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
-        if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
-          unavailable('observation_stale');
-        return accepted(false);
+  async function validateListener(route: GatewayRoute, ownedBindings: readonly GatewayEndpoint[]) {
+    const state = await inspect(route, ownedBindings, true);
+    const accepted = (backendReady: boolean) => {
+      validatedProvider.set(route.id, {
+        key: evidenceKey(state.route, state.context),
+        evidence: structuredClone(state.providerEvidence),
+        ...(state.container?.running && state.backendBindingsComplete
+          ? {
+              leasedProbe: {
+                routeKey: JSON.stringify(state.route),
+                observedAt: state.observation.observedAt,
+                identity: JSON.stringify([state.digest, state.container.id]),
+                failures: failureToken(route.id),
+              },
+            }
+          : {}),
+      });
+      if (validatedProvider.size > 10000) {
+        const oldest = validatedProvider.keys().next().value;
+        if (oldest) validatedProvider.delete(oldest);
       }
-      const retainBinding = () => {
-        if (!state.container) return;
-        retainedBindings.set(route.id, {
-          public: { ...route.public },
-          container: structuredClone(state.container),
-        });
-        // Bound memory even if withdrawn routes never return to this validator.
-        if (retainedBindings.size > 10000) {
-          const oldest = retainedBindings.keys().next().value;
-          if (oldest) retainedBindings.delete(oldest);
-        }
-      };
-      // Bootstrap from an actually ready owned backend using this inspection.
-      // Stopped containers and protocol failures cannot replace a missing/stale
-      // proof. This is the same gate used by readiness, not metadata promotion.
-      if (!matches) {
-        await proveBackend(state);
-        if (route.mode === 'online') {
-          retainBinding();
-          return accepted(true);
-        }
-      } else if (route.mode === 'online' && state.container.running) {
-        // A failed game probe revokes forwarding, not an independently proven
-        // public binding. Ownership/collision/topology failures above still throw.
-        const result = await options.probeBackend(route).catch(() => false);
-        const backendReady = typeof result === 'boolean' ? result : result.ready === true;
-        if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
-          unavailable('observation_stale');
-        if (backendReady) {
-          retainBinding();
-          return accepted(true);
-        }
-      }
+      return { backendReady };
+    };
+    const raw = await options.loadProof(route);
+    const proof = gatewayReachabilityProofSchema.safeParse(raw);
+    const matches =
+      proof.success &&
+      proof.data.routeId === route.id &&
+      proof.data.serverId === route.serverId &&
+      proof.data.allocationId === route.allocationId &&
+      proof.data.namespaceId === state.observation.namespaceId &&
+      proof.data.dockerDaemonId === state.observation.dockerDaemonId &&
+      proof.data.digest === (proof.data.version === 1 ? state.legacyDigest : state.digest) &&
+      proof.data.verifiedAt <= now();
+    if (!state.container || (state.container.running && !state.backendBindingsComplete)) {
+      if (!state.mayRetainStatus || !matches || !proof.success || proof.data.version !== 2)
+        unavailable('retained_proof_mismatch');
       if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
       if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
         unavailable('observation_stale');
-      retainBinding();
       return accepted(false);
+    }
+    const retainBinding = () => {
+      if (!state.container) return;
+      retainedBindings.set(route.id, {
+        public: { ...route.public },
+        container: structuredClone(state.container),
+      });
+      // Bound memory even if withdrawn routes never return to this validator.
+      if (retainedBindings.size > 10000) {
+        const oldest = retainedBindings.keys().next().value;
+        if (oldest) retainedBindings.delete(oldest);
+      }
+    };
+    // Bootstrap from an actually ready owned backend using this inspection.
+    // Stopped containers and protocol failures cannot replace a missing/stale
+    // proof. This is the same gate used by readiness, not metadata promotion.
+    if (!matches) {
+      await proveBackend(state);
+      if (route.mode === 'online') {
+        retainBinding();
+        return accepted(true);
+      }
+    } else if (route.mode === 'online' && state.container.running) {
+      // A failed game probe revokes forwarding, not an independently proven
+      // public binding. Ownership/collision/topology failures above still throw.
+      const result = await options.probeBackend(route).catch(() => false);
+      const backendReady = typeof result === 'boolean' ? result : result.ready === true;
+      if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+        unavailable('observation_stale');
+      if (backendReady) {
+        retainBinding();
+        return accepted(true);
+      }
+    }
+    if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
+    if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+      unavailable('observation_stale');
+    retainBinding();
+    return accepted(false);
+  }
+  return {
+    validate(route, ownedBindings) {
+      // Serialize renewals: an older successful inspection must never restore
+      // authority after a newer failed inspection. Revoke while checks run.
+      const preceding = renewals.get(route.id);
+      validatedProvider.delete(route.id);
+      let work!: Promise<{ backendReady: boolean }>;
+      work = (async () => {
+        await preceding?.catch(() => undefined);
+        validatedProvider.delete(route.id);
+        try {
+          return await validateListener(route, ownedBindings);
+        } catch (error) {
+          validatedProvider.delete(route.id);
+          failureToken(route.id, true);
+          throw error;
+        } finally {
+          if (renewals.get(route.id) === work) renewals.delete(route.id);
+        }
+      })();
+      renewals.set(route.id, work);
+      return work;
     },
     validateBackend,
     async probeLeasedBackend(routeValue) {
@@ -790,7 +828,6 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         const time = now();
         return (
           previous?.leasedProbe !== undefined &&
-          validatedProvider.get(route.id) === previous &&
           previous.leasedProbe.observedAt <= time &&
           previous.evidence.started <= time &&
           time - previous.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
@@ -803,16 +840,51 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       if (
         !['waking', 'online'].includes(route.mode) ||
         previous?.leasedProbe?.routeKey !== JSON.stringify(route) ||
+        validatedProvider.get(route.id) !== previous ||
         !fresh()
       )
         return validateBackend(route);
+      const leasedProbe = previous.leasedProbe;
       const validationId = randomUUID();
       const result = await timed(route, validationId, 'leased_backend_protocol', () =>
         options.probeBackend(route, validationId),
       );
       if (!(typeof result === 'boolean' ? result : result.ready === true))
         unavailable('backend_protocol');
-      if (!fresh())
+      // A fresh identical renewal may finish during the game response. Await it
+      // rather than throwing away that response, within the ORIGINAL age budget.
+      await timed(route, validationId, 'renewal_wait', async () => {
+        while (renewals.has(route.id) && fresh()) {
+          const renewal = renewals.get(route.id);
+          const remaining =
+            Math.min(leasedProbe.observedAt, previous.evidence.started) +
+            policy.maximumObservationAgeMs -
+            now();
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const completed = await Promise.race([
+            renewal?.then(
+              () => true,
+              () => false,
+            ),
+            new Promise<false>((resolve) => {
+              timeout = setTimeout(() => resolve(false), Math.max(0, remaining));
+            }),
+          ]).finally(() => clearTimeout(timeout));
+          if (!completed) break;
+        }
+      });
+      const current = validatedProvider.get(route.id);
+      const equivalent =
+        current?.leasedProbe !== undefined &&
+        current.leasedProbe.observedAt <= now() &&
+        current.evidence.started <= now() &&
+        now() - current.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
+        now() - current.evidence.started < policy.maximumObservationAgeMs &&
+        current?.key === previous.key &&
+        current?.leasedProbe?.identity === previous.leasedProbe.identity &&
+        current?.leasedProbe?.failures === previous.leasedProbe.failures &&
+        failures.get(route.id) === previous.leasedProbe.failures;
+      if (!fresh() || renewals.has(route.id) || !equivalent)
         throw new GatewaySafetyError(
           'observation_stale',
           validatedProvider.get(route.id) !== previous
