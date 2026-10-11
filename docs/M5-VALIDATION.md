@@ -3634,3 +3634,41 @@ pass with existing CSS warnings only. No broad suite or production rebuild.
 Independent review found no blocker. No production changes, new infrastructure
 or restarts; disposable fixtures cleaned. Existing HMR delivers changes. Rollback:
 source revert; PR #21 remains open/unmerged.
+
+## 2026-10-11 — Console resource sidebar without outer card
+
+Removed the Console section wrapper/visible title (retaining an accessible
+heading). Desktop places the raw terminal beside Address, Uptime, CPU Load,
+Memory, Disk, Network (Inbound) and Network (Outbound) cards. Start/Restart/Stop
+sit above the card column; the Address card aligns with the terminal top. Narrow
+screens put controls above the terminal and cards below. Command focus/scroll,
+connection indicator, charts and existing lifecycle handlers remain.
+
+Cards and charts consume one shared resource query. Uptime uses provider
+milliseconds (no invented duration when absent); only confirmed offline gets the
+red clock background. Errors and a 30-second freshness deadline show unavailable,
+including when a refresh hangs. Address uses the authorized primary public
+endpoint; auxiliary ports cannot substitute for an unconfigured primary. No new
+backend API, provider mutation or infrastructure configuration.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/console-sidebar.browser.test.ts`: final **4/4 passed**. Initial four cases and one diagnostic rerun failed Axe because the new stylesheet established its CSS layer before the main ordering declaration; the canonical layer preamble fixes input, indicator and legend styles. Final checks cover desktop alignment, control order, actual isolated API requests, one resource request shared by cards/graphs, units, offline state, primary/unconfigured address variants, unavailable readings and pending-refresh expiry after 31 seconds, viewer controls, EN/IT mobile layout and Axe.
+- Same runner for `apps/web/tests/server-navigation.browser.test.ts -t 'keeps lifecycle admission|without console|permissions'`: **1 passed / 4 skipped**, covering admission refusal, job feedback and restart confirmation. Follow-up exact filter `'preserves operator power controls'`: **1 passed / 4 skipped**, covering no-console operator and viewer fallback.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm i18n:check` (1093 keys), scoped Biome/diff/governance checks pass. Initial typecheck caught an optional fixture-array spread in the new test; corrected to guarded primary data. Three existing reduced-motion CSS warnings remain. No historical full-suite run.
+
+Independent source review resolved primary-endpoint selection, stale expiration
+without an intervening render, and CSS-layer ordering. Final review reports no
+must-fix findings. Independent browser/UX review and coordinator screenshot
+inspection confirmed the final layout and restored terminal appearance. Four
+Axe scans have no violations; this is not full accessibility certification.
+
+Screenshots: [offline desktop EN](screenshots/m5/console-sidebar-offline-desktop-en.png),
+[running desktop EN](screenshots/m5/console-sidebar-running-desktop-en.png),
+[unavailable desktop EN](screenshots/m5/console-sidebar-unavailable-desktop-en.png),
+[running mobile IT](screenshots/m5/console-sidebar-running-mobile-it.png).
+
+Browser tests use real isolated app handlers with fixture provider readings and
+disposable schemas; cleanup completed. No live servers, new infrastructure or
+container restarts. Existing HMR delivers the changes. Rollback: source revert;
+no migrations. PR #21 remains open/unmerged; SFTPGo #18 unchanged.

@@ -15,6 +15,7 @@ import {
   Section,
   Time,
 } from '../components/ui.js';
+import { ConsoleSummary } from './console-summary.js';
 import { useRequestOperation } from './servers.js';
 import {
   type Metrics,
@@ -115,9 +116,34 @@ function transientFailure(error: unknown) {
     failure.status >= 500
   );
 }
+function useLiveResources(serverId: string) {
+  return useQuery({
+    queryKey: ['resources', serverId],
+    queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
+    refetchInterval: 10000,
+    retry: (attempt, error) => attempt < 2 && transientFailure(error),
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
+  });
+}
+
+function useResourceStaleness(updatedAt: number) {
+  const [expiredSnapshot, setExpiredSnapshot] = useState(0);
+  useEffect(() => {
+    if (!updatedAt) return;
+    const timer = setTimeout(
+      () => setExpiredSnapshot(updatedAt),
+      Math.max(0, updatedAt + 30000 - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [updatedAt]);
+  return updatedAt > 0 && (expiredSnapshot === updatedAt || Date.now() - updatedAt >= 30000);
+}
+
 export function ConsolePage({ serverId }: { serverId: string }) {
   const t = useT();
   const server = useServer(serverId);
+  const live = useLiveResources(serverId);
+  const resourceStale = useResourceStaleness(live.dataUpdatedAt);
   const session = useSession();
   const consoleAvailable = Boolean(server.data?.capabilities?.console);
   const request = useRequestOperation(serverId);
@@ -275,60 +301,59 @@ export function ConsolePage({ serverId }: { serverId: string }) {
   }, [lines]);
   return (
     <>
-      <Section
-        title={t('web.console')}
-        actions={
-          <div className="actions console-actions">
-            {server.data?.permissions.operate &&
-              (['start', 'stop', 'restart'] as const).map((action) => (
+      {Boolean(powerError) && <ErrorNotice error={powerError} />}
+      <JobNotice jobId={jobId} />
+      {server.data?.activeOperationId && (
+        <Notice>
+          <Link to={`/activity/${server.data.activeOperationId}`}>
+            {t('platform.operationBlocksActions')}
+          </Link>
+        </Notice>
+      )}
+      {server.data?.firstStart && server.data.runtimeState === 'offline' && (
+        <Notice>
+          {t('platform.initialStartDenied')} <Time value={server.data.firstStart.occurredAt} />
+        </Notice>
+      )}
+      {consoleAvailable && Boolean(error) && <ErrorNotice error={error} />}
+      <div className="console-workspace">
+        <div className="console-heading">
+          <h2 className="visually-hidden">{t('web.console')}</h2>
+          {consoleAvailable && (
+            <>
+              <Tooltip content={t('service.connectionAction', { state: t(`service.${state}`) })}>
                 <button
                   type="button"
-                  key={action}
-                  className={action === 'start' ? '' : 'secondary'}
-                  disabled={powerBusy || !server.data.availableActions[action]}
-                  onClick={() => (action === 'restart' ? setRestart(true) : void power(action))}
+                  className="console-connection"
+                  data-state={state}
+                  aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
+                  onClick={() => setConnection((value) => value + 1)}
                 >
-                  {t(`web.${action}`)}
+                  <span className="console-connection-dot" aria-hidden="true" />
                 </button>
-              ))}
-            {consoleAvailable && (
-              <>
-                <Tooltip content={t('service.connectionAction', { state: t(`service.${state}`) })}>
-                  <button
-                    type="button"
-                    className="console-connection"
-                    data-state={state}
-                    aria-label={t('service.connectionAction', { state: t(`service.${state}`) })}
-                    onClick={() => setConnection((value) => value + 1)}
-                  >
-                    <span className="console-connection-dot" aria-hidden="true" />
-                  </button>
-                </Tooltip>
-                <span className="visually-hidden" role="status">
-                  {t(`service.${state}`)}
-                </span>
-              </>
-            )}
-          </div>
-        }
-      >
-        {Boolean(powerError) && <ErrorNotice error={powerError} />}
-        <JobNotice jobId={jobId} />
-        {server.data?.activeOperationId && (
-          <Notice>
-            <Link to={`/activity/${server.data.activeOperationId}`}>
-              {t('platform.operationBlocksActions')}
-            </Link>
-          </Notice>
-        )}
-        {server.data?.firstStart && server.data.runtimeState === 'offline' && (
-          <Notice>
-            {t('platform.initialStartDenied')} <Time value={server.data.firstStart.occurredAt} />
-          </Notice>
-        )}
-        {consoleAvailable ? (
-          <>
-            {Boolean(error) && <ErrorNotice error={error} />}
+              </Tooltip>
+              <span className="visually-hidden" role="status">
+                {t(`service.${state}`)}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="console-actions">
+          {server.data?.permissions.operate &&
+            (['start', 'restart', 'stop'] as const).map((action) => (
+              <button
+                type="button"
+                key={action}
+                className={action === 'start' ? '' : 'secondary'}
+                disabled={powerBusy || !server.data.availableActions[action]}
+                onClick={() => (action === 'restart' ? setRestart(true) : void power(action))}
+              >
+                {t(`web.${action}`)}
+              </button>
+            ))}
+        </div>
+        <div className="console-terminal-slot">
+          {consoleAvailable ? (
             <div className="console-terminal">
               <ConsoleOutput
                 output={output}
@@ -343,18 +368,29 @@ export function ConsolePage({ serverId }: { serverId: string }) {
                 <ConsoleCommand key={scope} serverId={serverId} />
               )}
             </div>
-          </>
-        ) : (
-          <Notice>{t('web.unavailable')}</Notice>
-        )}
-      </Section>
+          ) : (
+            <Notice>{t('web.unavailable')}</Notice>
+          )}
+        </div>
+        <ConsoleSummary
+          serverId={serverId}
+          resources={live.data}
+          availability={
+            live.isPending
+              ? 'loading'
+              : live.error || !live.data || resourceStale
+                ? 'unavailable'
+                : 'ready'
+          }
+        />
+      </div>
       <Dialog open={restart} title={t('web.restart')} onClose={() => setRestart(false)}>
         <p>{t('platform.restartWarning', { name: server.data?.name ?? '' })}</p>
         <button type="button" disabled={powerBusy} onClick={() => void power('restart')}>
           {t('web.restart')}
         </button>
       </Dialog>
-      <Telemetry serverId={serverId} />
+      <Telemetry serverId={serverId} live={live} stale={resourceStale} />
     </>
   );
 }
@@ -486,15 +522,16 @@ function Chart({ title, series, unit }: { title: string; series: ChartSeries[]; 
     </figure>
   );
 }
-export function Telemetry({ serverId }: { serverId: string }) {
+function Telemetry({
+  serverId,
+  live,
+  stale,
+}: {
+  serverId: string;
+  live: ReturnType<typeof useLiveResources>;
+  stale: boolean;
+}) {
   const t = useT();
-  const live = useQuery({
-    queryKey: ['resources', serverId],
-    queryFn: () => api<Resources>(`${serverPath(serverId)}/resources`),
-    refetchInterval: 10000,
-    retry: (attempt, error) => attempt < 2 && transientFailure(error),
-    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
-  });
   const history = useQuery({
     queryKey: ['metrics', serverId, 1],
     queryFn: () => {
@@ -514,7 +551,7 @@ export function Telemetry({ serverId }: { serverId: string }) {
     rx: Number(row.network_rx_bytes) / 1048576,
     tx: Number(row.network_tx_bytes) / 1048576,
   }));
-  if (live.data && !live.error) {
+  if (live.data && !live.error && !stale) {
     const r = live.data.resources;
     samples.push({
       time: live.dataUpdatedAt,
@@ -524,7 +561,6 @@ export function Telemetry({ serverId }: { serverId: string }) {
       tx: r.network_tx_bytes / 1048576,
     });
   }
-  const stale = live.dataUpdatedAt && Date.now() - live.dataUpdatedAt > 30000;
   return (
     <Section title={t('service.telemetry')}>
       {live.error && (

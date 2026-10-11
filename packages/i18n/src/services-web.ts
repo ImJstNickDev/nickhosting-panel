@@ -1,4 +1,12 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'service.summary.title': ['Server resources', 'Risorse del server'],
+  'service.summary.uptime': ['Uptime', 'Tempo di attività'],
+  'service.summary.cpu': ['CPU Load', 'Carico CPU'],
+  'service.summary.disk': ['Disk', 'Disco'],
+  'service.summary.inbound': ['Network (Inbound)', 'Rete (entrata)'],
+  'service.summary.outbound': ['Network (Outbound)', 'Rete (uscita)'],
+  'service.summary.starting': ['Starting…', 'Avvio…'],
+  'service.summary.stopping': ['Stopping…', 'Arresto…'],
   'service.consoleStatus.offline': ['Server stopped.', 'Server spento.'],
   'service.consoleStatus.starting': ['Server starting…', 'Avvio del server…'],
   'service.consoleStatus.running': [

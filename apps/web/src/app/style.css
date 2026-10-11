@@ -481,6 +481,44 @@
     font-size: 0.86rem;
     line-height: 1.5;
   }
+  .console-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    grid-template-areas: "heading actions" "terminal summary";
+    gap: 0.75rem 1.25rem;
+    margin-bottom: 1.25rem;
+    align-items: start;
+  }
+  .console-heading {
+    grid-area: heading;
+    display: flex;
+    justify-content: end;
+    min-height: 40px;
+  }
+  .console-actions {
+    grid-area: actions;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+  .console-actions button {
+    padding-inline: 0.35rem;
+  }
+  .console-terminal-slot {
+    grid-area: terminal;
+    min-width: 0;
+  }
+  .console-workspace > .console-summary {
+    grid-area: summary;
+    min-width: 0;
+  }
+  @media (max-width: 1099px) {
+    .console-workspace {
+      grid-template-columns: minmax(0, 1fr) 40px;
+      grid-template-areas: "actions heading" "terminal terminal" "summary summary";
+      gap: 0.75rem;
+    }
+  }
   .visually-hidden {
     position: absolute;
     width: 1px;
@@ -590,13 +628,6 @@
   }
   .mobile-menu {
     display: inline-flex;
-  }
-  .section-heading:has(> .console-actions) {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .console-actions {
-    width: 100%;
   }
   .topbar {
     padding: 0.7rem 1rem;

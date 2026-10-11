@@ -45,7 +45,7 @@ restricted Administration area for audit and read-only settings; Owner mutation
 controls are absent and backend checks remain authoritative. It moves focus to the page heading
 on navigation and supplies a skip link and a mobile navigation disclosure. Desktop navigation stays within the viewport while the page scrolls; short windows scroll the sidebar internally so administration and account links remain reachable. Mobile retains its existing disclosure layout.
 
-Server entry opens Console by default, with Start/Stop/Restart and their durable
+Server entry opens Console by default, with Start/Restart/Stop and their durable
 operation feedback and restart confirmation. Status is an informational tab after
 all game sections (after Content for Minecraft); its URL is `/servers/:id/status`.
 The server root replaces history with `/console` when console capability or operate
@@ -57,6 +57,15 @@ connecting, red disconnected). The 40px button reconnects the stream and exposes
 localized state/action text to assistive technology and its tooltip; it has no
 visible label. Retained output still survives navigation, without an explanatory
 paragraph. This indicator describes the console connection, not the game process.
+The terminal is not wrapped in a Console card or visible heading. On desktop it
+sits beside seven compact resource cards: Address, Uptime, CPU Load, Memory, Disk,
+Network (Inbound) and Network (Outbound). The three power buttons sit above that
+column, and its first card aligns with the terminal's top. On narrow screens the
+controls precede the terminal and resource cards follow it. Uptime uses measured
+provider milliseconds; only confirmed offline state gets an Offline value and red
+icon background. Failed, missing or expired readings remain unavailable. Cards and
+graphs share one resource query and a 30-second freshness deadline; connection
+addresses use the authorized primary endpoint, never an auxiliary/backend port.
 Output follows automatically while scrolled to the bottom; scrolling up pauses
 following, and returning to the bottom resumes it. No follow checkbox is needed.
 The output pane uses 55% of the small viewport height, bounded to 360–680px,
