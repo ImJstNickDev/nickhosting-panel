@@ -74,6 +74,16 @@ export const gatewayRouteSchema = z
     generation: z.uuid(),
     wakeJobId: z.uuid().optional(),
     sleepEligibleAt: timestamp.optional(),
+    // A durable confirmed sleep completion; consumers still match their exact local fence.
+    completedSleep: z
+      .object({
+        jobId: z.uuid(),
+        generation: z.uuid(),
+        quiescenceUntil: timestamp,
+        completedAt: timestamp,
+      })
+      .strict()
+      .optional(),
     public: gatewayEndpointSchema,
     backend: z
       .object({
@@ -95,6 +105,11 @@ export const gatewayRouteSchema = z
     locale: z.enum(['en', 'it']),
   })
   .strict()
+  .refine(
+    (route) =>
+      !route.completedSleep ||
+      (route.mode === 'sleeping' && route.completedSleep.generation === route.generation),
+  )
   .refine((route) => {
     const minecraft = route.protocol?.minecraft;
     if (route.protocol?.handlerId === 'minecraft-java')

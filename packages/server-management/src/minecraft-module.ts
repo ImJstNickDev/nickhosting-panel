@@ -368,11 +368,17 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         .executeTakeFirst();
       return profile ? verifyMinecraftRestore(context, await minecraftOptions()) : true;
     },
-    async verifyProcessEpoch(serverId, connection, before, readAgain, remote) {
+    async verifyProcessEpoch(serverId, connection, before, readAgain, remote, observerPreflight) {
       // Ordinary power/readiness trusts the installed artifact. Bytes are verified
       // by installation/content/restore workflows, not downloaded on every boot.
       // Current provider configuration, image and exact process identity stay fresh.
-      await assertMinecraftRuntimeImage(serverId, connection, before !== null, remote);
+      await assertMinecraftRuntimeImage(
+        serverId,
+        connection,
+        before !== null,
+        remote,
+        observerPreflight,
+      );
       const after = await readAgain();
       if (before !== after) throw new DomainError('operation_uncertain');
       return after;

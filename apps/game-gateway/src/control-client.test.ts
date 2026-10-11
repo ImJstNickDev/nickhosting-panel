@@ -188,7 +188,10 @@ describe('authenticated bounded Gateway control client', () => {
     );
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-NickHosting-Gateway-Features': 'completed-sleep-v1',
+      },
       redirect: 'error',
     });
     expect(fetcher.mock.calls[1]?.[1]).toMatchObject({
@@ -196,6 +199,8 @@ describe('authenticated bounded Gateway control client', () => {
       body: JSON.stringify(wake),
     });
     expect(fetcher.mock.calls[2]?.[1]).toMatchObject({ body: JSON.stringify(observation) });
+    for (const call of fetcher.mock.calls.slice(1))
+      expect(new Headers(call[1]?.headers).has('X-NickHosting-Gateway-Features')).toBe(false);
   });
   it.each([
     'http://core.example.test',

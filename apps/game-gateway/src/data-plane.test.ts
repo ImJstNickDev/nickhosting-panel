@@ -644,6 +644,30 @@ describe('sleep protocol handling and observations', () => {
       expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
     },
   );
+  it('fetches after readiness commit even when an older waking refresh is still in flight', async () => {
+    const backend = await tcpFixture();
+    const r = route(backend.port, 'tcp', 'waking');
+    const committed = Promise.withResolvers<void>();
+    const oldFetch = Promise.withResolvers<GatewaySnapshot>();
+    const f = plane([r], {
+      control: { reportObservation: vi.fn(async () => committed.resolve()) },
+    });
+    await f.gateway.start();
+    const stale = f.snapshot([r]);
+    vi.mocked(f.control.fetchSnapshot)
+      .mockImplementationOnce(() => oldFetch.promise)
+      .mockImplementationOnce(async () => f.snapshot([{ ...r, revision: 2, mode: 'online' }], 2));
+    const refreshing = f.gateway.refresh();
+    const observing = f.gateway.observe();
+    await committed.promise;
+    expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(2);
+    oldFetch.resolve(stale);
+    await Promise.all([refreshing, observing]);
+    expect(f.control.fetchSnapshot).toHaveBeenCalledTimes(3);
+    expect(f.gateway.health().revision).toBe(2);
+    expect((await exchange(backend.port, 'ready now')).toString()).toBe('ready now');
+  });
+
   it('uses a coherent adapter sample once with a legacy safety validator', async () => {
     const backend = await tcpFixture();
     const handler = fixtureProtocol({
@@ -1276,6 +1300,99 @@ describe('sleep protocol handling and observations', () => {
     expect(f.control.requestWake).not.toHaveBeenCalled();
     expect(f.gateway.metrics()).toMatchObject({ tcpBytesToBackend: 0, udpBytesToBackend: 0 });
   });
+  it.each([
+    'confirmed',
+    'missing',
+    'wrong-deadline',
+    'wrong-generation',
+    'old-completion',
+    'future-completion',
+    'prefetched',
+    'missing-role',
+    'different-role-proof',
+    'changed-backend',
+    'changed-allocation',
+    'failed-validation',
+  ] as const)(
+    'releases an exact completed sleep fence only with safe evidence: %s',
+    async (condition) => {
+      const tcp = await tcpFixture();
+      const udp = await udpFixture();
+      let clock = Date.now();
+      const initial = clock;
+      const first = { ...route(tcp.port), sleepEligibleAt: new Date(clock - 1000).toISOString() };
+      const second = {
+        ...route(udp.port, 'udp'),
+        serverId: first.serverId,
+        generation: first.generation,
+        sleepEligibleAt: first.sleepEligibleAt,
+      };
+      const log = vi.fn();
+      const f = plane([first, second], {
+        now: () => clock,
+        logger: { log },
+        policy: { maxClockSkewMs: 10 },
+        lease: 15000,
+        protocols: [fixtureProtocol({ probeIdle: async () => ({ idle: true, playerCount: 0 }) })],
+      });
+      await f.gateway.start();
+      await f.gateway.observe();
+      expect(f.gateway.health().quiescentServers).toBe(1);
+      clock += 1000;
+      const proof = {
+        jobId: randomUUID(),
+        generation: first.generation,
+        quiescenceUntil: new Date(initial + 15000).toISOString(),
+        completedAt: new Date(initial + 500).toISOString(),
+      };
+      if (condition === 'wrong-deadline')
+        proof.quiescenceUntil = new Date(initial + 14000).toISOString();
+      if (condition === 'old-completion') proof.completedAt = new Date(initial - 1).toISOString();
+      if (condition === 'future-completion') proof.completedAt = new Date(clock + 1).toISOString();
+      const stopped: GatewayRoute[] = [first, second].map((r) => ({
+        ...r,
+        revision: 2,
+        mode: 'sleeping',
+        ...(condition === 'missing' ? {} : { completedSleep: { ...proof } }),
+      }));
+      if (condition === 'wrong-generation') {
+        const generation = randomUUID();
+        for (const r of stopped) {
+          r.generation = generation;
+          if (r.completedSleep) r.completedSleep.generation = generation;
+        }
+      }
+      if (condition === 'missing-role') stopped.pop();
+      if (condition === 'different-role-proof' && stopped[1]?.completedSleep)
+        stopped[1].completedSleep.jobId = randomUUID();
+      if (condition === 'changed-backend' && stopped[1])
+        stopped[1].backend = { ...stopped[1].backend, port: 12345 };
+      if (condition === 'changed-allocation' && stopped[1]) stopped[1].allocationId = randomUUID();
+      if (condition === 'failed-validation')
+        vi.mocked(f.safety.validate).mockRejectedValueOnce(new DomainError('conflict'));
+      const applying = f.gateway.applySnapshot(
+        f.snapshot(stopped, 2),
+        condition === 'prefetched' ? initial : clock,
+      );
+      if (condition === 'failed-validation') await expect(applying).rejects.toThrow();
+      else await applying;
+      expect(f.gateway.health().quiescentServers).toBe(condition === 'confirmed' ? 0 : 1);
+      if (condition === 'confirmed') {
+        expect((await datagram(udp.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+        expect((await exchange(tcp.port, 'JOIN\n')).toString()).toBe('waking\n');
+        expect(f.control.requestWake).toHaveBeenCalledOnce();
+        expect(log).toHaveBeenCalledWith(
+          'info',
+          'gateway.quiescence_released',
+          expect.objectContaining({ reason: 'confirmed_sleep' }),
+        );
+      } else {
+        expect(f.control.requestWake).not.toHaveBeenCalled();
+      }
+      expect(f.gateway.metrics()).toMatchObject({ tcpBytesToBackend: 0, udpBytesToBackend: 0 });
+    },
+  );
+
   it('keeps Minecraft status and ping available while quiescent, rejects login and expires with the lease', async () => {
     const backend = await tcpFixture();
     let clock = Date.now();

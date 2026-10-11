@@ -198,6 +198,89 @@ describe('management runtime execution-time authorization', () => {
     );
     expect(observer.processStartedAt).not.toHaveBeenCalled();
   });
+  it('overlaps host preflight with provider reads but waits for both before process evidence', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    let finishPreflight!: () => void;
+    const preflight = new Promise<void>((resolve) => {
+      finishPreflight = resolve;
+    });
+    let finishProvider!: (value: ApplicationServer) => void;
+    const provider = new Promise<ApplicationServer>((resolve) => {
+      finishProvider = resolve;
+    });
+    const readProvider = vi.fn(() => provider);
+    Object.assign(f.adapter, { getApplicationServer: readProvider });
+    const stamp = new Date(Date.now() - 1000).toISOString();
+    const observer = {
+      preflight: vi.fn(() => preflight),
+      stopped: vi.fn(async () => true),
+      processStartedAt: vi.fn(async () => stamp),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db);
+    try {
+      await vi.waitFor(() => {
+        expect(observer.preflight).toHaveBeenCalledOnce();
+        expect(readProvider).toHaveBeenCalledOnce();
+      });
+      expect(observer.processStartedAt).not.toHaveBeenCalled();
+      finishPreflight();
+      await delay(10);
+      expect(observer.processStartedAt).not.toHaveBeenCalled();
+    } finally {
+      finishPreflight();
+      finishProvider(remote);
+    }
+    await expect(observation).resolves.toBe(stamp);
+    expect(observer.processStartedAt).toHaveBeenCalledOnce();
+  });
+  it('settles outstanding provider reads after a failed host preflight without observing the process', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    let finishProvider!: (value: ApplicationServer) => void;
+    const provider = new Promise<ApplicationServer>((resolve) => {
+      finishProvider = resolve;
+    });
+    const readProvider = vi.fn(() => provider);
+    Object.assign(f.adapter, { getApplicationServer: readProvider });
+    const observer = {
+      preflight: vi.fn(async () => {
+        throw new Error('preflight failed');
+      }),
+      stopped: vi.fn(async () => true),
+      processStartedAt: vi.fn(async () => new Date().toISOString()),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    let settled = false;
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db).catch((error) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await vi.waitFor(() => expect(observer.preflight).toHaveBeenCalledOnce());
+      await delay(10);
+      expect(readProvider).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      expect(observer.processStartedAt).not.toHaveBeenCalled();
+    } finally {
+      finishProvider(remote);
+    }
+    expect(await observation).toEqual(new Error('preflight failed'));
+    expect(observer.processStartedAt).not.toHaveBeenCalled();
+  });
   it.each([
     'valid',
     'absent',

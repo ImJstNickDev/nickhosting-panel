@@ -312,6 +312,197 @@ describe('durable explicit Gateway route registry', () => {
   });
 });
 
+describe('durable completed sleep evidence', () => {
+  async function completed() {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    await setGatewayRoute(f.db, f.owner, { ...input(), transport: 'udp' }, env);
+    const before = await getGatewaySnapshot(f.db, env);
+    const generation = (await getGatewayState(f.db, serverId)).generation;
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const completedAt = new Date(Date.now() - 1000);
+    const plan = {
+      stopConfirmed: true,
+      stopConfirmedAt: new Date(completedAt.getTime() - 100).toISOString(),
+      gatewayAutomation: {
+        kind: 'sleep',
+        generation,
+        quiescenceUntil: new Date(Date.now() + 10000).toISOString(),
+      },
+    };
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        action: 'stop',
+        phase: 'complete',
+        effect_state: 'confirmed',
+        plan: JSON.stringify(plan),
+      })
+      .where('job_id', '=', operation.job_id)
+      .execute();
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ state: 'succeeded', completed_at: completedAt })
+      .where('id', '=', operation.job_id)
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'sleeping', sleep_job_id: null })
+      .where('server_id', '=', serverId)
+      .execute();
+    return { before, plan, jobId: operation.job_id, completedAt };
+  }
+  it('publishes exact durable completion with stable revised snapshot content', async () => {
+    const evidence = await completed();
+    const first = await getGatewaySnapshot(f.db, env);
+    expect(first.routes[0]?.completedSleep).toEqual({
+      jobId: evidence.jobId,
+      generation: evidence.plan.gatewayAutomation.generation,
+      quiescenceUntil: evidence.plan.gatewayAutomation.quiescenceUntil,
+      completedAt: evidence.completedAt.toISOString(),
+    });
+    expect(first.routes).toHaveLength(2);
+    expect(first.routes[1]?.completedSleep).toEqual(first.routes[0]?.completedSleep);
+    expect(first.revision).toBeGreaterThan(evidence.before.revision);
+    expect(first.routes[0]?.revision).toBeGreaterThan(evidence.before.routes[0]?.revision ?? 0);
+    const second = await getGatewaySnapshot(f.db, env);
+    expect(second.revision).toBe(first.revision);
+    expect(second.routes).toEqual(first.routes);
+  });
+  it('database rejects a succeeded job without its durable completion timestamp', async () => {
+    const { jobId } = await completed();
+    await expect(
+      f.db
+        .updateTable('operation_jobs')
+        .set({ completed_at: null })
+        .where('id', '=', jobId)
+        .execute(),
+    ).rejects.toThrow('operation_jobs_check1');
+  });
+  it.each([
+    'generic-stop',
+    'foreign-generation',
+    'invalid-deadline',
+    'missing-confirmation',
+    'missing-confirmed-at',
+    'late-confirmation',
+    'failed',
+    'queued',
+    'uncertain',
+    'incomplete',
+    'future-completion',
+    'running',
+    'active-operation',
+    'reservation',
+    'manual-stop',
+    'newer-operation',
+  ] as const)('withholds completion for %s', async (condition) => {
+    const { plan, jobId, completedAt } = await completed();
+    if (condition === 'generic-stop')
+      delete (plan as { gatewayAutomation?: unknown }).gatewayAutomation;
+    if (condition === 'foreign-generation') plan.gatewayAutomation.generation = randomUUID();
+    if (condition === 'invalid-deadline') plan.gatewayAutomation.quiescenceUntil = 'invalid';
+    if (condition === 'missing-confirmation') plan.stopConfirmed = false;
+    if (condition === 'missing-confirmed-at')
+      delete (plan as { stopConfirmedAt?: string }).stopConfirmedAt;
+    if (condition === 'late-confirmation')
+      plan.stopConfirmedAt = new Date(completedAt.getTime() + 1).toISOString();
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        plan: JSON.stringify(plan),
+        ...(condition === 'uncertain' ? { effect_state: 'uncertain' as const } : {}),
+        ...(condition === 'incomplete' ? { phase: 'power' } : {}),
+      })
+      .where('job_id', '=', jobId)
+      .execute();
+    if (condition === 'failed' || condition === 'queued')
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: condition, ...(condition === 'queued' ? { completed_at: null } : {}) })
+        .where('id', '=', jobId)
+        .execute();
+    if (condition === 'future-completion')
+      await f.db
+        .updateTable('operation_jobs')
+        .set({
+          completed_at: new Date(Date.now() + 60000),
+        })
+        .where('id', '=', jobId)
+        .execute();
+    if (condition === 'running')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: 'running' })
+        .where('id', '=', serverId)
+        .execute();
+    if (condition === 'active-operation')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: jobId })
+        .where('id', '=', serverId)
+        .execute();
+    if (condition === 'manual-stop')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'manually_stopped' })
+        .where('id', '=', serverId)
+        .execute();
+    if (condition === 'reservation')
+      await f.db
+        .insertInto('resource_reservations')
+        .values({
+          server_id: serverId,
+          owner_id: f.context.subjectUserId,
+          physical_host_id: f.hostId,
+          memory_mib: 100,
+          physical_memory_mib: 100,
+          cpu_percent: 100,
+          operation_id: jobId,
+          state: 'uncertain',
+        })
+        .execute();
+    if (condition === 'newer-operation') {
+      const previous = await f.db
+        .selectFrom('operation_jobs')
+        .selectAll()
+        .where('id', '=', jobId)
+        .executeTakeFirstOrThrow();
+      const nextId = randomUUID();
+      await f.db
+        .insertInto('operation_jobs')
+        .values({
+          ...previous,
+          id: nextId,
+          idempotency_key: nextId,
+          command: JSON.stringify(previous.command),
+          policy_snapshot: JSON.stringify(previous.policy_snapshot),
+          state: 'failed',
+          created_at: new Date(Date.now() + 1),
+        })
+        .execute();
+      await f.db
+        .insertInto('server_operations')
+        .values({
+          job_id: nextId,
+          server_id: serverId,
+          action: 'stop',
+          phase: 'failed',
+          effect_state: 'uncertain',
+          plan: JSON.stringify(plan),
+          effect_started_at: null,
+          lease_until: null,
+          lease_token: null,
+        })
+        .execute();
+    }
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.completedSleep).toBeUndefined();
+  });
+});
+
 describe('route authorization after resource-lock waits', () => {
   it.each(['logout', 'demotion'] as const)(
     'rejects %s while queued for the lock',

@@ -338,6 +338,8 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .selectAll('route')
       .select([
         'server.node_id',
+        'server.runtime_state',
+        'server.active_operation_id',
         'mapping.game_id',
         'policy.protocol_id as stored_handler_id',
         'allocation.address',
@@ -357,6 +359,46 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .limit(10001)
       .execute();
     if (rows.length > 10000) throw new DomainError('configuration_invalid');
+    // One batched lookup, selecting the latest operation before checking success.
+    // Filtering for successful stops in SQL would resurrect an older proof after a
+    // newer failed/uncertain operation. No per-route operation/reservation query.
+    const serverIds = [
+      ...new Set(
+        rows
+          .filter((row) => row.runtime_state === 'offline' && row.active_operation_id === null)
+          .map((row) => row.server_id),
+      ),
+    ];
+    const completedOperations = serverIds.length
+      ? await tx
+          .selectFrom('server_operations as operation')
+          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+          .leftJoin(
+            'resource_reservations as reservation',
+            'reservation.server_id',
+            'operation.server_id',
+          )
+          .select([
+            'operation.server_id',
+            'operation.job_id',
+            'operation.action',
+            'operation.phase',
+            'operation.effect_state',
+            'operation.plan',
+            'job.state',
+            'job.completed_at',
+            'reservation.server_id as reserved_server_id',
+          ])
+          .where('operation.server_id', 'in', serverIds)
+          .distinctOn('operation.server_id')
+          .orderBy('operation.server_id')
+          .orderBy('job.created_at', 'desc')
+          .orderBy('job.id', 'desc')
+          .execute()
+      : [];
+    const latestOperations = new Map(
+      completedOperations.map((operation) => [operation.server_id, operation]),
+    );
     const routes: GatewayRoute[] = [];
     for (const row of rows) {
       let state: Awaited<ReturnType<typeof getGatewayState>>;
@@ -381,12 +423,53 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
           continue;
         throw error;
       }
+      const operation = latestOperations.get(row.server_id);
+      let completedSleep: GatewayRoute['completedSleep'];
+      if (
+        state.state === 'sleeping' &&
+        row.runtime_state === 'offline' &&
+        row.active_operation_id === null &&
+        operation &&
+        !operation.reserved_server_id &&
+        operation.state === 'succeeded' &&
+        operation.completed_at &&
+        operation.completed_at.getTime() <= now &&
+        operation.action === 'stop' &&
+        operation.phase === 'complete' &&
+        operation.effect_state === 'confirmed' &&
+        operation.plan.stopConfirmed === true
+      ) {
+        const marker = z
+          .object({
+            kind: z.literal('sleep'),
+            generation: z.uuid(),
+            quiescenceUntil: z.iso.datetime({ offset: true }),
+          })
+          .safeParse(operation.plan.gatewayAutomation);
+        const confirmedAt = z.iso
+          .datetime({ offset: true })
+          .safeParse(operation.plan.stopConfirmedAt);
+        if (
+          marker.success &&
+          marker.data.generation === state.generation &&
+          confirmedAt.success &&
+          Date.parse(confirmedAt.data) <= operation.completed_at.getTime()
+        ) {
+          completedSleep = {
+            jobId: operation.job_id,
+            generation: marker.data.generation,
+            quiescenceUntil: marker.data.quiescenceUntil,
+            completedAt: operation.completed_at.toISOString(),
+          };
+        }
+      }
       const payload = {
         id: row.id,
         serverId: row.server_id,
         nodeId: row.node_id,
         allocationId: row.allocation_id,
         generation: state.generation,
+        ...(completedSleep ? { completedSleep } : {}),
         ...(state.sleepEligibleAt ? { sleepEligibleAt: state.sleepEligibleAt } : {}),
         ...(state.wakeJobId ? { wakeJobId: state.wakeJobId } : {}),
         public: { address: row.public_address, port: row.public_port, transport: row.transport },

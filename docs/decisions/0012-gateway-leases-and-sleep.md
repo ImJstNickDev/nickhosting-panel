@@ -93,3 +93,22 @@ existing bootstrap rules. Fixed diagnostic reason codes distinguish recreation,
 binding conflicts, topology/proof failures and validation timeouts without leaking
 provider payloads or credentials. A single validation pass may share its fresh
 Core context with the node challenge; it is not reused across validation passes.
+
+
+## 2026-10-11 amendment — Early release after exact completed sleep
+
+The original deadline-only local fence remains the fallback. A negotiated Core
+snapshot may additionally acknowledge the exact durable completed sleep operation.
+Only succeeded, confirmed, terminal stop with offline state, no active operation
+and no reservation supplies this proof. Gateway matches the original generation,
+promised deadline, observation time and complete unchanged route identities, and
+requires a new fully validated post-completion snapshot before releasing early.
+A generic sleeping response or expired/lost report cannot substitute for proof.
+
+This removes unnecessary remaining lease wait after a stop has conclusively
+finished while preserving the promise during any unresolved stop. Route revision
+checks under Core's resource lock continue rejecting delayed old idle reports.
+Restart still drains the maximum old lease because local fence context is lost;
+this change does not introduce multi-active-Gateway support. Feature negotiation
+allows Core-first deployment with older strict Gateway clients. See the exact
+[M3 control contract](../M3-API.md) and targeted M5 regression evidence.

@@ -332,7 +332,7 @@ refreshes or displays its MOTD. Logs are transition/job scoped, not one record p
 packet or unchanged idle probe. Diagnostic sink failures do not alter the measured
 operation or relax its authorization.
 
-Confirmed stop does not cancel an outstanding quiescence promise. The Gateway
+Under the original deadline-only contract, confirmed stop does not cancel an outstanding quiescence promise (the terminal acknowledgement amendment below adds an exact-proof exception). The Gateway
 retains it until a successful snapshot fetch starts after the original deadline
 plus clock-skew allowance and has an issue timestamp at/after the deadline. This
 may leave a stopped backend answering “Server stopping” for the remaining lease
@@ -447,3 +447,41 @@ context changes, expiration or failed listener renewal prevent reuse. Each liste
 bind/renewal fetches fresh provider inventory. This removes the repeated provider
 reads between nearby snapshot validation and backend observation without caching
 permission or treating a configured address as reachability proof.
+
+
+## 2026-10-11 — Confirmed sleep acknowledgement and readiness refresh
+
+Authenticated snapshot clients advertise
+`X-NickHosting-Gateway-Features: completed-sleep-v1` to receive optional per-route
+`completedSleep: {jobId,generation,quiescenceUntil,completedAt}`. Core strips this
+additive field for legacy strict decoders; canonical route/snapshot revisions
+remain the same. New clients work with old Core by retaining deadline fallback.
+Do not change the negotiated feature set during one Gateway process lifetime.
+
+Core derives the acknowledgement from the latest durable server operation, using
+one batched query for offline servers without an active operation. It requires a
+succeeded, complete, confirmed sleep stop, valid stop-confirmation/completion
+timestamps, the current generation, and no resource reservation. A newer failed,
+pending or unrelated operation prevents reuse of an older success. The exact
+original sleep deadline is preserved; no migration or provider request is added.
+
+After normal full snapshot safety validation, the Gateway may release its local
+fence early only if all original roles still exist with unchanged identity,
+endpoints and protocol, increased route revisions, sleeping mode and identical
+completion evidence. Generation and deadline must match the locally retained
+fence; completion must follow its observation, precede snapshot issuance and
+precede fetch start by at least the configured conservative clock-skew margin. Generic sleeping
+state, missing/partial evidence, changed topology, stale fetches, failed jobs or
+lost responses do not release early. The original post-deadline fallback, lease
+expiry and startup drain remain. This permits a new admitted wake after confirmed
+stop; it does not authorize forwarding to an offline backend.
+
+After a successful readiness report the Gateway settles an older in-flight
+snapshot refresh, then requests fresh authority instead of accidentally joining
+a pre-commit fetch. Provider cooldown and full route validation still apply.
+Core process observations run independent host, provider identity and compiled
+module prerequisites concurrently, settling all branches on failure. The same
+observation's completed host preflight is reused in Minecraft image verification;
+the before/image/after process-incarnation fence remains. No cross-observation
+identity cache or JAR download is introduced. Live latency is measured separately
+from these regression tests.

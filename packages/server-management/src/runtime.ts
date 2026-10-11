@@ -549,7 +549,6 @@ export async function createManagementRuntime(options: ManagementOptions) {
       return containerObserver.processStartedAt(server.pterodactyl_uuid);
     },
     observeProcessStart: async (serverId: string, connection: Kysely<Database>) => {
-      await verifyObservationHost(serverId, connection);
       const server = await connection
         .selectFrom('managed_servers')
         .selectAll()
@@ -562,12 +561,25 @@ export async function createManagementRuntime(options: ManagementOptions) {
         !containerObserver?.processStartedAt
       )
         throw new DomainError('configuration_invalid');
-      const remote = await adapter.getApplicationServer(server.pterodactyl_id);
-      await verifyManagedIdentity(connection, server, remote);
+      // Independent, read-only prerequisites share this observation's connection.
+      // Settle every branch before returning it to a caller that may release it.
+      const observerPreflight = verifyObservationHost(serverId, connection);
+      const proofs = await Promise.allSettled([
+        observerPreflight,
+        adapter.getApplicationServer(server.pterodactyl_id).then(async (remote) => {
+          await verifyManagedIdentity(connection, server, remote);
+          return remote;
+        }),
+        gameRuntime(connection, serverId),
+      ]);
+      for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
+      if (proofs[1].status !== 'fulfilled' || proofs[2].status !== 'fulfilled')
+        throw new DomainError('integration_unavailable');
+      const remote = proofs[1].value;
+      const module = proofs[2].value;
       const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
       const uuid = server.pterodactyl_uuid;
       const before = await processStartedAt(uuid);
-      const module = await gameRuntime(connection, serverId);
       return module
         ? module.verifyProcessEpoch(
             serverId,
@@ -575,6 +587,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
             before,
             () => processStartedAt(uuid),
             remote,
+            observerPreflight,
           )
         : before;
     },

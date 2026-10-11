@@ -213,6 +213,55 @@ describe('M3 Core service authentication and managed control plane', () => {
       expect(text).not.toContain(token);
     }
   });
+  it('negotiates terminal sleep evidence without breaking strict legacy snapshot clients', async () => {
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('job_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const completedAt = new Date(Date.now() - 1000);
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        action: 'stop',
+        phase: 'complete',
+        effect_state: 'confirmed',
+        plan: JSON.stringify({
+          stopConfirmed: true,
+          stopConfirmedAt: completedAt.toISOString(),
+          gatewayAutomation: {
+            kind: 'sleep',
+            generation: route.generation,
+            quiescenceUntil: new Date(Date.now() + 10000).toISOString(),
+          },
+        }),
+      })
+      .where('job_id', '=', operation.job_id)
+      .execute();
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ state: 'succeeded', completed_at: completedAt })
+      .where('id', '=', operation.job_id)
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'sleeping', sleep_job_id: null })
+      .where('server_id', '=', serverId)
+      .execute();
+    const legacy = await request(`${prefix()}/snapshot`);
+    expect(legacy.status).toBe(200);
+    const oldPayload = await legacy.json();
+    expect(oldPayload.routes[0].completedSleep).toBeUndefined();
+    const modern = await request(`${prefix()}/snapshot`, undefined, {
+      'X-NickHosting-Gateway-Features': 'completed-sleep-v1',
+    });
+    expect(modern.status).toBe(200);
+    const newPayload = await modern.json();
+    expect(newPayload.routes[0].completedSleep).toMatchObject({ jobId: operation.job_id });
+    expect(newPayload.revision).toBe(oldPayload.revision);
+    expect(newPayload.routes[0].revision).toBe(oldPayload.routes[0].revision);
+  });
+
   it('returns bounded provider cooldown only after Gateway authentication', async () => {
     vi.mocked(f.adapter.listNodes).mockRejectedValue(
       new PterodactylError('rate_limited', 'application', 'rejected', 429, 1700),

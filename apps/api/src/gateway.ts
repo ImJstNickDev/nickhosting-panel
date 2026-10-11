@@ -95,7 +95,18 @@ export function registerGatewayRoutes(
       Object.fromEntries(Object.entries(values).filter(([key]) => key.startsWith('gateway'))),
     );
   });
-  app.get(`${prefix}/snapshot`, async (c) => c.json(await getGatewaySnapshot(db, env)));
+  app.get(`${prefix}/snapshot`, async (c) => {
+    const snapshot = await getGatewaySnapshot(db, env);
+    // Old Gateways use strict route decoding. Negotiate the additive terminal
+    // proof so a Core-first rolling update cannot interrupt their listeners.
+    if (c.req.header('X-NickHosting-Gateway-Features') !== 'completed-sleep-v1') {
+      return c.json({
+        ...snapshot,
+        routes: snapshot.routes.map(({ completedSleep: _proof, ...route }) => route),
+      });
+    }
+    return c.json(snapshot);
+  });
   app.post(`${prefix}/wake`, async (c) => {
     // Timing begins after service authentication; requestId connects the early
     // phases to the operation ID that exists only after the durable enqueue.

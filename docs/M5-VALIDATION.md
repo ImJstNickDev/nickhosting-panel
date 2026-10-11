@@ -2856,3 +2856,76 @@ and restart the Gateway under approval to roll back; no database rollback requir
   files, 44 ignore cases; heuristic secret scan). Read-only Docker inspection
   found development API, worker and Gateway running/healthy. API/worker watchers
   load their changes; the Gateway still requires activation of this revision.
+
+
+### 2026-10-11 — Terminal sleep proof and post-readiness refresh
+
+The Owner-operated cycle on `8bee7343` was audited read-only: intentional join to
+successful power HTTP response **1.963 s**, join to Docker process start **2.812 s**,
+Minecraft Done to forwarding **4.552 s**, and Docker exit to sleeping response
+**12.984 s**. The last interval consisted of 10.109 s remaining original fence
+plus 2.875 s subsequent refresh/validation. The game's own empty-for-60-seconds
+pause log preceded stop by 7.269 s; that is not a measured player-disconnect or
+NickHosting idle deadline. Both jobs succeeded and final state was offline/sleeping
+without active jobs/errors. No post-restart 429 or listener-loss event appeared in
+the captured application logs. Revision conflicts and unavailable observations
+still occurred; no successful player-login evidence was present. This single
+sample neither establishes sustained gameplay nor exercises live rate-limit
+fallback. Raw logs remain private; [PR cycle evidence](https://github.com/ImJstNickDev/nickhosting-panel/pull/21#issuecomment-6103599173)
+records commands/boundaries. [Issue #25](https://github.com/ImJstNickDev/nickhosting-panel/issues/25)
+tracks future per-user Client keys and Blueprint work separately.
+
+Corrections in this pass:
+
+- Core supplies negotiated, optional terminal sleep evidence from the latest
+  durable confirmed sleep stop. Batch lookup only covers offline inactive servers;
+  no new per-route operation lookup or provider request. Generic/uncertain/failed
+  stops, active operations/reservations and foreign generations cannot mint proof.
+- Gateway can release the exact local fence after fresh fully validated terminal
+  evidence across all unchanged roles. The original deadline remains for unknown
+  cases. Withdrawal, deadline changes, prefetched snapshots, partial roles and
+  changed endpoints cannot release early. Status/wake only resume with sleeping
+  authority; no forwarding to an offline backend is granted.
+- A post-readiness refresh now waits for a pre-commit in-flight refresh and fetches
+  again. Previously joining that older promise could leave a waking snapshot in
+  place until the next periodic poll.
+- Process observation runs independent prerequisites concurrently and reuses only
+  that invocation's completed host preflight for Minecraft image verification.
+  All concurrent branches settle on failure; identity and before/image/after
+  process checks remain, without cross-observation caching or artifact transfers.
+- Snapshot feature negotiation protects older strict Gateway clients during a
+  Core-first update. No database migration, dependency, provider configuration,
+  UI or infrastructure change is needed.
+
+Validation (targeted; not a repeated historical full suite):
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/runtime.integration.test.ts packages/server-management/src/minecraft-queued.integration.test.ts`:
+  **84/84 passed**. Includes independent prerequisite concurrency, failure drain
+  and exactly one host preflight per observation.
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/gateway.test.ts`:
+  **7/7 passed**.
+- `scripts/dev.sh pnpm test:m3 packages/server-management/src/gateway-registry.integration.test.ts`:
+  initial **40/42 passed**; two newly written fixtures violated existing DB
+  completion/state constraints. Corrected fixtures and asserted the impossible
+  state is rejected by PostgreSQL. Targeted `-t 'durable completed sleep evidence'`
+  **18/18 passed**, including matching TCP/UDP proof and all rejection cases;
+  final offline-only query selection checks **3/3 passed**.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts apps/game-gateway/src/control-client.test.ts`:
+  initial **144 passed, 1 failed** because the positive new fixture's clock margin
+  was smaller than its configured skew. Corrected the fixture's explicit skew;
+  `-t 'completed sleep fence|older waking refresh|validates authenticated snapshot'`
+  **14 passed, 131 filtered**. No production check was relaxed to fix the fixture.
+- `scripts/dev.sh pnpm test:m3 apps/api/src/gateway.integration.test.ts`:
+  **22/22 passed**, including legacy/new snapshot negotiation with stable revision.
+- `scripts/dev.sh pnpm exec tsc --noEmit`: passed on integrated source.
+
+Independent reviewer found no must-fix in terminal-proof authority, late-report
+rejection, legacy negotiation, readiness refresh or process-verification changes.
+Tests used existing isolated PostgreSQL/Redis and loopback fixtures. No game server
+was created, powered or modified, and no infrastructure was restarted for this
+pass. API/worker development watchers can load source changes; the standalone
+Gateway requires an operation-specific approved restart. No new measured latency
+improvement is claimed before activation and a subsequent Owner-operated cycle.
+Rollback: revert this change, then load the prior Gateway under a scoped restart
+approval; no database rollback is required. SFTPGo #18 remains unchanged. M5 PR
+stays open/unmerged; no M6 or production deployment.

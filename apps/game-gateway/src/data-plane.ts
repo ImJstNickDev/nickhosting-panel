@@ -145,7 +145,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   let shutdown: Promise<void> | undefined;
   let pendingUdpIntents = 0;
   let pendingUdpResponseBytes = 0;
-  const quiescence = new Map<string, number>();
+  const quiescence = new Map<
+    string,
+    { deadline: number; observedAt: number; generation: string; routes: GatewayRoute[] }
+  >();
   const loggedRouteStates = new Map<string, string>();
   const logTiming = (event: string, data: Readonly<Record<string, unknown>>) => {
     try {
@@ -808,13 +811,47 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         listener.backendReady = readiness.get(route.id) ?? false;
       }
       snapshot = next;
-      for (const [serverId, deadline] of quiescence) {
+      for (const [serverId, fence] of quiescence) {
+        const { deadline } = fence;
+        const currentRoutes = next.routes.filter((route) => route.serverId === serverId);
+        const completion = currentRoutes[0]?.completedSleep;
+        // Only Core's durable terminal acknowledgement of this exact fenced
+        // operation may release early. A sleeping label or route withdrawal alone
+        // cannot cancel a report still capable of authorizing a stop.
+        const confirmed =
+          completion !== undefined &&
+          completion.generation === fence.generation &&
+          Date.parse(completion.quiescenceUntil) === deadline &&
+          Date.parse(completion.completedAt) >= fence.observedAt &&
+          Date.parse(completion.completedAt) <= issued &&
+          fetchStartedAt >= Date.parse(completion.completedAt) + policy.maxClockSkewMs &&
+          currentRoutes.length === fence.routes.length &&
+          currentRoutes.every((route) => {
+            const previous = fence.routes.find((old) => old.id === route.id);
+            return (
+              previous !== undefined &&
+              route.mode === 'sleeping' &&
+              route.wakeJobId === undefined &&
+              route.generation === fence.generation &&
+              route.revision > previous.revision &&
+              route.nodeId === previous.nodeId &&
+              route.allocationId === previous.allocationId &&
+              isDeepStrictEqual(route.public, previous.public) &&
+              isDeepStrictEqual(route.backend, previous.backend) &&
+              isDeepStrictEqual(route.protocol, previous.protocol) &&
+              isDeepStrictEqual(route.completedSleep, completion)
+            );
+          });
         // Route withdrawal does not cancel an in-flight idle report. Retain
-        // the fence across disable/re-enable until a post-deadline fetch.
-        if (fetchStartedAt >= deadline + policy.maxClockSkewMs && issued >= deadline) {
+        // the fence without exact terminal evidence until a post-deadline fetch.
+        if (
+          confirmed ||
+          (fetchStartedAt >= deadline + policy.maxClockSkewMs && issued >= deadline)
+        ) {
           quiescence.delete(serverId);
           logTiming('gateway.quiescence_released', {
             serverId,
+            reason: confirmed ? 'confirmed_sleep' : 'deadline_reconciled',
             deadline: new Date(deadline).toISOString(),
             fetchStartedAt: new Date(fetchStartedAt).toISOString(),
             issuedAt: next.issuedAt,
@@ -1027,7 +1064,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             routes.every((route) => route.sleepEligibleAt === anchor.sleepEligibleAt) &&
             Date.parse(observedAt) >= Date.parse(anchor.sleepEligibleAt);
           if (canQuiesce && !quiescence.has(anchor.serverId)) {
-            quiescence.set(anchor.serverId, Date.parse(candidates.expiresAt));
+            quiescence.set(anchor.serverId, {
+              deadline: Date.parse(candidates.expiresAt),
+              observedAt: Date.parse(observedAt),
+              generation: anchor.generation,
+              routes: structuredClone(routes),
+            });
             logTiming('gateway.quiescence_started', {
               ...routeIdentity(anchor),
               observedAt,
@@ -1040,7 +1082,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
                 logRouteTransition(listener, 'idle_quiescence');
           }
           const quiescenceUntil = canQuiesce
-            ? Math.min(quiescence.get(anchor.serverId) ?? 0, Date.parse(candidates.expiresAt))
+            ? Math.min(
+                quiescence.get(anchor.serverId)?.deadline ?? 0,
+                Date.parse(candidates.expiresAt),
+              )
             : undefined;
           // A lost report must not perpetually extend a fence. Only a new
           // post-deadline Core fetch can reconcile this promise and re-arm it.
@@ -1080,7 +1125,13 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       }
       // A committed positive wake observation can change route authority. Refresh
       // through the usual full safety path instead of waiting an extra poll period.
-      if (refreshAfterReadiness && !stopping) await refresh().catch(() => {});
+      if (refreshAfterReadiness && !stopping) {
+        // An existing fetch may predate the observation commit. Wait for it to
+        // settle, then fetch again; joining that promise can otherwise leave the
+        // newly ready backend behind a waking snapshot until the next timer.
+        await refreshing?.catch(() => {});
+        if (!stopping) await refresh().catch(() => {});
+      }
     })().finally(() => {
       counters.observationCycles++;
       counters.lastObservationDurationMs = Math.round(performance.now() - cycleStarted);

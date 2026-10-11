@@ -1033,7 +1033,9 @@ describe('host-bound Minecraft runtime image evidence', () => {
     const value = await installed();
     const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
     const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
+    value.observer.preflight.mockClear();
     const first = await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
+    expect(value.observer.preflight).toHaveBeenCalledOnce();
     await expect(
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).resolves.toBe(first);
@@ -1042,6 +1044,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     await expect(
       value.management.lifecycle.observeProcessStart(value.serverId, f.db),
     ).resolves.toBe(replacement);
+    expect(value.observer.preflight).toHaveBeenCalledTimes(3);
     expect(listFiles).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
   });

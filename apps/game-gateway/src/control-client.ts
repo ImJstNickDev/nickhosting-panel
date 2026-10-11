@@ -87,6 +87,9 @@ export function createGatewayControlClient(
         headers: {
           Authorization: `Bearer ${options.token}`,
           Accept: 'application/json',
+          ...(action === 'snapshot'
+            ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1' }
+            : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),

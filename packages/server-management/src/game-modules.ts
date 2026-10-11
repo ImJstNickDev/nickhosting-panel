@@ -77,6 +77,8 @@ export interface GameRuntimeHooks {
     before: string | null,
     readAgain: () => Promise<string | null>,
     remote?: Awaited<ReturnType<PterodactylAdapter['getApplicationServer']>>,
+    /** Same server/connection observation only; never retained across calls. */
+    observerPreflight?: Promise<void>,
   ): Promise<string | null>;
 }
 /** Composition API for compiled modules and isolated fixtures. No HTTP/config
