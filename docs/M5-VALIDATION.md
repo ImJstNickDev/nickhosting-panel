@@ -3344,3 +3344,62 @@ above is not relabeled as improved. No real server commands, game assets, produc
 configuration or network changes were made. API/worker retain their existing source
 watch behavior. PR #21 stays open/unmerged; issue #18 is unchanged. Rollback is a code
 revert and separately approved Gateway restart; no state rollback or migration applies.
+
+
+## 2026-10-11 — Owner cycle after `d22bc36`: sleep receipt observed live
+
+Read-only log/state capture after the separately approved Gateway-only restart at
+11:31:56.414717578 UTC. The unchanged startup lease drain completed and the sleeping
+route returned at11:32:30.273. No agent game commands or infrastructure mutations
+were performed during this audit; raw capture remains private and untracked.
+
+| Event (UTC) | Time | Interval |
+| --- | --- | --- |
+| Intentional join | 11:34:59.307 | Wake begins |
+| Start HTTP response complete | 11:35:01.139 | 1.832s after join |
+| Docker process starts | 11:35:02.068692 | 2.762s after join |
+| Minecraft Done | 11:35:33.946994 | Actual game log |
+| Gateway startup hint | 11:35:33.973 | 26ms after Done |
+| Positive observation starts | 11:35:36.238 | 2.265s after hint |
+| Core online commit | 11:35:37.254 | 1.016s after observation starts |
+| Gateway forwards (`readiness_receipt`) | 11:35:37.277 | 3.330s after Done |
+| Final idle observation starts | 11:36:36.619 | Fresh sample |
+| Quiescence/stopping response | 11:36:37.487 | 868ms after sample begins |
+| Console receives stop | 11:36:39.040616 | 1.554s after quiescence |
+| Docker process exits | 11:36:39.552579 | 512ms after command |
+| Terminal confirmation | 11:36:40.049 | 496ms after process exit |
+| Stop job returns succeeded | 11:36:40.496 | 943ms after process exit |
+| Gateway sleeping (`sleep_completion_receipt`) | 11:36:40.877 | 1.324s after exit; 381ms after job return |
+
+The new completion notification/receipt is directly observed, including release of
+the original local fence. Exit-to-sleep decreased from5.735s in the preceding cycle
+to1.324s (about77%). This is real confirmation/processing latency, not a configured
+post-stop timer. Both start and stop deliveries log `succeeded`; final Docker state
+is exited0/noOOM. Gateway authenticated readiness remains200, ready/control true,
+one route. Independent read-only review reproduced the timing and receipt result.
+
+No safety-failure, listener withdrawal, lease-expiration or container-churn event
+appears in this capture. Therefore the previous interruption did not recur in the
+server-side logs, but this run does not independently exercise the churn fallback
+or establish uninterrupted client packet delivery. No client packet capture exists.
+
+Readiness latency remains unresolved: Done-to-forwarding is3.330s versus2.438s in
+the preceding cycle. Hint delivery is26ms; the positive sample begins2.265s later,
+and Core verification takes about1s (943ms process verification). An unavailable
+probe is logged at11:35:34.219 between hint and positive sample. The logs do not
+identify that probe's precise failure or fully attribute the intervening delay.
+No claim of improved readiness or a complete latency fix is made.
+
+The first positive observation plus60s yields11:36:36.238; the idle sample begins
+381ms later. This is derived from observations, not a captured authoritative deadline.
+No player join/disconnect is logged, so this is not a disconnect-based idle benchmark.
+Minecraft's own empty-for60s pause at11:36:34.181 is a different clock; the stop
+command follows4.859s later. Existing unavailable observations remain (79 in the
+full captured window), with one API409 during startup and one proof-read412 near
+sleep completion. No429 or worker warnings/errors were captured.
+
+No implementation changes or test-suite reruns in this audit. Only documentation
+and PR evidence updated; governance/diff checks apply. No test assets created or
+cleaned, no new restart performed, and SFTPGo #18 remains unchanged. PR #21 stays
+open/unmerged. Follow-up should target hint-to-positive-observation latency, without
+misrepresenting this successful sleep fast path as zero physical latency.
