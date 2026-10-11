@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Navigate, NavLink, Outlet, useLocation, useParams } from 'react-router';
-import { ErrorNotice, Loading, Page } from '../components/ui.js';
+import { ErrorNotice, Loading } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
 import { gameUiRegistry } from '../features/integrations.js';
 import { useServer } from '../features/service-contracts.js';
@@ -14,9 +14,9 @@ export function ServerShell() {
     server = useServer(serverId);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reveal the active tab after route or loaded server changes.
   useEffect(() => {
-    tabsElement.current
-      ?.querySelector('[aria-current="page"]')
-      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const active = tabsElement.current?.querySelector<HTMLAnchorElement>('[aria-current="page"]');
+    active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (!document.querySelector('main h1')) active?.focus({ preventScroll: true });
   }, [location.pathname, server.data?.id]);
   if (server.isPending) return <Loading />;
   if (server.error) return <ErrorNotice error={server.error} />;
@@ -39,7 +39,7 @@ export function ServerShell() {
     ...(value.permissions.manage ? [['settings', 'web.settings']] : []),
   ];
   const game = gameUiRegistry.get(value.gameId);
-  const content = (
+  return (
     <>
       <nav
         ref={tabsElement}
@@ -66,11 +66,6 @@ export function ServerShell() {
       </nav>
       <Outlet />
     </>
-  );
-  return location.pathname.replace(/\/$/, '') === `${base}/console` ? (
-    content
-  ) : (
-    <Page title={value.name}>{content}</Page>
   );
 }
 export function ServerGameSection() {

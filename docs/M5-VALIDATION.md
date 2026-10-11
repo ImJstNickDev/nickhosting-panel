@@ -3697,3 +3697,21 @@ behavior is preserved. Rollback is a source revert; no migration is required.
 Final independent review confirmed contrast ratios of 5.28:1 for the disconnected
 dot and 10.38:1 for its focus ring against the terminal, reviewed the updated
 screenshots and found no remaining must-fix findings. Indexed governance passed.
+
+### 2026-10-11 — Server name only on Console
+
+Removed the shared server-name heading from other server tabs; their own section
+titles remain. Console keeps its name beside the power controls. Independent
+review identified the removed Page heading's navigation-focus role: the active
+server tab now receives focus when the route has no main h1, preserving Console
+and Activity heading behavior.
+
+Web typecheck, scoped Biome (one pre-existing non-null assertion warning) and diff
+checks passed. A temporary one-case real browser check verified Console retains
+its name, Connection omits it and keeps its actual content; Axe found no violations.
+The check used the existing isolated fixture harness, not a production server.
+[Connection screenshot](screenshots/m5/server-network-without-name-desktop-en.png).
+No backend changes, container restarts or production interactions. Rollback:
+revert the source change. No historical full-suite rerun was needed.
+Final focused browser check also passed active-tab focus after direct reload
+(1/1); the temporary test was removed and disposable fixtures cleaned.

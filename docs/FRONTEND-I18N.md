@@ -62,7 +62,7 @@ sits beside seven compact resource cards: Address, Uptime, CPU Load, Memory, Dis
 Network (Inbound) and Network (Outbound). The three power buttons sit above that
 column; the card column and terminal share both top and bottom edges. The server
 name appears below the tabs, left-aligned with the terminal and vertically centered
-with the power controls. Other server tabs retain their existing page heading. On narrow screens the
+with the power controls. Other server tabs omit the repeated server-name heading and retain their section titles. On narrow screens the
 controls precede the terminal and resource cards follow it. Uptime uses measured
 provider milliseconds; only confirmed offline state gets an Offline value and red
 icon background. Failed, missing or expired readings remain unavailable. Cards and
