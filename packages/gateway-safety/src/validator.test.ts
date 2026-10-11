@@ -377,6 +377,126 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await safety.validate(f.route, [f.route.public]);
     expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
   });
+  it('probes an unchanged leased waking backend without repeating full inspection or proof writes', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const sample = { ready: true, idle: false, playerCount: 2 };
+    f.options.probeBackend = vi.fn(async () => sample);
+    expect(await safety.probeLeasedBackend?.(f.route)).toBe(sample);
+    expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route);
+    expect(f.options.observer.observe).toHaveBeenCalledOnce();
+    expect(f.options.resolveContext).toHaveBeenCalledOnce();
+    expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+    expect(f.options.saveProof).toHaveBeenCalledOnce();
+    expect(f.options.probeNode).toHaveBeenCalledOnce();
+    // A subsequent renewal still checks every source, even while the grant is fresh.
+    await safety.validate(f.route, [f.route.public]);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    'unvalidated',
+    'revision',
+    'generation',
+    'wake-job',
+    'backend',
+    'online',
+    'expired',
+  ] as const)('requires normal backend inspection for %s leased probes', async (change) => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    if (change !== 'unvalidated') await safety.validate(f.route, []);
+    if (change === 'revision') f.route.revision++;
+    if (change === 'generation') f.route.generation = ids.server;
+    if (change === 'wake-job') f.route.wakeJobId = ids.server;
+    if (change === 'backend') f.route.backend.port++;
+    if (change === 'online') f.route.mode = 'online';
+    if (change === 'expired') {
+      now += f.options.policy.maximumObservationAgeMs;
+      f.observation.observedAt = now;
+    }
+    const before = vi.mocked(f.options.observer.observe).mock.calls.length;
+    if (change === 'backend') await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+    else await safety.probeLeasedBackend?.(f.route);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(before + 1);
+    expect(f.options.resolveContext).toHaveBeenCalledTimes(before + 1);
+  });
+  it.each(['stopped', 'missing-bindings'] as const)(
+    'does not retain fast authority for a %s backend',
+    async (change) => {
+      const f = fixture();
+      f.route.mode = 'waking';
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      const container = f.observation.containers[0];
+      if (!container) throw new Error('Missing fixture container');
+      if (change === 'stopped') container.running = false;
+      else container.activeBindings = [];
+      await safety.validate(f.route, [f.route.public]);
+      await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+    },
+  );
+  it('rejects leased samples that cross the original evidence deadline without extending it', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.probeBackend = async () => {
+      now += 5000;
+      return { ready: true, idle: false, playerCount: 1 };
+    };
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toMatchObject({
+      reason: 'observation_stale',
+    });
+    expect(f.options.observer.observe).toHaveBeenCalledOnce();
+    expect(f.options.saveProof).toHaveBeenCalledOnce();
+  });
+  it('never accepts a negative leased protocol sample as readiness', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.probeBackend = async () => ({ ready: false });
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toMatchObject({
+      reason: 'backend_protocol',
+    });
+    expect(f.options.saveProof).toHaveBeenCalledOnce();
+  });
+  it('revokes fast evidence immediately when a renewal fails during a leased probe', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    let resolveProbe: ((result: boolean) => void) | undefined;
+    f.options.probeBackend = () => new Promise((resolve) => (resolveProbe = resolve));
+    const pending = safety.probeLeasedBackend?.(f.route);
+    f.server.suspended = true;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+    resolveProbe?.(true);
+    await expect(pending).rejects.toMatchObject({ reason: 'observation_stale' });
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+  });
+  it('revokes fast evidence after a full backend inspection observes a conflict', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const original = f.observation.containers[0];
+    if (!original) throw new Error('Missing fixture container');
+    f.observation.containers.push({ ...original, id: 'c'.repeat(64), name: '/foreign' });
+    await expect(safety.validateBackend(f.route)).rejects.toThrow();
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+  });
   it.each(['revision', 'generation', 'context', 'expired', 'failed-renewal'] as const)(
     'does not reuse provider evidence after %s',
     async (change) => {

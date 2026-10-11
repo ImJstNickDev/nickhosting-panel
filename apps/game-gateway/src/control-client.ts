@@ -90,6 +90,9 @@ export function createGatewayControlClient(
           ...(action === 'snapshot'
             ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1' }
             : {}),
+          ...(action === 'observations'
+            ? { 'X-NickHosting-Gateway-Features': 'readiness-receipt-v1' }
+            : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -211,7 +214,12 @@ export function createGatewayControlClient(
     async reportObservation(input) {
       const value = gatewayObservationSchema.safeParse(input);
       if (!value.success) throw new DomainError('validation_failed');
-      await request('observations', value.data);
+      const receipt = await request('observations', value.data);
+      if (receipt === undefined) return;
+      const parsed = gatewaySnapshotSchema.safeParse(receipt);
+      if (!parsed.success || parsed.data.gatewayId !== options.gatewayId)
+        throw new DomainError('integration_unavailable');
+      return parsed.data;
     },
   };
 }

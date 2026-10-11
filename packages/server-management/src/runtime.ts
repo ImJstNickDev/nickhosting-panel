@@ -564,6 +564,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
       // Independent, read-only prerequisites share this observation's connection.
       // Settle every branch before returning it to a caller that may release it.
       const observerPreflight = verifyObservationHost(serverId, connection);
+      const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
+      const uuid = server.pterodactyl_uuid;
       const proofs = await Promise.allSettled([
         observerPreflight,
         adapter.getApplicationServer(server.pterodactyl_id).then(async (remote) => {
@@ -571,15 +573,21 @@ export async function createManagementRuntime(options: ManagementOptions) {
           return remote;
         }),
         gameRuntime(connection, serverId),
+        // The local host binding must be established before inspecting Docker,
+        // but this read need not wait for the remote identity round trip. Its
+        // result grants nothing until every prerequisite below has succeeded.
+        observerPreflight.then(() => processStartedAt(uuid)),
       ]);
       for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
-      if (proofs[1].status !== 'fulfilled' || proofs[2].status !== 'fulfilled')
+      if (
+        proofs[1].status !== 'fulfilled' ||
+        proofs[2].status !== 'fulfilled' ||
+        proofs[3].status !== 'fulfilled'
+      )
         throw new DomainError('integration_unavailable');
       const remote = proofs[1].value;
       const module = proofs[2].value;
-      const processStartedAt = containerObserver.processStartedAt.bind(containerObserver);
-      const uuid = server.pterodactyl_uuid;
-      const before = await processStartedAt(uuid);
+      const before = proofs[3].value;
       return module
         ? module.verifyProcessEpoch(
             serverId,

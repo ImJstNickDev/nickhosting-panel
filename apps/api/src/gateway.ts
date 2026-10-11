@@ -27,6 +27,7 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { registerGatewayStartupRoutes } from './gateway-startup.js';
 
 const routeRequest = z
   .object({ routeId: z.uuid(), routeRevision: z.number().int().positive().optional() })
@@ -88,6 +89,7 @@ export function registerGatewayRoutes(
       await recordGatewayContact(db, match[1] ?? '').catch(() => {});
     }
   });
+  registerGatewayStartupRoutes(app, options);
   const prefix = '/internal/gateway/:gatewayId';
   app.get(`${prefix}/configuration`, async (c) => {
     const values = await gatewayConfiguration(db, env);
@@ -256,6 +258,13 @@ export function registerGatewayRoutes(
         observationCommitMs: ms(completed - processVerified),
       });
     }
+    if (
+      selected.mode === 'waking' &&
+      value.ready &&
+      result.state === 'online' &&
+      c.req.header('X-NickHosting-Gateway-Features') === 'readiness-receipt-v1'
+    )
+      return c.json(await getGatewaySnapshot(db, env));
     return c.body(null, 204);
   });
   app.post(`${prefix}/context`, async (c) =>

@@ -537,48 +537,61 @@ describe('M3 Core service authentication and managed control plane', () => {
     });
     expect((await request(`${prefix()}/observations`, observation())).status).toBe(409);
   });
-  it('logs accepted readiness timing once and keeps unchanged idle samples quiet', async () => {
-    const startedAt = new Date(Date.now() - 1000).toISOString();
-    await f.db
-      .updateTable('managed_servers')
-      .set({ runtime_state: 'running', intent: 'auto_wake_enabled' })
-      .where('id', '=', serverId)
-      .execute();
-    await f.db
-      .updateTable('gateway_server_states')
-      .set({ state: 'waking', process_started_at: startedAt })
-      .where('server_id', '=', serverId)
-      .execute();
-    processStart.mockResolvedValue(startedAt);
-    route =
-      (await getGatewaySnapshot(f.db, env)).routes[0] ??
-      (() => {
-        throw new Error('Missing fixture route');
-      })();
-    expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
-    expect(timingLogs).toHaveLength(1);
-    expect(timingLogs[0]).toMatchObject({
-      event: 'gateway.observation_state_changed',
-      data: {
-        from: 'waking',
-        to: 'online',
-        serverId,
-        routeId: route.id,
-        validationMs: expect.any(Number),
-        processVerificationMs: expect.any(Number),
-        observationCommitMs: expect.any(Number),
-        managementConfigurationMs: expect.any(Number),
-        completedAt: expect.any(String),
-      },
-    });
-    route =
-      (await getGatewaySnapshot(f.db, env)).routes[0] ??
-      (() => {
-        throw new Error('Missing fixture route');
-      })();
-    expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
-    expect(timingLogs).toHaveLength(1);
-  });
+  it.each([false, true])(
+    'logs accepted readiness timing and negotiates receipt=%s',
+    async (receipt) => {
+      const startedAt = new Date(Date.now() - 1000).toISOString();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ runtime_state: 'running', intent: 'auto_wake_enabled' })
+        .where('id', '=', serverId)
+        .execute();
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ state: 'waking', process_started_at: startedAt })
+        .where('server_id', '=', serverId)
+        .execute();
+      processStart.mockResolvedValue(startedAt);
+      route =
+        (await getGatewaySnapshot(f.db, env)).routes[0] ??
+        (() => {
+          throw new Error('Missing fixture route');
+        })();
+      const accepted = await request(
+        `${prefix()}/observations`,
+        observation(),
+        receipt ? { 'X-NickHosting-Gateway-Features': 'readiness-receipt-v1' } : {},
+      );
+      expect(accepted.status).toBe(receipt ? 200 : 204);
+      if (receipt)
+        expect(await accepted.json()).toMatchObject({
+          gatewayId: env.NH_GATEWAY_ID,
+          routes: [expect.objectContaining({ id: route.id, mode: 'online' })],
+        });
+      expect(timingLogs).toHaveLength(1);
+      expect(timingLogs[0]).toMatchObject({
+        event: 'gateway.observation_state_changed',
+        data: {
+          from: 'waking',
+          to: 'online',
+          serverId,
+          routeId: route.id,
+          validationMs: expect.any(Number),
+          processVerificationMs: expect.any(Number),
+          observationCommitMs: expect.any(Number),
+          managementConfigurationMs: expect.any(Number),
+          completedAt: expect.any(String),
+        },
+      });
+      route =
+        (await getGatewaySnapshot(f.db, env)).routes[0] ??
+        (() => {
+          throw new Error('Missing fixture route');
+        })();
+      expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
+      expect(timingLogs).toHaveLength(1);
+    },
+  );
   it('cannot mark a container playable without a corroborated running process', async () => {
     expect((await request(`${prefix()}/observations`, observation())).status).toBe(204);
     expect((await getGatewayState(f.db, serverId)).state).not.toBe('online');

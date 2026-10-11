@@ -2929,3 +2929,54 @@ improvement is claimed before activation and a subsequent Owner-operated cycle.
 Rollback: revert this change, then load the prior Gateway under a scoped restart
 approval; no database rollback is required. SFTPGo #18 remains unchanged. M5 PR
 stays open/unmerged; no M6 or production deployment.
+
+### 2026-10-11 — Event-prompted Minecraft readiness, original-lease receipt
+
+Owner requested trying the live startup notification path rather than repeating
+full infrastructure checks simply to switch a validated waking route online.
+Minecraft now declares a provider-running hint; Core relays only correlated
+route/generation/job metadata from live status events, never historical console
+or raw `Done` lines. Gateway immediately schedules a real Minecraft probe, with
+single-flight observation and polling recovery. A hint alone cannot enable play.
+
+Fresh full validation may supply a bounded within-lease protocol-only probe.
+Core still verifies current process/identity and commits readiness. An opt-in
+receipt can advance unchanged waking roles online without a second infrastructure
+scan/configuration fetch, but cannot extend the original lease, create listeners,
+change endpoints or override quiescence. Full opening/renewal checks remain.
+Host-gated Docker process reads overlap provider/module discovery; retained
+start proofs were deliberately not reused because they lack configuration
+fingerprints. No startup/shutdown JAR download was added.
+
+Validation (isolated fixtures and the existing approved M2 test database only):
+
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts apps/game-gateway/src/control-client.test.ts apps/game-gateway/src/readiness-receipt.test.ts apps/game-gateway/src/startup-client.test.ts apps/api/src/gateway-startup.test.ts packages/game-sdk/src/gateway.test.ts games/minecraft/src/protocol.test.ts packages/gateway-safety/src/validator.test.ts`
+  — **326 passed, two failed** on the first affected-suite run. One old assertion
+  expected no observation feature header; updated for explicit receipt negotiation.
+  One existing completed-sleep fixture encountered `EADDRINUSE` on an ephemeral
+  loopback port. Neither failed attempt is relabeled as a passing full run.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts apps/game-gateway/src/control-client.test.ts --testNamePattern 'receipt|completed sleep fence|authenticated snapshot'`
+  — **15 passed, 135 filtered** after the changes, including both failed cases,
+  an actual held TCP stream expiring at its captured lease after concurrent renewal,
+  and rejection of a receipt racing replacement authority.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/main.test.ts apps/api/src/gateway-startup.test.ts apps/game-gateway/src/readiness-receipt.test.ts`
+  — **32 passed** on final source, including bounded SSE backpressure cleanup.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/gateway.integration.test.ts`
+  — **23 passed**: authenticated API, legacy 204 and receipt negotiation, process
+  verification, stale-route rejection and unchanged admission.
+- Independent runtime worker: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/runtime.integration.test.ts`
+  — **42 passed**; overlapping reads never return authority before all proofs,
+  and failed host preflight prevents the Docker read.
+- `scripts/dev.sh pnpm exec tsc --noEmit` — passed. Scoped Biome over the 24
+  affected/adjacent TypeScript files — passed. `git diff --check` — passed.
+- Independent technical review found and resolved two must-fix cases: stalled SSE
+  writes retaining a subscription, and a receipt failing to rearm the earlier
+  captured lease timer. No remaining must-fix was identified.
+
+No live server was created, started, stopped or changed. No Docker/Panel/network
+operation was performed for implementation or validation. API/worker source watchers
+may load changes automatically; Gateway requires its separately approved dev-only
+restart. Actual event-to-forwarding timing is **not yet measured** on this patch.
+Historical evidence above remains intact; SFTPGo #18 remains a release gate.
+Rollback is a source revert plus an approved Gateway restart; no migration or data
+rollback is involved. PR #21 remains open/unmerged; no M6 work.

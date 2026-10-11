@@ -485,3 +485,31 @@ observation's completed host preflight is reused in Minecraft image verification
 the before/image/after process-incarnation fence remains. No cross-observation
 identity cache or JAR download is introduced. Live latency is measured separately
 from these regression tests.
+
+### Event-prompted readiness and bounded receipts (M5, 2026-10-11)
+
+- Trusted `GatewayProtocolAdapter.startupHint = provider_running` opts into hints.
+  `POST /internal/gateway/:gatewayId/startup-events` takes the exact `routeId`,
+  `routeRevision`, `generation`, `wakeJobId`. Existing Gateway service authentication
+  and managed-provider identity checks apply. One sanitized SSE `startup` event
+  echoes only those fields after a live running status and fresh local authority
+  check. No raw console, history, commands or provider credentials are exposed.
+  Maximum subscription is 60 seconds, bounded write is five seconds/1 KiB; one
+  subscription per server and at most 128 per Core process. Reconnect is bounded
+  and polling remains authoritative. Neither channel failure nor a hint grants play.
+- Observation clients negotiate `X-NickHosting-Gateway-Features:
+  readiness-receipt-v1`. A committed waking-to-online positive observation may return
+  a snapshot (200); other observations and legacy clients retain 204. Receipt
+  parsing is strict. All original roles/endpoints/generation/job must match, all
+  other server routes must be unchanged, and route revisions must advance.
+- Gateway applies receipts serially with ordinary refreshes, only with positive
+  fresh all-role protocol evidence and no local stop fence. It caps expiry at the
+  original observed and committed leases and rearms stream expiration accordingly.
+  It cannot open a new listener, renew authority, bypass an expired lease, or
+  overwrite a replacement route. Rejected/legacy receipts use full refresh.
+- Optional `GatewaySafety.probeLeasedBackend` reuses only original fresh full
+  validation that observed running/container bindings; actual protocol probing
+  remains required. Missing/changed/stale grants use `validateBackend`. Full
+  opening/renewal safety is unchanged. Core independently confirms current process.
+- `gateway.startup_hint` and `gateway.route_transition` with reason
+  `readiness_receipt` distinguish the event and forwarding commit for live timing.

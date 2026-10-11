@@ -112,3 +112,31 @@ Restart still drains the maximum old lease because local fence context is lost;
 this change does not introduce multi-active-Gateway support. Feature negotiation
 allows Core-first deployment with older strict Gateway clients. See the exact
 [M3 control contract](../M3-API.md) and targeted M5 regression evidence.
+
+## 2026-10-11 amendment — Event-prompted readiness within the original lease
+
+Trusted protocol modules may declare `startupHint: provider_running`. Core then
+relays a bounded, sanitized live Wings status event for the exact waking
+route/generation/job. It never replays console history or treats a `Done` line,
+a running container, or the event alone as permission to forward. A hint prompts
+a real protocol observation; polling remains the fallback when events are lost.
+
+An already-bound waking route may reuse its original successful full topology
+validation only while that evidence remains fresh and had observed the running
+container with complete effective bindings. It still probes the actual backend.
+Missing, changed or expired evidence follows the full validation path. Listener
+creation and lease renewal always retain their complete checks.
+
+After independently verifying the current managed process and committing positive
+readiness, Core may return a negotiated snapshot receipt. Gateway can apply only
+the waking-to-online transition for the exact probed server and all its unchanged
+roles, endpoints, generation and wake job. Other servers must be unchanged; newer
+route authority, local quiescence, stale samples or expired leases reject this
+shortcut. Its expiry is capped at the original captured/committed lease, including
+closure of existing streams at that deadline. It does not renew listener authority
+or omit the next full safety refresh. Legacy clients retain the 204/refresh path.
+
+Core retains image/egg/process verification: durable start confirmation stores no
+configuration fingerprint sufficient to substitute for those proofs. Its initial
+host-gated Docker epoch read now overlaps provider identity/module discovery,
+with all branches settled before returning. No JAR or Mojang download is added.

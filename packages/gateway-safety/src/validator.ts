@@ -355,7 +355,14 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   };
   // Only backend observations may share a successful listener check. A bind or
   // renewal always fetches fresh provider inventory; sharing never extends its age.
-  const validatedProvider = new Map<string, { key: string; evidence: ProviderEvidence }>();
+  const validatedProvider = new Map<
+    string,
+    {
+      key: string;
+      evidence: ProviderEvidence;
+      leasedProbe?: { routeKey: string; observedAt: number };
+    }
+  >();
   const evidenceKey = (route: GatewayRoute, context: GatewaySafetyContext) =>
     JSON.stringify({ route, context });
   async function inspect(
@@ -608,6 +615,16 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     // Boolean-only adapters retain the legacy data-plane fallback.
     return typeof result === 'boolean' ? undefined : result;
   }
+  async function validateBackend(route: GatewayRoute) {
+    try {
+      const state = await inspect(route, [], false);
+      return await proveBackend(state);
+    } catch (error) {
+      // A later failed full inspection must not leave a fast-path grant behind.
+      validatedProvider.delete(route.id);
+      throw error;
+    }
+  }
   return {
     async validate(route, ownedBindings) {
       validatedProvider.delete(route.id);
@@ -616,6 +633,14 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         validatedProvider.set(route.id, {
           key: evidenceKey(state.route, state.context),
           evidence: structuredClone(state.providerEvidence),
+          ...(state.container?.running && state.backendBindingsComplete
+            ? {
+                leasedProbe: {
+                  routeKey: JSON.stringify(state.route),
+                  observedAt: state.observation.observedAt,
+                },
+              }
+            : {}),
         });
         if (validatedProvider.size > 10000) {
           const oldest = validatedProvider.keys().next().value;
@@ -682,9 +707,35 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       retainBinding();
       return accepted(false);
     },
-    async validateBackend(route) {
-      const state = await inspect(route, [], false);
-      return proveBackend(state);
+    validateBackend,
+    async probeLeasedBackend(routeValue) {
+      const route = gatewayRouteSchema.parse(routeValue);
+      const previous = validatedProvider.get(route.id);
+      const fresh = () => {
+        const time = now();
+        return (
+          previous?.leasedProbe !== undefined &&
+          validatedProvider.get(route.id) === previous &&
+          previous.leasedProbe.observedAt <= time &&
+          previous.evidence.started <= time &&
+          time - previous.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
+          time - previous.evidence.started < policy.maximumObservationAgeMs
+        );
+      };
+      // The caller owns the live listener lease. This only samples a waking
+      // backend within the ORIGINAL full validation budget; it cannot bind,
+      // renew, change identity or produce a reusable reachability proof.
+      if (
+        route.mode !== 'waking' ||
+        previous?.leasedProbe?.routeKey !== JSON.stringify(route) ||
+        !fresh()
+      )
+        return validateBackend(route);
+      const result = await options.probeBackend(route);
+      if (!(typeof result === 'boolean' ? result : result.ready === true))
+        unavailable('backend_protocol');
+      if (!fresh()) unavailable('observation_stale');
+      return typeof result === 'boolean' ? undefined : result;
     },
   };
 }

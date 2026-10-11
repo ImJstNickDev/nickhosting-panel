@@ -196,9 +196,11 @@ describe('management runtime execution-time authorization', () => {
     await expect(correct.lifecycle.observeProcessStart(serverId, f.db)).rejects.toThrow(
       'provenance_mismatch',
     );
-    expect(observer.processStartedAt).not.toHaveBeenCalled();
+    // A speculative read of this registered container cannot authorize a
+    // mismatched provider identity, even when its Docker epoch is available.
+    expect(observer.processStartedAt).toHaveBeenCalledWith(server.pterodactyl_uuid);
   });
-  it('overlaps host preflight with provider reads but waits for both before process evidence', async () => {
+  it('overlaps the host-bound process read with provider verification without granting early evidence', async () => {
     const serverId = await f.server();
     const remote = await providerIdentity(serverId);
     let finishPreflight!: () => void;
@@ -224,7 +226,11 @@ describe('management runtime execution-time authorization', () => {
       containerObserver: observer,
       env: { NH_OBSERVER_ID: 'isolated-observer' },
     });
-    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db);
+    let settled = false;
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db).then((value) => {
+      settled = true;
+      return value;
+    });
     try {
       await vi.waitFor(() => {
         expect(observer.preflight).toHaveBeenCalledOnce();
@@ -232,8 +238,8 @@ describe('management runtime execution-time authorization', () => {
       });
       expect(observer.processStartedAt).not.toHaveBeenCalled();
       finishPreflight();
-      await delay(10);
-      expect(observer.processStartedAt).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(observer.processStartedAt).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
     } finally {
       finishPreflight();
       finishProvider(remote);
@@ -280,6 +286,41 @@ describe('management runtime execution-time authorization', () => {
     }
     expect(await observation).toEqual(new Error('preflight failed'));
     expect(observer.processStartedAt).not.toHaveBeenCalled();
+  });
+  it('settles an outstanding process read before rejecting a mismatched provider identity', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    remote.external_id = 'foreign-server';
+    Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+    let finishProcess!: (value: string | null) => void;
+    const pendingProcess = new Promise<string | null>((resolve) => {
+      finishProcess = resolve;
+    });
+    const observer = {
+      preflight: vi.fn(async () => {}),
+      stopped: vi.fn(async () => true),
+      processStartedAt: vi.fn(() => pendingProcess),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    let settled = false;
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db).catch((error) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await vi.waitFor(() => expect(observer.processStartedAt).toHaveBeenCalledOnce());
+      await delay(10);
+      expect(settled).toBe(false);
+    } finally {
+      finishProcess(new Date().toISOString());
+    }
+    expect(await observation).toMatchObject({ code: 'provenance_mismatch' });
   });
   it.each([
     'valid',

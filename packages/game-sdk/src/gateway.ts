@@ -194,7 +194,14 @@ export type GatewayObservation = z.infer<typeof gatewayObservationSchema>;
 export interface GatewayControl {
   fetchSnapshot(): Promise<GatewaySnapshot>;
   requestWake(request: GatewayWakeRequest): Promise<GatewayWakeResult>;
-  reportObservation(observation: GatewayObservation): Promise<void>;
+  // A receipt can advance an unchanged waking route within its ORIGINAL lease.
+  // biome-ignore lint/suspicious/noConfusingVoidType: Legacy Core returns 204.
+  reportObservation(observation: GatewayObservation): Promise<void | GatewaySnapshot>;
+  watchStartup?(
+    request: { routeId: string; routeRevision: number; generation: string; wakeJobId: string },
+    onHint: () => void | Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export interface GatewayProtocolContext {
@@ -217,6 +224,8 @@ export interface GatewayProtocolSession {
  * and player idleness; an open socket or no Gateway traffic proves neither. */
 export interface GatewayProtocolAdapter {
   readonly id: string;
+  /** Live provider state is only a prompt to probe, never readiness authority. */
+  readonly startupHint?: 'provider_running';
   supports(route: Readonly<GatewayRoute>): boolean;
   classify(input: Uint8Array, context: GatewayProtocolContext): GatewayIntent;
   response(context: GatewayProtocolContext, state: GatewayResponseMode): Uint8Array | undefined;
@@ -244,4 +253,7 @@ export interface GatewaySafety {
   /** Independent exact Docker binding identity and namespace reachability proof. */
   // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
   validateBackend(route: GatewayRoute): Promise<void | GatewayProtocolObservation>;
+  /** Only for already-bound waking routes under the original live listener lease. */
+  // biome-ignore lint/suspicious/noConfusingVoidType: Legacy validators provide no reusable protocol sample.
+  probeLeasedBackend?(route: GatewayRoute): Promise<void | GatewayProtocolObservation>;
 }

@@ -129,3 +129,11 @@ through quiescence without allowing gameplay or wake. It is not a persisted stat
 and does not promise a fabricated fixed shutdown duration. Ordinary power and
 Gateway observations do not download the JAR (Owner amendment, 2026-10-10);
 installation/content/restore integrity checks remain. See [API details](M3-API.md).
+
+Live provider-running events can prompt Minecraft readiness probes immediately.
+They are bounded, authenticated hints tied to a waking route and operation, never
+readiness authority or historical console matches. Within an unchanged original
+listener lease, fresh topology evidence plus a positive protocol sample and Core
+current-process confirmation can advance to online without repeating the full
+listener validation. Opening/renewing listeners still performs that validation;
+event loss uses normal polling. See [ADR 0012](decisions/0012-gateway-leases-and-sleep.md).

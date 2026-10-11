@@ -2074,3 +2074,154 @@ describe('transition-only Gateway diagnostics', () => {
     expect(f.gateway.metrics().wakeErrors).toBe(0);
   });
 });
+
+describe('event-driven within-lease readiness', () => {
+  it('advances a freshly probed waking route without a second full validation or longer lease', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    let clock = Date.now();
+    const p = plane([r], {
+      now: () => clock,
+      lease: 5000,
+      safety: { probeLeasedBackend: vi.fn(async () => ({ ready: true, idle: false })) },
+    });
+    await p.gateway.refresh();
+    const originalExpiry = p.gateway.health().expiresAt;
+    p.control.reportObservation = vi.fn(async () =>
+      p.snapshot([{ ...r, mode: 'online', revision: 2 }], 2, 60000),
+    );
+    await p.gateway.observe();
+    expect(p.safety.validate).toHaveBeenCalledTimes(2);
+    expect(p.safety.probeLeasedBackend).toHaveBeenCalledTimes(1);
+    expect(p.control.fetchSnapshot).toHaveBeenCalledTimes(1);
+    expect(p.gateway.health().revision).toBe(2);
+    expect(p.gateway.health().expiresAt).toBe(originalExpiry);
+    expect((await exchange(backend.port, 'hello')).toString()).toBe('hello');
+    clock += 5001;
+    expect(p.gateway.health().ready).toBe(false);
+  });
+  it('a running hint triggers a protocol observation, never forwarding by itself', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    let hint: (() => void | Promise<void>) | undefined;
+    let signal: AbortSignal | undefined;
+    const watchStartup = vi.fn(async (_request, onHint, abort) => {
+      hint = onHint;
+      signal = abort;
+      await new Promise<void>((resolve) =>
+        abort.addEventListener('abort', () => resolve(), { once: true }),
+      );
+    });
+    const p = plane([r], {
+      control: { watchStartup },
+      protocols: [
+        fixtureProtocol({
+          startupHint: 'provider_running',
+          probeReadiness: async () => ({ ready: false }),
+        }),
+      ],
+    });
+    await p.gateway.refresh();
+    await p.gateway.refresh();
+    expect(watchStartup).toHaveBeenCalledTimes(1);
+    expect(hint).toBeDefined();
+    await hint?.();
+    expect(p.control.reportObservation).toHaveBeenCalledWith(
+      expect.objectContaining({ ready: false }),
+    );
+    expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+    await p.gateway.stop();
+    expect(signal?.aborted).toBe(true);
+  });
+  it('stale startup hints cannot probe a replacement generation', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    const hints: (() => void | Promise<void>)[] = [];
+    const p = plane([r], {
+      control: {
+        watchStartup: async (_request, onHint) => {
+          hints.push(onHint);
+        },
+      },
+      protocols: [fixtureProtocol({ startupHint: 'provider_running' })],
+    });
+    await p.gateway.refresh();
+    await p.gateway.applySnapshot(
+      p.snapshot([{ ...r, revision: 2, generation: randomUUID(), wakeJobId: randomUUID() }], 2),
+    );
+    await hints[0]?.();
+    expect(p.control.reportObservation).not.toHaveBeenCalled();
+  });
+});
+
+it('receipt closes an active stream at the captured lease after equivalent renewal', async () => {
+  const backend = await tcpFixture();
+  const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+  const p = plane([r], { lease: 700, policy: { probeTimeoutMs: 3000 } });
+  await p.gateway.refresh();
+  let release!: () => void;
+  let entered!: () => void;
+  const reporting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  p.control.reportObservation = vi.fn(async () => {
+    entered();
+    await pending;
+    return p.snapshot([{ ...r, mode: 'online', revision: 2 }], 2, 5000);
+  });
+  const observation = p.gateway.observe();
+  await reporting;
+  await p.gateway.applySnapshot(p.snapshot([r], 1, 5000));
+  release();
+  await observation;
+  const socket = connect({ host: '127.0.0.1', port: backend.port });
+  socket.on('error', () => {});
+  cleanups.push(async () => {
+    socket.destroy();
+  });
+  await once(socket, 'connect');
+  const echo = once(socket, 'data');
+  socket.write('forwarded');
+  expect((await echo)[0].toString()).toBe('forwarded');
+  const untilExpiry = Date.parse(p.gateway.health().expiresAt ?? '') - Date.now();
+  expect(untilExpiry).toBeLessThan(700);
+  const closed = once(socket, 'close');
+  await Promise.race([
+    closed,
+    delay(1200).then(() => {
+      throw new Error('Stream outlived original lease');
+    }),
+  ]);
+});
+
+it('a receipt arriving after route replacement cannot enable the replacement', async () => {
+  const backend = await tcpFixture();
+  const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+  const p = plane([r]);
+  await p.gateway.refresh();
+  let release!: () => void;
+  let entered!: () => void;
+  const reporting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  p.control.reportObservation = vi.fn(async () => {
+    entered();
+    await pending;
+    return p.snapshot([{ ...r, mode: 'online', revision: 2 }], 2);
+  });
+  const observation = p.gateway.observe();
+  await reporting;
+  const replacement = { ...r, revision: 3, generation: randomUUID(), wakeJobId: randomUUID() };
+  p.control.fetchSnapshot = vi.fn(async () => p.snapshot([replacement], 3));
+  await p.gateway.refresh();
+  release();
+  await observation;
+  expect(p.gateway.health().revision).toBe(3);
+  expect((await exchange(backend.port, 'STATUS\n')).toString()).toBe('waking\n');
+});

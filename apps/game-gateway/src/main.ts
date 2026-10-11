@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { createGatewayControlClient } from './control-client.js';
 import { createGatewayDataPlane } from './data-plane.js';
 import { probeNodeEndpoint } from './node-probe.js';
+import { watchGatewayStartup } from './startup-client.js';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 const fingerprint = (value: unknown) =>
@@ -69,6 +70,12 @@ export async function createGatewayRuntime(
   const bootstrap = resolveConfig({}, env).values;
   if (!bootstrap.gatewayId || !bootstrap.gatewayCoreUrl || !env.NH_GATEWAY_CONTROL_TOKEN)
     throw new DomainError('configuration_invalid');
+  const startupOptions = {
+    gatewayId: bootstrap.gatewayId,
+    baseUrl: bootstrap.gatewayCoreUrl,
+    token: env.NH_GATEWAY_CONTROL_TOKEN,
+    fetcher: dependencies.fetcher,
+  };
   const client = createGatewayControlClient({
     gatewayId: bootstrap.gatewayId,
     baseUrl: bootstrap.gatewayCoreUrl,
@@ -195,6 +202,8 @@ export async function createGatewayRuntime(
       logger,
       control: {
         ...client,
+        watchStartup: (request, onHint, signal) =>
+          watchGatewayStartup(startupOptions, request, onHint, signal),
         async fetchSnapshot() {
           const current = await client.requestJson('configuration');
           if (fingerprint(current) !== initial) {

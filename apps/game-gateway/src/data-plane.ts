@@ -22,6 +22,7 @@ import {
   GatewayProviderRateLimitedError,
   GatewayRouteRevisionStaleError,
 } from './control-client.js';
+import { readinessReceipt } from './readiness-receipt.js';
 
 const positive = z.number().int().positive().max(2_147_483_647);
 export const gatewayDataPlanePolicySchema = z
@@ -143,6 +144,10 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   let refreshing: Promise<void> | undefined;
   let observing: Promise<void> | undefined;
   let shutdown: Promise<void> | undefined;
+  const startupWatches = new Map<
+    string,
+    { key: string; abort: AbortController; retryAt: number; done: boolean }
+  >();
   let pendingUdpIntents = 0;
   let pendingUdpResponseBytes = 0;
   const quiescence = new Map<
@@ -811,6 +816,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         listener.backendReady = readiness.get(route.id) ?? false;
       }
       snapshot = next;
+      syncStartupWatches();
       for (const [serverId, fence] of quiescence) {
         const { deadline } = fence;
         const currentRoutes = next.routes.filter((route) => route.serverId === serverId);
@@ -871,6 +877,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       if (leaseTimer) clearTimeout(leaseTimer);
       leaseTimer = setTimeout(
         () => {
+          syncStartupWatches();
           void expire();
         },
         Math.max(1, expires - now()),
@@ -935,6 +942,129 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       });
     return refreshing;
   };
+  const syncStartupWatches = () => {
+    const watch = options.control.watchStartup;
+    const eligible = new Map<string, GatewayRoute>();
+    if (watch && !stopping && snapshot && Date.parse(snapshot.expiresAt) > now()) {
+      for (const route of snapshot.routes)
+        if (
+          route.mode === 'waking' &&
+          route.wakeJobId &&
+          protocol(route)?.startupHint === 'provider_running'
+        )
+          eligible.set(route.serverId, route);
+    }
+    for (const [serverId, existing] of startupWatches) {
+      const route = eligible.get(serverId);
+      if (!route || existing.key !== `${route.generation}:${route.wakeJobId}`) {
+        existing.abort.abort();
+        startupWatches.delete(serverId);
+      }
+    }
+    if (!watch) return;
+    for (const [serverId, route] of eligible) {
+      if (!route.wakeJobId) continue;
+      const previous = startupWatches.get(serverId);
+      if (previous && (!previous.done || previous.retryAt > now())) continue;
+      const state = {
+        key: `${route.generation}:${route.wakeJobId}`,
+        abort: new AbortController(),
+        retryAt: 0,
+        done: false,
+      };
+      startupWatches.set(serverId, state);
+      void watch(
+        {
+          routeId: route.id,
+          routeRevision: route.revision,
+          generation: route.generation,
+          wakeJobId: route.wakeJobId,
+        },
+        async () => {
+          const current = () =>
+            !stopping &&
+            !state.abort.signal.aborted &&
+            snapshot &&
+            Date.parse(snapshot.expiresAt) > now() &&
+            snapshot.routes.some(
+              (value) =>
+                value.serverId === serverId &&
+                value.mode === 'waking' &&
+                value.generation === route.generation &&
+                value.wakeJobId === route.wakeJobId,
+            );
+          if (!current()) return;
+          logTiming('gateway.startup_hint', routeIdentity(route));
+          // A pre-event negative probe must not swallow a newer running hint.
+          await observing?.catch(() => {});
+          if (current()) await observe();
+        },
+        state.abort.signal,
+      )
+        .catch(() => {
+          // Polling remains the authority and recovery path if events are lost.
+        })
+        .finally(() => {
+          state.done = true;
+          state.retryAt = now() + 10000;
+        });
+    }
+  };
+  const applyReadinessReceipt = (
+    input: unknown,
+    captured: GatewaySnapshot,
+    serverId: string,
+    observedAt: string,
+  ) => {
+    const work = serial.then(() => {
+      if (
+        stopping ||
+        !snapshot ||
+        quiescence.has(serverId) ||
+        now() - Date.parse(observedAt) > policy.probeTimeoutMs ||
+        !candidateSnapshot ||
+        !isDeepStrictEqual(candidateSnapshot.routes, captured.routes)
+      )
+        return false;
+      const next = readinessReceipt(
+        snapshot,
+        captured,
+        input,
+        serverId,
+        now(),
+        policy.maxClockSkewMs,
+      );
+      if (!next || next.routes.some((route) => !listeners.has(route.id))) return false;
+      snapshot = next;
+      candidateSnapshot = next;
+      for (const route of next.routes) {
+        const listener = listeners.get(route.id);
+        if (!listener) throw new DomainError('internal_error');
+        listener.route = route;
+        if (route.serverId === serverId) {
+          listener.backendReady = true;
+          logRouteTransition(listener, 'readiness_receipt');
+        }
+      }
+      syncStartupWatches();
+      // A receipt may shorten the expiry after an equivalent renewal raced it.
+      // Close existing streams at that original deadline, not a later sweep.
+      if (leaseTimer) clearTimeout(leaseTimer);
+      leaseTimer = setTimeout(
+        () => {
+          void expire();
+        },
+        Math.max(1, Date.parse(next.expiresAt) - now()),
+      );
+      leaseTimer.unref();
+      return true;
+    });
+    serial = work.then(
+      () => {},
+      () => {},
+    );
+    return work;
+  };
   const observe = () => {
     if (providerRetryAt > now()) return Promise.resolve();
     if (observing) return observing;
@@ -987,7 +1117,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           try {
             const validated: GatewayProtocolObservation & { coherent: boolean } = await bounded(
               async (signal) => {
-                const sample = await options.safety.validateBackend(route);
+                const listener = listeners.get(route.id);
+                const leasedProbe =
+                  route.mode === 'waking' &&
+                  leased() &&
+                  listener &&
+                  isDeepStrictEqual(listener.route, route) &&
+                  options.safety.probeLeasedBackend;
+                const sample = leasedProbe
+                  ? await leasedProbe.call(options.safety, route)
+                  : await options.safety.validateBackend(route);
                 if (sample) return { ...sample, coherent: true };
                 if (handler.observe)
                   return { ...(await handler.observe({ route, signal })), coherent: true };
@@ -1091,7 +1230,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
           // post-deadline Core fetch can reconcile this promise and re-arm it.
           if (quiescenceUntil !== undefined && quiescenceUntil <= now()) continue;
           const reportStarted = performance.now();
-          await options.control
+          const receipt = await options.control
             .reportObservation({
               routeId: anchor.id,
               routeRevision: anchor.revision,
@@ -1111,7 +1250,12 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             .finally(() => {
               reportDuration += performance.now() - reportStarted;
             });
-          if (ready && anchor.mode === 'waking') refreshAfterReadiness = true;
+          if (ready && anchor.mode === 'waking') {
+            const applied =
+              receipt &&
+              (await applyReadinessReceipt(receipt, candidates, anchor.serverId, observedAt));
+            if (!applied) refreshAfterReadiness = true;
+          }
         } catch (error) {
           if (error instanceof GatewayProviderRateLimitedError) {
             deferProvider(error);
@@ -1199,6 +1343,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         for (const listener of listeners.values())
           for (const [key, session] of listener.sessions)
             if (now() - session.lastActivity >= policy.udpIdleTimeoutMs) dropSession(listener, key);
+        syncStartupWatches();
         void expire();
       },
       Math.min(policy.udpIdleTimeoutMs, 1000),
@@ -1208,6 +1353,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   const stop = () => {
     if (shutdown) return shutdown;
     stopping = true;
+    for (const watch of startupWatches.values()) watch.abort.abort();
+    startupWatches.clear();
     if (pollTimer) clearTimeout(pollTimer);
     if (observationTimer) clearTimeout(observationTimer);
     if (leaseTimer) clearTimeout(leaseTimer);

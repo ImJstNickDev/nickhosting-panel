@@ -199,8 +199,16 @@ describe('authenticated bounded Gateway control client', () => {
       body: JSON.stringify(wake),
     });
     expect(fetcher.mock.calls[2]?.[1]).toMatchObject({ body: JSON.stringify(observation) });
-    for (const call of fetcher.mock.calls.slice(1))
-      expect(new Headers(call[1]?.headers).has('X-NickHosting-Gateway-Features')).toBe(false);
+    expect(
+      new Headers(fetcher.mock.calls[1]?.[1]?.headers).has('X-NickHosting-Gateway-Features'),
+    ).toBe(false);
+    expect(
+      new Headers(fetcher.mock.calls[2]?.[1]?.headers).get('X-NickHosting-Gateway-Features'),
+    ).toBe('readiness-receipt-v1');
+    fetcher.mockResolvedValueOnce(Response.json(snapshot));
+    expect(await client.reportObservation(observation)).toEqual(snapshot);
+    fetcher.mockResolvedValueOnce(Response.json({ ...snapshot, gatewayId: randomUUID() }));
+    await expect(client.reportObservation(observation)).rejects.toThrow('integration_unavailable');
   });
   it.each([
     'http://core.example.test',
