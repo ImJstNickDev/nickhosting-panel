@@ -37,7 +37,6 @@ export interface StopConfirmationOptions {
 }
 interface Boundary {
   getApplicationServer(id: number): Promise<ApplicationServer>;
-  getEgg(nestId: number, eggId: number): Promise<Egg>;
   relayConsole(
     identifier: string,
     options: ConsoleRelayOptions,
@@ -71,17 +70,10 @@ export async function stopWithConfirmation(
       } catch {}
     }
   };
-  await timed('observer_preflight', () => observer.preflight());
   const server =
     options.verifiedServer ??
     (await timed('server_metadata', () => adapter.getApplicationServer(applicationId)));
-  if (
-    (options.verifiedServer && server.id !== applicationId) ||
-    server.identifier !== identifier ||
-    !supportsStopConfirmation(
-      await timed('egg_metadata', () => adapter.getEgg(server.nest, server.egg)),
-    )
-  )
+  if ((options.verifiedServer && server.id !== applicationId) || server.identifier !== identifier)
     throw new PterodactylError('invalid_request', 'application', 'rejected');
   let armed = false,
     stopping = false,
@@ -111,28 +103,41 @@ export async function stopWithConfirmation(
       void proof.then(finish, finish);
     } else stopping = false;
   };
-  const relay = await timed('console_session', () =>
-    adapter.relayConsole(
-      identifier,
-      {
-        authorize: options.authorize,
-        onEvent,
-        maxDurationMs: Math.max(1000, timeoutMs),
-      },
-      server.uuid,
-    ),
-  );
-  const timer = setTimeout(() => {
-    ended = true;
-    finish();
-  }, timeoutMs);
+  let relay: ConsoleRelay | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let powerError: unknown;
   try {
+    // Wings owns egg stop semantics. Confirmation depends on the actual ordered
+    // transition plus host exit, not another egg metadata fetch. These read-only
+    // prerequisites are independent once managed identity is known.
+    // Settle every branch before unwinding so a late-opened relay cannot leak.
+    const preparation = await Promise.allSettled([
+      timed('observer_preflight', () => observer.preflight()),
+      timed('console_session', async () => {
+        relay = await adapter.relayConsole(
+          identifier,
+          {
+            authorize: options.authorize,
+            onEvent,
+            maxDurationMs: Math.max(1000, timeoutMs),
+          },
+          server.uuid,
+        );
+      }),
+    ]);
+    for (const result of preparation) {
+      if (result.status === 'rejected') throw result.reason;
+    }
+    timer = setTimeout(() => {
+      ended = true;
+      finish();
+    }, timeoutMs);
     if (ended || !(await options.authorize()))
       throw new PterodactylError('permission_denied', 'client', 'rejected');
     await timed('final_handoff', async () => {
       await options.beforePower?.();
     });
+    if (ended) throw new PterodactylError('unavailable', 'client', 'rejected');
     armed = true;
     try {
       await timed('power_request', () => adapter.power(identifier, 'stop'));
@@ -150,6 +155,6 @@ export async function stopWithConfirmation(
   } finally {
     ended = true;
     clearTimeout(timer);
-    relay.close();
+    relay?.close();
   }
 }

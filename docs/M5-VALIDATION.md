@@ -3174,3 +3174,69 @@ only documentation/governance checks apply to this evidence update. Raw private
 logs stay untracked, no cleanup was performed. PR #21 stays open/unmerged;
 SFTPGo #18 and production/M5 boundaries remain unchanged. Further sleep latency
 work is not claimed complete by this startup result.
+
+
+## 2026-10-11 — idle deadline and stop critical-path optimization
+
+Source changes after `e69ff79`, limited to the existing stop/idle paths:
+
+- A fresh Gateway observation is scheduled at authoritative `sleepEligibleAt`;
+  it waits out pre-deadline work then re-probes. Due servers are checked first,
+  with stable ordering for others. Same deadlines cannot spin; revocation,
+  shutdown and provider cooldown retain authority over the timer.
+- Unchanged online routes, like waking routes, may perform a fresh protocol
+  sample within the **original** full-validation evidence lifetime. Full bind
+  and renewal checks remain. Expiry or any route/proof change requires full
+  validation; samples cannot extend a lease or evidence lifetime.
+- Stop no longer fetches egg metadata. Wings executes its configured stop
+  semantics; mapping validation remains unchanged. A signal that leaves the
+  process running cannot pass ordered status + actual host exit confirmation.
+- Observer preflight and confirmation WebSocket preparation overlap. Fresh
+  provider identity and host/effect authorization overlap at final handoff.
+  Every branch settles before power; current local authority/policy and the
+  original quiescence fence are rechecked after slow proofs/durable writes.
+- After persisted terminal evidence, lifecycle and runtime share this attempt's
+  provider/host proof promises instead of fetching twice. Runtime still verifies
+  the registry identity and actual stopped process. Missing shared host proof
+  falls back to its own preflight. No capacity is released from an HTTP success
+  or cached resources response.
+
+Executed checks (isolated fixtures, no real server mutations):
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/power.test.ts packages/pterodactyl-adapter/src/console.test.ts packages/gateway-safety/src/validator.test.ts apps/game-gateway/src/data-plane.test.ts`: **274 passed** on final unit-test source, including real local WebSocket fixtures, timer revocation, due-server priority, no premature power, failed preparation cleanup and original evidence expiry.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts packages/server-management/src/runtime.integration.test.ts`: **291 passed** before the final shared post-stop proof optimization.
+- Same isolated integration command restricted to lifecycle/runtime with
+  `--testNamePattern 'stop|stopped|host|observer'`: **51 passed, 158 deliberately skipped**, after the shared proof change. No full historical milestone matrix rerun.
+- Initial typecheck caught an omitted optional callback-context signature in
+  `LifecycleOptions`; corrected before delivery. This was a compile-time finding,
+  not a passing result. Final typecheck and the final two shared-proof/fallback
+  regression results are recorded below.
+
+Independent read-only review found no remaining must-fix. Its optional observation
+fairness concern was addressed by due-first ordering and a two-server regression.
+These tests establish ordering and safety, **not a measured live latency gain**.
+No early egg/WS preparation is claimed before the timeout; parallel preparation
+still starts with the durable stop job. Post-exit Gateway snapshot reconciliation
+remains, so event-driven/instantaneous sleeping replies are not claimed.
+
+No manual power command, live provider mutation, container restart, infrastructure
+change, new test asset or cleanup was performed. Integration tests used the already
+approved isolated M2 services and temporary schemas. PR #21 remains open/unmerged;
+SFTPGo #18 and all production boundaries remain unchanged. A new exact Gateway dev
+restart approval and Owner-driven cycle are required to collect live timings.
+
+Final checks after the optional shared-context/fallback refinement:
+
+- `scripts/dev.sh pnpm exec tsc --noEmit`: **passed**.
+- Isolated lifecycle/runtime integration selection
+  `--testNamePattern 'completes an observed stop immediately|binds no-op stop proof'`:
+  **2 passed, 207 deliberately skipped**. This verifies shared proof reuse,
+  provider identity mismatch rejection and missing shared host-proof fallback.
+- Scoped `scripts/dev.sh pnpm exec biome check` on all11 changed TypeScript files:
+  **passed**; `git diff --check`: **passed**.
+- `python3 scripts/check-governance.py`: **passed**,510 indexed text files,
+  106 review PNGs,434 relative links,4 TOML files,44 ignore cases. Secret scanning
+  remains heuristic; staged content was inspected before publication.
+- Read-only Docker inspection: dev Gateway, API and worker all running/healthy.
+  No container operation was performed. Gateway still needs the approved restart
+  before its new timer/sampling code is active.

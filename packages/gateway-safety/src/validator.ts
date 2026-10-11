@@ -722,11 +722,11 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
           time - previous.evidence.started < policy.maximumObservationAgeMs
         );
       };
-      // The caller owns the live listener lease. This only samples a waking
+      // The caller owns the live listener lease. This only samples an unchanged
       // backend within the ORIGINAL full validation budget; it cannot bind,
       // renew, change identity or produce a reusable reachability proof.
       if (
-        route.mode !== 'waking' ||
+        !['waking', 'online'].includes(route.mode) ||
         previous?.leasedProbe?.routeKey !== JSON.stringify(route) ||
         !fresh()
       )

@@ -139,6 +139,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   let leaseTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let observationTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const sampledIdleDeadlines = new Map<string, string>();
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   let serial: Promise<void> = Promise.resolve();
   let refreshing: Promise<void> | undefined;
@@ -817,6 +819,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       }
       snapshot = next;
       syncStartupWatches();
+      syncIdleDeadline();
       for (const [serverId, fence] of quiescence) {
         const { deadline } = fence;
         const currentRoutes = next.routes.filter((route) => route.serverId === serverId);
@@ -1047,6 +1050,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         }
       }
       syncStartupWatches();
+      syncIdleDeadline();
       // A receipt may shorten the expiry after an equivalent renewal raced it.
       // Close existing streams at that original deadline, not a later sweep.
       if (leaseTimer) clearTimeout(leaseTimer);
@@ -1065,6 +1069,70 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     );
     return work;
   };
+  // One fresh sample at the authoritative idle deadline avoids waiting for the
+  // next periodic observation. This is a scheduling hint only: observe() still
+  // proves every role, current lease, zero players/sessions and the stop fence.
+  const idleDeadlines = () => {
+    const eligible = new Map<string, { key: string; at: number }>();
+    if (stopping || !leased() || !snapshot) return eligible;
+    const invalid = new Set<string>();
+    for (const route of snapshot.routes) {
+      const previous = eligible.get(route.serverId);
+      const key = `${route.generation}:${route.sleepEligibleAt}`;
+      if (
+        route.mode !== 'online' ||
+        !route.sleepEligibleAt ||
+        quiescence.has(route.serverId) ||
+        invalid.has(route.serverId) ||
+        (previous && previous.key !== key)
+      ) {
+        eligible.delete(route.serverId);
+        invalid.add(route.serverId);
+        continue;
+      }
+      eligible.set(route.serverId, { key, at: Date.parse(route.sleepEligibleAt) });
+    }
+    return eligible;
+  };
+  const syncIdleDeadline = () => {
+    if (idleDeadlineTimer) clearTimeout(idleDeadlineTimer);
+    idleDeadlineTimer = undefined;
+    const eligible = idleDeadlines();
+    for (const serverId of sampledIdleDeadlines.keys())
+      if (!eligible.has(serverId)) sampledIdleDeadlines.delete(serverId);
+    const next = [...eligible]
+      .filter(([serverId, deadline]) => sampledIdleDeadlines.get(serverId) !== deadline.key)
+      .sort((a, b) => a[1].at - b[1].at)[0];
+    if (!next) return;
+    const [serverId, deadline] = next;
+    idleDeadlineTimer = setTimeout(
+      () => {
+        idleDeadlineTimer = undefined;
+        const current = () => idleDeadlines().get(serverId)?.key === deadline.key;
+        if (
+          !current() ||
+          now() < deadline.at ||
+          sampledIdleDeadlines.get(serverId) === deadline.key
+        ) {
+          syncIdleDeadline();
+          return;
+        }
+        // Consume before waiting: equivalent snapshots and already elapsed
+        // deadlines must not create a tight loop (including during a 429 cooldown).
+        for (const [id, due] of idleDeadlines())
+          if (due.at <= now()) sampledIdleDeadlines.set(id, due.key);
+        void (async () => {
+          // A probe begun before the deadline cannot prove the complete interval.
+          await observing?.catch(() => {});
+          if (current()) await observe();
+        })()
+          .catch(() => {})
+          .finally(syncIdleDeadline);
+      },
+      Math.min(2147483647, Math.max(1, deadline.at - now())),
+    );
+    idleDeadlineTimer.unref();
+  };
   const observe = () => {
     if (providerRetryAt > now()) return Promise.resolve();
     if (observing) return observing;
@@ -1081,7 +1149,16 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         servers.set(route.serverId, routes);
       }
       let refreshAfterReadiness = false;
-      for (const routes of servers.values()) {
+      const orderingTime = now();
+      const dueAt = (routes: GatewayRoute[]) => {
+        const anchor = routes[0];
+        const deadline = anchor?.sleepEligibleAt ? Date.parse(anchor.sleepEligibleAt) : Infinity;
+        return anchor?.mode === 'online' && deadline <= orderingTime ? deadline : Infinity;
+      };
+      // Expiring idle windows must not queue behind unrelated slow probes.
+      // Non-due servers keep their stable snapshot order; effects stay serialized.
+      const orderedServers = [...servers.values()].sort((a, b) => dueAt(a) - dueAt(b));
+      for (const routes of orderedServers) {
         routes.sort((a, b) => a.id.localeCompare(b.id));
         const anchor = routes[0];
         if (!anchor || stopping) continue;
@@ -1102,6 +1179,11 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         let ready = true;
         let idle = true;
         const observedAt = new Date(now()).toISOString();
+        if (anchor.sleepEligibleAt && Date.parse(anchor.sleepEligibleAt) <= Date.parse(observedAt))
+          sampledIdleDeadlines.set(
+            anchor.serverId,
+            `${anchor.generation}:${anchor.sleepEligibleAt}`,
+          );
         const players: (number | undefined)[] = [];
         for (const route of routes) {
           if (providerRetryAt > now()) return;
@@ -1119,7 +1201,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
               async (signal) => {
                 const listener = listeners.get(route.id);
                 const leasedProbe =
-                  route.mode === 'waking' &&
+                  (route.mode === 'waking' || route.mode === 'online') &&
                   leased() &&
                   listener &&
                   isDeepStrictEqual(listener.route, route) &&
@@ -1357,6 +1439,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     startupWatches.clear();
     if (pollTimer) clearTimeout(pollTimer);
     if (observationTimer) clearTimeout(observationTimer);
+    if (idleDeadlineTimer) clearTimeout(idleDeadlineTimer);
+    sampledIdleDeadlines.clear();
     if (leaseTimer) clearTimeout(leaseTimer);
     if (sweepTimer) clearInterval(sweepTimer);
     shutdown = (async () => {

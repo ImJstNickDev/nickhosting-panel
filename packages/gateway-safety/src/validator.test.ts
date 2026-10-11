@@ -377,25 +377,28 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await safety.validate(f.route, [f.route.public]);
     expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
   });
-  it('probes an unchanged leased waking backend without repeating full inspection or proof writes', async () => {
-    const f = fixture();
-    f.route.mode = 'waking';
-    const safety = f.validator();
-    await safety.validate(f.route, []);
-    const sample = { ready: true, idle: false, playerCount: 2 };
-    f.options.probeBackend = vi.fn(async () => sample);
-    expect(await safety.probeLeasedBackend?.(f.route)).toBe(sample);
-    expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route);
-    expect(f.options.observer.observe).toHaveBeenCalledOnce();
-    expect(f.options.resolveContext).toHaveBeenCalledOnce();
-    expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
-    expect(f.options.saveProof).toHaveBeenCalledOnce();
-    expect(f.options.probeNode).toHaveBeenCalledOnce();
-    // A subsequent renewal still checks every source, even while the grant is fresh.
-    await safety.validate(f.route, [f.route.public]);
-    expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
-    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
-  });
+  it.each(['waking', 'online'] as const)(
+    'probes an unchanged leased %s backend without repeating full inspection or proof writes',
+    async (mode) => {
+      const f = fixture();
+      f.route.mode = mode;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      const sample = { ready: true, idle: false, playerCount: 2 };
+      f.options.probeBackend = vi.fn(async () => sample);
+      expect(await safety.probeLeasedBackend?.(f.route)).toBe(sample);
+      expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route);
+      expect(f.options.observer.observe).toHaveBeenCalledOnce();
+      expect(f.options.resolveContext).toHaveBeenCalledOnce();
+      expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+      expect(f.options.saveProof).toHaveBeenCalledOnce();
+      expect(f.options.probeNode).toHaveBeenCalledTimes(mode === 'waking' ? 1 : 0);
+      // A subsequent renewal still checks every source, even while the grant is fresh.
+      await safety.validate(f.route, [f.route.public]);
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+      expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+    },
+  );
   it.each([
     'unvalidated',
     'revision',
@@ -442,23 +445,26 @@ describe('Gateway pre-bind and forwarding safety', () => {
       expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
     },
   );
-  it('rejects leased samples that cross the original evidence deadline without extending it', async () => {
-    const f = fixture();
-    f.route.mode = 'waking';
-    let now = f.observation.observedAt;
-    f.options.now = () => now;
-    const safety = f.validator();
-    await safety.validate(f.route, []);
-    f.options.probeBackend = async () => {
-      now += 5000;
-      return { ready: true, idle: false, playerCount: 1 };
-    };
-    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toMatchObject({
-      reason: 'observation_stale',
-    });
-    expect(f.options.observer.observe).toHaveBeenCalledOnce();
-    expect(f.options.saveProof).toHaveBeenCalledOnce();
-  });
+  it.each(['waking', 'online'] as const)(
+    'rejects %s leased samples that cross the original evidence deadline without extending it',
+    async (mode) => {
+      const f = fixture();
+      f.route.mode = mode;
+      let now = f.observation.observedAt;
+      f.options.now = () => now;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      f.options.probeBackend = async () => {
+        now += 5000;
+        return { ready: true, idle: false, playerCount: 1 };
+      };
+      await expect(safety.probeLeasedBackend?.(f.route)).rejects.toMatchObject({
+        reason: 'observation_stale',
+      });
+      expect(f.options.observer.observe).toHaveBeenCalledOnce();
+      expect(f.options.saveProof).toHaveBeenCalledOnce();
+    },
+  );
   it('never accepts a negative leased protocol sample as readiness', async () => {
     const f = fixture();
     f.route.mode = 'waking';

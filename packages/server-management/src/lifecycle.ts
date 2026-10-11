@@ -130,7 +130,14 @@ export interface LifecycleOptions {
     connection: Kysely<Database>,
   ) => Promise<ExternalStopReceipt | null>;
   /** Physical proof for a no-op stop, only when no compute/installer reservation exists. */
-  confirmAlreadyStopped?: (serverId: string, connection: Kysely<Database>) => Promise<boolean>;
+  confirmAlreadyStopped?: (
+    serverId: string,
+    connection: Kysely<Database>,
+    context?: {
+      providerServer: Promise<ApplicationServer>;
+      observerPreflight?: Promise<void>;
+    },
+  ) => Promise<boolean>;
   /** Fresh admission revalidation before a power effect, not an implicit reservation. */
   reserveStart?: (
     serverId: string,
@@ -1147,9 +1154,18 @@ export async function processServerOperation(
       // The persisted terminal proof belongs to this operation. Recheck the
       // exact host/process before releasing capacity: Panel resources can still
       // report running for 20 seconds. This never grants another power effect.
-      await timed('provider_identity', () => ownedRemote(db, server, options));
-      await options.verifyObservationHost?.(server.id, db);
-      if (!(await options.confirmAlreadyStopped(server.id, db)))
+      const providerServer = timed('provider_identity', () => ownedRemote(db, server, options));
+      const observerPreflight = options.verifyObservationHost?.(server.id, db);
+      // Share this attempt's proofs with the runtime instead of fetching the
+      // same identity and Docker preflight twice. Generic observers cannot skip
+      // either proof: all branches settle before capacity can be released.
+      const proofs = await Promise.allSettled([
+        providerServer,
+        observerPreflight,
+        options.confirmAlreadyStopped(server.id, db, { providerServer, observerPreflight }),
+      ]);
+      for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
+      if (proofs[2].status !== 'fulfilled' || !proofs[2].value)
         return wait('stop_terminal_unproven', 'operation_uncertain');
       return finish(true, true, null, false, true);
     };
@@ -1456,16 +1472,34 @@ export async function processServerOperation(
                       log('servers.stop_stage', { stage, durationMs, outcome }),
                     beforePower: async () => {
                       try {
-                        // The socket/token handshake can wait. Recheck ownership and
-                        // full effect authority once after it, immediately before power.
-                        if (!options.effectAuthorizationVerifiesHost)
-                          await options.verifyObservationHost?.(server.id, db);
-                        const providerServer = await timed('provider_identity', () =>
+                        // The socket/token handshake can wait. Fresh provider identity
+                        // and host/effect authorization are independent read-only proofs.
+                        // Settle both before durable handoff; neither alone permits power.
+                        const providerServer = timed('provider_identity', () =>
                           ownedRemote(db, server, options),
                         );
-                        await timed('authorization', () =>
-                          options.authorizeEffect(jobId, server.id, db, { providerServer }),
-                        );
+                        const proofs = await Promise.allSettled([
+                          providerServer,
+                          timed('authorization', async () => {
+                            if (!options.effectAuthorizationVerifiesHost)
+                              await options.verifyObservationHost?.(server.id, db);
+                            await options.authorizeEffect(jobId, server.id, db, {
+                              providerServer,
+                            });
+                          }),
+                        ]);
+                        for (const proof of proofs)
+                          if (proof.status === 'rejected') throw proof.reason;
+                        // Generic authorizers need not consume the shared promise.
+                        // Always re-read revocable local authority after both proofs.
+                        if (!isGatewaySleep(operation))
+                          await timed('authorization', () =>
+                            options.authorizeIntent
+                              ? options.authorizeIntent(jobId, server.id, db)
+                              : options.authorizeEffect(jobId, server.id, db, {
+                                  providerServer,
+                                }),
+                          );
                         if (isGatewaySleep(operation)) {
                           assertGatewaySleepFence(operation.plan, nowOf(options));
                           await update({

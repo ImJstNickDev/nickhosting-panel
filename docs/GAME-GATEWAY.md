@@ -137,3 +137,29 @@ listener lease, fresh topology evidence plus a positive protocol sample and Core
 current-process confirmation can advance to online without repeating the full
 listener validation. Opening/renewing listeners still performs that validation;
 event loss uses normal polling. See [ADR 0012](decisions/0012-gateway-leases-and-sleep.md).
+
+
+## Idle deadline and stop dispatch (M5 optimization)
+
+The authoritative `sleepEligibleAt` schedules one fresh observation at the idle
+deadline, in addition to normal polling. A pre-deadline in-flight sample cannot
+stand in for that observation. Equivalent snapshots do not reschedule elapsed
+deadlines repeatedly; provider cooldowns still apply. Unknown player counts,
+active sessions, changed policy/generation or expired route authority prevent sleep.
+
+An unchanged online or waking route may sample its actual game protocol using the
+original, unexpired full-validation evidence. This does not renew a lease, extend
+evidence age, open a listener or skip full collision/identity/topology validation
+on renewal. An expired or changed grant returns to full validation.
+
+Once idle is proven, the Gateway fences new joins while preserving status replies.
+The durable worker prepares its stop-confirmation WebSocket and observer in parallel;
+final provider identity and host authorization also overlap. Local authority is
+rechecked after the independent proofs and durable handoff, within the original
+fence. Wings owns execution of the egg's stop command: no per-stop egg fetch, JAR
+hash, Mojang lookup or image check occurs. Capacity remains reserved until ordered
+terminal status, exact host exit evidence and durable completion prove the stop.
+Completion shares the same attempt’s provider/host proofs instead of repeating
+those reads, but still checks the exact process after the stop.
+Snapshot reconciliation still determines when the Gateway displays sleeping;
+these changes do not claim event-driven stop completion or instantaneous shutdown.

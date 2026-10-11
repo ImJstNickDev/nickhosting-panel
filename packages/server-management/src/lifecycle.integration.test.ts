@@ -859,10 +859,57 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
       return { confirmed: true };
     });
     expect(await f.run()).toBe('waiting');
-    expect(intent).toHaveBeenCalledTimes(4);
+    expect(intent).toHaveBeenCalledTimes(5);
     expect(effect).toHaveBeenCalledTimes(1);
     expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
   });
+  it.each(['none', 'identity', 'host', 'revoked'] as const)(
+    'overlaps stop identity/host proofs and rechecks local authority after both: %s',
+    async (failure) => {
+      const f = await fixture('stop');
+      f.setState('running');
+      const identityStarted = Promise.withResolvers<void>();
+      const hostStarted = Promise.withResolvers<void>();
+      const hostReleased = Promise.withResolvers<void>();
+      let revoked = false;
+      let preparing = false;
+      let powerSent = false;
+      f.options.authorizeIntent = async () => {
+        if (revoked) throw new DomainError('forbidden');
+      };
+      f.options.verifyObservationHost = async () => {
+        hostStarted.resolve();
+        await identityStarted.promise;
+        hostReleased.resolve();
+        if (failure === 'host') throw new DomainError('configuration_invalid');
+      };
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        if (!preparing) return;
+        expect(context?.providerServer).toBeInstanceOf(Promise);
+        expect(powerSent).toBe(false);
+        // Deliberately ignore provider proof like an injected generic authorizer.
+      };
+      f.adapter.stopWithConfirmation.mockImplementationOnce(async (_id, _identifier, input) => {
+        preparing = true;
+        f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+          identityStarted.resolve();
+          await hostStarted.promise;
+          await hostReleased.promise;
+          if (failure === 'revoked') revoked = true;
+          return failure === 'identity' ? { ...f.remote, uuid: randomUUID() } : f.remote;
+        });
+        await input.beforePower?.();
+        powerSent = true;
+        f.setState('offline');
+        await input.onConfirmed();
+        return { confirmed: true };
+      });
+      expect(await f.run()).toBe(failure === 'none' ? 'waiting' : 'failed');
+      expect(powerSent).toBe(failure === 'none');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      if (failure !== 'none') expect((await f.server()).runtime_state).toBe('running');
+    },
+  );
   it.each(['identity', 'permission'] as const)(
     'rejects stop when %s changes during console setup',
     async (change) => {
@@ -2378,7 +2425,14 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     const f = await fixture('stop');
     await f.prepareReservation();
     f.setState('running');
-    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.options.verifyObservationHost = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = vi.fn(async (_id, _db, context) => {
+      expect(context?.providerServer).toBeInstanceOf(Promise);
+      expect(context?.observerPreflight).toBeInstanceOf(Promise);
+      expect((await context?.providerServer)?.uuid).toBe(f.remote.uuid);
+      await context?.observerPreflight;
+      return true;
+    });
     f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
       // Ordered provider/Docker confirmation arrived; the resources cache has not changed.
       await input.onConfirmed();

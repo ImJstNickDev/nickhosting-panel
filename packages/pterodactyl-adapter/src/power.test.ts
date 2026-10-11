@@ -47,6 +47,103 @@ function fixture(stop = 'end') {
   };
 }
 describe('stop confirmation from verified stop semantics', () => {
+  it('starts independent stop prerequisites together and waits for all before power', async () => {
+    const f = fixture();
+    const observerGate = Promise.withResolvers<void>();
+    const relayGate = Promise.withResolvers<void>();
+    const observerStarted = Promise.withResolvers<void>();
+    const relayStarted = Promise.withResolvers<void>();
+    const openRelay = f.adapter.relayConsole.getMockImplementation();
+    if (!openRelay) throw new Error('Missing fixture relay');
+    f.observer.preflight.mockImplementation(async () => {
+      observerStarted.resolve();
+      await observerGate.promise;
+    });
+    f.adapter.relayConsole.mockImplementation(async (id, options) => {
+      relayStarted.resolve();
+      await relayGate.promise;
+      return openRelay(id, options);
+    });
+    const beforePower = vi.fn(async () => {});
+    const result = stopWithConfirmation(
+      f.adapter,
+      1,
+      'fixture',
+      { ...f.options, beforePower },
+      1000,
+      f.observer,
+    );
+    await Promise.all([observerStarted.promise, relayStarted.promise]);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    observerGate.resolve();
+    expect(beforePower).not.toHaveBeenCalled();
+    relayGate.resolve();
+    await expect(result).resolves.toEqual({ confirmed: true });
+    expect(beforePower).toHaveBeenCalledTimes(1);
+    expect(f.close).toHaveBeenCalledTimes(1);
+  });
+  it('closes a late-opened relay after an independent preparation failure', async () => {
+    const f = fixture();
+    const relayGate = Promise.withResolvers<void>();
+    const relayStarted = Promise.withResolvers<void>();
+    const openRelay = f.adapter.relayConsole.getMockImplementation();
+    if (!openRelay) throw new Error('Missing fixture relay');
+    f.observer.preflight.mockRejectedValue(new Error('observer unavailable'));
+    f.adapter.relayConsole.mockImplementation(async (id, options) => {
+      relayStarted.resolve();
+      await relayGate.promise;
+      return openRelay(id, options);
+    });
+    const beforePower = vi.fn(async () => {});
+    const result = stopWithConfirmation(
+      f.adapter,
+      1,
+      'fixture',
+      { ...f.options, beforePower },
+      1000,
+      f.observer,
+    );
+    const rejected = expect(result).rejects.toThrow('observer unavailable');
+    await relayStarted.promise;
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    relayGate.resolve();
+    await rejected;
+    expect(beforePower).not.toHaveBeenCalled();
+    expect(f.close).toHaveBeenCalledTimes(1);
+    expect(f.options.onConfirmed).not.toHaveBeenCalled();
+  });
+  it('does not send power after console preparation fails', async () => {
+    const f = fixture();
+    f.adapter.relayConsole.mockRejectedValue(new Error('console unavailable'));
+    await expect(
+      stopWithConfirmation(f.adapter, 1, 'fixture', f.options, 20, f.observer),
+    ).rejects.toThrow('console unavailable');
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.options.onConfirmed).not.toHaveBeenCalled();
+  });
+  it('does not send power if the console closes during final authorization', async () => {
+    const f = fixture();
+    await expect(
+      stopWithConfirmation(
+        f.adapter,
+        1,
+        'fixture',
+        {
+          ...f.options,
+          beforePower: async () => {
+            const options = f.adapter.relayConsole.mock.calls[0]?.[1];
+            if (!options) throw new Error('Missing fixture relay options');
+            options.onEvent({ type: 'closed' });
+          },
+        },
+        20,
+        f.observer,
+      ),
+    ).rejects.toMatchObject({ outcome: 'rejected' });
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.close).toHaveBeenCalledTimes(1);
+  });
+
   it('reuses only the supplied attempt identity and keeps phase logging non-authoritative', async () => {
     const f = fixture();
     const verifiedServer = await f.adapter.getApplicationServer();
@@ -70,7 +167,7 @@ describe('stop confirmation from verified stop semantics', () => {
       ),
     ).toEqual({ confirmed: true });
     expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
-    expect(f.adapter.getEgg).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getEgg).not.toHaveBeenCalled();
     expect(f.adapter.relayConsole).toHaveBeenCalledWith(
       'fixture',
       expect.any(Object),
@@ -154,7 +251,7 @@ describe('stop confirmation from verified stop semantics', () => {
     ).rejects.toMatchObject({ outcome: 'rejected' });
     expect(f.adapter.power).not.toHaveBeenCalled();
   });
-  it.each(['end', 'stop', '^C', '^c'])(
+  it.each(['end', 'stop', '^C', '^c', '^SIGTERM', '^SIGINT', '^KILL', ''])(
     'requires and persists a new ordered transition for %s',
     async (stop) => {
       const f = fixture(stop);
@@ -168,13 +265,21 @@ describe('stop confirmation from verified stop semantics', () => {
     },
   );
   it.each(['^SIGTERM', '^SIGINT', '^KILL', ''])(
-    'rejects unsupported mode %s before mutation',
+    'does not infer completion from stop delivery for egg mode %s',
     async (stop) => {
       const f = fixture(stop);
+      f.adapter.power.mockImplementation(async () => {
+        f.emit('stopping');
+        f.emit('running');
+      });
       await expect(
-        stopWithConfirmation(f.adapter, 1, 'fixture', f.options, 20, f.observer),
-      ).rejects.toMatchObject({ outcome: 'rejected' });
-      expect(f.adapter.power).not.toHaveBeenCalled();
+        stopWithConfirmation(f.adapter, 1, 'fixture', f.options, 10, f.observer),
+      ).resolves.toEqual({ confirmed: false });
+      expect(f.adapter.getEgg).not.toHaveBeenCalled();
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      expect(f.observer.stopped).not.toHaveBeenCalled();
+      expect(f.options.onConfirmed).not.toHaveBeenCalled();
+      expect(f.close).toHaveBeenCalledTimes(1);
     },
   );
   it('accepts the effective inherited stop config and rejects missing metadata', () => {

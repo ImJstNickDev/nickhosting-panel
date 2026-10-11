@@ -84,19 +84,6 @@ describe('backend console mediation over a real isolated WebSocket', () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
       const path = new URL(String(url)).pathname;
       reads.push(path);
-      if (path.includes('/eggs/'))
-        return Response.json({
-          attributes: {
-            id: 1,
-            uuid,
-            name: 'fixture',
-            nest: 1,
-            description: null,
-            docker_image: 'fixture',
-            startup: 'fixture',
-            config: { stop: 'stop' },
-          },
-        });
       if (path.endsWith('/websocket')) return fixture.fetcher(url, init);
       if (path.endsWith('/power')) {
         fixture.send('status', ['stopping']);
@@ -131,7 +118,6 @@ describe('backend console mediation over a real isolated WebSocket', () => {
     });
     expect(result).toEqual({ confirmed: true });
     expect(reads).toEqual([
-      '/api/application/nests/1/eggs/1',
       `/api/client/servers/${client.identifier}/websocket`,
       `/api/client/servers/${client.identifier}/power`,
     ]);

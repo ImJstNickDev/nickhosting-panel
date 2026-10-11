@@ -447,8 +447,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
     verifyGameRestore: async (context: import('./lifecycle.js').GameLifecycleContext) =>
       (await gameRuntime(context.db, context.server.id))?.verifyRestore(context) ?? true,
     verifyObservationHost,
-    confirmAlreadyStopped: async (serverId: string, connection: Kysely<Database>) => {
-      await verifyObservationHost(serverId, connection);
+    confirmAlreadyStopped: async (
+      serverId: string,
+      connection: Kysely<Database>,
+      context?: { providerServer: Promise<ApplicationServer>; observerPreflight?: Promise<void> },
+    ) => {
       const server = await connection
         .selectFrom('managed_servers')
         .selectAll()
@@ -457,11 +460,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
         .executeTakeFirst();
       if (!server?.pterodactyl_uuid || !server.pterodactyl_id || !containerObserver)
         throw new DomainError('configuration_invalid');
-      await verifyManagedIdentity(
-        connection,
-        server,
-        await adapter.getApplicationServer(server.pterodactyl_id),
-      );
+      const proofs = await Promise.allSettled([
+        context?.observerPreflight ?? verifyObservationHost(serverId, connection),
+        (context?.providerServer ?? adapter.getApplicationServer(server.pterodactyl_id)).then(
+          (remote) => verifyManagedIdentity(connection, server, remote),
+        ),
+      ]);
+      for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
       return containerObserver.stopped(server.pterodactyl_uuid, 'server');
     },
     observeExternalStop: async (

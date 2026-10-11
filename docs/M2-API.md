@@ -87,9 +87,10 @@ external ID supports provisioning recovery. Ambiguous start/restart, reinstall
 and restore outcomes remain uncertain instead of being blindly replayed.
 Uncertainty must retain compute reservations: a stop request, cached `offline`
 sample or timeout is not proof that all delayed process starts have finished.
-Safe automatic stop completion is restricted to effective egg stop configuration
-with a nonempty command not beginning with `^`, or the native Docker stop value
-`^C` (case-insensitive). It requires a fresh, ordered `stopping` → `offline`
+Runtime mapping admission validates supported egg stop configuration (a nonempty
+command not beginning with `^`, or native Docker stop `^C`, case-insensitive).
+The stop operation does not fetch or reinterpret the egg again: Wings executes
+its configured stop semantics. Completion requires a fresh, ordered `stopping` → `offline`
 transition from the authenticated backend WebSocket, an independent exact-container
 Docker observation proving the process is no longer running, and no earlier
 unresolved power effect. Wings can emit offline after a failed output stream while
@@ -100,8 +101,10 @@ Offline state, job completion and reservation release commit together. Running o
 unverifiable container evidence retains the reservation; this path never
 issues another power request. The conservative cached-resource path remains when
 independent confirmation is unavailable.
-Other caret signal modes or unknown stop semantics are unsupported for automatic
-release and fail closed. Restart completion requires a verified running Docker
+Mapping admission continues to reject unsupported caret signal profiles. At
+execution time, a signal or changed egg which leaves the process running cannot
+confirm a stop or release its reservation; missing terminal evidence remains
+uncertain. Restart completion requires a verified running Docker
 process whose start
 timestamp is after the durable effect intent, differs from the recorded prior
 process when present, and is not in the future. Cached uptime may miss a fast

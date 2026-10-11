@@ -1460,6 +1460,137 @@ describe('sleep protocol handling and observations', () => {
     expect(await exchange(backend.port, handshake(1)).catch(() => Buffer.alloc(0))).toHaveLength(0);
     expect(f.control.requestWake).not.toHaveBeenCalled();
   });
+  it('observes due idle servers before unrelated servers in the snapshot', async () => {
+    const first = await tcpFixture();
+    const second = await tcpFixture();
+    const ordinary = route(first.port);
+    const due = {
+      ...route(second.port),
+      sleepEligibleAt: new Date(Date.now() - 100).toISOString(),
+    };
+    const f = plane([ordinary, due], {
+      safety: { validateBackend: vi.fn(async () => ({ ready: true, idle: true, playerCount: 0 })) },
+    });
+    await f.gateway.start();
+    await f.gateway.observe();
+    const reports = vi
+      .mocked(f.control.reportObservation)
+      .mock.calls.map(([value]) => value.routeId);
+    expect(reports).toEqual([due.id, ordinary.id]);
+    expect(f.gateway.health().quiescentServers).toBe(1);
+  });
+  it('samples a fresh idle deadline without waiting for the long observation interval', async () => {
+    const backend = await tcpFixture();
+    const deadline = Date.now() + 150;
+    const r = { ...route(backend.port), sleepEligibleAt: new Date(deadline).toISOString() };
+    const f = plane([r], {
+      protocols: [fixtureProtocol({ probeIdle: async () => ({ idle: true, playerCount: 0 }) })],
+      safety: {
+        probeLeasedBackend: vi.fn(async () => ({ ready: true, idle: true, playerCount: 0 })),
+      },
+    });
+    await f.gateway.start();
+    await delay(30);
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    expect(f.gateway.health().quiescentServers).toBe(0);
+    await vi.waitFor(() => expect(f.gateway.health().quiescentServers).toBe(1));
+    expect(f.control.reportObservation).toHaveBeenCalledTimes(1);
+    expect(
+      Date.parse(vi.mocked(f.control.reportObservation).mock.calls[0]?.[0].observedAt ?? ''),
+    ).toBeGreaterThanOrEqual(deadline);
+    expect(f.safety.probeLeasedBackend).toHaveBeenCalledTimes(1);
+    expect(f.safety.validateBackend).not.toHaveBeenCalled();
+  });
+  it.each(['withdrawn', 'disabled'] as const)(
+    'cancels a deadline when its route is %s',
+    async (change) => {
+      const backend = await tcpFixture();
+      const r = {
+        ...route(backend.port),
+        sleepEligibleAt: new Date(Date.now() + 100).toISOString(),
+      };
+      const f = plane([r], {
+        protocols: [fixtureProtocol({ probeIdle: async () => ({ idle: true, playerCount: 0 }) })],
+      });
+      await f.gateway.start();
+      await f.gateway.applySnapshot(
+        f.snapshot(
+          change === 'withdrawn' ? [] : [{ ...r, revision: 2, sleepEligibleAt: undefined }],
+          2,
+        ),
+      );
+      await delay(160);
+      expect(f.control.reportObservation).not.toHaveBeenCalled();
+      expect(f.gateway.health().quiescentServers).toBe(0);
+    },
+  );
+  it('waits for an older in-flight probe then takes a new deadline sample', async () => {
+    const backend = await tcpFixture();
+    const deadline = Date.now() + 100;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const probe = vi.fn(async () => ({ ready: true, idle: true, playerCount: 0 }));
+    probe.mockImplementationOnce(async () => {
+      await gate;
+      return { ready: true, idle: true, playerCount: 0 };
+    });
+    const f = plane(
+      [{ ...route(backend.port), sleepEligibleAt: new Date(deadline).toISOString() }],
+      {
+        safety: { validateBackend: probe },
+      },
+    );
+    await f.gateway.start();
+    const old = f.gateway.observe();
+    await delay(150);
+    release();
+    await old;
+    await vi.waitFor(() => expect(f.gateway.health().quiescentServers).toBe(1));
+    expect(f.control.reportObservation).toHaveBeenCalledTimes(2);
+    const reports = vi.mocked(f.control.reportObservation).mock.calls.map(([value]) => value);
+    expect(reports[0]?.quiescenceUntil).toBeUndefined();
+    expect(Date.parse(reports[1]?.observedAt ?? '')).toBeGreaterThanOrEqual(deadline);
+  });
+  it('does not run the queued deadline sample after route revocation during an older probe', async () => {
+    const backend = await tcpFixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const probe = vi.fn(async () => {
+      await gate;
+      return { ready: true, idle: true, playerCount: 0 };
+    });
+    const r = { ...route(backend.port), sleepEligibleAt: new Date(Date.now() + 70).toISOString() };
+    const f = plane([r], { safety: { validateBackend: probe } });
+    await f.gateway.start();
+    const old = f.gateway.observe();
+    await delay(120);
+    await f.gateway.applySnapshot(f.snapshot([], 2));
+    release();
+    await old;
+    await delay(30);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    expect(f.gateway.health().quiescentServers).toBe(0);
+  });
+  it('does not repeat an elapsed deadline on equivalent snapshots or bypass provider cooldown', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port), sleepEligibleAt: new Date(Date.now() + 60).toISOString() };
+    const probe = vi.fn(async () => {
+      throw new GatewayProviderRateLimitedError(1000);
+    });
+    const f = plane([r], { safety: { validateBackend: probe } });
+    await f.gateway.start();
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(1));
+    await f.gateway.applySnapshot(f.snapshot());
+    await delay(150);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(f.control.reportObservation).not.toHaveBeenCalled();
+    expect(f.gateway.health().quiescentServers).toBe(0);
+  });
   it.each(['disabled', 'before-idle-timeout', 'waking', 'inconsistent-role-eligibility'] as const)(
     'does not fence ordinary idle measurements when %s',
     async (condition) => {

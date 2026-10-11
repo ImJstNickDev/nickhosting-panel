@@ -487,6 +487,30 @@ describe('management runtime execution-time authorization', () => {
     });
     expect(await correct.lifecycle.confirmAlreadyStopped(serverId, f.db)).toBe(true);
     expect(observer.stopped).toHaveBeenCalledWith(server.pterodactyl_uuid, 'server');
+    observer.preflight.mockClear();
+    vi.mocked(f.adapter.getApplicationServer).mockClear();
+    const sharedProofs = {
+      providerServer: Promise.resolve(remote),
+      observerPreflight: Promise.resolve(),
+    };
+    expect(await correct.lifecycle.confirmAlreadyStopped(serverId, f.db, sharedProofs)).toBe(true);
+    expect(observer.preflight).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(
+      await correct.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+        providerServer: Promise.resolve(remote),
+      }),
+    ).toBe(true);
+    expect(observer.preflight).toHaveBeenCalledOnce();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    observer.stopped.mockClear();
+    await expect(
+      correct.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+        ...sharedProofs,
+        providerServer: Promise.resolve({ ...remote, uuid: randomUUID() }),
+      }),
+    ).rejects.toThrow('provenance_mismatch');
+    expect(observer.stopped).not.toHaveBeenCalled();
     observer.stopped.mockResolvedValue(false);
     expect(await correct.lifecycle.confirmAlreadyStopped(serverId, f.db)).toBe(false);
     observer.stopped.mockRejectedValue(new Error('isolated observer unavailable'));
