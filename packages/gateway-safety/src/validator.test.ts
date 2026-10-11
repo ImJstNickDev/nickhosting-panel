@@ -197,16 +197,43 @@ describe('Gateway pre-bind and forwarding safety', () => {
       });
     },
   );
+  it('keeps the existing sleeping responder through a new wake generation before Docker recreates its container', async () => {
+    const f = fixture();
+    const validator = f.validator();
+    await validator.validate(f.route, []);
+    f.route.mode = 'sleeping';
+    const container = f.observation.containers[0];
+    if (!container) throw new Error('fixture');
+    container.running = false;
+    container.activeBindings = [];
+    await validator.validate(f.route, [f.route.public]);
+    f.route.mode = 'waking';
+    f.route.generation = '77777777-7777-4777-8777-777777777777';
+    f.route.revision++;
+    f.observation.containers = [];
+    vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+    await expect(validator.validate(f.route, [f.route.public])).resolves.toEqual({
+      backendReady: false,
+    });
+    expect(f.options.probeBackend).not.toHaveBeenCalled();
+    await expect(validator.validateBackend(f.route)).rejects.toBeInstanceOf(GatewaySafetyError);
+    await expect(validator.validate(f.route, [])).rejects.toBeInstanceOf(GatewaySafetyError);
+    // Core changing mode alone still cannot authorize forwarding without Docker/protocol evidence.
+    f.route.mode = 'online';
+    await expect(validator.validate(f.route, [f.route.public])).rejects.toBeInstanceOf(
+      GatewaySafetyError,
+    );
+  });
   it.each([
     'socket-collision',
     'allocation-collision',
     'foreign-backend',
     'provider-identity',
+    'changed-provider-owner',
     'namespace',
     'daemon',
     'network',
     'proof',
-    'generation',
     'node-challenge',
   ] as const)(
     'fails closed on fresh %s even during a known backend replacement gap',
@@ -217,6 +244,7 @@ describe('Gateway pre-bind and forwarding safety', () => {
       const original = structuredClone(f.observation.containers[0]);
       if (!original) throw new Error('fixture');
       f.route.mode = 'waking';
+      f.route.generation = '77777777-7777-4777-8777-777777777777';
       f.observation.containers = [];
       if (failure === 'socket-collision')
         f.observation.sockets.push({ ...f.route.public, processOwned: false, inode: 'foreign' });
@@ -228,6 +256,11 @@ describe('Gateway pre-bind and forwarding safety', () => {
       if (failure === 'foreign-backend')
         f.observation.containers.push({ ...original, name: '/foreign', id: 'd'.repeat(64) });
       if (failure === 'provider-identity') f.server.external_id = 'foreign';
+      if (failure === 'changed-provider-owner') {
+        const context = await f.options.resolveContext(f.route);
+        f.server.user = 9;
+        vi.mocked(f.options.resolveContext).mockResolvedValue({ ...context, providerUserId: 9 });
+      }
       if (failure === 'namespace')
         f.observation.namespaceId = f.observation.hostNamespaceId = 'net:[200]';
       if (failure === 'daemon') f.observation.dockerDaemonId = 'different-daemon';
@@ -236,7 +269,6 @@ describe('Gateway pre-bind and forwarding safety', () => {
         if (network) network.driver = 'host';
       }
       if (failure === 'proof') vi.mocked(f.options.loadProof).mockResolvedValue(null);
-      if (failure === 'generation') f.route.generation = '77777777-7777-4777-8777-777777777777';
       if (failure === 'node-challenge') vi.mocked(f.options.probeNode).mockResolvedValue(false);
       await expect(validator.validate(f.route, [f.route.public])).rejects.toBeInstanceOf(
         GatewaySafetyError,

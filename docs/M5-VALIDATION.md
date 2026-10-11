@@ -4160,3 +4160,53 @@ the precise failure reason, so not every event can be attributed conclusively.
 Host sampling is now reused successfully, but the full cycle is not a clean
 acceptance pass and the300–400ms end-to-end target is not met in these samples.
 No new assets, restarts, mutations or test suites in this read-only check.
+
+### 2026-10-11 — Startup responder continuity and readiness hint priority
+
+Read-only trace of the Owner's Start job `558b8b28-08d5-4334-9dbc-2af3d8712a80`
+(UTC): API handler entry approximately20:25:16.113, adapter power invocation16.330,
+provider response16.542, container start17.475, Minecraft Done51.051, Wings running
+hint51.074, forwarding20:25:56.315. Adapter invocation is not a wire-dispatch
+measurement. Done-to-forwarding was5.264s; no fixed five-second readiness hold was
+found. The hint waited approximately2.793s behind an existing observation, followed
+by approximately1.11s of backend probing,765ms Core process verification and roughly
+507ms until receipt application. These stages are inferred from correlated logs;
+the new timing events separately expose startup probe/report and receipt queue time.
+
+The new wake generation caused `backend_container_missing` at20:25:17.448 and
+status recovered21.321: a3.873s unavailable route interval. This is a logged route
+transition, not a continuous external packet measurement.
+
+Corrections:
+
+- An existing sleeping/waking responder survives generation rotation and transient
+  container absence only with fresh ownership, allocation, topology/collision and
+  matching v2 reachability proof plus node challenge. This cannot authorize a new
+  listener or forwarding to an absent/unready backend.
+- A running hint starts a coalesced, server-specific readiness observation without
+  waiting for the old periodic probe. Superseded probes cannot report stale results;
+  Core ordering and route/generation/lease fences remain in force.
+- Ordinary process readiness no longer fetches egg installer metadata. Actual
+  provider startup/image and process identity remain checked. Provisioning and
+  explicit installation revalidation still validate egg metadata.
+
+Validation on changed source:
+
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts`:
+  135 passed, including priority hint, duplicate coalescing and stale-negative test.
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src/validator.test.ts`:
+  121 passed, including generation transition and negative identity/topology cases.
+- Minecraft queued readiness/provisioning targeted integration selection:15 passed.
+  Full `minecraft-queued.integration.test.ts`:29 passed,14 failed. Restoring the
+  prior implementation in the test transform reproduced13 identical failures
+  (existing lean-start/sampler fixture assumptions and asynchronous image-observer
+  assertion); the additional timeout was not independently repeated. This full
+  integration run is **not a pass**.
+- TypeScript and focused Biome checks passed. Independent safety/concurrency review
+  found no must-fix; suggested extra race regressions remain follow-up coverage.
+
+No real game power/file mutations or infrastructure changes were performed.
+Gateway activation requires a separately approved dev Gateway restart; the new
+live latency and responder behavior remain unverified until an Owner-driven test.
+API/worker development watchers may already load their source change. Historical
+failures above remain recorded. PR21 remains open; no milestone merge or release.

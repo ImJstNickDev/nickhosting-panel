@@ -376,12 +376,14 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       // Ordinary power/readiness trusts the installed artifact. Bytes are verified
       // by installation/content/restore workflows, not downloaded on every boot.
       // Current provider configuration, image and exact process identity stay fresh.
+      // Egg installer metadata belongs to provisioning, not the running process.
       await assertMinecraftRuntimeImage(
         serverId,
         connection,
         before !== null,
         remote,
         observerPreflight,
+        false,
       );
       const after = await readAgain();
       if (before !== after) throw new DomainError('operation_uncertain');

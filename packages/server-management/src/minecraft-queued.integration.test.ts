@@ -1041,10 +1041,14 @@ describe('host-bound Minecraft runtime image evidence', () => {
     ).rejects.toThrow('integration_unavailable');
     expect(download).not.toHaveBeenCalled();
   });
-  it('observes repeated and replacement process epochs without reading runtime files', async () => {
+  it('observes repeated and replacement process epochs without runtime files or egg metadata', async () => {
     const value = await installed();
     const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
     const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
+    const egg = vi
+      .mocked(value.external.adapter.getEgg)
+      .mockClear()
+      .mockRejectedValue(new Error('egg catalog unavailable'));
     value.observer.preflight.mockClear();
     const first = await value.management.lifecycle.observeProcessStart(value.serverId, f.db);
     expect(value.observer.preflight).toHaveBeenCalledOnce();
@@ -1059,6 +1063,13 @@ describe('host-bound Minecraft runtime image evidence', () => {
     expect(value.observer.preflight).toHaveBeenCalledTimes(3);
     expect(listFiles).not.toHaveBeenCalled();
     expect(download).not.toHaveBeenCalled();
+    expect(egg).not.toHaveBeenCalled();
+    // Explicit installation/revalidation retains the egg contract even though
+    // an already installed process can become ready during a catalog outage.
+    await expect(
+      value.management.assertMinecraftRuntimeImage(value.serverId, f.db, false),
+    ).rejects.toThrow('egg catalog unavailable');
+    expect(egg).toHaveBeenCalledOnce();
   });
   it('checks current launch configuration across concurrent request runtimes without artifact transfers', async () => {
     const value = await installed();

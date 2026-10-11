@@ -2449,6 +2449,60 @@ describe('event-driven within-lease readiness', () => {
     await p.gateway.stop();
     expect(signal?.aborted).toBe(true);
   });
+  it('a running hint bypasses an in-flight negative probe and discards its stale report', async () => {
+    const backend = await tcpFixture();
+    const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };
+    let hint: (() => void | Promise<void>) | undefined;
+    let release: (() => void) | undefined;
+    let entered: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const p = plane([r], {
+      control: {
+        watchStartup: async (_request, onHint, abort) => {
+          hint = onHint;
+          await new Promise<void>((resolve) =>
+            abort.addEventListener('abort', () => resolve(), { once: true }),
+          );
+        },
+      },
+      protocols: [
+        fixtureProtocol({
+          startupHint: 'provider_running',
+          probeReadiness: async () => {
+            calls++;
+            if (calls === 1) {
+              entered?.();
+              await pending;
+              return { ready: false };
+            }
+            return { ready: true };
+          },
+        }),
+      ],
+    });
+    await p.gateway.refresh();
+    const oldCycle = p.gateway.observe();
+    await started;
+    // This must complete while the old negative probe is still deliberately blocked.
+    try {
+      await Promise.all([hint?.(), hint?.()]);
+      expect(calls).toBe(2);
+      expect(p.control.reportObservation).toHaveBeenCalledTimes(1);
+      expect(p.control.reportObservation).toHaveBeenCalledWith(
+        expect.objectContaining({ ready: true }),
+      );
+    } finally {
+      release?.();
+      await oldCycle;
+    }
+    expect(p.control.reportObservation).toHaveBeenCalledTimes(1);
+  });
   it('stale startup hints cannot probe a replacement generation', async () => {
     const backend = await tcpFixture();
     const r = { ...route(backend.port, 'tcp', 'waking'), wakeJobId: randomUUID() };

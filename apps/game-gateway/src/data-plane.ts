@@ -147,6 +147,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
   let serial: Promise<void> = Promise.resolve();
   let refreshing: Promise<void> | undefined;
   let observing: Promise<void> | undefined;
+  const startupObservations = new Map<string, Promise<void>>();
+  const observationEpochs = new Map<string, object>();
   let shutdown: Promise<void> | undefined;
   const startupWatches = new Map<
     string,
@@ -994,6 +996,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       if (!route || existing.key !== `${route.generation}:${route.wakeJobId}`) {
         existing.abort.abort();
         startupWatches.delete(serverId);
+        observationEpochs.delete(serverId);
       }
     }
     if (!watch) return;
@@ -1030,9 +1033,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
             );
           if (!current()) return;
           logTiming('gateway.startup_hint', routeIdentity(route));
-          // A pre-event negative probe must not swallow a newer running hint.
-          await observing?.catch(() => {});
-          if (current()) await observe();
+          // Supersede only this server: an old negative probe must neither delay
+          // the running event nor report after its fresh observation.
+          if (current()) await observe(serverId);
         },
         state.abort.signal,
       )
@@ -1144,7 +1147,9 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     serverId: string,
     observedAt: string,
   ) => {
+    const queuedAt = performance.now();
     const work = serial.then(() => {
+      const queueMs = Math.round(performance.now() - queuedAt);
       if (
         stopping ||
         !snapshot ||
@@ -1173,6 +1178,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         if (route.serverId === serverId) {
           listener.backendReady = true;
           logRouteTransition(listener, 'readiness_receipt');
+          logTiming('gateway.readiness_receipt_applied', { ...routeIdentity(route), queueMs });
         }
       }
       syncStartupWatches();
@@ -1259,17 +1265,24 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     );
     idleDeadlineTimer.unref();
   };
-  const observe = () => {
+  const observe = (priorityServerId?: string): Promise<void> => {
     if (providerRetryAt > now()) return Promise.resolve();
-    if (observing) return observing;
+    if (priorityServerId) {
+      const pending = startupObservations.get(priorityServerId);
+      if (pending) return pending;
+      observationEpochs.set(priorityServerId, {});
+    } else if (observing) return observing;
     const cycleStarted = performance.now();
     let probeDuration = 0;
     let reportDuration = 0;
-    observing = (async () => {
+    const work = (async () => {
       const candidates = candidateSnapshot;
       if (!candidates || Date.parse(candidates.expiresAt) <= now() || stopping) return;
       const servers = new Map<string, GatewayRoute[]>();
+      const epochs = new Map(observationEpochs);
       for (const route of candidates.routes) {
+        if (priorityServerId && route.serverId !== priorityServerId) continue;
+        if (!priorityServerId && startupObservations.has(route.serverId)) continue;
         const routes = servers.get(route.serverId) ?? [];
         routes.push(route);
         servers.set(route.serverId, routes);
@@ -1383,6 +1396,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
         try {
           if (providerRetryAt > now()) return;
           if (
+            observationEpochs.get(anchor.serverId) !== epochs.get(anchor.serverId) ||
             !candidateSnapshot ||
             candidateSnapshot.gatewayId !== candidates.gatewayId ||
             candidateSnapshot.revision !== candidates.revision ||
@@ -1495,9 +1509,19 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       );
       counters.lastObservationProbeDurationMs = Math.round(probeDuration);
       counters.lastObservationReportDurationMs = Math.round(reportDuration);
-      observing = undefined;
+      if (priorityServerId) {
+        startupObservations.delete(priorityServerId);
+        logTiming('gateway.startup_observation', {
+          serverId: priorityServerId,
+          durationMs: Math.round(performance.now() - cycleStarted),
+          probeDurationMs: Math.round(probeDuration),
+          reportDurationMs: Math.round(reportDuration),
+        });
+      } else observing = undefined;
     });
-    return observing;
+    if (priorityServerId) startupObservations.set(priorityServerId, work);
+    else observing = work;
+    return work;
   };
   const start = async () => {
     if (started || stopping) return;
@@ -1585,7 +1609,8 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
       clearTimeout(timer);
       listeners.clear();
       wakeRequests.clear();
-      await Promise.allSettled([serial, refreshing, observing]);
+      await Promise.allSettled([serial, refreshing, observing, ...startupObservations.values()]);
+      observationEpochs.clear();
     })();
     return shutdown;
   };

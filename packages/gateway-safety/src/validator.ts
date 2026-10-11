@@ -330,7 +330,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
   // this is not cached permission or cached inventory. New listeners cannot use it.
   const retainedBindings = new Map<
     string,
-    { generation: string; public: GatewayEndpoint; container: ObservedContainer }
+    { public: GatewayEndpoint; container: ObservedContainer }
   >();
   async function inventories() {
     const result = new Map<number, Awaited<ReturnType<GatewayProviderSource['listAllocations']>>>();
@@ -489,10 +489,15 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     }
     if (!ownInventory) unavailable('provider_allocation');
     const retained = retainedBindings.get(route.id);
+    // A wake operation rotates generation while retaining the same public listener.
+    // Generation scopes control-plane authority, not backend identity: the caller
+    // enforces its current lease, and the fresh v2 proof below still binds the exact
+    // server, allocation, provider context and network. Never promote this retained
+    // shape into forwarding or a new listener.
     const mayRetainStatus =
       listener &&
       (route.mode === 'waking' || route.mode === 'sleeping') &&
-      retained?.generation === route.generation &&
+      retained !== undefined &&
       exactEndpoint(retained.public, route.public) &&
       ownedBindings.some((binding) => exactEndpoint(binding, route.public));
     const container = safeContainer(route, context, observation, selectedNetwork, mayRetainStatus);
@@ -670,7 +675,6 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       const retainBinding = () => {
         if (!state.container) return;
         retainedBindings.set(route.id, {
-          generation: route.generation,
           public: { ...route.public },
           container: structuredClone(state.container),
         });
