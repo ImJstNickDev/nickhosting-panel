@@ -3121,3 +3121,56 @@ Heartbeat validation on final changed source:
 Rollback: revert this source change and perform a separately approved dev Gateway
 restart; no migration or data reset. PR #21 remains open/unmerged; SFTPGo #18 and
 M5 boundaries unchanged.
+
+### 2026-10-11 — Live startup hint confirmed on `0e786e5`
+
+Owner-driven cycle, inspected read-only and independently cross-checked. Private
+raw evidence remains ignored under `.codex/local/cycle-0e786e5/`.
+
+| Event (UTC) | Time | Measured interval |
+| --- | --- | --- |
+| Intentional join | 10:43:41.495 | Origin |
+| Start power HTTP response | 10:43:43.408 | 1.913 s from join |
+| Docker process starts | 10:43:44.383404576 | 2.888 s from join |
+| Minecraft `Done` | 10:44:15.135770392 | Game startup completion log |
+| Gateway receives startup hint | 10:44:15.219 | 83.230 ms after `Done` |
+| Readiness observation begins | 10:44:15.470 | 251 ms after hint |
+| Core commits online | 10:44:16.079 | 943.230 ms after `Done` |
+| Gateway forwards (`readiness_receipt`) | 10:44:16.104 | 968.230 ms after `Done`; 25 ms after Core |
+| Player disconnect | 10:44:33.330991397 | Idle origin |
+| Gateway stopping reply/quiescence | 10:45:36.003 | 62.672 s after disconnect |
+| Console receives `stop` | 10:45:38.447163457 | 65.116 s after disconnect |
+| Docker exits | 10:45:39.031504087 | Clean exit 0, no OOM |
+| Stop job succeeds | 10:45:40.233 | Durable terminal completion |
+| Gateway sleeping reply | 10:45:43.158 | 4.126 s after Docker exit |
+
+Live channel evidence is now present: Core logged `keepalives=true`, then
+`gateway_startup_channel_closed` with `reason=hint_sent` and elapsed31529ms;
+Gateway logged exactly one `gateway.startup_hint` for the same operation and
+subsequently the receipt forwarding transition. The channel survived the former
+30-second inactivity failure. This proves actual event delivery alongside the
+real protocol/Core confirmation; it is not merely a fixture or module-export test.
+Polling remains available and the logs do not establish a latency percentile.
+
+`Done`→forwarding was0.968s versus1.629s in the prior cycle. Remaining measured
+Core process verification was489.490ms, commit29.378ms. The interval from hint to
+observation start was251ms; no narrower attribution is claimed. Start dispatch
+remains approximately1.9s to the completed provider response, plus approximately
+0.975s before Docker starts. Sleep latency is a separate unchanged path: about
+2.672s beyond the configured minute to quiescence, another2.444s to the stop
+command, and4.126s after process exit to the sleeping response. The exact completed
+sleep proof released its fence6.175s before the original deadline.
+
+Both jobs succeeded. No429, listener closure, lease expiry, snapshot failure or
+error-level event was captured. Three412 stale conflicts, two409 conflicts and
+one409 uncertain-stop observation occurred around transitions;36 unavailable
+observations are retained as diagnostics. Minecraft reported2.025s tick lag,
+which is not attributed to Gateway without further evidence. Gateway remained
+healthy at final inspection and the game container was stopped cleanly.
+
+This session made no application-code changes, infrastructure changes, manual
+server commands or test assets. No runtime restart or test-suite rerun was needed;
+only documentation/governance checks apply to this evidence update. Raw private
+logs stay untracked, no cleanup was performed. PR #21 stays open/unmerged;
+SFTPGo #18 and production/M5 boundaries remain unchanged. Further sleep latency
+work is not claimed complete by this startup result.
