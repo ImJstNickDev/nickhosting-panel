@@ -40,7 +40,7 @@ function DestinationFolder({
   const item = useRef<HTMLDivElement>(null);
   const expanded = state.expanded.has(path);
   const query = useQuery({
-    ...fileDirectoryQuery(state.serverId, path),
+    ...fileDirectoryQuery(state.serverId, path, { prepareDownloads: false }),
     enabled: expanded,
     retry: false,
   });

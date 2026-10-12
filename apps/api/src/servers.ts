@@ -373,7 +373,30 @@ export function registerServerRoutes(
   app.get('/v1/servers/:id/files', async (c) => {
     const context = await principal(c),
       service = await management();
-    return c.json(await service.listFiles(context, c.req.param('id'), c.req.query('path') ?? ''));
+    return c.json(
+      await service.listFiles(
+        context,
+        c.req.param('id'),
+        c.req.query('path') ?? '',
+        c.req.query('prepareDownloads') !== 'false',
+      ),
+    );
+  });
+  app.post('/v1/servers/:id/files/directories', async (c) => {
+    const context = await principal(c);
+    const { directories } = parse(
+      z.strictObject({ directories: z.array(z.string().max(4096)).min(1).max(48) }),
+      await body(c),
+    );
+    const service = await management();
+    return c.json({
+      results: await service.listDirectories(
+        context,
+        c.req.param('id'),
+        directories,
+        c.req.raw.signal,
+      ),
+    });
   });
   app.get('/v1/servers/:id/files/content', async (c) => {
     const context = await principal(c),

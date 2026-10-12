@@ -41,7 +41,7 @@ export function FilePathPicker({
   }>();
   const parsed = useMemo(() => parseFilePathInput(value), [value]);
   const query = useQuery({
-    ...fileDirectoryQuery(serverId, parsed?.parent ?? ''),
+    ...fileDirectoryQuery(serverId, parsed?.parent ?? '', { prepareDownloads: false }),
     enabled: Boolean(parsed),
     retry: false,
   });

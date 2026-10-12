@@ -538,6 +538,17 @@ export async function installBrowserFixtures(
         type: 'console',
         data: `[Server thread/INFO]: ${command === 'list' ? 'There are 0 of a max of 20 players online' : `Command received: ${command}`}`,
       }),
+    getDirectoryBatchSettings: async (id) => {
+      remote(id);
+      return { directoryBatchLimit: 48, directoryConcurrency: 2, directoryTimeoutSeconds: 8 };
+    },
+    listDirectoriesBatch: async (id, directories) =>
+      Promise.all(
+        directories.map(async (directory) => ({
+          directory,
+          files: await adapter.listFiles(id, directory),
+        })),
+      ),
     listFiles: async (id, directory = '') => {
       const r = remote(id),
         root = path(directory, true),

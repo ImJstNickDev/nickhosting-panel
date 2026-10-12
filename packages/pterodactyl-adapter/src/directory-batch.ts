@@ -28,7 +28,7 @@ export type DirectoryBatchResult = z.infer<typeof resultSchema>;
 const endpoint = (identifier: string, operation: string) =>
   `extensions/nickhosting/servers/${segment(identifier)}/${operation}`;
 
-/** Explicit experimental probe: older extensions report their native 404, without fallback. */
+/** Optional metadata capability: older extensions report their native 404, without fallback. */
 export function getDirectoryBatchSettings(transport: Transport, identifier: string) {
   return transport.json('client', endpoint(identifier, 'directory-settings'), settingsSchema);
 }

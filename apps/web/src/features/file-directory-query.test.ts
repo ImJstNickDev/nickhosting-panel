@@ -1,8 +1,11 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { queryClient } from '../api/client.js';
 import { fileDirectoryQuery } from './service-contracts.js';
 
-afterEach(() => queryClient.clear());
+afterEach(() => {
+  queryClient.clear();
+  vi.unstubAllGlobals();
+});
 
 it('isolates directory data when the session identity changes without a local sign-in action', () => {
   const context = {
@@ -26,4 +29,20 @@ it('isolates directory data when the session identity changes without a local si
   }
   queryClient.removeQueries({ queryKey: ['session'] });
   expect(queryClient.getQueryData(fileDirectoryQuery('server', 'world').queryKey)).toBeUndefined();
+});
+
+it('shares metadata keys without preparing downloads for path and tree discovery', async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json([]));
+  vi.stubGlobal('fetch', fetcher);
+  const foreground = fileDirectoryQuery('server', 'world');
+  const metadata = fileDirectoryQuery('server', 'world', { prepareDownloads: false });
+  expect(metadata.queryKey).toEqual(foreground.queryKey);
+  expect(metadata.staleTime).toBe(Number.POSITIVE_INFINITY);
+  expect(metadata.refetchOnWindowFocus).toBe(false);
+  await metadata.queryFn({ signal: new AbortController().signal });
+  expect(fetcher.mock.calls[0]?.[0]).toBe(
+    '/v1/servers/server/files?path=world&prepareDownloads=false',
+  );
+  await foreground.queryFn({ signal: new AbortController().signal });
+  expect(fetcher.mock.calls[1]?.[0]).toBe('/v1/servers/server/files?path=world');
 });

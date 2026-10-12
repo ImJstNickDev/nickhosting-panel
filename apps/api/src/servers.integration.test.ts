@@ -750,6 +750,74 @@ describe('M2 Hono API with real invitation, password and session authentication'
     ).toBe(204);
     expect(identity.mock.calls.length - identityBefore).toBe(2);
   });
+  it('authorizes directory batches once per request and keeps metadata prefetch separate from downloads', async () => {
+    const server = await f.server();
+    const originalSettings = f.adapter.getDirectoryBatchSettings;
+    const originalBatch = f.adapter.listDirectoriesBatch;
+    const originalDownloads = f.adapter.prefetchDownloads;
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 48,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files: [fileEntry('a.txt')] })),
+    );
+    const downloads = vi.fn(async () => {});
+    Object.assign(f.adapter, {
+      getDirectoryBatchSettings: settings,
+      listDirectoriesBatch: batch,
+      prefetchDownloads: downloads,
+    });
+    const path = `/v1/servers/${server}/files/directories`;
+    try {
+      for (const client of [null, outsider]) {
+        const response = await request(client, path, { directories: ['world'] });
+        expect(response.status).toBe(client ? 403 : 401);
+      }
+      expect(settings).not.toHaveBeenCalled();
+      expect(batch).not.toHaveBeenCalled();
+      expect(
+        (
+          await request(
+            user,
+            path,
+            { directories: ['world'] },
+            {
+              headers: { origin: 'https://foreign.example.test' },
+            },
+          )
+        ).status,
+      ).toBe(403);
+      expect(batch).not.toHaveBeenCalled();
+      const response = await request(user, path, { directories: ['world', 'logs'] });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        results: [
+          { directory: 'world', files: [fileEntry('a.txt')] },
+          { directory: 'logs', files: [fileEntry('a.txt')] },
+        ],
+      });
+      expect(batch).toHaveBeenCalledExactlyOnceWith(expect.any(String), ['world', 'logs']);
+      expect(downloads).not.toHaveBeenCalled();
+      for (const directories of [[], ['world', 'world'], ['../world'], Array(49).fill('world')])
+        expect((await request(user, path, { directories })).status).toBe(400);
+      expect(batch).toHaveBeenCalledTimes(1);
+      expect(
+        (await request(user, `/v1/servers/${server}/files?path=world&prepareDownloads=false`))
+          .status,
+      ).toBe(200);
+      expect(downloads).not.toHaveBeenCalled();
+      expect((await request(user, `/v1/servers/${server}/files?path=world`)).status).toBe(200);
+      expect(downloads).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.assign(f.adapter, {
+        getDirectoryBatchSettings: originalSettings,
+        listDirectoriesBatch: originalBatch,
+        prefetchDownloads: originalDownloads,
+      });
+    }
+  });
   it('isolates unrelated users from every server read and write surface before provider access', async () => {
     const server = await f.server();
     const reads = [

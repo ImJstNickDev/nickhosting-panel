@@ -14,7 +14,11 @@ import {
   createContainerObserver,
   createPterodactylAdapter,
   createTransportCoordinator,
+  type DirectoryBatchResult,
+  type DirectoryBatchSettings,
   type PterodactylAdapter,
+  PterodactylError,
+  relativePath,
 } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
 import { type Environment, reserveInstallation, reserveStart } from './admission.js';
@@ -241,6 +245,12 @@ export interface ManagementOptions {
 }
 
 const injectedAdapterBindings = new WeakMap<PterodactylAdapter, string>();
+// Performance settings only, never authorization or directory contents. Runtime
+// instances are request-scoped, so retain bounded metadata across those instances.
+const directoryBatchSettings = new WeakMap<
+  Kysely<Database>,
+  Map<string, { expiresAt: number; value: Promise<DirectoryBatchSettings> }>
+>();
 
 export async function createManagementRuntime(options: ManagementOptions) {
   async function timed<T>(
@@ -991,7 +1001,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
   ) {
     return withAccess(context, serverId, write, work, 'fresh', timing);
   }
-  async function listFiles(context: AuthContext, serverId: string, path: string) {
+  async function listFiles(
+    context: AuthContext,
+    serverId: string,
+    path: string,
+    prepareDownloads = true,
+  ) {
     const { identifier, files } = await withAccess(
       context,
       serverId,
@@ -1001,11 +1016,114 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
     // The authenticated listing is already available. Issuance is optional
     // background work and must not delay or replace a successful directory response.
-    const paths = files
-      .filter((file) => file.is_file && !file.is_symlink)
-      .map((file) => (path ? `${path}/${file.name}` : file.name));
-    if (paths.length) void adapter.prefetchDownloads(identifier, paths).catch(() => {});
+    if (prepareDownloads) {
+      const paths = files
+        .filter((file) => file.is_file && !file.is_symlink)
+        .map((file) => (path ? `${path}/${file.name}` : file.name));
+      if (paths.length) void adapter.prefetchDownloads(identifier, paths).catch(() => {});
+    }
     return files;
+  }
+  async function listDirectories(
+    context: AuthContext,
+    serverId: string,
+    directories: string[],
+    signal?: AbortSignal,
+  ): Promise<DirectoryBatchResult[]> {
+    signal?.throwIfAborted();
+    if (
+      !Array.isArray(directories) ||
+      !directories.length ||
+      directories.length > 48 ||
+      new Set(directories).size !== directories.length
+    )
+      throw new DomainError('validation_failed');
+    for (const path of directories) {
+      relativePath(path, true);
+      if (Buffer.byteLength(path, 'utf8') > 4096 || /\p{C}/u.test(path))
+        throw new DomainError('validation_failed');
+    }
+    const outcome = await withAccess(
+      context,
+      serverId,
+      false,
+      async (identifier, _connection, _current, server) => {
+        try {
+          signal?.throwIfAborted();
+          let cache = directoryBatchSettings.get(db);
+          if (!cache) {
+            cache = new Map();
+            directoryBatchSettings.set(db, cache);
+          }
+          const key = JSON.stringify([consoleProviderBinding, directoryServerIdentity(server)]);
+          let settings = cache.get(key);
+          if (!settings || settings.expiresAt <= performance.now()) {
+            cache.delete(key);
+            if (cache.size >= 256) cache.delete(cache.keys().next().value as string);
+            settings = {
+              expiresAt: performance.now() + 60_000,
+              value: adapter.getDirectoryBatchSettings(identifier),
+            };
+            cache.set(key, settings);
+          }
+          let configuration: DirectoryBatchSettings;
+          try {
+            configuration = await settings.value;
+          } catch (error) {
+            // Missing optional endpoints need a cooldown; transient outages must
+            // not disable prefetch for a full minute after the provider recovers.
+            if (
+              !(
+                error instanceof PterodactylError && [404, 405].includes(error.upstreamStatus ?? 0)
+              ) &&
+              cache.get(key) === settings
+            )
+              cache.delete(key);
+            throw error;
+          }
+          const { directoryBatchLimit, directoryTimeoutSeconds } = configuration;
+          const deadline = performance.now() + directoryTimeoutSeconds * 1000;
+          const results: DirectoryBatchResult[] = [];
+          let responseBytes = 0;
+          for (let offset = 0; offset < directories.length; offset += directoryBatchLimit) {
+            signal?.throwIfAborted();
+            if (performance.now() >= deadline) {
+              results.push(
+                ...directories
+                  .slice(offset)
+                  .map((directory) => ({ directory, error: 'deadline_exceeded' as const })),
+              );
+              break;
+            }
+            const chunk = await adapter.listDirectoriesBatch(
+              identifier,
+              directories.slice(offset, offset + directoryBatchLimit),
+            );
+            // Splitting for a lower Owner limit must not multiply the response budget.
+            responseBytes += Buffer.byteLength(JSON.stringify(chunk), 'utf8');
+            if (responseBytes > 8 * 1024 * 1024) throw new DomainError('integration_unavailable');
+            results.push(...chunk);
+          }
+          // Optional metadata prefetch must never issue download URLs, fetch file
+          // contents, or fan out to native listings when Blueprint is unavailable.
+          return { results };
+        } catch (error) {
+          if (
+            (error instanceof PterodactylError &&
+              [401, 403, 409].includes(error.upstreamStatus ?? 0)) ||
+            (error instanceof DomainError && error.code === 'provenance_mismatch')
+          )
+            directoryIdentityCache.invalidate(serverId);
+          // Optional prefetch errors say nothing about the identity proof we
+          // just established, except explicit contradictory identity/access
+          // responses above. Leave it reusable for missing endpoints/outages.
+          return { error };
+        }
+      },
+      'directory',
+    );
+    if ('error' in outcome) throw outcome.error;
+    return outcome.results;
   }
   function fileReadAccess<T>(
     context: AuthContext,
@@ -1071,6 +1189,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     uploadBatchAccess,
     uploadBatchBinding,
     listFiles,
+    listDirectories,
     fileReadAccess,
     authorizeTransfer,
     lifecycle,

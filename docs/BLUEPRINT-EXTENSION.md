@@ -675,6 +675,9 @@ It does not reverse Blueprint's shared housekeeping. SFTPGo #18 remains unchange
 
 ## 2026-10-13 — 1.4.0-dev directory-list experiment
 
+Historical prerelease record. Stable promotion and current defaults are recorded
+in the [1.4.0 follow-up](#2026-10-13--140-stable-directory-batches).
+
 The Owner chose a Blueprint batch experiment before considering direct Wings
 access. This is a minor prerelease, not a stable replacement for 1.3.0. It adds
 metadata reads and configurable batch bounds; no migration or recursive browser
@@ -733,3 +736,47 @@ incorrect missing-directory smoke assertion, the installed native HTTP 500
 finding, resource observations and sampling limitations. This supports bounded
 prefetch exploration, not an automatic switch of the file manager or a claim
 that single-directory latency disappeared.
+
+## 2026-10-13 — 1.4.0 stable directory batches
+
+The Owner approved stable promotion after the
+[batch-size comparison](M5-DIRECTORY-BENCHMARK.md#2026-10-13--batch-size-and-concurrency-comparison).
+Version **1.4.0** defaults to **48 directories / two concurrent Wings reads /
+eight seconds**. Administrator labels no longer call this experimental. Existing
+saved settings take precedence and are preserved, including the four-reader
+override used in the last benchmark. Promotion does not silently reset Owner
+configuration. Per-batch authorization, bounds, deadlines and native Wings
+filesystem semantics are unchanged; there are no new migrations.
+
+The independently reviewed archive was installed using the existing standard
+Blueprint update command. The hook reported **Nothing to migrate** and the
+installer completed successfully. Stable archive SHA-256:
+`f11207f60ad38436100d6b552361c9d03211b5b9940cd4868f78ccdf417f5571`.
+The exact 1.4.0-dev and 1.3.0 archives and a scoped pre-update file backup remain
+private. Blueprint performed its normal cache/queue/ownership finalization;
+no manual Panel core patch, Wings change, game operation or network change was
+performed.
+
+Read-only discovery confirmed version 1.4.0 and `bulkDirectoryListings=true`.
+Live settings remained **48/4/8**, correctly preserving the saved override.
+One batch over the existing balanced/wide fixture directories returned 12/502
+entries, identical to the native API. No fixture file was created, changed or
+deleted, and no signed download URL was needed for this check.
+
+Validation: 12 package tests, 266 vendor-backed isolated PHP checks and 32
+expanded PHP syntax checks passed. New regressions cover the 48-path boundary,
+constant five-query batch authorization and saved override preservation. Actual
+Blade fixtures were rendered and reviewed in Chromium:
+[desktop EN](screenshots/m5/blueprint-directory-stable-desktop-en.png) and
+[mobile IT](screenshots/m5/blueprint-directory-stable-mobile-it.png). They show
+nine labelled settings, stable version/defaults, eight feature bullets and no
+horizontal overflow. These are sanitized framework fixtures, not authenticated
+production screenshots.
+
+NickHosting's optional bounded prefetch uses the
+[metadata API contract](M5-API-CONTRACTS.md#directory-metadata-batches-blueprint-140).
+Rollback is the retained previous archive through the same standard update plus
+a source revert; no schema rollback is required. A missing batch endpoint simply
+disables optional acceleration, leaving native foreground navigation available.
+It does not remove the existing technical-account/mail guards or weaken the
+separate SFTPGo production-release gate in issue #18.

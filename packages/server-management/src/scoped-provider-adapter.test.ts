@@ -12,6 +12,8 @@ describe('managed owner Client credential dispatch', () => {
     'reinstall',
     'sendCommand',
     'listFiles',
+    'getDirectoryBatchSettings',
+    'listDirectoriesBatch',
     'readFile',
     'readFileForEditor',
     'prefetchDownloads',

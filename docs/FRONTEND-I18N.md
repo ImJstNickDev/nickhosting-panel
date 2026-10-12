@@ -671,3 +671,26 @@ without adding a second outer rectangle or shadow. Other keyboard controls retai
 their focus outlines. Forced-colors mode restores an explicit system Highlight
 outline for text entry; component-specific states such as invalid fields remain
 visible. This is a shared field style, not an editor-only override.
+
+### Silent directory prefetch
+
+File navigation may display previously listed metadata immediately while refreshing
+only the open directory. Leaving Files still resets the folder to root; reloading
+within Files restores that folder and its bounded, tab-local snapshot. Unchanged
+rows retain their identity while additions, removals and metadata changes reconcile.
+
+Visible folder rows seed optional Blueprint directory batches. Work is limited
+to three levels below the open folder, 96 candidate directories per navigation,
+and one batch of at most 48 paths in flight. Visibility and per-depth budgets
+prevent scrolling past a wide tree from triggering an unbounded recursive crawl.
+Cached descendants are reused without recurring polling; speculative results
+cannot overwrite a newer foreground response or a mutation invalidation.
+
+Only directory metadata is cached. In-memory inactive listings use a bounded
+192-directory / 8 MiB serialized-metadata budget; active view data remains usable.
+This is a cache budget, not a claim that total browser heap is exactly 8 MiB.
+The separate reload snapshot remains one folder, at most 5,000 entries / 1 MiB.
+Identity/session/server scopes remain isolated. Background listings do not prepare
+signed URLs; only the open folder does so. No new banner, progress label, toast,
+marketing copy or notification accompanies prefetch. Optional failures silently
+leave ordinary navigation available; foreground errors are still reported.

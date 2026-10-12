@@ -24,6 +24,7 @@ import type {
 } from '../../../../packages/server-management/src/schedules.js';
 import { api, queryClient } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
+import { directoryMemory } from './file-directory-memory.js';
 
 export type ServerInfo = Result<typeof getPlatformServer>;
 export type Transfers = Result<typeof getPlatformTransfers>;
@@ -43,7 +44,12 @@ export function serverPath(id: string) {
 export function platformPath(id: string) {
   return `/v1/platform/servers/${encodeURIComponent(id)}`;
 }
-export function fileDirectoryQuery(id: string, directory: string) {
+export function fileDirectoryQuery(
+  id: string,
+  directory: string,
+  options: { prepareDownloads?: boolean } = {},
+) {
+  directoryMemory(queryClient);
   const context = queryClient.getQueryData<{ context: AuthContext }>(['session'])?.context;
   const identity = context
     ? [context.actorUserId, context.subjectUserId, context.sessionType, context.support?.id ?? '']
@@ -51,10 +57,17 @@ export function fileDirectoryQuery(id: string, directory: string) {
   return {
     // Keep all listing consumers on the same cache, without reusing another identity's data.
     queryKey: ['files', id, directory, identity] as const,
+    // Metadata is immediately reusable; opening a folder always refreshes it independently.
+    gcTime: 30 * 60 * 1000,
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchOnWindowFocus: false,
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      api<ServerFile[]>(`${serverPath(id)}/files?path=${encodeURIComponent(directory)}`, {
-        signal,
-      }),
+      api<ServerFile[]>(
+        `${serverPath(id)}/files?path=${encodeURIComponent(directory)}${options.prepareDownloads === false ? '&prepareDownloads=false' : ''}`,
+        {
+          signal,
+        },
+      ),
   };
 }
 export function useServer(id: string) {

@@ -29,8 +29,8 @@ function directoryRequest(array $paths, $server = null, $user = null, mixed $tok
     global $uploadServer,$uploadUser;
     return transferRequest('directory-list',['directories'=>$paths],$server??$uploadServer,$user??$uploadUser,$token);
 }
-$directoryDefaults = ['directoryBatchLimit'=>24,'directoryConcurrency'=>2,'directoryTimeoutSeconds'=>8];
-check($settings->directory()===$directoryDefaults,'directory settings have bounded experimental defaults');
+$directoryDefaults = ['directoryBatchLimit'=>48,'directoryConcurrency'=>2,'directoryTimeoutSeconds'=>8];
+check($settings->directory()===$directoryDefaults,'directory settings have bounded stable defaults');
 $directorySettings = new DirectorySettingsController();
 $discoveryRequest=transferRequest('directory-settings',[],$uploadServer,$uploadUser);
 check($discoveryRequest->authorize() && $directorySettings($discoveryRequest,$uploadServer)->getData(true)===$directoryDefaults,
@@ -59,7 +59,7 @@ check($access->handle($directoryReq,fn()=>true)===true,'directory listing native
 $uploadServer->status=Pterodactyl\Models\Server::STATUS_SUSPENDED;
 denied(fn()=>$access->handle($directoryReq,fn()=>true),409,'directory listing rejects suspended server');
 $uploadServer->status=null;
-foreach ([[],['',''],['a','a'],['named'=>'a'],[null],[1],[false],['/'],['/a'],['a/'],['a//b'],['.'],['..'],['a/../b'],['a/./b'],['a\\b'],['%2f'],["a\0b"],["a\nb"],[str_repeat('a',4097)],array_map(fn($n)=>'d'.$n,range(1,25))] as $paths) {
+foreach ([[],['',''],['a','a'],['named'=>'a'],[null],[1],[false],['/'],['/a'],['a/'],['a//b'],['.'],['..'],['a/../b'],['a/./b'],['a\\b'],['%2f'],["a\0b"],["a\nb"],[str_repeat('a',4097)],array_map(fn($n)=>'d'.$n,range(1,49))] as $paths) {
     try { directoryRequest($paths); throw new LogicException('expected invalid directories'); }
     catch (Illuminate\Validation\ValidationException $error) { check(true,'directory listing rejects invalid or excessive canonical paths'); }
 }
@@ -87,10 +87,10 @@ check($seen[0]['options']['timeout']<=8 && $seen[0]['options']['connect_timeout'
     'directory reads override native long timeout and disable redirects');
 
 DB::connection()->enableQueryLog();DB::connection()->flushQueryLog();
-$seen=[];$repo=directoryRepo(array_fill(0,24,new Response(200,[],'[]')),$seen);
-(new DirectoryListController($repo))(directoryRequest(array_map(fn($n)=>'d'.$n,range(1,24))),$uploadServer);
+$seen=[];$repo=directoryRepo(array_fill(0,48,new Response(200,[],'[]')),$seen);
+(new DirectoryListController($repo))(directoryRequest(array_map(fn($n)=>'d'.$n,range(1,48))),$uploadServer);
 $queries=DB::connection()->getQueryLog();DB::connection()->disableQueryLog();
-check(count($seen)===24 && count($queries)===5,'24 listings use three setting reads and two managed-identity reads total');
+check(count($seen)===48 && count($queries)===5,'48 listings use three setting reads and two managed-identity reads total');
 
 // Real Guzzle Pool with deferred fake promises, never a network socket.
 $repo=new MemoryDirectoryRepository($app);$repo->setServer($uploadServer);
@@ -144,4 +144,9 @@ $settings->saveOperational(['directoryBatchLimit'=>1,'directoryConcurrency'=>1,'
 check($directorySettings(transferRequest('directory-settings',[],$uploadServer,$uploadUser),$uploadServer)->getData(true)===
     ['directoryBatchLimit'=>1,'directoryConcurrency'=>1,'directoryTimeoutSeconds'=>1],'directory settings expose Owner overrides');
 try{directoryRequest(['a','b']);throw new LogicException('expected limit');}catch(Illuminate\Validation\ValidationException $error){check(true,'directory validator applies configured count');}
+$settings->saveOperational(['directoryBatchLimit'=>48,'directoryConcurrency'=>4,'directoryTimeoutSeconds'=>8]);
+$settings->saveOperational(['downloadBatchLimit'=>$settings->transfer()['downloadBatchLimit']]);
+check((new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Settings())->directory()===
+    ['directoryBatchLimit'=>48,'directoryConcurrency'=>4,'directoryTimeoutSeconds'=>8],
+    'stable settings preserve an existing Owner concurrency override across reads and unrelated saves');
 $settings->saveOperational($directoryDefaults);

@@ -65,6 +65,7 @@ import { nextUpload, planUploadBatch, runUploadPool } from './file-upload-queue.
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
+import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 
 type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'extract';
 type UploadItem = {
@@ -397,6 +398,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   );
   const files = useQuery({
     ...directoryQuery,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    staleTime: 0,
     // A restored snapshot is display data, never evidence of a fresh listing.
     placeholderData: cachedListing,
     queryFn: async (context) => {
@@ -513,6 +517,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     () => visibleFiles(files.data ?? [], search, order, descending),
     [files.data, search, order, descending],
   );
+  useDirectoryPrefetch({
+    serverId,
+    directory,
+    identity: JSON.stringify(directoryQuery.queryKey[3]),
+    container: managerRef,
+    rows,
+    enabled: Boolean(saveScope && files.data && !files.error && !editing),
+  });
   const canManage = server.data?.permissions.manage === true;
   const canMutate = canManage && server.data?.availableActions.files === true;
   const uploadAvailable = transfers.data?.upload.available === true;
@@ -2082,6 +2094,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               {rows.map((entry) => (
                 <li
                   key={entry.name}
+                  data-directory-path={
+                    !entry.is_file && !entry.is_symlink ? join(directory, entry.name) : undefined
+                  }
                   className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''}`}
                   draggable={canMutate && !entry.is_symlink}
                   onDragStart={(event) => {

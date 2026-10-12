@@ -14,6 +14,8 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   reinstall: 0,
   sendCommand: 0,
   listFiles: 0,
+  getDirectoryBatchSettings: 0,
+  listDirectoriesBatch: 0,
   readFile: 0,
   readFileForEditor: 0,
   prefetchDownloads: 0,

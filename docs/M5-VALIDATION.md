@@ -6534,3 +6534,84 @@ was exported. The exact stable 1.3.0 artifact and scoped backup remain private f
 rollback through the standard approved update; no database rollback is required.
 No historical full milestone suite was rerun. M5 PR #21 remains open/unmerged;
 SFTPGo #18 is unchanged. Recursive prefetch remains a separate follow-up.
+
+### 2026-10-13 — Stable Blueprint 1.4.0 and silent directory prefetch
+
+The Owner approved implementation after the
+[96-directory comparison](M5-DIRECTORY-BENCHMARK.md#2026-10-13--batch-size-and-concurrency-comparison).
+Stable Blueprint defaults are 48 paths / two simultaneous Wings reads / eight
+seconds. The ordinary Files view now prefetches only metadata through the managed,
+authorized batch endpoint. Visible folders seed up to three levels, with at most
+96 candidates per navigation, 48 paths per request and one request in flight.
+Cached descendants are reused; only the opened folder refreshes and prepares
+download URLs. No notification, banner or progress text was added.
+
+The browser retains at most 192 inactive directory listings / 8 MiB serialized
+metadata, while keeping active data usable. This is not a total-heap guarantee.
+The existing single-folder reload snapshot remains at most 1 MiB / 5,000 entries.
+Identity scoping, mutation invalidation, current-folder reload and root-on-tab-reentry
+remain intact. Prefetch aborts on navigation and cannot overwrite newer foreground
+results. Lower Owner batch limits use bounded sequential chunks; missing Blueprint
+support never causes native request fanout. Foreground browsing remains functional.
+
+Focused validation on final source; the historical full M1–M5 matrix was not rerun:
+
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/scoped-provider-adapter.test.ts packages/pterodactyl-adapter/src/directory-batch.test.ts`:
+  **82 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts apps/api/src/servers.integration.test.ts -t 'directory batches|directory extension|directory metadata|path and tree|invalid directory|directory settings'`:
+  **15 passed, 142 skipped by filter**. Covers authentication, outsider/Origin
+  rejection, canonical paths, one identity proof, Owner-key selection, settings
+  refresh, transient recovery, abort/deadline/response budgets and no signing.
+- Independent review found that an optional-batch catch also preserved a proof
+  after contradictory provider identity errors. Corrected 401/403/409 and
+  provenance-mismatch handling to invalidate it, retaining the optional behavior
+  for absent endpoints/outages. Reran only affected checks:
+  `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts -t 'contradictory directory batch|directory extension'`:
+  **4 passed, 80 skipped** (three new cases and the repeated missing-endpoint case).
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-directory-memory.test.ts apps/web/src/features/file-directory-prefetch.test.ts apps/web/src/features/file-directory-query.test.ts apps/web/src/features/file-listing-cache.test.ts`:
+  **25 passed**. Includes memory/work bounds, visible roots, old descendant reuse,
+  identity separation, cancellation, late responses, foreground/mutation fences,
+  unsafe-name/symlink exclusion and snapshot compatibility.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-directory-prefetch.browser.test.ts`:
+  **3 passed**, final run 32.96 seconds. Real application handlers and the existing
+  isolated test database, with fixture external-provider metadata, prove a
+  500-folder listing does not preload all offscreen folders, scrolling reveals
+  new candidates, cached rows remain visible under a held GET, changed rows
+  reconcile without replacing unchanged DOM rows, download preparation stays
+  separated, tab exit aborts work and optional 503 failures stay silent. Reload
+  and root re-entry behavior also passed. An earlier run passed before the final
+  cache defaults; only these three affected browser cases were rerun afterward.
+- `scripts/dev.sh pnpm typecheck`: passed for backend, WebPanel and browser-test
+  types. Focused Biome and `git diff --check` passed. No dependency installation
+  or historical full build/test matrix was needed.
+- Indexed governance passed: **669 text files, 205 review PNGs, 578 relative
+  links, four TOML files and 44 ignore cases**; the heuristic secret scan passed.
+- Extension validation: **12 package tests, 266 isolated PHP checks and 32 expanded
+  PHP syntax checks passed**. Commands and stable artifact/installation evidence
+  are recorded in the [extension follow-up](BLUEPRINT-EXTENSION.md#2026-10-13--140-stable-directory-batches).
+
+Independent source, rendered UI and content review found no remaining must-fix.
+Reviewed real-browser fixtures:
+[Files root](screenshots/m5/files-prefetch-root-desktop-en.png),
+[opened folder](screenshots/m5/files-prefetch-open-desktop-en.png),
+[Blueprint EN](screenshots/m5/blueprint-directory-stable-desktop-en.png),
+[Blueprint IT](screenshots/m5/blueprint-directory-stable-mobile-it.png).
+There was no Files layout/copy redesign. A rare shared, already-running metadata
+GET can skip optional URL warming for that navigation; normal on-demand issuance
+remains available. No duplicate GET was added solely for this optimization.
+
+The authorized standard Blueprint update installed 1.4.0 successfully and reported
+**Nothing to migrate**. Existing saved settings remained **48/4/8**; the new
+default does not overwrite the Owner's last benchmark override. Read-only live
+discovery and one two-directory fixture batch matched the native API (12/502
+entries). API, Vite and Panel remained running/healthy; dev HTTPS and Panel login
+returned HTTP 200. No manual container restart, network change, game-file mutation
+or power command occurred. Existing fixture assets remain unchanged; isolated
+test schemas use their normal cleanup.
+
+Rollback: revert the NickHosting source and, if necessary, apply the retained
+1.4.0-dev or 1.3.0 archive using the standard approved Blueprint update. No schema
+rollback is required. Optional batch absence leaves foreground navigation intact.
+Framework housekeeping is not reversed by code rollback. Private credentials,
+raw timings, scoped backups and archives remain untracked. PR #21 remains open
+and unmerged; SFTPGo #18 remains a separate production-release blocker.

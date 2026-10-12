@@ -7,7 +7,7 @@ final class Settings
 {
     // Upper bounds preserve the existing queue timeout/claim budget and token lifetime.
     public const OPERATIONAL = [
-        'directoryBatchLimit' => ['default' => 24, 'min' => 1, 'max' => 64],
+        'directoryBatchLimit' => ['default' => 48, 'min' => 1, 'max' => 64],
         'directoryConcurrency' => ['default' => 2, 'min' => 1, 'max' => 4],
         'directoryTimeoutSeconds' => ['default' => 8, 'min' => 1, 'max' => 10],
         'downloadBatchLimit' => ['default' => 2500, 'min' => 1, 'max' => 2500],

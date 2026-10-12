@@ -1,7 +1,8 @@
 # Directory prefetch measurements — 2026-10-12
 
-Latest follow-up: the [1.4.0-dev comparison](#2026-10-13--blueprint-140-dev-batch-comparison)
-measures the Owner-approved batch extension against native directory calls.
+Latest follow-up: the [batch-size comparison](#2026-10-13--batch-size-and-concurrency-comparison)
+measures 12/24/48-directory batches at two/four concurrent Wings reads. Earlier
+experiments and their evidence boundaries are retained below.
 
 Scope: measurement and design recommendation only, on source commit
 `4642e289cae0f7c0a6e0a2f343344f97e574087a`, M5 / PR #21. No recursive prefetch,
@@ -399,3 +400,51 @@ small, prioritize visible candidate folders, refresh only the opened folder and
 prepare signed URLs only for that opened folder. No automatic whole-tree crawl
 or new frontend cache budget is activated by this work. The fixture remains;
 there are no new game assets or fixture changes to clean up from this comparison.
+
+## 2026-10-13 — Batch size and concurrency comparison
+
+The Owner changed only the extension's directory settings between two bounded,
+read-only runs. Both used exactly the same 96 fixture paths and metadata
+fingerprints: the balanced root, ten parents, 84 grandchildren and the wide
+directory containing 502 entries. Three repetitions per method rotated batch
+sizes. Native reads used two simultaneous requests; Blueprint sent one batch
+request at a time, with two or four concurrent Wings reads inside Panel.
+No file body or signed download URL was requested.
+
+Elapsed times below cover **all 96 directories**, in seconds, including response
+parsing and metadata comparison. Settings requests and six-second inter-stage
+pauses are excluded. These are warm runs, not cold disk or browser timings.
+
+| Method | Minimum | Maximum | Mean | Median |
+| --- | ---: | ---: | ---: | ---: |
+| Native Client API, concurrency 2 | 11.877 | 12.170 | 12.056 | 12.120 |
+| A: batch 12, concurrency 2 | 1.984 | 2.414 | 2.231 | 2.295 |
+| B: batch 24, concurrency 2 | 1.024 | 1.348 | 1.165 | 1.124 |
+| C: batch 48, concurrency 2 | 0.736 | 0.938 | 0.810 | 0.755 |
+| D: batch 12, concurrency 4 | 2.324 | 2.616 | 2.460 | 2.440 |
+| E: batch 24, concurrency 4 | 1.242 | 1.546 | 1.392 | 1.389 |
+| F: batch 48, concurrency 4 | 0.621 | 0.953 | 0.751 | 0.677 |
+
+Batch 48 reduces Panel listing requests per pass from 96 to two; Wings still
+reads 96 directories. Its two-reader mean is about 15 times faster than native
+listing. Four readers save only 59 ms (7.3%) at batch 48, with overlapping ranges;
+the smaller batches were slower. The two concurrency phases ran separately under
+different background loads. Three samples do not establish a reliable benefit
+from four readers or isolate CPU efficiency. **48 paths / two reads** is the
+selected conservative default for the stable extension.
+
+All recorded directory responses were HTTP 200, metadata matched, and both
+monitors exited successfully without safety stops. Including discovery,
+preflight and recovery, the two runs made 405 Panel requests representing 2,044
+Wings directory reads. Host CPU sampling peaked at 51.9%; available RAM remained
+at least 27.5 GiB. Panel/Wings CPU readings include unrelated live work and are
+not attributable solely to these requests. Guards covered remaining API budget,
+individual request deadlines, total work and sustained host/container pressure.
+
+Private raw JSONL, resource samples and the combined summary remain under
+`.codex/local/dirscan-sweetspot-*`. The existing monitor invoked the private
+`directory-sweetspot-bench.mjs` helper for the c2/c4 inputs. Independent review
+recomputed the table and checked identical fingerprints. No source change,
+installation, restart, fixture write or cleanup occurred in these benchmark
+runs. The Owner subsequently authorized stable 1.4.0 and bounded file-manager
+prefetch; that implementation is documented separately from these measurements.

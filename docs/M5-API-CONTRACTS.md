@@ -836,11 +836,11 @@ possible provider filesystem types were tested live. Initial cold issuance and
 HTTP latency remain real; the acceleration depends on background preparation
 finishing before the read.
 
-### Experimental directory batches (Blueprint 1.4.0-dev)
+### Directory metadata batches (Blueprint 1.4.0)
 
-This is an opt-in provider-adapter contract, not a new browser endpoint or an
-automatic file-manager prefetch policy. `listFiles` and opened-folder download
-preparation retain their existing behavior. See the
+The original prerelease added the provider-adapter contract; stable 1.4.0 is
+also used by the bounded browser prefetch described below. `listFiles` and
+opened-folder download preparation retain their existing behavior. See the
 [extension contract](BLUEPRINT-EXTENSION.md#2026-10-13--140-dev-directory-list-experiment)
 for Client endpoints, permissions and configurable limits.
 
@@ -854,9 +854,32 @@ ordinary JSON responses retain their existing 4 MiB bound. Settings are not an
 authorization grant. Callers must still resolve the managed server and authorized
 user credential before invoking the adapter.
 
-There is no implicit fallback, recursion, download issuance or cache warming.
+The provider adapter itself performs no implicit fallback, recursion or download issuance.
 The read-only POST does not claim an uncertain filesystem mutation on transport
 failure. Configure the caller timeout above the chosen whole-batch deadline plus
 Panel/network overhead: defaults are 10 seconds at the adapter and 8 seconds in
 the extension. Raising the extension deadline to 10 seconds also requires a
 longer caller timeout if partial timeout results must be received.
+
+`POST /v1/servers/:id/files/directories` accepts `{directories:string[]}` with
+1–48 unique canonical paths and returns `{results:DirectoryBatchResult[]}`.
+It is an authenticated, authorized metadata read, despite the POST method; normal
+Origin validation applies. It uses the managed resource owner's Client key and
+the existing directory identity proof. Lower extension batch limits are respected
+with sequential chunks. It never requests file bodies or signed URLs and never
+falls back to many native requests when the optional extension is unavailable.
+Provider permissions and identity checks remain mandatory; cached listings grant
+no authority to read or mutate files.
+
+`GET /v1/servers/:id/files?path=...&prepareDownloads=false` supplies metadata
+without background signing for path completion and destination-tree browsing.
+The open Files listing keeps default download preparation. Prefetched descendants
+are display hints; entering one revalidates that folder and prepares only its
+listed regular files. Errors from optional background prefetch do not replace
+the current listing or trigger notifications. Actual foreground failures retain
+the existing actionable error states.
+
+Download URL preparation remains best-effort: if opening a directory shares an
+already-running metadata-only path/tree query, that response does not sign URLs.
+The existing on-demand editor/download issuance handles a cold cache. No extra
+directory request is made solely to warm signed URLs in this uncommon case.

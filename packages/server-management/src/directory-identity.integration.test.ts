@@ -3,7 +3,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import {
+  type ApplicationServer,
+  type PterodactylAdapter,
+  PterodactylError,
+} from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDirectoryIdentityCache } from './directory-identity.js';
 import { createProject, setProjectMember } from './registry.js';
@@ -118,6 +122,234 @@ describe('directory browsing identity proof reuse', () => {
     for (const path of ['', 'world', 'world/playerdata']) await browse(path);
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing.mock.calls.map((call) => call[1])).toEqual(['', 'world', 'world/playerdata']);
+  });
+
+  it('batches only directory metadata with one identity proof and sequential Owner-limited chunks', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 2,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    let active = 0;
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) => {
+      expect(active++).toBe(0);
+      await delay(1);
+      active--;
+      return paths.map((directory) =>
+        directory === 'missing'
+          ? { directory, error: 'not_found' as const }
+          : { directory, files: [] },
+      );
+    });
+    const downloads = vi.fn(async () => {});
+    Object.assign(f.adapter, {
+      getDirectoryBatchSettings: settings,
+      listDirectoriesBatch: batch,
+      prefetchDownloads: downloads,
+    });
+    const directories = ['', 'world', 'world/region', 'logs', 'missing'];
+    for (let count = 0; count < 2; count++) {
+      expect(await (await runtime()).listDirectories(f.context, serverId, directories)).toEqual(
+        directories.map((directory) =>
+          directory === 'missing' ? { directory, error: 'not_found' } : { directory, files: [] },
+        ),
+      );
+    }
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls.map(([, paths]) => paths)).toEqual([
+      ['', 'world'],
+      ['world/region', 'logs'],
+      ['missing'],
+      ['', 'world'],
+      ['world/region', 'logs'],
+      ['missing'],
+    ]);
+    expect(listing).not.toHaveBeenCalled();
+    expect(downloads).not.toHaveBeenCalled();
+  });
+
+  it('does not fan out to native listings when the optional directory extension is absent', async () => {
+    const settings = vi.fn(async () => {
+      throw new PterodactylError('unavailable', 'client', 'rejected', 404);
+    });
+    const batch = vi.fn();
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    for (let count = 0; count < 2; count++)
+      await expect(
+        (await runtime()).listDirectories(f.context, serverId, ['world']),
+      ).rejects.toMatchObject({ upstreamStatus: 404 });
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(batch).not.toHaveBeenCalled();
+    expect(listing).not.toHaveBeenCalled();
+    await browse('world');
+    expect(listing).toHaveBeenCalledTimes(1);
+    expect(remote).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([401, 403, 409])(
+    'invalidates identity after contradictory directory batch access status %s',
+    async (status) => {
+      const settings = vi.fn(async () => ({
+        directoryBatchLimit: 48,
+        directoryConcurrency: 2,
+        directoryTimeoutSeconds: 8,
+      }));
+      const batch = vi.fn(async () => {
+        throw new PterodactylError('unavailable', 'client', 'rejected', status);
+      });
+      Object.assign(f.adapter, {
+        getDirectoryBatchSettings: settings,
+        listDirectoriesBatch: batch,
+      });
+      await browse('world');
+      expect(remote).toHaveBeenCalledTimes(1);
+      await expect(
+        (await runtime()).listDirectories(f.context, serverId, ['world']),
+      ).rejects.toMatchObject({ upstreamStatus: status });
+      await browse('world');
+      expect(remote).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('retries transient directory settings failures and refreshes their bounded cache after expiry', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 48,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    settings.mockRejectedValueOnce(new PterodactylError('unavailable', 'client', 'rejected', 503));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files: [] })),
+    );
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    await expect(
+      (await runtime()).listDirectories(f.context, serverId, ['world']),
+    ).rejects.toMatchObject({ upstreamStatus: 503 });
+    await (await runtime()).listDirectories(f.context, serverId, ['world']);
+    await (await runtime()).listDirectories(f.context, serverId, ['world']);
+    expect(settings).toHaveBeenCalledTimes(2);
+    const now = performance.now();
+    const time = vi.spyOn(performance, 'now').mockReturnValue(now + 60_001);
+    try {
+      await (await runtime()).listDirectories(f.context, serverId, ['world']);
+      expect(settings).toHaveBeenCalledTimes(3);
+      expect(remote).toHaveBeenCalledTimes(1);
+    } finally {
+      time.mockRestore();
+    }
+  });
+
+  it.each(['abort', 'deadline'] as const)(
+    'stops dispatching directory batches after %s',
+    async (reason) => {
+      const settings = vi.fn(async () => ({
+        directoryBatchLimit: 1,
+        directoryConcurrency: 2,
+        directoryTimeoutSeconds: 8,
+      }));
+      const controller = new AbortController();
+      const now = performance.now();
+      const time = vi.spyOn(performance, 'now').mockReturnValue(now);
+      const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) => {
+        if (reason === 'abort') controller.abort();
+        else time.mockReturnValue(now + 8_001);
+        return paths.map((directory) => ({ directory, files: [] }));
+      });
+      Object.assign(f.adapter, {
+        getDirectoryBatchSettings: settings,
+        listDirectoriesBatch: batch,
+      });
+      try {
+        const result = (await runtime()).listDirectories(
+          f.context,
+          serverId,
+          ['world', 'logs', 'plugins'],
+          controller.signal,
+        );
+        if (reason === 'abort') await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+        else
+          expect(await result).toEqual([
+            { directory: 'world', files: [] },
+            { directory: 'logs', error: 'deadline_exceeded' },
+            { directory: 'plugins', error: 'deadline_exceeded' },
+          ]);
+        expect(batch).toHaveBeenCalledTimes(1);
+        expect(listing).not.toHaveBeenCalled();
+      } finally {
+        time.mockRestore();
+      }
+    },
+  );
+
+  it('retains one total response budget when directory batches are split for a lower Owner limit', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 1,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    const files = Array.from({ length: 1024 }, () => ({
+      name: 'x'.repeat(4096),
+      size: 0,
+      is_file: true,
+      is_symlink: false,
+      mode: '0644',
+      mimetype: 'text/plain',
+      created_at: '',
+      modified_at: '',
+    }));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files })),
+    );
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    await expect(
+      (await runtime()).listDirectories(f.context, serverId, ['world', 'logs', 'plugins']),
+    ).rejects.toMatchObject({ code: 'integration_unavailable' });
+    expect(batch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(
+    [
+      [],
+      ['world', 'world'],
+      ['../world'],
+      ['/world'],
+      ['world/'],
+      ['world\u200b'],
+      Array.from({ length: 49 }, (_, index) => `folder-${index}`),
+    ].map((directories) => ({ directories })),
+  )(
+    'rejects invalid directory batches before provider calls: $directories',
+    async ({ directories }) => {
+      const settings = vi.fn();
+      Object.assign(f.adapter, { getDirectoryBatchSettings: settings });
+      await expect(
+        (await runtime()).listDirectories(f.context, serverId, directories),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect(remote).not.toHaveBeenCalled();
+      expect(settings).not.toHaveBeenCalled();
+    },
+  );
+
+  it('path and tree navigation can request a listing without preparing downloads', async () => {
+    listing.mockResolvedValue([
+      {
+        name: 'a.json',
+        is_file: true,
+        is_symlink: false,
+        size: 1,
+        mode: '0644',
+        mimetype: 'application/json',
+        created_at: '',
+        modified_at: '',
+      },
+    ]);
+    const downloads = vi.fn(async () => {});
+    f.adapter.prefetchDownloads = downloads;
+    expect(await (await runtime()).listFiles(f.context, serverId, 'world', false)).toHaveLength(1);
+    expect(downloads).not.toHaveBeenCalled();
+    await browse('world');
+    expect(downloads).toHaveBeenCalledExactlyOnceWith(expect.any(String), ['world/a.json']);
   });
 
   it('prefetches only listed regular files without delaying the directory for issuance', async () => {
