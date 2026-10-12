@@ -12,6 +12,7 @@ import {
   relativePath,
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
+import { createUploadTiming, type UploadTiming } from '@nickhosting/server-management';
 import type { Hono } from 'hono';
 import { ZipFile } from 'yazl';
 import { z } from 'zod';
@@ -36,12 +37,17 @@ export async function inspectFilePath(
   adapter: Pick<PterodactylAdapter, 'listFiles'>,
   id: string,
   value: string,
+  timing?: UploadTiming,
 ) {
   const parts = path(value).split('/');
   let directory = '';
   let entry: ServerFile | undefined;
   for (let index = 0; index < parts.length; index++) {
-    entry = (await adapter.listFiles(id, directory)).find((file) => file.name === parts[index]);
+    const read = () => adapter.listFiles(id, directory);
+    const entries = timing
+      ? await timing.measure(`editor.directoryList${Math.min(index, 31)}`, read)
+      : await read();
+    entry = entries.find((file) => file.name === parts[index]);
     if (!entry) {
       if (index === parts.length - 1) return undefined;
       throw new DomainError('not_found');
@@ -160,19 +166,60 @@ export function registerFileBrowsingRoutes(
 ) {
   const { principal, management } = options;
   app.get('/v1/servers/:id/files/editor', async (c) => {
-    const context = await principal(c),
-      service = await management();
-    const target = path(c.req.query('path') ?? '');
-    const result = await service.access(context, c.req.param('id'), false, async (id) => {
-      const entry = await inspectFilePath(service.adapter, id, target);
-      if (!entry?.is_file) throw new DomainError('not_found');
-      requireEditableFile(entry);
-      const bytes = await service.adapter.readFile(id, target, editorMaxBytes);
-      const content = decodeEditableText(bytes);
-      return { content, revision: fileRevision(bytes) };
-    });
-    c.header('Cache-Control', 'no-store');
-    return c.json(result);
+    const trace = options.logger?.isEnabled('debug') ?? false;
+    const timing = createUploadTiming(trace);
+    const started = trace ? performance.now() : 0;
+    let outcome = 'failed';
+    let bytesRead: number | undefined;
+    try {
+      const context = await timing.measure('editor.principal', () => principal(c));
+      const service = await timing.measure('editor.management', management);
+      const target = path(c.req.query('path') ?? '');
+      const result = await timing.measure('editor.access', () =>
+        service.access(
+          context,
+          c.req.param('id'),
+          false,
+          async (id) => {
+            const entry = await inspectFilePath(
+              service.adapter,
+              id,
+              target,
+              trace ? timing : undefined,
+            );
+            if (!entry?.is_file) throw new DomainError('not_found');
+            requireEditableFile(entry);
+            const bytes = await timing.measure('editor.readContent', () =>
+              service.adapter.readFile(id, target, editorMaxBytes),
+            );
+            bytesRead = bytes.byteLength;
+            const content = timing.measureSync('editor.decode', () => decodeEditableText(bytes));
+            const revision = timing.measureSync('editor.revision', () => fileRevision(bytes));
+            return { content, revision };
+          },
+          trace ? timing : undefined,
+        ),
+      );
+      c.header('Cache-Control', 'no-store');
+      const response = timing.measureSync('editor.serialize', () => c.json(result));
+      outcome = 'succeeded';
+      return response;
+    } finally {
+      if (trace) {
+        try {
+          options.logger?.log('debug', 'server.file_editor_open', {
+            requestId: c.get('requestId'),
+            serverId: c.req.param('id'),
+            outcome,
+            bytes: bytesRead,
+            durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+            phases: timing.snapshot(),
+          });
+        } catch {
+          // Diagnostics must not replace the file response or its original error.
+        }
+      }
+    }
   });
   app.put('/v1/servers/:id/files/editor', async (c) => {
     const context = await principal(c),

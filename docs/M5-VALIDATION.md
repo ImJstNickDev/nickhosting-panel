@@ -6207,3 +6207,33 @@ schemas and temporary test assets. No real server file operation, container
 restart, production/infrastructure change, or new resource. Development uses
 its existing Vite HMR. No layout change or new screenshot; no historical full
 suite rerun. PR #21 remains open and unmerged; rollback is a source revert.
+
+### 2026-10-12 — debug-only editor opening timings
+
+Added `server.file_editor_open`, one aggregate diagnostic per editor GET only
+when the API logger enables `debug`. It records principal/configuration setup,
+connection acquisition/release, both local authorization passes, remote identity
+fetch versus local identity verification, sequential directory reads, content
+read, decode, revision hashing and response serialization. Labels contain no file
+paths, names, content, credentials or provider error text. Request/server IDs,
+byte count, outcome and handler duration allow correlation. Depths >=31 share a
+bounded directory phase with a count. `editor.access` includes its nested phases;
+do not add it to those children. Client calls include credential resolution and
+transport time, not separately instrumented here. Handler duration excludes
+response delivery and browser rendering. No performance or authorization policy
+was changed; editor reads still perform fresh identity corroboration.
+
+Validation: `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts packages/server-management/src/upload-timing.test.ts`
+**64 passed** (2.82 seconds), including debug/off logging, failed read, redaction
+and diagnostic sink failure. `scripts/dev.sh pnpm exec tsc --noEmit`, changed-file
+Biome, whitespace and indexed governance passed. Independent review found no
+must-fix and confirmed inclusive phase semantics. No historical/browser suite
+rerun for this server-only diagnostic change.
+
+Development already has database `logLevel=debug` with no environment override.
+Existing source watcher reloaded the API; read-only inspection found it healthy
+with container restart count zero. No manual restart, configuration/state change,
+real file operation or new infrastructure/test asset. Ready for the Owner's next
+file opening; no live timing result claimed yet. Revert the source change to roll
+back; `info` disables this trace on API logger initialization. PR #21 remains open
+and unmerged; SFTPGo #18 remains unchanged.

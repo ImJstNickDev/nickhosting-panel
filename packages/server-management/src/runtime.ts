@@ -907,12 +907,14 @@ export async function createManagementRuntime(options: ManagementOptions) {
               db,
             ),
           );
-        else
-          await verifyManagedIdentity(
-            connection,
-            server,
-            await adapter.getApplicationServer(server.pterodactyl_id),
+        else {
+          const remote = await timed('access.identityFetch', () =>
+            adapter.getApplicationServer(server.pterodactyl_id as number),
           );
+          await timed('access.identityVerify', () =>
+            verifyManagedIdentity(connection, server, remote),
+          );
+        }
         // Binary batches perform their final fresh authorization after admission,
         // directly before the provider POST. Only that path may defer this check;
         // preparation, cancellation and ordinary effects still recheck here.
@@ -969,8 +971,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     write: boolean,
     work: Parameters<typeof withAccess<T>>[3],
+    timing?: UploadTiming,
   ) {
-    return withAccess(context, serverId, write, work);
+    return withAccess(context, serverId, write, work, 'fresh', timing);
   }
   function listFiles(context: AuthContext, serverId: string, path: string) {
     return withAccess(context, serverId, false, (id) => adapter.listFiles(id, path), 'directory');

@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { readArchiveFile, visitArchive } from '@nickhosting/content-providers';
-import { DomainError, SecretCodec } from '@nickhosting/core';
+import { createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
 import type { PterodactylAdapter, ServerFile } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
@@ -52,6 +52,7 @@ function fixture(serverName = 'Fixture server') {
       _server: string,
       _write: boolean,
       work: (...args: unknown[]) => unknown,
+      _timing?: unknown,
     ) => work('provider', {}, {}, { name: serverName }),
   );
   const service = {
@@ -384,7 +385,7 @@ describe('file browsing and streaming ZIP', () => {
   });
 });
 describe('editor revisions', () => {
-  function appFixture() {
+  function appFixture(logger?: ServerRouteOptions['logger']) {
     const f = fixture();
     const app = new Hono();
     app.onError((e, c) =>
@@ -396,12 +397,90 @@ describe('editor revisions', () => {
     registerFileBrowsingRoutes(
       app as never,
       {
+        logger,
         principal: async () => ({}),
         management: async () => f.service,
       } as unknown as ServerRouteOptions,
     );
     return { ...f, app };
   }
+  it('records bounded debug timings for editor reads without file paths or contents', async () => {
+    const sink = vi.fn();
+    const f = appFixture(createLogger(sink, { level: 'debug' }));
+    const response = await f.app.request('/v1/servers/abc/files/editor?path=folder/b.txt');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      content: 'two',
+      revision: fileRevision(Buffer.from('two')),
+    });
+    expect(sink).toHaveBeenCalledTimes(1);
+    const record = sink.mock.calls[0]?.[0];
+    expect(record).toMatchObject({
+      level: 'debug',
+      event: 'server.file_editor_open',
+      data: { serverId: 'abc', outcome: 'succeeded', bytes: 3, durationMs: expect.any(Number) },
+    });
+    expect(Object.keys(record.data.phases).sort()).toEqual(
+      [
+        'editor.access',
+        'editor.decode',
+        'editor.directoryList0',
+        'editor.directoryList1',
+        'editor.management',
+        'editor.principal',
+        'editor.readContent',
+        'editor.revision',
+        'editor.serialize',
+      ].sort(),
+    );
+    for (const phase of Object.values(record.data.phases))
+      expect(phase).toMatchObject({
+        count: 1,
+        totalMs: expect.any(Number),
+        maxMs: expect.any(Number),
+      });
+    expect(JSON.stringify(record)).not.toMatch(/folder|b\.txt|two/);
+    expect(f.service.access.mock.calls[0]?.[4]).toBeDefined();
+  });
+  it.each(['info', 'warn', 'error'] as const)(
+    'does not trace editor reads at %s',
+    async (level) => {
+      const sink = vi.fn();
+      const f = appFixture(createLogger(sink, { level }));
+      expect((await f.app.request('/v1/servers/abc/files/editor?path=a.txt')).status).toBe(200);
+      expect(sink).not.toHaveBeenCalled();
+      expect(f.service.access.mock.calls[0]?.[4]).toBeUndefined();
+    },
+  );
+  it('records a failed read without logging provider errors or changing the error response', async () => {
+    const sink = vi.fn();
+    const f = appFixture(createLogger(sink, { level: 'debug' }));
+    vi.mocked(f.adapter.readFile).mockRejectedValueOnce(new Error('private provider detail'));
+    expect((await f.app.request('/v1/servers/abc/files/editor?path=a.txt')).status).toBe(500);
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(sink.mock.calls[0]?.[0]).toMatchObject({
+      data: {
+        outcome: 'failed',
+        phases: {
+          'editor.readContent': { count: 1 },
+        },
+      },
+    });
+    expect(JSON.stringify(sink.mock.calls)).not.toContain('private provider detail');
+  });
+  it('preserves successful reads when the diagnostic sink fails', async () => {
+    const f = appFixture(
+      createLogger(
+        () => {
+          throw new Error('sink unavailable');
+        },
+        { level: 'debug' },
+      ),
+    );
+    const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ content: 'one' });
+  });
   it.each(['server.jar', 'world.dat', 'r.0.0.mca', 'backup.zip', 'icon.png'])(
     'rejects editing %s before downloading its body, even with text MIME',
     async (name) => {
