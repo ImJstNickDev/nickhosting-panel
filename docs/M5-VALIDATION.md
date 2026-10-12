@@ -5576,3 +5576,67 @@ No live game-file mutation, infrastructure change, new test server or explicit
 container restart occurred. No API-schema, migration or dependency changes.
 Rollback: revert this code change. PR#21 remains OPEN/unmerged; SFTPGo#18 remains
 a separate production-release gate.
+
+### 2026-10-12 — Remove waits and duplicate reads between uploads
+
+The browser still sends one file at a time and marks completion only after the
+upload API returns success. It no longer awaits a directory display refresh
+between successful files. Refreshes are coalesced outside the upload loop, with
+a final/pause refresh; display failures stay with the file query and cannot turn
+a confirmed upload into a failed upload. Directory/identity changes dispose old
+refresh work. Uploads retain the existing cancellation, busy backoff and uncertain
+outcome rules; no parallel-upload or storage-admission policy was introduced.
+
+The upload route now shares each request's listings between the Minecraft guard
+and generic destination checks, and overlaps the resource read with independent
+path checks. Every started branch settles before a failed request releases its
+server lock/connection. Folder uploads use strict `overwrite=false` and localized
+`409 file_exists` instead of issuing a separate parent-listing GET for each file.
+Default/explicit `overwrite=true` retains existing overwrite behavior. Collision
+checks remain preflight observations, not atomic guarantees against external
+filesystem writers. Provider success, authorization and ingestion-claim settlement
+still precede the upload response.
+
+Backend validation on pinned Node/pnpm:
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/core.test.ts packages/i18n/src/i18n.test.ts`: **53 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts`: **63 passed**,0 skipped,44.06 seconds. Covers strict query parsing, exact/case/symlink/directory collisions before dispatch, shared/fresh listings, concurrent-read barriers, lock retention on failures and existing transfer/authentication/uncertainty regressions.
+
+The first API run passed 51 cases but failed 12 new Minecraft cases during fixture
+creation because the extracted helper duplicated a unique runtime mapping. The
+helper now reuses its isolated mapping and creates distinct combination identities;
+the final run above passed. This fixture failure required no production-code fix.
+
+`scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check` and
+`scripts/dev.sh pnpm --filter @nickhosting/web build` passed on the final source;
+the catalog contains 1241 EN/IT/pseudolocale keys. The existing bundle-size advisory
+remains. Scoped Biome passed for the six changed source/test files. No historical
+M1–M5 full-suite rerun or live upload performance claim is made.
+
+Browser validation used the actual Hono handlers and isolated provider fixtures:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-refresh.browser.test.ts apps/web/tests/file-upload-cancel.browser.test.ts`: **13 passed,1 failed**,87.02 seconds. All eight existing cancellation/busy cases and five new refresh cases passed. The navigation case expected exactly one destination read, but preserving the pending final refresh correctly adds one follow-up when joining an older listing.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-refresh.browser.test.ts -t 'folder navigation'`: **1 passed,5 skipped**,10.25 seconds after correcting that assertion to require exactly two root reads and one or two destination reads, still checking stale-response isolation and final contents. All14 scenarios passed across these runs; this is not a claimed single clean14-case run.
+
+The new coverage proves 49 uploads finish while a display GET is held, followed by
+one fresh final listing; failed listings retain Completed upload states; folder
+navigation and workspace unmount discard stale responses; a destination listing
+started before the final upload cannot satisfy its final refresh; folder uploads
+send `overwrite=false` without per-file browser listings and preserve existing
+case-insensitive collision bytes. An earlier exploratory browser run passed 3/4
+cases but used an outdated “Retry” locator instead of “Try again”; this test typo
+was corrected. An intermediate focused run passed display-failure and navigation
+but needed the remount request-count assertion adjusted from two reads to at most
+three; its no-late-refresh assertion passed, as did the final unmount test.
+Review also resolved the directory-effect handoff/joined-listing
+edges before the final combined run. No unnecessary full-suite repeat followed.
+
+Independent technical review found no remaining must-fix findings. Regenerated
+private EN desktop/IT mobile queue screenshots were inspected; layout and existing
+published screenshot history are unchanged. Existing approved isolated services
+were reused; fixture schemas/locks were disposed normally. API/Vite remained
+healthy with their normal source watchers. No real game-file upload, production
+mutation, new infrastructure/test server or explicit container restart occurred.
+No migration/dependency change. Indexed hygiene/governance checks passed. Rollback:
+revert this commit's API/browser/catalog changes together. PR#21 remains OPEN and
+unmerged; SFTPGo#18 remains a separate production-release gate.

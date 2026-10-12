@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { useBlocker, useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
-import { ApiError, api, download, upload } from '../api/client.js';
+import { ApiError, api, download, queryClient, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -303,6 +303,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const uploadQueue = useRef<UploadItem[]>([]);
   const uploadIdentity = saveScope?.join('\0');
   const previousUploadIdentity = useRef(uploadIdentity);
+  const uploadDisplayRefresh = useRef<(final?: boolean) => void>(() => {});
+  const uploadDisplayPending = useRef<{ identity: string | undefined; final: boolean } | undefined>(
+    undefined,
+  );
+  const displayDirectory = useRef(directory);
+  displayDirectory.current = directory;
   const mounted = useRef(true);
   const folderInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -327,6 +333,85 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const readAbort = useRef<AbortController | undefined>(undefined),
     readSequence = useRef(0);
   const files = useQuery(fileDirectoryQuery(serverId, directory));
+  useEffect(() => {
+    let active = true,
+      dirty = false,
+      urgent = false,
+      inFlight = false,
+      lastStarted = 0;
+    let timer: number | undefined;
+    let ownedRequest: Promise<unknown> | undefined;
+    const queryKey = fileDirectoryQuery(serverId, directory).queryKey;
+    const current = () =>
+      active &&
+      mounted.current &&
+      saveIdentity.current === uploadIdentity &&
+      displayDirectory.current === directory;
+    const schedule = () => {
+      if (!current() || !dirty || inFlight || timer !== undefined) return;
+      timer = window.setTimeout(
+        () => {
+          timer = undefined;
+          if (!current()) return;
+          const final = urgent;
+          dirty = false;
+          urgent = false;
+          inFlight = true;
+          lastStarted = performance.now();
+          const existing = queryClient.getQueryCache().find({ queryKey, exact: true });
+          const previousRequest =
+            existing?.state.fetchStatus === 'fetching' ? existing.promise : undefined;
+          const request = files.refetch({ cancelRefetch: false });
+          ownedRequest = queryClient.getQueryCache().find({ queryKey, exact: true })?.promise;
+          if (previousRequest && previousRequest === ownedRequest) {
+            // A navigation/focus listing may predate the just-confirmed upload.
+            // Joining it saves a request, but cannot satisfy the final refresh.
+            dirty = true;
+            urgent = final;
+          }
+          const settled = () => {
+            if (!current()) return;
+            inFlight = false;
+            schedule();
+          };
+          // The file query owns display errors; they never change upload outcomes.
+          void request.then(settled, settled);
+        },
+        urgent ? 0 : Math.max(0, 1000 - (performance.now() - lastStarted)),
+      );
+    };
+    uploadDisplayRefresh.current = (final = false) => {
+      if (!current()) return;
+      dirty = true;
+      urgent ||= final;
+      uploadDisplayPending.current = undefined;
+      if (final && timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+      schedule();
+    };
+    const pending = uploadDisplayPending.current;
+    if (pending && pending.identity === uploadIdentity) uploadDisplayRefresh.current(pending.final);
+    else uploadDisplayPending.current = undefined;
+    return () => {
+      active = false;
+      uploadDisplayRefresh.current = () => {};
+      window.clearTimeout(timer);
+      if (dirty && saveIdentity.current === uploadIdentity)
+        uploadDisplayPending.current = {
+          identity: uploadIdentity,
+          final: urgent || uploadDisplayPending.current?.final === true,
+        };
+      // Do not cancel a newer query started by navigation or an identity reset.
+      if (
+        inFlight &&
+        ownedRequest &&
+        queryClient.getQueryCache().find({ queryKey, exact: true })?.promise === ownedRequest
+      )
+        void queryClient.cancelQueries({ queryKey, exact: true });
+    };
+  }, [directory, files.refetch, serverId, uploadIdentity]);
   const rows = useMemo(
     () => visibleFiles(files.data ?? [], search, order, descending),
     [files.data, search, order, descending],
@@ -872,6 +957,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         previous.map((item) => (item.id === id ? { ...item, ...patch } : item)),
       );
   }
+  function refreshUploadDisplay(final = false) {
+    // Mark cached folders stale without fetching every directory touched by a batch.
+    void queryClient.invalidateQueries({ queryKey: ['files', serverId], refetchType: 'none' });
+    uploadDisplayPending.current = {
+      identity: saveIdentity.current,
+      final: final || uploadDisplayPending.current?.final === true,
+    };
+    uploadDisplayRefresh.current(final);
+  }
   async function runUploads() {
     if (uploadRunning.current) return;
     const identity = saveIdentity.current;
@@ -910,23 +1004,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         const start = performance.now();
         updateUpload(item.id, { status: 'uploading' });
         try {
-          if (item.exclusive) {
-            const parent = item.path.split('/').slice(0, -1).join('/');
-            const listing = await api<ServerFile[]>(
-              `${serverPath(serverId)}/files?path=${encodeURIComponent(parent)}`,
-              { signal: controller.signal },
-            );
-            if (
-              listing.some(
-                (entry) => entry.name.toLocaleLowerCase() === item.file.name.toLocaleLowerCase(),
-              )
-            )
-              throw { messageKey: 'file.folderFileExists' };
-          }
           if (!isCurrent()) break;
           updateUpload(item.id, { submitted: true });
           await upload(
-            `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}`,
+            `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}${item.exclusive ? '&overwrite=false' : ''}`,
             item.file,
             {
               signal: controller.signal,
@@ -942,7 +1023,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           );
           if (!isCurrent()) break;
           updateUpload(item.id, { status: 'complete', sent: item.file.size });
-          await files.refetch();
+          refreshUploadDisplay();
         } catch (failure) {
           if (!isCurrent()) break;
           if (
@@ -992,6 +1073,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       }
     } finally {
       uploadRunning.current = false;
+      if (isCurrent()) refreshUploadDisplay(true);
     }
   }
   function queueUploads(incoming: File[], target = directory, paths?: string[]) {
@@ -1097,7 +1179,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       folderPreparation.current = undefined;
       if (mounted.current) {
         setPreparingFolder(false);
-        void files.refetch();
+        refreshUploadDisplay(true);
       }
     }
   }

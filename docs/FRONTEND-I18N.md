@@ -532,6 +532,14 @@ in-app navigation away also discards it. It is not durable across reloads. Queue
 files, while submitted cancellation keeps that caution. Directory uploads are not
 silently flattened.
 
+Uploads remain sequential and complete only after the API confirms the provider
+transfer. Display-list refreshes run separately and are coalesced during the
+queue, with a final refresh on completion or pause; a slow or failed listing
+does not delay the next upload or reclassify a confirmed upload as failed.
+Folder entries request the API's no-overwrite preflight rather than fetching
+their parent directory separately before each file. Errors and uncertain outcomes
+retain the existing admission/recovery rules above.
+
 Initial and uncached-directory loads use noninteractive skeleton rows/tiles for
 the selected view, without a visible Loading paragraph. The listing and count
 footer reserve the same bounded height across loading, loaded, empty and error

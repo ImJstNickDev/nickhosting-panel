@@ -1,7 +1,11 @@
 import { posix } from 'node:path';
 import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
-import { isUploadNotDispatched, relativePath } from '@nickhosting/pterodactyl-adapter';
+import {
+  isUploadNotDispatched,
+  relativePath,
+  type ServerFile,
+} from '@nickhosting/pterodactyl-adapter';
 import {
   assignServerDns,
   authorizeServer,
@@ -407,6 +411,10 @@ export function registerServerRoutes(
     )
       throw new DomainError('validation_failed');
     const contentLength = Number(declared);
+    const overwriteValues = c.req.queries('overwrite');
+    if (overwriteValues && overwriteValues.length !== 1) throw new DomainError('validation_failed');
+    const overwrite =
+      parse(z.enum(['false', 'true']).default('true'), overwriteValues?.[0]) === 'true';
     const path = c.req.query('path') ?? '';
     relativePath(path);
     const slash = path.lastIndexOf('/');
@@ -416,15 +424,45 @@ export function registerServerRoutes(
     const release = options.acquireUploadSlot();
     try {
       await service.access(context, serverId, true, async (id, connection, current) => {
-        await service.assertFileMutation(serverId, [path], connection);
-        const server = await authorizeServer(connection, current, serverId, 'server:manage');
-        const maxBytes = server.limits.disk * 1024 * 1024;
-        if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
-          throw new DomainError('validation_failed', 413);
-        const [resources, files] = await Promise.all([
-          service.adapter.getResources(id),
-          service.adapter.listFiles(id, directory),
+        const directories = new Map<string, Promise<ServerFile[]>>();
+        const listFiles = (root: string) => {
+          let listing = directories.get(root);
+          if (!listing) {
+            listing = service.adapter.listFiles(id, root).then((files) => {
+              // Refuse the leaf collision after the game guard has checked its ancestors.
+              // This is a preflight observation, not an atomic external no-clobber guarantee.
+              if (
+                !overwrite &&
+                root === directory &&
+                files.some((file) => file.name.toLowerCase() === name.toLowerCase())
+              )
+                throw new DomainError('file_exists');
+              return files;
+            });
+            directories.set(root, listing);
+          }
+          return listing;
+        };
+        const [preflight, observed] = await Promise.allSettled([
+          (async () => {
+            await service.assertFileMutation(serverId, [path], connection, {
+              providerIdentifier: id,
+              listFiles,
+            });
+            const server = await authorizeServer(connection, current, serverId, 'server:manage');
+            const maxBytes = server.limits.disk * 1024 * 1024;
+            if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
+              throw new DomainError('validation_failed', 413);
+            return { maxBytes, files: await listFiles(directory) };
+          })(),
+          Promise.resolve().then(() => service.adapter.getResources(id)),
         ]);
+        // Drain every started read before the pinned connection/server lock can be released.
+        // Game/authorization failures keep precedence over the independent resource read.
+        if (preflight.status === 'rejected') throw preflight.reason;
+        if (observed.status === 'rejected') throw observed.reason;
+        const { maxBytes, files } = preflight.value;
+        const resources = observed.value;
         const existing = files.find((file) => file.name === name);
         if (existing && (!existing.is_file || existing.is_symlink))
           throw new DomainError('conflict');

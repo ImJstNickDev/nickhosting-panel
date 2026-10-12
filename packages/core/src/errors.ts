@@ -4,6 +4,7 @@ export const domainErrorCodes = [
   'forbidden',
   'not_found',
   'file_not_editable',
+  'file_exists',
   'conflict',
   // Retryable only when this request has not entered its effect callback.
   'operation_busy',
@@ -35,6 +36,7 @@ const defaultStatuses: Record<DomainErrorCode, number> = {
   forbidden: 403,
   not_found: 404,
   file_not_editable: 415,
+  file_exists: 409,
   conflict: 409,
   operation_busy: 409,
   rate_limited: 429,

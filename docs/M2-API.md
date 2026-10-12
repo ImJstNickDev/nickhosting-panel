@@ -175,7 +175,7 @@ project clients should use the authorized per-server operation view above.
 | POST `/v1/servers/:id/console` | `{command}` (1–4,096 characters) → `204`. Audit records the request, not raw command text. |
 | GET `/v1/servers/:id/files?path=` | Directory listing under the server root. |
 | GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; `Content-Disposition` provides the validated basename via an ASCII fallback and UTF-8 `filename*`. No fixed total byte limit; signed URL remains private. |
-| PUT `/v1/servers/:id/files/upload?path=...` | Raw `application/octet-stream` body and exact `X-NH-Upload-Length` header; `204` only after a complete provider upload. |
+| PUT `/v1/servers/:id/files/upload?path=...` | Raw `application/octet-stream` body and exact `X-NH-Upload-Length` header; optional `overwrite=false` refuses an existing destination name during preflight (`409 file_exists`); default `true`. `204` only after a complete provider upload. |
 | POST `/v1/servers/:id/files` | `write`: `{action,path,content}` (text ≤60,000 characters); `mkdir`: `{action,root,name}`; `rename`: `{action,root,files:[{from,to}]}`; `delete`: `{action,root,files:[name],confirm:true}`. Rename/delete batches contain 1–100 entries. Returns `204`. |
 | GET `/v1/servers/:id/backups` | Provider backup metadata. Create and restore use durable lifecycle operations. |
 | DELETE `/v1/servers/:id/backups/:backupId` | `{confirm:true}` → `204`. |
@@ -233,6 +233,17 @@ files are supported. The API validates the server's configured disk allowance
 and observed usage, accounting for an existing regular file when overwriting.
 Native provider filesystem quotas remain authoritative against concurrent game
 writes. Uploading onto a directory or symlink is refused.
+
+Upload preflight shares request-local directory observations between the game
+guard and destination checks; it does not list the destination twice. Resource
+usage is read concurrently with independent path checks. All started branches
+settle before the server lock/database connection can be released on failure.
+The optional `overwrite` query accepts only `true` or `false`; `false` rejects
+case-insensitive name collisions before obtaining an upload URL or creating an
+ingestion claim. Folder uploads use this server-side preflight instead of a
+separate browser listing before each file. This is not an atomic no-clobber
+filesystem operation: concurrent game/SFTP/provider writes can still race it.
+Existing locking, storage admission and uncertain-outcome recovery are unchanged.
 
 Uploads stream one generated multipart `files` part to the private Wings signed
 upload URL; the body is never accumulated in `FormData` or a full-file buffer.

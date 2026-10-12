@@ -14,6 +14,7 @@ import {
   createPterodactylAdapter,
   type PterodactylAdapter,
   PterodactylError,
+  type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
 import { createManagementRuntime, reconcileManagedServer } from '@nickhosting/server-management';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +68,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     length: number,
     headers: Record<string, string> = {},
     signal?: AbortSignal,
+    query: { path?: string; overwrite?: string | string[] } = {},
   ) {
     const requestHeaders = client?.headers() ?? new Headers({ origin });
     requestHeaders.set('content-type', 'application/octet-stream');
@@ -79,7 +81,23 @@ describe('M2 Hono API with real invitation, password and session authentication'
       duplex: 'half',
       signal,
     };
-    return app.request(`${origin}/v1/servers/${server}/files/upload?path=world.bin`, init);
+    const parameters = new URLSearchParams({ path: query.path ?? 'world.bin' });
+    const overwrite = typeof query.overwrite === 'string' ? [query.overwrite] : query.overwrite;
+    for (const value of overwrite ?? []) parameters.append('overwrite', value);
+    return app.request(`${origin}/v1/servers/${server}/files/upload?${parameters}`, init);
+  }
+  function fileEntry(name: string, patch: Partial<ServerFile> = {}): ServerFile {
+    return {
+      name,
+      mode: '-rw-r--r--',
+      size: 1,
+      is_file: true,
+      is_symlink: false,
+      mimetype: 'application/octet-stream',
+      created_at: '2026-01-01T00:00:00Z',
+      modified_at: '2026-01-01T00:00:00Z',
+      ...patch,
+    };
   }
   const relayClose = vi.fn();
   const requestConsoleLogs = vi.fn(async () => {});
@@ -1051,7 +1069,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(writeFile.mock.calls.length).toBe(before);
     expect(JSON.stringify(logs)).not.toContain(providerSecret);
   });
-  it('protects Minecraft launch inputs in every browser mutation without blocking worlds or mods', async () => {
+  async function minecraftServer() {
     const server = await f.server();
     // A Minecraft profile must belong to a Minecraft mapping. Keep the generic
     // M2 fixture untouched: trusted dispatch correctly rejects a retained game
@@ -1070,19 +1088,27 @@ describe('M2 Hono API with real invitation, password and session authentication'
       .selectAll()
       .where('id', '=', f.mappingId)
       .executeTakeFirstOrThrow();
-    const minecraftMappingId = randomUUID();
-    await f.db
-      .insertInto('runtime_egg_mappings')
-      .values({
-        ...mapping,
-        id: minecraftMappingId,
-        game_id: minecraftManifest.id,
-        runtime_id: 'fabric',
-        environment: JSON.stringify(mapping.environment),
-        port_roles: JSON.stringify(mapping.port_roles),
-        feature_limits: JSON.stringify(mapping.feature_limits),
-      })
-      .execute();
+    const previous = await f.db
+      .selectFrom('runtime_egg_mappings')
+      .select('id')
+      .where('game_id', '=', minecraftManifest.id)
+      .where('runtime_id', '=', 'fabric')
+      .where('node_id', '=', mapping.node_id)
+      .executeTakeFirst();
+    const minecraftMappingId = previous?.id ?? randomUUID();
+    if (!previous)
+      await f.db
+        .insertInto('runtime_egg_mappings')
+        .values({
+          ...mapping,
+          id: minecraftMappingId,
+          game_id: minecraftManifest.id,
+          runtime_id: 'fabric',
+          environment: JSON.stringify(mapping.environment),
+          port_roles: JSON.stringify(mapping.port_roles),
+          feature_limits: JSON.stringify(mapping.feature_limits),
+        })
+        .execute();
     await f.db
       .updateTable('managed_servers')
       .set({ mapping_id: minecraftMappingId })
@@ -1110,7 +1136,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         resolved_runtime: '{}',
         binding: JSON.stringify(binding),
         mapping_digest: 'a'.repeat(64),
-        identity_digest: 'b'.repeat(64),
+        identity_digest: choiceId.replaceAll('-', '').repeat(2),
       })
       .execute();
     await f.db
@@ -1126,6 +1152,10 @@ describe('M2 Hono API with real invitation, password and session authentication'
         ]),
       })
       .execute();
+    return server;
+  }
+  it('protects Minecraft launch inputs in every browser mutation without blocking worlds or mods', async () => {
+    const server = await minecraftServer();
     for (const input of [
       { action: 'write', path: 'server.jar', content: 'bad' },
       {
@@ -1235,6 +1265,270 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(JSON.stringify(audits)).not.toMatch(/private-token|a5a5/);
     expect(JSON.stringify(logs)).not.toMatch(/private-token/);
   });
+
+  it('accepts only one strict boolean overwrite query before provider work', async () => {
+    const server = await f.server();
+    const identityCalls = vi.mocked(f.adapter.getApplicationServer).mock.calls.length;
+    const before = uploadFile.mock.calls.length;
+    for (const overwrite of ['', '0', 'FALSE', 'yes', ' false', ['false', 'true']]) {
+      const response = await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+        overwrite,
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe('validation_failed');
+    }
+    expect(vi.mocked(f.adapter.getApplicationServer).mock.calls).toHaveLength(identityCalls);
+    expect(uploadFile.mock.calls).toHaveLength(before);
+  });
+
+  it.each([false, true])(
+    'refuses every destination-name collision before upload admission with Minecraft=%s',
+    async (minecraft) => {
+      const server = minecraft ? await minecraftServer() : await f.server();
+      const before = uploadFile.mock.calls.length;
+      const pull = vi.fn();
+      for (const existing of [
+        fileEntry('world.bin'),
+        fileEntry('WORLD.BIN'),
+        fileEntry('world.bin', { is_file: false }),
+        fileEntry('world.bin', { is_symlink: true }),
+        fileEntry('WORLD.BIN', { is_symlink: true }),
+      ]) {
+        vi.mocked(f.adapter.listFiles).mockResolvedValueOnce([existing]);
+        const response = await upload(
+          user,
+          server,
+          new ReadableStream({ pull }, { highWaterMark: 0 }),
+          1,
+          {},
+          undefined,
+          { overwrite: 'false' },
+        );
+        expect(response.status).toBe(409);
+        expect((await response.json()).error.code).toBe('file_exists');
+      }
+      expect(pull).not.toHaveBeenCalled();
+      expect(uploadFile.mock.calls).toHaveLength(before);
+      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+      const audits = await f.db
+        .selectFrom('audit_events')
+        .select('metadata')
+        .where('action', '=', 'server.files.requested')
+        .execute();
+      expect(
+        audits.some((audit) => (audit.metadata as { serverId?: string }).serverId === server),
+      ).toBe(false);
+    },
+  );
+
+  it.each([undefined, 'true'])(
+    'preserves regular file overwrites with overwrite=%s',
+    async (overwrite) => {
+      const server = await minecraftServer();
+      vi.mocked(f.adapter.listFiles).mockResolvedValueOnce([fileEntry('world.bin')]);
+      const before = uploadFile.mock.calls.length;
+      expect(
+        (await upload(user, server, new Uint8Array(1), 1, {}, undefined, { overwrite })).status,
+      ).toBe(204);
+      expect(uploadFile.mock.calls).toHaveLength(before + 1);
+    },
+  );
+
+  it.each(['protected-runtime', 'symlink-ancestor'])(
+    'keeps %s guards ahead of overwrite=false destination checks',
+    async (failure) => {
+      const server = await minecraftServer();
+      const files = vi.mocked(f.adapter.listFiles);
+      const before = files.mock.calls.length;
+      const uploads = uploadFile.mock.calls.length;
+      if (failure === 'symlink-ancestor')
+        files.mockResolvedValueOnce([fileEntry('mods', { is_file: false, is_symlink: true })]);
+      const response = await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+        path: failure === 'protected-runtime' ? 'server.jar' : 'mods/world.bin',
+        overwrite: 'false',
+      });
+      expect((await response.json()).error.code).toBe(
+        failure === 'protected-runtime' ? 'validation_failed' : 'conflict',
+      );
+      expect(files.mock.calls.slice(before).map(([, directory]) => directory)).toEqual(
+        failure === 'protected-runtime' ? [] : [''],
+      );
+      expect(uploadFile.mock.calls).toHaveLength(uploads);
+      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+    },
+  );
+
+  it.each(['', 'mods', 'world/data'])(
+    'shares each fresh upload directory observation between game and destination guards under %j',
+    async (root) => {
+      const server = await minecraftServer();
+      const listings = new Map<string, ServerFile[]>();
+      let directory = '';
+      for (const component of root ? root.split('/') : []) {
+        listings.set(directory, [fileEntry(component, { is_file: false })]);
+        directory = [directory, component].filter(Boolean).join('/');
+      }
+      listings.set(root, []);
+      const listFiles = vi.mocked(f.adapter.listFiles);
+      const original = listFiles.getMockImplementation();
+      const before = listFiles.mock.calls.length;
+      const resourceCalls = vi.mocked(f.adapter.getResources).mock.calls.length;
+      listFiles.mockImplementation(async (_id, path = '') => listings.get(path) ?? []);
+      try {
+        const path = [root, 'world.bin'].filter(Boolean).join('/');
+        expect(
+          (
+            await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+              path,
+              overwrite: 'false',
+            })
+          ).status,
+        ).toBe(204);
+        expect(listFiles.mock.calls.slice(before).map(([, path]) => path)).toEqual([
+          ...listings.keys(),
+        ]);
+        expect(vi.mocked(f.adapter.getResources).mock.calls).toHaveLength(resourceCalls + 1);
+        // A subsequent request must see newly created destination entries.
+        listings.set(root, [fileEntry('world.bin')]);
+        const next = listFiles.mock.calls.length;
+        const response = await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+          path,
+          overwrite: 'false',
+        });
+        expect(response.status).toBe(409);
+        expect((await response.json()).error.code).toBe('file_exists');
+        expect(listFiles.mock.calls.slice(next).map(([, path]) => path)).toEqual([
+          ...listings.keys(),
+        ]);
+      } finally {
+        listFiles.mockImplementation(original ?? (async () => []));
+      }
+    },
+  );
+
+  it('overlaps resource sampling with game directory checks before starting an upload', async () => {
+    const server = await minecraftServer();
+    const resources = vi.mocked(f.adapter.getResources);
+    const original = resources.getMockImplementation();
+    if (!original) throw new Error('Missing isolated resource fixture');
+    const resourceStarted = Promise.withResolvers<void>();
+    const listingStarted = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    resources.mockImplementationOnce(async (id) => {
+      resourceStarted.resolve();
+      await release.promise;
+      return original(id);
+    });
+    vi.mocked(f.adapter.listFiles).mockImplementationOnce(async () => {
+      listingStarted.resolve();
+      await release.promise;
+      return [];
+    });
+    const before = uploadFile.mock.calls.length;
+    let finished = false;
+    const pending = upload(user, server, new Uint8Array(1), 1).then((response) => {
+      finished = true;
+      return response;
+    });
+    try {
+      await Promise.race([
+        Promise.all([resourceStarted.promise, listingStarted.promise]),
+        delay(2000).then(() => {
+          throw new Error('Independent preflight reads did not overlap');
+        }),
+      ]);
+      expect(finished).toBe(false);
+      expect(uploadFile.mock.calls).toHaveLength(before);
+      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+    } finally {
+      release.resolve();
+      expect((await pending).status).toBe(204);
+    }
+  });
+
+  it.each(['game-guard', 'listing', 'resources'])(
+    'drains concurrent preflight reads and retains the lock after %s fails',
+    async (failure) => {
+      const server = await minecraftServer();
+      const resources = vi.mocked(f.adapter.getResources);
+      const originalResources = resources.getMockImplementation();
+      if (!originalResources) throw new Error('Missing isolated resource fixture');
+      const failed = Promise.withResolvers<void>();
+      const blocked = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const originalGuard = runtime.assertFileMutation;
+      const guard = vi.spyOn(runtime, 'assertFileMutation').mockImplementation(async (...args) => {
+        try {
+          await originalGuard(...args);
+        } catch (error) {
+          if (failure === 'game-guard') failed.resolve();
+          throw error;
+        }
+      });
+      if (failure === 'resources') {
+        resources.mockImplementationOnce(() => {
+          failed.resolve();
+          throw new DomainError('integration_unavailable');
+        });
+        vi.mocked(f.adapter.listFiles).mockImplementationOnce(async () => {
+          blocked.resolve();
+          await release.promise;
+          return [];
+        });
+      } else {
+        resources.mockImplementationOnce(async (id) => {
+          blocked.resolve();
+          await release.promise;
+          if (failure === 'game-guard') throw new DomainError('integration_unavailable');
+          return originalResources(id);
+        });
+        if (failure === 'listing')
+          vi.mocked(f.adapter.listFiles).mockImplementationOnce(async () => {
+            failed.resolve();
+            throw new DomainError('conflict');
+          });
+      }
+      const before = uploadFile.mock.calls.length;
+      let finished = false;
+      const pending = upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+        path: failure === 'game-guard' ? 'server.jar' : 'world.bin',
+      }).then((response) => {
+        finished = true;
+        return response;
+      });
+      let response: Response;
+      try {
+        await Promise.race([
+          Promise.all([failed.promise, blocked.promise]),
+          delay(2000).then(() => {
+            throw new Error('Missing isolated preflight failure barrier');
+          }),
+        ]);
+        expect(finished).toBe(false);
+        const contender = await request(user, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'other.txt',
+          content: 'must-not-run',
+        });
+        expect(contender.status).toBe(409);
+        expect((await contender.json()).error.code).toBe('operation_busy');
+        expect(uploadFile.mock.calls).toHaveLength(before);
+        expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+      } finally {
+        release.resolve();
+        response = await pending;
+        guard.mockRestore();
+      }
+      const expected =
+        failure === 'game-guard'
+          ? 'validation_failed'
+          : failure === 'listing'
+            ? 'conflict'
+            : 'integration_unavailable';
+      expect((await response.json()).error.code).toBe(expected);
+      expect(uploadFile.mock.calls).toHaveLength(before);
+    },
+  );
 
   it.each([
     'already-aborted',
