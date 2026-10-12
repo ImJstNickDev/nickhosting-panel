@@ -95,11 +95,16 @@ export function relativePath(value: string, allowRoot = false): string {
   }
   return `/${value}`;
 }
+export class ResponseTooLargeError extends Error {
+  constructor() {
+    super('response_too_large');
+  }
+}
 export async function readBounded(response: Response, maxBytes: number): Promise<Uint8Array> {
   const length = Number(response.headers.get('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
     await response.body?.cancel();
-    throw new Error('response_too_large');
+    throw new ResponseTooLargeError();
   }
   const reader = response.body?.getReader();
   if (!reader) return new Uint8Array();
@@ -110,7 +115,7 @@ export async function readBounded(response: Response, maxBytes: number): Promise
       const { done, value } = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > maxBytes) throw new Error('response_too_large');
+      if (size > maxBytes) throw new ResponseTooLargeError();
       chunks.push(value);
     }
     return Buffer.concat(chunks);

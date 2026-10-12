@@ -434,12 +434,27 @@ describe('files and backup credential isolation', () => {
     expect(() => adapter.deleteFiles('f729c8a1', '', ['../unrelated'])).toThrow();
     expect(() => adapter.writeFile('f729c8a1', 'large', 'x'.repeat(1048577))).toThrow();
   });
-  it('bounds file reads even without Content-Length', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('too much data'));
-    await expect(
-      createPterodactylAdapter({ ...config, fetcher }).readFile('f729c8a1', 'fixture.txt', 4),
-    ).rejects.toMatchObject({ reason: 'invalid_response' });
-  });
+  it.each([false, true])(
+    'bounds file reads with Content-Length=%s and cancels the body',
+    async (declared) => {
+      const cancelled = vi.fn();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('too much data'));
+        },
+        cancel: cancelled,
+      });
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(body, {
+          headers: declared ? { 'content-length': '13' } : {},
+        }),
+      );
+      await expect(
+        createPterodactylAdapter({ ...config, fetcher }).readFile('f729c8a1', 'fixture.txt', 4),
+      ).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+      expect(cancelled).toHaveBeenCalledTimes(1);
+    },
+  );
   it('proxies signed downloads without exposing URLs or forwarding API credentials', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

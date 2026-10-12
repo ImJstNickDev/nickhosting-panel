@@ -203,8 +203,12 @@ identity changes may take up to the 60-second lifetime to be detected. Client AP
 authorization remains authoritative on each request. No directory contents,
 permission decisions or credentials are returned from this cache. Uploads retain
 fresh session/manage authorization, lifecycle/pending-claim checks, server locks,
-path validation and storage admission for each file. Editor reads, downloads and
-other mutations retain their existing fresh identity verification.
+path validation and storage admission for each file. Editor GET reads reuse the
+same identity proof with fresh local session/read authorization and no pinned DB
+connection while waiting for renewal. Downloads and other mutations retain their
+existing fresh identity verification. Editor reads request contents directly:
+Wings enforces path containment at open time; no ancestor directory listing is
+made. Missing files remain errors, and the editor byte/text limits still apply.
 
 Paths are validated and scoped through the adapter. Minecraft's file-mutation
 preflight reads each distinct ancestor directory once per guard invocation and

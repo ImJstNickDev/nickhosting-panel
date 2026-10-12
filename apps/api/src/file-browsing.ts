@@ -9,10 +9,11 @@ import {
 import { recordAudit } from '@nickhosting/database';
 import {
   type PterodactylAdapter,
+  PterodactylError,
   relativePath,
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
-import { createUploadTiming, type UploadTiming } from '@nickhosting/server-management';
+import { createUploadTiming } from '@nickhosting/server-management';
 import type { Hono } from 'hono';
 import { ZipFile } from 'yazl';
 import { z } from 'zod';
@@ -37,17 +38,12 @@ export async function inspectFilePath(
   adapter: Pick<PterodactylAdapter, 'listFiles'>,
   id: string,
   value: string,
-  timing?: UploadTiming,
 ) {
   const parts = path(value).split('/');
   let directory = '';
   let entry: ServerFile | undefined;
   for (let index = 0; index < parts.length; index++) {
-    const read = () => adapter.listFiles(id, directory);
-    const entries = timing
-      ? await timing.measure(`editor.directoryList${Math.min(index, 31)}`, read)
-      : await read();
-    entry = entries.find((file) => file.name === parts[index]);
+    entry = (await adapter.listFiles(id, directory)).find((file) => file.name === parts[index]);
     if (!entry) {
       if (index === parts.length - 1) return undefined;
       throw new DomainError('not_found');
@@ -176,22 +172,23 @@ export function registerFileBrowsingRoutes(
       const service = await timing.measure('editor.management', management);
       const target = path(c.req.query('path') ?? '');
       const result = await timing.measure('editor.access', () =>
-        service.access(
+        service.fileReadAccess(
           context,
           c.req.param('id'),
-          false,
           async (id) => {
-            const entry = await inspectFilePath(
-              service.adapter,
-              id,
-              target,
-              trace ? timing : undefined,
-            );
-            if (!entry?.is_file) throw new DomainError('not_found');
-            requireEditableFile(entry);
-            const bytes = await timing.measure('editor.readContent', () =>
-              service.adapter.readFile(id, target, editorMaxBytes),
-            );
+            // Wings performs path containment at open time. Do not relist every
+            // ancestor as an existence check: the contents request is authoritative.
+            requireEditableFile({ name: target.split('/').at(-1) ?? '' });
+            let bytes: Uint8Array;
+            try {
+              bytes = await timing.measure('editor.readContent', () =>
+                service.adapter.readFile(id, target, editorMaxBytes),
+              );
+            } catch (error) {
+              if (error instanceof PterodactylError && error.reason === 'not_found')
+                throw new DomainError('not_found', 404);
+              throw error;
+            }
             bytesRead = bytes.byteLength;
             const content = timing.measureSync('editor.decode', () => decodeEditableText(bytes));
             const revision = timing.measureSync('editor.revision', () => fileRevision(bytes));

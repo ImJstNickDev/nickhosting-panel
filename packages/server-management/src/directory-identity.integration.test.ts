@@ -27,6 +27,7 @@ describe('directory browsing identity proof reuse', () => {
   const remote = vi.fn<() => Promise<ApplicationServer>>();
   const listing = vi.fn(async (_identifier: string, _directory = '') => []);
   const uploaded = vi.fn(async () => 'isolated upload');
+  const read = vi.fn(async () => 'isolated file contents');
 
   async function identity(): Promise<ApplicationServer> {
     const server = await f.db
@@ -70,6 +71,8 @@ describe('directory browsing identity proof reuse', () => {
     createManagementRuntime({ db: f.db, codec, adapter, directoryIdentityCache: cache });
   const browse = async (path = '') => (await runtime()).listFiles(f.context, serverId, path);
   const upload = async () => (await runtime()).uploadAccess(f.context, serverId, uploaded);
+  const readFile = async (timing = createUploadTiming()) =>
+    (await runtime()).fileReadAccess(f.context, serverId, read, timing);
   const batchUpload = async (
     beforeTransfer: () => Promise<void> = async () => {},
     timing = createUploadTiming(),
@@ -99,6 +102,7 @@ describe('directory browsing identity proof reuse', () => {
     remote.mockReset().mockImplementation(identity);
     listing.mockClear();
     uploaded.mockReset().mockResolvedValue('isolated upload');
+    read.mockClear();
     f.adapter.getApplicationServer = remote;
     f.adapter.listFiles = listing;
   });
@@ -122,6 +126,32 @@ describe('directory browsing identity proof reuse', () => {
     expect(remote).toHaveBeenCalledTimes(1);
     expect(uploaded).toHaveBeenCalledTimes(49);
     expect(listing).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses browsing proof for file reads while retaining fresh authorization and timing', async () => {
+    await browse();
+    const timing = createUploadTiming();
+    expect(await readFile(timing)).toBe('isolated file contents');
+    expect(await readFile()).toBe('isolated file contents');
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(timing.snapshot()['access.identityProof']?.count).toBe(1);
+    expect(timing.snapshot()['access.sessionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.permissionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.sessionSecond']?.count).toBe(1);
+    expect(timing.snapshot()['access.permissionSecond']?.count).toBe(1);
+    expect(timing.snapshot()['access.connectionAcquire']).toBeUndefined();
+  });
+
+  it('fetches a cold file-read proof and refreshes at expiry without extending its TTL', async () => {
+    await readFile();
+    clock = 54_999;
+    await readFile();
+    expect(remote).toHaveBeenCalledTimes(1);
+    clock = 60_000;
+    await readFile();
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledTimes(3);
   });
 
   it('also prepares a cold upload identity once and expires it without extending TTL', async () => {
@@ -376,11 +406,13 @@ describe('directory browsing identity proof reuse', () => {
       });
       await service.listFiles(f.context, serverId, '');
       clock = 60_000;
-      await Promise.all(
-        ['world', 'logs', 'plugins'].map((path) => service.listFiles(f.context, serverId, path)),
-      );
+      await Promise.all([
+        ...['world', 'logs', 'plugins'].map((path) => service.listFiles(f.context, serverId, path)),
+        service.fileReadAccess(f.context, serverId, read, createUploadTiming()),
+      ]);
       expect(remote).toHaveBeenCalledTimes(2);
       expect(listing).toHaveBeenCalledTimes(4);
+      expect(read).toHaveBeenCalledTimes(1);
     } finally {
       cache.close();
       await small.db.destroy();
@@ -577,8 +609,10 @@ describe('directory browsing identity proof reuse', () => {
       .execute();
     await expect(browse('world')).rejects.toThrow('provenance_mismatch');
     await expect(upload()).rejects.toThrow('provenance_mismatch');
+    await expect(readFile()).rejects.toThrow('provenance_mismatch');
     expect(listing).toHaveBeenCalledTimes(1);
     expect(uploaded).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('does not cache failed remote identity reads or serve expired proofs on error', async () => {
@@ -609,9 +643,11 @@ describe('directory browsing identity proof reuse', () => {
       .execute();
     await expect(browse('world')).rejects.toThrow('unauthenticated');
     await expect(upload()).rejects.toThrow('unauthenticated');
+    await expect(readFile()).rejects.toThrow('unauthenticated');
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing).toHaveBeenCalledTimes(1);
     expect(uploaded).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('denies revoked project membership even with a warm proof', async () => {
@@ -633,9 +669,11 @@ describe('directory browsing identity proof reuse', () => {
     });
     await expect(browse('world')).rejects.toThrow('forbidden');
     await expect(upload()).rejects.toThrow('forbidden');
+    await expect(readFile()).rejects.toThrow('forbidden');
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing).toHaveBeenCalledTimes(1);
     expect(uploaded).toHaveBeenCalledTimes(1);
+    expect(read).not.toHaveBeenCalled();
   });
 
   it.each(['active-operation', 'pending-upload'] as const)(
@@ -700,7 +738,7 @@ describe('directory browsing identity proof reuse', () => {
 
   it.each(
     ['identity', 'credential', 'session'].flatMap((change) =>
-      ['directory', 'upload'].map((mode) => ({ change, mode })),
+      ['directory', 'upload', 'file-read'].map((mode) => ({ change, mode })),
     ),
   )(
     'rejects $change changes while the remote $mode proof is in flight',
@@ -708,7 +746,7 @@ describe('directory browsing identity proof reuse', () => {
       const snapshot = await identity();
       const proof = deferredProof();
       remote.mockReturnValueOnce(proof.promise);
-      const request = mode === 'upload' ? upload() : browse();
+      const request = mode === 'upload' ? upload() : mode === 'file-read' ? readFile() : browse();
       const rejected = expect(request).rejects.toThrow(
         change === 'session' ? 'unauthenticated' : 'conflict',
       );
@@ -735,6 +773,7 @@ describe('directory browsing identity proof reuse', () => {
       await rejected;
       expect(listing).not.toHaveBeenCalled();
       expect(uploaded).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
     },
   );
 });

@@ -6237,3 +6237,35 @@ real file operation or new infrastructure/test asset. Ready for the Owner's next
 file opening; no live timing result claimed yet. Revert the source change to roll
 back; `info` disables this trace on API logger initialization. PR #21 remains open
 and unmerged; SFTPGo #18 remains unchanged.
+
+### 2026-10-12 — direct editor reads with reused identity proof
+
+The Owner's 10 KiB opening measured **778.194 ms** inside the API: identity fetch
+170.106 ms, local identity verification 4.627 ms, ancestor listings 199.820 and
+186.002 ms, contents 208.544 ms, decode/hash 0.390 ms. This is the pre-change
+measurement; it excludes browser rendering and response delivery.
+
+Editor GET now uses the same 60-second non-sliding identity proof as folder
+browsing, retaining fresh local session/permission checks, binding invalidation,
+background renewal and expiry behavior. It requests contents directly without
+listing ancestors. The pinned Panel/Wings source evidence and containment limits
+are documented in M5-API-CONTRACTS.md. No live symlink/adversarial filesystem test
+was performed. PUT path/revision/game-file guards remain unchanged. The browser
+still excludes listed symlinks. API reads enforce local path/extension validation,
+strict text decoding and bounded bytes; oversize responses, with or without a
+length header, cancel the stream and return 413. Missing content returns 404;
+other provider failures do not trigger alternate-path retries. Debug timings
+remain enabled for the Owner's next measurement; no post-change latency promised.
+
+Checks:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/transport.test.ts`: initial **126 passed, 1 failed** because the trace test still expected the deliberately removed directory phases. Corrected that assertion, added provider-refusal coverage, then reran `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts`: final **66 passed**. Adapter/transport **63 passed** in the initial run; their source/tests did not change afterward.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts`: **65 passed**, 87.34 seconds. After extending the final single-connection case, targeted rerun with `-t 'single-connection pool'`: **1 passed, 64 skipped**, 3.45 seconds. Covers warm/cold/expired proof, revocation, identity/account drift and pool safety.
+- `scripts/dev.sh pnpm exec tsc --noEmit`, changed-file Biome, whitespace and indexed governance: passed. Independent technical review: no must-fix. No browser/layout change or full historical suite rerun.
+
+Only existing approved isolated services/fixture providers and disposable schemas
+were used; integration fixtures dispose their schemas. No real server/file
+operation, new infrastructure, credential change or manual container restart.
+Existing watcher loaded the API; read-only health check was healthy with container
+restart count zero. Rollback is a source revert. PR #21 stays open/unmerged;
+SFTPGo #18 remains a separate production-release gate.

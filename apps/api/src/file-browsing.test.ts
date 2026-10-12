@@ -2,7 +2,11 @@ import { Readable } from 'node:stream';
 import { readArchiveFile, visitArchive } from '@nickhosting/content-providers';
 import { createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import type { PterodactylAdapter, ServerFile } from '@nickhosting/pterodactyl-adapter';
+import {
+  type PterodactylAdapter,
+  PterodactylError,
+  type ServerFile,
+} from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
 import type { Kysely } from 'kysely';
 import { describe, expect, it, vi } from 'vitest';
@@ -58,6 +62,10 @@ function fixture(serverName = 'Fixture server') {
   const service = {
     adapter,
     access,
+    fileReadAccess: vi.fn(
+      async (_ctx: unknown, _server: string, work: (id: string) => unknown, _timing?: unknown) =>
+        work('provider'),
+    ),
     assertFileMutation: vi.fn(
       async (
         _server: string,
@@ -424,8 +432,6 @@ describe('editor revisions', () => {
       [
         'editor.access',
         'editor.decode',
-        'editor.directoryList0',
-        'editor.directoryList1',
         'editor.management',
         'editor.principal',
         'editor.readContent',
@@ -440,7 +446,7 @@ describe('editor revisions', () => {
         maxMs: expect.any(Number),
       });
     expect(JSON.stringify(record)).not.toMatch(/folder|b\.txt|two/);
-    expect(f.service.access.mock.calls[0]?.[4]).toBeDefined();
+    expect(f.service.fileReadAccess.mock.calls[0]?.[3]).toBeDefined();
   });
   it.each(['info', 'warn', 'error'] as const)(
     'does not trace editor reads at %s',
@@ -449,7 +455,7 @@ describe('editor revisions', () => {
       const f = appFixture(createLogger(sink, { level }));
       expect((await f.app.request('/v1/servers/abc/files/editor?path=a.txt')).status).toBe(200);
       expect(sink).not.toHaveBeenCalled();
-      expect(f.service.access.mock.calls[0]?.[4]).toBeUndefined();
+      expect(f.service.fileReadAccess.mock.calls[0]?.[3]).toBeUndefined();
     },
   );
   it('records a failed read without logging provider errors or changing the error response', async () => {
@@ -562,13 +568,57 @@ describe('editor revisions', () => {
     expect(save.status).toBe(200);
     expect(f.contents.get(name)?.toString()).toBe(`${content}\nnext=true`);
   });
-  it('retains the editor byte limit without reading a known oversize file', async () => {
+  it('retains the editor byte limit on the actual content without metadata reads', async () => {
     const f = appFixture();
-    f.entries.set('', [file('huge.txt', true, 1048577)]);
+    f.contents.set('huge.txt', Buffer.alloc(1048577, 'x'));
     const response = await f.app.request('/v1/servers/abc/files/editor?path=huge.txt');
     expect(response.status).toBe(413);
-    expect(f.adapter.readFile).not.toHaveBeenCalled();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
   });
+  it('reads a nested file once without listing any ancestor or trusting browser metadata', async () => {
+    const f = appFixture();
+    f.entries.clear();
+    const response = await f.app.request('/v1/servers/abc/files/editor?path=folder/b.txt');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ content: 'two' });
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.readFile).toHaveBeenCalledExactlyOnceWith('provider', 'folder/b.txt', 1048576);
+  });
+  it('reports a file removed after browsing as not found', async () => {
+    const f = appFixture();
+    vi.mocked(f.adapter.readFile).mockRejectedValueOnce(
+      new PterodactylError('not_found', 'client', 'rejected', 404),
+    );
+    const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: 'not_found' });
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+  });
+  it.each(['permission_denied', 'invalid_request'] as const)(
+    'keeps provider %s failures without retrying through another path',
+    async (reason) => {
+      const f = appFixture();
+      vi.mocked(f.adapter.readFile).mockRejectedValueOnce(
+        new PterodactylError(reason, 'client', 'rejected', 403),
+      );
+      const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ code: 'integration_unavailable' });
+      expect(f.adapter.readFile).toHaveBeenCalledTimes(1);
+      expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['../outside', 'folder/../../outside', 'folder/%2e%2e/outside'])(
+    'rejects unsafe editor path %s before reading',
+    async (path) => {
+      const f = appFixture();
+      const response = await f.app.request(
+        `/v1/servers/abc/files/editor?path=${encodeURIComponent(path)}`,
+      );
+      expect(response.status).toBe(400);
+      expect(f.adapter.readFile).not.toHaveBeenCalled();
+    },
+  );
   it('reads a revision and rejects a changed provider file before writing', async () => {
     const f = appFixture();
     const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');

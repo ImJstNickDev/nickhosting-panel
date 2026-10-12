@@ -978,6 +978,14 @@ export async function createManagementRuntime(options: ManagementOptions) {
   function listFiles(context: AuthContext, serverId: string, path: string) {
     return withAccess(context, serverId, false, (id) => adapter.listFiles(id, path), 'directory');
   }
+  function fileReadAccess<T>(
+    context: AuthContext,
+    serverId: string,
+    work: Parameters<typeof withAccess<T>>[3],
+    timing?: UploadTiming,
+  ) {
+    return withAccess(context, serverId, false, work, 'directory', timing);
+  }
   function uploadAccess<T>(
     context: AuthContext,
     serverId: string,
@@ -1034,6 +1042,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     uploadBatchAccess,
     uploadBatchBinding,
     listFiles,
+    fileReadAccess,
     authorizeTransfer,
     lifecycle,
     externalOptions,

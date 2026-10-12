@@ -16,6 +16,7 @@ import {
   numericId,
   PterodactylError,
   parseInput,
+  ResponseTooLargeError,
   readBounded,
   relativePath,
   segment,
@@ -329,7 +330,8 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       );
       try {
         return await readBounded(response, maxBytes);
-      } catch {
+      } catch (error) {
+        if (error instanceof ResponseTooLargeError) throw new DomainError('validation_failed', 413);
         throw new PterodactylError('invalid_response', 'client', 'rejected');
       }
     },

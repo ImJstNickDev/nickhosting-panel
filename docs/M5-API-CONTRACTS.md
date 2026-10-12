@@ -656,7 +656,7 @@ credential is returned to the browser.
 
 | Route | Request/result |
 | --- | --- |
-| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; symlinks and binary content rejected. Known binary metadata returns `file_not_editable` (415) before reading the body. |
+| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; known binary extensions rejected before reading, actual bytes validated afterward. Reuses the directory identity proof with fresh local authorization; one direct provider content request, no ancestor listings. Wings contains the path and rejects final symlinks. |
 | `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
 | `POST /archive` (preferred); `GET /archive?root=...&files=...` (compatible) | POST uses URL-encoded `root` and `files` (JSON array of selected basenames), avoiding long URLs. Actual streamed ZIP, including folders/empty directories; 10,000 enumerated entries including selected roots, 64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
 | `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
@@ -735,14 +735,28 @@ revision/read-back checks remain unchanged; this is a request-count reduction,
 not a measured live-provider latency guarantee. The browser may continue editing
 or navigate while PUT completes, retaining submitted and newer drafts separately.
 
-Browser and API share the metadata exclusion policy. Both editor reads and writes
-reject known binary formats, including JARs, archives, images and Minecraft world
-data. Unknown extensions or `application/octet-stream` alone do not prove a file
+The browser uses listing metadata for early exclusion. API reads reject known
+binary extensions without fetching metadata; writes retain metadata/path guards.
+Both reject known binary extensions, including JARs, archives, images and Minecraft
+world data. Unknown extensions or `application/octet-stream` alone do not prove a file
 binary: contents still undergo the 1 MiB bound, strict UTF-8 decoding, binary control
 character and signature checks. PUT validates submitted and existing bytes, so
 renaming a binary to `.txt` does not make it editable. Valid text keeps its Unicode,
 line endings and BOM. No binary-specific editors are supported today. Streaming
 downloads/uploads remain independent of this text-editor limit and policy.
+
+Editor GET delegates containment to Wings' descriptor-based file open, rather
+than preliminary directory listings that can race filesystem changes. Pinned
+[Panel 1.11.11 contents](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Http/Controllers/Api/Client/Servers/FileController.php)
+also reads directly through Wings. [Wings 1.11.13 Unix filesystem](https://github.com/pterodactyl/wings/blob/v1.11.13/internal/ufs/fs_unix.go)
+uses `O_NOFOLLOW` for the final component, `RESOLVE_BENEATH` with `openat2`, and
+parent-descriptor containment on its fallback. Intermediate links contained in
+the server root may be followed; the browser still excludes listed symlinks and
+PUT still rejects symlink ancestry. This is pinned source evidence, not a live
+adversarial symlink test. Do not infer read-denylist or comprehensive special-file
+protection from it. Oversize responses abort their bounded read and return 413,
+including when no Content-Length is supplied. A file removed after browsing
+returns 404. No browser metadata is accepted as authorization or content proof.
 
 Copy/extraction failures after effects may leave partial files. They record
 `server.files.incomplete` and return `operation_uncertain`; inspect the destination
