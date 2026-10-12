@@ -595,6 +595,50 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       row('beta.json').getByRole('button', { name: 'beta.json', exact: true }),
     ).toBeFocused();
   });
+  it('indents with Tab and outdents with Shift+Tab without trapping keyboard focus', async () => {
+    await user.goto(base);
+    await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
+    await browserExpect(editor).toHaveAttribute('aria-description', /Escape.*Tab/);
+    await editor.fill('first\nsecond');
+    await editor.press('Control+a');
+    await editor.press('Tab');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['  first', '  second']);
+    await browserExpect(editor).toBeFocused();
+    await editor.press('Shift+Tab');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
+    await browserExpect(editor).toBeFocused();
+    await editor.press('Control+z');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['  first', '  second']);
+    await editor.press('Control+y');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
+
+    await editor.press('ArrowRight');
+    await editor.press('Tab');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', '  second']);
+    await editor.press('Shift+Tab');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
+
+    await editor.press('Control+f');
+    const search = user.locator('.fm-search-panel input[name=search]');
+    await browserExpect(search).toBeFocused();
+    await search.press('Tab');
+    await browserExpect(search).not.toBeFocused();
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
+    await user
+      .locator('.fm-search-panel')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
+    for (const key of ['Tab', 'Shift+Tab']) {
+      await editor.focus();
+      await editor.press('Escape');
+      await user.keyboard.press(key);
+      await browserExpect(editor).not.toBeFocused();
+      await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
+    }
+    user.once('dialog', (confirmation) => confirmation.accept());
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+  });
   it('retains the open editor and prevents further editing until a save finishes', async () => {
     await user.goto(base.replace(/files$/, 'console'));
     await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
@@ -620,6 +664,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await editor.press('Control+s');
       await began;
       await browserExpect(editor).toHaveAttribute('contenteditable', 'false');
+      await editor.press('Tab');
+      await editor.press('Shift+Tab');
+      await browserExpect(editor).toHaveText('Saved after pending request');
       await browserExpect(
         user.getByRole('button', { name: 'Back to files', exact: true }),
       ).toBeDisabled();

@@ -5061,3 +5061,25 @@ remains open and unmerged; this does not declare all M5 acceptance complete.
 Final index governance passed:611 text files,163 review PNGs,514 relative links,
 4 TOML files and44 ignore cases. Screenshots were visually inspected for fixture
 content before staging; automated secret scanning remains heuristic.
+
+### 2026-10-12 — Files editor Tab indentation
+
+The editor now uses CodeMirror's native `indentWithTab`: Tab indents the current
+or selected lines; Shift+Tab outdents. These edits participate in undo/redo.
+Escape then Tab/Shift+Tab preserves a keyboard exit, described in EN/IT accessible
+editor instructions. Search inputs retain normal Tab focus navigation; pending
+saves remain read-only. No layout, API, dependency or infrastructure change.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'indents with Tab|retains the open editor'`: **2 passed**,17 unrelated cases skipped. Covers single/multiple lines, undo/redo, both keyboard exits, search focus and pending-save protection through real application handlers with an isolated provider fixture.
+- The first focused run had **1 passed,1 failed** because the new test used a platform-dependent redo shortcut. Using the native Ctrl+Y binding corrected the test; no production behavior was changed to accommodate it.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm i18n:compile` and `scripts/dev.sh pnpm i18n:check`: passed,1215 EN/IT/pseudo keys.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/features/file-text-editor.tsx apps/web/tests/file-manager.browser.test.ts packages/i18n/src/services-web.ts`: passed.
+- `git diff --check`: passed. Full historical suites were not rerun for this keyboard-only change; prior failures and evidence above remain unchanged.
+
+Independent review found no must-fix issue. Existing screenshots remain applicable:
+there is no visual layout change. Tests reused the approved isolated services and
+disposed their own schemas/staging; no live provider call, game-server asset,
+container restart, Docker resource creation or production mutation was performed.
+Rollback is a code revert; no state migration is required. PR#21 remains open and
+unmerged, and issue#18 remains a release gate.

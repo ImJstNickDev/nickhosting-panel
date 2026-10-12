@@ -2,6 +2,7 @@ import {
   defaultKeymap,
   history,
   historyKeymap,
+  indentWithTab,
   redo,
   redoDepth,
   undo,
@@ -346,7 +347,7 @@ function CompactSearch({ view, state }: SearchPanelState) {
   );
 }
 
-/** A local editor. Tab leaves the editor; no script execution, network LSP, or remote schema fetch. */
+/** Tab indents; Escape then Tab leaves. No script execution, network LSP, or remote schema fetch. */
 export function FileTextEditor({
   path,
   value,
@@ -443,6 +444,7 @@ export function FileTextEditor({
                 return true;
               },
             },
+            indentWithTab,
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
@@ -476,6 +478,7 @@ export function FileTextEditor({
         EditorView.editable.of(!readOnly),
         EditorView.contentAttributes.of({
           'aria-label': label,
+          'aria-description': callbacks.current.t('editor.indentKeys'),
           'aria-multiline': 'true',
           'aria-readonly': String(readOnly),
           role: 'textbox',

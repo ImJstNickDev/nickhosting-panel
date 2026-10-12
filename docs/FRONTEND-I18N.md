@@ -528,6 +528,10 @@ the path, including when the field is already open. These shortcuts yield to dia
 
 The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.
+Tab indents the current or selected lines; Shift+Tab outdents, using native undoable
+CodeMirror commands. Escape followed by Tab or Shift+Tab leaves the editor; its
+localized accessible description explains this exit. Search fields retain normal
+Tab navigation, and indentation cannot modify a file while saving.
 Opening a text file replaces the listing in place, without a modal. The breadcrumb
 retains clickable parent directories and includes the current filename. List-only
 search, upload and view controls are hidden until returning to the directory.
