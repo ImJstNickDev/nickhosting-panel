@@ -6456,3 +6456,13 @@ game-file mutation, new infrastructure or manual container restart. Existing Vit
 HMR loads the frontend; API/Vite were observed healthy. Isolated schemas and test
 assets use existing fixture cleanup. Rollback is a source revert; the snapshot is
 optional browser state. PR #21 remains open/unmerged; SFTPGo #18 is unchanged.
+
+### 2026-10-12 — Directory prefetch cost investigation
+
+[Directory benchmark report](M5-DIRECTORY-BENCHMARK.md) separates nine read-only
+native provider samples, 3,586 isolated HTTP directory requests and actual Chromium cache
+measurements. All requests succeeded within the bounded probes. Synthetic provider
+throughput is not production capacity evidence. The report records current cache
+budgets, background signing amplification, the native 1,000-entry page limit and
+recommendations for visible-folder prefetch. No product behavior, Blueprint code
+or infrastructure was changed; recursive prefetch remains a proposal.
