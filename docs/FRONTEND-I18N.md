@@ -513,6 +513,14 @@ to exact regular-file destinations. Copy also refreshes transfer availability an
 checks its upload capability before submission. An active claim from its own copy
 may temporarily disable new copies without hiding the in-flight result. Failed or
 uncertain copies ask for destination inspection; there is no automatic replay.
+Multi-selection and drag/drop no longer stop at 100 items. Delete/move use
+aggregated provider requests and automatically split selections larger than 1,000;
+the user does not need to select batches manually. Full-selection validation and
+exact overwrite consent precede mutations; uncertain effects are not replayed.
+Copy/ZIP retain recursive work budgets rather than a shared selection cap. ZIP
+downloads use native same-origin POST to avoid long URLs and whole-archive browser
+buffering. The normal download manager handles the attachment; failed responses
+open separately without navigating away from Files.
 Folders precede files for every sort; search filters the current directory only.
 Name, Size and Modified headers are sorting buttons in both list and grid views.
 The active non-default ordering has an up/down arrow; default Name ascending has

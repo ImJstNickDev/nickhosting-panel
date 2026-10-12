@@ -162,10 +162,6 @@
   align-items: center;
   gap: 2px;
 }
-.fm-selection-limit {
-  grid-column: 1 / -1;
-  font-size: 0.875rem;
-}
 .fm-list {
   height: min(62svh, 720px);
   max-height: min(62svh, 720px);

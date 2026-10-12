@@ -144,7 +144,21 @@ export function createApp(options: Options) {
       throw new DomainError('validation_failed', 413);
     },
   });
+  // File selections travel in bounded bodies rather than long download URLs.
+  // Provider mutation batches and recursive archive/copy budgets are enforced
+  // separately by their handlers; unrelated JSON routes keep the small limit.
+  const fileSelectionBodyLimit = bodyLimit({
+    maxSize: 4 * 1024 * 1024,
+    onError: () => {
+      throw new DomainError('validation_failed', 413);
+    },
+  });
   app.use('*', async (c, next) => {
+    if (
+      c.req.method === 'POST' &&
+      /^\/v1\/servers\/[^/]+\/files(?:\/(?:copy|archive))?$/.test(c.req.path)
+    )
+      return fileSelectionBodyLimit(c, next);
     if (c.req.method === 'PUT' && /^\/v1\/servers\/[^/]+\/files\/editor$/.test(c.req.path))
       return editorBodyLimit(c, next);
     // Only this authenticated binary route streams its body. Its handler checks

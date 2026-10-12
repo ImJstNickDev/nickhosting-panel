@@ -140,13 +140,19 @@ export function useFileTransfer(options: {
         `${serverPath(options.serverId)}/files?path=${encodeURIComponent(plan.destination)}`,
       ),
     ]);
+    const sourceNames = new Map(sources.map((entry) => [entry.name, entry]));
+    const destinationNames = new Map<string, ServerFile[]>();
+    for (const entry of destination) {
+      const key = entry.name.toLowerCase();
+      const matches = destinationNames.get(key);
+      if (matches) matches.push(entry);
+      else destinationNames.set(key, [entry]);
+    }
     const collisions: Collision[] = [];
     for (const name of names) {
-      const source = sources.find((entry) => entry.name === name);
+      const source = sourceNames.get(name);
       if (!source || source.is_symlink) throw { messageKey: 'file.pathNotFound' };
-      const targets = destination.filter(
-        (entry) => entry.name.toLowerCase() === name.toLowerCase(),
-      );
+      const targets = destinationNames.get(name.toLowerCase()) ?? [];
       if (!targets.length) continue;
       const target = targets[0];
       const canOverwrite = Boolean(

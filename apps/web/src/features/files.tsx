@@ -899,16 +899,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   function downloadNames(names: string[]) {
     const entry = files.data?.find((item) => item.name === names[0]);
     const direct = names.length === 1 && entry?.is_file;
-    download(
-      direct
-        ? `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, names[0] ?? ''))}`
-        : `${serverPath(serverId)}/files/archive?root=${encodeURIComponent(directory)}&files=${encodeURIComponent(JSON.stringify(names))}`,
-    );
+    if (direct)
+      download(
+        `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, names[0] ?? ''))}`,
+      );
+    else downloadZip(names);
   }
   function downloadZip(names: string[]) {
-    download(
-      `${serverPath(serverId)}/files/archive?root=${encodeURIComponent(directory)}&files=${encodeURIComponent(JSON.stringify(names))}`,
-    );
+    download(`${serverPath(serverId)}/files/archive`, {
+      root: directory,
+      files: JSON.stringify(names),
+    });
   }
   function showMenu(entry: ServerFile, element: HTMLElement, x?: number, y?: number) {
     menuTrigger.current = element;
@@ -948,7 +949,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         payload.directory !== directory ||
         !Array.isArray(payload.names) ||
         !payload.names.length ||
-        payload.names.length > 100 ||
         !payload.names.every((name) =>
           files.data?.some((entry) => entry.name === name && !entry.is_symlink),
         )
@@ -1746,7 +1746,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 aria-label={t('file.downloadZip')}
                 onClick={() => downloadZip(selectedNames)}
                 disabled={
-                  totalSelected > 100 ||
                   selectedEntries.some((entry) => entry.is_symlink) ||
                   !transfers.data?.download.available
                 }
@@ -1761,7 +1760,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool"
                     aria-label={t('file.move')}
-                    disabled={!canMutate || totalSelected > 100}
+                    disabled={!canMutate}
                     onClick={() => chooseMode('move')}
                   >
                     <ToolbarIcon kind="move" />
@@ -1772,7 +1771,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool"
                     aria-label={t('file.copy')}
-                    disabled={!canMutate || totalSelected > 100 || capabilities.data?.copy !== true}
+                    disabled={!canMutate || capabilities.data?.copy !== true}
                     onClick={() => chooseMode('copy')}
                   >
                     <ToolbarIcon kind="copy" />
@@ -1783,7 +1782,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool fm-selection-delete"
                     aria-label={t('web.delete')}
-                    disabled={!canMutate || totalSelected > 100}
+                    disabled={!canMutate}
                     onClick={() => chooseMode('delete')}
                   >
                     <ToolbarIcon kind="delete" />
@@ -1807,11 +1806,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               <ToolbarIcon kind="clear" />
             </button>
           </Tooltip>
-          {totalSelected > 100 && (
-            <span className="fm-selection-limit" role="status">
-              {t('file.selectionLimit')}
-            </span>
-          )}
         </section>
       )}
       {Boolean(error) && <ErrorNotice error={error} />}

@@ -54,14 +54,103 @@ export interface CopyEntry {
   directory: boolean;
 }
 
+/** Provider batches are bounded; the complete request is validated before this runs. */
+export async function applyFileChunks<T>(
+  entries: T[],
+  authorize: () => Promise<void>,
+  apply: (chunk: T[]) => Promise<void>,
+) {
+  let completed = 0;
+  let dispatched = false;
+  try {
+    for (let offset = 0; offset < entries.length; offset += 1000) {
+      dispatched = false;
+      await authorize();
+      const chunk = entries.slice(offset, offset + 1000);
+      dispatched = true;
+      await apply(chunk);
+      completed += chunk.length;
+    }
+  } catch (error) {
+    if (!completed && !dispatched) throw error;
+    // The failing chunk can itself be partial: never offer to replay the full selection.
+    throw new DomainError('operation_uncertain', 409, {
+      completed,
+      fileReason: 'partial_or_uncertain',
+      cause: error instanceof DomainError ? error.code : 'provider_error',
+    });
+  }
+}
+
+function directoryIndex(entries: ServerFile[]) {
+  const index = new Map<string, ServerFile[]>();
+  for (const entry of entries) {
+    const key = entry.name.toLowerCase();
+    const matches = index.get(key);
+    if (matches) matches.push(entry);
+    else index.set(key, [entry]);
+  }
+  return index;
+}
+
+/** Cache only this read-only plan, never later destination checks or writes. */
+function planningDirectory(list: (path: string) => Promise<ServerFile[]>) {
+  const listings = new Map<string, Promise<ServerFile[]>>();
+  const indexes = new Map<string, Promise<ReturnType<typeof directoryIndex>>>();
+  const cached = (path: string) => {
+    let pending = listings.get(path);
+    if (!pending) {
+      pending = list(path);
+      listings.set(path, pending);
+    }
+    return pending;
+  };
+  return {
+    list: cached,
+    matches: async (path: string, name: string) => {
+      let pending = indexes.get(path);
+      if (!pending) {
+        pending = cached(path).then(directoryIndex);
+        indexes.set(path, pending);
+      }
+      return (await pending).get(name.toLowerCase()) ?? [];
+    },
+  };
+}
+
+function selectedAncestor(path: string, selected: ReadonlySet<string>, self = true) {
+  let cursor = self ? path : path.slice(0, Math.max(0, path.lastIndexOf('/')));
+  while (cursor) {
+    if (selected.has(cursor)) return true;
+    const slash = cursor.lastIndexOf('/');
+    cursor = slash < 0 ? '' : cursor.slice(0, slash);
+  }
+  return false;
+}
+
+/** Duplicate or nested deletes can straddle chunks; reject them before any dispatch. */
+export function validateFileDeletes(root: string, names: string[]) {
+  root = clean(root, true);
+  const paths = names.map((name) => pathJoin(root, clean(name)).toLowerCase());
+  const selected = new Set(paths);
+  if (
+    selected.size !== paths.length ||
+    paths.some((path) => selectedAncestor(path, selected, false))
+  )
+    throw new DomainError('validation_failed');
+}
+
 function assertCopyDestination(
-  listing: ServerFile[],
+  listing: ServerFile[] | ReturnType<typeof directoryIndex>,
   target: string,
   sourceIsFile: boolean,
   approved: ReadonlySet<string>,
 ) {
   const name = target.split('/').at(-1);
-  const matches = listing.filter((entry) => entry.name.toLowerCase() === name?.toLowerCase());
+  const matches =
+    listing instanceof Map
+      ? (listing.get(name?.toLowerCase() ?? '') ?? [])
+      : listing.filter((entry) => entry.name.toLowerCase() === name?.toLowerCase());
   if (
     matches.length > 0 &&
     (!approved.has(target) ||
@@ -100,24 +189,24 @@ export async function planFileCopy(
 ): Promise<CopyEntry[]> {
   root = clean(root, true);
   destination = clean(destination, true);
+  list = planningDirectory(list).list;
   const selected = names.map(child);
   if (new Set(selected.map((name) => name.toLowerCase())).size !== selected.length)
     throw new DomainError('validation_failed');
   const approved = overwrite.map((path) => clean(path));
-  const targetPaths = selected.map((name) => pathJoin(destination, name));
-  if (
-    new Set(approved).size !== approved.length ||
-    approved.some((path) => !targetPaths.includes(path))
-  )
+  const targetPaths = new Set(selected.map((name) => pathJoin(destination, name)));
+  if (new Set(approved).size !== approved.length || approved.some((path) => !targetPaths.has(path)))
     throw new DomainError('validation_failed');
   const approvedTargets = new Set(approved);
-  const sources = selected.map((name) => pathJoin(root, name).toLowerCase());
-  for (const target of targetPaths.map((path) => path.toLowerCase()))
-    for (const source of sources)
-      if (target === source || target.startsWith(`${source}/`) || source.startsWith(`${target}/`))
-        throw new DomainError('conflict');
+  const sources = new Set(selected.map((name) => pathJoin(root, name).toLowerCase()));
+  const targetsLower = new Set([...targetPaths].map((path) => path.toLowerCase()));
+  if (
+    [...targetsLower].some((target) => selectedAncestor(target, sources)) ||
+    [...sources].some((source) => selectedAncestor(source, targetsLower))
+  )
+    throw new DomainError('conflict');
   for (const path of [root, destination]) await assertCopyDirectory(list, path);
-  const targets = await list(destination);
+  const targets = directoryIndex(await list(destination));
   const entries: CopyEntry[] = [];
   let bytes = 0;
   async function visit(source: string, target: string, entry: ServerFile, depth: number) {
@@ -144,9 +233,9 @@ export async function planFileCopy(
       }
     }
   }
-  const source = await list(root);
+  const source = directoryIndex(await list(root));
   for (const name of selected) {
-    const matches = source.filter((item) => item.name.toLowerCase() === name.toLowerCase());
+    const matches = source.get(name.toLowerCase()) ?? [];
     if (matches.length !== 1 || matches[0]?.name !== name) throw new DomainError('conflict');
     const selected = matches[0];
     if (!selected) throw new DomainError('conflict');
@@ -173,9 +262,10 @@ export async function validateFileMoves(
     to: pathJoin(root, clean(move.to)),
   }));
   const approved = overwrite.map((target) => pathJoin(root, clean(target)));
+  const exactTargets = new Set(planned.map((move) => move.to));
   if (
     new Set(approved).size !== approved.length ||
-    approved.some((target) => !planned.some((move) => move.to === target))
+    approved.some((target) => !exactTargets.has(target))
   )
     throw new DomainError('validation_failed');
   const approvedTargets = new Set(approved);
@@ -190,25 +280,37 @@ export async function validateFileMoves(
     targets.add(to);
   }
   for (const target of targets)
-    for (const source of sources) {
-      if (target === source || target.startsWith(`${source}/`)) throw new DomainError('conflict');
-    }
+    if (selectedAncestor(target, sources)) throw new DomainError('conflict');
   for (const source of sources)
-    for (const other of sources)
-      if (source !== other && source.startsWith(`${other}/`)) throw new DomainError('conflict');
+    if (selectedAncestor(source, sources, false)) throw new DomainError('conflict');
+  const directories = planningDirectory((path) => adapter.listFiles(id, path));
+  async function inspect(path: string) {
+    const parts = path.split('/');
+    let entry: ServerFile | undefined;
+    for (let index = 0; index < parts.length; index++) {
+      const matches = await directories.matches(
+        parts.slice(0, index).join('/'),
+        parts[index] ?? '',
+      );
+      if (matches.length > 1) throw new DomainError('conflict');
+      entry = matches[0];
+      if (!entry || entry.name !== parts[index]) return undefined;
+      if (entry.is_symlink || (index < parts.length - 1 && entry.is_file))
+        throw new DomainError('forbidden');
+    }
+    return entry;
+  }
   for (const move of planned) {
-    const source = await inspectFilePath(adapter, id, move.from);
+    const source = await inspect(move.from);
     if (!source) throw new DomainError('not_found');
     const parts = move.to.split('/');
     const name = parts.pop();
     const parent = parts.join('/');
     if (parent) {
-      const directory = await inspectFilePath(adapter, id, parent);
+      const directory = await inspect(parent);
       if (!directory || directory.is_file) throw new DomainError('conflict');
     }
-    const existing = (await adapter.listFiles(id, parent)).filter(
-      (entry) => entry.name.toLowerCase() === name?.toLowerCase(),
-    );
+    const existing = await directories.matches(parent, name ?? '');
     if (
       existing.length > 0 &&
       (!approvedTargets.has(move.to) ||
@@ -395,9 +497,9 @@ export function registerFileOperationRoutes(
     const input = parse(
       z.strictObject({
         root: z.string(),
-        files: z.array(z.string()).min(1).max(100),
+        files: z.array(z.string()).min(1).max(maxEntries),
         destination: z.string(),
-        overwrite: z.array(z.string()).max(100).optional(),
+        overwrite: z.array(z.string()).max(maxEntries).optional(),
       }),
       await body(c.req.raw),
     );

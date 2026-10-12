@@ -122,6 +122,133 @@ function minecraftGuard(f: ReturnType<typeof fixture>) {
 }
 vi.mock('@nickhosting/database', () => ({ recordAudit: vi.fn(async () => {}) }));
 describe('file browsing and streaming ZIP', () => {
+  function archiveApp(f = fixture(), principal = vi.fn(async () => ({}))) {
+    const app = new Hono();
+    app.onError((error, c) =>
+      c.json(
+        { code: error instanceof DomainError ? error.code : 'internal' },
+        error instanceof DomainError ? (error.status as 400) : 500,
+      ),
+    );
+    registerFileBrowsingRoutes(
+      app as never,
+      { principal, management: async () => f.service } as unknown as ServerRouteOptions,
+    );
+    return { ...f, app, principal };
+  }
+  it('streams a large URL-encoded POST selection without putting names in the URL', async () => {
+    const f = archiveApp();
+    const names = Array.from(
+      { length: 512 },
+      (_, index) => `${index}-${'selected-file-'.repeat(12)}città.txt`,
+    );
+    f.entries.set(
+      '',
+      names.map((name) => file(name)),
+    );
+    let releaseFirst = () => {};
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    f.adapter.downloadFile = vi.fn(async (_id, target) => ({
+      body: new ReadableStream<Uint8Array>({
+        async start(controller) {
+          if (target === names[0]) await first;
+          controller.enqueue(Buffer.from('one'));
+          controller.close();
+        },
+      }),
+      contentType: 'application/octet-stream' as const,
+      contentLength: 3,
+    }));
+    const body = new URLSearchParams({ root: '', files: JSON.stringify(names) });
+    expect(Buffer.byteLength(body.toString())).toBeGreaterThan(65536);
+    const response = await f.app.request('/v1/servers/abc/files/archive', {
+      method: 'POST',
+      body,
+    });
+    try {
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('application/zip');
+      await vi.waitFor(() => expect(f.adapter.downloadFile).toHaveBeenCalledTimes(1));
+      expect(f.adapter.readFile).not.toHaveBeenCalled();
+    } finally {
+      releaseFirst();
+    }
+    const extracted: string[] = [];
+    await visitArchive(Buffer.from(await response.arrayBuffer()), async (entry) => {
+      expect((await readArchiveFile(entry, 100)).toString()).toBe('one');
+      extracted.push(entry.path);
+    });
+    expect(extracted).toEqual(names);
+    expect(f.principal).toHaveBeenCalledTimes(1);
+    expect(f.service.access).toHaveBeenCalledWith(
+      expect.anything(),
+      'abc',
+      false,
+      expect.any(Function),
+    );
+    expect(f.service.authorizeTransfer.mock.calls.length).toBeGreaterThanOrEqual(names.length);
+  });
+  it.each([
+    ['missing files', 'root='],
+    ['malformed JSON', 'files=%5B'],
+    ['duplicate files', 'files=%5B%22a.txt%22%5D&files=%5B%22b.txt%22%5D'],
+    ['duplicate root', 'root=&root=folder&files=%5B%22a.txt%22%5D'],
+    ['unexpected field', 'files=%5B%22a.txt%22%5D&token=untrusted'],
+    ['empty selection', 'files=%5B%5D'],
+    [
+      'selection over the archive entry budget',
+      new URLSearchParams({ files: JSON.stringify(Array<string>(10001).fill('a.txt')) }).toString(),
+    ],
+  ])('rejects a POST manifest with %s before provider access', async (_name, body) => {
+    const f = archiveApp();
+    const response = await f.app.request('/v1/servers/abc/files/archive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body,
+    });
+    expect(response.status).toBe(400);
+    expect(f.service.access).not.toHaveBeenCalled();
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+  });
+  it('retains session and transfer authorization for POST archives', async () => {
+    const f = archiveApp();
+    const request = () =>
+      f.app.request('/v1/servers/abc/files/archive', {
+        method: 'POST',
+        body: new URLSearchParams({ root: '', files: '["a.txt"]' }),
+      });
+    f.principal.mockRejectedValueOnce(new DomainError('unauthenticated'));
+    expect((await request()).status).toBe(401);
+    expect(f.service.access).not.toHaveBeenCalled();
+    f.service.authorizeTransfer.mockRejectedValueOnce(new DomainError('forbidden'));
+    expect((await request()).status).toBe(403);
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+  });
+  it.each(['application/json', 'multipart/form-data', 'text/plain'])(
+    'rejects the unsupported POST manifest content type %s',
+    async (contentType) => {
+      const f = archiveApp();
+      const response = await f.app.request('/v1/servers/abc/files/archive', {
+        method: 'POST',
+        headers: { 'content-type': contentType },
+        body: 'files=%5B%22a.txt%22%5D',
+      });
+      expect(response.status).toBe(400);
+      expect(f.service.access).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps the actual recursive entry budget when a selected folder expands', async () => {
+    const f = fixture();
+    f.entries.set(
+      'folder',
+      Array.from({ length: 10000 }, (_, index) => file(`${index}.txt`)),
+    );
+    await expect(
+      collectArchiveEntries(f.adapter, 'id', '', ['folder'], async () => {}),
+    ).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+  });
   it.each([
     ['  Survival di Nic — Città 26.1!  ', 'survival-di-nic-citta-26-1'],
     ['../"Server"\r\nName', 'server-name'],
@@ -431,6 +558,8 @@ describe('editor revisions', () => {
 
     // A subsequent authorized request must see a newly introduced provider symlink.
     f.entries.set('', [file('a.txt'), { ...file('folder', false), is_symlink: true }]);
+    vi.mocked(f.adapter.listFiles).mockClear();
+    const previousContentReads = vi.mocked(f.adapter.readFile).mock.calls.length;
     const next = await f.app.request('/v1/servers/abc/files/editor', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
@@ -441,7 +570,13 @@ describe('editor revisions', () => {
       }),
     });
     expect(next.status).toBe(409);
-    expect(f.adapter.listFiles).toHaveBeenCalledTimes(3);
+    // The existing parallel ancestor preflight reads both directories afresh,
+    // then rejects the symlink before another content read or write can start.
+    expect(vi.mocked(f.adapter.listFiles).mock.calls).toEqual([
+      ['provider', ''],
+      ['provider', 'folder'],
+    ]);
+    expect(f.adapter.readFile).toHaveBeenCalledTimes(previousContentReads);
     expect(f.adapter.writeFile).toHaveBeenCalledTimes(1);
   });
   it.each(['case-alias', 'duplicate-alias', 'symlink', 'file-ancestor'])(

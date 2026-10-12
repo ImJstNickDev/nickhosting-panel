@@ -1,7 +1,45 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { apiError, consumeEvents, readText, safeApiPath } from './client.js';
+import { apiError, consumeEvents, download, readText, safeApiPath } from './client.js';
 
 afterEach(() => vi.unstubAllGlobals());
+it('submits a large native POST download and removes its temporary form without fetching ZIP bytes', () => {
+  const form = { append: vi.fn(), remove: vi.fn() };
+  const append = vi.fn();
+  const submit = vi.fn(function (this: unknown) {
+    expect(this).toBe(form);
+    expect(append).toHaveBeenCalledWith(form);
+  });
+  const fetcher = vi.fn();
+  vi.stubGlobal('fetch', fetcher);
+  vi.stubGlobal('HTMLFormElement', { prototype: { submit } });
+  vi.stubGlobal('document', {
+    createElement: vi.fn((tag) => (tag === 'form' ? form : {})),
+    body: { append },
+  });
+  const fields = {
+    root: 'worlds',
+    files: JSON.stringify(Array.from({ length: 512 }, (_, index) => `${index}-città.txt`)),
+  };
+  download('/v1/servers/test/files/archive', fields);
+  expect(form).toMatchObject({
+    action: '/v1/servers/test/files/archive',
+    method: 'POST',
+    enctype: 'application/x-www-form-urlencoded',
+    acceptCharset: 'UTF-8',
+    target: '_blank',
+    rel: 'noopener',
+    hidden: true,
+  });
+  expect(form.append.mock.calls).toEqual([
+    [{ type: 'hidden', name: 'root', value: fields.root }],
+    [{ type: 'hidden', name: 'files', value: fields.files }],
+  ]);
+  expect(submit).toHaveBeenCalledTimes(1);
+  expect(form.remove).toHaveBeenCalledTimes(1);
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(() => download('https://provider.invalid/archive', fields)).toThrow('invalid_api_path');
+  expect(submit).toHaveBeenCalledTimes(1);
+});
 function response(chunks: string[], type = 'text/event-stream') {
   vi.stubGlobal(
     'fetch',

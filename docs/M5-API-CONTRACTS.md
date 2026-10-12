@@ -654,9 +654,9 @@ credential is returned to the browser.
 | --- | --- |
 | `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; symlinks and binary content rejected. Known binary metadata returns `file_not_editable` (415) before reading the body. |
 | `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
-| `GET /archive?root=...&files=...` | JSON array of selected basenames; actual streamed ZIP, including folders/empty directories. At most100 selected roots,10,000 enumerated entries,64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
+| `POST /archive` (preferred); `GET /archive?root=...&files=...` (compatible) | POST uses URL-encoded `root` and `files` (JSON array of selected basenames), avoiding long URLs. Actual streamed ZIP, including folders/empty directories; 10,000 enumerated entries including selected roots, 64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
 | `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
-| `POST /copy` | `{root,files,destination,overwrite?}`; copies selections recursively into an existing directory, preserving originals. Optional `overwrite: string[]` authorizes exact server-root-relative regular-file destinations; omission rejects collisions. Links, directory replacement/merging, ambiguous casing, overlapping paths and protected targets remain rejected. |
+| `POST /copy` | `{root,files,destination,overwrite?}`; copies selections recursively into an existing directory, preserving originals. Limits apply to actual work: 20,000 total entries (including roots), 16 GiB copied bytes, depth 64. Optional `overwrite: string[]` authorizes exact server-root-relative regular-file destinations; omission rejects collisions. Links, directory replacement/merging, ambiguous casing, overlapping paths and protected targets remain rejected. |
 | `POST /extract` | `{root,file,destination,confirm:true}`; destination is one new child directory. Validate/stage the entire archive before remote writes, then use existing upload admission and adapter streams. |
 
 ZIP attachments use `nhpanel-<server-name>-YYYY-MM-DD_HH_mm_ss.zip`, with the
@@ -665,13 +665,31 @@ diacritics are removed, spaces/symbols become single hyphens, and the stem is
 trimmed/bounded to 100 characters (fallback `server`). Naming reuses the authorized
 server row and adds no provider request. Archive contents/paths are unchanged.
 
+The WebPanel submits ZIP manifests as native same-origin form POSTs so large
+selections do not overflow browser/proxy URL limits or buffer an entire ZIP in
+JavaScript. HttpOnly session/support cookies and the existing Origin check apply.
+The document referrer policy is `same-origin`: native POST supplies its Origin,
+while cross-origin referrers remain suppressed. The form is removed immediately;
+attachment responses use the browser download manager, and error responses open
+in a separate tab without replacing the workspace. Legacy GET remains supported.
+Only POST `/files`, `/files/copy` and `/files/archive` have a 4 MiB selection-body
+limit; unrelated JSON routes keep their previous limit. This is a manifest bound,
+not an upload/download byte limit or a cap of 100 selected items.
+
 `POST /v1/servers/:id/files` with `action:"rename"` also handles moves. Its optional
 `overwrite: string[]` identifies exact root-relative destination paths from the
 same `files:[{from,to}]` request. Omission retains no-overwrite preflight. Consent
 permits only regular-file to regular-file replacement with an exact matching name;
 directories, symlinks, case ambiguity, duplicate/unrelated approvals and overlapping
-batch paths remain rejected. The entire batch is checked before one adapter call,
-with existing protected-path guards, authorization recheck and audited approvals.
+batch paths remain rejected. The entire selection is checked before any adapter
+mutation, with existing protected-path guards and audited approvals. Delete and
+rename requests dispatch sequential provider batches of up to 1,000 entries,
+reauthorizing before each batch. Unknown/partial dispatch failure stops the sequence
+with `operation_uncertain`; confirmed prior-entry counts are only a lower bound,
+not proof that the failed batch had no effects. No batch is automatically replayed.
+Pre-dispatch authorization failures retain their normal error when nothing ran.
+Planning reuses directory indexes only inside that request; copy's subsequent
+source/destination checks remain fresh before writes.
 There is no delete-before-move. Destination names appearing after browser preflight
 are checked again by the API. Provider filesystem changes can still race the final
 preflight/rename interval: the current Client API contract has no atomic no-clobber

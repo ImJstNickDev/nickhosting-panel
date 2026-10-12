@@ -53,6 +53,7 @@ beforeEach(async () => {
     .where('id', '=', f.hostId)
     .execute();
   const adapter = {
+    deleteFiles: vi.fn(async () => {}),
     renameFiles: vi.fn(async () => {}),
     listFiles: vi.fn(
       async (_id: string, path: string): Promise<ServerFile[]> =>
@@ -150,6 +151,80 @@ async function moveFiles(files: { from: string; to: string }[], overwrite?: stri
   });
 }
 describe('file operation handlers with isolated authoritative database', () => {
+  it('moves 1001 files in two bounded requests after complete preflight', async () => {
+    const moves = Array.from({ length: 1001 }, (_, index) => {
+      files.set(`source/file-${index}`, Buffer.from('data'));
+      return { from: `source/file-${index}`, to: `target/file-${index}` };
+    });
+    const authorize = vi.spyOn(service, 'authorizeTransfer');
+    expect((await moveFiles(moves)).status).toBe(204);
+    expect(vi.mocked(service.adapter.renameFiles).mock.calls).toEqual([
+      ['fixture', '', moves.slice(0, 1000)],
+      ['fixture', '', moves.slice(1000)],
+    ]);
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(
+      vi
+        .mocked(service.adapter.listFiles)
+        .mock.calls.map(([, path]) => path)
+        .sort(),
+    ).toEqual(['', 'source', 'target']);
+  });
+  it('rejects a conflict beyond the first 1000 moves before any provider effect', async () => {
+    const moves = Array.from({ length: 1001 }, (_, index) => {
+      files.set(`source/file-${index}`, Buffer.from('data'));
+      return { from: `source/file-${index}`, to: `target/file-${index}` };
+    });
+    files.set('target/file-1000', Buffer.from('existing'));
+    expect((await moveFiles(moves)).status).toBe(409);
+    expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+  });
+  it.each(['delete', 'rename'] as const)(
+    'reports partial %s as uncertain and does not dispatch later chunks',
+    async (action) => {
+      const selected = Array.from({ length: 2001 }, (_, index) => {
+        files.set(`source/file-${index}`, Buffer.from('data'));
+        return `source/file-${index}`;
+      });
+      const mutation = vi.mocked(
+        action === 'delete' ? service.adapter.deleteFiles : service.adapter.renameFiles,
+      );
+      mutation.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new DomainError('conflict'));
+      const response = await app.request(`/v1/servers/${serverId}/files`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          root: '',
+          files:
+            action === 'delete'
+              ? selected
+              : selected.map((from, index) => ({ from, to: `target/file-${index}` })),
+          ...(action === 'delete' ? { confirm: true } : {}),
+        }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ code: 'operation_uncertain' });
+      expect(mutation).toHaveBeenCalledTimes(2);
+    },
+  );
+  it('accepts copying 101 roots while enforcing the existing complete-tree budget', async () => {
+    const selected = Array.from({ length: 101 }, (_, i) => `empty-${i}`);
+    for (const name of selected) files.set(`source/${name}`, null);
+    const response = await post('copy', { root: 'source', files: selected, destination: 'target' });
+    expect(response.status).toBe(200);
+    expect(service.adapter.createDirectory).toHaveBeenCalledTimes(101);
+    expect(
+      (
+        await post('copy', {
+          root: 'source',
+          files: Array.from({ length: 20_001 }, (_, i) => `file-${i}`),
+          destination: 'target',
+        })
+      ).status,
+    ).toBe(400);
+    expect(service.adapter.createDirectory).toHaveBeenCalledTimes(101);
+  });
   it.each([false, true])(
     'rechecks mutation authorization after batch move preflight (overwrite %s)',
     async (overwrite) => {

@@ -251,18 +251,37 @@ export function registerFileBrowsingRoutes(
     );
     return c.json({ revision });
   });
-  app.get('/v1/servers/:id/files/archive', async (c) => {
+  app.on(['GET', 'POST'], '/v1/servers/:id/files/archive', async (c) => {
     const requestedAt = new Date();
     const context = await principal(c),
       service = await management(),
       serverId = c.req.param('id');
+    let root = c.req.query('root') ?? '';
+    let selected = c.req.query('files') ?? 'null';
+    if (c.req.method === 'POST') {
+      if (
+        c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase() !==
+        'application/x-www-form-urlencoded'
+      )
+        throw new DomainError('validation_failed');
+      // The shared request middleware bounds this small manifest before parsing.
+      const fields = new URLSearchParams(await c.req.text());
+      if (
+        fields.getAll('files').length !== 1 ||
+        fields.getAll('root').length > 1 ||
+        [...fields.keys()].some((key) => key !== 'files' && key !== 'root')
+      )
+        throw new DomainError('validation_failed');
+      root = fields.get('root') ?? '';
+      selected = fields.get('files') ?? 'null';
+    }
     let raw: unknown;
     try {
-      raw = JSON.parse(c.req.query('files') ?? 'null');
+      raw = JSON.parse(selected);
     } catch {
       throw new DomainError('validation_failed');
     }
-    const parsed = z.array(z.string().min(1).max(255)).min(1).max(100).safeParse(raw);
+    const parsed = z.array(z.string().min(1).max(255)).min(1).max(10000).safeParse(raw);
     if (!parsed.success) throw new DomainError('validation_failed');
     const authorize = () => service.authorizeTransfer(context, serverId, false);
     const { id, serverName, entries } = await service.access(
@@ -275,7 +294,7 @@ export function registerFileBrowsingRoutes(
         entries: await collectArchiveEntries(
           service.adapter,
           id,
-          c.req.query('root') ?? '',
+          root,
           parsed.data,
           () => service.authorizeTransfer(current, serverId, false, connection),
           c.req.raw.signal,

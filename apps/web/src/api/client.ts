@@ -132,9 +132,36 @@ export function upload(
 
 /** Native download stays streamed by the browser. The HttpOnly support cookie
  * carries the same authority as API calls; no signed upstream URL is exposed. */
-export function download(path: string) {
+export function download(path: string, fields?: Readonly<Record<string, string>>) {
+  const target = safeApiPath(path);
+  if (fields) {
+    const form = document.createElement('form');
+    form.action = target;
+    form.method = 'POST';
+    form.enctype = 'application/x-www-form-urlencoded';
+    form.acceptCharset = 'UTF-8';
+    form.target = '_blank';
+    form.rel = 'noopener';
+    form.hidden = true;
+    for (const [name, value] of Object.entries(fields)) {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = name;
+      input.value = value;
+      form.append(input);
+    }
+    document.body.append(form);
+    try {
+      // A native attachment remains streamed; an HTTP error opens separately
+      // instead of replacing the workspace or buffering the ZIP in JavaScript.
+      HTMLFormElement.prototype.submit.call(form);
+    } finally {
+      form.remove();
+    }
+    return;
+  }
   const link = document.createElement('a');
-  link.href = safeApiPath(path);
+  link.href = target;
   link.rel = 'noreferrer';
   link.download = '';
   link.click();

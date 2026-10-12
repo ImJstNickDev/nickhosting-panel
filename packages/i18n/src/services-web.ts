@@ -78,10 +78,6 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Folder upload cancelled.',
     'Caricamento della cartella annullato.',
   ],
-  'file.selectionLimit': [
-    'Select up to 100 items per operation. Download a folder to include all its contents.',
-    'Seleziona fino a 100 elementi per operazione. Scarica una cartella per includere tutti i suoi contenuti.',
-  ],
   'owner.config.fileOperationsFreeBytes': [
     'File staging free-space reserve (bytes)',
     'Riserva di spazio per i file temporanei (byte)',

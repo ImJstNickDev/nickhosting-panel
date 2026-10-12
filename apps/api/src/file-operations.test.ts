@@ -8,9 +8,86 @@ import type { PterodactylAdapter, ServerFile } from '@nickhosting/pterodactyl-ad
 import { pack } from 'tar-stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
-import { planFileCopy, stageFileArchive, validateFileMoves } from './file-operations.js';
+import {
+  applyFileChunks,
+  planFileCopy,
+  stageFileArchive,
+  validateFileDeletes,
+  validateFileMoves,
+} from './file-operations.js';
 
 const roots: string[] = [];
+describe('bounded provider file batches', () => {
+  it('rejects duplicate, nested and invalid deletions anywhere in the full selection before dispatch', () => {
+    const files = Array.from({ length: 1001 }, (_, i) => `file-${i}`);
+    expect(() => validateFileDeletes('world', files)).not.toThrow();
+    for (const final of ['file-0', 'FILE-0', 'file-0/child', '../escape'])
+      expect(() => validateFileDeletes('world', [...files, final])).toThrow();
+    expect(() => validateFileDeletes('', ['world/config', 'world'])).toThrow();
+    expect(() => validateFileDeletes('', ['world-file', 'world'])).not.toThrow();
+  });
+  it('dispatches sequential chunks after authorization, not one request per file', async () => {
+    const events: string[] = [];
+    await applyFileChunks(
+      Array.from({ length: 2501 }, (_, i) => i),
+      async () => {
+        events.push('authorize');
+      },
+      async (entries) => {
+        events.push(`${entries[0]}:${entries.length}`);
+      },
+    );
+    expect(events).toEqual([
+      'authorize',
+      '0:1000',
+      'authorize',
+      '1000:1000',
+      'authorize',
+      '2000:501',
+    ]);
+  });
+  it('never retries a partly completed operation or labels failed chunks as confirmed', async () => {
+    const apply = vi.fn(async (_entries: number[]) => {});
+    apply.mockImplementationOnce(async () => {}).mockRejectedValueOnce(new Error('lost response'));
+    await expect(
+      applyFileChunks(
+        Array.from({ length: 2501 }, (_, i) => i),
+        async () => {},
+        apply,
+      ),
+    ).rejects.toMatchObject({ code: 'operation_uncertain', details: { completed: 1000 } });
+    expect(apply).toHaveBeenCalledTimes(2);
+    apply.mockClear().mockRejectedValueOnce(new Error('partial first chunk'));
+    await expect(applyFileChunks([1, 2], async () => {}, apply)).rejects.toMatchObject({
+      code: 'operation_uncertain',
+      details: { completed: 0 },
+    });
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+  it('leaves pre-dispatch authorization failures unchanged and marks later revocation uncertain', async () => {
+    const { DomainError } = await import('@nickhosting/core');
+    const authorize = vi.fn<() => Promise<void>>(async () => {
+      throw new DomainError('forbidden');
+    });
+    const apply = vi.fn(async (_entries: number[]) => {});
+    await expect(applyFileChunks([1], authorize, apply)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    expect(apply).not.toHaveBeenCalled();
+    authorize.mockImplementationOnce(async () => {});
+    await expect(
+      applyFileChunks(
+        Array.from({ length: 1001 }, (_, i) => i),
+        authorize,
+        apply,
+      ),
+    ).rejects.toMatchObject({
+      code: 'operation_uncertain',
+      details: { completed: 1000, cause: 'forbidden' },
+    });
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+});
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -61,6 +138,28 @@ async function tar(
   return archive;
 }
 describe('safe file copy planning', () => {
+  it('plans more than 100 selected roots with one listing per directory and keeps the tree budget', async () => {
+    const names = Array.from({ length: 1001 }, (_, i) => `file-${i}.txt`);
+    const list = vi.fn(async (path: string) =>
+      path === 'source'
+        ? names.map((name) => file(name))
+        : path === ''
+          ? [file('source', true), file('target', true)]
+          : [],
+    );
+    expect(await planFileCopy(list, 'source', names, 'target')).toHaveLength(1001);
+    expect(list.mock.calls.map(([path]) => path).sort()).toEqual(['', 'source', 'target']);
+    const oversized = Array.from({ length: 20_001 }, (_, i) => `file-${i}.txt`);
+    await expect(
+      planFileCopy(
+        async (path) =>
+          path === 'target' ? [] : [file('target', true), ...oversized.map((name) => file(name))],
+        '',
+        oversized,
+        'target',
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
   it('enumerates directories before effects and maintains structure', async () => {
     const list = vi.fn(
       async (path: string) =>
@@ -302,6 +401,27 @@ describe('validated file archive staging', () => {
 });
 
 describe('batch move preflight', () => {
+  it('validates more than 1000 moves using each directory once and detects a conflict at the end', async () => {
+    const names = Array.from({ length: 1001 }, (_, i) => `file-${i}`);
+    const listings = {
+      '': [file('source', true), file('target', true)],
+      source: names.map((name) => file(name)),
+      target: [] as ServerFile[],
+    };
+    const a = adapter(listings);
+    const moves = names.map((name) => ({ from: `source/${name}`, to: `target/${name}` }));
+    await expect(validateFileMoves(a, 'server', '', moves)).resolves.toBeUndefined();
+    expect(
+      vi
+        .mocked(a.listFiles)
+        .mock.calls.map(([, path]) => path)
+        .sort(),
+    ).toEqual(['', 'source', 'target']);
+    listings.target.push(file('file-1000'));
+    await expect(validateFileMoves(a, 'server', '', moves)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+  });
   it('rejects targets inside another simultaneously moved source', async () => {
     const a = { listFiles: vi.fn(async () => []) } as unknown as PterodactylAdapter;
     await expect(

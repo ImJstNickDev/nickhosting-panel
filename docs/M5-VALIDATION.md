@@ -6082,3 +6082,50 @@ the update; no container restart, provider operation, production mutation or new
 live asset. Test fixtures clean their isolated schemas/files. Rollback is a source
 revert, without migration or data reset. M5 PR #21 remains open and unmerged;
 SFTPGo #18 is unchanged.
+
+
+## 2026-10-12 — large file selections without the 100-item UI cap
+
+Removed the uniform 100-item selection/drag/API restriction. Delete and move
+validate the complete selection before dispatch, then use sequential provider
+batches of at most 1,000 entries, with authorization before each batch. Planning
+indexes directory contents once per request instead of rereading a directory for
+every selected file. Invalid/protected paths, duplicate/case aliases, overlapping
+sources and unapproved replacements fail before the first remote effect. A lost
+response or later-batch failure remains uncertain, without replaying completed
+batches or claiming the failing batch made no changes.
+
+ZIP downloads now submit the manifest through a native streamed POST rather than
+an oversized query string. Legacy GET remains supported. The temporary form is
+removed immediately; successful attachments use the browser download manager,
+while HTTP errors open separately instead of replacing the workspace. A Chromium
+probe established that `no-referrer` gives native POST `Origin: null`; the page
+now uses `same-origin`, retaining suppression of external referrers and Core's
+normal Origin/session enforcement. No CSRF bypass or provider token exposure.
+
+Remaining workload limits are explicit: 4 MiB manifest bodies on the three file
+selection endpoints, 10,000 recursively enumerated ZIP entries, and 20,000 copy
+entries / 16 GiB, with depth 64. The manifest limit does not limit transferred file
+bytes. Copy's later per-write source/destination checks do not reuse planning
+snapshots. Removed the obsolete EN/IT selection-limit message.
+
+Focused checks used existing approved isolated M2 PostgreSQL/Redis resources,
+disposable schemas, real application/authentication/browser handlers and fixture
+provider effects:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-operations.test.ts`: **58 passed**, including 2,501-entry dispatch, pre-dispatch rejection, later revocation, uncertain partial effects and indexed planning budgets.
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts apps/web/src/api/client.test.ts`: **57 passed**, including 512-file streamed POST, malformed/duplicate fields, authorization, recursive archive budget and native form cleanup. Initial run: 56 passed and one pre-existing editor assertion failed. A temporary baseline test confirmed that existing parallel ancestor validation already reads both root and child before rejecting a new symlink. The corrected test asserts those exact fresh reads and no additional content read/write instead of the obsolete serial call count; editor production behavior did not change.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-operations.integration.test.ts`: **28 passed**. Covers 1,001 moves as 1,000 + 1, conflict at the end before any dispatch, 2,001-entry partial failures without a third request, copy over 100 roots and existing overwrite/recovery regressions.
+- Same integration command with `apps/api/src/servers.integration.test.ts -t 'protects Minecraft launch inputs|larger bounded POST archive'`: **2 passed, 73 intentionally skipped**. Covers 1,001 deletes, late protected/invalid paths before any mutation, missing/null/forged Origin rejection, valid manifest over 64 KiB and 4 MiB body rejection.
+- `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'more than 100 selected|keyboard context menus, range selection'`: **2 passed, 28 intentionally skipped**. Real Chromium selects 128 long-named files, downloads their ZIP through POST without leaving the SPA, copies them, moves them in one provider call and deletes them in one provider call. Existing keyboard/context-menu/overwrite behavior also passes. Test files and disposable schemas are cleaned by fixtures.
+- `scripts/dev.sh pnpm typecheck` and `scripts/dev.sh pnpm i18n:check`: passed (1,239 keys per locale). Initial typecheck caught two new test-only mock/error typings; both were corrected before this final pass. Changed-source/test Biome passes with one pre-existing informational template-string suggestion. Diff and indexed governance checks passed. No historical full-suite rerun.
+
+Independent source review found no remaining must-fix. Reviewed the actual browser
+[screenshot with 128 selected files](screenshots/m5/file-selection-large-en-desktop.png):
+bounded listing, enabled compact actions, long names truncated without overflow,
+no obsolete selection warning. No unrelated visual redesign.
+
+No container/network changes, manual restart, production provider mutation or live
+test asset. Existing development source watchers can load the change. Rollback is
+a source revert, without database migration or reset. PR #21 remains open and
+unmerged; SFTPGo #18 remains an independent production-release blocker.

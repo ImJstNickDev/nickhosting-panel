@@ -260,6 +260,92 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     (await provider.files()).set('selection.zip', bytes);
     await user.getByRole('button', { name: 'Clear selection', exact: true }).click();
   });
+  it('downloads, copies, moves and deletes more than 100 selected files without a selection cap', async () => {
+    const source = 'bulk-selection-source',
+      copy = 'bulk-selection-copy',
+      moved = 'bulk-selection-moved';
+    const endpoint = `/v1/servers/${provider.ids.serverId}/files`;
+    const names = Array.from(
+      { length: 128 },
+      (_, index) => `bulk-${String(index).padStart(3, '0')}-${'x'.repeat(72)}.txt`,
+    );
+    const originalDelete = provider.adapter.deleteFiles;
+    const originalRename = provider.adapter.renameFiles;
+    const deletes: number[] = [],
+      renames: number[] = [];
+    for (const name of [source, copy, moved])
+      await journeyRequest(harness, user, endpoint, { action: 'mkdir', root: '', name });
+    const remote = await provider.files();
+    for (const name of names) remote.set(`${source}/${name}`, Buffer.from(name));
+    provider.adapter.deleteFiles = async (...args) => {
+      deletes.push(args[2].length);
+      return originalDelete(...args);
+    };
+    provider.adapter.renameFiles = async (...args) => {
+      renames.push(args[2].length);
+      return originalRename(...args);
+    };
+    try {
+      await user.goto(base);
+      await row(source).getByRole('button', { name: source, exact: true }).click();
+      await user.getByRole('checkbox', { name: 'Select all files', exact: true }).check();
+      const selection = user.getByRole('region', { name: 'Selected files' });
+      await browserExpect(selection).toContainText('128');
+      for (const name of ['Download ZIP', 'Move', 'Copy', 'Delete'])
+        await browserExpect(selection.getByRole('button', { name, exact: true })).toBeEnabled();
+      await browserExpect(selection).not.toContainText('up to 100');
+      await harness.screenshot(user, 'file-selection-large-en-desktop');
+      const request = user.context().waitForEvent('request', {
+        predicate: (value) => new URL(value.url()).pathname === `${endpoint}/archive`,
+      });
+      const downloading = user.waitForEvent('download');
+      await selection.getByRole('button', { name: 'Download ZIP', exact: true }).click();
+      const sent = await request;
+      expect(sent.method()).toBe('POST');
+      expect(new URL(sent.url()).search).toBe('');
+      expect(sent.postData()?.length).toBeGreaterThan(8000);
+      const downloaded = await downloading;
+      expect(await downloaded.failure()).toBeNull();
+      const saved = await downloaded.path();
+      if (!saved) throw new Error('Missing archive download');
+      const bytes = await readFile(saved);
+      expect(bytes.subarray(0, 2).toString()).toBe('PK');
+      for (const name of names) expect(bytes.toString()).toContain(name);
+      expect(user.url()).toContain('/files');
+      await selection.getByRole('button', { name: 'Copy', exact: true }).click();
+      await dialog().getByRole('treeitem', { name: copy, exact: true }).click();
+      await dialog().getByRole('button', { name: 'Copy', exact: true }).click();
+      await browserExpect(dialog()).not.toBeVisible({ timeout: 30000 });
+      for (const name of names) expect(remote.get(`${copy}/${name}`)).toEqual(Buffer.from(name));
+      await user.getByRole('checkbox', { name: 'Select all files', exact: true }).check();
+      await selection.getByRole('button', { name: 'Move', exact: true }).click();
+      await dialog().getByRole('treeitem', { name: moved, exact: true }).click();
+      await dialog().getByRole('button', { name: 'Move', exact: true }).click();
+      await browserExpect(dialog()).not.toBeVisible({ timeout: 30000 });
+      expect(renames).toEqual([128]);
+      for (const name of names) {
+        expect(remote.has(`${source}/${name}`)).toBe(false);
+        expect(remote.get(`${moved}/${name}`)).toEqual(Buffer.from(name));
+      }
+      await user.getByRole('button', { name: 'root', exact: true }).click();
+      await row(moved).getByRole('button', { name: moved, exact: true }).click();
+      await user.getByRole('checkbox', { name: 'Select all files', exact: true }).check();
+      await selection.getByRole('button', { name: 'Delete', exact: true }).click();
+      await dialog().getByRole('button', { name: 'Delete', exact: true }).click();
+      await browserExpect(dialog()).not.toBeVisible();
+      expect(deletes).toEqual([128]);
+      for (const name of names) expect(remote.has(`${moved}/${name}`)).toBe(false);
+    } finally {
+      provider.adapter.deleteFiles = originalDelete;
+      provider.adapter.renameFiles = originalRename;
+      await journeyRequest(harness, user, endpoint, {
+        action: 'delete',
+        root: '',
+        files: [source, copy, moved],
+        confirm: true,
+      });
+    }
+  }, 90000);
   it('preserves original download filenames and bytes for nested ASCII and Unicode files', async () => {
     const files = await provider.files();
     const names = ['server.jar', 'World notes 2026.txt', 'Città 日本語.txt'];

@@ -49,7 +49,12 @@ import { z } from 'zod';
 import type { Variables } from './app.js';
 import { createConsoleCommandRelays } from './console-command-relays.js';
 import { registerFileBrowsingRoutes } from './file-browsing.js';
-import { registerFileOperationRoutes, validateFileMoves } from './file-operations.js';
+import {
+  applyFileChunks,
+  registerFileOperationRoutes,
+  validateFileDeletes,
+  validateFileMoves,
+} from './file-operations.js';
 import { registerUploadBatchRoutes } from './file-upload-batches.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
@@ -575,7 +580,7 @@ export function registerServerRoutes(
           .object({
             action: z.literal('delete'),
             root: z.string(),
-            files: z.array(z.string()).min(1).max(100),
+            files: z.array(z.string()).min(1),
             confirm: z.literal(true),
           })
           .strict(),
@@ -583,11 +588,8 @@ export function registerServerRoutes(
           .object({
             action: z.literal('rename'),
             root: z.string(),
-            files: z
-              .array(z.object({ from: z.string(), to: z.string() }).strict())
-              .min(1)
-              .max(100),
-            overwrite: z.array(z.string()).max(100).optional(),
+            files: z.array(z.object({ from: z.string(), to: z.string() }).strict()).min(1),
+            overwrite: z.array(z.string()).optional(),
           })
           .strict(),
       ]),
@@ -611,6 +613,7 @@ export function registerServerRoutes(
           paths.push([input.root, name].filter(Boolean).join('/'));
         }
       }
+      if (input.action === 'delete') validateFileDeletes(input.root, input.files);
       await service.assertFileMutation(c.req.param('id'), paths, connection);
       await recordAudit(connection, current, 'server.files.requested', {
         serverId: c.req.param('id'),
@@ -621,11 +624,18 @@ export function registerServerRoutes(
       else if (input.action === 'mkdir')
         await service.adapter.createDirectory(id, input.root, input.name);
       else if (input.action === 'delete')
-        await service.adapter.deleteFiles(id, input.root, input.files);
+        await applyFileChunks(
+          input.files,
+          () => service.authorizeTransfer(current, c.req.param('id'), true, connection),
+          (files) => service.adapter.deleteFiles(id, input.root, files),
+        );
       else {
         await validateFileMoves(service.adapter, id, input.root, input.files, input.overwrite);
-        await service.authorizeTransfer(current, c.req.param('id'), true, connection);
-        await service.adapter.renameFiles(id, input.root, input.files);
+        await applyFileChunks(
+          input.files,
+          () => service.authorizeTransfer(current, c.req.param('id'), true, connection),
+          (files) => service.adapter.renameFiles(id, input.root, files),
+        );
       }
     });
     return c.body(null, 204);

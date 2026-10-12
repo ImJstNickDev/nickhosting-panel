@@ -1289,7 +1289,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         })
       ).status,
     ).toBe(204);
-    const files = Array.from({ length: 49 }, (_, index) => `file-${index}.dat`);
+    const files = Array.from({ length: 1001 }, (_, index) => `file-${index}.dat`);
     const entry = (name: string, isFile = true) => ({
       name,
       mode: '-rw-r--r--',
@@ -1313,6 +1313,25 @@ describe('M2 Hono API with real invitation, password and session authentication'
     const deleteFiles = vi.fn<PterodactylAdapter['deleteFiles']>().mockResolvedValue(undefined);
     Object.assign(f.adapter, { listFiles, deleteFiles });
     try {
+      for (const input of [
+        { action: 'delete', root: '', files: [...files, 'libraries'], confirm: true },
+        {
+          action: 'rename',
+          root: '',
+          files: [
+            ...files.map((from) => ({ from, to: `target/${from}` })),
+            { from: 'libraries', to: 'target/libraries' },
+          ],
+        },
+        { action: 'delete', root: '', files: [...files, '../escape'], confirm: true },
+        { action: 'delete', root: '', files: [...files, files[0]], confirm: true },
+        { action: 'delete', root: '', files: [...files, 'FILE-0.dat'], confirm: true },
+        { action: 'delete', root: '', files: [...files, 'file-0.dat/child'], confirm: true },
+      ]) {
+        expect((await request(user, `/v1/servers/${server}/files`, input)).status).toBe(400);
+        expect(deleteFiles).not.toHaveBeenCalled();
+      }
+      listFiles.mockClear();
       expect(
         (
           await request(user, `/v1/servers/${server}/files`, {
@@ -1328,10 +1347,58 @@ describe('M2 Hono API with real invitation, password and session authentication'
         'world',
         'world/data',
       ]);
-      expect(deleteFiles).toHaveBeenCalledOnce();
-      expect(deleteFiles).toHaveBeenCalledWith(expect.any(String), 'world/data', files);
+      expect(deleteFiles).toHaveBeenCalledTimes(2);
+      expect(deleteFiles).toHaveBeenNthCalledWith(
+        1,
+        expect.any(String),
+        'world/data',
+        files.slice(0, 1000),
+      );
+      expect(deleteFiles).toHaveBeenNthCalledWith(
+        2,
+        expect.any(String),
+        'world/data',
+        files.slice(1000),
+      );
     } finally {
       Object.assign(f.adapter, { listFiles: originalListFiles, deleteFiles: originalDeleteFiles });
+    }
+  });
+  it('enforces CSRF and the larger bounded POST archive manifest through real application middleware', async () => {
+    const server = await f.server();
+    const listing = vi.mocked(f.adapter.listFiles);
+    const original = listing.getMockImplementation();
+    listing.mockImplementation(async (_id, directory = '') =>
+      directory === '' ? [fileEntry('archive', { is_file: false, size: 0 })] : [],
+    );
+    const body = new URLSearchParams({
+      root: '',
+      files: `[${' '.repeat(70 * 1024)}"archive"]`,
+    }).toString();
+    expect(Buffer.byteLength(body)).toBeGreaterThan(64 * 1024);
+    const send = (requestOrigin: string | null, payload = body) => {
+      const headers = user.headers();
+      headers.set('content-type', 'application/x-www-form-urlencoded');
+      if (requestOrigin === null) headers.delete('origin');
+      else headers.set('origin', requestOrigin);
+      return app.request(`${origin}/v1/servers/${server}/files/archive`, {
+        method: 'POST',
+        headers,
+        body: payload,
+      });
+    };
+    try {
+      for (const forged of [null, 'null', 'https://attacker.example.test']) {
+        expect((await send(forged)).status).toBe(403);
+        expect(listing).not.toHaveBeenCalled();
+      }
+      const allowed = await send(origin);
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get('content-type')).toContain('application/zip');
+      expect((await allowed.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      expect((await send(origin, `files=${'x'.repeat(4 * 1024 * 1024)}`)).status).toBe(413);
+    } finally {
+      listing.mockImplementation(original ?? (async () => []));
     }
   });
   it('uploads binary data larger than the JSON/text limits through the authorized streaming route', async () => {
