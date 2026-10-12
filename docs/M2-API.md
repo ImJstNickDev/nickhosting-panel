@@ -206,10 +206,15 @@ downloads and mutations retain their existing fresh identity verification.
 
 Paths are validated and scoped through the adapter. File/command/backup-delete
 mutations share the lifecycle server lock and reject an active lifecycle job.
-Contending interactive writes return `409` instead of waiting with a database
-connection. A shared per-pool upload gate leaves connections available for
-authentication, authorization refresh and logout; a one-connection pool cannot
-accept uploads. Saturated upload slots also return `409`.
+Initial server-lock contention returns `409 operation_busy` before the callback or
+any provider effect, instead of waiting with a database connection. A shared
+per-pool upload gate leaves connections available for authentication, authorization
+refresh and logout; a one-connection pool cannot accept uploads. Saturated upload
+slots also return `409 operation_busy` before dispatch. This explicit code is proof
+that this attempt did not start an effect; generic `conflict`, lifecycle conflicts,
+existing ingestion claims and unknown provider outcomes do not carry that proof.
+The browser upload queue alone retries `operation_busy` with a bounded backoff;
+there is no second retry/wait layer in the API.
 Provider failures stay failures; no synthetic success response is produced.
 The JSON text-edit action remains bounded; binary transfers use the separate raw
 upload endpoint. `path` is a relative server path, with traversal, control

@@ -520,7 +520,11 @@ no arrow. Header controls remain keyboard accessible on mobile.
 List is default; Grid is optional. External file drops use the same upload queue
 as the toolbar, with per-file progress, speed, cancellation and errors. Cancellation
 is bound to an entry ID; cancelling a queued item never aborts another active file.
-Submitted failures/cancellations refresh admission before continuing. Shared-state
+The explicit pre-effect `operation_busy` response keeps the same file waiting and
+retries with a short bounded backoff; exhaustion preserves it at the head of the
+queue for Check and resume. Cancelling during that wait removes only that item.
+The retry loop adds no availability polling during backoff; normal view refreshes remain.
+Other submitted failures/cancellations refresh admission before continuing. Shared-state
 failures pause the untouched queue even when availability reads look ready; the
 localized Check and resume action checks admission again without replaying failed
 or uncertain writes. A paused queue stays in the current Files view and warns before tab close/reload;

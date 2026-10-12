@@ -160,8 +160,13 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Uploads paused. Queued files stay in this tab. If the block persists, ask the Owner to check the previous upload.',
     'Caricamenti in pausa. I file in coda restano in questa scheda. Se il blocco persiste, chiedi all’Owner di verificare il caricamento precedente.',
   ],
+  'file.uploadQueueBusy': [
+    'The server is busy. Your files are still queued. Check and resume.',
+    'Il server è occupato. I tuoi file restano in coda. Verifica e riprendi.',
+  ],
   'file.resumeUploads': ['Check and resume', 'Verifica e riprendi'],
   'file.upload.queued': ['Queued', 'In coda'],
+  'file.upload.waiting': ['Waiting for server', 'In attesa del server'],
   'file.upload.uploading': ['Uploading', 'Caricamento'],
   'file.upload.confirming': ['Confirming upload', 'Conferma caricamento'],
   'file.upload.complete': ['Completed', 'Completato'],

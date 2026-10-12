@@ -129,6 +129,34 @@ describe('M5 upload cancellation preserves unattempted files', () => {
   }
   const puts = () => requests.filter((entry) => entry.startsWith('PUT:'));
 
+  async function holdServerLock() {
+    if (!harness.database.schema.startsWith('nh_test_'))
+      throw new Error('Server lock fixtures require a disposable test schema');
+    const connection = await harness.database.pool.connect();
+    const key = `:nickhosting:server:${provider.ids.serverId}`;
+    await connection.query('select pg_advisory_lock(hashtextextended(current_schema() || $1, 0))', [
+      key,
+    ]);
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await connection.query(
+          'select pg_advisory_unlock(hashtextextended(current_schema() || $1, 0))',
+          [key],
+        );
+      } finally {
+        connection.release();
+      }
+    };
+  }
+  async function captureQueue(name: string, focusName: string) {
+    await uploads().getByRole('button', { name: focusName, exact: true }).focus();
+    await user.evaluate(() => window.scrollTo(0, 0));
+    await harness.screenshot(user, name);
+  }
+
   it('cancels file 11 of 49, waits for fresh admission, then completes the other 48 without replay', async () => {
     const files = batch('cancel-active', 49);
     const cancelled = fileName(files, 10);
@@ -225,10 +253,10 @@ describe('M5 upload cancellation preserves unattempted files', () => {
     }
   });
 
-  it('pauses after one conflicting submission while an earlier preflight holds the lock without a claim', async () => {
+  it('retains a busy file while an earlier cancelled preflight holds the lock without a claim', async () => {
     const files = batch('cancel-preflight', 8);
     const cancelled = fileName(files, 0);
-    const failed = fileName(files, 1);
+    const waiting = fileName(files, 1);
     const getResources = provider.adapter.getResources;
     let entered = false;
     let released = false;
@@ -253,16 +281,21 @@ describe('M5 upload cancellation preserves unattempted files', () => {
       const conflictResponse = user.waitForResponse(
         (response) =>
           response.request().method() === 'PUT' &&
-          new URL(response.url()).searchParams.get('path') === failed,
+          new URL(response.url()).searchParams.get('path') === waiting,
       );
       await row(cancelled)
         .getByRole('button', { name: `Cancel upload of ${cancelled}` })
         .click();
-      expect((await conflictResponse).status()).toBe(409);
-      await browserExpect(uploads().getByRole('status')).toContainText('Uploads paused.');
-      await browserExpect(row(failed)).toContainText('Failed');
-      await browserExpect(uploads().getByText('Queued', { exact: true })).toHaveCount(6);
-      expect(puts()).toEqual([`PUT:${cancelled}`, `PUT:${failed}`]);
+      const rejected = await conflictResponse;
+      expect(rejected.status()).toBe(409);
+      expect(await rejected.json()).toMatchObject({ error: { code: 'operation_busy' } });
+      await browserExpect.poll(() => puts().length).toBe(5);
+      await browserExpect(row(waiting)).toContainText('Waiting for server');
+      await captureQueue('file-upload-busy-waiting-en-desktop', `Cancel upload of ${waiting}`);
+      await browserExpect(uploads().getByRole('status')).toContainText('The server is busy.');
+      await browserExpect(uploads().getByText('Failed', { exact: true })).toHaveCount(0);
+      await browserExpect(uploads().getByText('Queued', { exact: true })).toHaveCount(7);
+      expect(puts()).toEqual([`PUT:${cancelled}`, ...Array<string>(5).fill(`PUT:${waiting}`)]);
       expect(released).toBe(false);
       expect(
         await harness.database.db
@@ -281,19 +314,103 @@ describe('M5 upload cancellation preserves unattempted files', () => {
       await browserExpect(
         uploads().getByRole('button', { name: 'Check and resume' }),
       ).toBeEnabled();
-      expect(puts()).toHaveLength(2);
+      expect(puts()).toHaveLength(6);
+      await captureQueue('file-upload-busy-paused-en-desktop', 'Check and resume');
       release();
       await browserExpect.poll(() => released).toBe(true);
       await uploads().getByRole('button', { name: 'Check and resume', exact: true }).click();
-      await browserExpect(uploads().getByText('Completed', { exact: true })).toHaveCount(6);
-      expect(puts()).toEqual(files.map((file) => `PUT:${file.name}`));
+      await browserExpect(uploads().getByText('Completed', { exact: true })).toHaveCount(7);
+      expect(puts().filter((entry) => entry === `PUT:${waiting}`)).toHaveLength(6);
+      expect(puts()).toHaveLength(13);
       const remote = await provider.files();
       expect(remote.has(cancelled)).toBe(false);
-      expect(remote.has(failed)).toBe(false);
-      for (const file of files.slice(2)) expect(remote.get(file.name)).toEqual(file.buffer);
+      for (const file of files.slice(1)) expect(remote.get(file.name)).toEqual(file.buffer);
     } finally {
       release();
       provider.adapter.getResources = getResources;
+    }
+  });
+
+  it('uploads every file automatically after a short background server lock without polling admission on retries', async () => {
+    const files = batch('background-busy', 5);
+    const first = fileName(files, 0);
+    const release = await holdServerLock();
+    try {
+      await choose(files);
+      await browserExpect(row(first)).toContainText('Waiting for server');
+      const reads = requests.filter((entry) => entry.startsWith('GET:'));
+      await browserExpect.poll(() => puts().length).toBe(2);
+      expect(requests.filter((entry) => entry.startsWith('GET:'))).toEqual(reads);
+      await release();
+      await browserExpect(uploads().getByText('Completed', { exact: true })).toHaveCount(5);
+      await browserExpect(uploads().getByText('Failed', { exact: true })).toHaveCount(0);
+      expect(puts().filter((entry) => entry === `PUT:${first}`).length).toBeGreaterThan(1);
+      for (const file of files.slice(1))
+        expect(puts().filter((entry) => entry === `PUT:${file.name}`)).toHaveLength(1);
+      const remote = await provider.files();
+      for (const file of files) expect(remote.get(file.name)).toEqual(file.buffer);
+    } finally {
+      await release();
+    }
+  });
+
+  it('cancels a waiting busy file without retrying it or cancelling the remaining queue', async () => {
+    const files = batch('cancel-busy-wait', 3);
+    const cancelled = fileName(files, 0);
+    const release = await holdServerLock();
+    try {
+      await choose(files);
+      await browserExpect.poll(() => puts().length).toBe(4);
+      await browserExpect(row(cancelled)).toContainText('Waiting for server');
+      await row(cancelled)
+        .getByRole('button', { name: `Cancel upload of ${cancelled}` })
+        .click();
+      await browserExpect(row(cancelled)).toContainText('Cancelled');
+      await release();
+      await browserExpect(uploads().getByText('Completed', { exact: true })).toHaveCount(2);
+      expect(puts().filter((entry) => entry === `PUT:${cancelled}`)).toHaveLength(4);
+      const remote = await provider.files();
+      expect(remote.has(cancelled)).toBe(false);
+      for (const file of files.slice(1)) expect(remote.get(file.name)).toEqual(file.buffer);
+    } finally {
+      await release();
+    }
+  });
+
+  it('preserves the same queue head after exhausting busy retries and resumes it manually in Italian', async () => {
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'it' });
+    await user.setViewportSize({ width: 390, height: 844 });
+    const files = batch('busy-exhaustion', 4);
+    const first = fileName(files, 0);
+    const release = await holdServerLock();
+    try {
+      await choose(files, true);
+      await browserExpect.poll(() => puts().length).toBe(4);
+      await browserExpect(row(first)).toContainText('In attesa del server');
+      await captureQueue('file-upload-busy-waiting-it-mobile', `Annulla caricamento di ${first}`);
+      await browserExpect(uploads().getByRole('status')).toContainText('Il server è occupato.');
+      await browserExpect(uploads().getByText('In coda', { exact: true })).toHaveCount(4);
+      await browserExpect(uploads().getByText('Non riuscito', { exact: true })).toHaveCount(0);
+      expect(puts()).toEqual(Array<string>(5).fill(`PUT:${first}`));
+      await captureQueue('file-upload-busy-paused-it-mobile', 'Verifica e riprendi');
+      const audit = await new AxeBuilder({ page: user })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze();
+      expect(audit.violations.map(({ id }) => id)).toEqual([]);
+      expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await release();
+      await uploads().getByRole('button', { name: 'Verifica e riprendi', exact: true }).click();
+      await browserExpect(uploads().getByText('Completato', { exact: true })).toHaveCount(4);
+      expect(puts()).toEqual([
+        ...Array<string>(5).fill(`PUT:${first}`),
+        ...files.map((file) => `PUT:${file.name}`),
+      ]);
+      const remote = await provider.files();
+      for (const file of files) expect(remote.get(file.name)).toEqual(file.buffer);
+    } finally {
+      await release();
     }
   });
 

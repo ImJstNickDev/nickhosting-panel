@@ -15,7 +15,7 @@ import {
   type PterodactylAdapter,
   PterodactylError,
 } from '@nickhosting/pterodactyl-adapter';
-import { createManagementRuntime } from '@nickhosting/server-management';
+import { createManagementRuntime, reconcileManagedServer } from '@nickhosting/server-management';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
 import { createDownloadProxy } from '../../../packages/pterodactyl-adapter/src/downloads.js';
@@ -1300,6 +1300,13 @@ describe('M2 Hono API with real invitation, password and session authentication'
       expect(blocked.status).toBe(409);
       expect((await blocked.json()).error.code).toBe('operation_uncertain');
       expect(uploadFile.mock.calls).toHaveLength(before);
+      if (failure === 'generic-rejected') {
+        const sibling = await f.server();
+        const hostBlocked = await upload(user, sibling, new Uint8Array(1), 1);
+        expect(hostBlocked.status).toBe(409);
+        expect((await hostBlocked.json()).error.code).toBe('conflict');
+        expect(uploadFile.mock.calls).toHaveLength(before);
+      }
       const audits = (
         await f.db.selectFrom('audit_events').select(['action', 'metadata']).execute()
       ).filter((audit) => (audit.metadata as { serverId?: string }).serverId === server);
@@ -1315,6 +1322,55 @@ describe('M2 Hono API with real invitation, password and session authentication'
       await recoverFixtureUploads();
     },
   );
+
+  it('reports background reconciliation lock contention as busy before upload work and accepts a retry after release', async () => {
+    const server = await f.server();
+    const getRemote = vi.mocked(f.adapter.getApplicationServer);
+    const implementation = getRemote.getMockImplementation();
+    if (!implementation) throw new Error('Missing isolated provider identity implementation');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    getRemote.mockImplementationOnce(async (id) => {
+      entered.resolve();
+      await release.promise;
+      return implementation(id);
+    });
+    const reconciliation = reconcileManagedServer(f.db, server, {
+      adapter: f.adapter,
+      authorizeEffect: async () => {},
+    });
+    try {
+      await entered.promise;
+      const before = {
+        identity: getRemote.mock.calls.length,
+        resources: vi.mocked(f.adapter.getResources).mock.calls.length,
+        files: vi.mocked(f.adapter.listFiles).mock.calls.length,
+        upload: uploadFile.mock.calls.length,
+      };
+      const response = await upload(user, server, new Uint8Array(1), 1);
+      expect(response.status).toBe(409);
+      expect((await response.json()).error.code).toBe('operation_busy');
+      expect(getRemote.mock.calls).toHaveLength(before.identity);
+      expect(vi.mocked(f.adapter.getResources).mock.calls).toHaveLength(before.resources);
+      expect(vi.mocked(f.adapter.listFiles).mock.calls).toHaveLength(before.files);
+      expect(uploadFile.mock.calls).toHaveLength(before.upload);
+      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+      const audits = await f.db
+        .selectFrom('audit_events')
+        .select('metadata')
+        .where('action', '=', 'server.files.requested')
+        .execute();
+      expect(
+        audits.some((audit) => (audit.metadata as { serverId?: string }).serverId === server),
+      ).toBe(false);
+    } finally {
+      release.resolve();
+      expect(await reconciliation).toBe('observed');
+    }
+    const before = uploadFile.mock.calls.length;
+    expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(204);
+    expect(uploadFile.mock.calls).toHaveLength(before + 1);
+  });
 
   it('enforces binary upload authentication, current project permissions and origin', async () => {
     const project = await (
@@ -1390,7 +1446,9 @@ describe('M2 Hono API with real invitation, password and session authentication'
         })
       ).status,
     ).toBe(202);
-    expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(409);
+    const activeOperation = await upload(user, server, new Uint8Array(1), 1);
+    expect(activeOperation.status).toBe(409);
+    expect((await activeOperation.json()).error.code).toBe('conflict');
     expect(uploadFile.mock.calls.length).toBe(before);
   });
 
@@ -1767,6 +1825,21 @@ describe('M2 Hono API with real invitation, password and session authentication'
       expect((await request(owner, `/v1/owner/uploads/${claim.id}/recover`, recovery)).status).toBe(
         409,
       );
+      const beforeContenders = uploadFile.mock.calls.length;
+      const anonymous = await sibling.request(
+        `${origin}/v1/servers/${second}/files/upload?path=world.bin`,
+        {
+          method: 'PUT',
+          headers: {
+            origin,
+            'content-type': 'application/octet-stream',
+            'x-nh-upload-length': '1',
+          },
+          body: new Uint8Array(1),
+        },
+      );
+      expect(anonymous.status).toBe(401);
+      expect((await anonymous.json()).error.code).toBe('unauthenticated');
       const contenders = await Promise.all(
         Array.from({ length: 8 }, (_, index) => {
           const headers = client.headers();
@@ -1779,6 +1852,10 @@ describe('M2 Hono API with real invitation, password and session authentication'
         }),
       );
       expect(contenders.map((response) => response.status)).toEqual(Array(8).fill(409));
+      expect(
+        await Promise.all(contenders.map(async (response) => (await response.json()).error.code)),
+      ).toEqual(Array(8).fill('operation_busy'));
+      expect(uploadFile.mock.calls).toHaveLength(beforeContenders);
       const jsonHeaders = client.headers();
       jsonHeaders.set('content-type', 'application/json');
       const write = await sibling.request(`${origin}/v1/servers/${first}/files`, {
@@ -1787,6 +1864,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         body: JSON.stringify({ action: 'write', path: 'fixture', content: 'must-not-wait' }),
       });
       expect(write.status).toBe(409);
+      expect((await write.json()).error.code).toBe('operation_busy');
       const read = await sibling.request(`${origin}/v1/servers/${second}/files`, {
         headers: client.headers(),
       });

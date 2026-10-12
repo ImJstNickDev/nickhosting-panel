@@ -1003,7 +1003,7 @@ describe('management runtime execution-time authorization', () => {
         ),
       );
       expect(contenders).toEqual(
-        Array.from({ length: 12 }, () => expect.objectContaining({ code: 'conflict' })),
+        Array.from({ length: 12 }, () => expect.objectContaining({ code: 'operation_busy' })),
       );
       expect(effect).not.toHaveBeenCalled();
       await expect(runtime.access(context, serverId, false, async () => 'read')).resolves.toBe(

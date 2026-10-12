@@ -5,6 +5,8 @@ export const domainErrorCodes = [
   'not_found',
   'file_not_editable',
   'conflict',
+  // Retryable only when this request has not entered its effect callback.
+  'operation_busy',
   'rate_limited',
   'invitation_invalid',
   'invitation_expired',
@@ -34,6 +36,7 @@ const defaultStatuses: Record<DomainErrorCode, number> = {
   not_found: 404,
   file_not_editable: 415,
   conflict: 409,
+  operation_busy: 409,
   rate_limited: 429,
   invitation_invalid: 400,
   invitation_expired: 410,

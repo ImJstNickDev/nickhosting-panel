@@ -114,7 +114,14 @@ transport has closed.
 File, backup, console, metrics and DNS actions reuse M2 endpoints. Browser uploads
 send `Blob` through XHR with declared `X-NH-Upload-Length`, observable byte progress
 and cancellation; server admission/stream verification remains authoritative.
-Cancellation targets one queue entry. After a submitted failure/cancellation,
+Cancellation targets one queue entry. The specific `409 operation_busy` response
+means initial lock/slot contention before provider effects. The upload queue keeps
+that exact file and retries at most five attempts, with cancellable 250/500/1000/2000 ms
+waits; this retry loop adds no availability polling. Existing view refreshes remain. Exhaustion pauses with the same
+file still queued; Check and resume includes it. Each new attempt runs normal
+current authorization and admission. Generic conflicts, provider/network errors
+and unknown outcomes are never automatically replayed.
+After other submitted failures/cancellations,
 fresh transfer/capability reads precede further uploads. A shared-state failure
 (`conflict`, `operation_uncertain`, `integration_unavailable`) pauses untouched
 entries even if those advisory reads report availability: an earlier request may

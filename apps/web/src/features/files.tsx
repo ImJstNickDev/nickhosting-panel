@@ -74,9 +74,22 @@ type UploadItem = {
   submitted: boolean;
   sent: number;
   speed: number;
-  status: 'queued' | 'uploading' | 'confirming' | 'complete' | 'cancelled' | 'failed';
+  status: 'queued' | 'waiting' | 'uploading' | 'confirming' | 'complete' | 'cancelled' | 'failed';
   error?: unknown;
 };
+const uploadBusyRetryDelays = [250, 500, 1000, 2000] as const;
+function waitForUploadRetry(delay: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = window.setTimeout(finish, delay);
+    function finish() {
+      window.clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    }
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
 const dragType = 'application/x-nickhosting-files';
 const filePlaceholders = Array.from({ length: 12 }, (_, index) => ({
   id: `file-placeholder-${index}`,
@@ -279,7 +292,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [menu, setMenu] = useState<{ entry: ServerFile; left: number; top: number }>();
   const [dropActive, setDropActive] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
-  const [uploadPause, setUploadPause] = useState<'checking' | 'blocked'>();
+  const [uploadPause, setUploadPause] = useState<'checking' | 'blocked' | 'busy'>();
   const [preparingFolder, setPreparingFolder] = useState(false);
   const folderPreparation = useRef<AbortController | undefined>(undefined);
   const [pendingUploads, setPendingUploads] = useState<File[]>([]);
@@ -865,6 +878,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const isCurrent = () => mounted.current && identity === saveIdentity.current;
     if (!identity || !isCurrent()) return;
     let pauseAfterRefresh = false;
+    const busyAttempts = new Map<number, number>();
     uploadRunning.current = true;
     try {
       while (uploadQueue.current.length && isCurrent()) {
@@ -931,6 +945,35 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           await files.refetch();
         } catch (failure) {
           if (!isCurrent()) break;
+          if (
+            !controller.signal.aborted &&
+            failure instanceof ApiError &&
+            failure.code === 'operation_busy'
+          ) {
+            // This explicit response proves rejection before effects. The queue
+            // alone retries it; generic conflicts and uncertain writes never retry.
+            const attempt = (busyAttempts.get(item.id) ?? 0) + 1;
+            busyAttempts.set(item.id, attempt);
+            const delay = uploadBusyRetryDelays[attempt - 1];
+            updateUpload(item.id, {
+              status: delay === undefined ? 'queued' : 'waiting',
+              submitted: false,
+              sent: 0,
+              speed: 0,
+              error: undefined,
+            });
+            if (delay === undefined) {
+              uploadQueue.current.unshift(item);
+              uploadNeedsAdmission.current = true;
+              setUploadPause('busy');
+              break;
+            }
+            await waitForUploadRetry(delay, controller.signal);
+            if (!isCurrent()) break;
+            if (controller.signal.aborted) updateUpload(item.id, { status: 'cancelled' });
+            else uploadQueue.current.unshift(item);
+            continue;
+          }
           updateUpload(item.id, {
             status: controller.signal.aborted ? 'cancelled' : 'failed',
             error: controller.signal.aborted ? undefined : failure,
@@ -1068,7 +1111,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }
   const totalSelected = selected.size;
   const uploadsBusy = uploads.some((item) =>
-    ['queued', 'uploading', 'confirming'].includes(item.status),
+    ['queued', 'waiting', 'uploading', 'confirming'].includes(item.status),
   );
   return (
     <section
@@ -1920,7 +1963,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               onClick={() =>
                 setUploads((items) =>
                   items.filter((item) =>
-                    ['queued', 'uploading', 'confirming'].includes(item.status),
+                    ['queued', 'waiting', 'uploading', 'confirming'].includes(item.status),
                   ),
                 )
               }
@@ -1934,7 +1977,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 {t(
                   uploadPause === 'checking'
                     ? 'file.uploadQueueChecking'
-                    : 'file.uploadQueuePaused',
+                    : uploadPause === 'busy'
+                      ? 'file.uploadQueueBusy'
+                      : 'file.uploadQueuePaused',
                 )}
               </p>
               <button
@@ -1959,7 +2004,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                         : `file.upload.${item.status}`,
                     )}
                   </span>
-                  {['queued', 'uploading', 'confirming'].includes(item.status) && (
+                  {['queued', 'waiting', 'uploading', 'confirming'].includes(item.status) && (
                     <button
                       type="button"
                       className="text-button"

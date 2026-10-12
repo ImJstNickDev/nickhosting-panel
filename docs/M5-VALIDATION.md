@@ -5499,3 +5499,50 @@ staged governance checks passed. Independent scoped CSS review found no issue.
 No type/build/full-suite rerun for this CSS-only change, no infrastructure or
 provider interaction, no restart. Rollback: revert the scoped CSS rule.
 PR#21 remains open/unmerged; no new blockers.
+
+### 2026-10-12 — Transient upload contention without losing the queued file
+
+The new report occurred without cancellation. Read-only dev evidence shows a409
+at12:16:20.268Z, immediately after the previous file's confirmed/uploaded audits at
+12:16:19.918Z/19.921Z. The rejected request produced no upload-request audit or claim;
+inspection found no outstanding ingestion claims, so no dev-state recovery was
+needed. Historical logs did not identify the exact conflict site/lock holder.
+Source investigation and an actual reconciliation-barrier regression establish a
+concrete defect with this symptom: periodic reconciliation takes the same server
+lock as file writes, and initial lock refusal was reported as a changed-item
+conflict. A saturated upload slot used the same misleading code. The browser
+marked that file failed and manual resume processed only the remaining entries.
+
+The two initial refusals now return `operation_busy` before provider effects.
+Only the existing browser queue retries this explicit code: at most five attempts,
+with cancellable 250/500/1000/2000 ms waits. Brief contention resolves automatically;
+exhaustion leaves the same file at the queue head for Check and resume. Cancelling
+a waiting file affects only that entry. The retry loop adds no availability polling;
+normal view refreshes remain. No backend wait/retry, new infrastructure, extra
+provider check or duplicated upload implementation was added. Generic conflicts,
+lifecycle conflicts, retained host/server claims and unknown provider outcomes
+remain non-retryable. Old failures without the new explicit proof cannot safely
+be converted into automatic retries; the previously failed file can be reselected
+by the Owner after inspecting its result.
+
+Final targeted validation on pinned Node/pnpm:
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/core.test.ts packages/i18n/src/i18n.test.ts`: **53 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'M2 Hono API|keeps a two-connection pool'`: **50 passed**,58 unrelated runtime cases skipped. Includes real reconciliation lock contention with no extra identity/resources/list/upload calls, no claim/request audit, then exactly one upload after release. Pool contention preserves authentication, reads and logout; lifecycle conflicts and retained same-server/sibling-host claims remain nonbusy.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-cancel.browser.test.ts`.
+- Prefix + `-t 'retains a busy file|short background server lock|cancels a waiting busy|exhausting busy retries|keeps queued files'`: **5 passed**,3 skipped. Actual advisory-lock fixtures cover automatic continuation, bounded exhaustion, same-file manual resume, cancellation during backoff and unchanged unknown-outcome no-replay behavior.
+- Prefix + `-t 'cancels file 11|cancels a queued file|continues untouched files'`: **3 passed**,5 skipped. All eight cases passed across these non-overlapping runs; this is not a claimed single eight-case run. The49-file cancellation regression remains covered.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check`, `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed;1240 EN/IT/pseudolocale keys. Browser types were checked again by the frontend worker after final test edits. Existing bundle-size advisory remains.
+- Changed-file Biome and diff checks passed; staged governance checks passed. No historical full-suite rerun. Mobile axe scan reported no applicable violations or horizontal overflow.
+
+Independent technical/accessibility/content review found no remaining must-fix
+finding. Reviewed [EN waiting](screenshots/m5/file-upload-busy-waiting-en-desktop.png),
+[EN paused](screenshots/m5/file-upload-busy-paused-en-desktop.png),
+[IT waiting](screenshots/m5/file-upload-busy-waiting-it-mobile.png) and
+[IT paused](screenshots/m5/file-upload-busy-paused-it-mobile.png) screenshots.
+Tests used existing approved isolated services, real handlers and provider fixtures;
+their locks, schemas and assets were disposed. Live investigation was read-only.
+No dev database repair, game-file mutation, provider write, explicit container
+restart or infrastructure change occurred; API/Vite remained healthy. No migration
+or dependency change. Rollback: code revert. PR#21 remains OPEN/unmerged and
+SFTPGo#18 remains a separate release gate.

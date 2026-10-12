@@ -447,7 +447,8 @@ export function createApp(options: Options) {
     }
     const poolSize = pool.options.max ?? 10;
     const capacity = Math.max(0, poolSize - (poolSize > 2 ? 2 : 1));
-    if (slots.active >= capacity) throw new DomainError('conflict');
+    // Admission failed before the transfer callback or any provider effect.
+    if (slots.active >= capacity) throw new DomainError('operation_busy');
     slots.active++;
     let released = false;
     return () => {

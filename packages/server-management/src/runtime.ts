@@ -854,7 +854,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
         }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`.execute(
           connection,
         );
-        if (!lock.rows[0]?.acquired) throw new DomainError('conflict');
+        // This request has not entered the callback or started any provider effect.
+        if (!lock.rows[0]?.acquired) throw new DomainError('operation_busy');
       }
       try {
         const current = await currentInteractiveContext(connection, context, env);
