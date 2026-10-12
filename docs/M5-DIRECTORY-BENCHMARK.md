@@ -1,5 +1,8 @@
 # Directory prefetch measurements — 2026-10-12
 
+Latest follow-up: the [1.4.0-dev comparison](#2026-10-13--blueprint-140-dev-batch-comparison)
+measures the Owner-approved batch extension against native directory calls.
+
 Scope: measurement and design recommendation only, on source commit
 `4642e289cae0f7c0a6e0a2f343344f97e574087a`, M5 / PR #21. No recursive prefetch,
 new cache policy, provider extension or product behavior was activated.
@@ -305,3 +308,94 @@ during this benchmark. Independent review checked the harness before execution;
 scope-separated quotas, a self-deadline, extraction samples and baseline CPU guards
 were corrected before fixture writes. Final evidence review is recorded in the
 validation report and PR.
+
+## 2026-10-13 — Blueprint 1.4.0-dev batch comparison
+
+The Owner approved trying Blueprint first, retaining the exact stable 1.3.0
+artifact for rollback. Version 1.4.0-dev was packaged, independently reviewed and
+installed through the standard Blueprint update. No Wings modification or node
+credential export was required. The new provider methods are opt-in; normal file
+manager reads and browser prefetch policy have not been switched.
+
+The same existing `dirscan-test` fixture was reused without filesystem writes.
+The private ledger was corroborated against the managed registry and live
+Application/Client identities. Comparison runs use the same 24 paths, including
+one 502-entry directory, at concurrency two. Native reads issue 24 Panel requests;
+the extension issues one Panel request and up to two concurrent native Wings
+reads. Native/batch order alternates across three rounds. Metadata fingerprints
+compare names, sizes, modes, file/symlink flags, MIME types and timestamps; all
+matched. This is adapter end-to-end HTTP/parse time, not a browser-render timing.
+
+| Method, 24 directories | Round 1 | Round 2 | Round 3 | Minimum | Maximum | Mean | Median |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Native Client API, concurrency 2 | 3621.2 ms | 3350.6 ms | 3700.5 ms | 3350.6 ms | 3700.5 ms | 3557.4 ms | 3621.2 ms |
+| Blueprint batch, Wings concurrency 2 | 350.6 ms | 468.9 ms | 362.1 ms | 350.6 ms | 468.9 ms | 393.8 ms | 362.1 ms |
+
+The mean group completion time fell **88.9%**, approximately **9.0× faster**.
+A separate real breadth-first traversal discovers children from responses rather
+than a precomputed path list. Through depth two, it visits **111 directories**:
+
+| Traversal | Panel directory requests | Wings directory reads | Elapsed |
+| --- | ---: | ---: | ---: |
+| Native, concurrency 2 | 111 | 111 | 14.8316 s |
+| Batch, chunks up to 24, Wings concurrency 2 | 7 | 111 | 1.8368 s |
+
+Traversal ran native first and batch second; filesystem warming may favor the
+second pass. Three alternating flat comparisons support the direction of the
+result, not an unlimited throughput or cold-cache guarantee. Single batch probes
+of 1/4/12 paths took 376.1/407.3/255.5 ms. These are individual observations, not a
+scaling curve: one directory still pays Panel bootstrap/network costs. The batch
+is useful for lookahead, not proof that every first click is now instantaneous.
+
+The comparative run made **202 Panel requests**: two identity reads, one settings
+read, 186 native directory requests and 13 batch requests. This represents **386
+Wings directory reads**, across **120 distinct directories**. All listing HTTP
+responses were 200 and every returned path succeeded. No download URL was issued,
+no game-file body was transferred and no recursive cache was installed. Wings
+internally samples regular-file contents for native MIME detection as before.
+The largest batch metadata payload measured in the adapter was **150,209 bytes**.
+
+Resource observations (five baseline and fifty approximately two-second samples):
+
+- No resource, timeout, HTTP, rate-budget or request-count guard stopped the test.
+- Host CPU peaked at **47.3%**; available RAM stayed at least **27.56 GiB**.
+- Panel CPU baseline mean was already **134.93%**; mixed-test mean including pauses
+  was **97.70%**, peak **363.69%**. These are whole-container observations,
+  including unrelated activity, not isolated CPU savings attributable to batching.
+- Wings mean including pauses was **17.58%**, peak **125.39%**. Database/Redis peaks
+  were **7.81% / 5.87%**. Docker CPU 100% represents one core.
+- First/last in-run memory samples: Panel **1.381/1.372 GiB**; Wings
+  **5.025/5.023 GiB**.
+  These observations do not establish a general memory ceiling. Response byte
+  limits are not a promise that PHP object memory has the same size.
+- Native recovery reads completed in **302.1 / 363.2 ms**. No server power command,
+  cleanup, configuration change or container restart occurred during measurement.
+
+The monitored helper enforces at most 250 HTTP calls, 220 native listings, 420
+underlying Wings reads and five minutes, with six-second pauses between stages.
+It stops on sustained CPU pressure, low memory, latency or rate-budget failure.
+The private invocation was `python3 .codex/local/dirscan-monitor.py --script
+.codex/local/directory-batch-bench.mjs --input .codex/local/dirscan-batch-input.json
+--output .codex/local/dirscan-batch-provider`. Identity/input/results/resource
+records remain ignored. Aborting the helper does not guarantee immediate remote
+PHP cancellation; extension work is independently bounded by its batch deadline.
+
+### Smoke-test correction and current recommendation
+
+Two initial smoke assertions expected `not_found` for a nonexistent fixture path.
+The extension returned `unavailable`, while the valid path in the same batch
+returned all 12 entries. Investigation confirmed the native Client API also
+returns **HTTP 500** for that missing directory on the installed Wings revision;
+its filesystem error mapping does not classify the wrapped missing-path error as
+404. No extension code was changed to reinterpret arbitrary 500 responses. The
+corrected smoke verifies explicit failure plus the unaffected successful result.
+Anonymous/Application-key requests returned **401/403**; unsafe/duplicate paths
+returned **422**. These deliberate failures are separate from the all-success
+comparative run. Isolated tests still cover explicit upstream 404 mapping.
+
+Recommendation: retain **1.4.0-dev** for the bounded prefetch experiment; direct
+Wings HTTP is not needed to establish this improvement. Keep background batches
+small, prioritize visible candidate folders, refresh only the opened folder and
+prepare signed URLs only for that opened folder. No automatic whole-tree crawl
+or new frontend cache budget is activated by this work. The fixture remains;
+there are no new game assets or fixture changes to clean up from this comparison.

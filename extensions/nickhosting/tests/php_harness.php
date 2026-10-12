@@ -238,7 +238,7 @@ foreach (['en','it'] as $locale) {
     check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
     check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
     check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
-    check(substr_count($html, '<li>') === 7 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
+    check(substr_count($html, '<li>') === 8 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
     check(str_contains($html, 'name="downloadBatchLimit"') && str_contains($html, 'value="2500"') && str_contains($html, $locale === 'it' ? 'Durata URL firmati' : 'Signed URL lifetime'), 'Blade operational settings localized ' . $locale);
 }
 $instance = '11111111-1111-4111-8111-111111111111';
@@ -365,9 +365,18 @@ function transferRequest(string $kind, array $data, $server, $user, mixed $token
         'upload-urls' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\UploadUrlsRequest::class,
         'download-urls' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DownloadUrlsRequest::class,
         'transfer-settings' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\TransferSettingsRequest::class,
+        'directory-list' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DirectoryListRequest::class,
+        'directory-settings' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DirectorySettingsRequest::class,
     };
-    $method=$kind==='transfer-settings' ? 'GET' : 'POST';
+    $method=str_ends_with($kind,'settings') ? 'GET' : 'POST';
     $r=$class::create('/api/client/extensions/nickhosting/servers/'.$server->uuidShort.'/'.$kind, $method, $data);
+    if ($kind === 'directory-list') {
+        $r=$class::create($r->getUri(),$method,[],[],[],['CONTENT_TYPE'=>'application/json'],json_encode($data,JSON_THROW_ON_ERROR));
+        (new Pterodactyl\Http\Middleware\TrimStrings())->handle($r,fn()=>null);
+        (new Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull())->handle($r,fn()=>null);
+        (new ReflectionMethod($class,'prepareForValidation'))->invoke($r);
+        $data=$r->all();
+    }
     $key = is_int($tokenType) ? new Pterodactyl\Models\ApiKey() : $tokenType;
     if ($key instanceof Pterodactyl\Models\ApiKey) { $key->setRawAttributes(['key_type'=>$tokenType, 'user_id'=>$user->id]); }
     $user=clone $user; $user->withAccessToken($key); $r->setUserResolver(fn () => $user);
@@ -495,6 +504,7 @@ $lowerUploadBody=$uploads(uploadRequest(['count'=>2],$uploadServer,$uploadUser),
 $ttl=strtotime($lowerUploadBody['expiresAt'])-time();
 check($ttl>=118 && $ttl<=120, 'upload signing uses configurable lifetime');
 $settings->saveOperational($defaults);
+eval($directoryHarness);
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['valid'=>false]);
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects invalidated server link');
 denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects invalidated server link');

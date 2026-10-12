@@ -2,6 +2,7 @@ import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { allocationInventory } from './allocations.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
+import { getDirectoryBatchSettings, listDirectoriesBatch } from './directory-batch.js';
 import { createDownloadPool } from './download-pool.js';
 import {
   allowedOrigin,
@@ -337,6 +338,11 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         fileSchema,
       );
     },
+    /** Experimental Blueprint batch API; normal listing and downloads remain independent. */
+    listDirectoriesBatch: (identifier: string, directories: string[]) =>
+      listDirectoriesBatch(transport, identifier, directories),
+    getDirectoryBatchSettings: (identifier: string) =>
+      getDirectoryBatchSettings(transport, identifier),
     async readFile(
       identifier: string,
       path: string,

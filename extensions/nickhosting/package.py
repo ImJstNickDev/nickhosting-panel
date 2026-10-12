@@ -22,6 +22,12 @@ FILES = (
     'app/Http/Controllers/DownloadUrlsController.php',
     'app/Http/Controllers/TransferSettingsController.php',
     'app/Services/ManagedTransferAccess.php',
+    'app/Services/DirectoryListingRepository.php',
+    'app/Http/Requests/ClientDirectorySettings.php',
+    'app/Http/Requests/DirectoryListRequest.php',
+    'app/Http/Requests/DirectorySettingsRequest.php',
+    'app/Http/Controllers/DirectoryListController.php',
+    'app/Http/Controllers/DirectorySettingsController.php',
     'app/Http/Controllers/UploadUrlsController.php',
     'app/Jobs/DeliverChanges.php',
     'app/Providers/BridgeServiceProvider.php',
@@ -77,6 +83,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.3.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.4.0-dev/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

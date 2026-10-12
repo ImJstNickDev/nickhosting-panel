@@ -1,5 +1,8 @@
 @php
     $operationalLabels = [
+        'directoryBatchLimit' => ['Directories per request (experimental)', 'Cartelle per richiesta (sperimentale)'],
+        'directoryConcurrency' => ['Concurrent directory reads', 'Letture cartelle simultanee'],
+        'directoryTimeoutSeconds' => ['Directory batch deadline (seconds)', 'Durata massima batch cartelle (secondi)'],
         'downloadBatchLimit' => ['Download URLs per request', 'URL download per richiesta'],
         'uploadBatchLimit' => ['Upload URLs per request', 'URL upload per richiesta'],
         'signedUrlTtlSeconds' => ['Signed URL lifetime (seconds)', 'Durata URL firmati (secondi)'],
@@ -10,7 +13,7 @@
     $italian = str_starts_with(app()->getLocale(), 'it');
 @endphp
 <div class="box box-primary">
-    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.3.0</small></h3></div>
+    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.4.0-dev</small></h3></div>
     <div class="box-body">
         <ul>
             <li>{{ $italian ? 'Crea account tecnici Pterodactyl separati per gli utenti NickHosting.' : 'Creates separate Pterodactyl technical accounts for NickHosting users.' }}</li>
@@ -20,6 +23,7 @@
             <li>{{ $italian ? 'Fornisce snapshot dei limiti e stato delle notifiche per il recupero.' : 'Provides limit snapshots and notification status for recovery.' }}</li>
             <li>{{ $italian ? 'Genera URL Wings firmati per più upload con una sola richiesta Client API.' : 'Generates signed Wings URLs for multiple uploads in one Client API request.' }}</li>
             <li>{{ $italian ? 'Prepara URL Wings monouso per più file da scaricare, senza leggerne il contenuto.' : 'Prepares one-use Wings download URLs for multiple files without reading their contents.' }}</li>
+            <li>{{ $italian ? 'Elenca più cartelle dei server collegati con una richiesta, usando letture Wings limitate e parallele (sperimentale).' : 'Lists multiple linked-server directories in one request with bounded parallel Wings reads (experimental).' }}</li>
         </ul>
         @if (session('nickhosting_saved'))
             <div class="alert alert-success" role="status">{{ $italian ? 'Impostazioni salvate.' : 'Settings saved.' }}</div>
@@ -40,7 +44,7 @@
                     <p id="nickhosting-origin-error" class="help-block" role="alert">{{ $errors->first('origin') }}</p>
                 @endif
             </div>
-            <h4>{{ $italian ? 'Trasferimenti e notifiche' : 'Transfers and notifications' }}</h4>
+            <h4>{{ $italian ? 'Cartelle, trasferimenti e notifiche' : 'Directories, transfers and notifications' }}</h4>
             @foreach ($operationalDefinitions as $name => $definition)
                 <div class="form-group {{ $errors->has($name) ? 'has-error' : '' }}">
                     <label for="nickhosting-{{ $name }}">{{ $operationalLabels[$name][$italian ? 1 : 0] }}</label>

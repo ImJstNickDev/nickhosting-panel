@@ -14,6 +14,22 @@ const options = {
   clientKey: 'fixture-client',
 };
 describe('Blueprint extension discovery', () => {
+  it('recognizes experimental directory batching without requiring it from 1.3.0', async () => {
+    const previous = { ...capabilities, extensionVersion: '1.3.0' };
+    const experimental = {
+      ...previous,
+      extensionVersion: '1.4.0-dev',
+      capabilities: { ...previous.capabilities, bulkDirectoryListings: true },
+    };
+    for (const payload of [previous, experimental]) {
+      expect(
+        await discoverNickHostingExtension({
+          ...options,
+          fetcher: async () => Response.json(payload),
+        }),
+      ).toEqual(payload);
+    }
+  });
   it('recognizes bulk upload signing without requiring it from older extensions', async () => {
     const current = {
       ...capabilities,

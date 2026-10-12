@@ -7,6 +7,9 @@ final class Settings
 {
     // Upper bounds preserve the existing queue timeout/claim budget and token lifetime.
     public const OPERATIONAL = [
+        'directoryBatchLimit' => ['default' => 24, 'min' => 1, 'max' => 64],
+        'directoryConcurrency' => ['default' => 2, 'min' => 1, 'max' => 4],
+        'directoryTimeoutSeconds' => ['default' => 8, 'min' => 1, 'max' => 10],
         'downloadBatchLimit' => ['default' => 2500, 'min' => 1, 'max' => 2500],
         'uploadBatchLimit' => ['default' => 500, 'min' => 1, 'max' => 500],
         'signedUrlTtlSeconds' => ['default' => 900, 'min' => 60, 'max' => 900],
@@ -32,6 +35,11 @@ final class Settings
     public function transfer(): array
     {
         return $this->operational(['downloadBatchLimit', 'uploadBatchLimit', 'signedUrlTtlSeconds']);
+    }
+
+    public function directory(): array
+    {
+        return $this->operational(['directoryBatchLimit', 'directoryConcurrency', 'directoryTimeoutSeconds']);
     }
 
     public function saveOperational(array $values): void

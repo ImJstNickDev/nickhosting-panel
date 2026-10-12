@@ -6479,3 +6479,58 @@ no claim of cost-free or indefinitely sustainable prefetch is made. No guard,
 error or rate limit fired. The fixture remains for scoped cleanup; no existing
 game content, power state, provider configuration or infrastructure was changed.
 This is benchmark evidence only, not an implementation of recursive prefetch.
+
+### 2026-10-13 — Blueprint 1.4.0-dev directory batch trial
+
+The Owner selected a reversible Blueprint batch experiment before considering
+direct Wings access. New explicit adapter methods and extension routes read
+metadata for several directories under one native Client authorization. Normal
+file-manager listing, download preparation and cache policy remain unchanged.
+No recursive browser prefetch or node-wide token export was added.
+
+Focused checks on the final implementation:
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/directory-batch.test.ts packages/pterodactyl-adapter/src/blueprint.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/transport.test.ts`:
+  **130 passed**, four files.
+- `scripts/dev.sh pnpm exec tsc --noEmit`: passed.
+- `python3 extensions/nickhosting/tests/run_php_tests.py --container <existing-panel-container>`:
+  **265 checks passed**, Composer-only SQLite-memory/fake HTTP harness; no live
+  application bootstrap or production database writes.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s extensions/nickhosting/tests -p 'test_*.py'`:
+  **12 passed**. Deterministic allowlisted archive and expanded manifests verified.
+- **32 expanded PHP source syntax checks** passed using the installed PHP binary.
+- Changed TypeScript files passed Biome and `git diff --check`.
+
+Coverage includes native file-read and server-state permissions, exact linked
+technical-owner identity, rejection of anonymous/Application/session credentials,
+root and whitespace preservation through Laravel middleware, canonical paths,
+constant per-batch SQL checks, ordered results and partial failures, bounded concurrency 1/2/4, deadlines, oversized streamed/output
+responses and 429 suppression without retries. Negative network behavior uses
+isolated Guzzle handlers; it is not a live cURL timeout/oversize fault injection.
+
+The actual Blade view was rendered with sanitized fixture data in Chromium:
+[desktop English](screenshots/m5/blueprint-directory-settings-desktop-en.png) and
+[mobile Italian](screenshots/m5/blueprint-directory-settings-mobile-it.png).
+Both have eight feature bullets, nine correctly labelled/described settings and
+no horizontal overflow. Independent source and visual review found no must-fix;
+these fixtures are not authenticated production screenshots or a full WCAG audit.
+The batch deadline/caller-timeout relationship is documented in the API contract.
+
+The authorized standard installer completed with **Nothing to migrate**; live
+capability/settings discovery and native route middleware were verified. Two
+initial negative smoke assertions failed because the installed Wings reports a
+missing directory as HTTP 500, not 404. The native API corroborated this; the
+corrected assertion passed without a production-code workaround. Anonymous,
+Application-key and invalid-path rejections passed. The
+[complete comparison](M5-DIRECTORY-BENCHMARK.md#2026-10-13--blueprint-140-dev-batch-comparison)
+records 202 Panel requests representing 386 successful Wings directory reads,
+three alternating 24-directory rounds, a 111-directory traversal per method,
+identical metadata, resource sampling and recovery. Mean 24-directory duration
+fell from **3557.4 to 393.8 ms**; traversal from **14.8316 to 1.8368 s**.
+
+No directory/file/power mutation occurred during these reads, no new asset was
+created and the existing fixture was retained. No native Wings access credential
+was exported. The exact stable 1.3.0 artifact and scoped backup remain private for
+rollback through the standard approved update; no database rollback is required.
+No historical full milestone suite was rerun. M5 PR #21 remains open/unmerged;
+SFTPGo #18 is unchanged. Recursive prefetch remains a separate follow-up.

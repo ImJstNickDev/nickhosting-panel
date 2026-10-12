@@ -835,3 +835,28 @@ length verification and strict text decoding. These checks do not claim that all
 possible provider filesystem types were tested live. Initial cold issuance and
 HTTP latency remain real; the acceleration depends on background preparation
 finishing before the read.
+
+### Experimental directory batches (Blueprint 1.4.0-dev)
+
+This is an opt-in provider-adapter contract, not a new browser endpoint or an
+automatic file-manager prefetch policy. `listFiles` and opened-folder download
+preparation retain their existing behavior. See the
+[extension contract](BLUEPRINT-EXTENSION.md#2026-10-13--140-dev-directory-list-experiment)
+for Client endpoints, permissions and configurable limits.
+
+`getDirectoryBatchSettings(identifier)` returns the current batch count,
+concurrency and deadline. `listDirectoriesBatch(identifier, directories)` returns
+an ordered array of `{directory,files}` or `{directory,error}`. It accepts unique
+canonical relative directory paths, including `""` for root. Partial errors are
+explicit, never equivalent to an empty listing. Missing, duplicate, unrequested
+or reordered results are rejected. The adapter bounds this response to 8 MiB;
+ordinary JSON responses retain their existing 4 MiB bound. Settings are not an
+authorization grant. Callers must still resolve the managed server and authorized
+user credential before invoking the adapter.
+
+There is no implicit fallback, recursion, download issuance or cache warming.
+The read-only POST does not claim an uncertain filesystem mutation on transport
+failure. Configure the caller timeout above the chosen whole-batch deadline plus
+Panel/network overhead: defaults are 10 seconds at the adapter and 8 seconds in
+the extension. Raising the extension deadline to 10 seconds also requires a
+longer caller timeout if partial timeout results must be received.

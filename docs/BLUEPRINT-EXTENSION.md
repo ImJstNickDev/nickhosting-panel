@@ -672,3 +672,64 @@ one replacement path per consumed token, not regeneration of the folder.
 Rollback uses the retained 1.2.0 archive through the standard approved update and
 reverts NickHosting source. No schema rollback is needed; settings remain stored.
 It does not reverse Blueprint's shared housekeeping. SFTPGo #18 remains unchanged.
+
+## 2026-10-13 — 1.4.0-dev directory-list experiment
+
+The Owner chose a Blueprint batch experiment before considering direct Wings
+access. This is a minor prerelease, not a stable replacement for 1.3.0. It adds
+metadata reads and configurable batch bounds; no migration or recursive browser
+prefetch is introduced. Ordinary `listFiles` continues using the native Client
+API, so installing the extension does not automatically crawl any server.
+
+`bulkDirectoryListings` capability discovery advertises two Client endpoints:
+
+- `GET /api/client/extensions/nickhosting/servers/{server}/directory-settings`:
+  `directoryBatchLimit` (default 24, range 1–64), `directoryConcurrency` (default
+  2, range 1–4), and `directoryTimeoutSeconds` (default 8, range 1–10).
+- `POST /api/client/extensions/nickhosting/servers/{server}/directory-list`:
+  `{directories:string[]}` with unique canonical relative paths; `""` means root.
+  The response is `{results:[{directory,files}|{directory,error}]}`, in the exact
+  request order. Errors are `not_found`, `forbidden`, `unavailable`, `too_large`
+  or `deadline_exceeded`. Failed reads are never presented as empty directories.
+
+Native `file.read`, account-token authentication and server-state middleware
+remain mandatory, followed by the exact managed technical-owner check once per
+batch. Settings are also resolved once. The native node HTTP client retains its
+credentials inside Panel; NickHosting receives no daemon token. Guzzle bounds
+simultaneous reads and the whole-batch deadline, including queued paths. There
+is no retry cascade, redirect following or signed-download preparation. Native
+Wings still lists each directory and samples regular files for MIME detection;
+the optimization removes repeated Panel request bootstrapping, not filesystem
+work. Hard bounds are 4 MiB input per directory, 8 MiB aggregate input/output
+and 10,000 entries per directory, with explicit errors instead of truncation.
+
+The adapter exposes `getDirectoryBatchSettings` and `listDirectoriesBatch` as
+explicit opt-in methods. It validates complete ordered results and bounded
+responses; it does not automatically fall back or retry failures. Existing 1.3.0
+discovery remains valid when the new optional capability is absent. Rollback is
+the retained exact 1.3.0 archive through the standard Blueprint update procedure;
+existing extension tables/settings/keys are retained. Framework cache, queue and
+ownership housekeeping is not undone by that code rollback.
+
+### Controlled installation and measurement
+
+The standard authorized update installed **1.4.0-dev** successfully; its hook
+reported **Nothing to migrate**. Artifact SHA-256:
+`8424c25ca7b82bcfc636497376a797dfb69b4584cb46879c7a37d7622f83d630`.
+A private scoped backup and the exact **1.3.0** archive (SHA-256
+`dd0514770d955acb39674b408cb384b55f223bb8f6982785bf277c46fab12944`)
+were retained. No new infrastructure or manual container restart was needed.
+Blueprint performed its usual cache/queue/ownership finalization; no Panel core
+patch, Wings modification or game-file mutation was made by this extension.
+Native Client authentication/state/throttle middleware was verified on both new
+routes. Live discovery/settings returned the expected version, capability and
+24/2/8 defaults. Permission/path rejections and partial results were verified.
+
+The [comparative benchmark](M5-DIRECTORY-BENCHMARK.md#2026-10-13--blueprint-140-dev-batch-comparison)
+reused the existing fixture read-only. Three 24-directory rounds averaged
+3557.4 ms native versus 393.8 ms batch; a 111-directory traversal took 14.8316 s
+versus 1.8368 s. All successful metadata matched. The report preserves the initial
+incorrect missing-directory smoke assertion, the installed native HTTP 500
+finding, resource observations and sampling limitations. This supports bounded
+prefetch exploration, not an automatic switch of the file manager or a claim
+that single-directory latency disappeared.

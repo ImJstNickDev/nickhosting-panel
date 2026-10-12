@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.3.0**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.4.0-dev**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
@@ -84,6 +84,46 @@ prefetch does not emit misleading per-file download events in the Panel.
 Client-key revocation does not revoke already-issued native Wings URLs before
 expiry; the NickHosting backend must recheck local authorization before use.
 
+### Experimental directory batches — Client API
+
+`POST /api/client/extensions/nickhosting/servers/{server}/directory-list` accepts
+JSON `{directories:string[]}` and returns `{results:[{directory,files}|{directory,error}]}`
+in exactly the requested order. Each directory appears once. `files` contains the
+native Panel `FileObjectTransformer` fields, not Fractal envelopes. An empty
+directory returns `files:[]`; a failed directory never becomes an empty success.
+Errors are `not_found`, `forbidden`, `unavailable`, `too_large` or
+`deadline_exceeded`, without upstream messages, tokens or node addresses.
+Capability discovery reports `bulkDirectoryListings:true`.
+
+`GET /api/client/extensions/nickhosting/servers/{server}/directory-settings`
+returns `{directoryBatchLimit,directoryConcurrency,directoryTimeoutSeconds}`.
+Both routes require a real account Client token, native `file.read`, native
+server-state middleware and the exact linked nonadministrator owner and server
+identity. These checks and settings reads happen once per batch. Native listing
+routes are unchanged; this experiment does not replace ordinary directory reads.
+
+Paths use the download batch's canonical UTF-8 rules, except `''` identifies the
+root directory. The request restores the exact names from its bounded JSON body
+after native trim/null middleware, so root and names containing edge spaces are
+preserved. Bodies are limited to 512 KiB, with at most 64 unique paths of 4096
+bytes each. No recursion, retries, signed URL generation or file downloads occur.
+Wings itself may read file prefixes while computing its native MIME metadata.
+
+The extension reuses the native daemon HTTP client and node authentication
+inside the Panel. A Guzzle pool dispatches at most the configured number of reads;
+each uses the remaining monotonic whole-batch deadline, not the native 60-second
+timeout. Redirects are disabled. A Wings 429 stops dispatching pending directories.
+Each response is bounded while streaming, even without Content-Length: 4 MiB per
+directory, 8 MiB aggregate input, 10,000 entries per directory, and 8 MiB aggregate
+serialized output. A limit yields an explicit per-path error, never a truncated
+successful list. Metadata is held only for the request; no recursive cache is added.
+
+The `-dev` version remains experimental; live measurements are recorded in the extension report. Rollback to the
+retained 1.3.0 artifact removes the new routes/capability without a schema migration,
+data reset or change to existing uploads/downloads/account links. The new optional
+settings may remain stored and are ignored by 1.3.0. Installation or rollback on
+the real Panel still follows the Owner-approved Blueprint workflow.
+
 ### Administrator settings
 
 The extension's administrator page stores these operational values through
@@ -91,6 +131,9 @@ Blueprint's `nickhosting` namespace. Defaults require no migration or reset.
 
 | Setting | Default | Allowed range |
 | --- | --- | --- |
+| `directoryBatchLimit` | 24 | 1–64 |
+| `directoryConcurrency` | 2 | 1–4 |
+| `directoryTimeoutSeconds` | 8 | 1–10 seconds |
 | `downloadBatchLimit` | 2500 | 1–2500 |
 | `uploadBatchLimit` | 500 | 1–500 |
 | `signedUrlTtlSeconds` | 900 | 60–900 seconds |
@@ -250,7 +293,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.3.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.4.0-dev/nickhosting.blueprint`.
 
 Version 1.2.0 introduced bulk upload URLs. Version 1.3.0 adds bulk path-scoped
 download URLs, transfer settings discovery and configurable operational bounds;
@@ -259,7 +302,8 @@ permission policy, server-state middleware and JWT service with isolated model
 data and an ephemeral signing key. They verify signatures, exact claims, expiry,
 unique consumption IDs, response ordering, canonical paths, configured limits,
 constant per-batch query count and settings preservation without contacting Wings.
-The admin view lists the extension's seven responsibilities in English and Italian.
+Version 1.4.0-dev adds experimental directory batches and three configurable bounds.
+The admin view lists eight responsibilities in English and Italian.
 
 ## Upstream reference / licensing
 
