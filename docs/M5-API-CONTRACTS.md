@@ -508,6 +508,19 @@ credential is returned to the browser.
 | `POST /copy` | `{root,files,destination}`; copies selections recursively into an existing directory. Preflight rejects collisions, symlinks, self-descendants and protected targets. No overwrite. |
 | `POST /extract` | `{root,file,destination,confirm:true}`; destination is one new child directory. Validate/stage the entire archive before remote writes, then use existing upload admission and adapter streams. |
 
+`POST /v1/servers/:id/files` with `action:"rename"` also handles moves. Its optional
+`overwrite: string[]` identifies exact root-relative destination paths from the
+same `files:[{from,to}]` request. Omission retains no-overwrite preflight. Consent
+permits only regular-file to regular-file replacement with an exact matching name;
+directories, symlinks, case ambiguity, duplicate/unrelated approvals and overlapping
+batch paths remain rejected. The entire batch is checked before one adapter call,
+with existing protected-path guards, authorization recheck and audited approvals.
+There is no delete-before-move. Destination names appearing after browser preflight
+are checked again by the API. Provider filesystem changes can still race the final
+preflight/rename interval: the current Client API contract has no atomic no-clobber
+flag and multi-file renames are not transactional. No rollback or automatic retry
+is claimed after an ambiguous/partial provider failure.
+
 The editor serializes NickHosting writes and rechecks authorization before writing.
 Wings does not expose atomic compare-and-swap against external Panel/game writes:
 a write in the comparison/write interval remains possible. A post-write mismatch

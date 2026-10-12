@@ -489,6 +489,7 @@ export function registerServerRoutes(
               .array(z.object({ from: z.string(), to: z.string() }).strict())
               .min(1)
               .max(100),
+            overwrite: z.array(z.string()).max(100).optional(),
           })
           .strict(),
       ]),
@@ -516,6 +517,7 @@ export function registerServerRoutes(
       await recordAudit(connection, current, 'server.files.requested', {
         serverId: c.req.param('id'),
         action: input.action,
+        ...(input.action === 'rename' ? { overwrite: input.overwrite ?? [] } : {}),
       });
       if (input.action === 'write') await service.adapter.writeFile(id, input.path, input.content);
       else if (input.action === 'mkdir')
@@ -523,7 +525,7 @@ export function registerServerRoutes(
       else if (input.action === 'delete')
         await service.adapter.deleteFiles(id, input.root, input.files);
       else {
-        await validateFileMoves(service.adapter, id, input.root, input.files);
+        await validateFileMoves(service.adapter, id, input.root, input.files, input.overwrite);
         await service.authorizeTransfer(current, c.req.param('id'), true, connection);
         await service.adapter.renameFiles(id, input.root, input.files);
       }

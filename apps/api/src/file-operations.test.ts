@@ -268,6 +268,59 @@ describe('batch move preflight', () => {
       ]),
     ).rejects.toThrow();
   });
+  it('permits only explicitly approved file destinations relative to the supplied root', async () => {
+    const a = adapter({
+      '': [file('config', true)],
+      config: [file('a'), file('target', true)],
+      'config/target': [file('a')],
+    });
+    await expect(
+      validateFileMoves(a, 'server', 'config', [{ from: 'a', to: 'target/a' }], ['target/a']),
+    ).resolves.toBeUndefined();
+    await expect(
+      validateFileMoves(a, 'server', 'config', [{ from: 'a', to: 'target/a' }]),
+    ).rejects.toMatchObject({ code: 'conflict' });
+  });
+  it.each([['elsewhere/a'], ['target/A'], ['target/a', 'target/a']])(
+    'rejects unrelated, differently cased or duplicated overwrite consent: %j',
+    async (...overwrite) => {
+      const a = adapter({ '': [file('a'), file('target', true)], target: [file('a')] });
+      await expect(
+        validateFileMoves(a, 'server', '', [{ from: 'a', to: 'target/a' }], overwrite),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect(a.listFiles).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    ['directory destination', file('a'), [file('a', true)]],
+    ['directory source', file('a', true), [file('a')]],
+    ['symlink destination', file('a'), [file('a', false, true)]],
+    ['case-only destination', file('a'), [file('A')]],
+    ['ambiguous destination', file('a'), [file('a'), file('A')]],
+  ] as const)('rejects approved overwrite with a %s', async (_reason, source, targets) => {
+    const a = adapter({ '': [source, file('target', true)], target: [...targets] });
+    await expect(
+      validateFileMoves(a, 'server', '', [{ from: 'a', to: 'target/a' }], ['target/a']),
+    ).rejects.toMatchObject({ code: 'conflict' });
+  });
+  it('rejects a second unapproved collision even if the first target is approved', async () => {
+    const a = adapter({
+      '': [file('a'), file('b'), file('target', true)],
+      target: [file('a'), file('b')],
+    });
+    await expect(
+      validateFileMoves(
+        a,
+        'server',
+        '',
+        [
+          { from: 'a', to: 'target/a' },
+          { from: 'b', to: 'target/b' },
+        ],
+        ['target/a'],
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' });
+  });
   it('rejects subtree moves, overlapping selections and symbolic-link ancestors', async () => {
     const a = adapter({ '': [file('world', true), file('alias', true, true)], world: [file('a')] });
     await expect(

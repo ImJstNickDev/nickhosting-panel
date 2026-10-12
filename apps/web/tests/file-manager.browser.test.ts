@@ -199,6 +199,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect(await filesTab.evaluate((link) => getComputedStyle(link).outlineStyle)).toBe('solid');
   });
   it('supports keyboard context menus, range selection, batch copy/move and streamed ZIP download', async () => {
+    await user.goto(base);
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).focus();
     await user.keyboard.press('Shift+F10');
     await browserExpect(user.getByRole('menu')).toBeVisible();
@@ -266,21 +267,186 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(dialog()).not.toBeVisible();
     expect((await provider.files()).get('extracted/alpha.txt')?.toString()).toBe('Alpha notes');
     await row('gamma.yaml').dragTo(row('extracted'));
-    await browserExpect(dialog().getByLabel('Destination folder', { exact: true })).toHaveValue(
-      '/extracted',
-    );
-    await dialog().getByRole('button', { name: 'Move', exact: true }).click();
+    await browserExpect(row('gamma.yaml')).toHaveCount(0);
     await browserExpect(dialog()).not.toBeVisible();
     expect((await provider.files()).has('gamma.yaml')).toBe(false);
     await row('extracted').getByRole('button', { name: 'extracted', exact: true }).click();
     await row('gamma.yaml').dragTo(user.getByRole('button', { name: 'root', exact: true }));
-    await browserExpect(dialog().getByLabel('Destination folder', { exact: true })).toHaveValue(
-      '/',
-    );
-    await dialog().getByRole('button', { name: 'Move', exact: true }).click();
+    await browserExpect(row('gamma.yaml')).toHaveCount(0);
     await browserExpect(dialog()).not.toBeVisible();
     expect((await provider.files()).has('gamma.yaml')).toBe(true);
     await user.getByRole('button', { name: 'root', exact: true }).click();
+  });
+  it('asks only for file collisions on drop, supports cancellation and scopes overwrite to freshly confirmed names', async () => {
+    await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
+      action: 'mkdir',
+      root: '',
+      name: 'drop-target',
+    });
+    const remote = await provider.files();
+    remote.set('move-a.txt', Buffer.from('new a'));
+    remote.set('move-b.txt', Buffer.from('new b'));
+    remote.set('drop-target/move-a.txt', Buffer.from('old a'));
+    const selectAndDrop = async (italian = false) => {
+      await user
+        .getByRole('checkbox', {
+          name: `${italian ? 'Seleziona' : 'Select'} move-a.txt`,
+          exact: true,
+        })
+        .check();
+      await user
+        .getByRole('checkbox', {
+          name: `${italian ? 'Seleziona' : 'Select'} move-b.txt`,
+          exact: true,
+        })
+        .check();
+      await row('move-a.txt').dragTo(row('drop-target'));
+    };
+    for (const locale of ['en', 'it'] as const) {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+      await user.setViewportSize(
+        locale === 'it' ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
+      );
+      await user.goto(base);
+      await selectAndDrop(locale === 'it');
+      await browserExpect(dialog()).toHaveAccessibleName(
+        locale === 'it'
+          ? 'File con lo stesso nome presente in drop-target'
+          : 'A file with the same name exists in drop-target',
+      );
+      await browserExpect(dialog().getByRole('button')).toHaveCount(2);
+      const cancel = dialog().getByRole('button', {
+        name: locale === 'it' ? 'Annulla' : 'Cancel',
+        exact: true,
+      });
+      await browserExpect(cancel).toBeFocused();
+      const overwrite = dialog().getByRole('button', {
+        name: locale === 'it' ? 'Sovrascrivi' : 'Overwrite',
+        exact: true,
+      });
+      await browserExpect(overwrite).toHaveClass('danger');
+      expect(
+        await dialog()
+          .getByRole('heading')
+          .evaluate((heading) => getComputedStyle(heading).textAlign),
+      ).toBe('center');
+      expect(
+        await dialog()
+          .getByRole('heading')
+          .evaluate((heading) => Number.parseFloat(getComputedStyle(heading).fontSize)),
+      ).toBeGreaterThanOrEqual(24);
+      expect((await overwrite.boundingBox())?.height).toBeGreaterThanOrEqual(48);
+      expect(remote.get('drop-target/move-a.txt')?.toString()).toBe('old a');
+      expect(remote.has('move-a.txt')).toBe(true);
+      const audit = await new AxeBuilder({ page: user })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze();
+      expect(audit.violations.map(({ id }) => id)).toEqual([]);
+      await harness.screenshot(
+        user,
+        `file-drop-collision-${locale === 'it' ? 'mobile-it' : 'desktop-en'}`,
+      );
+      await cancel.click();
+      await browserExpect(dialog()).not.toBeVisible();
+      expect(remote.get('drop-target/move-a.txt')?.toString()).toBe('old a');
+      expect(remote.has('move-b.txt')).toBe(true);
+    }
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await user.goto(base);
+    await selectAndDrop();
+    await browserExpect(dialog()).toBeVisible();
+    // A new conflict after the first prompt requires another explicit confirmation.
+    remote.set('drop-target/move-b.txt', Buffer.from('old b'));
+    await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
+    await browserExpect(dialog()).toHaveAccessibleName(
+      'Files with the same names exist in drop-target',
+    );
+    expect(remote.get('drop-target/move-a.txt')?.toString()).toBe('old a');
+    expect(remote.get('drop-target/move-b.txt')?.toString()).toBe('old b');
+    await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
+    await browserExpect(dialog()).not.toBeVisible();
+    expect(remote.get('drop-target/move-a.txt')?.toString()).toBe('new a');
+    expect(remote.get('drop-target/move-b.txt')?.toString()).toBe('new b');
+    expect(remote.has('move-a.txt')).toBe(false);
+    expect(remote.has('move-b.txt')).toBe(false);
+    // Existing folder collisions are not converted into recursive deletion/replacement.
+    await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
+      action: 'mkdir',
+      root: '',
+      name: 'drop-folder',
+    });
+    await user.getByRole('button', { name: 'Refresh files', exact: true }).click();
+    await row('drop-folder').dragTo(row('drop-target'));
+    await browserExpect(row('drop-folder')).toHaveCount(0);
+    await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
+      action: 'mkdir',
+      root: '',
+      name: 'drop-folder',
+    });
+    await user.getByRole('button', { name: 'Refresh files', exact: true }).click();
+    await row('drop-folder').dragTo(row('drop-target'));
+    await browserExpect(user.getByRole('alert')).toContainText(
+      'A folder, link or differently capitalized name already exists',
+    );
+    await browserExpect(dialog()).not.toBeVisible();
+  });
+  it('requests consent when a collision appears after drop preflight without replaying the move', async () => {
+    await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
+      action: 'mkdir',
+      root: '',
+      name: 'late-target',
+    });
+    const remote = await provider.files();
+    remote.set('late-drop.txt', Buffer.from('source'));
+    let attempts = 0;
+    let failOverwrite = false;
+    await user.route('**/files', async (route) => {
+      if (
+        route.request().method() === 'POST' &&
+        route.request().postDataJSON()?.action === 'rename'
+      ) {
+        attempts++;
+        if (failOverwrite)
+          return route.fulfill({
+            status: 503,
+            json: {
+              error: {
+                code: 'integration_unavailable',
+                messageKey: 'errors.integration_unavailable',
+              },
+            },
+          });
+        remote.set('late-target/late-drop.txt', Buffer.from('appeared after preflight'));
+      }
+      await route.continue();
+    });
+    try {
+      await user.goto(base);
+      await row('late-drop.txt').dragTo(row('late-target'));
+      await browserExpect(dialog()).toHaveAccessibleName(
+        'A file with the same name exists in late-target',
+      );
+      expect(attempts).toBe(1);
+      expect(remote.get('late-drop.txt')?.toString()).toBe('source');
+      expect(remote.get('late-target/late-drop.txt')?.toString()).toBe('appeared after preflight');
+      await dialog().getByRole('button', { name: 'Cancel', exact: true }).click();
+      expect(attempts).toBe(1);
+      failOverwrite = true;
+      await row('late-drop.txt').dragTo(row('late-target'));
+      await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
+      await browserExpect(dialog().getByRole('alert')).toBeVisible();
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Cancel', exact: true }),
+      ).toBeEnabled();
+      expect(attempts).toBe(2);
+      expect(remote.get('late-drop.txt')?.toString()).toBe('source');
+      expect(remote.get('late-target/late-drop.txt')?.toString()).toBe('appeared after preflight');
+      await dialog().getByRole('button', { name: 'Cancel', exact: true }).click();
+      expect(attempts).toBe(2);
+    } finally {
+      await user.unroute('**/files');
+    }
   });
   it('opens text inline with a stable skeleton and preserves dirty edits across breadcrumb and app navigation', async () => {
     for (const locale of ['en', 'it'] as const) {

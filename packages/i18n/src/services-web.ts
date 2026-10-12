@@ -168,6 +168,19 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   ],
   'file.replaceUpload': ['Replace and upload', 'Sostituisci e carica'],
   'file.destination': ['Destination folder', 'Cartella di destinazione'],
+  'file.moveCollisionTitle': [
+    '{count, plural, one {A file with the same name exists in {folder}} other {Files with the same names exist in {folder}}}',
+    '{count, plural, one {File con lo stesso nome presente in {folder}} other {File con gli stessi nomi presenti in {folder}}}',
+  ],
+  'file.moveOverwriteWarning': [
+    'Clicking Overwrite replaces the existing files with the files being moved. Their previous contents will be lost.',
+    'Premendo Sovrascrivi, sostituirai i file presenti con quelli spostati. Il contenuto precedente andrà perso.',
+  ],
+  'file.overwrite': ['Overwrite', 'Sovrascrivi'],
+  'file.moveCollisionUnsupported': [
+    'A folder, link or differently capitalized name already exists. Rename it or choose another folder.',
+    'Esiste già una cartella, un collegamento o un nome con maiuscole diverse. Rinominalo o scegli un’altra cartella.',
+  ],
   'file.noOverwrite': [
     'Existing files will not be overwritten.',
     'I file esistenti non verranno sovrascritti.',

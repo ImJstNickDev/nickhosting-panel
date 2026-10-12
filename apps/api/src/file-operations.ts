@@ -129,12 +129,20 @@ export async function validateFileMoves(
   id: string,
   root: string,
   moves: { from: string; to: string }[],
+  overwrite: string[] = [],
 ) {
   root = clean(root, true);
   const planned = moves.map((move) => ({
     from: pathJoin(root, clean(move.from)),
     to: pathJoin(root, clean(move.to)),
   }));
+  const approved = overwrite.map((target) => pathJoin(root, clean(target)));
+  if (
+    new Set(approved).size !== approved.length ||
+    approved.some((target) => !planned.some((move) => move.to === target))
+  )
+    throw new DomainError('validation_failed');
+  const approvedTargets = new Set(approved);
   const sources = new Set<string>(),
     targets = new Set<string>();
   for (const move of planned) {
@@ -162,10 +170,17 @@ export async function validateFileMoves(
       const directory = await inspectFilePath(adapter, id, parent);
       if (!directory || directory.is_file) throw new DomainError('conflict');
     }
+    const existing = (await adapter.listFiles(id, parent)).filter(
+      (entry) => entry.name.toLowerCase() === name?.toLowerCase(),
+    );
     if (
-      (await adapter.listFiles(id, parent)).some(
-        (entry) => entry.name.toLowerCase() === name?.toLowerCase(),
-      )
+      existing.length > 0 &&
+      (!approvedTargets.has(move.to) ||
+        existing.length !== 1 ||
+        existing[0]?.name !== name ||
+        !source.is_file ||
+        !existing[0]?.is_file ||
+        existing[0]?.is_symlink)
     )
       throw new DomainError('conflict');
   }

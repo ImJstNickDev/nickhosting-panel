@@ -5209,3 +5209,48 @@ were disposed. No production operation, game-server asset, container restart or
 new infrastructure resource occurred. Development source watchers remain in use.
 Rollback is a code revert, without migrations/dependencies. PR#21 remains OPEN and
 unmerged; SFTPGo#18 and other existing release boundaries are unchanged.
+
+
+### 2026-10-12 — Direct drag/drop moves and scoped overwrite confirmation
+
+Dropping internal files onto a folder, parent row or breadcrumb now moves them
+without a form when a fresh target listing has no collisions. Existing same-name
+regular files produce a compact EN/IT confirmation with the destination, affected
+names, actual replacement consequences and only Cancel/Overwrite. The Owner's
+visual refinement uses a larger centered title, normal-sized subtitle, more space,
+centered 48px buttons, neutral Cancel and red Overwrite. Cancel receives initial
+focus; mobile layout and keyboard dialog behavior remain accessible.
+
+Overwrite consent names exact destination paths, rather than allowing all
+collisions in a batch. A newly appearing collision requires renewed consent.
+The API revalidates the entire batch, keeps authorization/protected-file checks,
+and refuses folders, symlinks, case ambiguity and unrelated/duplicate approval.
+No delete-before-move was introduced. Source and destination query caches are
+invalidated after success. POST409 reconciliation can reopen confirmation but
+never replays the operation automatically; failed overwrite remains visible.
+Manual Move/Copy retain their existing no-overwrite behavior.
+
+Focused evidence:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-operations.test.ts`: **35 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-operations.integration.test.ts`: **14 passed**. Covers exact/root-relative consent, default refusal, changed target type, unapproved collisions in a mixed batch, audit and authorization revocation before mutation.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts -t 'supports keyboard context menus|extracts a ZIP|asks only for file collisions' --reporter verbose --hideSkippedTests`: **3 passed**,21 unrelated skipped. Covers unchanged manual behavior, direct folder/breadcrumb moves, cancellation, multi-selection replacement, added conflicts and refusal to replace folders.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts -t 'collision appears after drop preflight' --reporter verbose --hideSkippedTests`: final **1 passed**,24 unrelated skipped. Covers a new target between browser preflight and POST, API409 consent recovery and a failed overwrite with visible error/no extra POST.
+- After the Owner's styling refinement, prefix + `apps/web/tests/file-manager.browser.test.ts -t 'asks only for file collisions' --reporter verbose --hideSkippedTests`: **1 passed**,24 unrelated skipped. EN desktop/IT mobile assert centered enlarged heading, 48px action height, destructive styling, initial Cancel focus and zero applicable axe violations.
+- Root TypeScript, final WebPanel source/test typecheck/build, i18n compile/check (1224 EN/IT/pseudo keys), changed-file Biome and diff checks passed. Existing bundle-size advisory remains. No historical full-suite rerun; these are focused results.
+
+Independent security/configuration and rendered UX review found no must-fix issue.
+Reviewed screenshots: [EN desktop](screenshots/m5/file-drop-collision-desktop-en.png),
+[IT mobile](screenshots/m5/file-drop-collision-mobile-it.png). Evidence uses real
+application handlers and isolated external-provider fixtures with approved test
+services. Test-owned schemas/staging were disposed; no game server, live-provider
+mutation, restart, new Docker resource or production configuration change occurred.
+Existing development watchers load source changes.
+
+The existing provider limitation remains explicit: Client API rename has no
+atomic no-clobber flag and batch renames are not transactional. External writes
+can race final preflight, and a failed provider operation may have partial effects;
+no rollback guarantee or automatic retry is claimed. The new optional API field
+is backward-compatible. Rollback is a code revert with no migration or dependency
+change. PR#21 remains OPEN/unmerged and SFTPGo#18 remains a release gate.

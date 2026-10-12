@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { useBlocker, useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
-import { api, download, upload } from '../api/client.js';
+import { api, download, queryClient, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -73,6 +73,7 @@ import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
 
 type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'move' | 'copy' | 'extract';
+type DroppedMove = { source: string; destination: string; names: string[] };
 type UploadItem = {
   id: number;
   file: File;
@@ -246,6 +247,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [mode, setMode] = useState<Mode>();
   const [targets, setTargets] = useState<string[]>([]);
   const [destination, setDestination] = useState('');
+  const [pendingMove, setPendingMove] = useState<DroppedMove & { collisions: string[] }>();
+  const [moveError, setMoveError] = useState<unknown>();
   const [content, setContent] = useState('');
   const [newName, setNewName] = useState('');
   const [revision, setRevision] = useState<string | null>(null);
@@ -769,7 +772,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
   }
   function dropFolder(event: DragEvent, folder: string) {
-    if (!event.dataTransfer.types.includes(dragType) || !canMutate) return;
+    if (!event.dataTransfer.types.includes(dragType) || !canMutate || mutationRunning.current)
+      return;
     event.preventDefault();
     event.stopPropagation();
     try {
@@ -783,6 +787,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         payload.directory !== directory ||
         !Array.isArray(payload.names) ||
         !payload.names.length ||
+        payload.names.length > 100 ||
         !payload.names.every((name) =>
           files.data?.some((entry) => entry.name === name && !entry.is_symlink),
         )
@@ -792,9 +797,105 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         setError({ messageKey: 'file.invalidMove' });
         return;
       }
-      chooseMode('move', payload.names, folder);
+      setMenu(undefined);
+      void moveDropped({ source: directory, destination: folder, names: payload.names });
     } catch {
       setError({ messageKey: 'file.invalidMove' });
+    }
+  }
+  async function dropCollisions(move: DroppedMove) {
+    const entries = await api<ServerFile[]>(
+      `${serverPath(serverId)}/files?path=${encodeURIComponent(move.destination)}`,
+    );
+    const collisions: string[] = [];
+    for (const name of move.names) {
+      const matches = entries.filter((entry) => entry.name.toLowerCase() === name.toLowerCase());
+      if (!matches.length) continue;
+      const target = matches[0];
+      const source = files.data?.find((entry) => entry.name === name);
+      if (
+        matches.length !== 1 ||
+        target?.name !== name ||
+        !target.is_file ||
+        target.is_symlink ||
+        !source?.is_file ||
+        source.is_symlink
+      )
+        throw { messageKey: 'file.moveCollisionUnsupported' };
+      collisions.push(name);
+    }
+    return collisions;
+  }
+  async function moveDropped(move: DroppedMove, overwrite: string[] = []) {
+    if (!canMutate || mutationRunning.current) return;
+    mutationRunning.current = true;
+    setMutating(true);
+    setError(undefined);
+    setMoveError(undefined);
+    try {
+      // Read fresh metadata, not a cached folder visited earlier. The backend
+      // repeats authoritative validation before any provider effect.
+      const collisions = await dropCollisions(move);
+      if (collisions.some((name) => !overwrite.includes(name))) {
+        setPendingMove({ ...move, collisions });
+        return;
+      }
+      await api(`${serverPath(serverId)}/files`, {
+        method: 'POST',
+        body: {
+          action: 'rename',
+          root: '',
+          files: move.names.map((name) => ({
+            from: join(move.source, name),
+            to: join(move.destination, name),
+          })),
+          ...(overwrite.length
+            ? { overwrite: overwrite.map((name) => join(move.destination, name)) }
+            : {}),
+        },
+      });
+      setPendingMove(undefined);
+      setSelected(new Set());
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['files', serverId, move.source], exact: true }),
+        queryClient.invalidateQueries({
+          queryKey: ['files', serverId, move.destination],
+          exact: true,
+        }),
+      ]);
+    } catch (failure) {
+      if (
+        failure &&
+        typeof failure === 'object' &&
+        'code' in failure &&
+        failure.code === 'conflict'
+      ) {
+        // A target may have appeared since preflight. Offer explicit consent,
+        // never replay automatically or assume a partial provider move rolled back.
+        try {
+          const sources = await api<ServerFile[]>(
+            `${serverPath(serverId)}/files?path=${encodeURIComponent(move.source)}`,
+          );
+          const collisions = await dropCollisions(move);
+          if (
+            collisions.length &&
+            collisions.some((name) => !overwrite.includes(name)) &&
+            move.names.every((name) =>
+              sources.some((entry) => entry.name === name && !entry.is_symlink),
+            )
+          ) {
+            setPendingMove({ ...move, collisions });
+            return;
+          }
+        } catch {
+          /* Preserve the original operation error; there is no retry. */
+        }
+      }
+      if (pendingMove) setMoveError(failure);
+      else setError(failure);
+    } finally {
+      mutationRunning.current = false;
+      setMutating(false);
     }
   }
   function dragOverFolder(event: DragEvent) {
@@ -1856,6 +1957,48 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         <button type="button" onClick={() => queueUploads(pendingUploads)}>
           {t('file.replaceUpload')}
         </button>
+      </Dialog>
+      <Dialog
+        open={Boolean(pendingMove)}
+        className="fm-move-confirm"
+        title={t('file.moveCollisionTitle', {
+          count: pendingMove?.collisions.length ?? 0,
+          folder: pendingMove?.destination.split('/').at(-1) || t('file.root'),
+        })}
+        showClose={false}
+        onClose={() => {
+          if (!mutationRunning.current) {
+            setPendingMove(undefined);
+            setMoveError(undefined);
+          }
+        }}
+      >
+        <p>{t('file.moveOverwriteWarning')}</p>
+        <p className="fm-targets fm-move-names">{pendingMove?.collisions.join(', ')}</p>
+        {Boolean(moveError) && <ErrorNotice error={moveError} />}
+        <div className="actions fm-move-actions">
+          <button
+            type="button"
+            className="secondary"
+            disabled={mutating}
+            onClick={() => {
+              setPendingMove(undefined);
+              setMoveError(undefined);
+            }}
+          >
+            {t('web.cancel')}
+          </button>
+          <button
+            type="button"
+            className="danger"
+            disabled={mutating}
+            onClick={() => {
+              if (pendingMove) void moveDropped(pendingMove, pendingMove.collisions);
+            }}
+          >
+            {t('file.overwrite')}
+          </button>
+        </div>
       </Dialog>
       <Dialog
         open={Boolean(mode) && !editing}

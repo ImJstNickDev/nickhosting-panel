@@ -476,6 +476,19 @@ open directories or the editor. Each row has an accessible overflow menu and a
 desktop context menu; destructive actions require confirmation. Checkbox range
 selection, focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and
 explicit Move/Copy dialogs provide equivalent pointer and keyboard paths.
+Internal drag/drop moves immediately when a fresh destination listing has no
+collision. A regular file with the same exact name opens a compact dialog naming
+the destination and affected files, explaining that prior content will be lost,
+with only Cancel and Overwrite. Cancel receives initial focus. Confirmation is
+presented with a larger centered title, normal-sized explanatory copy, generous
+spacing and centered buttons of at least 48px height; Overwrite uses the destructive
+red style and Cancel stays neutral. These styles apply only to this dialog. Consent is
+scoped to those paths; another colliding name requires renewed consent. Backend
+validation remains authoritative before moving the batch. Folder/link/type and
+case-ambiguous collisions are refused rather than recursively replaced. Errors
+remain visible and never trigger an automatic mutation retry. Folder, parent-row
+and breadcrumb drop targets use this same flow; manual Move/Copy forms retain
+their existing no-overwrite behavior.
 Folders precede files for every sort; search filters the current directory only.
 Name, Size and Modified headers are sorting buttons in both list and grid views.
 The active non-default ordering has an up/down arrow; default Name ascending has

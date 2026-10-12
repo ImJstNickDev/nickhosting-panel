@@ -142,26 +142,91 @@ async function post(action: string, body: unknown, id = serverId) {
     body: JSON.stringify(body),
   });
 }
+async function moveFiles(files: { from: string; to: string }[], overwrite?: string[]) {
+  return app.request(`/v1/servers/${serverId}/files`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'rename', root: '', files, overwrite }),
+  });
+}
 describe('file operation handlers with isolated authoritative database', () => {
-  it('rechecks mutation authorization after batch move preflight', async () => {
-    const request = () =>
-      app.request(`/v1/servers/${serverId}/files`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          action: 'rename',
-          root: '',
-          files: [{ from: 'source/a.txt', to: 'target/a.txt' }],
-        }),
-      });
-    expect((await request()).status).toBe(204);
-    expect(service.adapter.renameFiles).toHaveBeenCalledTimes(1);
-    vi.mocked(service.adapter.renameFiles).mockClear();
-    service.authorizeTransfer = async () => {
-      throw new DomainError('forbidden');
-    };
-    expect((await request()).status).toBe(403);
+  it.each([false, true])(
+    'rechecks mutation authorization after batch move preflight (overwrite %s)',
+    async (overwrite) => {
+      if (overwrite) files.set('target/a.txt', Buffer.from('existing'));
+      const request = () =>
+        moveFiles(
+          [{ from: 'source/a.txt', to: 'target/a.txt' }],
+          overwrite ? ['target/a.txt'] : undefined,
+        );
+      expect((await request()).status).toBe(204);
+      expect(service.adapter.renameFiles).toHaveBeenCalledTimes(1);
+      vi.mocked(service.adapter.renameFiles).mockClear();
+      service.authorizeTransfer = async () => {
+        throw new DomainError('forbidden');
+      };
+      expect((await request()).status).toBe(403);
+      expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires exact overwrite consent, preserves protected-path checks and audits the request', async () => {
+    files.set('target/a.txt', Buffer.from('existing'));
+    const moves = [{ from: 'source/a.txt', to: 'target/a.txt' }];
+    expect((await moveFiles(moves)).status).toBe(409);
     expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+    expect((await moveFiles(moves, ['target/a.txt'])).status).toBe(204);
+    expect(service.adapter.renameFiles).toHaveBeenCalledExactlyOnceWith('fixture', '', moves);
+    expect(service.assertFileMutation).toHaveBeenCalledWith(
+      serverId,
+      ['source/a.txt', 'target/a.txt'],
+      f.db,
+    );
+    const audit = await f.db
+      .selectFrom('audit_events')
+      .select('metadata')
+      .where('action', '=', 'server.files.requested')
+      .execute();
+    expect(audit).toContainEqual({
+      metadata: { serverId, action: 'rename', overwrite: ['target/a.txt'] },
+    });
+  });
+
+  it('rechecks a colliding destination type when overwrite consent arrives', async () => {
+    files.set('target/a.txt', Buffer.from('existing'));
+    const moves = [{ from: 'source/a.txt', to: 'target/a.txt' }];
+    expect((await moveFiles(moves)).status).toBe(409);
+    files.set('target/a.txt', null);
+    expect((await moveFiles(moves, ['target/a.txt'])).status).toBe(409);
+    expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('refuses overwrite consent for a path outside this move', async () => {
+    files.set('target/a.txt', Buffer.from('existing'));
+    expect(
+      (await moveFiles([{ from: 'source/a.txt', to: 'target/a.txt' }], ['target/unrelated.txt']))
+        .status,
+    ).toBe(400);
+    expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+  });
+
+  it('preflights the whole batch before mutating any approved overwrite', async () => {
+    files.set('source/b.txt', Buffer.from('second source'));
+    files.set('target/a.txt', Buffer.from('first existing'));
+    files.set('target/b.txt', Buffer.from('second existing'));
+    expect(
+      (
+        await moveFiles(
+          [
+            { from: 'source/a.txt', to: 'target/a.txt' },
+            { from: 'source/b.txt', to: 'target/b.txt' },
+          ],
+          ['target/a.txt'],
+        )
+      ).status,
+    ).toBe(409);
+    expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+    expect(files.get('target/a.txt')?.toString()).toBe('first existing');
   });
 
   it('rejects legacy batch rename collisions before sending a provider mutation', async () => {

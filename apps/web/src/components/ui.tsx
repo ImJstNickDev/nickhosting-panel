@@ -249,11 +249,15 @@ export function Dialog({
   title,
   children,
   onClose,
+  showClose = true,
+  className,
 }: {
   open: boolean;
   title: string;
   children: ReactNode;
   onClose: () => void;
+  showClose?: boolean;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -266,6 +270,7 @@ export function Dialog({
   return (
     <dialog
       ref={ref}
+      className={className}
       aria-labelledby={titleId}
       onCancel={(event) => {
         event.preventDefault();
@@ -275,9 +280,11 @@ export function Dialog({
     >
       <header className="section-heading">
         <h2 id={titleId}>{title}</h2>
-        <button type="button" className="secondary" onClick={onClose}>
-          {t('web.close')}
-        </button>
+        {showClose && (
+          <button type="button" className="secondary" onClick={onClose}>
+            {t('web.close')}
+          </button>
+        )}
       </header>
       {children}
     </dialog>
