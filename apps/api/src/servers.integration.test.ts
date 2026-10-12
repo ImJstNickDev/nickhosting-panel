@@ -841,8 +841,11 @@ describe('M2 Hono API with real invitation, password and session authentication'
     const backup = await request(user, `/v1/servers/${server}/backups/${backupId}/download`);
     expect(backup.status).toBe(200);
     expect(await backup.text()).toBe('fixture-backup');
+    expect(file.headers.get('content-disposition')).toBe(
+      'attachment; filename="server.properties"; filename*=UTF-8\'\'server.properties',
+    );
+    expect(backup.headers.get('content-disposition')).toBe('attachment');
     for (const response of [file, backup]) {
-      expect(response.headers.get('content-disposition')).toBe('attachment');
       expect(response.headers.get('cache-control')).toBe('no-store');
       expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     }
@@ -1392,6 +1395,45 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(
       audits.some((entry) => (entry.metadata as { serverId: string }).serverId === server),
     ).toBe(false);
+  });
+
+  it('names file attachments using only the validated basename with UTF-8 and safe ASCII fallback', async () => {
+    const server = await f.server();
+    for (const [path, expected] of [
+      ['world/server.jar', 'filename="server.jar"; filename*=UTF-8\'\'server.jar'],
+      [
+        'world/World notes 2026.txt',
+        'filename="World notes 2026.txt"; filename*=UTF-8\'\'World%20notes%202026.txt',
+      ],
+      [
+        'world/Città 日本語.txt',
+        'filename="Citt_ ___.txt"; filename*=UTF-8\'\'Citt%C3%A0%20%E6%97%A5%E6%9C%AC%E8%AA%9E.txt',
+      ],
+      [
+        'world/notes "owner\'s" (1)*.txt',
+        "filename=\"notes _owner's_ (1)*.txt\"; filename*=UTF-8''notes%20%22owner%27s%22%20%281%29%2A.txt",
+      ],
+    ] as const) {
+      const file = await request(
+        user,
+        `/v1/servers/${server}/files/content?path=${encodeURIComponent(path)}`,
+      );
+      expect(file.status).toBe(200);
+      expect(file.headers.get('content-disposition')).toBe(`attachment; ${expected}`);
+      expect(await file.text()).toBe('fixture-data');
+      expect(vi.mocked(f.adapter.downloadFile).mock.lastCall?.[1]).toBe(path);
+    }
+    const calls = vi.mocked(f.adapter.downloadFile).mock.calls.length;
+    for (const path of ['', 'world/', '../secret.txt', 'world\\secret.txt', 'bad\r\nX-Evil: yes']) {
+      const file = await request(
+        user,
+        `/v1/servers/${server}/files/content?path=${encodeURIComponent(path)}`,
+      );
+      expect(file.status).toBe(400);
+      expect(file.headers.get('content-disposition')).toBeNull();
+      expect(file.headers.get('x-evil')).toBeNull();
+    }
+    expect(vi.mocked(f.adapter.downloadFile).mock.calls.length).toBe(calls);
   });
 
   it.each(['file', 'backup'])(

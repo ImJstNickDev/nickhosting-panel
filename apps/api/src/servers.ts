@@ -1,3 +1,4 @@
+import { posix } from 'node:path';
 import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
 import { relativePath } from '@nickhosting/pterodactyl-adapter';
@@ -366,7 +367,15 @@ export function registerServerRoutes(
       service = await management();
     const serverId = c.req.param('id');
     const id = await service.access(context, serverId, false, async (identifier) => identifier);
-    const download = await service.adapter.downloadFile(id, c.req.query('path') ?? '', {
+    const path = c.req.query('path') ?? '';
+    const filename = posix.basename(relativePath(path));
+    const fallback = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+    const encodedFilename = encodeURIComponent(filename).replace(
+      /['()*]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    const disposition = `attachment; filename="${fallback}"; filename*=UTF-8''${encodedFilename}`;
+    const download = await service.adapter.downloadFile(id, path, {
       signal: c.req.raw.signal,
       authorize: () => service.authorizeTransfer(context, serverId, false),
     });
@@ -378,7 +387,7 @@ export function registerServerRoutes(
           : { 'content-length': String(download.contentLength) }),
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
-        'content-disposition': 'attachment',
+        'content-disposition': disposition,
       },
     });
   });

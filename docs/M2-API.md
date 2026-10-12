@@ -174,7 +174,7 @@ project clients should use the authorized per-server operation view above.
 | GET `/v1/servers/:id/console` | SSE relay of allowlisted console/daemon/status/stat events. Backend obtains and refreshes the privileged WebSocket token; authorization is rechecked during the stream. Requests bounded provider log replay on an empty console; `history=0` skips replay when retaining a browser buffer. Errors use a typed, sanitized SSE envelope. A bounded `heartbeat` every 10 seconds keeps an otherwise silent stream alive without polling the provider; it never replaces authorization checks. |
 | POST `/v1/servers/:id/console` | `{command}` (1–4,096 characters) → `204`. Audit records the request, not raw command text. |
 | GET `/v1/servers/:id/files?path=` | Directory listing under the server root. |
-| GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; no fixed total byte limit, signed URL remains private. |
+| GET `/v1/servers/:id/files/content?path=...` | Backend-streamed binary attachment; `Content-Disposition` provides the validated basename via an ASCII fallback and UTF-8 `filename*`. No fixed total byte limit; signed URL remains private. |
 | PUT `/v1/servers/:id/files/upload?path=...` | Raw `application/octet-stream` body and exact `X-NH-Upload-Length` header; `204` only after a complete provider upload. |
 | POST `/v1/servers/:id/files` | `write`: `{action,path,content}` (text ≤60,000 characters); `mkdir`: `{action,root,name}`; `rename`: `{action,root,files:[{from,to}]}`; `delete`: `{action,root,files:[name],confirm:true}`. Rename/delete batches contain 1–100 entries. Returns `204`. |
 | GET `/v1/servers/:id/backups` | Provider backup metadata. Create and restore use durable lifecycle operations. |

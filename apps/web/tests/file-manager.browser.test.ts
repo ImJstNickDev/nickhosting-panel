@@ -249,6 +249,32 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     (await provider.files()).set('selection.zip', bytes);
     await user.getByRole('button', { name: 'Clear selection', exact: true }).click();
   });
+  it('preserves original download filenames and bytes for nested ASCII and Unicode files', async () => {
+    const files = await provider.files();
+    const names = ['server.jar', 'World notes 2026.txt', 'Città 日本語.txt'];
+    const bytes = Buffer.from([0, 1, 2, 127, 128, 255]);
+    for (const name of names) files.set(`world/${name}`, bytes);
+    try {
+      await user.goto(base);
+      await row('world').getByRole('button', { name: 'world', exact: true }).click();
+      for (const name of names) {
+        await menu(name);
+        const waiting = user.waitForEvent('download');
+        await user.getByRole('menuitem', { name: 'Download', exact: true }).click();
+        const downloaded = await waiting;
+        expect(downloaded.suggestedFilename()).toBe(name);
+        expect(new URL(downloaded.url()).pathname).toBe(
+          `/v1/servers/${provider.ids.serverId}/files/content`,
+        );
+        const path = await downloaded.path();
+        expect(path).toBeTruthy();
+        if (!path) throw new Error('Missing browser download');
+        expect(await readFile(path)).toEqual(bytes);
+      }
+    } finally {
+      for (const name of names) files.delete(`world/${name}`);
+    }
+  });
   it('keeps bulk file actions compact and labelled across desktop and mobile with keyboard clear', async () => {
     try {
       for (const [locale, width] of [

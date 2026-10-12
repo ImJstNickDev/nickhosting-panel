@@ -5281,3 +5281,27 @@ No game-server asset, live-provider call, infrastructure change or container res
 occurred. Development source watchers load the UI change. Rollback is a code revert;
 no migration, dependency or API change. PR#21 remains OPEN/unmerged and issue#18
 remains an independent production-release gate.
+
+### 2026-10-12 — Preserve single-file download names
+
+The mediated file route previously sent bare `Content-Disposition: attachment`,
+so native browser downloads fell back to the endpoint name `content`. It now
+provides the validated POSIX basename as a safe ASCII fallback plus UTF-8
+`filename*`. Spaces, accents and other Unicode names survive; parent paths never
+become the download name. Validation/encoding happens before opening the provider
+stream. Streaming, content length, cancellation, access checks and live transfer
+authorization are unchanged. No client-side buffering or provider URL is added.
+
+Focused evidence:
+
+- The new browser regression first reproduced `content` instead of `server.jar`.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts apps/web/tests/services.browser.test.ts -t 'preserves original download filenames|streams a 12 MiB binary upload' --reporter verbose --hideSkippedTests`: **2 passed**,45 unrelated skipped. Native browser filenames and identical bytes verified for nested binary, spaced and Unicode names; existing 12 MiB upload/download also verifies its filename.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'names file attachments|streams safe bytes|ends an established .* download|isolates unrelated users' --reporter verbose --hideSkippedTests`: **5 passed**,34 unrelated skipped. Covers header encoding, invalid paths/control characters, unchanged bytes, cross-user denial, private token mediation and file/backup transfer revocation.
+- `scripts/dev.sh pnpm typecheck`, changed-file Biome, diff and staged governance checks passed. Biome retains three pre-existing non-null assertion warnings in the services browser tests; no new warning. No historical full-suite rerun; no visual change requiring new screenshots.
+
+Independent review found no must-fix issue. Tests used existing approved isolated
+services, real application handlers and provider fixtures, disposing their own
+schemas/staging. No live provider call, game-server asset, infrastructure operation
+or explicit container restart occurred; existing dev source watchers load the fix.
+No secrets, migration or dependency changes. Rollback is a code revert. PR#21 stays
+OPEN/unmerged; SFTPGo#18 remains an independent production-release gate.

@@ -111,6 +111,7 @@ describe('M5 browser files, backups, console and automation', () => {
     await user.getByRole('menuitem', { name: 'Download', exact: true }).click();
     const result = await waiting;
     expect(result.url()).toContain('/v1/servers/');
+    expect(result.suggestedFilename()).toBe('world-export.bin');
     const file = await result.path();
     expect(file).toBeTruthy();
     expect(
