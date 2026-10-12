@@ -219,6 +219,11 @@ Delete remains one provider request
 containing the selected names; no deletion is dispatched until preflight passes.
 File/command/backup-delete mutations share the lifecycle server lock and reject
 an active lifecycle job.
+Background reconciliation collects provider/host observations without holding
+that lock. Only its brief database apply takes the lock, rejecting superseded
+observations before any state/metric/reservation update. Collection does not
+extend the previous observation's validity. Reconciliation waiting on resource
+admission does not monopolize the server lock.
 Initial server-lock contention returns `409 operation_busy` before the callback or
 any provider effect, instead of waiting with a database connection. A shared
 per-pool upload gate leaves connections available for authentication, authorization

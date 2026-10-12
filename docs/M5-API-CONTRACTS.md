@@ -342,7 +342,11 @@ and installed/offline state. It records `owner_resolved_failed`, preserves the
 unknown outcome and audit, and never claims rollback, success or permission to
 replay. Power/initial-start uncertainty does not use this manual path.
 
-`POST /v1/owner/reconcile` returns actual checked/failed subsets. Partial provider
+`POST /v1/owner/reconcile` returns `observed`, `deferred` (server IDs),
+`unavailable` (server IDs) and external recovery counts. Only applied observations
+count as observed; a busy server or superseded observation is deferred without
+refreshing timestamps. Provider collection holds no lifecycle server lock; a
+short guarded transaction applies accepted results atomically. Partial provider
 failure must not be rendered as “all checked.” Upload recovery remains a separate
 existing Owner operation with its own remote-write settlement proof; it is not a
 shortcut around active upload claims.

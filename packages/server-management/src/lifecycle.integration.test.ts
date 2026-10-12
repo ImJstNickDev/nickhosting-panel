@@ -3002,3 +3002,204 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).pterodactyl_id).toBe(f.remote.id);
   });
 });
+
+/** These gates model slow external I/O, never a production provider or clock sleep. */
+function reconciliationGate<T>() {
+  const entered = Promise.withResolvers<void>();
+  const result = Promise.withResolvers<T>();
+  return { entered, result };
+}
+
+describe('unlocked reconciliation collection and atomic stale-result fencing', () => {
+  async function idleFixture() {
+    const f = await fixture('start');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', f.serverId)
+      .execute();
+    return f;
+  }
+  async function history(f: Awaited<ReturnType<typeof fixture>>) {
+    return {
+      server: await f.server(),
+      reservation: await f.reservation(),
+      installation: await f.installationReservation(),
+      metrics: await f.db
+        .selectFrom('server_metrics')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute(),
+      events: await f.db
+        .selectFrom('server_events')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute(),
+    };
+  }
+  async function heldResources(f: Awaited<ReturnType<typeof fixture>>) {
+    const sample = await f.adapter.getResources();
+    const gate = reconciliationGate<Resources>();
+    f.adapter.getResources.mockImplementationOnce(async () => {
+      gate.entered.resolve();
+      return gate.result.promise;
+    });
+    const observation = reconcileManagedServer(f.db, f.serverId, f.options);
+    await gate.entered.promise;
+    return { sample, gate, observation };
+  }
+  it('leaves the server operation lock free during provider collection and preserves freshness on failure', async () => {
+    const f = await idleFixture();
+    const before = await history(f);
+    f.remote.status = 'install_failed';
+    const held = await heldResources(f);
+    await f.db.connection().execute(async (connection) => {
+      const acquired = await sql<{
+        acquired: boolean;
+      }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${f.serverId}`},0)) as acquired`.execute(
+        connection,
+      );
+      expect(acquired.rows[0]?.acquired).toBe(true);
+      await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${f.serverId}`},0))`.execute(
+        connection,
+      );
+    });
+    expect(await history(f)).toEqual(before);
+    const rejected = expect(held.observation).rejects.toThrow('fixture read failure');
+    held.gate.result.reject(new Error('fixture read failure'));
+    await rejected;
+    expect(await history(f)).toEqual(before);
+  });
+  it('rejects a completed ABA lifecycle even when all server values and JS timestamps are unchanged', async () => {
+    const f = await idleFixture();
+    const before = await history(f);
+    f.remote.status = 'install_failed';
+    const held = await heldResources(f);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: f.jobId })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', f.serverId)
+      .execute();
+    expect(await f.server()).toEqual(before.server);
+    held.gate.result.resolve({ ...held.sample, current_state: 'running' });
+    expect(await held.observation).toBe('deferred');
+    expect(await history(f)).toEqual(before);
+  });
+  it('discards an older observation after a newer observation and readiness update', async () => {
+    const f = await idleFixture();
+    const held = await heldResources(f);
+    f.setState('running');
+    f.tick(1);
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ readiness: 'ready' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const newer = await history(f);
+    held.gate.result.resolve(held.sample);
+    expect(await held.observation).toBe('deferred');
+    expect(await history(f)).toEqual(newer);
+  });
+  it.each([
+    'identity',
+    'node',
+    'host',
+    'allocation',
+    'deleted',
+    'power_receipt',
+    'reservation',
+  ] as const)('discards every old effect after intervening %s changes', async (change) => {
+    const f = await idleFixture();
+    const held = await heldResources(f);
+    if (change === 'identity')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ pterodactyl_uuid: randomUUID() })
+        .where('id', '=', f.serverId)
+        .execute();
+    if (change === 'node')
+      await f.db
+        .updateTable('managed_nodes')
+        .set({ pterodactyl_node_id: f.remote.node + 10000 })
+        .where('id', '=', f.nodeId)
+        .execute();
+    if (change === 'host')
+      await f.db
+        .updateTable('physical_hosts')
+        .set({ observer_id: 'replacement' })
+        .where('id', '=', f.hostId)
+        .execute();
+    if (change === 'allocation')
+      await f.db
+        .updateTable('server_allocations')
+        .set({ protocols: ['tcp', 'udp'] })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    if (change === 'deleted')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ deleted_at: f.now() })
+        .where('id', '=', f.serverId)
+        .execute();
+    if (change === 'power_receipt')
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ startConfirmed: true }) })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    if (change === 'reservation') await f.prepareReservation();
+    const changed = await history(f);
+    held.gate.result.resolve({ ...held.sample, current_state: 'running' });
+    expect(await held.observation).toBe('deferred');
+    expect(await history(f)).toEqual(changed);
+  });
+  it('does not release a new reservation when a late external-stop receipt arrives', async () => {
+    const f = await idleFixture();
+    await f.prepareReservation();
+    const gate = reconciliationGate<import('./lifecycle.js').ExternalStopReceipt | null>();
+    f.options.observeExternalStop = async () => {
+      gate.entered.resolve();
+      return gate.result.promise;
+    };
+    const pending = reconcileManagedServer(f.db, f.serverId, f.options);
+    await gate.entered.promise;
+    await f.db
+      .updateTable('resource_reservations')
+      .set({ operation_id: randomUUID(), state: 'starting' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const newer = await history(f);
+    gate.result.resolve({
+      containerId: 'fixture',
+      startedAt: new Date(f.now().getTime() - 10000).toISOString(),
+      finishedAt: f.now().toISOString(),
+      activityId: 'fixture',
+      activityAt: f.now().toISOString(),
+      action: 'kill',
+    });
+    expect(await pending).toBe('deferred');
+    expect(await history(f)).toEqual(newer);
+  });
+  it('rolls back installation, observation, metrics and reservations together if atomic apply fails', async () => {
+    const f = await idleFixture();
+    const before = await history(f);
+    f.remote.status = 'install_failed';
+    f.setState('running');
+    // Database CHECK failure during the final reservation insertion, after observation.
+    await f.db
+      .updateTable('managed_servers')
+      .set({ limits: JSON.stringify({ ...f.remote.limits, cpu: -1 }) })
+      .where('id', '=', f.serverId)
+      .execute();
+    const invalid = await history(f);
+    await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toBeDefined();
+    expect(await history(f)).toEqual(invalid);
+    expect((await f.server()).last_observed_at).toEqual(before.server.last_observed_at);
+  });
+});

@@ -797,9 +797,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
       .where('pterodactyl_id', 'is not', null)
       .execute();
     const failures: string[] = [];
+    const deferred: string[] = [];
+    let observed = 0;
     for (const server of servers) {
       try {
-        await reconcileManagedServer(db, server.id, lifecycle);
+        if ((await reconcileManagedServer(db, server.id, lifecycle)) === 'observed') observed++;
+        else deferred.push(server.id);
       } catch {
         failures.push(server.id);
       }
@@ -811,7 +814,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       .deleteFrom('server_metrics')
       .where('observed_at', '<', new Date(Date.now() - 30 * 86400000))
       .execute();
-    return { observed: servers.length - failures.length, unavailable: failures, external };
+    return { observed, deferred, unavailable: failures, external };
   }
   /** Streaming transfers must not retain a session/role snapshot. Uploads use
    * their already-pinned lock connection; downloads borrow only for each check. */

@@ -300,7 +300,7 @@ async function ownedRemote(db: Kysely<Database>, server: Server, options: Lifecy
 }
 
 async function observation(db: Kysely<Database>, server: Server, resources: Resources, now: Date) {
-  await db.transaction().execute(async (tx) => {
+  const apply = async (tx: Kysely<Database>) => {
     await tx
       .updateTable('managed_servers')
       .set({
@@ -330,7 +330,9 @@ async function observation(db: Kysely<Database>, server: Server, resources: Reso
       })
       .onConflict((conflict) => conflict.columns(['server_id', 'observed_at']).doNothing())
       .execute();
-  });
+  };
+  if (db.isTransaction) await apply(db);
+  else await db.transaction().execute(apply);
 }
 
 /** No remote effect occurs inside a SQL transaction; every effect gets a committed intent first. */
@@ -2093,304 +2095,359 @@ export function createLifecycleProcessor(db: Kysely<Database>, options: Lifecycl
   };
 }
 
+/** One MVCC snapshot, including PostgreSQL row revisions rather than rounded JS
+ * timestamps. A lifecycle may begin and finish during provider I/O (ABA); its
+ * server revision still changes even when active_operation_id is null again.
+ * No history is loaded: only the latest power receipt participates. */
+function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
+  return db
+    .selectFrom('managed_servers as server')
+    .selectAll('server')
+    .select(
+      sql<string>`jsonb_build_array(
+    server.xmin::text,
+    (select node.xmin::text from managed_nodes node where node.id = server.node_id),
+    (select host.xmin::text from physical_hosts host join managed_nodes node on node.physical_host_id = host.id where node.id = server.node_id),
+    (select jsonb_agg(jsonb_build_array(allocation.id, allocation.xmin::text) order by allocation.id) from server_allocations allocation where allocation.server_id = server.id),
+    (select reservation.xmin::text from resource_reservations reservation where reservation.server_id = server.id),
+    (select reservation.xmin::text from installation_reservations reservation where reservation.server_id = server.id),
+    (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
+      from server_operations operation join operation_jobs job on job.id = operation.job_id
+      where operation.server_id = server.id and operation.action in ('start','restart','stop','provision','reinstall','wipe','delete','restore')
+      order by operation.updated_at desc, operation.job_id desc limit 1),
+    (select jsonb_build_array(settings.value->'pterodactylBaseUrl', settings.value->'dockerObserverSocket') from platform_settings settings where settings.key = 'platform'),
+    (select secret.xmin::text from encrypted_secrets secret where secret.name = 'pterodactylApplicationKey'),
+    (select account.xmin::text from provider_accounts account where account.user_id = server.owner_id)
+  )::text`.as('revision'),
+    )
+    .where('server.id', '=', serverId)
+    .where('server.deleted_at', 'is', null)
+    .executeTakeFirst();
+}
+
 /** Read reconciliation never imports or changes a remote server. It errs toward retaining capacity. */
 export async function reconcileManagedServer(
   db: Kysely<Database>,
   serverId: string,
   options: LifecycleOptions,
 ): Promise<'observed' | 'deferred'> {
-  return withServerLock(db, serverId, async (db) => {
-    const server = await db
+  const server = await reconciliationSnapshot(db, serverId);
+  if (!server?.pterodactyl_id) return 'deferred';
+  const remote = await ownedRemote(db, server, options);
+  const state = ['install_failed', 'reinstall_failed'].includes(remote.status ?? '')
+    ? 'failed'
+    : installationPending(remote)
+      ? 'installing'
+      : server.installation_state;
+  let suppressCachedRunning = false;
+  let current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
+  const now = nowOf(options);
+  let externalStop: ExternalStopReceipt | null = null;
+  if (!server.active_operation_id && options.observeExternalStop) {
+    const reserved = await db
+      .selectFrom('resource_reservations')
+      .select('server_id')
+      .where('server_id', '=', server.id)
+      .executeTakeFirst();
+    if (reserved || (server.intent === 'manually_stopped' && current.current_state !== 'offline')) {
+      try {
+        externalStop = await options.observeExternalStop(server.id, db);
+      } catch (error) {
+        // Missing activity permission/observer evidence is not proof of a stop.
+        // Continue conservative state reconciliation without releasing capacity.
+        if (error instanceof DomainError && error.code === 'provenance_mismatch') throw error;
+      }
+    }
+    if (externalStop)
+      current = {
+        ...current,
+        current_state: 'offline',
+        resources: { ...current.resources, memory_bytes: 0, cpu_absolute: 0 },
+      };
+  }
+  if (
+    !externalStop &&
+    !server.active_operation_id &&
+    server.intent !== 'manually_stopped' &&
+    server.intent !== 'maintenance' &&
+    installed(remote) &&
+    ['offline', 'starting'].includes(current.current_state) &&
+    options.observeReconciliationProcessStart
+  ) {
+    const latestPower = await db
+      .selectFrom('server_operations as operation')
+      .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+      .select([
+        'operation.action',
+        'operation.phase',
+        'operation.plan',
+        'operation.effect_state',
+        'operation.effect_started_at',
+        'job.state as job_state',
+      ])
+      .where('operation.server_id', '=', server.id)
+      .where('operation.action', 'in', [
+        'start',
+        'restart',
+        'stop',
+        'provision',
+        'reinstall',
+        'wipe',
+        'delete',
+        'restore',
+      ])
+      .orderBy('operation.updated_at', 'desc')
+      .orderBy('operation.job_id', 'desc')
+      .executeTakeFirst();
+    const restart = latestPower?.action === 'restart';
+    const epoch = processStartTime(
+      restart ? latestPower?.plan.restartProcessStartedAt : latestPower?.plan.startProcessStartedAt,
+    );
+    const confirmed = processStartTime(
+      restart ? latestPower?.plan.restartConfirmedAt : latestPower?.plan.startConfirmedAt,
+    );
+    const reservation = await db
+      .selectFrom('resource_reservations')
+      .select('server_id')
+      .where('server_id', '=', server.id)
+      .executeTakeFirst();
+    if (
+      reservation &&
+      latestPower &&
+      ['start', 'restart', 'provision'].includes(latestPower.action) &&
+      latestPower.phase === 'complete' &&
+      latestPower.job_state === 'succeeded' &&
+      latestPower.effect_state === 'confirmed' &&
+      latestPower.effect_started_at &&
+      (restart ? latestPower.plan.restartConfirmed : latestPower.plan.startConfirmed) === true &&
+      epoch !== null &&
+      confirmed !== null &&
+      epoch > BigInt(latestPower.effect_started_at.getTime()) * 1_000_000n &&
+      confirmed >= epoch &&
+      confirmed <= BigInt(now.getTime()) * 1_000_000n
+    ) {
+      try {
+        const observed = processStartTime(
+          await options.observeReconciliationProcessStart(server.id, db, remote),
+        );
+        // Panel caches resources across power transitions. Only a fresh proof
+        // of the exact durably confirmed epoch supersedes that stale sample;
+        // another process, unavailable observer or stop never inherits it.
+        if (observed === epoch) current = { ...current, current_state: 'running' };
+      } catch (error) {
+        if (error instanceof DomainError && error.code === 'provenance_mismatch') throw error;
+        // Preserve conservative cached-state accounting; never release capacity.
+      }
+    }
+  }
+  if (
+    current.current_state !== 'offline' &&
+    server.runtime_state === 'offline' &&
+    !server.active_operation_id &&
+    options.confirmAlreadyStopped
+  ) {
+    const latestPower = await db
+      .selectFrom('server_operations')
+      .select(['action', 'phase', 'plan'])
+      .where('server_id', '=', server.id)
+      .where('action', 'in', ['start', 'restart', 'stop', 'provision'])
+      .orderBy('updated_at', 'desc')
+      .orderBy('job_id', 'desc')
+      .executeTakeFirst();
+    const confirmedAt =
+      typeof latestPower?.plan.stopConfirmedAt === 'string'
+        ? Date.parse(latestPower.plan.stopConfirmedAt)
+        : NaN;
+    if (
+      latestPower?.action === 'stop' &&
+      latestPower.phase === 'complete' &&
+      latestPower.plan.stopConfirmed === true &&
+      confirmedAt <= now.getTime() &&
+      now.getTime() - confirmedAt < settleOf(options)
+    ) {
+      // A completed ordered stop can precede expiry of Panel's resources
+      // cache. Do not re-import that cached running sample as an external
+      // start or recreate its released reservation. A new running process,
+      // newer power operation or expired cache window defeats this exception.
+      await options.verifyObservationHost?.(server.id, db);
+      if (await options.confirmAlreadyStopped(server.id, db)) {
+        await ownedRemote(db, server, options);
+        suppressCachedRunning = true;
+      }
+    }
+  }
+  return db.transaction().execute(async (tx) => {
+    await lockResources(tx);
+    const node = await tx
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', server.node_id)
+      .forShare()
+      .executeTakeFirst();
+    if (!node) return 'deferred' as const;
+    // Match admission lock order: physical host before user and server state.
+    await tx
+      .selectFrom('physical_hosts')
+      .select('id')
+      .where('id', '=', node.physical_host_id)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    await tx
+      .selectFrom('user')
+      .select('id')
+      .where('id', '=', server.owner_id)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    const locked = await tx
       .selectFrom('managed_servers')
       .selectAll()
-      .where('id', '=', serverId)
-      .where('deleted_at', 'is', null)
+      .where('id', '=', server.id)
+      .forUpdate()
       .executeTakeFirst();
-    if (!server?.pterodactyl_id) return 'deferred';
-    const remote = await ownedRemote(db, server, options);
-    const state = ['install_failed', 'reinstall_failed'].includes(remote.status ?? '')
-      ? 'failed'
-      : installationPending(remote)
-        ? 'installing'
-        : server.installation_state;
-    await db
+    if (!locked || locked.deleted_at) return 'deferred' as const;
+    await tx
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', server.id)
+      .forShare()
+      .execute();
+    await tx
+      .selectFrom('platform_settings')
+      .select('key')
+      .where('key', '=', 'platform')
+      .forShare()
+      .execute();
+    await tx
+      .selectFrom('encrypted_secrets')
+      .select('name')
+      .where('name', '=', 'pterodactylApplicationKey')
+      .forShare()
+      .execute();
+    await tx
+      .selectFrom('provider_accounts')
+      .select('user_id')
+      .where('user_id', '=', server.owner_id)
+      .forShare()
+      .execute();
+    // Never hold the server lock while waiting for admission or database row locks.
+    // Lifecycle takes server -> resources, so this inverse attempt MUST not wait.
+    const acquired = await sql<{ acquired: boolean }>`select pg_try_advisory_xact_lock(
+        hashtextextended(current_schema() || ${`:nickhosting:server:${server.id}`}, 0)
+      ) as acquired`.execute(tx);
+    if (!acquired.rows[0]?.acquired) return 'deferred' as const;
+    const fresh = await reconciliationSnapshot(tx, server.id);
+    if (!fresh || fresh.revision !== server.revision) return 'deferred' as const;
+    await tx
       .updateTable('managed_servers')
       .set({ installation_state: state })
       .where('id', '=', server.id)
       .execute();
-    let current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
-    const now = nowOf(options);
-    let externalStop: ExternalStopReceipt | null = null;
-    if (!server.active_operation_id && options.observeExternalStop) {
-      const reserved = await db
-        .selectFrom('resource_reservations')
-        .select('server_id')
-        .where('server_id', '=', server.id)
-        .executeTakeFirst();
-      if (
-        reserved ||
-        (server.intent === 'manually_stopped' && current.current_state !== 'offline')
-      ) {
-        try {
-          externalStop = await options.observeExternalStop(server.id, db);
-        } catch (error) {
-          // Missing activity permission/observer evidence is not proof of a stop.
-          // Continue conservative state reconciliation without releasing capacity.
-          if (error instanceof DomainError && error.code === 'provenance_mismatch') throw error;
-        }
-      }
-      if (externalStop)
-        current = {
-          ...current,
-          current_state: 'offline',
-          resources: { ...current.resources, memory_bytes: 0, cpu_absolute: 0 },
-        };
-    }
-    if (
-      !externalStop &&
-      !server.active_operation_id &&
-      server.intent !== 'manually_stopped' &&
-      server.intent !== 'maintenance' &&
-      installed(remote) &&
-      ['offline', 'starting'].includes(current.current_state) &&
-      options.observeReconciliationProcessStart
-    ) {
-      const latestPower = await db
-        .selectFrom('server_operations as operation')
-        .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
-        .select([
-          'operation.action',
-          'operation.phase',
-          'operation.plan',
-          'operation.effect_state',
-          'operation.effect_started_at',
-          'job.state as job_state',
-        ])
-        .where('operation.server_id', '=', server.id)
-        .where('operation.action', 'in', [
-          'start',
-          'restart',
-          'stop',
-          'provision',
-          'reinstall',
-          'wipe',
-          'delete',
-          'restore',
-        ])
-        .orderBy('operation.updated_at', 'desc')
-        .orderBy('operation.job_id', 'desc')
-        .executeTakeFirst();
-      const restart = latestPower?.action === 'restart';
-      const epoch = processStartTime(
-        restart
-          ? latestPower?.plan.restartProcessStartedAt
-          : latestPower?.plan.startProcessStartedAt,
-      );
-      const confirmed = processStartTime(
-        restart ? latestPower?.plan.restartConfirmedAt : latestPower?.plan.startConfirmedAt,
-      );
-      const reservation = await db
-        .selectFrom('resource_reservations')
-        .select('server_id')
-        .where('server_id', '=', server.id)
-        .executeTakeFirst();
-      if (
-        reservation &&
-        latestPower &&
-        ['start', 'restart', 'provision'].includes(latestPower.action) &&
-        latestPower.phase === 'complete' &&
-        latestPower.job_state === 'succeeded' &&
-        latestPower.effect_state === 'confirmed' &&
-        latestPower.effect_started_at &&
-        (restart ? latestPower.plan.restartConfirmed : latestPower.plan.startConfirmed) === true &&
-        epoch !== null &&
-        confirmed !== null &&
-        epoch > BigInt(latestPower.effect_started_at.getTime()) * 1_000_000n &&
-        confirmed >= epoch &&
-        confirmed <= BigInt(now.getTime()) * 1_000_000n
-      ) {
-        try {
-          const observed = processStartTime(
-            await options.observeReconciliationProcessStart(server.id, db, remote),
-          );
-          // Panel caches resources across power transitions. Only a fresh proof
-          // of the exact durably confirmed epoch supersedes that stale sample;
-          // another process, unavailable observer or stop never inherits it.
-          if (observed === epoch) current = { ...current, current_state: 'running' };
-        } catch (error) {
-          if (error instanceof DomainError && error.code === 'provenance_mismatch') throw error;
-          // Preserve conservative cached-state accounting; never release capacity.
-        }
-      }
-    }
-    if (
-      current.current_state !== 'offline' &&
-      server.runtime_state === 'offline' &&
-      !server.active_operation_id &&
-      options.confirmAlreadyStopped
-    ) {
-      const latestPower = await db
-        .selectFrom('server_operations')
-        .select(['action', 'phase', 'plan'])
-        .where('server_id', '=', server.id)
-        .where('action', 'in', ['start', 'restart', 'stop', 'provision'])
-        .orderBy('updated_at', 'desc')
-        .orderBy('job_id', 'desc')
-        .executeTakeFirst();
-      const confirmedAt =
-        typeof latestPower?.plan.stopConfirmedAt === 'string'
-          ? Date.parse(latestPower.plan.stopConfirmedAt)
-          : NaN;
-      if (
-        latestPower?.action === 'stop' &&
-        latestPower.phase === 'complete' &&
-        latestPower.plan.stopConfirmed === true &&
-        confirmedAt <= now.getTime() &&
-        now.getTime() - confirmedAt < settleOf(options)
-      ) {
-        // A completed ordered stop can precede expiry of Panel's resources
-        // cache. Do not re-import that cached running sample as an external
-        // start or recreate its released reservation. A new running process,
-        // newer power operation or expired cache window defeats this exception.
-        await options.verifyObservationHost?.(server.id, db);
-        if (await options.confirmAlreadyStopped(server.id, db)) {
-          await ownedRemote(db, server, options);
-          return 'observed';
-        }
-      }
-    }
-    await observation(db, server, current, now);
-    await db.transaction().execute(async (tx) => {
-      await lockResources(tx);
-      const node = await tx
-        .selectFrom('managed_nodes')
-        .selectAll()
-        .where('id', '=', server.node_id)
-        .executeTakeFirstOrThrow();
-      // Match admission lock order: physical host before user and server state.
+    if (suppressCachedRunning) return 'observed' as const;
+    await observation(tx, server, current, now);
+    const reservation = await tx
+      .selectFrom('resource_reservations')
+      .selectAll()
+      .where('server_id', '=', server.id)
+      .executeTakeFirst();
+    if (externalStop && !locked.active_operation_id) {
+      await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
       await tx
-        .selectFrom('physical_hosts')
-        .select('id')
-        .where('id', '=', node.physical_host_id)
-        .forUpdate()
-        .executeTakeFirstOrThrow();
-      await tx
-        .selectFrom('user')
-        .select('id')
-        .where('id', '=', server.owner_id)
-        .forUpdate()
-        .executeTakeFirstOrThrow();
-      const locked = await tx
-        .selectFrom('managed_servers')
-        .selectAll()
+        .updateTable('managed_servers')
+        .set({
+          intent: 'manually_stopped',
+          runtime_state: 'offline',
+          readiness: 'unknown',
+          last_observed_at: now,
+          updated_at: now,
+        })
         .where('id', '=', server.id)
-        .forUpdate()
-        .executeTakeFirstOrThrow();
-      const reservation = await tx
-        .selectFrom('resource_reservations')
-        .selectAll()
-        .where('server_id', '=', server.id)
-        .executeTakeFirst();
-      if (externalStop && !locked.active_operation_id) {
-        await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
+        .execute();
+      if (reservation)
         await tx
-          .updateTable('managed_servers')
+          .insertInto('server_events')
+          .values({
+            server_id: server.id,
+            job_id: null,
+            actor_id: null,
+            subject_id: server.owner_id,
+            support_session_id: null,
+            message_key: 'servers.operation.stop_confirmed',
+            data: JSON.stringify({ source: 'provider_activity', receipt: externalStop }),
+          })
+          .execute();
+      return 'observed' as const;
+    }
+    const overhead = effectiveNodeOverhead(node, options.env);
+    const physicalMemory = physicalMemoryMiB(server.limits.memory, overhead);
+    const installation = await tx
+      .selectFrom('installation_reservations')
+      .selectAll()
+      .where('server_id', '=', server.id)
+      .executeTakeFirst();
+    const installationMemory = physicalMemoryMiB(
+      Math.max(server.limits.memory, node.installer_memory_mib),
+      overhead,
+    );
+    if (installation && installationMemory > installation.memory_mib)
+      await tx
+        .updateTable('installation_reservations')
+        .set({ memory_mib: installationMemory, updated_at: now })
+        .where('server_id', '=', server.id)
+        .execute();
+    if (reservation && physicalMemory > reservation.physical_memory_mib)
+      await tx
+        .updateTable('resource_reservations')
+        .set({ physical_memory_mib: physicalMemory, updated_at: now })
+        .where('server_id', '=', server.id)
+        .execute();
+    if (current.current_state !== 'offline') {
+      if (reservation && !locked.active_operation_id)
+        await tx
+          .updateTable('resource_reservations')
           .set({
-            intent: 'manually_stopped',
-            runtime_state: 'offline',
-            readiness: 'unknown',
-            last_observed_at: now,
+            state: current.current_state === 'running' ? 'running' : 'starting',
             updated_at: now,
           })
-          .where('id', '=', server.id)
+          .where('server_id', '=', server.id)
           .execute();
-        if (reservation)
-          await tx
-            .insertInto('server_events')
-            .values({
-              server_id: server.id,
-              job_id: null,
-              actor_id: null,
-              subject_id: server.owner_id,
-              support_session_id: null,
-              message_key: 'servers.operation.stop_confirmed',
-              data: JSON.stringify({ source: 'provider_activity', receipt: externalStop }),
-            })
-            .execute();
-        return;
+      if (!reservation) {
+        await tx
+          .insertInto('resource_reservations')
+          .values({
+            server_id: server.id,
+            owner_id: server.owner_id,
+            physical_host_id: node.physical_host_id,
+            memory_mib: server.limits.memory,
+            physical_memory_mib: physicalMemory,
+            cpu_percent: server.limits.cpu,
+            operation_id: locked.active_operation_id ?? randomUUID(),
+            state: current.current_state === 'running' ? 'running' : 'uncertain',
+            updated_at: now,
+          })
+          .execute();
+        await tx
+          .insertInto('server_events')
+          .values({
+            server_id: server.id,
+            job_id: locked.active_operation_id,
+            actor_id: null,
+            subject_id: server.owner_id,
+            support_session_id: null,
+            message_key: 'servers.reconciliation.external_start',
+            data: JSON.stringify({ reservationExceedsPolicyPossible: true }),
+          })
+          .execute();
       }
-      const overhead = effectiveNodeOverhead(node, options.env);
-      const physicalMemory = physicalMemoryMiB(server.limits.memory, overhead);
-      const installation = await tx
-        .selectFrom('installation_reservations')
-        .selectAll()
+    } else if (reservation && !locked.active_operation_id) {
+      // Wings automatic crash recovery can remain offline while a new start is
+      // already executing. A cached offline sample does not prove final quiescence.
+      await tx
+        .updateTable('resource_reservations')
+        .set({ state: 'uncertain', updated_at: now })
         .where('server_id', '=', server.id)
-        .executeTakeFirst();
-      const installationMemory = physicalMemoryMiB(
-        Math.max(server.limits.memory, node.installer_memory_mib),
-        overhead,
-      );
-      if (installation && installationMemory > installation.memory_mib)
-        await tx
-          .updateTable('installation_reservations')
-          .set({ memory_mib: installationMemory, updated_at: now })
-          .where('server_id', '=', server.id)
-          .execute();
-      if (reservation && physicalMemory > reservation.physical_memory_mib)
-        await tx
-          .updateTable('resource_reservations')
-          .set({ physical_memory_mib: physicalMemory, updated_at: now })
-          .where('server_id', '=', server.id)
-          .execute();
-      if (current.current_state !== 'offline') {
-        if (reservation && !locked.active_operation_id)
-          await tx
-            .updateTable('resource_reservations')
-            .set({
-              state: current.current_state === 'running' ? 'running' : 'starting',
-              updated_at: now,
-            })
-            .where('server_id', '=', server.id)
-            .execute();
-        if (!reservation) {
-          await tx
-            .insertInto('resource_reservations')
-            .values({
-              server_id: server.id,
-              owner_id: server.owner_id,
-              physical_host_id: node.physical_host_id,
-              memory_mib: server.limits.memory,
-              physical_memory_mib: physicalMemory,
-              cpu_percent: server.limits.cpu,
-              operation_id: locked.active_operation_id ?? randomUUID(),
-              state: current.current_state === 'running' ? 'running' : 'uncertain',
-              updated_at: now,
-            })
-            .execute();
-          await tx
-            .insertInto('server_events')
-            .values({
-              server_id: server.id,
-              job_id: locked.active_operation_id,
-              actor_id: null,
-              subject_id: server.owner_id,
-              support_session_id: null,
-              message_key: 'servers.reconciliation.external_start',
-              data: JSON.stringify({ reservationExceedsPolicyPossible: true }),
-            })
-            .execute();
-        }
-      } else if (reservation && !locked.active_operation_id) {
-        // Wings automatic crash recovery can remain offline while a new start is
-        // already executing. A cached offline sample does not prove final quiescence.
-        await tx
-          .updateTable('resource_reservations')
-          .set({ state: 'uncertain', updated_at: now })
-          .where('server_id', '=', server.id)
-          .execute();
-      }
-    });
-    return 'observed';
+        .execute();
+    }
+    return 'observed' as const;
   });
 }
 

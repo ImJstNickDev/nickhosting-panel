@@ -1199,6 +1199,111 @@ describe('management runtime execution-time authorization', () => {
       );
     },
   );
+  it('allows a file mutation while reconciliation waits for the provider', async () => {
+    const serverId = await f.server(),
+      sessionId = randomUUID();
+    await database.pool.query(
+      'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
+      [sessionId, randomUUID(), f.context.actorUserId],
+    );
+    const remote = { ...(await providerIdentity(serverId)), container: { installed: true } };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    Object.assign(f.adapter, {
+      getApplicationServer: vi.fn(async () => remote),
+      getResources: vi.fn(async () => {
+        entered.resolve();
+        await release.promise;
+        return {
+          current_state: 'offline',
+          is_suspended: false,
+          resources: {
+            memory_bytes: 0,
+            cpu_absolute: 0,
+            disk_bytes: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            uptime: 0,
+          },
+        };
+      }),
+    });
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      reconcileExternal: async () => ({ recovered: 0, failed: 0 }),
+    });
+    const collecting = runtime.reconcile();
+    const removeFiles = vi.fn(async () => {});
+    try {
+      await entered.promise;
+      await runtime.access(
+        { ...f.context, [authSessionId]: sessionId },
+        serverId,
+        true,
+        removeFiles,
+      );
+      expect(removeFiles).toHaveBeenCalledOnce();
+      const row = await f.db
+        .selectFrom('managed_servers')
+        .select('last_observed_at')
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(row.last_observed_at).toBeNull();
+    } finally {
+      release.resolve();
+      await collecting;
+    }
+    expect(await collecting).toMatchObject({ observed: 1, deferred: [], unavailable: [] });
+    expect(removeFiles).toHaveBeenCalledOnce();
+  });
+  it('reports lock-deferred reconciliation separately from confirmed observations', async () => {
+    const serverId = await f.server();
+    const remote = { ...(await providerIdentity(serverId)), container: { installed: true } };
+    Object.assign(f.adapter, {
+      getApplicationServer: vi.fn(async () => remote),
+      getResources: vi.fn(async () => ({
+        current_state: 'offline',
+        is_suspended: false,
+        resources: {
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          disk_bytes: 0,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+          uptime: 0,
+        },
+      })),
+    });
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      reconcileExternal: async () => ({ recovered: 0, failed: 0 }),
+    });
+    const holder = await database.pool.connect();
+    try {
+      await holder.query('SELECT pg_advisory_lock(hashtextextended(current_schema() || $1,0))', [
+        `:nickhosting:server:${serverId}`,
+      ]);
+      expect(await runtime.reconcile()).toEqual({
+        observed: 0,
+        deferred: [serverId],
+        unavailable: [],
+        external: { recovered: 0, failed: 0 },
+      });
+      const row = await f.db
+        .selectFrom('managed_servers')
+        .select('last_observed_at')
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(row.last_observed_at).toBeNull();
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock_all()');
+      holder.release();
+    }
+  });
   it('reports partial external recovery failures to the caller', async () => {
     const reconcileExternal = vi.fn(async () => ({ recovered: 2, failed: 1 }));
     const runtime = await createManagementRuntime({
@@ -1209,6 +1314,7 @@ describe('management runtime execution-time authorization', () => {
     });
     expect(await runtime.reconcile()).toEqual({
       observed: 0,
+      deferred: [],
       unavailable: [],
       external: { recovered: 2, failed: 1 },
     });

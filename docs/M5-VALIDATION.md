@@ -6129,3 +6129,57 @@ No container/network changes, manual restart, production provider mutation or li
 test asset. Existing development source watchers can load the change. Rollback is
 a source revert, without database migration or reset. PR #21 remains open and
 unmerged; SFTPGo #18 remains an independent production-release blocker.
+
+
+## 2026-10-12 — background reconciliation without remote-I/O server locks
+
+The intermittent file `operation_busy` response originated before provider dispatch
+at the per-server advisory lock. Read-only development sampling found the worker
+holding that lock during periodic provider reads: four windows of approximately
+400–500 ms, 19 occupied samples among 180 at 100 ms intervals. The historical
+failed request's individual lock holder was not logged; the periodic worker
+contention was independently observed, and no pending upload claim or active
+lifecycle operation remained at inspection.
+
+Reconciliation now collects provider/host evidence without a server lock, pinned
+connection or open transaction. A single short database transaction checks
+PostgreSQL row revisions and applies installation/runtime/readiness, metrics,
+reservations and events. The revision check detects an operation that begins and
+ends during collection even if its final values/timestamps equal the originals;
+newer observations, identity/configuration/allocation changes and new reservations
+also invalidate old results. Potentially blocking resource/row locks precede the
+nonwaiting server-lock attempt. A busy/stale pass returns deferred and refreshes
+no observation timestamp. The existing cached-running-after-stop safeguard remains.
+Lifecycle effects, upload/file mutual exclusion and resource admission are unchanged.
+No automatic retry of external effects or extension of stale host samples.
+
+`POST /v1/owner/reconcile` now includes `deferred` server IDs and only counts
+accepted observations in `observed`, rather than counting skipped passes as
+successful. Contracts and resource-operation documentation were updated.
+
+Validation used the already approved isolated M2 database/Redis stack, disposable
+schemas and fixture provider effects, without creating containers:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts`: **196 passed, one new fixture failed**. All 185 existing cases passed. The new fixture attempted to alter immutable allocation identity and was correctly rejected by the database before exercising the race. It was corrected to change permitted allocation protocol metadata; the production immutability guard was retained.
+- Same command plus `-t 'unlocked reconciliation|stale running reconciliation|does not suppress a current observation'`: final **14 passed, 183 skipped**, covering all 12 new collection/concurrency/atomic rollback cases and two cached-stop regressions after the final ordering correction. This is targeted final validation, not a claim of a second clean full-file run.
+- Same integration prefix with `packages/server-management/src/runtime.integration.test.ts -t 'reconciliation|partial external recovery|two-connection pool'`: final **4 passed, 57 skipped**. A held provider response permits an actual authorized file-mutation callback exactly once while leaving the old observation untouched; busy reconciliation is reported deferred, external recovery errors remain visible and the existing two-connection upload contention/revocation behavior is preserved. Initial run had two new fixture failures (one timeout awaiting a provider stage never reached): the identity-only helper lacked `container.installed`. A direct diagnostic confirmed that omission; adding installed metadata to these two fixtures resolved it without product changes.
+- `scripts/dev.sh pnpm typecheck`: root and WebPanel passed. After final test/code edits, `scripts/dev.sh pnpm exec tsc --noEmit` passed again. Changed-file Biome, diff and indexed governance checks passed. No historical milestone-wide or browser suite rerun; no UI layout change or new screenshot.
+
+Independent technical review found no remaining must-fix. It checked lock order,
+revision guards, competing Gateway state updates, capacity accounting and test
+coverage. Review specifically confirmed that live sampling is not proof that
+legitimate contention is impossible.
+
+Existing dev source watchers loaded the correction. Read-only post-change
+sampling over 18 seconds found **one occupied sample among 357 at 50 ms intervals**,
+with three subsequent observation timestamp advances. The earlier sustained
+remote-I/O lock windows were not observed; brief atomic apply still takes a lock.
+This sampling is observational, not a precise lock-duration benchmark. API and
+worker health remained healthy, container restart counts remained zero, and no
+new warning/error was observed in the inspected worker window. Source-watcher
+process reloads occurred; no manual container restart or infrastructure change.
+
+No real game-server command/file mutation, new live asset, network change,
+credential change or production deployment. Test schemas are disposed by their
+fixtures. Rollback is a source revert, without migration/data reset. PR #21 stays
+open and unmerged; SFTPGo #18 remains a separate production-release blocker.
