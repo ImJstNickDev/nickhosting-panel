@@ -179,6 +179,61 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     expect(writes).toHaveLength(1);
   });
 
+  it('pastes a newly created extensionless file after folder navigation, lost focus and empty-space clicks', async () => {
+    const destination = 'empty-paste-target';
+    await journeyRequest(harness, user, endpoint, { action: 'mkdir', root: '', name: destination });
+    await open();
+    await user.getByRole('button', { name: 'New text file', exact: true }).click();
+    await user.getByRole('textbox', { name: 'Name', exact: true }).fill('test');
+    const editor = user.locator('.cm-content');
+    await editor.fill('Created in the editor');
+    await editor.press('Control+s');
+    await browserExpect(
+      user.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toBeDisabled();
+    await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+    await checkbox('test').check();
+    await user.keyboard.press('Control+x');
+    await browserExpect(row('test')).toHaveClass(/fm-cut/);
+    writes.length = 0;
+    await nameButton(destination).click();
+    await browserExpect(user.getByRole('button', { name: destination, exact: true })).toBeFocused();
+    // Emulate the lost document focus reported across folder transitions, with no extra click.
+    await user.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+    await user.keyboard.press('Control+v');
+    await browserExpect(nameButton('test')).toBeVisible();
+    expect(writes).toHaveLength(1);
+    expect((await provider.files()).get(`${destination}/test`)?.toString()).toBe(
+      'Created in the editor',
+    );
+    await select('test');
+    await user.keyboard.press('Control+x');
+    await root();
+    await user.keyboard.press('Control+v');
+    await browserExpect(nameButton('test')).toBeVisible();
+    await select('test');
+    await user.keyboard.press('Control+x');
+    await nameButton(destination).click();
+    const empty = user.locator('.file-manager .empty');
+    await browserExpect(empty).toBeVisible();
+    await empty.click();
+    await browserExpect(user.locator('.file-manager')).toBeFocused();
+    await harness.screenshot(user, 'files-empty-folder-paste-focus-en');
+    // Text selected in the listing is not an editor/OS-clipboard paste destination.
+    await user.locator('.fm-columns').evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(range);
+    });
+    await user.keyboard.press('Control+v');
+    await browserExpect(nameButton('test')).toBeVisible();
+    expect(writes).toHaveLength(3);
+    expect((await provider.files()).has('test')).toBe(false);
+    await user.evaluate(() => window.getSelection()?.removeAllRanges());
+  });
+
   it('keeps a pending paste exclusive without showing a destination or checking dialog', async () => {
     const name = 'slow-copy.txt';
     (await provider.files()).set(name, Buffer.from('Slow copy'));
@@ -220,6 +275,129 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     await browserExpect(
       user.getByRole('button', { name: 'New folder', exact: true }),
     ).toBeEnabled();
+  });
+
+  it('reuses listed metadata and releases control before post-copy directory and transfer refreshes', async () => {
+    const name = 'background-copy.txt';
+    (await provider.files()).set(name, Buffer.from('Copy in background'));
+    await open();
+    await select(name);
+    await user.keyboard.press('Control+c');
+    await nameButton('target').click();
+    const refresh = user.getByRole('button', { name: 'Refresh files', exact: true });
+    await browserExpect(refresh).toBeEnabled();
+    let acknowledged = false;
+    const preliminaryReads: string[] = [];
+    const heldReads: string[] = [];
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await user.route('**/v1/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (request.method() === 'POST' && url.pathname === `${endpoint}/copy`) {
+        const response = await route.fetch();
+        acknowledged = true;
+        return route.fulfill({ response });
+      }
+      if (request.method() === 'GET' && url.pathname === endpoint && !acknowledged)
+        preliminaryReads.push(url.searchParams.get('path') ?? '');
+      if (
+        request.method() === 'GET' &&
+        acknowledged &&
+        (url.pathname === endpoint || url.pathname.endsWith('/transfers'))
+      ) {
+        heldReads.push(url.pathname);
+        await waiting;
+      }
+      return route.continue();
+    });
+    try {
+      await user.keyboard.press('Control+v');
+      await browserExpect.poll(() => acknowledged).toBe(true);
+      await browserExpect.poll(() => heldReads.includes(endpoint)).toBe(true);
+      await browserExpect(refresh).toBeDisabled();
+      await browserExpect(
+        user.getByRole('button', { name: 'New folder', exact: true }),
+      ).toBeEnabled();
+      await user.getByLabel('Search this folder', { exact: true }).fill('background');
+      await user.getByRole('button', { name: 'New folder', exact: true }).click();
+      await browserExpect(dialog()).toBeVisible();
+      expect(preliminaryReads).toEqual([]);
+      expect(writes).toHaveLength(1);
+      expect((await provider.files()).has(`target/${name}`)).toBe(true);
+      await dialog().getByRole('button', { name: 'Close', exact: true }).click();
+    } finally {
+      release();
+    }
+    await browserExpect(nameButton(name)).toBeVisible();
+  });
+
+  it('requires new overwrite consent when a collision appears after the cached listing', async () => {
+    const name = 'late-collision.txt';
+    const remote = await provider.files();
+    remote.set(name, Buffer.from('Source stays'));
+    await open();
+    await select(name);
+    await user.keyboard.press('Control+c');
+    await nameButton('target').click();
+    await browserExpect(
+      user.getByRole('button', { name: 'Refresh files', exact: true }),
+    ).toBeEnabled();
+    remote.set(`target/${name}`, Buffer.from('Unapproved external file'));
+    await user.keyboard.press('Control+v');
+    await browserExpect(dialog().getByRole('button', { name: 'Skip', exact: true })).toBeFocused();
+    expect(writes).toHaveLength(1);
+    expect(remote.get(`target/${name}`)?.toString()).toBe('Unapproved external file');
+    await dialog().getByRole('button', { name: 'Skip', exact: true }).click();
+    await browserExpect(dialog()).not.toBeVisible();
+    expect(writes).toHaveLength(1);
+  });
+
+  it('refreshes temporary copy unavailability after the upload claim has settled', async () => {
+    (await provider.files()).set('capability-copy.txt', Buffer.from('Claim polling'));
+    await open();
+    await select('capability-copy.txt');
+    await user.keyboard.press('Control+c');
+    await nameButton('target').click();
+    let pending = false;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await user.route(`**${endpoint}/copy`, async (route) => {
+      pending = true;
+      await waiting;
+      const response = await route.fetch();
+      pending = false;
+      return route.fulfill({ response });
+    });
+    await user.route(`**${endpoint}/capabilities`, async (route) => {
+      if (!pending) return route.continue();
+      // An upload ingestion claim makes the real capability temporarily false.
+      // Hold that response deterministically instead of waiting for a timer poll.
+      return route.fulfill({
+        json: { copy: false, extract: false, extractFormats: [], zipDownload: true },
+      });
+    });
+    const readCopy = () =>
+      user.evaluate(
+        `import('/src/api/client.ts').then(({queryClient}) => queryClient.getQueryData(['file-capabilities', ${JSON.stringify(provider.ids.serverId)}])?.copy)`,
+      );
+    try {
+      await user.keyboard.press('Control+v');
+      await browserExpect.poll(() => pending).toBe(true);
+      await user.evaluate(
+        `import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey:['file-capabilities', ${JSON.stringify(provider.ids.serverId)}], exact:true}))`,
+      );
+      expect(await readCopy()).toBe(false);
+    } finally {
+      release();
+    }
+    await browserExpect.poll(readCopy, { timeout: 5000 }).toBe(true);
+    await browserExpect(nameButton('capability-copy.txt')).toBeVisible();
+    expect(writes).toHaveLength(1);
   });
 
   it('does not replay an uncertain cut and keeps file shortcuts out of the editor', async () => {

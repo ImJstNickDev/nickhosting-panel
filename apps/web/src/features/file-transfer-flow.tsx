@@ -4,7 +4,7 @@ import { useT } from '../app/i18n.js';
 import { Dialog, ErrorNotice } from '../components/ui.js';
 import { FileDestinationTree } from './file-destination-tree.js';
 import { joinFilePath as join, validMoveTarget } from './file-manager-model.js';
-import { type ServerFile, serverPath } from './service-contracts.js';
+import { fileDirectoryQuery, type ServerFile, serverPath } from './service-contracts.js';
 import './file-move-flow.css';
 
 export interface FileTransferPlan {
@@ -15,6 +15,10 @@ export interface FileTransferPlan {
 type Choice = 'overwrite' | 'skip';
 type Collision = { name: string; canOverwrite: boolean };
 type TransferAction = 'move' | 'copy';
+type DirectoryQueries = {
+  source: ReturnType<typeof fileDirectoryQuery>;
+  destination: ReturnType<typeof fileDirectoryQuery>;
+};
 type TransferState = {
   action: TransferAction;
   plan: FileTransferPlan;
@@ -108,16 +112,22 @@ export function useFileTransfer(options: {
       latest.current.canMutate
     );
   }
-  async function refresh(plan: FileTransferPlan, action: TransferAction) {
-    await Promise.all([
+  function refresh(listings: DirectoryQueries, action: TransferAction) {
+    // An acknowledged operation is complete independently of the next listing.
+    // Invalidation still fences stale prefetches; observed queries report their
+    // own refresh errors without turning a successful mutation into a failure.
+    void Promise.all([
+      ...(action === 'move'
+        ? [queryClient.invalidateQueries({ queryKey: listings.source.queryKey, exact: true })]
+        : []),
       queryClient.invalidateQueries({
-        queryKey: ['files', options.serverId, plan.source],
-      }),
-      queryClient.invalidateQueries({
-        queryKey: ['files', options.serverId, plan.destination],
+        queryKey: listings.destination.queryKey,
+        exact: true,
       }),
       ...(action === 'copy'
         ? [
+            // Copy temporarily owns an ingestion claim. A poll during that
+            // claim can report copy=false until capability state is refreshed.
             queryClient.invalidateQueries({
               queryKey: ['file-capabilities', options.serverId],
               exact: true,
@@ -128,17 +138,22 @@ export function useFileTransfer(options: {
             }),
           ]
         : []),
-    ]);
+    ]).catch(() => {
+      // Query state retains the refresh error for its existing UI consumer.
+    });
   }
-  async function inspect(plan: FileTransferPlan, decisions: Record<string, Choice>) {
+  async function inspect(
+    plan: FileTransferPlan,
+    decisions: Record<string, Choice>,
+    listings: DirectoryQueries,
+    fresh = false,
+  ) {
     const names = plan.names.filter((name) => decisions[name] !== 'skip');
+    // Cached metadata plans consent only; the mutation endpoint checks the
+    // actual source and destination before changing provider files.
     const [sources, destination] = await Promise.all([
-      api<ServerFile[]>(
-        `${serverPath(options.serverId)}/files?path=${encodeURIComponent(plan.source)}`,
-      ),
-      api<ServerFile[]>(
-        `${serverPath(options.serverId)}/files?path=${encodeURIComponent(plan.destination)}`,
-      ),
+      queryClient.fetchQuery({ ...listings.source, ...(fresh ? { staleTime: 0 } : {}) }),
+      queryClient.fetchQuery({ ...listings.destination, ...(fresh ? { staleTime: 0 } : {}) }),
     ]);
     const sourceNames = new Map(sources.map((entry) => [entry.name, entry]));
     const destinationNames = new Map<string, ServerFile[]>();
@@ -170,14 +185,22 @@ export function useFileTransfer(options: {
     if (working.current || !canAct(operation.action)) return;
     const version = generation.current;
     if (!isCurrent(operation, version)) return;
+    const listings: DirectoryQueries = {
+      source: fileDirectoryQuery(options.serverId, operation.plan.source, {
+        prepareDownloads: false,
+      }),
+      destination: fileDirectoryQuery(options.serverId, operation.plan.destination, {
+        prepareDownloads: false,
+      }),
+    };
     setWorking(true);
     update({ ...operation, phase: 'checking', error: undefined });
     const names = operation.plan.names.filter((name) => operation.decisions[name] !== 'skip');
     let submitted = false;
     try {
       if (names.length) {
-        // Revalidate after decisions: new collisions never inherit blanket consent.
-        const collisions = await inspect(operation.plan, operation.decisions);
+        // Consent remains per path; the API remains authoritative for new collisions.
+        const collisions = await inspect(operation.plan, operation.decisions, listings);
         if (!isCurrent(operation, version)) throw { messageKey: 'errors.forbidden' };
         if (!canAct(operation.action)) throw { messageKey: 'errors.integration_unavailable' };
         if (collisions.length) {
@@ -214,7 +237,7 @@ export function useFileTransfer(options: {
           },
         );
       }
-      await refresh(operation.plan, operation.action);
+      if (submitted) refresh(listings, operation.action);
       if (isCurrent(operation, version)) {
         update(undefined);
         latest.current.onComplete(names);
@@ -229,7 +252,11 @@ export function useFileTransfer(options: {
         return;
       }
       if (submitted) {
-        await refresh(operation.plan, operation.action);
+        refresh(listings, operation.action);
+      }
+      const failure: TransferState = { ...operation, phase: 'failed', error, attempted: submitted };
+      update(failure);
+      if (submitted) {
         // A proven API preflight conflict may acquire new explicit choices, but
         // a failed/unknown provider effect is never automatically replayed.
         if (
@@ -239,19 +266,20 @@ export function useFileTransfer(options: {
           error.code === 'conflict' &&
           isCurrent(operation, version)
         ) {
-          try {
-            const collisions = await inspect(operation.plan, operation.decisions);
-            if (collisions.length && isCurrent(operation, version)) {
-              update({ ...operation, phase: 'conflict', collisions, error: undefined });
-              return;
-            }
-          } catch {
-            /* Keep the original error and require inspection. */
-          }
+          void inspect(operation.plan, operation.decisions, listings, true)
+            .then((collisions) => {
+              if (
+                collisions.length &&
+                isCurrent(operation, version) &&
+                stateRef.current === failure
+              )
+                update({ ...operation, phase: 'conflict', collisions, error: undefined });
+            })
+            .catch(() => {
+              // Keep the already-visible API failure; never replay an unknown effect.
+            });
         }
       }
-      if (isCurrent(operation, version))
-        update({ ...operation, phase: 'failed', error, attempted: submitted });
     } finally {
       setWorking(false);
     }

@@ -6676,3 +6676,75 @@ scoped cleanup. No live game files, provider resources, containers, networks or
 Blueprint extension were mutated or restarted. Rollback is a source revert;
 there is no persistent clipboard or migration to undo. PR #21 remains open and
 unmerged; SFTPGo #18 remains a separate production-release gate.
+
+### 2026-10-13 — Paste focus recovery and transfer completion latency
+
+An isolated browser reproduction confirmed that cutting a file, opening an empty
+folder and clicking its empty area could move focus to the document body. The
+section-local keyboard handler then never received Paste. A newly created,
+extensionless `test` file otherwise moved correctly when breadcrumb focus remained.
+The workspace now accepts focus from empty-space clicks; a paste-only document
+fallback also handles lost body focus immediately after navigation. It is removed
+when Files unmounts and does not capture shortcuts addressed to other controls,
+inputs, the editor or dialogs. Noneditable listing text selection cannot suppress
+Paste. Both direct navigation and empty-space navigation are regression-tested.
+
+The read-only dev audit recorded one copy's requested-to-completed interval at
+**1,598 ms**. This is only the recorded backend segment, not the browser's total
+latency or a network-transfer measurement. No rename audit existed in the inspected
+window. No live file was created, copied, moved or deleted for diagnosis.
+
+The frontend previously issued two additional directory reads before submission,
+then held its mutation lock while listings, transfers and capabilities refreshed.
+It now plans consent from shared, identity-scoped cached metadata; cold reads
+disable download-URL preparation. The existing backend remains authoritative for
+path safety, collisions and authorization. An API conflict fetches fresh metadata
+and requests new consent without replaying an uncertain effect. UI locks release
+at the operation response; follow-up reads run in the background. Copy refreshes
+its destination, move both directories. Capability refresh remains asynchronous
+because the copy's own ingestion claim can temporarily make polling report it
+unavailable. Real backend work still takes time; no optimistic success is shown.
+
+Focused validation, preserving prior evidence rather than rerunning historical
+milestone suites:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-manager-model.test.ts apps/web/src/features/file-directory-query.test.ts apps/web/src/features/file-directory-memory.test.ts`:
+  **14 passed**.
+- Browser command prefix:
+  `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+  `apps/web/tests/file-shortcuts.browser.test.ts` initially reported **9 passed / 2
+  failed** out of 11: both new tests used the wrong accessible Refresh label.
+  After correcting that locator, `-t 'reuses listed metadata|requires new overwrite'`
+  passed the late-collision case and exposed a second test locator error (search
+  inputs have searchbox semantics). Corrected the selector; the targeted
+  `-t 'reuses listed metadata'` case passed. It holds background reads indefinitely
+  and proves that controls are usable, while counting **zero extra preflight
+  directory GETs** for already-listed folders. This is deterministic fixture
+  evidence, not a new live throughput benchmark.
+- Added `-t 'refreshes temporary'`: **1 passed / 11 filtered**, proving that a
+  polled `copy=false` during an in-flight claim is refreshed after completion.
+  `-t 'pastes a newly created'` also passed with a fresh extensionless file,
+  body-focus loss, direct navigation, empty-space clicking and selected listing
+  text. Thus all **12 shortcut cases** passed across focused runs, not one full run.
+- `apps/web/tests/file-manager.browser.test.ts -t 'asks only for file collisions|requests consent when a collision|clears move decisions'`:
+  **3 passed / 27 filtered**, 23.58 seconds. The identity test deliberately evicts
+  just its destination cache entry to retain a real delayed cold preflight; warm
+  navigation no longer needs a duplicate GET. Covers changed consent, failed
+  effects and actor changes before/during submission.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, focused Biome and
+  `git diff --check`: passed. No dependencies, backend/API/schema changes or
+  production deployment were needed.
+- `python3 scripts/check-governance.py`: passed on staged content — 670 text
+  files, 209 review PNGs, 582 relative links, four TOML files and 44 ignore cases;
+  heuristic secret scan passed.
+
+Independent review found and resolved one capability-refresh regression before
+delivery: removing that refresh could leave Copy disabled until the next poll.
+It remains a background authoritative refresh. Final review found no remaining
+must-fix. [Empty-folder focus screenshot](screenshots/m5/files-empty-folder-paste-focus-en.png)
+comes from the running isolated browser application; the existing EN/IT deletion
+and selection screenshots remain applicable. Browser/provider fixtures and test
+schemas use scoped cleanup. Live actions were limited to reading dev container
+status, logs and dev file-operation audit timestamps. No live server/file mutation,
+new infrastructure, container restart or Blueprint change occurred. Rollback is
+a source revert; PR #21 stays open/unmerged and SFTPGo #18 remains unchanged.

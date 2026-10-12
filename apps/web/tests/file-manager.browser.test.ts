@@ -890,6 +890,17 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await menu(name);
         await user.getByRole('menuitem', { name: 'Move', exact: true }).click();
         await dialog().getByRole('treeitem', { name: 'identity-target', exact: true }).click();
+        if (phase === 'preflight') {
+          // Deliberately cold metadata: warm listings are now reused and no
+          // longer generate an extra GET merely because Move was requested.
+          await user.evaluate(
+            `import('/src/api/client.ts').then(async ({queryClient}) => {
+              const filter = {queryKey:['files', ${JSON.stringify(provider.ids.serverId)}, 'identity-target']};
+              await queryClient.cancelQueries(filter);
+              queryClient.removeQueries(filter);
+            })`,
+          );
+        }
         if (phase !== 'destination') {
           armed = true;
           await dialog().getByRole('button', { name: 'Move', exact: true }).click();

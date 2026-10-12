@@ -1045,12 +1045,31 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       top: Math.max(8, Math.min(y ?? rect.bottom, window.innerHeight - 350)),
     });
   }
-  function keyboard(event: KeyboardEvent<HTMLElement>) {
+  const unfocusedPaste = useRef<(event: globalThis.KeyboardEvent) => void>(() => {});
+  unfocusedPaste.current = (event) => {
+    // A browser can drop focus to its document when the previous folder's row
+    // disappears. Paste still belongs to the mounted Files view in that case.
+    // Never capture a shortcut directed at another control or application tab.
+    if (
+      (event.target === document.body || event.target === document.documentElement) &&
+      (event.ctrlKey || event.metaKey) &&
+      event.key.toLowerCase() === 'v'
+    )
+      keyboard(event);
+  };
+  useEffect(() => {
+    const paste = (event: globalThis.KeyboardEvent) => unfocusedPaste.current(event);
+    document.addEventListener('keydown', paste);
+    return () => document.removeEventListener('keydown', paste);
+  }, []);
+  function keyboard(event: KeyboardEvent<HTMLElement> | globalThis.KeyboardEvent) {
     const target = event.target as HTMLElement;
+    const modifier = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
     if (
       editing ||
       event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
+      ('nativeEvent' in event ? event.nativeEvent.isComposing : event.isComposing) ||
       target.closest(
         'input:not([type="checkbox"]),textarea,select,[contenteditable]:not([contenteditable="false"]),dialog',
       )
@@ -1069,11 +1088,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       mode ||
       menu ||
       document.querySelector('dialog[open]') ||
-      window.getSelection()?.toString()
+      (window.getSelection()?.toString() && !(modifier && key === 'v'))
     )
       return;
-    const modifier = event.ctrlKey || event.metaKey;
-    const key = event.key.toLowerCase();
     if (modifier && key === 'a') {
       event.preventDefault();
       setSelected(new Set(rows.filter((entry) => !entry.is_symlink).map((entry) => entry.name)));
@@ -1621,6 +1638,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       className="file-manager"
       ref={managerRef}
       aria-label={t('web.files')}
+      tabIndex={-1}
       onKeyDown={keyboard}
       onDragEnter={(event) => {
         if (!editing && !fileActionsBusy && event.dataTransfer.types.includes('Files')) {

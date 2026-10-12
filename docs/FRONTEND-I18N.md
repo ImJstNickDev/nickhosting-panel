@@ -487,6 +487,22 @@ when the move is submitted, including when its outcome is uncertain. Dismissing 
 conflict before submission leaves the cut available. This clipboard does not read
 or overwrite the operating-system clipboard and does not survive leaving Files or
 reloading. Inputs, dialogs, the editor and selected text retain their own shortcuts.
+The workspace remains a focus target when clicking empty space. Paste also works
+if folder navigation has left document focus on the page body, without requiring
+another click; this fallback is active only while Files is mounted and never
+captures input/editor/dialog shortcuts. Selected listing text does not block file
+paste. Other application controls retain their shortcuts.
+
+Transfer preflight uses the shared identity-scoped metadata cache to plan consent;
+the backend validates actual paths, identity and collisions before applying an
+operation. Cold preflight reads request metadata without preparing download URLs.
+A new API conflict refreshes metadata before offering new explicit overwrite
+choices. The UI releases after the operation response; directory, transfer and
+capability refreshes run in the background and do not extend the mutation lock.
+Copy refreshes only the destination listing; move refreshes both listings. Copy
+capabilities are refreshed after an ingestion claim settles, since a poll during
+copy can temporarily report them unavailable. No permissions or success are
+inferred optimistically.
 Move and Copy use the same bounded, lazy folder tree with keyboard navigation,
 expand/collapse, loading/error/retry states and a live destination path. Root is selectable;
 the source and a selected folder's descendants cannot be destinations, but the
