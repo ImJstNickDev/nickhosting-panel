@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { getSettings } from '@nickhosting/database';
 import {
+  isUploadCancelled,
   isUploadNotDispatched,
   relativePath,
   type ServerFile,
@@ -18,6 +19,7 @@ import {
   reserveUploadIngestion,
   type UploadTiming,
   uploadBatchMaxFiles,
+  uploadBatchStatus,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
@@ -256,6 +258,31 @@ export function registerUploadBatchRoutes(
       release();
     }
   });
+  app.get('/v1/servers/:id/files/upload-batches/:batchId', async (c) => {
+    const context = await options.principal(c),
+      service = await options.management();
+    const serverId = parse(z.uuid(), c.req.param('id')),
+      batchId = parse(z.uuid(), c.req.param('batchId'));
+    const release = options.acquireUploadSlot();
+    try {
+      return c.json(
+        await service.uploadBatchAccess(
+          context,
+          serverId,
+          async (_id, connection, current, server) =>
+            uploadBatchStatus(
+              connection,
+              current,
+              serverId,
+              batchId,
+              service.uploadBatchBinding(server),
+            ),
+        ),
+      );
+    } finally {
+      release();
+    }
+  });
   for (const action of ['close', 'cancel'] as const) {
     const handler = async (c: C) => {
       const context = await options.principal(c),
@@ -419,6 +446,7 @@ async function runBatchUpload(
           } catch (error) {
             if (!received) {
               if (isUploadNotDispatched(error)) await lease.rejectBeforeDispatch();
+              else if (isUploadCancelled(error)) await lease.cancelConfirmed();
               else await lease.uncertain();
             }
             throw error;

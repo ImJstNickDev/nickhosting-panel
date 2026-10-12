@@ -2345,7 +2345,11 @@ describe('M2 Hono API with real invitation, password and session authentication'
           fetcher,
         });
         uploadFile.mockImplementationOnce((_id, path, input) =>
-          proxy('https://wings.example.test/upload/file', path, input),
+          proxy('https://wings.example.test/upload/file', path, {
+            ...input,
+            // The provider never acknowledges cancellation in this fixture.
+            idleTimeoutMs: 50,
+          }),
         );
       }
       expect((await upload(user, server, new Uint8Array(1), 1, {}, controller.signal)).status).toBe(
@@ -3247,6 +3251,134 @@ describe('M2 Hono API with real invitation, password and session authentication'
       expect(downloaded.headers.get('content-length')).toBe(String(binary.length));
       expect(Buffer.from(await downloaded.arrayBuffer())).toEqual(Buffer.from(binary));
     } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('settles two cancelled HTTP uploads after multipart rejection and accepts another batch', async () => {
+    const serverId = await f.server();
+    const batchId = randomUUID();
+    const paths = ['cancel-a.bin', 'cancel-b.bin'];
+    const controllers = paths.map(() => new AbortController());
+    const original = uploadFile.getMockImplementation();
+    let entered = 0;
+    let writes = 0;
+    const proxy = createUploadProxy({
+      baseURL: 'https://panel.example.test',
+      applicationKey: 'isolated-key',
+      uploadOrigins: ['https://wings.example.test'],
+      fetcher: async (_url, init) => {
+        entered++;
+        try {
+          await new Request('https://wings.example.test/upload/file', {
+            ...init,
+            duplex: 'half',
+          } as RequestInit).formData();
+        } catch {
+          return Response.json(
+            { error: 'Failed to get multipart form data from request.' },
+            { status: 400 },
+          );
+        }
+        writes++;
+        return new Response(null, { status: 204 });
+      },
+    });
+    uploadFile.mockImplementation((_id, path, input) =>
+      proxy('https://wings.example.test/upload/file', path, input),
+    );
+    const server = createServer(getRequestListener(app.fetch));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing test listener');
+    const statusPath = `/v1/servers/${serverId}/files/upload-batches/${batchId}`;
+    const pending: Promise<unknown>[] = [];
+    try {
+      expect(
+        (
+          await request(user, `/v1/servers/${serverId}/files/upload-batches`, {
+            id: batchId,
+            files: paths.map((path, index) => ({
+              id: String(index),
+              path,
+              bytes: 1024 ** 2,
+              overwrite: false,
+            })),
+          })
+        ).status,
+      ).toBe(200);
+      expect((await request(outsider, statusPath)).status).toBe(403);
+      for (const [index, path] of paths.entries()) {
+        const headers = user.headers();
+        headers.set('content-type', 'application/octet-stream');
+        headers.set('x-nh-upload-length', String(1024 ** 2));
+        pending.push(
+          fetch(
+            `http://127.0.0.1:${address.port}/v1/servers/${serverId}/files/upload?path=${path}&batchId=${batchId}&entryId=${index}&overwrite=false`,
+            {
+              method: 'PUT',
+              headers,
+              signal: controllers[index]?.signal,
+              duplex: 'half',
+              body: new ReadableStream({
+                start(controller) {
+                  controller.enqueue(new Uint8Array(1024));
+                },
+              }),
+            } as RequestInit,
+          ).catch(() => undefined),
+        );
+      }
+      await vi.waitFor(() => expect(entered).toBe(2));
+      expect((await (await request(user, statusPath)).json()).files).toEqual([
+        { id: '0', state: 'active' },
+        { id: '1', state: 'active' },
+      ]);
+      for (const controller of controllers) controller.abort();
+      await Promise.all(pending);
+      await vi.waitFor(
+        async () => {
+          expect(await (await request(user, statusPath)).json()).toEqual({
+            closed: true,
+            files: [],
+          });
+        },
+        { timeout: 3000 },
+      );
+      expect(writes).toBe(0);
+      const audits = await f.db
+        .selectFrom('audit_events')
+        .select('action')
+        .where('metadata', '@>', { claimId: batchId })
+        .execute();
+      expect(audits.filter((event) => event.action === 'server.upload.cancelled')).toHaveLength(2);
+      expect(audits.some((event) => event.action === 'server.upload.uncertain')).toBe(false);
+      const nextId = randomUUID();
+      expect(
+        (
+          await request(user, `/v1/servers/${serverId}/files/upload-batches`, {
+            id: nextId,
+            files: [{ id: 'next', path: 'next.bin', bytes: 1, overwrite: false }],
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await upload(user, serverId, new Uint8Array(1), 1, {}, undefined, {
+            batchId: nextId,
+            entryId: 'next',
+            path: 'next.bin',
+            overwrite: 'false',
+          })
+        ).status,
+      ).toBe(204);
+      expect(writes).toBe(1);
+    } finally {
+      for (const controller of controllers) controller.abort();
+      await Promise.allSettled(pending);
+      if (original) uploadFile.mockImplementation(original);
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

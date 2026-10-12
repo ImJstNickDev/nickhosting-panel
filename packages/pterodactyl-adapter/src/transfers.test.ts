@@ -1,12 +1,13 @@
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
 import { createPterodactylAdapter } from './adapter.js';
 import { createDownloadProxy } from './downloads.js';
 import { createTransferGuard } from './transfer-guard.js';
 import { createTransportCoordinator, PterodactylError } from './transport.js';
-import { isUploadNotDispatched } from './upload-dispatch.js';
+import { isUploadCancelled, isUploadNotDispatched } from './upload-dispatch.js';
 import { createUploadProxy } from './uploads.js';
 
 async function withHttp(
@@ -203,7 +204,8 @@ describe('real HTTP streaming transfers', () => {
           tail = Buffer.concat([tail, chunk]).subarray(-100);
           if (uploaded % (2 * 1024 ** 2) < chunk.length) await delay(1);
         }
-        expect(uploaded).toBe(Number(request.headers['content-length']));
+        expect(request.headers['content-length']).toBeUndefined();
+        expect(request.headers['transfer-encoding']).toBe('chunked');
         response.writeHead(204).end();
       },
       async (origin) => {
@@ -226,6 +228,205 @@ describe('real HTTP streaming transfers', () => {
     expect(tail.toString()).toMatch(/\r\n--nh-[a-f0-9-]+--\r\n$/);
     const suffix = /\r\n--nh-[a-f0-9-]+--\r\n$/.exec(tail.toString())?.[0];
     expect(uploaded - start - Buffer.byteLength(suffix ?? '')).toBe(length);
+  });
+
+  it.each(['parser-400', 'other-400', 'server-500', 'lost-response'])(
+    'cancels an active multipart stream without a file write and trusts only confirmed parser rejection: %s',
+    async (reply) => {
+      const controller = new AbortController();
+      let cancelled = false,
+        parsed = false,
+        writes = 0;
+      const source = new ReadableStream<Uint8Array>(
+        {
+          async pull(output) {
+            await delay(2);
+            if (!cancelled) output.enqueue(new Uint8Array(1024));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      await withHttp(
+        async (request, response) => {
+          expect(request.headers['content-length']).toBeUndefined();
+          request.once('data', () => controller.abort());
+          try {
+            await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+              headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+            }).formData();
+            writes++;
+          } catch {
+            parsed = true;
+          }
+          if (reply === 'lost-response') {
+            response.destroy();
+            return;
+          }
+          response.writeHead(reply === 'server-500' ? 500 : 400, {
+            'Content-Type': 'application/json',
+          });
+          response.end(
+            JSON.stringify({
+              error:
+                reply === 'parser-400'
+                  ? 'Failed to get multipart form data from request.'
+                  : 'Unrelated private provider failure',
+            }),
+          );
+        },
+        async (origin) => {
+          const result = await createUploadProxy({
+            ...options,
+            baseURL: origin,
+            uploadOrigins: [origin],
+          })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+            body: source,
+            contentLength: 1024 ** 2,
+            maxBytes: 1024 ** 2,
+            signal: controller.signal,
+            idleTimeoutMs: 1000,
+          }).catch((error: unknown) => error);
+          expect(parsed).toBe(true);
+          expect(writes).toBe(0);
+          expect(cancelled).toBe(true);
+          expect(isUploadCancelled(result)).toBe(reply === 'parser-400');
+          expect(isUploadNotDispatched(result)).toBe(false);
+          if (reply !== 'parser-400') expect(result).toMatchObject({ outcome: 'unknown' });
+          expect(String(result)).not.toContain('private');
+        },
+      );
+    },
+  );
+
+  it('recognizes cancellation after final authorization but before the multipart terminal boundary', async () => {
+    const controller = new AbortController();
+    let checks = 0;
+    let writes = 0;
+    await withHttp(
+      async (request, response) => {
+        try {
+          await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+            headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+          }).formData();
+          writes++;
+          response.writeHead(204).end();
+        } catch {
+          response.writeHead(400, { 'Content-Type': 'application/json' }).end(
+            JSON.stringify({
+              error: 'Failed to get multipart form data from request.',
+            }),
+          );
+        }
+      },
+      async (origin) => {
+        const result = await createUploadProxy({
+          ...options,
+          baseURL: origin,
+          uploadOrigins: [origin],
+        })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+          body: bytes(1),
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+          authorize: async () => {
+            if (++checks === 2) controller.abort();
+          },
+        }).catch((error: unknown) => error);
+        expect(checks).toBe(2);
+        expect(writes).toBe(0);
+        expect(isUploadCancelled(result)).toBe(true);
+      },
+    );
+  });
+
+  it.each(['confirmed', 'lost-response', 'parser-400'])(
+    'does not call a late browser abort cancellation proof after the full form: %s',
+    async (reply) => {
+      const controller = new AbortController();
+      let writes = 0;
+      await withHttp(
+        async (request, response) => {
+          const form = await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+            headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+          }).formData();
+          expect((form.get('files') as File).size).toBe(1);
+          writes++;
+          controller.abort();
+          if (reply === 'lost-response') response.destroy();
+          else if (reply === 'parser-400')
+            response.writeHead(400, { 'Content-Type': 'application/json' }).end(
+              JSON.stringify({
+                error: 'Failed to get multipart form data from request.',
+              }),
+            );
+          else response.writeHead(204).end();
+        },
+        async (origin) => {
+          const result = await createUploadProxy({
+            ...options,
+            baseURL: origin,
+            uploadOrigins: [origin],
+          })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+            body: bytes(1),
+            contentLength: 1,
+            maxBytes: 1,
+            signal: controller.signal,
+          }).catch((error: unknown) => error);
+          expect(writes).toBe(1);
+          expect(isUploadCancelled(result)).toBe(false);
+          expect(isUploadNotDispatched(result)).toBe(false);
+          if (reply === 'confirmed') expect(result).toBeUndefined();
+          else expect(result).toMatchObject({ outcome: 'unknown' });
+        },
+      );
+    },
+  );
+
+  it('handles browser body failure delivered before its abort signal without destroying the rejection response', async () => {
+    const controller = new AbortController();
+    let output: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const source = new ReadableStream<Uint8Array>({
+      start(value) {
+        output = value;
+      },
+    });
+    await withHttp(
+      async (request, response) => {
+        request.once('data', () => {
+          output?.error(new Error('browser disconnected'));
+          setImmediate(() => controller.abort());
+        });
+        try {
+          await new Response(Readable.toWeb(request) as ReadableStream<Uint8Array>, {
+            headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+          }).formData();
+          throw new Error('Unexpected complete multipart');
+        } catch {
+          response.writeHead(400, { 'Content-Type': 'application/json' }).end(
+            JSON.stringify({
+              error: 'Failed to get multipart form data from request.',
+            }),
+          );
+        }
+      },
+      async (origin) => {
+        const result = await createUploadProxy({
+          ...options,
+          baseURL: origin,
+          uploadOrigins: [origin],
+        })(`${origin}/upload/file?token=fixture`, 'world.dat', {
+          body: source,
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+          idleTimeoutMs: 1000,
+        }).catch((error: unknown) => error);
+        expect(isUploadCancelled(result)).toBe(true);
+      },
+    );
   });
 
   it('cancels the upstream socket when the downstream cancels', async () => {

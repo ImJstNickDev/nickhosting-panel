@@ -381,6 +381,8 @@ export async function claimUploadBatchEntry(
     complete: () => settle('complete', 'server.upload.confirmed'),
     /** Only after adapter proof that the external upload was never invoked. */
     rejectBeforeDispatch: () => settle('cancelled', 'server.upload.not_dispatched'),
+    /** Only after the adapter receives Wings' rejection of our incomplete multipart. */
+    cancelConfirmed: () => settle('cancelled', 'server.upload.cancelled'),
     uncertain: () => settle('uncertain', 'server.upload.uncertain'),
     /** Process loss before settlement retains an active claim, never replayable. */
     unlock,
@@ -430,6 +432,24 @@ export async function closeUploadBatch(
       for (const file of batch.files) if (file.state === 'queued') file.state = 'cancelled';
     },
   );
+}
+
+/** Cancellation polling exposes only entry state; it does not replay provider work. */
+export async function uploadBatchStatus(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  batchId: string,
+  bindingHash: string,
+) {
+  const claim = await db
+    .selectFrom('upload_ingestion_claims')
+    .selectAll()
+    .where('id', '=', batchId)
+    .executeTakeFirst();
+  if (!claim) return { closed: true, files: [] };
+  const batch = checkBinding(claim, context, serverId, bindingHash);
+  return { closed: false, files: batch.files.map(({ id, state }) => ({ id, state })) };
 }
 
 /** A prepare retry may reuse this exact manifest; it never replays an entry. */

@@ -218,7 +218,9 @@ export async function reserveUploadIngestion(
     throw error;
   }
   let released = false;
-  async function settle(action: 'server.upload.confirmed' | 'server.upload.not_dispatched') {
+  async function settle(
+    action: 'server.upload.confirmed' | 'server.upload.not_dispatched' | 'server.upload.cancelled',
+  ) {
     if (released) throw new DomainError('conflict');
     await connection.transaction().execute(async (tx) => {
       await lockResources(tx);
@@ -240,6 +242,10 @@ export async function reserveUploadIngestion(
     /** Only call with adapter proof that the Wings upload POST was never invoked. */
     async rejectBeforeDispatch() {
       await settle('server.upload.not_dispatched');
+    },
+    /** Only after Wings confirms rejection of the deliberately incomplete multipart. */
+    async cancelConfirmed() {
+      await settle('server.upload.cancelled');
     },
     /** Unproven failure, cancellation or process loss leaves the durable claim intact. */
     async unlock() {

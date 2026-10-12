@@ -192,8 +192,26 @@ complete/cancelled. Browser groups are bounded to this budget. Successful files
 are not replayed. `POST /files/upload-batches/:batchId/cancel` with `{entryId}`
 cancels only an unstarted entry; `DELETE /files/upload-batches/:batchId` abandons
 queued entries. An active/uncertain entry retains its reservation and consumes a
-slot; other entries can use remaining slots. Provider failure/cancellation after
-dispatch is not an atomic rollback. Owner recovery retains its existing explicit
+slot; other entries can use remaining slots. For cancellation before the terminal
+multipart boundary, the adapter stops consuming browser bytes and closes the
+chunked provider request without that boundary. Only Wings' exact, bounded native
+multipart-parser rejection confirms cancellation before final file writes and
+settles `server.upload.cancelled`. An arbitrary HTTP 400, timeout, lost response
+or cancellation after the complete multipart remains insufficient evidence of
+rollback; confirmed successful writes remain successful. Byte limits and stream
+authorization still apply, without buffering whole files or modifying Wings.
+
+`GET /files/upload-batches/:batchId` returns `{closed,files:[{id,state}]}` under
+current server authorization, batch actor/session/binding checks and the existing
+upload-slot gate. Only cancelled browser transfers poll it (150 ms, at most five
+seconds, retrying `operation_busy`); their scheduler slots stay occupied until
+settlement. Unresolved cancellation blocks another batch, while already admitted
+siblings remain independent. Successful transfers add no status polling.
+`closed:true` means the reservation ended, not proof that a late-cancelled file is
+absent: the final entry could already have succeeded before the browser aborted.
+
+Provider failure/cancellation after dispatch is not an atomic rollback.
+Owner recovery retains its existing explicit
 external-completion evidence requirements. Process loss is conservative, not an
 automatic retry. The previous non-batch binary route remains available for older
 clients and uses its original per-request checks.

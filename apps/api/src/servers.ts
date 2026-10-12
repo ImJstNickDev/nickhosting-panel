@@ -2,6 +2,7 @@ import { posix } from 'node:path';
 import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
 import {
+  isUploadCancelled,
   isUploadNotDispatched,
   relativePath,
   type ServerFile,
@@ -532,6 +533,7 @@ export function registerServerRoutes(
           await measure('settlementMs', () => claim.complete());
         } catch (error) {
           if (isUploadNotDispatched(error)) await claim.rejectBeforeDispatch();
+          else if (isUploadCancelled(error)) await claim.cancelConfirmed();
           throw error;
         } finally {
           await claim.unlock();

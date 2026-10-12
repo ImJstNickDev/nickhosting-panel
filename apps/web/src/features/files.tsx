@@ -1009,6 +1009,58 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const closeBatch = (id: string) => api(`${endpoint}/${id}`, { method: 'DELETE' });
     let pause = false;
     let pauseState: 'busy' | 'blocked' | undefined;
+    let unsettledCancellation = false;
+    const settleCancellation = async (batchId: string, item: UploadItem) => {
+      const signal = AbortSignal.timeout(5000);
+      let queuedCancellationRequested = false;
+      if (isCurrent()) updateUpload(item.id, { status: 'waiting', speed: 0 });
+      try {
+        while (isCurrent() && !signal.aborted) {
+          try {
+            const result = await api<{
+              closed: boolean;
+              files: {
+                id: string;
+                state: 'queued' | 'active' | 'complete' | 'cancelled' | 'uncertain';
+              }[];
+            }>(`${endpoint}/${batchId}`, { signal });
+            const state = result.files.find((entry) => entry.id === String(item.id))?.state;
+            if (state === 'complete') {
+              if (isCurrent()) {
+                updateUpload(item.id, { status: 'complete', sent: item.file.size });
+                refreshUploadDisplay();
+              }
+              return;
+            }
+            if (state === 'cancelled' || result.closed) {
+              if (isCurrent()) updateUpload(item.id, { status: 'cancelled' });
+              return;
+            }
+            if (state === 'uncertain') break;
+            if (state === 'queued' && !queuedCancellationRequested) {
+              await api(`${endpoint}/${batchId}/cancel`, {
+                body: { entryId: String(item.id) },
+                signal,
+              });
+              queuedCancellationRequested = true;
+            }
+          } catch (failure) {
+            if (!(failure instanceof ApiError) || failure.code !== 'operation_busy') throw failure;
+          }
+          await waitForUploadRetry(150, signal);
+        }
+      } catch {
+        // A disconnected browser cannot infer the provider's final write outcome.
+      }
+      if (isCurrent()) {
+        unsettledCancellation = true;
+        pauseState = 'blocked';
+        updateUpload(item.id, {
+          status: 'failed',
+          error: new ApiError('operation_uncertain', 'errors.operation_uncertain'),
+        });
+      }
+    };
     try {
       setUploadPause(undefined);
       setError(undefined);
@@ -1151,11 +1203,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     return;
                   } catch (failure) {
                     if (!isCurrent()) return;
-                    if (
-                      !controller.signal.aborted &&
-                      failure instanceof ApiError &&
-                      failure.code === 'operation_busy'
-                    ) {
+                    if (controller.signal.aborted) {
+                      await settleCancellation(batch.id, item);
+                      return;
+                    }
+                    if (failure instanceof ApiError && failure.code === 'operation_busy') {
                       const delay = uploadBusyRetryDelays[attempt];
                       updateUpload(item.id, {
                         status: delay === undefined ? 'queued' : 'waiting',
@@ -1175,19 +1227,25 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     // An unknown write belongs to this entry only. Never replay it;
                     // the batch reservation already covers every remaining sibling.
                     updateUpload(item.id, {
-                      status: controller.signal.aborted ? 'cancelled' : 'failed',
-                      error: controller.signal.aborted ? undefined : failure,
+                      status: 'failed',
+                      error: failure,
                     });
                     return;
                   }
                 }
                 if (isCurrent() && controller.signal.aborted)
-                  updateUpload(item.id, { status: 'cancelled' });
+                  await settleCancellation(batch.id, item);
               } finally {
                 activeUploads.current.delete(item.id);
               }
             },
           });
+          // Admitted siblings may finish independently; an unresolved cancellation
+          // must settle before another batch can reserve or submit new work.
+          if (unsettledCancellation) {
+            pause = true;
+            pauseState = 'blocked';
+          }
         } catch (failure) {
           pause = true;
           if (isCurrent()) {
@@ -1211,7 +1269,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       uploadRunning.current = false;
       if (isCurrent()) {
         // Resume only after active requests and reservation cleanup have settled.
-        setUploadPause(uploadQueue.current.length ? pauseState : undefined);
+        setUploadPause(
+          uploadQueue.current.length || unsettledCancellation ? pauseState : undefined,
+        );
         refreshUploadDisplay(true);
         void queryClient.invalidateQueries({ queryKey: ['transfers', serverId] });
         void queryClient.invalidateQueries({ queryKey: ['server', serverId] });

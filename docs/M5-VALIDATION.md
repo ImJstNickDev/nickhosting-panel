@@ -5992,3 +5992,62 @@ no manual restart/rebuild, production-provider call, game-file mutation, new
 test asset or infrastructure change. The disposable integration schema is
 cleaned by its fixture. Rollback is a source revert with no migration/data reset.
 PR #21 remains open and unmerged; SFTPGo issue #18 is unchanged.
+
+## 2026-10-12 — active upload cancellation without a stale reservation
+
+The Owner's new batch completed 100 small files, but cancelling two concurrent
+450 MiB files retained two uncertain entries. Browser abort previously closed
+the provider socket before NickHosting could learn the result; the browser also
+released its scheduler slot before backend settlement. Subsequent writes were
+correctly blocked by that unresolved reservation, but normal cancellation had
+no way to settle it automatically.
+
+The adapter now sends chunked multipart, retaining declared-byte enforcement and
+bounded streaming. Browser abort before the final boundary closes an incomplete
+form and waits for Wings' native parser rejection. Only its exact HTTP 400 error
+body, bounded to 1 KiB, establishes cancellation before final writes. Generic
+errors, missing responses, timeouts and aborts after a complete form remain
+conservative; no destructive compensating delete or automatic upload replay is
+introduced. This follows the existing parse-before-write path in
+[Wings 1.11.13](https://github.com/pterodactyl/wings/blob/v1.11.13/router/router_server_files.go)
+and multipart cleanup behavior in
+[Go ReadForm](https://github.com/golang/go/blob/go1.23.6/src/mime/multipart/formdata.go).
+Go attempts temporary-file cleanup on parsing failure; filesystem accounting
+still applies if cleanup itself fails. No Wings patch is needed.
+
+The browser keeps cancelled slots occupied while checking authenticated batch
+status for at most five seconds. Only `operation_busy` is retried. An unresolved
+result remains visible and prevents a new batch; admitted siblings can finish.
+Normal successful uploads add no polling. `closed:true` proves the reservation
+ended, not absence of a file whose upload may have completed before a late abort.
+Upload diagnostics remain opt-in at `debug`.
+
+Focused validation (existing approved isolated database/Redis, disposable schemas,
+real API/authentication and browser handlers, fixture provider writes):
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/transfers.test.ts`: **51 passed**, including real loopback HTTP multipart cancellation, native versus unrelated 400, lost responses, late abort and body-error/abort ordering.
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/bulk-uploads.test.ts packages/pterodactyl-adapter/src/adapter.test.ts`: **75 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'upload|binary|stream'`: **31 passed, 43 intentionally skipped**. Two actual browser-side HTTP disconnects settle two cancellation audits, zero fixture writes, release the claim and permit another batch; unauthorized status access is rejected. Initially an existing never-responding provider fixture waited the default 30-second idle timeout and hit the test deadline, causing 13 cascading failures (18 passed). Setting that fixture's idle timeout to 50 ms corrected the test; the final complete selected run passed. Production timeouts are unchanged.
+- `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-cancel.browser.test.ts`: **13 passed**. Covers two held cancellation acknowledgements, busy status retry, next-batch sequencing, sibling independence, no claims left, subsequent upload/delete and normal uploads without status polling. An initial 12-pass/1-fail run exposed a missing `confirm:true` in the new fixture's final delete; correcting the fixture yielded the final 13-pass run.
+- `scripts/dev.sh pnpm typecheck`: root and WebPanel passed. Changed-source Biome, `git diff --check` and indexed governance checks passed. No full historical suite, layout changes or new screenshots.
+
+Independent review found and resolved one must-fix: status polling now uses the
+existing upload-slot gate rather than competing without bounds for reserved DB
+connections. Final review found no remaining must-fix; late-abort semantics above
+remain explicitly conservative.
+
+The old dev claim was recovered through the existing Owner recovery service,
+with exact scope hash, current session, exclusive claim lock and an audit event.
+Read-only evidence corroborated provider ID/UUID/external identity, both cancelled
+destination files absent, 100 HTTP 200 upload responses followed by two completed
+HTTP 400 responses, and no multipart temporary files in the current Wings `/tmp`
+archive metadata. The 100 completed files were preserved. The claim is absent and
+exactly one recovery audit exists. Private identities and evidence remain ignored.
+No provider file deletion, game-server mutation or production configuration change
+was performed; no live upload was generated by Codex for this fix.
+
+API, worker and Vite remain healthy with container restart counts zero; existing
+source watchers load the correction. No manual restart, new infrastructure or
+live test asset. Rollback is a source revert without migration; reverting does not
+recreate the manually recovered stale reservation. PR #21 remains open/unmerged,
+and SFTPGo issue #18 remains a separate production-release blocker.

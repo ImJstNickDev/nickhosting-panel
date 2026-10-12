@@ -2,6 +2,7 @@ import { AxeBuilder } from '@axe-core/playwright';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { expect as browserExpect, type Page, type Route } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { createUploadProxy } from '../../../packages/pterodactyl-adapter/src/uploads.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -14,8 +15,11 @@ describe('M5 parallel file upload batches', () => {
   let base: string;
   let endpoint: string;
   const requests: string[] = [],
+    statusRequests: string[] = [],
     errors: string[] = [];
   const holds = new Set<string>();
+  const nativeCancellations = new Set<string>();
+  const incompleteBodies = new Set<string>();
   const pending = new Map<string, { release(): void; fail(): void }>();
   let active = 0,
     maximumActive = 0;
@@ -65,12 +69,43 @@ describe('M5 parallel file upload batches', () => {
       const url = new URL(request.url());
       if (url.pathname === `${endpoint}/upload` && request.method() === 'PUT')
         requests.push(url.searchParams.get('path') ?? '');
+      if (url.pathname.startsWith(`${endpoint}/upload-batches/`) && request.method() === 'GET')
+        statusRequests.push(url.pathname);
     });
     const uploadFile = provider.adapter.uploadFile;
     provider.adapter.uploadFile = async (id, path, input) => {
       active++;
       maximumActive = Math.max(maximumActive, active);
       try {
+        if (nativeCancellations.has(path)) {
+          return await createUploadProxy({
+            baseURL: 'https://panel.example.test',
+            applicationKey: 'isolated-browser-fixture',
+            uploadOrigins: ['https://wings.example.test'],
+            fetcher: async (_, init) => {
+              if (!(init?.body instanceof ReadableStream))
+                throw new Error('Missing multipart body');
+              const reader = (init.body as ReadableStream<Uint8Array>).getReader();
+              expect((await reader.read()).done).toBe(false);
+              const acknowledgement = new Promise<void>((resolve) => {
+                pending.set(path, { release: resolve, fail: resolve });
+              });
+              await new Promise<void>((resolve) => {
+                if (input.signal?.aborted) resolve();
+                else input.signal?.addEventListener('abort', () => resolve(), { once: true });
+              });
+              // The real proxy closes without consuming the file or emitting the
+              // terminal boundary. Keep Wings' parser reply pending independently.
+              expect((await reader.read()).done).toBe(true);
+              incompleteBodies.add(path);
+              await acknowledgement;
+              return Response.json(
+                { error: 'Failed to get multipart form data from request.' },
+                { status: 400 },
+              );
+            },
+          })('https://wings.example.test/upload/file', path, input);
+        }
         if (holds.has(path)) {
           await new Promise<void>((resolve, reject) => {
             const fail = () => reject(new PterodactylError('unavailable', 'client', 'unknown'));
@@ -92,6 +127,8 @@ describe('M5 parallel file upload batches', () => {
     await user.unrouteAll({ behavior: 'ignoreErrors' });
     await user.goto(`${harness.origin}/servers`);
     await browserExpect.poll(() => active).toBe(0);
+    nativeCancellations.clear();
+    incompleteBodies.clear();
     if (!harness.database.schema.startsWith('nh_test_'))
       throw new Error('Isolated schema required');
     await harness.database.db
@@ -123,6 +160,7 @@ describe('M5 parallel file upload batches', () => {
       'false',
     );
     requests.length = 0;
+    statusRequests.length = 0;
     maximumActive = 0;
     await user.locator('input[type="file"]:not([webkitdirectory])').setInputFiles(files);
   }
@@ -137,6 +175,7 @@ describe('M5 parallel file upload batches', () => {
     });
     expect(maximumActive).toBe(2);
     expect(requests).toEqual(files.map((file) => file.name));
+    expect(statusRequests).toEqual([]);
     pending.get(first)?.release();
     await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(49);
     const remote = await provider.files();
@@ -195,7 +234,7 @@ describe('M5 parallel file upload batches', () => {
       'DELETE',
     );
   });
-  it('keeps a cancelled provider outcome isolated while every untouched sibling completes', async () => {
+  it('keeps an uncertain cancellation visible while every admitted sibling completes', async () => {
     const files = batch('parallel-cancel', 8),
       cancelled = files[0]?.name ?? '';
     holds.add(cancelled);
@@ -204,11 +243,65 @@ describe('M5 parallel file upload batches', () => {
     await row(cancelled)
       .getByRole('button', { name: `Cancel upload of ${cancelled}` })
       .click();
-    await browserExpect(row(cancelled)).toContainText('Cancelled');
+    await browserExpect(row(cancelled)).toContainText('Failed');
+    await browserExpect(row(cancelled).getByRole('alert')).toBeVisible();
     await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(7);
     expect(requests.filter((path) => path === cancelled)).toHaveLength(1);
     expect((await provider.files()).has(cancelled)).toBe(false);
+    await browserExpect(queue().getByRole('button', { name: 'Check and resume' })).toBeVisible();
+  });
+  it('waits for both active cancellations before starting the next batch and releases its reservation', async () => {
+    const cancelled = batch('confirmed-cancel', 2),
+      next = batch('after-confirmed-cancel', 3);
+    let refusedStatus = false;
+    await user.route(`**${endpoint}/upload-batches/*`, async (route) => {
+      if (route.request().method() !== 'GET' || refusedStatus) return route.continue();
+      refusedStatus = true;
+      await route.fulfill({
+        status: 409,
+        json: { error: { code: 'operation_busy', messageKey: 'errors.operation_busy' } },
+      });
+    });
+    for (const file of cancelled) nativeCancellations.add(file.name);
+    await choose(cancelled);
+    await browserExpect.poll(() => pending.size).toBe(2);
+    await user.locator('input[type="file"]:not([webkitdirectory])').setInputFiles(next);
+    for (const file of cancelled)
+      await row(file.name)
+        .getByRole('button', { name: `Cancel upload of ${file.name}` })
+        .click();
+    await browserExpect.poll(() => incompleteBodies.size).toBe(2);
+    await browserExpect(queue().getByText('Waiting for server', { exact: true })).toHaveCount(2);
+    expect(requests).toEqual(cancelled.map((file) => file.name));
+    pending.get(cancelled[0]?.name ?? '')?.release();
+    await browserExpect(row(cancelled[0]?.name ?? '')).toContainText('Cancelled');
+    await browserExpect(row(cancelled[1]?.name ?? '')).toContainText('Waiting for server');
+    expect(requests).toEqual(cancelled.map((file) => file.name));
+    pending.get(cancelled[1]?.name ?? '')?.release();
+    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
     await browserExpect(queue().getByRole('button', { name: 'Check and resume' })).toHaveCount(0);
+    expect(requests).toEqual([...cancelled, ...next].map((file) => file.name));
+    expect(refusedStatus).toBe(true);
+    await browserExpect
+      .poll(async () =>
+        harness.database.db
+          .selectFrom('upload_ingestion_claims')
+          .select('id')
+          .where('server_id', '=', provider.ids.serverId)
+          .execute(),
+      )
+      .toEqual([]);
+    const remote = await provider.files();
+    for (const file of cancelled) expect(remote.has(file.name)).toBe(false);
+    for (const file of next) expect(remote.get(file.name)).toEqual(file.buffer);
+    await journeyRequest(harness, user, endpoint, {
+      action: 'delete',
+      root: '',
+      files: next.map((file) => file.name),
+      confirm: true,
+    });
+    const remaining = await provider.files();
+    for (const file of next) expect(remaining.has(file.name)).toBe(false);
   });
   it('does not retry an uncertain file or cancel its siblings', async () => {
     const files = batch('parallel-failed', 7),
