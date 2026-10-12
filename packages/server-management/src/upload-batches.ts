@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { lockResources } from './admission.js';
 import { parse } from './registry.js';
 import { uploadMultipartAllowanceBytes } from './upload-policy.js';
+import { createUploadTiming, type UploadTiming } from './upload-timing.js';
 
 type Claim = Selectable<Database['upload_ingestion_claims']>;
 type Batch = NonNullable<Claim['scope']['batch']>;
@@ -64,21 +65,36 @@ function view(claim: Claim, closed: boolean) {
     closed,
   };
 }
-async function persist(tx: Transaction<Database>, claim: Claim, releaseFinished = true) {
+type TimingPhase = 'admission' | 'settlement';
+async function persist(
+  tx: Transaction<Database>,
+  claim: Claim,
+  releaseFinished = true,
+  trace?: UploadTiming,
+  phase: TimingPhase = 'settlement',
+) {
+  const timing = trace ?? createUploadTiming(false);
   const batch = claim.scope.batch;
   if (!batch) throw new DomainError('conflict');
   const closed =
     releaseFinished &&
     batch.files.every((file) => file.state === 'complete' || file.state === 'cancelled');
   if (closed) {
-    await tx.deleteFrom('upload_ingestion_claims').where('id', '=', claim.id).execute();
+    await timing.measure(`${phase}.deleteClaim`, () =>
+      tx.deleteFrom('upload_ingestion_claims').where('id', '=', claim.id).execute(),
+    );
   } else {
-    const scope = JSON.stringify(claim.scope);
-    await tx
-      .updateTable('upload_ingestion_claims')
-      .set({ scope, scope_hash: createHash('sha256').update(scope).digest('hex') })
-      .where('id', '=', claim.id)
-      .execute();
+    const serialized = timing.measureSync(`${phase}.serializeHash`, () => {
+      const scope = JSON.stringify(claim.scope);
+      return { scope, scope_hash: createHash('sha256').update(scope).digest('hex') };
+    });
+    await timing.measure(`${phase}.updateClaim`, () =>
+      tx
+        .updateTable('upload_ingestion_claims')
+        .set(serialized)
+        .where('id', '=', claim.id)
+        .execute(),
+    );
   }
   return view(claim, closed);
 }
@@ -90,22 +106,49 @@ async function mutate(
   bindingHash: string,
   action: string,
   change: (batch: Batch) => void,
+  trace?: UploadTiming,
+  phase: TimingPhase = 'settlement',
 ) {
-  return db.transaction().execute(async (tx) => {
-    await lockResources(tx);
-    const claim = await tx
-      .selectFrom('upload_ingestion_claims')
-      .selectAll()
-      .where('id', '=', batchId)
-      .forUpdate()
-      .executeTakeFirst();
-    if (!claim) throw new DomainError('conflict');
-    const batch = checkBinding(claim, context, serverId, bindingHash);
-    change(batch);
-    const result = await persist(tx, claim);
-    await recordAudit(tx, context, action, { claimId: claim.id, serverId, closed: result.closed });
-    return result;
-  });
+  const timing = trace ?? createUploadTiming(false);
+  // Entry includes driver acquisition and BEGIN up to callback entry; the caller
+  // already pins its connection, so this is not a pure connection-pool metric.
+  const entered = timing.start(`${phase}.transactionEntry`);
+  let tail = () => {};
+  try {
+    return await db.transaction().execute(async (tx) => {
+      entered();
+      const body = timing.start(`${phase}.transactionBody`);
+      try {
+        await timing.measure(`${phase}.resourceLock`, () => lockResources(tx));
+        const claim = await timing.measure(`${phase}.selectForUpdate`, () =>
+          tx
+            .selectFrom('upload_ingestion_claims')
+            .selectAll()
+            .where('id', '=', batchId)
+            .forUpdate()
+            .executeTakeFirst(),
+        );
+        if (!claim) throw new DomainError('conflict');
+        timing.measureSync(`${phase}.validateTransition`, () => {
+          const batch = checkBinding(claim, context, serverId, bindingHash);
+          change(batch);
+        });
+        const result = await persist(tx, claim, true, timing, phase);
+        await timing.measure(`${phase}.audit`, () =>
+          recordAudit(tx, context, action, { claimId: claim.id, serverId, closed: result.closed }),
+        );
+        return result;
+      } finally {
+        body();
+        // Includes COMMIT or ROLLBACK and driver release; never label a failed
+        // transaction's rollback as a successful commit.
+        tail = timing.start(`${phase}.transactionTail`);
+      }
+    });
+  } finally {
+    entered();
+    tail();
+  }
 }
 
 /** Called once after path/quota preflight while the reservation's exclusive lock is held.
@@ -208,12 +251,18 @@ export async function claimUploadBatchEntry(
   serverId: string,
   batchId: string,
   input: UploadBatchFile & { bindingHash: string },
+  trace?: UploadTiming,
 ) {
-  const value = parse(fileSchema.extend({ bindingHash: bindingSchema }), input);
-  const result = await sql<{
-    acquired: boolean;
-  }>`select pg_try_advisory_lock_shared(hashtextextended(current_schema() || ${lockKey(batchId)},0)) as acquired`.execute(
-    connection,
+  const timing = trace ?? createUploadTiming(false);
+  const value = timing.measureSync('admission.validateInput', () =>
+    parse(fileSchema.extend({ bindingHash: bindingSchema }), input),
+  );
+  const result = await timing.measure('admission.claimLock', () =>
+    sql<{
+      acquired: boolean;
+    }>`select pg_try_advisory_lock_shared(hashtextextended(current_schema() || ${lockKey(batchId)},0)) as acquired`.execute(
+      connection,
+    ),
   );
   if (!result.rows[0]?.acquired) throw new DomainError('conflict');
   let unlocked = false;
@@ -221,8 +270,10 @@ export async function claimUploadBatchEntry(
   async function unlock() {
     if (unlocked) return;
     unlocked = true;
-    await sql`select pg_advisory_unlock_shared(hashtextextended(current_schema() || ${lockKey(batchId)},0))`.execute(
-      connection,
+    await timing.measure('release.claimUnlock', () =>
+      sql`select pg_advisory_unlock_shared(hashtextextended(current_schema() || ${lockKey(batchId)},0))`.execute(
+        connection,
+      ),
     );
   }
   try {
@@ -252,6 +303,8 @@ export async function claimUploadBatchEntry(
           .filter((entry) => entry.state === 'queued' || entry.state === 'active')
           .map(({ id, path }) => ({ id, path }));
       },
+      timing,
+      'admission',
     );
   } catch (error) {
     await unlock();
@@ -272,6 +325,8 @@ export async function claimUploadBatchEntry(
         if (file?.state !== 'active') throw new DomainError('conflict');
         file.state = state;
       },
+      timing,
+      'settlement',
     );
     settled = true;
     return result;

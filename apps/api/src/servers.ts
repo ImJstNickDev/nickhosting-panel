@@ -13,6 +13,7 @@ import {
   createManagedServer,
   createProject,
   createSftpCredential,
+  createUploadTiming,
   deleteServerDns,
   effectiveBackendAllocationPool,
   effectiveNodeOverhead,
@@ -399,8 +400,15 @@ export function registerServerRoutes(
   });
   app.put('/v1/servers/:id/files/upload', async (c) => {
     const started = performance.now();
-    const context = await principal(c),
-      service = await management();
+    const timing =
+      options.logger &&
+      (c.req.query('batchId') !== undefined || c.req.query('entryId') !== undefined)
+        ? createUploadTiming()
+        : undefined;
+    const context = await (timing
+        ? timing.measure('request.principal', () => principal(c))
+        : principal(c)),
+      service = await (timing ? timing.measure('request.runtime', management) : management());
     const declared = c.req.header('x-nh-upload-length');
     const rawLength = c.req.header('content-length');
     if (
@@ -426,6 +434,7 @@ export function registerServerRoutes(
         overwrite,
         contentLength,
         started,
+        timing,
         context,
         service,
       });

@@ -16,6 +16,7 @@ import {
   parse,
   readUploadBatch,
   reserveUploadIngestion,
+  type UploadTiming,
   uploadBatchMaxFiles,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
@@ -313,6 +314,7 @@ async function runBatchUpload(
     started: number;
     context: AuthContext;
     service: ManagementRuntime;
+    timing?: UploadTiming;
   },
   urls: UploadUrlCache,
 ) {
@@ -320,7 +322,7 @@ async function runBatchUpload(
   const entryId = parse(z.string().min(1).max(128), c.req.query('entryId'));
   if (c.req.queries('batchId')?.length !== 1 || c.req.queries('entryId')?.length !== 1)
     throw new DomainError('validation_failed');
-  const { context, service } = input;
+  const { context, service, timing } = input;
   const serverId = parse(z.uuid(), c.req.param('id')),
     release = options.acquireUploadSlot();
   let outcome = 'failed';
@@ -341,20 +343,29 @@ async function runBatchUpload(
         durations.accessMs = Math.round((performance.now() - input.started) * 1000) / 1000;
         const bindingHash = service.uploadBatchBinding(server);
         const admission = measure('admissionMs', () =>
-          claimUploadBatchEntry(connection, current, serverId, batchId, {
-            bindingHash,
-            id: entryId,
-            path: relativePath(input.path),
-            bytes: input.contentLength,
-            overwrite: input.overwrite,
-          }),
+          claimUploadBatchEntry(
+            connection,
+            current,
+            serverId,
+            batchId,
+            {
+              bindingHash,
+              id: entryId,
+              path: relativePath(input.path),
+              bytes: input.contentLength,
+              overwrite: input.overwrite,
+            },
+            timing,
+          ),
         );
         const [admitted, signed] = await Promise.allSettled([
           admission,
           measure('signedUrlMs', async () => {
-            const key = `${batchId}:${bindingHash}:${await service.consoleBindingForServer(serverId)}`;
+            const key = `${batchId}:${bindingHash}:${await service.consoleBindingForServer(serverId, timing)}`;
             const file = { id: entryId, path: relativePath(input.path) };
-            let send = await urls.take(key, file);
+            let send = await (timing
+              ? timing.measure('url.cacheLookup', () => urls.take(key, file))
+              : urls.take(key, file));
             if (send === undefined) {
               // Restart/expiry loses only disposable credentials. Reissue tokens
               // for queued entries and this admitted entry, never replay a write.
@@ -395,7 +406,8 @@ async function runBatchUpload(
                 contentLength: input.contentLength,
                 maxBytes: server.limits.disk * 1024 * 1024,
                 signal: c.req.raw.signal,
-                authorize: () => service.authorizeTransfer(current, serverId, true, connection),
+                authorize: () =>
+                  service.authorizeTransfer(current, serverId, true, connection, timing),
               }),
             );
             received = true;
@@ -407,14 +419,18 @@ async function runBatchUpload(
             }
             throw error;
           }
-          await recordAudit(connection, current, 'server.files.uploaded', {
-            serverId,
-            bytes: input.contentLength,
-          });
+          const audit = () =>
+            recordAudit(connection, current, 'server.files.uploaded', {
+              serverId,
+              bytes: input.contentLength,
+            });
+          await (timing ? timing.measure('completion.audit', audit) : audit());
         } finally {
           await lease.unlock();
         }
       },
+      false,
+      timing,
     );
     outcome = 'succeeded';
   } finally {
@@ -428,6 +444,7 @@ async function runBatchUpload(
         batch: true,
         ...durations,
         durationMs: Math.round((performance.now() - input.started) * 1000) / 1000,
+        atomic: timing?.snapshot(),
       });
     } catch {}
   }

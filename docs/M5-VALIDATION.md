@@ -5854,3 +5854,59 @@ network change or database reset occurred. Issue #18 remains a release gate.
 
 Full commands, artifact hash, evidence boundaries and rollback are in the
 [extension record](BLUEPRINT-EXTENSION.md#2026-10-12--120-bulk-upload-credentials).
+
+
+## 2026-10-12 — granular upload timing experiment
+
+The Owner authorized granular timing after the three unchanged-code upload runs.
+Those 147 successful uploads remain the pre-instrumentation baseline: mean
+59.732 ms/file, including 14.437 ms for the provider phase and 45.295 ms outside it.
+No upload optimization or policy change is included in this experiment.
+
+A bounded request-local collector adds `atomic` count/total/max durations to the
+existing final upload event, without per-query logging, SQL text/arguments,
+content, paths or credentials. Connection acquisition, session/permission reads,
+identity proof, locks, claim read/update/delete, validation, serialization/hash,
+audit, transaction entry/tail and release are distinguished. The provider phase
+also exposes its repeated local permission checks. Query times include database
+round trips and waiting; they do not isolate database-engine execution. Nested
+and parallel spans must not be summed as independent wall-clock costs.
+
+Focused validation:
+
+- Timing collector: **5 unit tests passed** (overlap/isolation, count/rounding,
+  bounds, disabled mode and error transparency).
+- Durable upload batches: **12 integration tests passed**, including independent
+  concurrent traces, failed admission with rollback, no mutation on refusal,
+  intermediate UPDATE and final DELETE.
+- API 49-file uploads, cache restart/cancellation and encrypted account lookup:
+  **3 targeted integration tests passed, 73 intentionally skipped**. Trace fields
+  survive redaction, contain numbers only and do not expose fixture private data.
+- Typecheck passed after correcting two TypeScript narrowings captured in timer
+  callbacks; focused Biome and diff checks passed. No browser/full historical
+  suite rerun: browser behavior and request contracts are unchanged.
+- Independent source review found no must-fix; ordering, lock release, rollback
+  and original errors are preserved. No new query, retry or provider call is added.
+
+Synthetic overhead measurement used 40 resolved-promise operations per request,
+a snapshot, existing logger redaction and JSON serialization: five alternating
+samples of 1,000 requests after warm-up. Incremental elapsed cost was
+**0.111–0.126 ms/request**, median **0.116 ms**. This excludes Docker stdout I/O,
+real database/network waits and live scheduling; it is not a performance bound or
+proof of zero measurement perturbation. Serialized output is larger but remains
+one event per file. Private benchmark output is retained with the timing records.
+
+Existing dev source watchers load the code; API and worker health checks pass,
+container restart counters remain zero. No manual restart/rebuild, infrastructure
+change, game-file operation or new live test asset. Detailed live results await
+the Owner's next upload. Rollback is a source revert; no migration or data reset.
+Issue #18 remains unchanged; PR #21 remains open and unmerged.
+
+Commands: `scripts/dev.sh pnpm exec vitest run
+packages/server-management/src/upload-timing.test.ts`; isolated wrapper
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+--config vitest.integration.config.ts packages/server-management/src/upload-batches.integration.test.ts`;
+same wrapper for `apps/api/src/servers.integration.test.ts
+packages/server-management/src/provider-accounts.integration.test.ts -t
+'prepares 49 files once|normalizes real bulk handoffs|enrolls once, encrypts credential'`;
+`scripts/dev.sh pnpm typecheck`, changed-file Biome and indexed governance.

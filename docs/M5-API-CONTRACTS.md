@@ -192,6 +192,28 @@ overlap and must not be summed. Trace fields contain no paths, content, keys or
 URLs; these are backend timings, not browser byte-progress measurements. Legacy
 uploads retain their earlier path/resource timing fields.
 
+Prepared-file traces also include request-local `atomic` aggregates when a logger
+is configured: `{label:{count,totalMs,maxMs}}`, maximum 64 code-defined labels.
+They separate principal/runtime lookup, pinned connection acquisition/release,
+server lock, first/second session and permission reads, identity proof, owner/key
+lookup and decryption, cached handoff, claim lock, transaction entry, resource
+lock, row `FOR UPDATE`, transition checks, serialization/hash, update/delete,
+audit, transaction tail and unlock. `transfer.*` measures the repeated local
+session/permission checks within the provider phase. No SQL, query arguments,
+paths, secrets, errors or per-operation log lines are emitted; all aggregates join
+the existing final `server.files_upload` event. Instrumentation adds no SQL or
+changes to the authorization/locking/transfer sequence.
+
+These are monotonic elapsed spans, not database-engine CPU timings. Connection
+acquisition includes driver setup; a lock/query span includes its round trip and
+any wait. Transaction entry includes BEGIN; transaction tail includes COMMIT or
+ROLLBACK and release. `transactionBody` includes its children and must not be
+summed with them. `url.*` overlaps admission; `transfer.*` is already included in
+`providerMs`. Server unlock/connection release occur after the callback and belong
+to the outer duration's remainder, not `accessMs`. Snapshot/redaction/log output
+occur after the outer duration is captured. Middleware before this route and
+browser delivery/render time remain outside these timers.
+
 Downloads use a native same-origin link, without creating a whole-file browser
 JavaScript blob. The CodeMirror editor alone caps UTF-8 content at 1 MiB, including
 its provider read. Binary transfers have no such editor cap. Legacy text routes

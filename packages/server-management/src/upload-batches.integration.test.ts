@@ -12,6 +12,7 @@ import {
   readUploadBatch,
   type UploadBatchFile,
 } from './upload-batches.js';
+import { createUploadTiming, type UploadTiming } from './upload-timing.js';
 
 const policy = {
   providerMaxFileBytes: 1024 ** 2,
@@ -84,16 +85,21 @@ describe('bounded durable upload batches', () => {
     context = f.context,
     hash = bindingHash,
     targetServer = serverId,
+    trace?: UploadTiming,
   ) {
     type Lease = Awaited<ReturnType<typeof claimUploadBatchEntry>>;
     const ready = Promise.withResolvers<Lease>();
     const done = Promise.withResolvers<void>();
     const work = f.db.connection().execute(async (connection) => {
       try {
-        const lease = await claimUploadBatchEntry(connection, context, targetServer, id, {
-          ...value,
-          bindingHash: hash,
-        });
+        const lease = await claimUploadBatchEntry(
+          connection,
+          context,
+          targetServer,
+          id,
+          { ...value, bindingHash: hash },
+          trace,
+        );
         ready.resolve(lease);
         await done.promise;
         await lease.unlock();
@@ -161,18 +167,30 @@ describe('bounded durable upload batches', () => {
       file('c'),
     ];
     const batch = await prepare(files);
+    const firstTiming = createUploadTiming(),
+      secondTiming = createUploadTiming(),
+      refusedTiming = createUploadTiming(),
+      lastTiming = createUploadTiming();
     const [first, second] = await Promise.all([
-      entry(batch.id, files[0]),
-      entry(batch.id, files[1]),
+      entry(batch.id, files[0], undefined, undefined, undefined, firstTiming),
+      entry(batch.id, files[1], undefined, undefined, undefined, secondTiming),
     ]);
-    await expect(entry(batch.id, files[2])).rejects.toMatchObject({ code: 'operation_busy' });
+    await expect(
+      entry(batch.id, files[2], undefined, undefined, undefined, refusedTiming),
+    ).rejects.toMatchObject({ code: 'operation_busy' });
+    const refused = refusedTiming.snapshot();
+    expect(refused['admission.validateTransition']?.count).toBe(1);
+    expect(refused['admission.transactionTail']?.count).toBe(1);
+    expect(refused['release.claimUnlock']?.count).toBe(1);
+    expect(refused['admission.updateClaim']).toBeUndefined();
+    expect(refused['admission.audit']).toBeUndefined();
     const before = await claim(batch.id);
     await first.lease.complete();
     await first.release();
     const after = await claim(batch.id);
     expect(after.reserved_bytes).toBe(before.reserved_bytes);
     expect(after.scope_hash).not.toBe(before.scope_hash);
-    const third = await entry(batch.id, files[2]);
+    const third = await entry(batch.id, files[2], undefined, undefined, undefined, lastTiming);
     await second.lease.complete();
     expect((await read(batch.id))?.files.map((file) => file.state)).toEqual([
       'complete',
@@ -180,6 +198,41 @@ describe('bounded durable upload batches', () => {
       'active',
     ]);
     expect((await third.lease.complete()).closed).toBe(true);
+    await second.release();
+    await third.release();
+    for (const trace of [firstTiming, secondTiming, lastTiming]) {
+      const timings = trace.snapshot();
+      for (const name of [
+        'admission.validateInput',
+        'admission.claimLock',
+        'admission.transactionEntry',
+        'admission.transactionBody',
+        'admission.transactionTail',
+        'admission.resourceLock',
+        'admission.selectForUpdate',
+        'admission.validateTransition',
+        'admission.serializeHash',
+        'admission.updateClaim',
+        'admission.audit',
+        'settlement.transactionEntry',
+        'settlement.transactionBody',
+        'settlement.transactionTail',
+        'settlement.resourceLock',
+        'settlement.selectForUpdate',
+        'settlement.validateTransition',
+        'settlement.audit',
+        'release.claimUnlock',
+      ]) {
+        expect(timings[name]?.count, name).toBe(1);
+        expect(timings[name]?.totalMs, name).toBeGreaterThanOrEqual(0);
+      }
+      expect(JSON.stringify(timings)).not.toContain(batch.id);
+      expect(JSON.stringify(timings)).not.toContain(serverId);
+    }
+    expect(firstTiming.snapshot()['settlement.updateClaim']?.count).toBe(1);
+    expect(firstTiming.snapshot()['settlement.deleteClaim']).toBeUndefined();
+    expect(lastTiming.snapshot()['settlement.deleteClaim']?.count).toBe(1);
+    expect(lastTiming.snapshot()['settlement.updateClaim']).toBeUndefined();
     await expect(read(batch.id)).rejects.toMatchObject({ code: 'conflict' });
   });
 

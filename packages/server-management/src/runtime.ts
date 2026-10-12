@@ -47,6 +47,7 @@ import { authorizeScheduledEffect } from './schedules.js';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
+import type { UploadTiming } from './upload-timing.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
 export async function authorizeQueuedEffect(
@@ -326,13 +327,14 @@ export async function createManagementRuntime(options: ManagementOptions) {
       );
       return createPterodactylAdapter({ ...adapterOptions, clientKey: credential.clientApiKey });
     });
-  async function consoleBindingForServer(serverId: string) {
+  async function consoleBindingForServer(serverId: string, timing?: UploadTiming) {
     if (options.adapter) return consoleProviderBinding;
     const credential = await resolveProviderCredential(
       db,
       options.codec,
       { serverId },
       adapterOptions.baseURL,
+      timing,
     );
     return createHash('sha256')
       .update(
@@ -818,13 +820,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     write: boolean,
     connection: Kysely<Database> = db,
+    timing?: UploadTiming,
   ): Promise<void> {
-    const current = await currentInteractiveContext(connection, context, env);
-    const server = await authorizeServer(
-      connection,
-      current,
-      serverId,
-      write ? 'server:manage' : 'server:read',
+    const timed = <T>(name: string, work: () => Promise<T>) =>
+      timing ? timing.measure(name, work) : work();
+    const current = await timed('transfer.sessionRead', () =>
+      currentInteractiveContext(connection, context, env),
+    );
+    const server = await timed('transfer.serverPermission', () =>
+      authorizeServer(connection, current, serverId, write ? 'server:manage' : 'server:read'),
     );
     if (
       !server.pterodactyl_id ||
@@ -845,30 +849,34 @@ export async function createManagementRuntime(options: ManagementOptions) {
       server: Awaited<ReturnType<typeof authorizeServer>>,
     ) => Promise<T>,
     identityMode: 'fresh' | 'directory' | 'upload' | 'upload-batch' | 'upload-prepare' = 'fresh',
+    timing?: UploadTiming,
   ) {
+    const timed = <T>(name: string, work: () => Promise<T>) =>
+      timing ? timing.measure(name, work) : work();
     const reuseIdentity = identityMode !== 'fresh';
     const run = async (connection: Kysely<Database>) => {
       let identityAttempted = false;
       if (write) {
         const shared = identityMode === 'upload-batch';
-        const lock = await (shared
-          ? sql<{
-              acquired: boolean;
-            }>`select pg_try_advisory_lock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
-          : sql<{
-              acquired: boolean;
-            }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
-        ).execute(connection);
+        const lock = await timed('access.serverLock', () =>
+          (shared
+            ? sql<{
+                acquired: boolean;
+              }>`select pg_try_advisory_lock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
+            : sql<{
+                acquired: boolean;
+              }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
+          ).execute(connection),
+        );
         // This request has not entered the callback or started any provider effect.
         if (!lock.rows[0]?.acquired) throw new DomainError('operation_busy');
       }
       try {
-        const current = await currentInteractiveContext(connection, context, env);
-        const server = await authorizeServer(
-          connection,
-          current,
-          serverId,
-          write ? 'server:manage' : 'server:read',
+        const current = await timed('access.sessionFirst', () =>
+          currentInteractiveContext(connection, context, env),
+        );
+        const server = await timed('access.permissionFirst', () =>
+          authorizeServer(connection, current, serverId, write ? 'server:manage' : 'server:read'),
         );
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
@@ -877,12 +885,14 @@ export async function createManagementRuntime(options: ManagementOptions) {
           await assertNoPendingUpload(connection, serverId);
         identityAttempted = true;
         if (reuseIdentity)
-          await directoryIdentityCache.verify(
-            connection,
-            server,
-            consoleProviderBinding,
-            () => adapter.getApplicationServer(server.pterodactyl_id as number),
-            db,
+          await timed('access.identityProof', () =>
+            directoryIdentityCache.verify(
+              connection,
+              server,
+              consoleProviderBinding,
+              () => adapter.getApplicationServer(server.pterodactyl_id as number),
+              db,
+            ),
           );
         else
           await verifyManagedIdentity(
@@ -892,12 +902,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
           );
         // Identity corroboration may itself wait on a remote API. Recheck directly
         // before the effect rather than extending an old authorization across it.
-        const refreshed = await currentInteractiveContext(connection, current, env);
-        const latest = await authorizeServer(
-          connection,
-          refreshed,
-          serverId,
-          write ? 'server:manage' : 'server:read',
+        const refreshed = await timed('access.sessionSecond', () =>
+          currentInteractiveContext(connection, current, env),
+        );
+        const latest = await timed('access.permissionSecond', () =>
+          authorizeServer(connection, refreshed, serverId, write ? 'server:manage' : 'server:read'),
         );
         if (reuseIdentity && directoryServerIdentity(latest) !== directoryServerIdentity(server))
           throw new DomainError('conflict');
@@ -907,15 +916,33 @@ export async function createManagementRuntime(options: ManagementOptions) {
         throw error;
       } finally {
         if (write)
-          await (identityMode === 'upload-batch'
-            ? sql`select pg_advisory_unlock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
-            : sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
-          ).execute(connection);
+          await timed('access.serverUnlock', () =>
+            (identityMode === 'upload-batch'
+              ? sql`select pg_advisory_unlock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
+              : sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
+            ).execute(connection),
+          );
       }
     };
     // Directory reads hold no lifecycle lock. Do not pin a pool connection while
     // waiting for a background renewal that itself needs that pool (even max=1).
-    return identityMode === 'directory' ? run(db) : db.connection().execute(run);
+    if (!timing || identityMode === 'directory')
+      return identityMode === 'directory' ? run(db) : db.connection().execute(run);
+    const acquired = timing.start('access.connectionAcquire');
+    let released: (() => void) | undefined;
+    try {
+      return await db.connection().execute(async (connection) => {
+        acquired();
+        try {
+          return await run(connection);
+        } finally {
+          released = timing.start('access.connectionRelease');
+        }
+      });
+    } finally {
+      acquired();
+      released?.();
+    }
   }
   // Existing generic access callers keep fresh remote corroboration. Uploads
   // explicitly reuse identity only; authorization, locks and file checks remain fresh.
@@ -946,8 +973,16 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     work: Parameters<typeof withAccess<T>>[3],
     prepare = false,
+    timing?: UploadTiming,
   ) {
-    return withAccess(context, serverId, true, work, prepare ? 'upload-prepare' : 'upload-batch');
+    return withAccess(
+      context,
+      serverId,
+      true,
+      work,
+      prepare ? 'upload-prepare' : 'upload-batch',
+      timing,
+    );
   }
   function uploadBatchBinding(server: Parameters<typeof directoryServerIdentity>[0]) {
     return createHash('sha256')

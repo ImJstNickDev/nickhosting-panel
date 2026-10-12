@@ -3,6 +3,7 @@ import { DomainError, type SecretCodec } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import { createNickHostingBridge } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
+import type { UploadTiming } from './upload-timing.js';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 const normalize = (url: string) => url.replace(/\/$/, '');
@@ -147,30 +148,38 @@ export async function resolveProviderCredential(
   codec: SecretCodec,
   target: { userId?: string; serverId?: string },
   providerUrl: string,
+  timing?: UploadTiming,
 ) {
+  const timed = <T>(name: string, work: () => Promise<T>) =>
+    timing ? timing.measure(name, work) : work();
   if (Boolean(target.userId) === Boolean(target.serverId))
     throw new DomainError('validation_failed');
-  const server = target.serverId
-    ? await db
-        .selectFrom('managed_servers')
-        .select(['owner_id', 'provider_user_id'])
-        .where('id', '=', target.serverId)
-        .where('deleted_at', 'is', null)
-        .executeTakeFirst()
+  const targetServerId = target.serverId;
+  const server = targetServerId
+    ? await timed('url.ownerRead', () =>
+        db
+          .selectFrom('managed_servers')
+          .select(['owner_id', 'provider_user_id'])
+          .where('id', '=', targetServerId)
+          .where('deleted_at', 'is', null)
+          .executeTakeFirst(),
+      )
     : undefined;
   if (target.serverId && !server) throw new DomainError('not_found');
   const userId = server?.owner_id ?? target.userId;
   if (!userId) throw new DomainError('validation_failed');
-  const row = await db
-    .selectFrom('provider_accounts as a')
-    .innerJoin('provider_change_feeds as f', 'f.instance_id', 'a.instance_id')
-    .selectAll('a')
-    .where('a.user_id', '=', userId)
-    .where('a.provider_url', '=', normalize(providerUrl))
-    .where('f.provider_url', '=', normalize(providerUrl))
-    .where('f.enabled', '=', true)
-    .where('a.status', '=', 'ready')
-    .executeTakeFirst();
+  const row = await timed('url.accountRead', () =>
+    db
+      .selectFrom('provider_accounts as a')
+      .innerJoin('provider_change_feeds as f', 'f.instance_id', 'a.instance_id')
+      .selectAll('a')
+      .where('a.user_id', '=', userId)
+      .where('a.provider_url', '=', normalize(providerUrl))
+      .where('f.provider_url', '=', normalize(providerUrl))
+      .where('f.enabled', '=', true)
+      .where('a.status', '=', 'ready')
+      .executeTakeFirst(),
+  );
   if (
     !row?.instance_id ||
     !row.provider_id ||
@@ -181,15 +190,15 @@ export async function resolveProviderCredential(
     (server && server.provider_user_id !== row.provider_id)
   )
     throw new DomainError('integration_unavailable');
+  const envelope = row.key_envelope;
+  const encryptionContext = context(userId, row.instance_id, row.key_operation_id);
+  const decrypt = () => codec.decrypt(envelope, encryptionContext);
   return {
     userId,
     providerUserId: row.provider_id,
     providerUserUuid: row.provider_uuid,
     externalId: row.external_id,
-    clientApiKey: codec.decrypt(
-      row.key_envelope,
-      context(userId, row.instance_id, row.key_operation_id),
-    ),
+    clientApiKey: timing ? timing.measureSync('url.decrypt', decrypt) : decrypt(),
     credentialRevision: `${row.key_operation_id}:${row.key_identifier}`,
   };
 }

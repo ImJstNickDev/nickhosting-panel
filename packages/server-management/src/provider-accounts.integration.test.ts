@@ -6,6 +6,7 @@ import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';
 import { registerProviderFeed } from './provider-change-feed.js';
+import { createUploadTiming } from './upload-timing.js';
 
 describe('durable technical provider accounts', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -72,6 +73,15 @@ describe('durable technical provider accounts', () => {
   it('enrolls once, encrypts credential and refuses another provider URL', async () => {
     expect(await run()).toEqual({ ready: 1, failed: 0 });
     expect((await credential()).clientApiKey).toBe('private-client-key');
+    const timing = createUploadTiming();
+    expect(
+      (await resolveProviderCredential(database.db, codec, { userId }, url, timing)).clientApiKey,
+    ).toBe('private-client-key');
+    expect(timing.snapshot()['url.accountRead']?.count).toBe(1);
+    expect(timing.snapshot()['url.decrypt']?.count).toBe(1);
+    expect(JSON.stringify(timing.snapshot())).not.toMatch(
+      /private-client-key|fixture-key-id|panel\.example/,
+    );
     expect(await run()).toEqual({ ready: 0, failed: 0 });
     expect(fetcher).toHaveBeenCalledTimes(2);
     const row = await database.db

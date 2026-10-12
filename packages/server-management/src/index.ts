@@ -25,3 +25,4 @@ export * from './sleep-policy.js';
 export * from './upload-admission.js';
 export * from './upload-batches.js';
 export * from './upload-policy.js';
+export * from './upload-timing.js';

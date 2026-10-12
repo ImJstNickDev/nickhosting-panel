@@ -1654,6 +1654,31 @@ describe('M2 Hono API with real invitation, password and session authentication'
       );
       expect(timings).toHaveLength(49);
       expect(timings.every((record) => typeof record.data.signedUrlMs === 'number')).toBe(true);
+      for (const { data } of timings) {
+        const atomic = data.atomic as Record<
+          string,
+          { count: number; totalMs: number; maxMs: number }
+        >;
+        expect(atomic['request.principal']?.count).toBe(1);
+        expect(atomic['access.connectionAcquire']?.count).toBe(1);
+        expect(atomic['access.sessionFirst']?.count).toBe(1);
+        expect(atomic['access.sessionSecond']?.count).toBe(1);
+        expect(atomic['admission.resourceLock']?.count).toBe(1);
+        expect(atomic['settlement.resourceLock']?.count).toBe(1);
+        expect(atomic['completion.audit']?.count).toBe(1);
+        expect(atomic['transfer.sessionRead']?.count).toBeGreaterThanOrEqual(1);
+        expect(atomic['transfer.serverPermission']?.count).toBe(
+          atomic['transfer.sessionRead']?.count,
+        );
+        expect(atomic['access.connectionRelease']?.count).toBe(1);
+        expect(Object.keys(atomic).length).toBeLessThanOrEqual(64);
+        for (const value of Object.values(atomic)) {
+          expect(value.totalMs).toBeGreaterThanOrEqual(0);
+          expect(value.maxMs).toBeLessThanOrEqual(value.totalMs);
+          expect(value.count).toBeGreaterThan(0);
+        }
+        expect(JSON.stringify(atomic)).not.toMatch(/private-|world|https?:|SELECT|INSERT/);
+      }
       expect(bulk.mock.calls.length - issued).toBe(1);
       expect(vi.mocked(f.adapter.prepareUpload).mock.calls.length).toBe(singles);
     } finally {
