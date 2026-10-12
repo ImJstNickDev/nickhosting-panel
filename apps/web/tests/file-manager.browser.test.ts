@@ -381,6 +381,140 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await user.setViewportSize({ width: 1440, height: 1000 });
     }
   });
+  it('confirms file deletion with consistent EN/IT dialogs and prevents cancellation or replay during the request', async () => {
+    const remote = await provider.files();
+    const names = ['delete-a.txt', 'delete-b.txt', 'delete-c.txt', 'delete-d.txt'];
+    for (const name of names) remote.set(name, Buffer.from(name));
+    let attempts = 0;
+    let entered = () => {};
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let italian = false;
+    const open = async () => {
+      await user
+        .getByRole('region', { name: italian ? 'File selezionati' : 'Selected files', exact: true })
+        .getByRole('button', { name: italian ? 'Elimina' : 'Delete', exact: true })
+        .click();
+      await browserExpect(dialog()).toBeVisible();
+    };
+    await user.route('**/files', async (route) => {
+      if (
+        route.request().method() !== 'POST' ||
+        route.request().postDataJSON()?.action !== 'delete'
+      )
+        return route.continue();
+      attempts++;
+      expect(route.request().postDataJSON()).toEqual({
+        action: 'delete',
+        root: '',
+        files: names,
+        confirm: true,
+      });
+      if (attempts === 1) {
+        entered();
+        await held;
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: 'integration_unavailable',
+              messageKey: 'errors.integration_unavailable',
+            },
+          },
+        });
+      }
+      return route.continue();
+    });
+    try {
+      for (const locale of ['en', 'it'] as const) {
+        italian = locale === 'it';
+        await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+        await user.setViewportSize(
+          italian ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
+        );
+        await user.goto(base);
+        for (const name of names)
+          await user
+            .getByRole('checkbox', {
+              name: `${italian ? 'Seleziona' : 'Select'} ${name}`,
+              exact: true,
+            })
+            .check();
+        await open();
+        await browserExpect(dialog().getByRole('checkbox')).toHaveCount(0);
+        const close = dialog().getByRole('button', {
+          name: italian ? 'Chiudi' : 'Close',
+          exact: true,
+        });
+        await browserExpect(close).toBeFocused();
+        await browserExpect(dialog()).toContainText(
+          italian ? 'e un altro elemento' : 'and 1 other item',
+        );
+        await browserExpect(dialog()).toContainText(
+          italian ? 'L’azione è irreversibile.' : 'This cannot be undone.',
+        );
+        const remove = dialog().getByRole('button', {
+          name: italian ? 'Elimina' : 'Delete',
+          exact: true,
+        });
+        expect(await remove.getAttribute('class')).toBe('danger');
+        expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(48);
+        expect(
+          await dialog().evaluate((element) => element.scrollWidth <= element.clientWidth),
+        ).toBe(true);
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(audit.violations.map(({ id }) => id)).toEqual([]);
+        await harness.screenshot(user, `file-delete-${italian ? 'mobile-it' : 'desktop-en'}`);
+        await dialog()
+          .getByRole('button', { name: italian ? 'Annulla' : 'Cancel', exact: true })
+          .click();
+        await browserExpect(dialog()).not.toBeVisible();
+        await open();
+        await user.keyboard.press('Escape');
+        await browserExpect(dialog()).not.toBeVisible();
+        await open();
+        await close.click();
+        await browserExpect(dialog()).not.toBeVisible();
+        expect(attempts).toBe(0);
+        for (const name of names) expect(remote.has(name)).toBe(true);
+      }
+      await open();
+      await dialog().getByRole('button', { name: 'Elimina', exact: true }).click();
+      await reached;
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Annulla', exact: true }),
+      ).toBeDisabled();
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Chiudi', exact: true }),
+      ).toBeDisabled();
+      await user.keyboard.press('Escape');
+      await user.keyboard.press('Enter');
+      await browserExpect(dialog()).toBeVisible();
+      expect(attempts).toBe(1);
+      release();
+      await browserExpect(dialog().getByRole('alert')).toBeVisible();
+      expect(attempts).toBe(1);
+      for (const name of names) expect(remote.has(name)).toBe(true);
+      await dialog().getByRole('button', { name: 'Annulla', exact: true }).click();
+      await open();
+      await dialog().getByRole('button', { name: 'Elimina', exact: true }).click();
+      await browserExpect(dialog()).not.toBeVisible();
+      expect(attempts).toBe(2);
+      for (const name of names) expect(remote.has(name)).toBe(false);
+    } finally {
+      release();
+      await user.unroute('**/files');
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
   it('extracts a ZIP into a new folder and moves files by folder and breadcrumb drops', async () => {
     await user.reload();
     await menu('selection.zip');

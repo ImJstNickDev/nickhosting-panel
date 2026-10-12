@@ -484,6 +484,13 @@ show no empty-state label. Summaries
 show the first three selected names and a localized remaining count. File dialogs
 use a compact X with an accessible Close label.
 
+Delete uses the same centered confirmation layout: bounded name summary, explicit
+irreversible-content warning, neutral Cancel and red Delete buttons with 48px
+targets. The Delete button itself confirms the operation; no additional generic
+checkbox is required. Initial focus stays on the safe Close control. Pending
+requests disable Cancel/Close/Delete and block Escape; failures remain visible
+without automatically repeating the deletion.
+
 Toolbar/context-menu moves and folder/parent/breadcrumb drops share one conflict
 flow. Drops move directly when fresh metadata has no collision. Otherwise the
 current conflicting filename and destination appear in a centered confirmation

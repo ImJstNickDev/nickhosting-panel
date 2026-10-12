@@ -191,12 +191,16 @@ export function ActionForm({
   submitLabel,
   success,
   className,
+  onCancel,
+  destructive = false,
 }: {
   onSubmit: (data: FormData) => Promise<unknown>;
   children: ReactNode;
   submitLabel?: string;
   success?: string | false;
   className?: string;
+  onCancel?: () => void;
+  destructive?: boolean;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -236,7 +240,12 @@ export function ActionForm({
       )}
       <fieldset disabled={busy}>{children}</fieldset>
       <div className="form-footer">
-        <button type="submit" disabled={busy}>
+        {onCancel && (
+          <button type="button" className="secondary" disabled={busy} onClick={onCancel}>
+            {t('web.cancel')}
+          </button>
+        )}
+        <button type="submit" disabled={busy} className={destructive ? 'danger' : undefined}>
           {busy ? t('web.pending') : (submitLabel ?? t('web.save'))}
         </button>
         {done && success !== false && <span role="status">{success ?? t('web.saved')}</span>}

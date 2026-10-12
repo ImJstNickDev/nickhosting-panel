@@ -5363,3 +5363,24 @@ game-server asset, infrastructure change or explicit restart occurred. No new
 dependencies or migrations; rollback is a code revert. Existing non-atomic Wings
 batch limitations remain documented; no automatic replay or rollback guarantee is
 introduced. PR#21 stays OPEN/unmerged; SFTPGo#18 remains a release gate.
+
+
+### 2026-10-12 — Consistent file Delete confirmation
+
+File deletion now uses the same centered title, spacing, bounded name summary,
+quiet X and large action buttons as the move conflict dialogs. Cancel is neutral;
+Delete is red and provides explicit confirmation in place of the generic checkbox.
+The irreversible-content warning and backend `confirm:true` remain. Initial focus
+stays on Close; pending requests prevent dismissal and duplicate submission.
+ActionForm's cancellation/destructive options are opt-in; other forms keep defaults.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts apps/web/tests/services.browser.test.ts -t 'confirms file deletion|creates, edits, renames and deletes' --reporter verbose --hideSkippedTests`: **2 passed**,47 unrelated skipped. Covers EN desktop/IT mobile with zero applicable axe violations, safe focus, Cancel/X/Escape without mutation, held-request guards, visible simulated503 without automatic replay, and exact confirmed fixture deletion. Existing editing/rename/focus behavior also passed.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` and `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed; existing bundle-size advisory remains. Changed-file Biome, diff and staged governance passed. No translation keys changed or historical full-suite rerun.
+
+Reviewed [EN desktop](screenshots/m5/file-delete-desktop-en.png) and
+[IT mobile](screenshots/m5/file-delete-mobile-it.png) screenshots. Independent
+technical/accessibility/content review found no must-fix issue. Tests used real
+handlers, provider fixtures and existing approved isolated services; their own
+schemas/staging were disposed. No live-provider mutation, game-server asset,
+container restart or infrastructure change. No API, migration or dependency change;
+rollback is a code revert. PR#21 stays OPEN/unmerged; SFTPGo#18 remains a release gate.

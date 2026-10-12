@@ -16,16 +16,7 @@ import { api, download, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
-import {
-  ActionForm,
-  Check,
-  Dialog,
-  Empty,
-  ErrorNotice,
-  Input,
-  Time,
-  text,
-} from '../components/ui.js';
+import { ActionForm, Dialog, Empty, ErrorNotice, Input, Time, text } from '../components/ui.js';
 import {
   type FileOrder,
   fileBreadcrumbs,
@@ -1928,6 +1919,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       {moveFlow.dialog}
       <Dialog
         open={Boolean(mode) && !editing}
+        className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
         title={t(
           mode === 'mkdir'
             ? 'service.newFolder'
@@ -1946,6 +1938,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         <ActionForm
           key={`${mode}:${targets.join(',')}`}
           success={false}
+          destructive={mode === 'delete'}
+          onCancel={mode === 'delete' ? closeEditor : undefined}
           submitLabel={t(
             mode === 'delete'
               ? 'web.delete'
@@ -2016,9 +2010,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           )}
           {mode === 'delete' && (
             <>
-              <p>{t('file.deleteWarning', { count: targets.length })}</p>
               <FileSelectionSummary names={targets} />
-              <Check label={t('web.confirm')} required />
+              <p>{t('file.deleteWarning', { count: targets.length })}</p>
             </>
           )}
           {mode === 'extract' && <p>{t('file.extractWarning')}</p>}
