@@ -524,16 +524,19 @@ The explicit pre-effect `operation_busy` response keeps the same file waiting an
 retries with a short bounded backoff; exhaustion preserves it at the head of the
 queue for Check and resume. Cancelling during that wait removes only that item.
 The retry loop adds no availability polling during backoff; normal view refreshes remain.
-Other submitted failures/cancellations refresh admission before continuing. Shared-state
-failures pause the untouched queue even when availability reads look ready; the
+Shared-state failures pause the untouched queue even when availability reads look ready; the
 localized Check and resume action checks admission again without replaying failed
 or uncertain writes. A paused queue stays in the current Files view and warns before tab close/reload;
-in-app navigation away also discards it. It is not durable across reloads. Queued cancellation does not imply partial remote
-files, while submitted cancellation keeps that caution. Directory uploads are not
-silently flattened.
+in-app navigation away also discards it. It is not durable across reloads.
+Completed and confirmed-cancelled rows disappear automatically; failed or uncertain
+uploads remain visible with their error. The queue has no manual clear-finished
+link or generic partial-file warning. Active cancellation waits for backend
+settlement before removing its row; uncertainty is not relabeled as cancellation.
+The section disappears when no queued, active or failed entries remain.
+Directory uploads are not silently flattened.
 
-Uploads remain sequential and complete only after the API confirms the provider
-transfer. Display-list refreshes run separately and are coalesced during the
+Uploads use the Owner-configured concurrency and complete only after the API
+confirms the provider transfer. Display-list refreshes run separately and are coalesced during the
 queue, with a final refresh on completion or pause; a slow or failed listing
 does not delay the next upload or reclassify a confirmed upload as failed.
 Folder entries request the API's no-overwrite preflight rather than fetching

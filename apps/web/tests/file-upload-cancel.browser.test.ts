@@ -153,6 +153,18 @@ describe('M5 parallel file upload batches', () => {
       mimeType: 'text/plain',
       buffer: Buffer.from(`contents ${index + 1}`),
     }));
+  async function completed(files: ReturnType<typeof batch>) {
+    await browserExpect
+      .poll(
+        async () => {
+          const remote = await provider.files();
+          return files.every((file) => remote.get(file.name)?.equals(file.buffer));
+        },
+        { timeout: 30000 },
+      )
+      .toBe(true);
+    for (const file of files) await browserExpect(row(file.name)).toHaveCount(0);
+  }
   async function choose(files: ReturnType<typeof batch>) {
     await user.goto(base);
     await browserExpect(user.getByRole('button', { name: 'Upload', exact: true })).toHaveAttribute(
@@ -170,16 +182,17 @@ describe('M5 parallel file upload batches', () => {
     holds.add(first);
     await choose(files);
     await browserExpect.poll(() => pending.has(first)).toBe(true);
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(48, {
-      timeout: 30000,
-    });
+    await completed(files.slice(1));
+    await browserExpect(queue().locator('li')).toHaveCount(1);
     expect(maximumActive).toBe(2);
     expect(requests).toEqual(files.map((file) => file.name));
     expect(statusRequests).toEqual([]);
     pending.get(first)?.release();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(49);
+    await completed(files);
+    await browserExpect(queue()).toHaveCount(0);
     const remote = await provider.files();
     for (const file of files) expect(remote.get(file.name)).toEqual(file.buffer);
+    await user.getByRole('searchbox', { name: 'Search this folder' }).fill('parallel-refill-49');
     await harness.screenshot(user, 'file-upload-parallel-complete-en-desktop');
   });
   it('starts the large transfer first and drains small files without waiting for it', async () => {
@@ -192,11 +205,13 @@ describe('M5 parallel file upload batches', () => {
     holds.add(large.name);
     await choose([...small, large]);
     await browserExpect.poll(() => pending.has(large.name)).toBe(true);
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
+    await completed(small);
+    await browserExpect(queue().locator('li')).toHaveCount(1);
     expect(requests[0]).toBe(large.name);
     expect(maximumActive).toBe(2);
     pending.get(large.name)?.release();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(4);
+    await completed([...small, large]);
+    await browserExpect(queue()).toHaveCount(0);
   });
   it('respects configured concurrency and cancels a queued file independently', async () => {
     await owner.goto(`${harness.origin}/owner/settings`);
@@ -220,10 +235,12 @@ describe('M5 parallel file upload batches', () => {
     await row(cancelled)
       .getByRole('button', { name: `Cancel upload of ${cancelled}` })
       .click();
+    await browserExpect(row(cancelled)).toHaveCount(0);
     expect(maximumActive).toBe(3);
     expect(requests).toEqual(files.slice(0, 3).map((file) => file.name));
     for (const entry of pending.values()) entry.release();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(4);
+    await completed(files.filter((file) => file.name !== cancelled));
+    await browserExpect(queue()).toHaveCount(0);
     expect(requests).not.toContain(cancelled);
     expect((await provider.files()).has(cancelled)).toBe(false);
     await journeyRequest(
@@ -245,7 +262,8 @@ describe('M5 parallel file upload batches', () => {
       .click();
     await browserExpect(row(cancelled)).toContainText('Failed');
     await browserExpect(row(cancelled).getByRole('alert')).toBeVisible();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(7);
+    await completed(files.slice(1));
+    await browserExpect(queue().locator('li')).toHaveCount(1);
     expect(requests.filter((path) => path === cancelled)).toHaveLength(1);
     expect((await provider.files()).has(cancelled)).toBe(false);
     await browserExpect(queue().getByRole('button', { name: 'Check and resume' })).toBeVisible();
@@ -274,11 +292,19 @@ describe('M5 parallel file upload batches', () => {
     await browserExpect(queue().getByText('Waiting for server', { exact: true })).toHaveCount(2);
     expect(requests).toEqual(cancelled.map((file) => file.name));
     pending.get(cancelled[0]?.name ?? '')?.release();
-    await browserExpect(row(cancelled[0]?.name ?? '')).toContainText('Cancelled');
+    await browserExpect(row(cancelled[0]?.name ?? '')).toHaveCount(0);
     await browserExpect(row(cancelled[1]?.name ?? '')).toContainText('Waiting for server');
     expect(requests).toEqual(cancelled.map((file) => file.name));
     pending.get(cancelled[1]?.name ?? '')?.release();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
+    try {
+      await completed(next);
+    } catch (failure) {
+      throw new Error(
+        JSON.stringify({ requests, queue: await queue().innerText().catch(() => '') }),
+        { cause: failure },
+      );
+    }
+    await browserExpect(queue()).toHaveCount(0);
     await browserExpect(queue().getByRole('button', { name: 'Check and resume' })).toHaveCount(0);
     expect(requests).toEqual([...cancelled, ...next].map((file) => file.name));
     expect(refusedStatus).toBe(true);
@@ -305,13 +331,23 @@ describe('M5 parallel file upload batches', () => {
   });
   it('does not retry an uncertain file or cancel its siblings', async () => {
     const files = batch('parallel-failed', 7),
-      failed = files[0]?.name ?? '';
+      failed = files[0]?.name ?? '',
+      progressing = files[1]?.name ?? '';
     holds.add(failed);
+    holds.add(progressing);
     await choose(files);
-    await browserExpect.poll(() => pending.has(failed)).toBe(true);
+    await browserExpect.poll(() => pending.size).toBe(2);
     pending.get(failed)?.fail();
     await browserExpect(row(failed)).toContainText('Failed');
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(6);
+    await browserExpect(row(progressing)).toBeVisible();
+    await browserExpect(
+      queue().getByRole('button', { name: 'Clear finished uploads' }),
+    ).toHaveCount(0);
+    await user.getByRole('searchbox', { name: 'Search this folder' }).fill('parallel-failed');
+    await harness.screenshot(user, 'file-upload-failed-pending-en-desktop');
+    pending.get(progressing)?.release();
+    await completed(files.slice(1));
+    await browserExpect(queue().locator('li')).toHaveCount(1);
     expect(requests.filter((path) => path === failed)).toHaveLength(1);
     const remote = await provider.files();
     for (const file of files.slice(1)) expect(remote.get(file.name)).toEqual(file.buffer);
@@ -331,7 +367,8 @@ describe('M5 parallel file upload batches', () => {
     });
     const files = batch('parallel-busy', 3);
     await choose(files);
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
+    await completed(files);
+    await browserExpect(queue()).toHaveCount(0);
     expect(ids).toHaveLength(3);
     expect(new Set(ids).size).toBe(1);
     expect(requests).toEqual(files.map((file) => file.name));
@@ -378,11 +415,13 @@ describe('M5 parallel file upload batches', () => {
         },
       });
     });
-    await choose(batch('lost-preparation', 3));
+    const files = batch('lost-preparation', 3);
+    await choose(files);
     await browserExpect(queue().getByRole('button', { name: 'Check and resume' })).toBeVisible();
     expect(requests).toEqual([]);
     await queue().getByRole('button', { name: 'Check and resume' }).click();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
+    await completed(files);
+    await browserExpect(queue()).toHaveCount(0);
     expect(ids).toHaveLength(2);
     expect(new Set(ids).size).toBe(1);
     expect(new Set(requests).size).toBe(3);
@@ -405,7 +444,8 @@ describe('M5 parallel file upload batches', () => {
       .getByRole('button', { name: `Cancel upload of ${cancelled}` })
       .click();
     const attempts = requests.filter((path) => path === cancelled).length;
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(2);
+    await completed(files.slice(1));
+    await browserExpect(queue()).toHaveCount(0);
     expect(requests.filter((path) => path === cancelled)).toHaveLength(attempts);
     expect((await provider.files()).has(cancelled)).toBe(false);
   });
@@ -440,6 +480,7 @@ describe('M5 parallel file upload batches', () => {
       )
       .toBe(0);
     expect(requests).toEqual([]);
+    await browserExpect(queue()).toHaveCount(0);
     await browserExpect(user.getByRole('button', { name: 'Upload', exact: true })).toHaveAttribute(
       'aria-disabled',
       'false',
@@ -466,7 +507,8 @@ describe('M5 parallel file upload batches', () => {
     expect(requests).toEqual(Array<string>(5).fill(waiting));
     reject = false;
     await queue().getByRole('button', { name: 'Check and resume' }).click();
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
+    await completed(files);
+    await browserExpect(queue()).toHaveCount(0);
     expect(requests.slice(5)).toEqual(files.map((file) => file.name));
   });
   it('renders independent progress and cancellation accessibly in Italian on mobile', async () => {
@@ -481,6 +523,9 @@ describe('M5 parallel file upload batches', () => {
     );
     await user.locator('input[type="file"]:not([webkitdirectory])').setInputFiles(files);
     await browserExpect.poll(() => pending.size).toBe(2);
+    await user
+      .getByRole('searchbox', { name: 'Cerca in questa cartella' })
+      .fill('italian-parallel');
     await queue()
       .getByRole('button', { name: `Annulla caricamento di ${files[0]?.name}` })
       .focus();
@@ -493,6 +538,8 @@ describe('M5 parallel file upload batches', () => {
       true,
     );
     for (const entry of pending.values()) entry.release();
-    await browserExpect(queue().getByText('Completato', { exact: true })).toHaveCount(3);
+    await completed(files);
+    await browserExpect(queue()).toHaveCount(0);
+    await harness.screenshot(user, 'file-upload-cleared-it-mobile');
   });
 });

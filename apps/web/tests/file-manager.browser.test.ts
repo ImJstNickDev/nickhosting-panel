@@ -1543,7 +1543,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       { name: 'upload-a.txt', mimeType: 'text/plain', buffer: Buffer.from('one') },
       { name: 'upload-b.txt', mimeType: 'text/plain', buffer: Buffer.from('two') },
     ]);
-    await browserExpect(user.getByText('Completed', { exact: true })).toHaveCount(2);
+    await browserExpect
+      .poll(async () => (await provider.files()).get('upload-b.txt')?.toString())
+      .toBe('two');
+    await browserExpect(user.locator('.fm-uploads')).toHaveCount(0);
     expect((await provider.files()).get('upload-a.txt')?.toString()).toBe('one');
     expect((await provider.files()).get('upload-b.txt')?.toString()).toBe('two');
     await user.getByLabel('Choose file', { exact: true }).setInputFiles({
@@ -1554,9 +1557,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(dialog()).toContainText('Existing content will be lost');
     expect((await provider.files()).get('upload-a.txt')?.toString()).toBe('one');
     await dialog().getByRole('button', { name: 'Replace and upload', exact: true }).click();
-    await browserExpect(user.getByText('Completed', { exact: true })).toHaveCount(3);
-    expect((await provider.files()).get('upload-a.txt')?.toString()).toBe('replacement');
-    await user.getByRole('button', { name: 'Clear finished uploads', exact: true }).click();
+    await browserExpect
+      .poll(async () => (await provider.files()).get('upload-a.txt')?.toString())
+      .toBe('replacement');
+    await browserExpect(user.locator('.fm-uploads')).toHaveCount(0);
   });
   it('uploads a whole folder with nested paths and rejects an existing folder without overwriting', async () => {
     await user.goto(base);
@@ -1570,7 +1574,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       user.getByRole('button', { name: 'Upload folder', exact: true }),
     ).toHaveAttribute('aria-disabled', 'false');
     await picker.setInputFiles(local);
-    await browserExpect(user.getByText('Completed', { exact: true })).toHaveCount(3);
+    await browserExpect
+      .poll(async () => (await provider.files()).get('client-pack/nested/地図/data.bin'))
+      .toEqual(Buffer.from([0, 255, 12, 7]));
+    await browserExpect(user.locator('.fm-uploads')).toHaveCount(0);
     const remote = await provider.files();
     expect(remote.get('client-pack/notes.txt')?.toString()).toBe('folder notes');
     expect(remote.get('client-pack/nested/地図/data.bin')).toEqual(Buffer.from([0, 255, 12, 7]));

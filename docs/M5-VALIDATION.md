@@ -6051,3 +6051,34 @@ source watchers load the correction. No manual restart, new infrastructure or
 live test asset. Rollback is a source revert without migration; reverting does not
 recreate the manually recovered stale reservation. PR #21 remains open/unmerged,
 and SFTPGo issue #18 remains a separate production-release blocker.
+
+## 2026-10-12 — automatically clear finished upload rows
+
+Completed and confirmed-cancelled uploads now disappear from the visible queue;
+failed/uncertain entries stay visible alongside pending transfers. Removed the
+clear-finished link and partial-file disclaimer, with EN/IT/pseudolocale catalogs
+updated. An empty queue hides its section. Backend settlement, cancellation and
+retry behavior are unchanged.
+
+Independent review caught an initial UI approach that discarded completed state:
+it would lose overwrite confirmation before a slow directory listing refreshed.
+The final change filters visible rows while preserving that existing state and
+guard. A browser regression holds the stale listing and verifies that uploading
+the same filename still requires replacement consent. Final review found no
+remaining source must-fix.
+
+Validation uses the existing approved isolated M2 database/Redis stack, real
+application handlers and browser, and fixture provider effects. Browser command
+prefix: `LD_LIBRARY_PATH="$HOME/.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu" scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+
+- Prefix + `apps/web/tests/file-upload-cancel.browser.test.ts`: **12 passed, one timeout** while awaiting the next batch after two cancellations. Prefix + the same file + `-t 'waits for both active cancellations'`: **1 passed, 12 skipped**, without product or test-behavior changes (only failure diagnostics added). The first timeout's exact cause is unconfirmed; this is not a claim of a clean single full-file run.
+- Prefix + `apps/web/tests/file-upload-refresh.browser.test.ts apps/web/tests/file-manager.browser.test.ts apps/web/tests/services.browser.test.ts -t 'M5 uploads coalesce|uploads multiple files sequentially|uploads a whole folder|streams a 12 MiB binary'`: **9 passed, 46 skipped**. Includes held/failed listings, directory changes, uploads with collisions, replacement confirmation, folder uploads and binary transfer integrity.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm i18n:compile`, `scripts/dev.sh pnpm i18n:check`: passed; 1,240 keys in each compiled locale. Changed-source/test Biome exits zero with three pre-existing non-null-assertion warnings in `services.browser.test.ts`. Diff and indexed governance checks passed. No historical backend/milestone suite rerun.
+
+Real rendered screenshots independently reviewed: [cleared desktop queue](screenshots/m5/file-upload-auto-clear-en-desktop.png), [failed and pending transfers](screenshots/m5/file-upload-failed-pending-en-desktop.png), [cleared Italian mobile queue](screenshots/m5/file-upload-cleared-it-mobile.png). Previous screenshots and failure evidence are retained.
+
+Only WebPanel presentation, translations and tests changed. Existing Vite HMR loads
+the update; no container restart, provider operation, production mutation or new
+live asset. Test fixtures clean their isolated schemas/files. Rollback is a source
+revert, without migration or data reset. M5 PR #21 remains open and unmerged;
+SFTPGo #18 is unchanged.

@@ -78,6 +78,17 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
   async function choose(files: ReturnType<typeof batch>) {
     await user.locator('input[type="file"]:not([webkitdirectory])').setInputFiles(files);
   }
+  async function completed(files: ReturnType<typeof batch>, directory = '') {
+    await browserExpect
+      .poll(
+        async () => {
+          const remote = await provider.files();
+          return files.every((file) => remote.get(`${directory}${file.name}`)?.equals(file.buffer));
+        },
+        { timeout: 30000 },
+      )
+      .toBe(true);
+  }
 
   async function holdFirstListing() {
     let held: { route: Route; body: unknown } | undefined;
@@ -104,12 +115,16 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
     try {
       await choose(files);
       await browserExpect.poll(listing.ready).toBe(true);
-      await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(49, {
-        timeout: 30000,
-      });
+      await completed(files);
+      await browserExpect(queue()).toHaveCount(0);
       expect(uploads).toHaveLength(49);
       // No second listing starts while the first is in flight, and writes continue.
       expect(listings).toEqual(['']);
+      // Completed rows disappear, but a stale listing must not bypass replacement consent.
+      await choose(files.slice(0, 1));
+      await browserExpect(user.getByRole('dialog')).toContainText('Existing content will be lost');
+      await user.keyboard.press('Escape');
+      expect(uploads).toHaveLength(49);
       await listing.release();
       await browserExpect(entry('coalesced-49.txt')).toHaveCount(1);
       expect(listings).toEqual(['', '']);
@@ -131,7 +146,8 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
         : route.continue(),
     );
     await choose(files);
-    await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(6);
+    await completed(files);
+    await browserExpect(queue()).toHaveCount(0);
     await browserExpect(queue().getByText('Failed', { exact: true })).toHaveCount(0);
     await browserExpect(user.locator('.fm-list-error').getByRole('alert')).toBeVisible();
     expect(uploads).toHaveLength(6);
@@ -151,10 +167,12 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
     (await provider.files()).set('world/inside.txt', Buffer.from('Inside world'));
     await open();
     const listing = await holdFirstListing();
+    const files = batch('navigation', 4);
     try {
-      await choose(batch('navigation', 4));
+      await choose(files);
       await browserExpect.poll(listing.ready).toBe(true);
-      await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(4);
+      await completed(files);
+      await browserExpect(queue()).toHaveCount(0);
       await entry('world').getByRole('button', { name: 'world', exact: true }).click();
       await browserExpect(entry('inside.txt')).toHaveCount(1);
       await listing.release();
@@ -179,10 +197,12 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
   it('cancels a held listing on workspace unmount without a late follow-up and remounts with current files', async () => {
     await open();
     const listing = await holdFirstListing();
+    const files = batch('unmounted', 3);
     try {
-      await choose(batch('unmounted', 3));
+      await choose(files);
       await browserExpect.poll(listing.ready).toBe(true);
-      await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(3);
+      await completed(files);
+      await browserExpect(queue()).toHaveCount(0);
       await user.getByRole('link', { name: 'Servers', exact: true }).first().click();
       await browserExpect(
         user.getByRole('heading', { name: 'Servers', exact: true }),
@@ -234,7 +254,14 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
       await entry(folder).getByRole('button', { name: folder, exact: true }).click();
       await browserExpect.poll(() => Boolean(held)).toBe(true);
       releaseUpload();
-      await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(2);
+      await completed(
+        [
+          { name: 'first.txt', mimeType: 'text/plain', buffer: Buffer.from('first') },
+          { name: 'last.txt', mimeType: 'text/plain', buffer: Buffer.from('last') },
+        ],
+        `${folder}/`,
+      );
+      await browserExpect(queue()).toHaveCount(0);
       await held?.route.fulfill({ json: held.body });
       await browserExpect(entry('last.txt')).toHaveCount(1);
       expect(listings.filter((path) => path === folder)).toHaveLength(2);
@@ -262,7 +289,8 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
     };
     try {
       await user.locator('input[webkitdirectory]').setInputFiles(local);
-      await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(7);
+      await completed(files, `${folder}/`);
+      await browserExpect(queue().locator('li')).toHaveCount(1);
       await browserExpect(queue().getByText('Failed', { exact: true })).toHaveCount(1);
       await browserExpect(queue().getByRole('alert')).toContainText('already exists');
       expect(uploads).toHaveLength(7);

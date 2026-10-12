@@ -98,7 +98,10 @@ describe('M5 browser files, backups, console and automation', () => {
       mimeType: 'application/octet-stream',
       buffer: bytes,
     });
-    await browserExpect(user.getByText('Completed', { exact: true })).toBeVisible();
+    await browserExpect
+      .poll(async () => (await provider.files()).get('world-export.bin')?.equals(bytes))
+      .toBe(true);
+    await browserExpect(user.locator('.fm-uploads')).toHaveCount(0);
     expect(
       createHash('sha256')
         .update((await provider.files()).get('world-export.bin')!)

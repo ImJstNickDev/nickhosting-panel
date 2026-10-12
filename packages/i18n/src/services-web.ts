@@ -150,7 +150,6 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   ],
   'file.noMatches': ['No matching files', 'Nessun file corrispondente'],
   'file.dropHere': ['Drop files to upload', 'Rilascia i file per caricarli'],
-  'file.clearFinished': ['Clear finished uploads', 'Rimuovi caricamenti conclusi'],
   'file.cancelUpload': ['Cancel upload of {name}', 'Annulla caricamento di {name}'],
   'file.uploadQueueChecking': [
     'Checking upload availability…',
@@ -170,11 +169,7 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'file.upload.uploading': ['Uploading', 'Caricamento'],
   'file.upload.confirming': ['Confirming upload', 'Conferma caricamento'],
   'file.upload.complete': ['Completed', 'Completato'],
-  'file.upload.cancelledQueued': ['Cancelled', 'Annullato'],
-  'file.upload.cancelled': [
-    'Cancelled · verify partial files',
-    'Annullato · verifica eventuali file parziali',
-  ],
+  'file.upload.cancelled': ['Cancelled', 'Annullato'],
   'file.upload.failed': ['Failed', 'Non riuscito'],
   'file.replaceTitle': ['Replace existing files?', 'Sostituire i file esistenti?'],
   'file.replaceWarning': [

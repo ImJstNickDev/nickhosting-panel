@@ -72,7 +72,6 @@ type UploadItem = {
   directory: string;
   path: string;
   exclusive: boolean;
-  submitted: boolean;
   sent: number;
   speed: number;
   status: 'queued' | 'waiting' | 'uploading' | 'confirming' | 'complete' | 'cancelled' | 'failed';
@@ -1179,7 +1178,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               try {
                 for (let attempt = 0; isCurrent() && !controller.signal.aborted; attempt++) {
                   const start = performance.now();
-                  updateUpload(item.id, { status: 'uploading', submitted: true, error: undefined });
+                  updateUpload(item.id, { status: 'uploading', error: undefined });
                   try {
                     await upload(
                       `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}${item.exclusive ? '&overwrite=false' : ''}&batchId=${encodeURIComponent(batch.id)}&entryId=${item.id}`,
@@ -1211,7 +1210,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       const delay = uploadBusyRetryDelays[attempt];
                       updateUpload(item.id, {
                         status: delay === undefined ? 'queued' : 'waiting',
-                        submitted: false,
                         sent: 0,
                         speed: 0,
                       });
@@ -1285,7 +1283,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       directory: target,
       path: paths?.[index] ?? join(target, file.name),
       exclusive: Boolean(paths),
-      submitted: false,
       sent: 0,
       speed: 0,
       status: 'queued' as const,
@@ -1404,6 +1401,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     } else activeUploads.current.get(id)?.abort();
   }
   const totalSelected = selected.size;
+  // Keep completed paths for overwrite confirmation when a listing is still stale;
+  // show only pending transfers and failures in the queue.
+  const visibleUploads = uploads.filter(
+    (item) => item.status !== 'complete' && item.status !== 'cancelled',
+  );
   const uploadsBusy = uploads.some((item) =>
     ['queued', 'waiting', 'uploading', 'confirming'].includes(item.status),
   );
@@ -2247,23 +2249,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           </button>
         </div>
       )}
-      {uploads.length > 0 && (
+      {visibleUploads.length > 0 && (
         <section className="fm-uploads" aria-label={t('web.upload')}>
           <header>
             <strong>{t('web.upload')}</strong>
-            <button
-              type="button"
-              className="text-button"
-              onClick={() =>
-                setUploads((items) =>
-                  items.filter((item) =>
-                    ['queued', 'waiting', 'uploading', 'confirming'].includes(item.status),
-                  ),
-                )
-              }
-            >
-              {t('file.clearFinished')}
-            </button>
           </header>
           {uploadPause && (
             <div className="notice">
@@ -2287,17 +2276,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             </div>
           )}
           <ul>
-            {uploads.map((item) => (
+            {visibleUploads.map((item) => (
               <li key={item.id}>
                 <div className="fm-upload-name">
                   <span>{item.path.slice(item.directory ? item.directory.length + 1 : 0)}</span>
-                  <span>
-                    {t(
-                      item.status === 'cancelled' && !item.submitted
-                        ? 'file.upload.cancelledQueued'
-                        : `file.upload.${item.status}`,
-                    )}
-                  </span>
+                  <span>{t(`file.upload.${item.status}`)}</span>
                   {['queued', 'waiting', 'uploading', 'confirming'].includes(item.status) && (
                     <button
                       type="button"
