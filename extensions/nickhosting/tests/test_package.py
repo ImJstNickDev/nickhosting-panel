@@ -61,9 +61,9 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.2.0', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.2.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.2.0</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'version: 1.3.0', archive.read('conf.yml'))
+            self.assertIn(b"'extensionVersion' => '1.3.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'<small>1.3.0</small>', archive.read('admin/view.blade.php'))
 
     def test_client_upload_route_and_authorization_packaged(self):
         packager.build(self.source, self.output)
@@ -75,6 +75,19 @@ class PackageTests(unittest.TestCase):
             self.assertIn('app/Http/Requests/UploadUrlsRequest.php', archive.namelist())
             self.assertIn('app/Http/Controllers/UploadUrlsController.php', archive.namelist())
             self.assertIn(b"'bulkUploadUrls' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+
+    def test_client_download_and_settings_routes_packaged(self):
+        packager.build(self.source, self.output)
+        with zipfile.ZipFile(self.output) as archive:
+            route = archive.read('routes/client.php').decode()
+            self.assertIn('/servers/{server}/download-urls', route)
+            self.assertIn('/servers/{server}/transfer-settings', route)
+            self.assertEqual(route.count('->middleware(AuthenticateServerAccess::class)'), 3)
+            for name in ('app/Http/Requests/ClientTransferSettings.php', 'app/Http/Requests/DownloadUrlsRequest.php',
+                         'app/Http/Requests/TransferSettingsRequest.php', 'app/Http/Controllers/DownloadUrlsController.php',
+                         'app/Http/Controllers/TransferSettingsController.php', 'app/Services/ManagedTransferAccess.php'):
+                self.assertIn(name, archive.namelist())
+            self.assertIn(b"'bulkDownloadUrls' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
 
     def test_does_not_overwrite(self):
         self.output.write_text("preserve")

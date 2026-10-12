@@ -18,6 +18,7 @@ export const nickHostingExtensionSchema = z
         serverChangeEvents: z.boolean(),
         technicalAccounts: z.boolean().optional(),
         bulkUploadUrls: z.boolean().optional(),
+        bulkDownloadUrls: z.boolean().optional(),
       })
       .strict(),
   })

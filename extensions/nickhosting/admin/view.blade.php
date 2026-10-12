@@ -1,8 +1,16 @@
 @php
+    $operationalLabels = [
+        'downloadBatchLimit' => ['Download URLs per request', 'URL download per richiesta'],
+        'uploadBatchLimit' => ['Upload URLs per request', 'URL upload per richiesta'],
+        'signedUrlTtlSeconds' => ['Signed URL lifetime (seconds)', 'Durata URL firmati (secondi)'],
+        'webhookBatchLimit' => ['Notifications per delivery job', 'Notifiche per job di consegna'],
+        'webhookConnectTimeoutSeconds' => ['Webhook connection timeout (seconds)', 'Timeout connessione webhook (secondi)'],
+        'webhookTimeoutSeconds' => ['Webhook response timeout (seconds)', 'Timeout risposta webhook (secondi)'],
+    ];
     $italian = str_starts_with(app()->getLocale(), 'it');
 @endphp
 <div class="box box-primary">
-    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.2.0</small></h3></div>
+    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.3.0</small></h3></div>
     <div class="box-body">
         <ul>
             <li>{{ $italian ? 'Crea account tecnici Pterodactyl separati per gli utenti NickHosting.' : 'Creates separate Pterodactyl technical accounts for NickHosting users.' }}</li>
@@ -11,9 +19,10 @@
             <li>{{ $italian ? 'Notifica le modifiche ai limiti e all’identità dei server collegati tramite webhook firmati.' : 'Reports linked-server limit and identity changes through signed webhooks.' }}</li>
             <li>{{ $italian ? 'Fornisce snapshot dei limiti e stato delle notifiche per il recupero.' : 'Provides limit snapshots and notification status for recovery.' }}</li>
             <li>{{ $italian ? 'Genera URL Wings firmati per più upload con una sola richiesta Client API.' : 'Generates signed Wings URLs for multiple uploads in one Client API request.' }}</li>
+            <li>{{ $italian ? 'Prepara URL Wings monouso per più file da scaricare, senza leggerne il contenuto.' : 'Prepares one-use Wings download URLs for multiple files without reading their contents.' }}</li>
         </ul>
         @if (session('nickhosting_saved'))
-            <div class="alert alert-success" role="status">{{ $italian ? 'Impostazione salvata.' : 'Setting saved.' }}</div>
+            <div class="alert alert-success" role="status">{{ $italian ? 'Impostazioni salvate.' : 'Settings saved.' }}</div>
         @endif
         <form method="post" action="{{ $root }}">
             @csrf
@@ -31,6 +40,25 @@
                     <p id="nickhosting-origin-error" class="help-block" role="alert">{{ $errors->first('origin') }}</p>
                 @endif
             </div>
+            <h4>{{ $italian ? 'Trasferimenti e notifiche' : 'Transfers and notifications' }}</h4>
+            @foreach ($operationalDefinitions as $name => $definition)
+                <div class="form-group {{ $errors->has($name) ? 'has-error' : '' }}">
+                    <label for="nickhosting-{{ $name }}">{{ $operationalLabels[$name][$italian ? 1 : 0] }}</label>
+                    <input class="form-control" id="nickhosting-{{ $name }}" name="{{ $name }}" type="number"
+                        min="{{ $definition['min'] }}" max="{{ $definition['max'] }}" step="1" required
+                        value="{{ old($name, $operational[$name]) }}"
+                        aria-describedby="nickhosting-{{ $name }}-help{{ $errors->has($name) ? ' nickhosting-'.$name.'-error' : '' }}"
+                        @if ($errors->has($name)) aria-invalid="true" @endif>
+                    <p id="nickhosting-{{ $name }}-help" class="help-block">{{ $italian ? 'Intervallo' : 'Range' }}:
+                        {{ $definition['min'] }}–{{ $definition['max'] }}. {{ $italian ? 'Predefinito' : 'Default' }}: {{ $definition['default'] }}.</p>
+                    @if ($errors->has($name))
+                        <p id="nickhosting-{{ $name }}-error" class="help-block" role="alert">{{ $errors->first($name) }}</p>
+                    @endif
+                </div>
+            @endforeach
+            <p class="help-block">{{ $italian
+                ? 'I nuovi limiti valgono dalle richieste successive. Gli URL già emessi conservano la scadenza originale. Il timeout di connessione non supera quello di risposta.'
+                : 'New limits apply to subsequent requests. Already-issued URLs keep their original expiry. The connection timeout cannot exceed the response timeout.' }}</p>
             <button type="submit" class="btn btn-primary">{{ $italian ? 'Salva' : 'Save' }}</button>
         </form>
         <p style="margin-top: 16px">{{ $italian

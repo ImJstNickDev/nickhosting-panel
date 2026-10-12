@@ -379,7 +379,7 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     const serverId = c.req.param('id');
-    const id = await service.access(context, serverId, false, async (identifier) => identifier);
+    const id = await service.fileReadAccess(context, serverId, async (identifier) => identifier);
     const path = c.req.query('path') ?? '';
     const filename = posix.basename(relativePath(path));
     const fallback = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');

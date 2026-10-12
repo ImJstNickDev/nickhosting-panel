@@ -317,7 +317,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         const read = () =>
           db
             .selectFrom('managed_servers')
-            .select('id')
+            .selectAll()
             .where('pterodactyl_identifier', '=', identifier)
             .where('deleted_at', 'is', null)
             .executeTakeFirst();
@@ -331,7 +331,15 @@ export async function createManagementRuntime(options: ManagementOptions) {
           timing,
         );
         const create = () =>
-          createPterodactylAdapter({ ...adapterOptions, clientKey: credential.clientApiKey });
+          createPterodactylAdapter({
+            ...adapterOptions,
+            clientKey: credential.clientApiKey,
+            fileDownloadBinding: createHash('sha256')
+              .update(
+                JSON.stringify([directoryServerIdentity(server), credential.credentialRevision]),
+              )
+              .digest('hex'),
+          });
         return timing ? timing.measureSync('file.adapterCreate', create) : create();
       },
     );
@@ -983,8 +991,21 @@ export async function createManagementRuntime(options: ManagementOptions) {
   ) {
     return withAccess(context, serverId, write, work, 'fresh', timing);
   }
-  function listFiles(context: AuthContext, serverId: string, path: string) {
-    return withAccess(context, serverId, false, (id) => adapter.listFiles(id, path), 'directory');
+  async function listFiles(context: AuthContext, serverId: string, path: string) {
+    const { identifier, files } = await withAccess(
+      context,
+      serverId,
+      false,
+      async (identifier) => ({ identifier, files: await adapter.listFiles(identifier, path) }),
+      'directory',
+    );
+    // The authenticated listing is already available. Issuance is optional
+    // background work and must not delay or replace a successful directory response.
+    const paths = files
+      .filter((file) => file.is_file && !file.is_symlink)
+      .map((file) => (path ? `${path}/${file.name}` : file.name));
+    if (paths.length) void adapter.prefetchDownloads(identifier, paths).catch(() => {});
+    return files;
   }
   function fileReadAccess<T>(
     context: AuthContext,

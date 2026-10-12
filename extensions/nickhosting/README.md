@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.2.0**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.3.0**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
@@ -28,7 +28,7 @@ All responses use `Cache-Control: no-store`.
 ### Bulk upload URLs — Client API
 
 `POST /api/client/extensions/nickhosting/servers/{server}/upload-urls` accepts
-`{count:1..500}` and returns `{expiresAt:ISO8601,urls:string[]}`. `{server}` is the
+`{count:1..uploadBatchLimit}` (default/maximum 500) and returns `{expiresAt:ISO8601,urls:string[]}`. `{server}` is the
 native short identifier or UUID. Capability discovery reports `bulkUploadUrls:true`.
 This route uses Blueprint's native Client authentication, IP restrictions and
 rate limiter, plus Pterodactyl's server-state middleware and `file.create`
@@ -39,7 +39,7 @@ The exact server must have a valid extension link, unchanged provider identity
 and owner, and a matching linked non-admin owner account in the same instance.
 Subusers and unrelated or invalidated resources cannot obtain bulk URLs.
 Native `NodeJWTService` generates a different `unique_id` for each upload, all
-with the same 15-minute expiry. There are no Wings calls or file mutations during
+with the same configured expiry (default/maximum 15 minutes). There are no Wings calls or file mutations during
 issuance. The backend keeps these bearer URLs private; do not log, persist in
 public state or return them to browsers. Each URL is consumed once by Wings.
 Issue replacements for unused expired URLs; never replay an uncertain upload
@@ -52,6 +52,60 @@ guarantees. Native signed upload URLs remain server-scoped, not filename-scoped;
 NickHosting's existing upload admission and manifest checks remain responsible
 for per-file access. As with native upload URLs, revoking the Client key does not
 revoke an already-issued Wings token before its expiry.
+
+### Bulk download URLs and transfer settings — Client API
+
+`GET /api/client/extensions/nickhosting/servers/{server}/transfer-settings`
+returns `{downloadBatchLimit,uploadBatchLimit,signedUrlTtlSeconds}` with no cache.
+`POST /api/client/extensions/nickhosting/servers/{server}/download-urls` accepts
+`{paths:string[]}` and returns `{expiresAt:ISO8601,urls:string[]}` in exactly the
+requested order. Capability discovery reports `bulkDownloadUrls:true`.
+Both routes require a real account Client token, native `file.read-content`
+permission, native server-state middleware and the same exact managed owner/link
+checks as bulk uploads. They do not permit subusers, administrators or unrelated
+resources, even if native file permissions would allow them.
+
+Paths must be unique, relative, canonical UTF-8 strings of at most 4096 bytes.
+Leading/trailing slashes, empty/`.`/`..` components, backslashes, percent signs and
+Unicode control/format characters are rejected. The request body is bounded to
+12 MiB and the count to `downloadBatchLimit` (default/maximum 2500). The response
+contains bearer URLs, not file metadata. Each native Wings token permits only its
+exact server and file path, with a unique one-use ID. The leading slash is added
+only to the signed claim; no URL decoding or pathname rewriting occurs.
+
+Signing does not list directories, read files, contact Wings or establish that a
+file exists. NickHosting can reuse its directory listing, prepare URLs in the
+background and replenish only the URL consumed by a read. Transfer settings and
+managed identity are resolved once per request, never inside the token loop.
+The native signer is retained unchanged. URLs must remain backend-only and
+memory-only; cache scoping, consumption and local authorization belong to
+NickHosting. Signature issuance is not evidence that a download occurred, so
+prefetch does not emit misleading per-file download events in the Panel.
+Client-key revocation does not revoke already-issued native Wings URLs before
+expiry; the NickHosting backend must recheck local authorization before use.
+
+### Administrator settings
+
+The extension's administrator page stores these operational values through
+Blueprint's `nickhosting` namespace. Defaults require no migration or reset.
+
+| Setting | Default | Allowed range |
+| --- | --- | --- |
+| `downloadBatchLimit` | 2500 | 1–2500 |
+| `uploadBatchLimit` | 500 | 1–500 |
+| `signedUrlTtlSeconds` | 900 | 60–900 seconds |
+| `webhookBatchLimit` | 10 | 1–10 events/job |
+| `webhookConnectTimeoutSeconds` | 2 | 1–2 seconds |
+| `webhookTimeoutSeconds` | 4 | 1–4 seconds |
+
+Lower batch limits can reduce individual PHP request work. New values apply to
+subsequent requests/jobs; already-issued URLs retain their original expiry.
+Missing fields in older forms preserve their current values, including `origin`;
+an explicitly blank origin still disables notifications. Invalid stored numeric
+values fall back to bounded defaults. The connection timeout is clamped to the
+response timeout. The webhook bounds preserve the existing 60-second job timeout
+and 120-second claim lease; retries, identity checks, permissions and signature
+validation are not optional administrator settings.
 
 Instance UUIDs must be unique per NickHosting environment/provider. An instance
 is pinned to the registering Application token's database ID. Changing that
@@ -104,8 +158,8 @@ The global Laravel service provider listens synchronously to server Updated and
 Deleted events. Relevant changes write an extension outbox in the existing Panel
 transaction. After commit, a normal `standard` queue job attempts delivery.
 Queue publication failure leaves the outbox intact. The existing Panel scheduler
-queues recovery every minute. Each job handles at most ten events, with bounded
-connect/response timeouts and retry backoff up to 15 minutes. Claims expire after
+queues recovery every minute. Each job handles the configured event count (default/maximum ten), with bounded
+configurable connect/response timeouts and retry backoff up to 15 minutes. Claims expire after
 120 seconds; crashes can duplicate delivery but cannot erase an unacknowledged
 event. Events can arrive out of order: consumers must use revisions and resnapshot.
 
@@ -196,13 +250,16 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.2.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.3.0/nickhosting.blueprint`.
 
-Version 1.2.0 adds no database migration. Its bounded upload tests use the installed
-native permission policy, server-state middleware and JWT service with isolated
-model data and an ephemeral signing key. They verify every returned signature,
-expiry and unique consumption ID without contacting Wings. The admin view lists
-the extension's six responsibilities in English and Italian.
+Version 1.2.0 introduced bulk upload URLs. Version 1.3.0 adds bulk path-scoped
+download URLs, transfer settings discovery and configurable operational bounds;
+neither adds a database migration. The transfer tests use the installed native
+permission policy, server-state middleware and JWT service with isolated model
+data and an ephemeral signing key. They verify signatures, exact claims, expiry,
+unique consumption IDs, response ordering, canonical paths, configured limits,
+constant per-batch query count and settings preservation without contacting Wings.
+The admin view lists the extension's seven responsibilities in English and Italian.
 
 ## Upstream reference / licensing
 

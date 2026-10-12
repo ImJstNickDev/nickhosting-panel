@@ -35,7 +35,8 @@ class {identifier}ExtensionController extends Controller
         });
         return $this->view->make('admin.extensions.{identifier}.index', [
             'blueprint' => $this->blueprint, 'version' => $this->version,
-            'root' => '/admin/extensions/{identifier}', 'origin' => $origin, 'instances' => $instances]);
+            'root' => '/admin/extensions/{identifier}', 'origin' => $origin, 'instances' => $instances,
+            'operational' => $this->settings->operational(), 'operationalDefinitions' => Settings::OPERATIONAL]);
     }
 
     public function update(Request $request): RedirectResponse
@@ -43,10 +44,21 @@ class {identifier}ExtensionController extends Controller
         $this->authorizeAdmin($request);
         $italian = str_starts_with(app()->getLocale(), 'it');
         $message = $italian ? 'Inserisci un URL HTTPS senza percorso, credenziali o parametri.' : 'Enter an HTTPS URL without a path, credentials or parameters.';
-        $input = $request->validate(['origin' => ['nullable', 'string', 'max:2048', function ($attribute, $value, $fail) use ($message) {
+        $rules = ['origin' => ['sometimes', 'nullable', 'string', 'max:2048', function ($attribute, $value, $fail) use ($message) {
             if (Settings::normalizeOrigin($value) === null) { $fail($message); }
-        }]]);
-        $this->settings->save($input['origin'] ?? '');
+        }]];
+        foreach (Settings::OPERATIONAL as $name => $definition) {
+            $rules[$name] = ['sometimes', 'required', 'integer', 'min:' . $definition['min'], 'max:' . $definition['max']];
+        }
+        $input = $request->validate($rules);
+        $values = [];
+        foreach (Settings::OPERATIONAL as $name => $definition) {
+            if (array_key_exists($name, $input)) { $values[$name] = (int) $input[$name]; }
+        }
+        DB::transaction(function () use ($input, $values) {
+            if (array_key_exists('origin', $input)) { $this->settings->save($input['origin'] ?? ''); }
+            $this->settings->saveOperational($values);
+        });
         return redirect('/admin/extensions/{identifier}')->with('nickhosting_saved', true);
     }
 }

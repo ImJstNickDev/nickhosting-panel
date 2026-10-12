@@ -5,6 +5,48 @@ use Pterodactyl\BlueprintFramework\Libraries\ExtensionLibrary\Admin\BlueprintAdm
 
 final class Settings
 {
+    // Upper bounds preserve the existing queue timeout/claim budget and token lifetime.
+    public const OPERATIONAL = [
+        'downloadBatchLimit' => ['default' => 2500, 'min' => 1, 'max' => 2500],
+        'uploadBatchLimit' => ['default' => 500, 'min' => 1, 'max' => 500],
+        'signedUrlTtlSeconds' => ['default' => 900, 'min' => 60, 'max' => 900],
+        'webhookBatchLimit' => ['default' => 10, 'min' => 1, 'max' => 10],
+        'webhookConnectTimeoutSeconds' => ['default' => 2, 'min' => 1, 'max' => 2],
+        'webhookTimeoutSeconds' => ['default' => 4, 'min' => 1, 'max' => 4],
+    ];
+
+    public function operational(?array $names = null): array
+    {
+        $library = app(BlueprintAdminLibrary::class);
+        $values = [];
+        foreach ($names ?? array_keys(self::OPERATIONAL) as $name) {
+            $definition = self::OPERATIONAL[$name];
+            $value = $library->dbGet('nickhosting', $name, $definition['default']);
+            $integer = filter_var($value, FILTER_VALIDATE_INT);
+            $values[$name] = $integer !== false && $integer >= $definition['min'] && $integer <= $definition['max']
+                ? $integer : $definition['default'];
+        }
+        return $values;
+    }
+
+    public function transfer(): array
+    {
+        return $this->operational(['downloadBatchLimit', 'uploadBatchLimit', 'signedUrlTtlSeconds']);
+    }
+
+    public function saveOperational(array $values): void
+    {
+        // Validate the whole update before writing anything. Omitted settings are preserved.
+        foreach ($values as $name => $value) {
+            $definition = self::OPERATIONAL[$name] ?? null;
+            if (!$definition || !is_int($value) || $value < $definition['min'] || $value > $definition['max']) {
+                throw new \InvalidArgumentException('Invalid operational setting');
+            }
+        }
+        $library = app(BlueprintAdminLibrary::class);
+        foreach ($values as $name => $value) { $library->dbSet('nickhosting', $name, $value); }
+    }
+
     public static function normalizeOrigin(string $value): ?string
     {
         $value = trim($value);

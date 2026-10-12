@@ -656,7 +656,7 @@ credential is returned to the browser.
 
 | Route | Request/result |
 | --- | --- |
-| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; known binary extensions rejected before reading, actual bytes validated afterward. Reuses the directory identity proof with fresh local authorization; one direct provider content request, no ancestor listings. Wings contains the path and rejects final symlinks. |
+| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; known binary extensions rejected before reading, actual bytes validated afterward. Reuses the directory identity proof with fresh local authorization; a private one-use signed Wings URL (prepared from the listing when available), no ancestor listings. Wings contains the path and rejects final symlinks. |
 | `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
 | `POST /archive` (preferred); `GET /archive?root=...&files=...` (compatible) | POST uses URL-encoded `root` and `files` (JSON array of selected basenames), avoiding long URLs. Actual streamed ZIP, including folders/empty directories; 10,000 enumerated entries including selected roots, 64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
 | `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
@@ -781,3 +781,42 @@ Transfer availability now distinguishes `upload_policy_missing`,
 `provider_account_unavailable` and `upload_observer_unavailable` from an active
 operation/provider failure. The UI explains the applicable reason. Configuration
 remains an Owner action; rendering Files never creates an upload policy.
+
+### Prepared file download URLs (Blueprint 1.3)
+
+Successful authenticated folder listing schedules background preparation for its
+regular, non-symlink files. The listing is returned without awaiting issuance and
+no directory is fetched again for this purpose. The trusted backend batches paths
+through Blueprint; signed bearer URLs never enter browser responses or logs.
+Editor GET uses the prepared Wings read; streamed file downloads share the same
+pool. Editor PUT and other mutation-verification reads retain the native contents
+path and existing revision/game-file checks.
+
+A credential/provider/managed-identity-bound, bounded process cache retains at
+most one available URL per file. Consumption removes it before any competing
+await and starts replacement for that file only. Concurrent consumers receive
+different tokens. Expiry uses a 30-second margin; unused URLs have no renewal
+loop. Missing entries wait for issuance. Rename/delete/reinstall/restore
+invalidate affected entries, including pending results; local authorization and
+transfer revocation checks remain mandatory on every access. Recreating a runtime
+preserves the pool, while credential/identity/origin changes select a new scope.
+The cache is disposable: process restart loses only unused credentials.
+
+The extension exposes authenticated Client `GET /transfer-settings` and
+`POST /download-urls` under `/api/client/extensions/nickhosting/servers/{server}`.
+The latter accepts `{paths:string[]}` and returns `{expiresAt,urls}` in the same
+order. Its count limit defaults to 2500 and is Owner-configurable in Blueprint;
+NickHosting also splits long-path batches by response byte budget. Upload batches
+respect their separately configurable limit (default 500). Token lifetime defaults
+to 900 seconds. Settings are refreshed at most every 60 seconds, with one early
+refresh on a changed-limit rejection. Only a missing old endpoint permits native
+fallback; denied/throttled/malformed responses do not bypass the extension.
+
+Wings 1.11.13 download and contents handlers use the same contained filesystem
+open and final-symlink rejection. Their response handlers are not identical:
+contents additionally checks named pipes and uses its size-limited reader. The
+editor signed-download path therefore retains a timeout, bounded bytes, declared
+length verification and strict text decoding. These checks do not claim that all
+possible provider filesystem types were tested live. Initial cold issuance and
+HTTP latency remain real; the acceleration depends on background preparation
+finishing before the read.

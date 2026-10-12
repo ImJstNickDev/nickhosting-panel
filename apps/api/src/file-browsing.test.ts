@@ -43,9 +43,11 @@ function fixture(serverName = 'Fixture server') {
     ['a.txt', Buffer.from('one')],
     ['folder/b.txt', Buffer.from('two')],
   ]);
+  const readFile = vi.fn(async (_id: string, path: string) => contents.get(path));
   const adapter = {
     listFiles: vi.fn(async (_id: string, path: string) => entries.get(path) ?? []),
-    readFile: vi.fn(async (_id: string, path: string) => contents.get(path)),
+    readFile,
+    readFileForEditor: readFile,
     writeFile: vi.fn(async (_id: string, path: string, text: string) => {
       contents.set(path, Buffer.from(text));
     }),
@@ -592,6 +594,26 @@ describe('editor revisions', () => {
       1048576,
       undefined,
     );
+  });
+  it('uses the prepared editor read without changing the save verification path', async () => {
+    const f = appFixture();
+    f.adapter.readFile = vi.fn(async () => Buffer.from('one'));
+    const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');
+    expect(response.status).toBe(200);
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
+    expect(f.adapter.readFile).not.toHaveBeenCalled();
+    const save = await f.app.request('/v1/servers/abc/files/editor', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: 'a.txt',
+        content: 'one',
+        expectedRevision: fileRevision(Buffer.from('one')),
+      }),
+    });
+    expect(save.status).toBe(200);
+    expect(f.adapter.readFile).toHaveBeenCalledTimes(2);
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
   });
   it('reports a file removed after browsing as not found', async () => {
     const f = appFixture();

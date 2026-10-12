@@ -182,7 +182,12 @@ export function registerFileBrowsingRoutes(
             let bytes: Uint8Array;
             try {
               bytes = await timing.measure('editor.readContent', () =>
-                service.adapter.readFile(id, target, editorMaxBytes, trace ? timing : undefined),
+                service.adapter.readFileForEditor(
+                  id,
+                  target,
+                  editorMaxBytes,
+                  trace ? timing : undefined,
+                ),
               );
             } catch (error) {
               if (error instanceof PterodactylError && error.reason === 'not_found')

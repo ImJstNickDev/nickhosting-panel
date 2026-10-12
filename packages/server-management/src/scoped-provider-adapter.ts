@@ -15,6 +15,9 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   sendCommand: 0,
   listFiles: 0,
   readFile: 0,
+  readFileForEditor: 0,
+  prefetchDownloads: 0,
+  invalidateFileDownloads: 0,
   writeFile: 0,
   deleteFiles: 0,
   createDirectory: 0,
@@ -58,7 +61,7 @@ export function createScopedProviderAdapter(
           const identifier = args[index];
           if (typeof identifier !== 'string' || !identifier) throw new DomainError('forbidden');
           const timing =
-            property === 'readFile'
+            property === 'readFile' || property === 'readFileForEditor'
               ? (args[3] as Parameters<PterodactylAdapter['readFile']>[3])
               : undefined;
           const scoped = timing ? await resolve(identifier, timing) : await resolve(identifier);

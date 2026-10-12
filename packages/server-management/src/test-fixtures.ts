@@ -226,6 +226,7 @@ export async function managementFixture(
     .where('id', '=', nodeId)
     .execute();
   const adapter = {
+    prefetchDownloads: vi.fn(async () => {}),
     listAllocations: vi.fn(async () => structuredClone(inventory)),
     getNode: vi.fn(async () => ({ id: providerNodeId })),
     listUsers: vi.fn(async () => [{ id: 1 }]),

@@ -9,6 +9,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\Protocol;
+use Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\Settings;
 
 final class DeliverChanges implements ShouldQueue
 {
@@ -18,8 +19,9 @@ final class DeliverChanges implements ShouldQueue
 
     public function handle(): void
     {
+        $settings = app(Settings::class)->operational(['webhookBatchLimit', 'webhookConnectTimeoutSeconds', 'webhookTimeoutSeconds']);
         // Claim each event transactionally before I/O; expired claims are retried by scheduler.
-        for ($i = 0; $i < 10; $i++) {
+        for ($i = 0; $i < $settings['webhookBatchLimit']; $i++) {
             $row = DB::transaction(function () {
                 $row = DB::table('nickhosting_outbox')->whereNull('delivered_at')
                     ->where('available_at', '<=', now())->orderBy('created_at')->lockForUpdate()->first();
@@ -36,7 +38,8 @@ final class DeliverChanges implements ShouldQueue
                 $origins = app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\Settings::class)->origins();
                 if (!Protocol::callbackAllowed($instance->callback_url, $origins)) { throw new \RuntimeException('Destination not allowed'); }
                 $timestamp = (string) time();
-                $response = Http::connectTimeout(2)->timeout(4)->withoutRedirecting()->withHeaders([
+                $response = Http::connectTimeout(min($settings['webhookConnectTimeoutSeconds'], $settings['webhookTimeoutSeconds']))
+                    ->timeout($settings['webhookTimeoutSeconds'])->withoutRedirecting()->withHeaders([
                     'X-NickHosting-Timestamp' => $timestamp,
                     'X-NickHosting-Event-Id' => $row->id,
                     'X-NickHosting-Signature' => Protocol::signature(decrypt($instance->secret), $timestamp, $row->payload),

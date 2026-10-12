@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { authSessionId, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
+import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDirectoryIdentityCache } from './directory-identity.js';
 import { createProject, setProjectMember } from './registry.js';
@@ -25,7 +25,7 @@ describe('directory browsing identity proof reuse', () => {
   let cache: ReturnType<typeof createDirectoryIdentityCache>;
   const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
   const remote = vi.fn<() => Promise<ApplicationServer>>();
-  const listing = vi.fn(async (_identifier: string, _directory = '') => []);
+  const listing = vi.fn<PterodactylAdapter['listFiles']>(async () => []);
   const uploaded = vi.fn(async () => 'isolated upload');
   const read = vi.fn(async () => 'isolated file contents');
 
@@ -100,7 +100,7 @@ describe('directory browsing identity proof reuse', () => {
     deferredProofs = [];
     cache = createDirectoryIdentityCache(() => clock);
     remote.mockReset().mockImplementation(identity);
-    listing.mockClear();
+    listing.mockReset().mockResolvedValue([]);
     uploaded.mockReset().mockResolvedValue('isolated upload');
     read.mockClear();
     f.adapter.getApplicationServer = remote;
@@ -118,6 +118,61 @@ describe('directory browsing identity proof reuse', () => {
     for (const path of ['', 'world', 'world/playerdata']) await browse(path);
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing.mock.calls.map((call) => call[1])).toEqual(['', 'world', 'world/playerdata']);
+  });
+
+  it('prefetches only listed regular files without delaying the directory for issuance', async () => {
+    const file = {
+      name: 'a.json',
+      is_file: true,
+      is_symlink: false,
+      size: 10,
+      mode: '0644',
+      mimetype: 'application/json',
+      created_at: '',
+      modified_at: '',
+    };
+    const files = [
+      ...Array.from({ length: 600 }, (_, i) => ({ ...file, name: `file-${i}.json` })),
+      { ...file, name: 'folder', is_file: false },
+      { ...file, name: 'link', is_symlink: true },
+    ];
+    listing.mockResolvedValue(files);
+    const pending = Promise.withResolvers<void>();
+    f.adapter.prefetchDownloads = vi.fn(() => pending.promise);
+    try {
+      expect(await browse('world')).toEqual(files);
+      expect(listing).toHaveBeenCalledTimes(1);
+      expect(f.adapter.prefetchDownloads).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        Array.from({ length: 600 }, (_, i) => `world/file-${i}.json`),
+      );
+    } finally {
+      pending.resolve();
+    }
+  });
+
+  it('does not replace successful listings with optional prefetch failures or prefetch after denied access', async () => {
+    const files = [
+      {
+        name: 'a.txt',
+        is_file: true,
+        is_symlink: false,
+        size: 10,
+        mode: '0644',
+        mimetype: 'text/plain',
+        created_at: '',
+        modified_at: '',
+      },
+    ];
+    listing.mockResolvedValue(files);
+    f.adapter.prefetchDownloads = vi.fn(async () => {
+      throw new Error('unavailable');
+    });
+    expect(await browse()).toEqual(files);
+    await f.db.deleteFrom('session').where('userId', '=', f.context.subjectUserId).execute();
+    await expect(browse()).rejects.toThrow();
+    expect(f.adapter.prefetchDownloads).toHaveBeenCalledTimes(1);
+    expect(listing).toHaveBeenCalledTimes(1);
   });
 
   it('reuses a browsed identity across 49 uploads without reusing upload callbacks', async () => {

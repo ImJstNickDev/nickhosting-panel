@@ -2,12 +2,14 @@ import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { allocationInventory } from './allocations.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
+import { createDownloadPool } from './download-pool.js';
 import {
   allowedOrigin,
   createDownloadProxy,
   type DownloadProxyOptions,
   signedTarget,
 } from './downloads.js';
+import { readEditorDownload } from './editor-download.js';
 import { confirmInstallation } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
@@ -52,6 +54,8 @@ export interface PterodactylOptions extends TransportOptions {
   downloadOrigins?: string[];
   /** Separately approved exact Wings upload origins; never backup/S3 origins. */
   uploadOrigins?: string[];
+  /** Changes whenever the managed provider identity/node or credential revision changes. */
+  fileDownloadBinding?: string;
 }
 export interface PreparedUploadBatch {
   expiresAt: number;
@@ -71,6 +75,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     `${clientServer(identifier)}/backups/${parseInput(z.string().uuid(), backupId)}`;
   const download = createDownloadProxy(options);
   const upload = createUploadProxy(options);
+  const fileDownloads = createDownloadPool(options, transport);
   const uploadOrigins = new Set(
     (options.uploadOrigins ?? []).map((origin) => allowedOrigin(origin, ['http:', 'https:'])),
   );
@@ -268,6 +273,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       identifier: string,
       input: StopConfirmationOptions,
     ): Promise<{ confirmed: boolean }> {
+      fileDownloads.invalidate(identifier);
       return confirmInstallation(
         adapter,
         applicationId,
@@ -276,7 +282,7 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         true,
         300000,
         options.containerObserver,
-      );
+      ).finally(() => fileDownloads.invalidate(identifier));
     },
     stopWithConfirmation(
       applicationId: number,
@@ -304,8 +310,12 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       });
     },
     /** Reinstallation does not imply a wipe; egg installation scripts decide what they replace. */
-    reinstall: (identifier: string) =>
-      transport.empty('client', `${clientServer(identifier)}/settings/reinstall`, 'POST'),
+    reinstall(identifier: string) {
+      fileDownloads.invalidate(identifier);
+      return transport
+        .empty('client', `${clientServer(identifier)}/settings/reinstall`, 'POST')
+        .finally(() => fileDownloads.invalidate(identifier));
+    },
     reinstallApplication: (id: number) =>
       transport.empty('application', `${appServer(id)}/reinstall`, 'POST'),
     sendCommand(identifier: string, command: string) {
@@ -349,6 +359,20 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         throw new PterodactylError('invalid_response', 'client', 'rejected');
       }
     },
+    prefetchDownloads: fileDownloads.prefetch,
+    invalidateFileDownloads: fileDownloads.invalidate,
+    async readFileForEditor(
+      identifier: string,
+      path: string,
+      maxBytes = 1048576,
+      timing?: FileReadTiming,
+    ): Promise<Uint8Array> {
+      parseInput(z.number().int().min(1).max(1048576), maxBytes);
+      const url = timing
+        ? await timing.measure('file.signedUrl', () => fileDownloads.take(identifier, path))
+        : await fileDownloads.take(identifier, path);
+      return readEditorDownload(options, url, maxBytes, timing);
+    },
     writeFile(identifier: string, path: string, contents: string) {
       if (typeof contents !== 'string' || Buffer.byteLength(contents, 'utf8') > 1048576)
         throw new DomainError('validation_failed');
@@ -365,10 +389,21 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       const names = parseInput(z.array(z.string()).min(1).max(1000), files).map((path) =>
         relativePath(path).slice(1),
       );
-      return transport.empty('client', `${clientServer(identifier)}/files/delete`, 'POST', {
-        root: rootPath,
-        files: names,
-      });
+      fileDownloads.invalidate(
+        identifier,
+        names.map((name) => [root, name].filter(Boolean).join('/')),
+      );
+      return transport
+        .empty('client', `${clientServer(identifier)}/files/delete`, 'POST', {
+          root: rootPath,
+          files: names,
+        })
+        .finally(() =>
+          fileDownloads.invalidate(
+            identifier,
+            names.map((name) => [root, name].filter(Boolean).join('/')),
+          ),
+        );
     },
     createDirectory(identifier: string, root: string, name: string) {
       const child = relativePath(name).slice(1);
@@ -389,10 +424,25 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         from: relativePath(from).slice(1),
         to: relativePath(to).slice(1),
       }));
-      return transport.empty('client', `${clientServer(identifier)}/files/rename`, 'PUT', {
-        root: relativePath(root, true),
-        files: moves,
-      });
+      fileDownloads.invalidate(
+        identifier,
+        moves.flatMap(({ from, to }) =>
+          [from, to].map((name) => [root, name].filter(Boolean).join('/')),
+        ),
+      );
+      return transport
+        .empty('client', `${clientServer(identifier)}/files/rename`, 'PUT', {
+          root: relativePath(root, true),
+          files: moves,
+        })
+        .finally(() =>
+          fileDownloads.invalidate(
+            identifier,
+            moves.flatMap(({ from, to }) =>
+              [from, to].map((name) => [root, name].filter(Boolean).join('/')),
+            ),
+          ),
+        );
     },
     listBackups: (identifier: string) =>
       transport.list('client', `${clientServer(identifier)}/backups`, backupSchema),
@@ -457,9 +507,12 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     deleteBackup: (identifier: string, backupId: string) =>
       transport.empty('client', backupPath(identifier, backupId), 'DELETE'),
     restoreBackup(identifier: string, backupId: string, truncate: boolean) {
-      return transport.empty('client', `${backupPath(identifier, backupId)}/restore`, 'POST', {
-        truncate: parseInput(z.boolean(), truncate),
-      });
+      fileDownloads.invalidate(identifier);
+      return transport
+        .empty('client', `${backupPath(identifier, backupId)}/restore`, 'POST', {
+          truncate: parseInput(z.boolean(), truncate),
+        })
+        .finally(() => fileDownloads.invalidate(identifier));
     },
     async downloadBackup(identifier: string, backupId: string, input: DownloadProxyOptions) {
       if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
@@ -472,12 +525,9 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     },
     async downloadFile(identifier: string, path: string, input: DownloadProxyOptions) {
       if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
-      const result = await transport.entity(
-        'client',
-        `${clientServer(identifier)}/files/download?file=${filePath(path)}`,
-        z.object({ url: z.string() }),
-      );
-      return download(result.url, input);
+      await input.authorize?.();
+      const url = await fileDownloads.take(identifier, path);
+      return download(url, input);
     },
     /** Private, single-use upload handoff. URL lookup may overlap read-only
      * preflight; no Wings mutation occurs until the returned function is called. */
@@ -526,36 +576,55 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
           throw new DomainError('validation_failed');
         const endpoint = `extensions/nickhosting/servers/${segment(identifier)}/upload-urls`;
         const guard = createTransferGuard(input, 'rejected');
-        const startedAt = Date.now();
         let result: { expiresAt: string; urls: string[] };
         try {
           await guard.run(() => guard.authorize(true));
-          try {
-            result = await guard.run(() =>
-              transport.json(
-                'client',
-                endpoint,
-                z
-                  .object({
-                    expiresAt: z.string().datetime({ offset: true }),
-                    urls: z.array(z.string().min(1).max(8192)).length(normalized.length),
-                  })
-                  .strict(),
-                'POST',
-                { count: normalized.length },
-              ),
-            );
-          } catch (error) {
-            // Missing old extension endpoint only. Access, throttling and broken
-            // responses are failures, not permission to bypass extension policy.
-            if (error instanceof PterodactylError && error.reason === 'not_found') return null;
-            throw error;
-          }
+          const issue = async (
+            refresh = false,
+          ): Promise<{ expiresAt: string; urls: string[] } | null> => {
+            const settings = await guard.run(() => fileDownloads.settings(identifier, refresh));
+            const urls: string[] = [];
+            let expiresAt = Number.POSITIVE_INFINITY;
+            for (let offset = 0; offset < normalized.length; offset += settings.uploadBatchLimit) {
+              const count = Math.min(settings.uploadBatchLimit, normalized.length - offset);
+              try {
+                const part = await guard.run(() =>
+                  transport.json(
+                    'client',
+                    endpoint,
+                    z.strictObject({
+                      expiresAt: z.string().datetime({ offset: true }),
+                      urls: z.array(z.string().min(1).max(8192)).length(count),
+                    }),
+                    'POST',
+                    { count },
+                  ),
+                );
+                guard.progress();
+                const expiry = Date.parse(part.expiresAt);
+                if (expiry <= Date.now() || expiry > Date.now() + 900_000 + 60_000)
+                  throw new PterodactylError('invalid_response', 'client', 'rejected');
+                expiresAt = Math.min(expiresAt, expiry);
+                urls.push(...part.urls);
+              } catch (error) {
+                // Only an absent endpoint permits the native fallback. A lowered
+                // configured limit gets one settings refresh; no policy downgrade.
+                if (error instanceof PterodactylError && error.reason === 'not_found') return null;
+                if (!refresh && error instanceof PterodactylError && error.upstreamStatus === 422)
+                  return issue(true);
+                throw error;
+              }
+            }
+            return { expiresAt: new Date(expiresAt).toISOString(), urls };
+          };
+          const issued = await issue();
+          if (!issued) return null;
+          result = issued;
         } finally {
           guard.close();
         }
         const expiresAt = Date.parse(result.expiresAt);
-        if (expiresAt <= Date.now() || expiresAt > startedAt + 16 * 60_000)
+        if (expiresAt <= Date.now())
           throw new PterodactylError('invalid_response', 'client', 'rejected');
         // Validate the whole response before releasing any usable credential.
         // Detect reuse even when the same token appears with another query/order.

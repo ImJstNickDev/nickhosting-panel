@@ -572,6 +572,10 @@ export async function installBrowserFixtures(
       if (value.length > (maxBytes ?? 1048576)) throw new DomainError('validation_failed');
       return new Uint8Array(value);
     },
+    readFileForEditor: async (id, name, maxBytes, timing) =>
+      adapter.readFile(id, name, maxBytes, timing),
+    prefetchDownloads: async () => {},
+    invalidateFileDownloads: () => {},
     writeFile: async (id, name, content) => put(remote(id), name, Buffer.from(content)),
     deleteFiles: async (id, directory, names) => {
       const r = remote(id);

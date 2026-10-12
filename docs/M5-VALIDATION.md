@@ -6297,3 +6297,108 @@ container restarts. No real file mutation, new test asset, manual restart,
 production/configuration change or infrastructure operation. Awaiting the next
 Owner opening for the new phase measurements. Rollback is a source revert; PR #21
 remains open/unmerged and SFTPGo #18 remains unchanged.
+
+### 2026-10-12 — prepared editor/download URLs and Blueprint 1.3.0
+
+The approved change prepares path-specific, one-use Wings download URLs from the
+existing authorized folder listing. Preparation runs in the background without
+another directory query. Editor GET and streamed downloads share a bounded,
+credential/managed-identity-bound backend cache. Taking a URL removes it before
+concurrent access and replenishes only that path. Cold reads wait for issuance;
+unused entries expire without recurring renewal. Mutation verification reads and
+revision checks are unchanged. Signed URLs never reach browser responses or logs.
+Blueprint now exposes configurable batch limits, signed URL lifetime and bounded
+webhook delivery settings; existing settings and omitted fields are preserved.
+See [contracts](M5-API-CONTRACTS.md#prepared-file-download-urls-blueprint-13) and
+[extension settings/evidence](BLUEPRINT-EXTENSION.md#2026-10-12--130-prepared-downloads-and-operational-settings).
+
+Focused validation, without rerunning the historical M1–M5 matrix:
+
+- Vendor-backed extension PHP harness: **207 assertions passed**; package tests:
+  **11 passed**; expanded extension PHP syntax: **25 files passed**. Commands:
+  `python3 extensions/nickhosting/tests/run_php_tests.py --container <existing-panel>`,
+  `python3 -m unittest discover -s extensions/nickhosting/tests`, and
+  `python3 extensions/nickhosting/package.py`. Framework fixtures use an in-memory
+  SQLite database; no production database is used by those assertions.
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/bulk-downloads.test.ts packages/pterodactyl-adapter/src/bulk-uploads.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/transfers.test.ts packages/pterodactyl-adapter/src/blueprint.test.ts`:
+  **178 passed**; after the final upload TTL/timeout adjustment,
+  `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/bulk-uploads.test.ts`:
+  **30 passed**. Coverage
+  includes concurrent token claims, per-path renewal, expiry, settings changes,
+  long-path chunking, invalidation, bounded cache pressure, stream bounds and
+  refusal without fallback on authorization/throttling/malformed responses.
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts packages/server-management/src/scoped-provider-adapter.test.ts`:
+  **99 passed**. Proves prepared editor reads, unchanged write verification and
+  per-owner scoping of every new adapter operation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts`:
+  initial **66 passed, 1 failed**. The new revoked-session fixture referenced the
+  wrong user property and therefore deleted no session. Corrected the fixture;
+  targeted rerun with `-t 'prefetch'`: **2 passed, 65 skipped**. Covers 600 paths
+  without another listing, nonblocking prefetch, optional issuance failure and
+  fresh authorization. This is not a claim of a second full-suite run.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts`:
+  initial **73 passed, 2 failed**. One provider fixture needed the new settings
+  endpoint; another asserted an exclusive lock during remote reconciliation I/O,
+  superseded by the earlier short-commit-lock implementation. Independent review
+  confirmed the lifecycle implementation was unchanged and its lock checks remain
+  covered. Updated those fixtures/assertions, then reran with
+  `-t 'normalizes real bulk handoffs|allows upload while reconciliation'`:
+  **2 passed, 73 skipped**. Existing busy-operation/concurrency cases passed in
+  the initial run; no lifecycle checks were removed from product code.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'editor|download'`:
+  **2 passed, 18 skipped**, using real application handlers with isolated database
+  state and fixture external providers. No real game-file mutation.
+- `scripts/dev.sh pnpm exec tsc --noEmit` and
+  `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed. An earlier
+  typecheck caught the same incorrect fixture property above before its correction.
+  Changed-file Biome: **18 files passed**, no changes needed. Whitespace and
+  indexed governance passed: **650 text files, 199 review PNGs, 561 relative links,
+  4 TOML files and 44 ignore cases**. The heuristic secret scan passed; private
+  credentials, helpers, backups and signed URLs remain untracked.
+
+Independent technical review found and resolved stale cached-TTL handling, response
+byte budgeting for long paths, repeated set construction across chunks, stranded
+pending-cache entries after a reservation failure, and invalidation allocating a
+new scope under cache pressure. Final review found no remaining must-fix.
+Reviewed sanitized, actual framework-rendered administrator fixtures:
+[desktop EN](screenshots/m5/blueprint-transfer-settings-desktop-en.png) and
+[mobile IT](screenshots/m5/blueprint-transfer-settings-mobile-it.png). These prove
+rendering of the extension form, not a live administrator save or full accessibility
+certification. No NickHosting frontend layout was changed.
+
+The Owner-authorized standard Blueprint update installed **1.3.0** successfully;
+its hook reported **Nothing to migrate**. The previous artifact and scoped code
+backup remain private. Blueprint performed its normal cache/queue/ownership
+housekeeping. No manual Panel/Wings core patch, network change or game-server
+mutation was performed. Separately, the dev API source watcher stalled while
+shutting down after edits. Following explicit approval, only
+`docker restart --time 20 nickhosting-dev-api-1` was executed. API, worker and Vite
+were then running/healthy, and dev HTTPS and Panel login returned HTTP 200. The
+watcher shutdown issue was recovered by restart, not claimed fixed in code.
+
+Read-only live smoke used normal stored per-owner credentials and an existing
+Owner-selected 10 KiB file. The extension returned its version/capability/settings;
+anonymous, Application-key and unsafe-path requests returned **401/403/422**.
+One request signed **600 distinct paths in 238.487 ms**, without opening those
+synthetic files. Existing-file bytes/hashes matched privately:
+
+| Adapter operation | Observed duration |
+| --- | ---: |
+| Native contents, three reads | 203.767 / 182.405 / 215.405 ms |
+| First cold signed editor read | 344.962 ms |
+| Folder background preparation | 180.585 ms |
+| Warm signed editor reads | 3.749 / 4.043 / 2.970 ms |
+| Warm streamed download | 4.263 ms |
+
+Cold issuance includes settings discovery/token creation. Warm token acquisition
+was 0.828–1.694 ms, Wings response headers 1.730–2.267 ms and body consumption
+0.126–0.181 ms. These are adapter observations, not browser/whole-handler timings
+or statistical performance guarantees. Recorded batch sizes confirm one-path
+replacement after consumption, without whole-folder regeneration.
+
+No files were mutated; no new game/test infrastructure was created. Isolated test
+schemas were disposed by the existing fixtures. Unused signed credentials expire
+naturally. Rollback requires reverting NickHosting source and the retained prior
+Blueprint artifact through the approved update procedure; no schema rollback is
+needed. Further live restart/update operations retain their approval boundaries.
+PR #21 remains open/unmerged; SFTPGo #18 remains a separate production-release gate.

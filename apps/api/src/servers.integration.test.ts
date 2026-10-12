@@ -279,6 +279,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         },
       ]),
       readFile: vi.fn(async () => Buffer.from('fixture-data')),
+      readFileForEditor: vi.fn(async () => Buffer.from('fixture-data')),
       downloadFile: vi.fn(async (_id, _path, input) =>
         createDownloadProxy({
           baseURL: 'https://panel.example.test',
@@ -2016,6 +2017,14 @@ describe('M2 Hono API with real invitation, password and session authentication'
       fetcher: async (url, init) => {
         const target = new URL(String(url));
         if (target.origin === 'https://panel.example.test') {
+          if (target.pathname.endsWith('/transfer-settings')) {
+            expect(init?.method).toBe('GET');
+            return Response.json({
+              downloadBatchLimit: 2500,
+              uploadBatchLimit: 500,
+              signedUrlTtlSeconds: 900,
+            });
+          }
           expect(target.pathname).toMatch(
             /^\/api\/client\/extensions\/nickhosting\/servers\/[^/]+\/upload-urls$/,
           );
@@ -2458,7 +2467,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     },
   );
 
-  it('reports background reconciliation lock contention as busy before upload work and accepts a retry after release', async () => {
+  it('allows upload while reconciliation awaits provider I/O outside its short commit lock', async () => {
     const server = await f.server();
     const getRemote = vi.mocked(f.adapter.getApplicationServer);
     const implementation = getRemote.getMockImplementation();
@@ -2476,20 +2485,10 @@ describe('M2 Hono API with real invitation, password and session authentication'
     });
     try {
       await entered.promise;
-      const before = {
-        identity: getRemote.mock.calls.length,
-        resources: vi.mocked(f.adapter.getResources).mock.calls.length,
-        files: vi.mocked(f.adapter.listFiles).mock.calls.length,
-        upload: uploadFile.mock.calls.length,
-      };
+      const before = uploadFile.mock.calls.length;
       const response = await upload(user, server, new Uint8Array(1), 1);
-      expect(response.status).toBe(409);
-      expect((await response.json()).error.code).toBe('operation_busy');
-      expect(getRemote.mock.calls).toHaveLength(before.identity);
-      expect(vi.mocked(f.adapter.getResources).mock.calls).toHaveLength(before.resources);
-      expect(vi.mocked(f.adapter.listFiles).mock.calls).toHaveLength(before.files);
-      expect(uploadFile.mock.calls).toHaveLength(before.upload);
-      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+      expect(response.status).toBe(204);
+      expect(uploadFile.mock.calls).toHaveLength(before + 1);
       const audits = await f.db
         .selectFrom('audit_events')
         .select('metadata')
@@ -2497,7 +2496,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         .execute();
       expect(
         audits.some((audit) => (audit.metadata as { serverId?: string }).serverId === server),
-      ).toBe(false);
+      ).toBe(true);
     } finally {
       release.resolve();
       expect(await reconciliation).toBe('observed');

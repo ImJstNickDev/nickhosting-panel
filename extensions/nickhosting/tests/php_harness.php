@@ -202,6 +202,22 @@ $app->instance('redirect', $redirector);
 $owner->replace(['origin'=>'https://NEW.example/']);
 $redirect = $admin->update($owner);
 check($settings->origin()==='https://new.example' && $redirect->getStatusCode()===302,'administrator saves canonical origin');
+$defaults = ['downloadBatchLimit'=>2500, 'uploadBatchLimit'=>500, 'signedUrlTtlSeconds'=>900];
+check($settings->transfer() === $defaults, 'absent transfer settings use bounded defaults');
+$owner->replace(['downloadBatchLimit'=>100, 'uploadBatchLimit'=>40, 'signedUrlTtlSeconds'=>120]);
+$admin->update($owner);
+check($settings->origin()==='https://new.example' && $settings->transfer()===['downloadBatchLimit'=>100,'uploadBatchLimit'=>40,'signedUrlTtlSeconds'=>120], 'operational save preserves absent origin');
+$owner->replace(['origin'=>'https://retained.example']); $admin->update($owner);
+check($settings->transfer()['downloadBatchLimit']===100, 'older origin-only form preserves operational settings');
+foreach (['downloadBatchLimit'=>2501,'uploadBatchLimit'=>501,'signedUrlTtlSeconds'=>901,'webhookBatchLimit'=>11,'webhookTimeoutSeconds'=>5,'webhookConnectTimeoutSeconds'=>3] as $name=>$invalid) {
+    $owner->replace(['origin'=>'https://must-not-save.example',$name=>$invalid]);
+    try { $admin->update($owner); throw new LogicException('expected settings rejection'); }
+    catch (Illuminate\Validation\ValidationException $e) { check($settings->origin()==='https://retained.example', 'invalid setting rejected before origin changes '.$name); }
+}
+$settings->saveOperational($defaults);
+DB::table('settings')->where('key','nickhosting::downloadBatchLimit')->update(['value'=>'invalid']);
+check($settings->transfer()['downloadBatchLimit']===2500, 'invalid stored setting falls back to safe default');
+$settings->saveOperational($defaults);
 // Compile/render the actual Blade with framework directives, escaped input and both locales.
 $files = new Illuminate\Filesystem\Filesystem();
 $compiler = new Illuminate\View\Compilers\BladeCompiler($files, sys_get_temp_dir());
@@ -212,6 +228,7 @@ $session = new Illuminate\Session\Store('test', new Illuminate\Session\ArraySess
 $app->instance('session', $session); $session->start();
 $renderRequest = Request::create('/'); $renderRequest->setLaravelSession($session); $app->instance('request', $renderRequest);
 $errors = new Illuminate\Support\ViewErrorBag();
+$operational = $settings->operational(); $operationalDefinitions = $settingsClass::OPERATIONAL;
 $origin = 'https://review.example'; $root = '/admin/extensions/nickhosting';
 $instances = collect([['callback'=>'https://review.example/v1/events','allowed'=>true,'pending'=>2,'lastDelivered'=>null]]);
 $__env = $views;
@@ -221,7 +238,8 @@ foreach (['en','it'] as $locale) {
     check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
     check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
     check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
-    check(substr_count($html, '<li>') === 6 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
+    check(substr_count($html, '<li>') === 7 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
+    check(str_contains($html, 'name="downloadBatchLimit"') && str_contains($html, 'value="2500"') && str_contains($html, $locale === 'it' ? 'Durata URL firmati' : 'Signed URL lifetime'), 'Blade operational settings localized ' . $locale);
 }
 $instance = '11111111-1111-4111-8111-111111111111';
 // Technical-account tests use the installed native creation service with an isolated repository.
@@ -341,18 +359,29 @@ $uploadNode = new Pterodactyl\Models\Node();
 $uploadNode->setRawAttributes(['id'=>1, 'scheme'=>'https', 'fqdn'=>'wings.example', 'daemonListen'=>443,
     'daemon_token'=>encrypt($nodeSecret), 'maintenance_mode'=>false]);
 $uploadServer->setRelation('node', $uploadNode)->setRelation('transfer', null)->setRelation('subusers', collect());
-function uploadRequest(array $data, $server, $user, mixed $tokenType = 1) {
+function transferRequest(string $kind, array $data, $server, $user, mixed $tokenType = 1) {
     global $validator, $app;
-    $r=Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\UploadUrlsRequest::create(
-        '/api/client/extensions/nickhosting/servers/'.$server->uuidShort.'/upload-urls', 'POST', $data);
+    $class = match ($kind) {
+        'upload-urls' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\UploadUrlsRequest::class,
+        'download-urls' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\DownloadUrlsRequest::class,
+        'transfer-settings' => Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\TransferSettingsRequest::class,
+    };
+    $method=$kind==='transfer-settings' ? 'GET' : 'POST';
+    $r=$class::create('/api/client/extensions/nickhosting/servers/'.$server->uuidShort.'/'.$kind, $method, $data);
     $key = is_int($tokenType) ? new Pterodactyl\Models\ApiKey() : $tokenType;
     if ($key instanceof Pterodactyl\Models\ApiKey) { $key->setRawAttributes(['key_type'=>$tokenType, 'user_id'=>$user->id]); }
     $user=clone $user; $user->withAccessToken($key); $r->setUserResolver(fn () => $user);
-    $route = new Illuminate\Routing\Route('POST', '/api/client/extensions/nickhosting/servers/{server}/upload-urls', fn () => null);
+    $route = new Illuminate\Routing\Route($method, '/api/client/extensions/nickhosting/servers/{server}/'.$kind, fn () => null);
     $route->bind($r); $route->setParameter('server', $server); $r->setRouteResolver(fn () => $route);
     $v=$validator->make($data, $r->rules()); $v->validate();
     $r->setContainer($app); $r->setValidator($v);
     return $r;
+}
+function uploadRequest(array $data, $server, $user, mixed $tokenType = 1) {
+    return transferRequest('upload-urls', $data, $server, $user, $tokenType);
+}
+function downloadRequest(array $data, $server, $user, mixed $tokenType = 1) {
+    return transferRequest('download-urls', $data, $server, $user, $tokenType);
 }
 $uploads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\UploadUrlsController(new Pterodactyl\Services\Nodes\NodeJWTService());
 $uploadReq = uploadRequest(['count'=>49], $uploadServer, $uploadUser);
@@ -402,20 +431,107 @@ check(count(array_unique($unique))===49, 'bulk upload native signatures claims e
 $ttl=strtotime($body['expiresAt'])-time();
 check($ttl>=898 && $ttl<=900, 'bulk upload URLs expire after native 15 minutes');
 check(count($uploads(uploadRequest(['count'=>500],$uploadServer,$uploadUser),$uploadServer)->getData(true)['urls'])===500,'bulk upload supports bounded 500-file group');
+$downloads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\DownloadUrlsController(new Pterodactyl\Services\Nodes\NodeJWTService());
+$transferSettingsController = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\TransferSettingsController();
+$paths=['world/level.dat','server.properties','config/hello world.json','config/città.json'];
+$downloadReq=downloadRequest(['paths'=>$paths],$uploadServer,$uploadUser);
+check($downloadReq->authorize(), 'bulk download authorizes native file-read-content permission');
+foreach ([2, new Laravel\Sanctum\TransientToken(), null] as $tokenType) {
+    check(!downloadRequest(['paths'=>['a']],$uploadServer,$uploadUser,$tokenType)->authorize(), 'bulk download rejects nonaccount token');
+    check(!transferRequest('transfer-settings',[],$uploadServer,$uploadUser,$tokenType)->authorize(), 'transfer settings reject nonaccount token');
+}
+check(!downloadRequest(['paths'=>['a']],$uploadServer,$unrelatedUser)->authorize(), 'bulk download rejects missing native permission');
+$subuser->setRawAttributes(['user_id'=>900,'permissions'=>'["file.read-content"]']);
+$uploadServer->setRelation('subusers',collect([$subuser]));
+$subDownload=downloadRequest(['paths'=>['a']],$uploadServer,$unrelatedUser);
+check($subDownload->authorize(), 'native file-read-content subuser permission recognized');
+denied(fn () => $downloads($subDownload,$uploadServer),403,'bulk download still requires exact linked owner');
+$uploadServer->setRelation('subusers',collect());
+denied(fn () => $downloads(downloadRequest(['paths'=>['a']],$uploadServer,$adminUser),$uploadServer),403,'bulk download rejects administrator');
+check($access->handle($downloadReq,fn()=>true)===true, 'bulk download native state middleware passes');
+$uploadServer->status=Pterodactyl\Models\Server::STATUS_SUSPENDED;
+denied(fn () => $access->handle($downloadReq,fn()=>true),409,'bulk download native suspended state denied');
+$uploadServer->status=null;
+foreach ([[],['paths'=>[]],['paths'=>'a'],['paths'=>['a','a']],['paths'=>['named'=>'a']],['paths'=>[null]],['paths'=>[12]],['paths'=>[true]],['paths'=>['']],['paths'=>['/absolute']],['paths'=>['a/']],['paths'=>['a//b']],['paths'=>['..']],['paths'=>['a/../b']],['paths'=>['a/./b']],['paths'=>['a\\b']],['paths'=>['%2e%2e/a']],['paths'=>["a\0b"]],['paths'=>["a\nb"]],['paths'=>[str_repeat('a',4097)]],['paths'=>array_map(fn($n)=>'file-'.$n,range(1,2501))]] as $invalid) {
+    try { downloadRequest($invalid,$uploadServer,$uploadUser); throw new LogicException('expected invalid paths'); }
+    catch (Illuminate\Validation\ValidationException $e) { check(true,'bulk download rejects invalid bounded canonical paths'); }
+}
+$oversized=clone $downloadReq;
+$oversized->initialize([],[],[],[],[],[],str_repeat('x',12*1024*1024+1));
+denied(fn () => $oversized->authorize(),413,'bulk download bounds raw request body');
+$downloadResponse=$downloads($downloadReq,$uploadServer);
+$downloadBody=$downloadResponse->getData(true); $downloadUnique=[];
+check($downloadResponse->headers->get('Cache-Control')==='no-store, private' && count($downloadBody['urls'])===count($paths), 'bulk download response private and ordered');
+foreach ($downloadBody['urls'] as $index=>$url) {
+    parse_str(parse_url($url,PHP_URL_QUERY),$query); $jwt=$config->parser()->parse($query['token']);
+    check($config->validator()->validate($jwt,new Lcobucci\JWT\Validation\Constraint\SignedWith($config->signer(),$config->signingKey()))
+        && $jwt->claims()->get('file_path')==='/'.$paths[$index]
+        && $jwt->claims()->get('server_uuid')===$uploadServer->uuid
+        && $jwt->claims()->get('user_uuid')===$uploadUser->uuid
+        && $jwt->claims()->get('exp')->getTimestamp()===strtotime($downloadBody['expiresAt'])
+        && str_starts_with($url,'https://wings.example:443/download/file?token='), 'native file token signature exact path server owner expiry and ordering');
+    $downloadUnique[]=$jwt->claims()->get('unique_id');
+}
+check(count(array_unique($downloadUnique))===count($paths), 'download signatures have distinct one-use IDs');
+$settingsReq=transferRequest('transfer-settings',[],$uploadServer,$uploadUser);
+check($settingsReq->authorize() && $transferSettingsController($settingsReq,$uploadServer)->getData(true)===$defaults, 'transfer discovery returns exact defaults for authorized linked owner');
+DB::connection()->enableQueryLog(); DB::connection()->flushQueryLog();
+$largeRequest=downloadRequest(['paths'=>array_map(fn($n)=>'file-'.$n,range(1,2500))],$uploadServer,$uploadUser);
+$largeBody=$downloads($largeRequest,$uploadServer)->getData(true);
+$queries=DB::connection()->getQueryLog(); DB::connection()->disableQueryLog();
+check(count($largeBody['urls'])===2500 && count($queries)===5, '2500 signatures perform three setting reads and two identity reads only');
+$settings->saveOperational(['downloadBatchLimit'=>2,'uploadBatchLimit'=>2,'signedUrlTtlSeconds'=>60]);
+check($transferSettingsController(transferRequest('transfer-settings',[],$uploadServer,$uploadUser),$uploadServer)->getData(true)===['downloadBatchLimit'=>2,'uploadBatchLimit'=>2,'signedUrlTtlSeconds'=>60], 'fresh transfer discovery reflects configured lower limits');
+foreach (['upload-urls'=>['count'=>3],'download-urls'=>['paths'=>['a','b','c']]] as $kind=>$input) {
+    try { transferRequest($kind,$input,$uploadServer,$uploadUser); throw new LogicException('expected configured limit rejection'); }
+    catch (Illuminate\Validation\ValidationException $e) { check(true,'configured lower limit applies '.$kind); }
+}
+$lowerDownload=downloadRequest(['paths'=>['a','b']],$uploadServer,$uploadUser);
+$settings->saveOperational(['signedUrlTtlSeconds'=>120]);
+$lowerBody=$downloads($lowerDownload,$uploadServer)->getData(true);
+$ttl=strtotime($lowerBody['expiresAt'])-time();
+check($ttl>=58 && $ttl<=60, 'validated request preserves one settings snapshot for signing');
+$lowerUploadBody=$uploads(uploadRequest(['count'=>2],$uploadServer,$uploadUser),$uploadServer)->getData(true);
+$ttl=strtotime($lowerUploadBody['expiresAt'])-time();
+check($ttl>=118 && $ttl<=120, 'upload signing uses configurable lifetime');
+$settings->saveOperational($defaults);
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['valid'=>false]);
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects invalidated server link');
+denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects invalidated server link');
+denied(fn () => $transferSettingsController($settingsReq,$uploadServer),409,'settings discovery rejects invalidated server link');
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['valid'=>true]);
 $uploadServer->external_id='foreign';
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects exact server identity drift');
+denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects exact server identity drift');
+denied(fn () => $transferSettingsController($settingsReq,$uploadServer),409,'settings discovery rejects exact server identity drift');
 $uploadServer->external_id='owner-test';
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['owner_id'=>1]);
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects unacknowledged owner handoff');
+denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects unacknowledged owner handoff');
+denied(fn () => $transferSettingsController($settingsReq,$uploadServer),409,'settings discovery rejects unacknowledged owner handoff');
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['owner_id'=>2]);
 DB::table('nickhosting_users')->where('provider_id',2)->update(['provider_uuid'=>'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee']);
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects linked account identity drift');
+denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects linked account identity drift');
+denied(fn () => $transferSettingsController($settingsReq,$uploadServer),409,'settings discovery rejects linked account identity drift');
 DB::table('nickhosting_users')->where('provider_id',2)->update(['provider_uuid'=>$uploadUser->uuid,'instance_id'=>'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee']);
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects cross-instance owner link');
+denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects cross-instance owner link');
+denied(fn () => $transferSettingsController($settingsReq,$uploadServer),409,'settings discovery rejects cross-instance owner link');
 DB::table('nickhosting_users')->where('provider_id',2)->update(['instance_id'=>$instance]);
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->delete();
 denied(fn () => $uploads($uploadReq,$uploadServer),403,'bulk upload rejects server outside managed registry');
+denied(fn () => $downloads($downloadReq,$uploadServer),403,'bulk download rejects unmanaged server');
+denied(fn () => $transferSettingsController($settingsReq,$uploadServer),403,'transfer discovery rejects unmanaged server');
+// Delivery configuration remains bounded by the existing job and claim duration.
+$settings->save('https://review.example');
+$settings->saveOperational(['webhookBatchLimit'=>1,'webhookConnectTimeoutSeconds'=>2,'webhookTimeoutSeconds'=>1]);
+DB::table('nickhosting_outbox')->update(['delivered_at'=>null,'available_at'=>now()->subSecond()]);
+$beforePending=DB::table('nickhosting_outbox')->whereNull('delivered_at')->count();
+$deliveryOptions=[];
+$http = new Illuminate\Http\Client\Factory(); Illuminate\Support\Facades\Http::swap($http);
+$http->fake(function ($request,$options) use (&$deliveryOptions) { $deliveryOptions[]=$options; return Illuminate\Support\Facades\Http::response('',204); });
+(new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Jobs\DeliverChanges())->handle();
+check(count($deliveryOptions)===1 && DB::table('nickhosting_outbox')->whereNull('delivered_at')->count()===$beforePending-1, 'delivery job honors lower event batch setting');
+check($deliveryOptions[0]['connect_timeout']===1 && $deliveryOptions[0]['timeout']===1, 'delivery clamps connect timeout to configured response timeout');
 echo "$count checks passed\n";

@@ -614,3 +614,61 @@ apps/web/tests/file-upload-refresh.browser.test.ts`. pnpm commands use `scripts/
 The standard update was `blueprint -install nickhosting` in the existing Panel
 container after copying the hash-verified package and preserving the previous
 artifact. All private helper output excludes credentials and signed URLs.
+
+## 2026-10-12 — 1.3.0 prepared downloads and operational settings
+
+The Owner approved bulk signed downloads, per-file background replacement and
+updating the installed extension. Blueprint now exposes Client transfer-settings
+and download-urls routes, using native Client authentication, file-read permission,
+server-state middleware and the exact linked nonadministrator managed owner.
+It signs the supplied canonical paths without listing or opening files. A maximum
+batch has five extension queries total: three settings and two identity/link
+reads; native token signing still includes its existing per-token cryptography.
+No production signer or Wings patch was made.
+
+The administrator page now exposes these defaults, preserving existing values
+and omitted fields:
+
+| Setting | Default | Allowed range |
+| --- | ---: | ---: |
+| Download paths per batch | 2500 | 1–2500 |
+| Upload URLs per batch | 500 | 1–500 |
+| Signed URL lifetime, seconds | 900 | 60–900 |
+| Webhook events per job | 10 | 1–10 |
+| Webhook connect timeout, seconds | 2 | 1–2 |
+| Webhook response timeout, seconds | 4 | 1–4 |
+
+Webhook bounds retain the existing job/claim budget; connect timeout is clamped
+to total timeout. Account restrictions, permissions, token uniqueness, identity
+and destination validation remain compulsory. The UI includes seven short
+feature bullets. Reviewed actual Blade fixture screenshots:
+[desktop English](screenshots/m5/blueprint-transfer-settings-desktop-en.png) and
+[mobile Italian](screenshots/m5/blueprint-transfer-settings-mobile-it.png).
+These are sanitized framework-rendered fixtures, not live admin-session captures.
+
+Checks: 207 vendor-backed PHP/SQLite-memory assertions, 11 package tests, and 25
+expanded PHP source syntax checks passed. Independent review found no remaining
+must-fix in extension authorization/settings or rendered EN/IT presentation.
+
+The standard Owner-authorized `blueprint -install nickhosting` update succeeded
+in the existing Panel container. The hook reported **Nothing to migrate**. Its
+normal shared cache/queue/ownership housekeeping ran; no new network/container,
+game-file mutation, account change or Wings configuration was performed. Private
+scoped backups and the previous 1.2.0 archive were preserved. New artifact SHA-256:
+`dd0514770d955acb39674b408cb384b55f223bb8f6982785bf277c46fab12944`.
+Live route discovery confirmed native Blueprint Client/state/throttle middleware.
+
+Live discovery returned 1.3.0, bulkDownloadUrls=true and the documented defaults.
+A single authenticated batch generated 600 distinct path-scoped URLs in 238.487 ms;
+none of those synthetic paths was opened. Anonymous/Application-key/unsafe-path
+requests returned 401/403/422. Using the normal stored per-owner credential, the
+same existing 10 KiB file was then read without mutation: native contents requests
+203.767/182.405/215.405 ms, warm signed editor reads 3.749/4.043/2.970 ms,
+and a streamed download 4.263 ms. Bytes/hashes matched privately. A cold editor
+read took 344.962 ms including settings/token issuance; these are adapter timings,
+not complete browser or API handler measurements. Network traces confirm only
+one replacement path per consumed token, not regeneration of the folder.
+
+Rollback uses the retained 1.2.0 archive through the standard approved update and
+reverts NickHosting source. No schema rollback is needed; settings remain stored.
+It does not reverse Blueprint's shared housekeeping. SFTPGo #18 remains unchanged.
