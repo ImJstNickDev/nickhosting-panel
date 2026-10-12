@@ -9,6 +9,7 @@ import { createDirectoryIdentityCache } from './directory-identity.js';
 import { createProject, setProjectMember } from './registry.js';
 import { createManagementRuntime } from './runtime.js';
 import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
+import { createUploadTiming } from './upload-timing.js';
 
 describe('directory browsing identity proof reuse', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -69,6 +70,24 @@ describe('directory browsing identity proof reuse', () => {
     createManagementRuntime({ db: f.db, codec, adapter, directoryIdentityCache: cache });
   const browse = async (path = '') => (await runtime()).listFiles(f.context, serverId, path);
   const upload = async () => (await runtime()).uploadAccess(f.context, serverId, uploaded);
+  const batchUpload = async (
+    beforeTransfer: () => Promise<void> = async () => {},
+    timing = createUploadTiming(),
+  ) => {
+    const service = await runtime();
+    return service.uploadBatchAccess(
+      f.context,
+      serverId,
+      async (_identifier, connection, current, server) => {
+        await beforeTransfer();
+        await service.authorizeTransfer(current, serverId, true, connection, timing, server);
+        return uploaded();
+      },
+      false,
+      timing,
+      true,
+    );
+  };
 
   beforeEach(async () => {
     database = await createTestDatabase();
@@ -115,6 +134,124 @@ describe('directory browsing identity proof reuse', () => {
     expect(remote).toHaveBeenCalledTimes(2);
     expect(uploaded).toHaveBeenCalledTimes(3);
   });
+
+  it('coalesces binary batch authorization into its fresh pre-transfer check only', async () => {
+    const timing = createUploadTiming();
+    await batchUpload(undefined, timing);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    expect(timing.snapshot()['access.sessionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.permissionFirst']?.count).toBe(1);
+    expect(timing.snapshot()['access.sessionSecond']).toBeUndefined();
+    expect(timing.snapshot()['access.permissionSecond']).toBeUndefined();
+    expect(timing.snapshot()['transfer.sessionRead']?.count).toBe(1);
+    expect(timing.snapshot()['transfer.serverPermission']?.count).toBe(1);
+  });
+
+  it.each(['session', 'identity'] as const)(
+    'rejects %s drift during cold binary batch identity proof before any upload',
+    async (change) => {
+      const snapshot = await identity();
+      const proof = deferredProof();
+      remote.mockReturnValueOnce(proof.promise);
+      const rejected = expect(batchUpload()).rejects.toThrow(
+        change === 'session' ? 'unauthenticated' : 'conflict',
+      );
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+      if (change === 'session')
+        await f.db
+          .updateTable('session')
+          .set({ expiresAt: new Date(0) })
+          .where('id', '=', f.context[authSessionId] as string)
+          .execute();
+      else
+        await f.db
+          .updateTable('managed_servers')
+          .set({ pterodactyl_identifier: 'changed-during-proof' })
+          .where('id', '=', serverId)
+          .execute();
+      proof.resolve(snapshot);
+      await rejected;
+      expect(uploaded).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects project permission revoked after binary batch admission before any upload', async () => {
+    const project = await createProject(f.db, f.owner, { name: 'Shared upload fixture' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ owner_id: f.owner.subjectUserId, project_id: project.id })
+      .where('id', '=', serverId)
+      .execute();
+    await setProjectMember(f.db, f.owner, project.id, {
+      userId: f.context.subjectUserId,
+      role: 'manager',
+    });
+    await expect(
+      batchUpload(async () => {
+        await setProjectMember(f.db, f.owner, project.id, {
+          userId: f.context.subjectUserId,
+          role: null,
+        });
+      }),
+    ).rejects.toThrow('forbidden');
+    expect(uploaded).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'pterodactyl_id',
+    'pterodactyl_uuid',
+    'pterodactyl_identifier',
+    'external_id',
+    'provider_user_id',
+    'limits',
+    'active_operation_id',
+  ] as const)('rejects %s drift after binary batch admission before any upload', async (field) => {
+    await expect(
+      batchUpload(async () => {
+        const row = await f.db
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', serverId)
+          .executeTakeFirstOrThrow();
+        const value =
+          field === 'limits'
+            ? { ...row.limits, memory: row.limits.memory + 1 }
+            : field === 'pterodactyl_id' || field === 'provider_user_id'
+              ? (row[field] as number) + 10000
+              : randomUUID();
+        await f.db
+          .updateTable('managed_servers')
+          .set({ [field]: value })
+          .where('id', '=', serverId)
+          .execute();
+      }),
+    ).rejects.toThrow('conflict');
+    expect(uploaded).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'retains the immediate second authorization for batch bookkeeping (prepare=%s)',
+    async (prepare) => {
+      const service = await runtime();
+      const proof = deferredProof();
+      const snapshot = await identity();
+      const timing = createUploadTiming();
+      remote.mockReturnValueOnce(proof.promise);
+      const rejected = expect(
+        service.uploadBatchAccess(f.context, serverId, uploaded, prepare, timing),
+      ).rejects.toThrow('unauthenticated');
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(1));
+      await f.db
+        .updateTable('session')
+        .set({ expiresAt: new Date(0) })
+        .where('id', '=', f.context[authSessionId] as string)
+        .execute();
+      proof.resolve(snapshot);
+      await rejected;
+      expect(timing.snapshot()['access.sessionSecond']?.count).toBe(1);
+      expect(uploaded).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps proof across non-identity metadata, telemetry and feed heartbeat updates', async () => {
     await browse();

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId, DomainError } from '@nickhosting/core';
 import { type Database, recordAudit } from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
@@ -65,7 +65,7 @@ function view(claim: Claim, closed: boolean) {
     closed,
   };
 }
-type TimingPhase = 'admission' | 'settlement';
+type TimingPhase = 'admission' | 'settlement' | 'settlementRelease';
 async function persist(
   tx: Transaction<Database>,
   claim: Claim,
@@ -108,46 +108,88 @@ async function mutate(
   change: (batch: Batch) => void,
   trace?: UploadTiming,
   phase: TimingPhase = 'settlement',
+  lockMode: 'global' | 'claim' = 'global',
+  uploadedBytes?: number,
 ) {
   const timing = trace ?? createUploadTiming(false);
-  // Entry includes driver acquisition and BEGIN up to callback entry; the caller
-  // already pins its connection, so this is not a pure connection-pool metric.
-  const entered = timing.start(`${phase}.transactionEntry`);
-  let tail = () => {};
-  try {
-    return await db.transaction().execute(async (tx) => {
+  const needsGlobalRelease = Symbol('upload batch final release');
+  async function attempt(global: boolean, step: TimingPhase) {
+    // Entry includes driver acquisition and BEGIN up to callback entry; the caller
+    // already pins its connection, so this is not a pure connection-pool metric.
+    const entered = timing.start(`${step}.transactionEntry`);
+    let tail = () => {};
+    try {
+      return await db.transaction().execute(async (tx) => {
+        entered();
+        const body = timing.start(`${step}.transactionBody`);
+        try {
+          if (global) await timing.measure(`${step}.resourceLock`, () => lockResources(tx));
+          const claim = await timing.measure(`${step}.selectForUpdate`, () =>
+            tx
+              .selectFrom('upload_ingestion_claims')
+              .selectAll()
+              .where('id', '=', batchId)
+              .forUpdate()
+              .executeTakeFirst(),
+          );
+          if (!claim) throw new DomainError('conflict');
+          timing.measureSync(`${step}.validateTransition`, () => {
+            const batch = checkBinding(claim, context, serverId, bindingHash);
+            change(batch);
+            // Intermediate states do not change the reserved capacity. Final
+            // deletion must serialize with statfs + outstanding-reservation reads.
+            // Roll back before taking the global lock: never invert global→row.
+            if (
+              !global &&
+              batch.files.every((file) => file.state === 'complete' || file.state === 'cancelled')
+            )
+              throw needsGlobalRelease;
+          });
+          const result = await persist(tx, claim, true, timing, step);
+          await timing.measure(`${step}.audit`, async () => {
+            const metadata = { claimId: claim.id, serverId, closed: result.closed };
+            if (uploadedBytes === undefined) {
+              await recordAudit(tx, context, action, metadata);
+              return;
+            }
+            // Keep the operational and file-activity events, but commit them
+            // atomically with the completed claim in one INSERT.
+            await tx
+              .insertInto('audit_events')
+              .values(
+                [
+                  { action, metadata },
+                  { action: 'server.files.uploaded', metadata: { serverId, bytes: uploadedBytes } },
+                ].map((event) => ({
+                  id: randomUUID(),
+                  actor_user_id: context.actorUserId,
+                  subject_user_id: context.subjectUserId,
+                  correlation_id: context.support?.id ?? randomUUID(),
+                  ...event,
+                })),
+              )
+              .execute();
+          });
+          return result;
+        } finally {
+          body();
+          // Includes COMMIT or ROLLBACK and driver release; never label a failed
+          // transaction's rollback as a successful commit.
+          tail = timing.start(`${step}.transactionTail`);
+        }
+      });
+    } finally {
       entered();
-      const body = timing.start(`${phase}.transactionBody`);
-      try {
-        await timing.measure(`${phase}.resourceLock`, () => lockResources(tx));
-        const claim = await timing.measure(`${phase}.selectForUpdate`, () =>
-          tx
-            .selectFrom('upload_ingestion_claims')
-            .selectAll()
-            .where('id', '=', batchId)
-            .forUpdate()
-            .executeTakeFirst(),
-        );
-        if (!claim) throw new DomainError('conflict');
-        timing.measureSync(`${phase}.validateTransition`, () => {
-          const batch = checkBinding(claim, context, serverId, bindingHash);
-          change(batch);
-        });
-        const result = await persist(tx, claim, true, timing, phase);
-        await timing.measure(`${phase}.audit`, () =>
-          recordAudit(tx, context, action, { claimId: claim.id, serverId, closed: result.closed }),
-        );
-        return result;
-      } finally {
-        body();
-        // Includes COMMIT or ROLLBACK and driver release; never label a failed
-        // transaction's rollback as a successful commit.
-        tail = timing.start(`${phase}.transactionTail`);
-      }
-    });
-  } finally {
-    entered();
-    tail();
+      tail();
+    }
+  }
+  try {
+    return await attempt(lockMode === 'global', phase);
+  } catch (error) {
+    if (error !== needsGlobalRelease) throw error;
+    // Re-read and revalidate once in a fresh transaction. No file effect or
+    // database mutation occurred during the rolled-back decision attempt.
+    return attempt(true, 'settlementRelease');
   }
 }
 
@@ -305,6 +347,7 @@ export async function claimUploadBatchEntry(
       },
       timing,
       'admission',
+      'claim',
     );
   } catch (error) {
     await unlock();
@@ -327,6 +370,8 @@ export async function claimUploadBatchEntry(
       },
       timing,
       'settlement',
+      'claim',
+      state === 'complete' ? value.bytes : undefined,
     );
     settled = true;
     return result;

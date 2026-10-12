@@ -163,6 +163,28 @@ buffers; XHR100% is not completion. Only the successful provider response and
 local settlement mark an entry complete. No per-file post-upload listing/hash
 verification is added.
 
+Batch admission and intermediate settlement lock the existing claim row, without
+the global resource lock: reserved capacity does not change between files. Before
+deleting the final claim, settlement rolls back its decision-only transaction and
+revalidates once in a fresh transaction with global resource lock → claim row lock.
+This preserves serialization with filesystem observations and outstanding-capacity
+sums, without reversing lock order or replaying an external upload. Preparation,
+cancel/close and Owner recovery retain their existing locking. Admission commits
+before dispatch; settlement commits only after the provider outcome. Successful
+settlement inserts both `server.upload.confirmed` and `server.files.uploaded` in
+one statement inside that transaction, preserving attribution and avoiding a
+separate post-settlement audit commit.
+
+Only binary batch transfers defer the second access-authorization read to the
+existing mandatory pre-POST transfer check. That check compares the full current
+managed identity and upload binding against the initially verified server. Initial
+access checks, all three stream checkpoints and periodic authorization during long
+transfers remain active; preparation/cancel/close retain their immediate recheck.
+The `/v1` middleware no longer pre-reads a session solely for localization:
+authenticated handlers already obtain it through the identity service. Errors
+before authentication resolve stored locale lazily; no session result is cached
+across requests or reused instead of a fresh transfer check.
+
 The existing host ingestion claim stores batch metadata; no migration is needed.
 Conservative reservation is twice total declared bytes plus 65,536 bytes per
 possible concurrent multipart request. It remains charged until all entries are
@@ -195,14 +217,18 @@ uploads retain their earlier path/resource timing fields.
 Prepared-file traces also include request-local `atomic` aggregates when a logger
 is configured: `{label:{count,totalMs,maxMs}}`, maximum 64 code-defined labels.
 They separate principal/runtime lookup, pinned connection acquisition/release,
-server lock, first/second session and permission reads, identity proof, owner/key
+server lock, session and permission reads, identity proof, owner/key
 lookup and decryption, cached handoff, claim lock, transaction entry, resource
 lock, row `FOR UPDATE`, transition checks, serialization/hash, update/delete,
 audit, transaction tail and unlock. `transfer.*` measures the repeated local
 session/permission checks within the provider phase. No SQL, query arguments,
 paths, secrets, errors or per-operation log lines are emitted; all aggregates join
 the existing final `server.files_upload` event. Instrumentation adds no SQL or
-changes to the authorization/locking/transfer sequence.
+changes to the authorization/locking/transfer sequence. With the scoped batch
+optimization, `access.sessionSecond`, `access.permissionSecond`, ordinary
+`admission.resourceLock`/`settlement.resourceLock` and `completion.audit` are absent.
+The last entry has `settlementRelease.*` spans for its fresh global-lock transaction;
+its preceding `settlement.*` spans include the decision-only rollback, not a commit.
 
 These are monotonic elapsed spans, not database-engine CPU timings. Connection
 acquisition includes driver setup; a lock/query span includes its round trip and

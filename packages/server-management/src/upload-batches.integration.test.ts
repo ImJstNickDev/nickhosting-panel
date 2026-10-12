@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'kysely';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { managementFixture } from './test-fixtures.js';
 import { recoverUploadIngestion, reserveUploadIngestion } from './upload-admission.js';
 import {
@@ -208,7 +210,6 @@ describe('bounded durable upload batches', () => {
         'admission.transactionEntry',
         'admission.transactionBody',
         'admission.transactionTail',
-        'admission.resourceLock',
         'admission.selectForUpdate',
         'admission.validateTransition',
         'admission.serializeHash',
@@ -217,10 +218,8 @@ describe('bounded durable upload batches', () => {
         'settlement.transactionEntry',
         'settlement.transactionBody',
         'settlement.transactionTail',
-        'settlement.resourceLock',
         'settlement.selectForUpdate',
         'settlement.validateTransition',
-        'settlement.audit',
         'release.claimUnlock',
       ]) {
         expect(timings[name]?.count, name).toBe(1);
@@ -228,12 +227,196 @@ describe('bounded durable upload batches', () => {
       }
       expect(JSON.stringify(timings)).not.toContain(batch.id);
       expect(JSON.stringify(timings)).not.toContain(serverId);
+      expect(timings['admission.resourceLock']).toBeUndefined();
+      expect(timings['settlement.resourceLock']).toBeUndefined();
+      const settled = trace === lastTiming ? 'settlementRelease' : 'settlement';
+      expect(timings[`${settled}.audit`]?.count).toBe(1);
     }
     expect(firstTiming.snapshot()['settlement.updateClaim']?.count).toBe(1);
     expect(firstTiming.snapshot()['settlement.deleteClaim']).toBeUndefined();
-    expect(lastTiming.snapshot()['settlement.deleteClaim']?.count).toBe(1);
+    expect(lastTiming.snapshot()['settlementRelease.deleteClaim']?.count).toBe(1);
+    expect(lastTiming.snapshot()['settlementRelease.resourceLock']?.count).toBe(1);
+    expect(lastTiming.snapshot()['settlement.audit']).toBeUndefined();
     expect(lastTiming.snapshot()['settlement.updateClaim']).toBeUndefined();
     await expect(read(batch.id)).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('does not wait for unrelated global work until final release, then releases its row before waiting', async () => {
+    const files: [UploadBatchFile, UploadBatchFile] = [file('a'), file('b')];
+    const batch = await prepare(files);
+    const blocker = await database.pool.connect();
+    let final: Promise<unknown> | undefined;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources',0))",
+      );
+      const pid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]
+        ?.pid;
+      const first = await Promise.race([
+        entry(batch.id, files[0]),
+        delay(2000).then(() => {
+          throw new Error('Admission waited for unrelated global work');
+        }),
+      ]);
+      await Promise.race([
+        first.lease.complete(),
+        delay(2000).then(() => {
+          throw new Error('Intermediate settlement waited for unrelated global work');
+        }),
+      ]);
+      await first.release();
+      const second = await entry(batch.id, files[1]);
+      final = second.lease.complete();
+      await vi.waitFor(async () => {
+        const waiting = await database.pool.query<{ count: string }>(
+          'SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+          [pid],
+        );
+        expect(Number(waiting.rows[0]?.count)).toBe(1);
+      });
+      // A global→row caller can still acquire the row: the final settlement
+      // rolled its first transaction back instead of upgrading row→global.
+      const row = await blocker.query<{ scope: { batch: { files: { state: string }[] } } }>(
+        'SELECT scope FROM upload_ingestion_claims WHERE id=$1 FOR UPDATE NOWAIT',
+        [batch.id],
+      );
+      expect(row.rows[0]?.scope.batch.files.map((file) => file.state)).toEqual([
+        'complete',
+        'active',
+      ]);
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+      await final;
+    }
+    await expect(read(batch.id)).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('retains the final reservation across another admission filesystem observation and outstanding sum', async () => {
+    const uploaded = file('a');
+    const batch = await prepare([uploaded]);
+    const active = await entry(batch.id, uploaded);
+    const oldReserved = BigInt((await claim(batch.id)).reserved_bytes);
+    const other = await managementFixture(f.db);
+    const otherServer = await other.server();
+    await f.db
+      .updateTable('physical_hosts')
+      .set({
+        upload_policy: JSON.stringify(policy),
+        disk_headroom_mib: '0',
+      })
+      .where('id', '=', other.hostId)
+      .execute();
+    const observed = Promise.withResolvers<void>(),
+      continueObservation = Promise.withResolvers<void>();
+    let observations = 0,
+      observerPid: number | undefined;
+    const nextReserved = BigInt(2 * uploaded.bytes + 65536);
+    const next = f.db
+      .connection()
+      .execute(async (connection) => {
+        observerPid = (
+          await sql<{ pid: number }>`SELECT pg_backend_pid() AS pid`.execute(connection)
+        ).rows[0]?.pid;
+        const reservation = await reserveUploadIngestion(
+          connection,
+          other.context,
+          otherServer,
+          uploaded.bytes,
+          env,
+          {
+            availableBytes: async () => {
+              if (++observations === 2) observed.resolve();
+              await continueObservation.promise;
+              // Without the old claim this observation would incorrectly admit the
+              // next transfer. Both configured roots can share the same disk.
+              return BigInt(policy.temporaryDiskHeadroomBytes) + oldReserved + nextReserved - 1n;
+            },
+          },
+        );
+        await reservation.unlock();
+        return reservation;
+      })
+      .then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+    let final: Promise<unknown> | undefined;
+    let admission: Awaited<typeof next> | undefined;
+    try {
+      await Promise.race([
+        observed.promise,
+        next.then(() => {
+          throw new Error('Reservation failed before fixture observation');
+        }),
+      ]);
+      final = active.lease.complete();
+      await vi.waitFor(async () => {
+        const waiting = await database.pool.query<{ count: string }>(
+          'SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+          [observerPid],
+        );
+        expect(Number(waiting.rows[0]?.count)).toBe(1);
+      });
+      expect(BigInt((await claim(batch.id)).reserved_bytes)).toBe(oldReserved);
+    } finally {
+      continueObservation.resolve();
+      admission = await next;
+      await final;
+    }
+    expect(admission).toMatchObject({ error: { code: 'resources_unavailable' } });
+    await expect(read(batch.id)).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('commits both completion audit events with settlement and rolls everything back on audit failure', async () => {
+    const uploaded = file('a');
+    const batch = await prepare([uploaded]);
+    const active = await entry(batch.id, uploaded);
+    await sql`CREATE FUNCTION fail_file_uploaded_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'server.files.uploaded' THEN RAISE EXCEPTION 'isolated audit failure'; END IF;
+        RETURN NEW;
+      END
+    $$`.execute(f.db);
+    await sql`CREATE TRIGGER fail_file_uploaded_audit BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION fail_file_uploaded_audit()`.execute(f.db);
+    const completionAudits = () =>
+      f.db
+        .selectFrom('audit_events')
+        .selectAll()
+        .where('action', 'in', ['server.upload.confirmed', 'server.files.uploaded'])
+        .where(sql<string>`metadata->>'serverId'`, '=', serverId)
+        .execute();
+    try {
+      await expect(active.lease.complete()).rejects.toThrow('isolated audit failure');
+      expect((await read(batch.id))?.files[0]?.state).toBe('active');
+      expect(await completionAudits()).toEqual([]);
+    } finally {
+      await sql`DROP TRIGGER fail_file_uploaded_audit ON audit_events`.execute(f.db);
+      await sql`DROP FUNCTION fail_file_uploaded_audit()`.execute(f.db);
+    }
+    expect((await active.lease.complete()).closed).toBe(true);
+    const audits = await completionAudits();
+    expect(audits).toHaveLength(2);
+    expect(audits.find((audit) => audit.action === 'server.upload.confirmed')?.metadata).toEqual({
+      claimId: batch.id,
+      serverId,
+      closed: true,
+    });
+    expect(audits.find((audit) => audit.action === 'server.files.uploaded')?.metadata).toEqual({
+      serverId,
+      bytes: uploaded.bytes,
+    });
+    expect(
+      audits.every(
+        (audit) =>
+          audit.actor_user_id === f.context.actorUserId &&
+          audit.subject_user_id === f.context.subjectUserId,
+      ),
+    ).toBe(true);
+    await expect(active.lease.complete()).rejects.toMatchObject({ code: 'conflict' });
+    expect(await completionAudits()).toHaveLength(2);
   });
 
   it('keeps the original manifest hash and rejected entries for a lost prepare response', async () => {

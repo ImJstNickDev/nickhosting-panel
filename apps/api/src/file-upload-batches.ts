@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { getSettings, recordAudit } from '@nickhosting/database';
+import { getSettings } from '@nickhosting/database';
 import {
   isUploadNotDispatched,
   relativePath,
@@ -407,7 +407,7 @@ async function runBatchUpload(
                 maxBytes: server.limits.disk * 1024 * 1024,
                 signal: c.req.raw.signal,
                 authorize: () =>
-                  service.authorizeTransfer(current, serverId, true, connection, timing),
+                  service.authorizeTransfer(current, serverId, true, connection, timing, server),
               }),
             );
             received = true;
@@ -419,18 +419,13 @@ async function runBatchUpload(
             }
             throw error;
           }
-          const audit = () =>
-            recordAudit(connection, current, 'server.files.uploaded', {
-              serverId,
-              bytes: input.contentLength,
-            });
-          await (timing ? timing.measure('completion.audit', audit) : audit());
         } finally {
           await lease.unlock();
         }
       },
       false,
       timing,
+      true,
     );
     outcome = 'succeeded';
   } finally {

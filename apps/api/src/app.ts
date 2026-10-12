@@ -188,6 +188,19 @@ export function createApp(options: Options) {
           }
         : {}),
     });
+    // Protected handlers already obtain the locale while authenticating. Public
+    // identity routes and failures before principal() need it only on error;
+    // don't read the same Better Auth session twice on every successful request.
+    if (c.get('locale') === undefined && c.get('identity')) {
+      try {
+        const session = await c.get('identity').auth.api.getSession({
+          headers: c.get('authHeaders'),
+        });
+        if (session) c.set('locale', session.user.locale === 'it' ? 'it' : 'en');
+      } catch {
+        // A locale lookup must not mask the original authentication/storage error.
+      }
+    }
     const locale = resolveLocale(
       c.get('locale'),
       c.req.header('accept-language'),
@@ -253,8 +266,6 @@ export function createApp(options: Options) {
     if (c.req.method === 'POST' && c.req.path === PROVIDER_EVENTS_PATH) return next();
     const identity = await options.identity();
     c.set('identity', identity);
-    const session = await identity.auth.api.getSession({ headers: c.get('authHeaders') });
-    if (session) c.set('locale', session.user.locale === 'it' ? 'it' : 'en');
     await next();
   });
 

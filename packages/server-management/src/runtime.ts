@@ -821,6 +821,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     write: boolean,
     connection: Kysely<Database> = db,
     timing?: UploadTiming,
+    expectedServer?: Awaited<ReturnType<typeof authorizeServer>>,
   ): Promise<void> {
     const timed = <T>(name: string, work: () => Promise<T>) =>
       timing ? timing.measure(name, work) : work();
@@ -833,7 +834,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
     if (
       !server.pterodactyl_id ||
       !server.pterodactyl_identifier ||
-      (write && server.active_operation_id)
+      (write && server.active_operation_id) ||
+      (expectedServer &&
+        (directoryServerIdentity(server) !== directoryServerIdentity(expectedServer) ||
+          uploadBatchBinding(server) !== uploadBatchBinding(expectedServer)))
     )
       throw new DomainError('conflict');
   }
@@ -848,18 +852,24 @@ export async function createManagementRuntime(options: ManagementOptions) {
       current: AuthContext,
       server: Awaited<ReturnType<typeof authorizeServer>>,
     ) => Promise<T>,
-    identityMode: 'fresh' | 'directory' | 'upload' | 'upload-batch' | 'upload-prepare' = 'fresh',
+    identityMode:
+      | 'fresh'
+      | 'directory'
+      | 'upload'
+      | 'upload-batch'
+      | 'upload-prepare'
+      | 'upload-transfer' = 'fresh',
     timing?: UploadTiming,
   ) {
     const timed = <T>(name: string, work: () => Promise<T>) =>
       timing ? timing.measure(name, work) : work();
     const reuseIdentity = identityMode !== 'fresh';
+    const sharedUpload = identityMode === 'upload-batch' || identityMode === 'upload-transfer';
     const run = async (connection: Kysely<Database>) => {
       let identityAttempted = false;
       if (write) {
-        const shared = identityMode === 'upload-batch';
         const lock = await timed('access.serverLock', () =>
-          (shared
+          (sharedUpload
             ? sql<{
                 acquired: boolean;
               }>`select pg_try_advisory_lock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
@@ -881,7 +891,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
         if (write && server.active_operation_id) throw new DomainError('conflict');
-        if (write && identityMode !== 'upload-batch' && identityMode !== 'upload-prepare')
+        if (write && !sharedUpload && identityMode !== 'upload-prepare')
           await assertNoPendingUpload(connection, serverId);
         identityAttempted = true;
         if (reuseIdentity)
@@ -900,6 +910,11 @@ export async function createManagementRuntime(options: ManagementOptions) {
             server,
             await adapter.getApplicationServer(server.pterodactyl_id),
           );
+        // Binary batches perform their final fresh authorization after admission,
+        // directly before the provider POST. Only that path may defer this check;
+        // preparation, cancellation and ordinary effects still recheck here.
+        if (identityMode === 'upload-transfer')
+          return await work(server.pterodactyl_identifier, connection, current, server);
         // Identity corroboration may itself wait on a remote API. Recheck directly
         // before the effect rather than extending an old authorization across it.
         const refreshed = await timed('access.sessionSecond', () =>
@@ -917,7 +932,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       } finally {
         if (write)
           await timed('access.serverUnlock', () =>
-            (identityMode === 'upload-batch'
+            (sharedUpload
               ? sql`select pg_advisory_unlock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
               : sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
             ).execute(connection),
@@ -967,20 +982,23 @@ export async function createManagementRuntime(options: ManagementOptions) {
     return withAccess(context, serverId, true, work, 'upload');
   }
   /** The callback must validate/consume its durable batch entry before sending
-   * bytes. Shared upload locks still exclude lifecycle and ordinary mutations. */
+   * bytes. Shared upload locks still exclude lifecycle and ordinary mutations.
+   * Only actual binary transfers may opt into deferred authorization; they must
+   * call authorizeTransfer with the verified server directly before provider POST. */
   function uploadBatchAccess<T>(
     context: AuthContext,
     serverId: string,
     work: Parameters<typeof withAccess<T>>[3],
     prepare = false,
     timing?: UploadTiming,
+    transfer = false,
   ) {
     return withAccess(
       context,
       serverId,
       true,
       work,
-      prepare ? 'upload-prepare' : 'upload-batch',
+      prepare ? 'upload-prepare' : transfer ? 'upload-transfer' : 'upload-batch',
       timing,
     );
   }

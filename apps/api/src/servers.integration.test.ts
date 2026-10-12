@@ -8,6 +8,7 @@ import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { authSessionId, createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { localizeError } from '@nickhosting/i18n';
 import { minecraftManifest } from '@nickhosting/minecraft';
 import {
   type ConsoleRelayOptions,
@@ -1035,6 +1036,69 @@ describe('M2 Hono API with real invitation, password and session authentication'
     await f.db.updateTable('user').set({ role: 'user' }).where('id', '=', peerId).execute();
     expect((await (await request(peer, '/v1/me')).json()).identity.role).toBe('user');
   });
+  it('reads the authenticated session once per successful request without reusing it across requests', async () => {
+    const temporary = new AuthClient(identity);
+    expect(
+      (await temporary.request('/sign-in/email', { email: 'servers-peer@example.test', password }))
+        .status,
+    ).toBe(200);
+    const { sessionId } = await identity.authenticate(temporary.headers());
+    const sessions = vi.spyOn(identity.auth.api, 'getSession');
+    try {
+      expect((await request(user, '/v1/me')).status).toBe(200);
+      expect(sessions).toHaveBeenCalledTimes(1);
+      sessions.mockClear();
+      expect((await request(temporary, '/v1/me')).status).toBe(200);
+      expect(sessions).toHaveBeenCalledTimes(1);
+      await database.pool.query('DELETE FROM session WHERE id=$1', [sessionId]);
+      const denied = await request(temporary, '/v1/me');
+      expect(denied.status).toBe(401);
+      expect((await denied.json()).error.code).toBe('unauthenticated');
+    } finally {
+      sessions.mockRestore();
+      await database.pool.query('DELETE FROM session WHERE id=$1', [sessionId]);
+    }
+  });
+  it('resolves stored error locale lazily before authentication and preserves original errors if lookup fails', async () => {
+    const previous = await f.db
+      .selectFrom('user')
+      .select('locale')
+      .where('id', '=', userId)
+      .executeTakeFirstOrThrow();
+    await f.db.updateTable('user').set({ locale: 'it' }).where('id', '=', userId).execute();
+    const sessions = vi.spyOn(identity.auth.api, 'getSession');
+    try {
+      const response = await request(
+        user,
+        '/v1/setup/owner',
+        {},
+        { headers: { 'accept-language': 'en' } },
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toEqual(
+        localizeError(new DomainError('validation_failed'), 'it'),
+      );
+      expect(sessions).toHaveBeenCalledTimes(1);
+      sessions.mockRejectedValueOnce(new Error('isolated locale lookup failure'));
+      const failed = await request(
+        user,
+        '/v1/setup/owner',
+        {},
+        { headers: { 'accept-language': 'it' } },
+      );
+      expect(failed.status).toBe(400);
+      expect((await failed.json()).error).toEqual(
+        localizeError(new DomainError('validation_failed'), 'it'),
+      );
+    } finally {
+      sessions.mockRestore();
+      await f.db
+        .updateTable('user')
+        .set({ locale: previous.locale })
+        .where('id', '=', userId)
+        .execute();
+    }
+  });
   it('fails closed on remote identity drift, pending lifecycle work and sensitive upstream errors', async () => {
     const server = await f.server();
     const readRemote = vi.mocked(f.adapter.getApplicationServer).getMockImplementation();
@@ -1529,6 +1593,97 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
   });
 
+  it.each(['session', 'identity'] as const)(
+    'rejects batch %s drift after admission without sending bytes or retaining unused capacity',
+    async (change) => {
+      const server = await f.server();
+      const batchId = randomUUID();
+      const path = 'batch-authorization.txt';
+      const { sessionId } = await identity.authenticate(user.headers());
+      const originalSession = await f.db
+        .selectFrom('session')
+        .select('expiresAt')
+        .where('id', '=', sessionId)
+        .executeTakeFirstOrThrow();
+      const originalServer = await f.db
+        .selectFrom('managed_servers')
+        .select('pterodactyl_uuid')
+        .where('id', '=', server)
+        .executeTakeFirstOrThrow();
+      const prepared = await request(user, `/v1/servers/${server}/files/upload-batches`, {
+        id: batchId,
+        files: [{ id: 'file', path, bytes: 1, overwrite: false }],
+      });
+      expect(prepared.status).toBe(200);
+      const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+      uploadFile.mockImplementationOnce(async (_identifier, filename, input) => {
+        const claim = await f.db
+          .selectFrom('upload_ingestion_claims')
+          .selectAll()
+          .where('id', '=', batchId)
+          .executeTakeFirstOrThrow();
+        expect(claim.scope.batch?.files[0]?.state).toBe('active');
+        if (change === 'session')
+          await f.db
+            .updateTable('session')
+            .set({ expiresAt: new Date(0) })
+            .where('id', '=', sessionId)
+            .execute();
+        else
+          await f.db
+            .updateTable('managed_servers')
+            .set({ pterodactyl_uuid: randomUUID() })
+            .where('id', '=', server)
+            .execute();
+        await createUploadProxy({
+          baseURL: 'https://panel.example.test',
+          applicationKey: 'isolated-key',
+          uploadOrigins: ['https://wings.example.test'],
+          fetcher,
+        })('https://wings.example.test/upload/file?token=isolated-token', filename, input);
+      });
+      try {
+        const result = await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+          batchId,
+          entryId: 'file',
+          path,
+          overwrite: 'false',
+        });
+        expect(result.status).toBe(503);
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(
+          await f.db
+            .selectFrom('upload_ingestion_claims')
+            .select('id')
+            .where('id', '=', batchId)
+            .execute(),
+        ).toEqual([]);
+        const audits = await f.db
+          .selectFrom('audit_events')
+          .select('action')
+          .where('metadata', '@>', { serverId: server })
+          .execute();
+        expect(audits.some((event) => event.action === 'server.upload.not_dispatched')).toBe(true);
+        expect(
+          audits.some((event) =>
+            ['server.upload.confirmed', 'server.files.uploaded'].includes(event.action),
+          ),
+        ).toBe(false);
+      } finally {
+        await f.db
+          .updateTable('session')
+          .set(originalSession)
+          .where('id', '=', sessionId)
+          .execute();
+        await f.db
+          .updateTable('managed_servers')
+          .set(originalServer)
+          .where('id', '=', server)
+          .execute();
+      }
+    },
+  );
+
   it('prepares 49 files once, transfers two concurrently and rejects replay without repeating remote checks', async () => {
     const server = await minecraftServer();
     const list = vi.mocked(f.adapter.listFiles),
@@ -1662,10 +1817,11 @@ describe('M2 Hono API with real invitation, password and session authentication'
         expect(atomic['request.principal']?.count).toBe(1);
         expect(atomic['access.connectionAcquire']?.count).toBe(1);
         expect(atomic['access.sessionFirst']?.count).toBe(1);
-        expect(atomic['access.sessionSecond']?.count).toBe(1);
-        expect(atomic['admission.resourceLock']?.count).toBe(1);
-        expect(atomic['settlement.resourceLock']?.count).toBe(1);
-        expect(atomic['completion.audit']?.count).toBe(1);
+        expect(atomic['access.sessionSecond']).toBeUndefined();
+        expect(atomic['access.permissionSecond']).toBeUndefined();
+        expect(atomic['admission.resourceLock']).toBeUndefined();
+        expect(atomic['settlement.resourceLock']).toBeUndefined();
+        expect(atomic['completion.audit']).toBeUndefined();
         expect(atomic['transfer.sessionRead']?.count).toBeGreaterThanOrEqual(1);
         expect(atomic['transfer.serverPermission']?.count).toBe(
           atomic['transfer.sessionRead']?.count,
@@ -1679,6 +1835,29 @@ describe('M2 Hono API with real invitation, password and session authentication'
         }
         expect(JSON.stringify(atomic)).not.toMatch(/private-|world|https?:|SELECT|INSERT/);
       }
+      expect(
+        timings.reduce(
+          (sum, record) =>
+            sum +
+            ((record.data.atomic as Record<string, { count: number }>)[
+              'settlementRelease.resourceLock'
+            ]?.count ?? 0),
+          0,
+        ),
+      ).toBe(1);
+      const completedAudits = await f.db
+        .selectFrom('audit_events')
+        .select(['action', 'metadata'])
+        .where('action', 'in', ['server.upload.confirmed', 'server.files.uploaded'])
+        .execute();
+      for (const action of ['server.upload.confirmed', 'server.files.uploaded'])
+        expect(
+          completedAudits.filter(
+            (event) =>
+              event.action === action &&
+              (event.metadata as { serverId?: string }).serverId === server,
+          ),
+        ).toHaveLength(49);
       expect(bulk.mock.calls.length - issued).toBe(1);
       expect(vi.mocked(f.adapter.prepareUpload).mock.calls.length).toBe(singles);
     } finally {

@@ -5910,3 +5910,59 @@ same wrapper for `apps/api/src/servers.integration.test.ts
 packages/server-management/src/provider-accounts.integration.test.ts -t
 'prepares 49 files once|normalizes real bulk handoffs|enrolls once, encrypts credential'`;
 `scripts/dev.sh pnpm typecheck`, changed-file Biome and indexed governance.
+
+## 2026-10-12 — scoped upload locks, authorization and atomic completion audit
+
+The first Owner run with granular timing at `8c8c39c` completed **49/49 files**,
+3,952,843 bytes, in **3,229.945 ms** including 528.945 ms preparation. Mean per-file
+time was 81.717 ms: 64.156 ms outside the provider phase and 17.561 ms inside it.
+The latter already included 9.626 ms of local authorization. This is a different
+sample from the previous 147-file baseline; the difference is not attributed to
+instrumentation. The two global resource-lock calls averaged 16.474 ms combined,
+but their combined median was 2.019 ms. These spans include communication and
+scheduling, not only lock contention. Connection acquisition averaged 0.066 ms;
+validation/serialization/hash together averaged 0.550 ms. Original private traces
+are retained; no paths, credentials or file contents are published.
+
+Following the read-only analysis and explicit Owner instruction, the changes are:
+
+- Entry admission and intermediate settlement use the existing batch row lock.
+  They do not change reserved capacity and no longer acquire the platform-wide
+  resource lock. Final release first rolls back a decision-only transaction, then
+  re-reads once under global → row locks. This keeps the reservation visible across
+  other admissions' filesystem-observation/capacity-sum interval and avoids a
+  row → global deadlock. Preparation, cancellation, close and recovery are unchanged.
+- Successful settlement preserves both completion event names and metadata in
+  one audit INSERT within the same transaction. The separate `files.uploaded`
+  autocommit is removed; an audit failure rolls back the settlement too.
+- Only actual binary batch transfers defer the second access recheck to the fresh
+  pre-POST authorization. That check also compares complete managed identity and
+  upload binding. All three stream checkpoints and periodic checks remain.
+- `/v1` no longer reads the session once for locale and again for authentication.
+  Authentication remains fresh per request; errors before authentication obtain
+  stored locale lazily without masking the original error if that lookup fails.
+
+No schema, dependency, provider endpoint, UI or infrastructure change is required.
+The two durable boundaries before and after provider dispatch remain. No external
+effect is retried by the internal final-release transaction fallback.
+
+Validation used existing approved isolated M2 PostgreSQL/Redis services, temporary
+per-test schemas, real application/authentication handlers and external-provider
+fixtures. Commands and results:
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/transfers.test.ts packages/pterodactyl-adapter/src/bulk-uploads.test.ts apps/api/src/upload-url-cache.test.ts packages/server-management/src/upload-timing.test.ts --reporter dot`: **78 passed**.
+- Integration prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts`.
+- Prefix + `packages/server-management/src/upload-batches.integration.test.ts`: **15 passed**. Proves intermediate progress while the global lock is held, final release waiting without holding its row, the filesystem-observation/accounting race, atomic audit rollback, concurrency, cancellation, uncertainty and recovery.
+- Prefix + `packages/server-management/src/directory-identity.integration.test.ts`: **59 passed** on the initial set. One additional case and a fixture property correction were finalized during this run; prefix + that file + `-t 'binary batch|batch bookkeeping'` then passed **13**, with 47 unrelated skipped. All 60 cases are covered across these runs; this is not a claimed single final 60-case run.
+- Prefix + `apps/api/src/servers.integration.test.ts apps/api/src/app.integration.test.ts --reporter dot`: **81 passed**. The real-handler 49-file fixture proves only one global release-lock acquisition, no second access authorization or separate completion audit, two transfers concurrently, and both completion events for each file. Session/identity changes after admission cause zero Wings POSTs and release unused capacity. Existing real HTTP-disconnect tests emit expected abort diagnostics and pass.
+- Two new localization/session cases first passed independently. A later TypeScript check caught a JSON predicate fixture passing a serialized string instead of its typed object. After correcting it, prefix + `apps/api/src/servers.integration.test.ts -t 'rejects batch .* drift after admission'` passed **2**, 70 skipped. Root TypeScript rerun passed; full root/web `pnpm typecheck` had passed before that test-only addition.
+- Changed-file Biome, `git diff --check` and indexed governance passed. No expensive historical M1–M5/browser rerun: UI, browser contracts and transfer-guard checkpoints are unchanged.
+
+Independent technical review found no must-fix. API/worker source watchers loaded
+the changes; both are healthy with container restart counts zero. No manual
+restart/rebuild, production-provider request, game-file mutation, network change
+or new live test asset was performed. Test schemas are removed by their fixtures.
+The live performance improvement remains to be measured with the Owner's next
+upload; removed spans must not be summed as guaranteed wall-clock savings.
+Rollback is a source revert with no migration/data reset. PR #21 remains open and
+unmerged; the SFTPGo issue #18 production-release gate is unchanged.
