@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { useBlocker, useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
-import { api, download, queryClient, upload } from '../api/client.js';
+import { api, download, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -67,13 +67,13 @@ import {
   useFileSaveRecords,
 } from './file-background-save.js';
 import { FileIcon } from './file-icon.js';
+import { FileSelectionSummary, useFileMove } from './file-move-flow.js';
 import { FilePathPicker } from './file-path-picker.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
 
-type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'move' | 'copy' | 'extract';
-type DroppedMove = { source: string; destination: string; names: string[] };
+type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'copy' | 'extract';
 type UploadItem = {
   id: number;
   file: File;
@@ -262,8 +262,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [mode, setMode] = useState<Mode>();
   const [targets, setTargets] = useState<string[]>([]);
   const [destination, setDestination] = useState('');
-  const [pendingMove, setPendingMove] = useState<DroppedMove & { collisions: string[] }>();
-  const [moveError, setMoveError] = useState<unknown>();
   const [content, setContent] = useState('');
   const [newName, setNewName] = useState('');
   const [revision, setRevision] = useState<string | null>(null);
@@ -331,6 +329,19 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const uploadAvailable = transfers.data?.upload.available === true;
   const selectedNames = [...selected];
   const selectedEntries = files.data?.filter((entry) => selected.has(entry.name)) ?? [];
+  const moveFlow = useFileMove({
+    serverId,
+    identity: saveIdentity.current,
+    canMutate,
+    isBusy: () => mutationRunning.current,
+    setBusy: (busy) => {
+      mutationRunning.current = busy;
+      setMutating(busy);
+    },
+    onClose: closeEditor,
+    onComplete: (names) =>
+      setSelected((current) => new Set([...current].filter((name) => !names.includes(name)))),
+  });
   const parent = directory.split('/').slice(0, -1).join('/');
   const uploadReason = transfers.error
     ? 'file.uploadReason.request'
@@ -508,12 +519,16 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       )?.focus();
     });
   }
-  function chooseMode(value: Mode, names = selectedNames, folder = directory) {
+  function chooseMode(value: Mode | 'move', names = selectedNames, folder = directory) {
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     setError(undefined);
     setMenu(undefined);
     setTargets(names);
     setDestination(folder);
+    if (value === 'move') {
+      moveFlow.begin({ source: directory, destination: folder, names });
+      return;
+    }
     setMode(value);
     setReadError(undefined);
     setSaveError(undefined);
@@ -813,104 +828,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         return;
       }
       setMenu(undefined);
-      void moveDropped({ source: directory, destination: folder, names: payload.names });
+      menuTrigger.current = document.activeElement as HTMLElement;
+      moveFlow.begin({ source: directory, destination: folder, names: payload.names }, false);
     } catch {
       setError({ messageKey: 'file.invalidMove' });
-    }
-  }
-  async function dropCollisions(move: DroppedMove) {
-    const entries = await api<ServerFile[]>(
-      `${serverPath(serverId)}/files?path=${encodeURIComponent(move.destination)}`,
-    );
-    const collisions: string[] = [];
-    for (const name of move.names) {
-      const matches = entries.filter((entry) => entry.name.toLowerCase() === name.toLowerCase());
-      if (!matches.length) continue;
-      const target = matches[0];
-      const source = files.data?.find((entry) => entry.name === name);
-      if (
-        matches.length !== 1 ||
-        target?.name !== name ||
-        !target.is_file ||
-        target.is_symlink ||
-        !source?.is_file ||
-        source.is_symlink
-      )
-        throw { messageKey: 'file.moveCollisionUnsupported' };
-      collisions.push(name);
-    }
-    return collisions;
-  }
-  async function moveDropped(move: DroppedMove, overwrite: string[] = []) {
-    if (!canMutate || mutationRunning.current) return;
-    mutationRunning.current = true;
-    setMutating(true);
-    setError(undefined);
-    setMoveError(undefined);
-    try {
-      // Read fresh metadata, not a cached folder visited earlier. The backend
-      // repeats authoritative validation before any provider effect.
-      const collisions = await dropCollisions(move);
-      if (collisions.some((name) => !overwrite.includes(name))) {
-        setPendingMove({ ...move, collisions });
-        return;
-      }
-      await api(`${serverPath(serverId)}/files`, {
-        method: 'POST',
-        body: {
-          action: 'rename',
-          root: '',
-          files: move.names.map((name) => ({
-            from: join(move.source, name),
-            to: join(move.destination, name),
-          })),
-          ...(overwrite.length
-            ? { overwrite: overwrite.map((name) => join(move.destination, name)) }
-            : {}),
-        },
-      });
-      setPendingMove(undefined);
-      setSelected(new Set());
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['files', serverId, move.source], exact: true }),
-        queryClient.invalidateQueries({
-          queryKey: ['files', serverId, move.destination],
-          exact: true,
-        }),
-      ]);
-    } catch (failure) {
-      if (
-        failure &&
-        typeof failure === 'object' &&
-        'code' in failure &&
-        failure.code === 'conflict'
-      ) {
-        // A target may have appeared since preflight. Offer explicit consent,
-        // never replay automatically or assume a partial provider move rolled back.
-        try {
-          const sources = await api<ServerFile[]>(
-            `${serverPath(serverId)}/files?path=${encodeURIComponent(move.source)}`,
-          );
-          const collisions = await dropCollisions(move);
-          if (
-            collisions.length &&
-            collisions.some((name) => !overwrite.includes(name)) &&
-            move.names.every((name) =>
-              sources.some((entry) => entry.name === name && !entry.is_symlink),
-            )
-          ) {
-            setPendingMove({ ...move, collisions });
-            return;
-          }
-        } catch {
-          /* Preserve the original operation error; there is no retry. */
-        }
-      }
-      if (pendingMove) setMoveError(failure);
-      else setError(failure);
-    } finally {
-      mutationRunning.current = false;
-      setMutating(false);
     }
   }
   function dragOverFolder(event: DragEvent) {
@@ -1989,6 +1910,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       <Dialog
         open={pendingUploads.length > 0}
         title={t('file.replaceTitle')}
+        closeIcon
         onClose={() => setPendingUploads([])}
       >
         <p>{t('file.replaceWarning')}</p>
@@ -2003,48 +1925,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           {t('file.replaceUpload')}
         </button>
       </Dialog>
-      <Dialog
-        open={Boolean(pendingMove)}
-        className="fm-move-confirm"
-        title={t('file.moveCollisionTitle', {
-          count: pendingMove?.collisions.length ?? 0,
-          folder: pendingMove?.destination.split('/').at(-1) || t('file.root'),
-        })}
-        showClose={false}
-        onClose={() => {
-          if (!mutationRunning.current) {
-            setPendingMove(undefined);
-            setMoveError(undefined);
-          }
-        }}
-      >
-        <p>{t('file.moveOverwriteWarning')}</p>
-        <p className="fm-targets fm-move-names">{pendingMove?.collisions.join(', ')}</p>
-        {Boolean(moveError) && <ErrorNotice error={moveError} />}
-        <div className="actions fm-move-actions">
-          <button
-            type="button"
-            className="secondary"
-            disabled={mutating}
-            onClick={() => {
-              setPendingMove(undefined);
-              setMoveError(undefined);
-            }}
-          >
-            {t('web.cancel')}
-          </button>
-          <button
-            type="button"
-            className="danger"
-            disabled={mutating}
-            onClick={() => {
-              if (pendingMove) void moveDropped(pendingMove, pendingMove.collisions);
-            }}
-          >
-            {t('file.overwrite')}
-          </button>
-        </div>
-      </Dialog>
+      {moveFlow.dialog}
       <Dialog
         open={Boolean(mode) && !editing}
         title={t(
@@ -2054,13 +1935,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               ? 'service.rename'
               : mode === 'delete'
                 ? 'web.delete'
-                : mode === 'move'
-                  ? 'file.move'
-                  : mode === 'copy'
-                    ? 'file.copy'
-                    : 'file.extract',
+                : mode === 'copy'
+                  ? 'file.copy'
+                  : 'file.extract',
         )}
         onClose={closeEditor}
+        closeIcon
+        closeDisabled={mutating}
       >
         <ActionForm
           key={`${mode}:${targets.join(',')}`}
@@ -2068,13 +1949,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           submitLabel={t(
             mode === 'delete'
               ? 'web.delete'
-              : mode === 'move'
-                ? 'file.move'
-                : mode === 'copy'
-                  ? 'file.copy'
-                  : mode === 'extract'
-                    ? 'file.extract'
-                    : 'web.save',
+              : mode === 'copy'
+                ? 'file.copy'
+                : mode === 'extract'
+                  ? 'file.extract'
+                  : 'web.save',
           )}
           onSubmit={async (data) => {
             if (!canMutate) throw { messageKey: 'error.forbidden' };
@@ -2088,24 +1967,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 root: directory,
                 files: [{ from: targets[0], to: text(data, 'name') }],
               });
-            else if (mode === 'move' || mode === 'copy') {
+            else if (mode === 'copy') {
               const folder = normalizeFilePath(text(data, 'destination'));
               if (folder === undefined || !validMoveTarget(directory, targets, folder))
                 throw { messageKey: 'file.invalidMove' };
-              if (mode === 'move')
-                await mutation({
-                  action: 'rename',
-                  root: '',
-                  files: targets.map((name) => ({
-                    from: join(directory, name),
-                    to: join(folder, name),
-                  })),
-                });
-              else
-                await mutation(
-                  { root: directory, files: targets, destination: folder },
-                  '/files/copy',
-                );
+              await mutation(
+                { root: directory, files: targets, destination: folder },
+                '/files/copy',
+              );
             } else if (mode === 'extract')
               await mutation(
                 {
@@ -2133,9 +2002,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               }
             />
           )}
-          {(mode === 'move' || mode === 'copy') && (
+          {mode === 'copy' && (
             <>
-              <p className="fm-targets">{targets.join(', ')}</p>
+              <FileSelectionSummary names={targets} />
               <Input
                 label={t('file.destination')}
                 name="destination"
@@ -2148,11 +2017,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           {mode === 'delete' && (
             <>
               <p>{t('file.deleteWarning', { count: targets.length })}</p>
-              <ul className="fm-targets">
-                {targets.map((name) => (
-                  <li key={name}>{name}</li>
-                ))}
-              </ul>
+              <FileSelectionSummary names={targets} />
               <Check label={t('web.confirm')} required />
             </>
           )}

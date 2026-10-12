@@ -230,10 +230,10 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect((await provider.files()).get('world/alpha.txt')?.toString()).toBe('Alpha notes');
     await menu('gamma.yaml');
     await user.getByRole('menuitem', { name: 'Move', exact: true }).click();
-    // Copy already created this filename: refusing overwrite keeps both files intact.
-    await dialog().getByLabel('Destination folder', { exact: true }).fill('/world');
+    // Copy already created this filename: closing the conflict keeps both files intact.
+    await dialog().getByRole('treeitem', { name: 'world', exact: true }).click();
     await dialog().getByRole('button', { name: 'Move', exact: true }).click();
-    await browserExpect(dialog().getByRole('alert')).toBeVisible();
+    await browserExpect(dialog().locator('.fm-conflict-file')).toHaveText('gamma.yaml');
     await dialog().getByRole('button', { name: 'Close', exact: true }).click();
     await user.getByRole('checkbox', { name: 'Select alpha.txt', exact: true }).check();
     await user.getByRole('checkbox', { name: 'Select beta.json', exact: true }).check();
@@ -446,12 +446,17 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           ? 'File con lo stesso nome presente in drop-target'
           : 'A file with the same name exists in drop-target',
       );
-      await browserExpect(dialog().getByRole('button')).toHaveCount(2);
+      await browserExpect(dialog().getByRole('button')).toHaveCount(5);
       const cancel = dialog().getByRole('button', {
-        name: locale === 'it' ? 'Annulla' : 'Cancel',
+        name: locale === 'it' ? 'Chiudi' : 'Close',
         exact: true,
       });
-      await browserExpect(cancel).toBeFocused();
+      await browserExpect(
+        dialog().getByRole('button', {
+          name: locale === 'it' ? 'Salta' : 'Skip',
+          exact: true,
+        }),
+      ).toBeFocused();
       const overwrite = dialog().getByRole('button', {
         name: locale === 'it' ? 'Sovrascrivi' : 'Overwrite',
         exact: true,
@@ -491,9 +496,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     // A new conflict after the first prompt requires another explicit confirmation.
     remote.set('drop-target/move-b.txt', Buffer.from('old b'));
     await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
-    await browserExpect(dialog()).toHaveAccessibleName(
-      'Files with the same names exist in drop-target',
-    );
+    await browserExpect(dialog().locator('.fm-conflict-file')).toHaveText('move-b.txt');
     expect(remote.get('drop-target/move-a.txt')?.toString()).toBe('old a');
     expect(remote.get('drop-target/move-b.txt')?.toString()).toBe('old b');
     await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
@@ -518,9 +521,13 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     });
     await user.getByRole('button', { name: 'Refresh files', exact: true }).click();
     await row('drop-folder').dragTo(row('drop-target'));
-    await browserExpect(user.getByRole('alert')).toContainText(
+    await browserExpect(dialog()).toContainText(
       'A folder, link or differently capitalized name already exists',
     );
+    await browserExpect(
+      dialog().getByRole('button', { name: 'Overwrite', exact: true }),
+    ).toBeDisabled();
+    await dialog().getByRole('button', { name: 'Skip', exact: true }).click();
     await browserExpect(dialog()).not.toBeVisible();
   });
   it('requests consent when a collision appears after drop preflight without replaying the move', async () => {
@@ -533,13 +540,23 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     remote.set('late-drop.txt', Buffer.from('source'));
     let attempts = 0;
     let failOverwrite = false;
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = () => {};
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     await user.route('**/files', async (route) => {
       if (
         route.request().method() === 'POST' &&
         route.request().postDataJSON()?.action === 'rename'
       ) {
         attempts++;
-        if (failOverwrite)
+        if (failOverwrite) {
+          entered();
+          await held;
           return route.fulfill({
             status: 503,
             json: {
@@ -549,6 +566,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
               },
             },
           });
+        }
         remote.set('late-target/late-drop.txt', Buffer.from('appeared after preflight'));
       }
       await route.continue();
@@ -562,22 +580,124 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       expect(attempts).toBe(1);
       expect(remote.get('late-drop.txt')?.toString()).toBe('source');
       expect(remote.get('late-target/late-drop.txt')?.toString()).toBe('appeared after preflight');
-      await dialog().getByRole('button', { name: 'Cancel', exact: true }).click();
+      await dialog().getByRole('button', { name: 'Close', exact: true }).click();
       expect(attempts).toBe(1);
       failOverwrite = true;
       await row('late-drop.txt').dragTo(row('late-target'));
       await dialog().getByRole('button', { name: 'Overwrite', exact: true }).click();
-      await browserExpect(dialog().getByRole('alert')).toBeVisible();
+      await reached;
       await browserExpect(
-        dialog().getByRole('button', { name: 'Cancel', exact: true }),
+        dialog().getByRole('button', { name: 'Close', exact: true }),
+      ).toBeDisabled();
+      await user.keyboard.press('Escape');
+      await browserExpect(dialog()).toBeVisible();
+      await user.keyboard.press('Enter');
+      expect(attempts).toBe(2);
+      release();
+      await browserExpect(dialog().getByRole('alert')).toBeVisible();
+      await browserExpect(dialog()).toContainText('Some files may already have moved');
+      await browserExpect(dialog().getByRole('button')).toHaveCount(1);
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Close', exact: true }),
       ).toBeEnabled();
       expect(attempts).toBe(2);
       expect(remote.get('late-drop.txt')?.toString()).toBe('source');
       expect(remote.get('late-target/late-drop.txt')?.toString()).toBe('appeared after preflight');
-      await dialog().getByRole('button', { name: 'Cancel', exact: true }).click();
+      await dialog().getByRole('button', { name: 'Close', exact: true }).click();
       expect(attempts).toBe(2);
     } finally {
+      release();
       await user.unroute('**/files');
+    }
+  });
+  it('clears move decisions on identity changes before and during requests without replay', async () => {
+    await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
+      action: 'mkdir',
+      root: '',
+      name: 'identity-target',
+    });
+    const remote = await provider.files();
+    for (const phase of ['destination', 'conflict', 'preflight', 'submitted'] as const) {
+      const name = `identity-${phase}.txt`;
+      remote.set(name, Buffer.from('source'));
+      if (phase === 'conflict') remote.set(`identity-target/${name}`, Buffer.from('target'));
+      let entered = () => {};
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let armed = false;
+      let posts = 0;
+      const intercept = async (route: import('@playwright/test').Route) => {
+        const request = route.request();
+        const parsed = new URL(request.url());
+        if (request.method() === 'POST' && request.postDataJSON()?.action === 'rename') {
+          posts++;
+          if (phase === 'submitted') {
+            entered();
+            await held;
+            return route.fulfill({
+              status: 503,
+              json: {
+                error: {
+                  code: 'integration_unavailable',
+                  messageKey: 'errors.integration_unavailable',
+                },
+              },
+            });
+          }
+        }
+        if (
+          armed &&
+          phase === 'preflight' &&
+          request.method() === 'GET' &&
+          parsed.searchParams.get('path') === 'identity-target'
+        ) {
+          entered();
+          await held;
+        }
+        await route.continue();
+      };
+      await user.route('**/files?*', intercept);
+      await user.route('**/files', intercept);
+      try {
+        await user.goto(base);
+        await menu(name);
+        await user.getByRole('menuitem', { name: 'Move', exact: true }).click();
+        await dialog().getByRole('treeitem', { name: 'identity-target', exact: true }).click();
+        if (phase !== 'destination') {
+          armed = true;
+          await dialog().getByRole('button', { name: 'Move', exact: true }).click();
+          if (phase === 'conflict')
+            await browserExpect(dialog().locator('.fm-conflict-file')).toHaveText(name);
+          else await reached;
+        }
+        // Isolate the client's authority transition; real mutation handlers retain
+        // their independently tested session/ownership checks.
+        await user.evaluate(
+          "import('/src/api/client.ts').then(({queryClient}) => queryClient.setQueryData(['session'], current => ({...current, context: {...current.context, actorUserId: 'different-browser-fixture'}})))",
+        );
+        await browserExpect(dialog()).not.toBeVisible();
+        release();
+        await browserExpect(
+          user.getByRole('button', { name: 'Refresh files', exact: true }),
+        ).toBeEnabled();
+        await browserExpect(dialog()).not.toBeVisible();
+        expect(posts).toBe(phase === 'submitted' ? 1 : 0);
+        expect(remote.get(name)?.toString()).toBe('source');
+      } finally {
+        release();
+        await user.unroute('**/files?*', intercept);
+        await user.unroute('**/files', intercept);
+        await user.evaluate(
+          "import('/src/api/client.ts').then(({queryClient}) => queryClient.invalidateQueries({queryKey:['session']}))",
+        );
+        remote.delete(name);
+        remote.delete(`identity-target/${name}`);
+      }
     }
   });
   it('opens text inline with a stable skeleton and preserves dirty edits across breadcrumb and app navigation', async () => {

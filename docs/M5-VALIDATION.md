@@ -5326,3 +5326,40 @@ cleaning their own schemas/staging. No production interaction, live provider cal
 game-server asset, infrastructure change or explicit restart occurred. No migration
 or dependency change; rollback is a code revert. PR#21 stays OPEN/unmerged and
 SFTPGo#18 remains an independent production-release gate.
+
+### 2026-10-12 — Folder-tree moves and per-file conflict decisions
+
+Move now opens a bounded folder tree with lazy expansion, keyboard navigation and
+a live destination path. Selection summaries show three names plus the remaining
+count. Close is an accessible X. Toolbar/context-menu moves and drag/drop share
+the same conflict flow: Skip, Overwrite, Skip all and Overwrite all. Decisions
+precede one batch; skipped files remain intact, all-skipped sends no mutation,
+and newly appearing conflicts need explicit consent. Unsafe folder/link/ambiguous
+replacements remain unavailable. No API schema or provider behavior changed.
+
+Final focused evidence:
+
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/file-move.browser.test.ts`: **6 passed**. Covers lazy loading, skeleton/error/retry, keyboard tree traversal, root/source/self/descendant/link handling, focus recovery after a directory disappears, exact mixed overwrite/skip payloads, newly appearing conflicts after Overwrite all, and Skip all with/without nonconflicting files.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts -t 'supports keyboard context menus|extracts a ZIP|asks only for file collisions|collision appears after drop preflight|clears move decisions on identity' --reporter verbose --hideSkippedTests`: **5 passed**,23 unrelated skipped. Existing ZIP/copy/drop behavior remains valid. A held mutation disables Close, ignores Escape and duplicate Enter, then shows an inspection warning without replay after a simulated 503. Actor-context changes discard decisions during destination selection, conflicts, preflight and submitted requests; the browser fixture changes its session cache, while real backend authorization remains independently enforced.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm --filter @nickhosting/web build`, `scripts/dev.sh pnpm i18n:check`: passed with1233 EN/IT/pseudolocale keys before the final label-only refinement. Existing bundle-size advisory remains.
+- The Owner then requested no label below leaf folders. Removed only the empty-state paragraph, its CSS selector and unused translation; `scripts/dev.sh pnpm i18n:compile` passed with1232 keys. Reran only prefix + `apps/web/tests/file-move.browser.test.ts -t 'loads expanded branches only' --reporter verbose --hideSkippedTests`: **1 passed**,5 skipped, plus scoped Biome. Prior screenshots contain no leaf labels and remain representative.
+- Changed-file Biome, diff and staged governance checks passed. Applicable axe scans on EN desktop/IT mobile reported no violations; screenshots and keyboard behavior were inspected. No historical full-suite rerun.
+
+Initial tree testing exposed inherited disabled semantics on expansion buttons;
+these are corrected without enabling forbidden destination selection. A later
+focus-recovery test initially failed because its synthetic visibility event did
+not bubble to the query listener; corrected the fixture and reran the affected
+test, then the complete six-case file. Independent review also found pending
+choices surviving identity changes and focus restoration preceding busy release;
+both were fixed and covered before the final runs. No must-fix finding remains.
+
+Reviewed screenshots: [EN desktop tree](screenshots/m5/file-move-tree-desktop-en.png),
+[IT mobile tree](screenshots/m5/file-move-tree-mobile-it.png),
+[IT mobile conflicts](screenshots/m5/file-move-conflict-mobile-it.png).
+Tests used the existing approved isolated services, real application handlers and
+provider fixtures, disposing their own schemas/staging. No live-provider request,
+game-server asset, infrastructure change or explicit restart occurred. No new
+dependencies or migrations; rollback is a code revert. Existing non-atomic Wings
+batch limitations remain documented; no automatic replay or rollback guarantee is
+introduced. PR#21 stays OPEN/unmerged; SFTPGo#18 remains a release gate.

@@ -250,6 +250,8 @@ export function Dialog({
   children,
   onClose,
   showClose = true,
+  closeIcon = false,
+  closeDisabled = false,
   className,
 }: {
   open: boolean;
@@ -257,6 +259,8 @@ export function Dialog({
   children: ReactNode;
   onClose: () => void;
   showClose?: boolean;
+  closeIcon?: boolean;
+  closeDisabled?: boolean;
   className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -281,8 +285,28 @@ export function Dialog({
       <header className="section-heading">
         <h2 id={titleId}>{title}</h2>
         {showClose && (
-          <button type="button" className="secondary" onClick={onClose}>
-            {t('web.close')}
+          <button
+            type="button"
+            className={closeIcon ? 'dialog-close-icon' : 'secondary'}
+            aria-label={closeIcon ? t('web.close') : undefined}
+            disabled={closeDisabled}
+            onClick={onClose}
+          >
+            {closeIcon ? (
+              <svg
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                aria-hidden="true"
+              >
+                <path d="m6 6 12 12M6 18 18 6" />
+              </svg>
+            ) : (
+              t('web.close')
+            )}
           </button>
         )}
       </header>

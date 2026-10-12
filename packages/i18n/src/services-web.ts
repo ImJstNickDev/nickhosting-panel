@@ -168,13 +168,30 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   ],
   'file.replaceUpload': ['Replace and upload', 'Sostituisci e carica'],
   'file.destination': ['Destination folder', 'Cartella di destinazione'],
+  'file.destinationExpand': ['Expand {name}', 'Espandi {name}'],
+  'file.destinationCollapse': ['Collapse {name}', 'Comprimi {name}'],
+  'file.destinationUnavailable': [
+    'This folder cannot be used as the destination.',
+    'Questa cartella non può essere usata come destinazione.',
+  ],
+  'file.moreItems': [
+    'and {count, plural, one {# other item} other {# other items}}',
+    'e {count, plural, one {un altro elemento} other {altri # elementi}}',
+  ],
+  'file.skip': ['Skip', 'Salta'],
+  'file.skipAll': ['Skip all', 'Salta tutti'],
+  'file.overwriteAll': ['Overwrite all', 'Sovrascrivi tutti'],
+  'file.moveInspectFailure': [
+    'Some files may already have moved. Check the source and destination before trying again.',
+    'Alcuni file potrebbero essere già stati spostati. Controlla origine e destinazione prima di riprovare.',
+  ],
   'file.moveCollisionTitle': [
     '{count, plural, one {A file with the same name exists in {folder}} other {Files with the same names exist in {folder}}}',
     '{count, plural, one {File con lo stesso nome presente in {folder}} other {File con gli stessi nomi presenti in {folder}}}',
   ],
   'file.moveOverwriteWarning': [
-    'Clicking Overwrite replaces the existing files with the files being moved. Their previous contents will be lost.',
-    'Premendo Sovrascrivi, sostituirai i file presenti con quelli spostati. Il contenuto precedente andrà perso.',
+    'Clicking Overwrite replaces this file at the destination. Its previous contents will be lost.',
+    'Premendo Sovrascrivi, sostituirai questo file nella destinazione. Il contenuto precedente andrà perso.',
   ],
   'file.overwrite': ['Overwrite', 'Sovrascrivi'],
   'file.moveCollisionUnsupported': [

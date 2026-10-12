@@ -476,19 +476,32 @@ open directories or the editor. Each row has an accessible overflow menu and a
 desktop context menu; destructive actions require confirmation. Checkbox range
 selection, focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and
 explicit Move/Copy dialogs provide equivalent pointer and keyboard paths.
-Internal drag/drop moves immediately when a fresh destination listing has no
-collision. A regular file with the same exact name opens a compact dialog naming
-the destination and affected files, explaining that prior content will be lost,
-with only Cancel and Overwrite. Cancel receives initial focus. Confirmation is
-presented with a larger centered title, normal-sized explanatory copy, generous
-spacing and centered buttons of at least 48px height; Overwrite uses the destructive
-red style and Cancel stays neutral. These styles apply only to this dialog. Consent is
-scoped to those paths; another colliding name requires renewed consent. Backend
-validation remains authoritative before moving the batch. Folder/link/type and
-case-ambiguous collisions are refused rather than recursively replaced. Errors
-remain visible and never trigger an automatic mutation retry. Folder, parent-row
-and breadcrumb drop targets use this same flow; manual Move/Copy forms retain
-their existing no-overwrite behavior.
+Move opens a bounded, lazy folder tree with keyboard navigation, expand/collapse,
+loading/error/retry states and a live destination path. Root is selectable;
+the source and a selected folder's descendants cannot be destinations, but the
+source remains expandable. Only real folders are shown, not symlinks; leaf folders
+show no empty-state label. Summaries
+show the first three selected names and a localized remaining count. File dialogs
+use a compact X with an accessible Close label.
+
+Toolbar/context-menu moves and folder/parent/breadcrumb drops share one conflict
+flow. Drops move directly when fresh metadata has no collision. Otherwise the
+current conflicting filename and destination appear in a centered confirmation
+with Skip, Overwrite, Skip all and Overwrite all. Skip receives initial focus;
+Overwrite actions are red and all action targets are at least 48px high. Decisions
+are collected before one batch: skipped names are excluded entirely, and skipping
+all files issues no mutation. All-actions apply only to currently observed,
+unresolved collisions. Revalidation can require a new choice for a newly appearing
+name. Folder/link/type and case-ambiguous replacements remain blocked and can be
+skipped; no recursive merge/delete is introduced. Close/Escape abandons undecided
+work and is blocked while requests are pending. A changed actor/subject/support
+context discards the old choices and prevents a delayed preflight from submitting.
+
+Backend validation remains authoritative. An API preflight conflict can reopen
+explicit choices, while an unknown/failed POST ends with a visible error and asks
+for source/destination inspection; it never retries automatically or claims rollback.
+Source/destination caches refresh after a mutation. Copy retains its existing
+no-overwrite behavior.
 Folders precede files for every sort; search filters the current directory only.
 Name, Size and Modified headers are sorting buttons in both list and grid views.
 The active non-default ordering has an up/down arrow; default Name ascending has

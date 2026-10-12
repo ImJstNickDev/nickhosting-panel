@@ -973,33 +973,8 @@ dialog.fm-move-confirm {
   text-wrap: balance;
   overflow-wrap: anywhere;
 }
-.fm-move-confirm > p {
-  line-height: 1.55;
-}
-.fm-move-confirm .fm-move-names {
-  margin-top: 1rem;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-  max-height: 8rem;
-  overflow-y: auto;
-}
-.fm-move-confirm .fm-move-actions {
-  justify-content: center;
-  gap: 1rem;
-  margin-top: 1.75rem;
-}
-.fm-move-actions button {
-  min-width: 9rem;
-  min-height: 48px;
-  padding: 0.75rem 1.25rem;
-}
 @media (max-width: 480px) {
   dialog.fm-move-confirm {
     padding: 1.5rem 1.25rem;
-  }
-  .fm-move-actions button {
-    flex: 1 1 0;
-    min-width: 0;
-    padding-inline: 0.75rem;
   }
 }

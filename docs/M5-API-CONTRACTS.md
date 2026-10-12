@@ -527,6 +527,14 @@ preflight/rename interval: the current Client API contract has no atomic no-clob
 flag and multi-file renames are not transactional. No rollback or automatic retry
 is claimed after an ambiguous/partial provider failure.
 
+The WebPanel Move tree and drag/drop share a client-side decision flow over this
+same API. Per-file Skip removes that move and its overwrite path; Overwrite all
+approves only current eligible collisions, and Skip all skips current unresolved
+collisions. All decisions precede one batch; an all-skipped operation sends no
+POST. Metadata is refreshed before submission, so new collisions need consent.
+Session/support identity changes invalidate pending choices. Ambiguous failures
+require inspection rather than automatic replay. No API schema changes are needed.
+
 The editor serializes NickHosting writes and rechecks authorization before writing.
 Wings does not expose atomic compare-and-swap against external Panel/game writes:
 a write in the comparison/write interval remains possible. A post-write mismatch
