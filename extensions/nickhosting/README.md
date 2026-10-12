@@ -1,13 +1,13 @@
 # NickHosting Blueprint bridge
 
-Version **1.1.0**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.2.0**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
 
 ## API contract
 
-All paths below are relative to `/api/application/extensions/nickhosting`.
+Administrative paths below are relative to `/api/application/extensions/nickhosting`.
 Every request requires an Application token; browser sessions and Client tokens
 are rejected. Blueprint's existing Application rate limiter remains in force.
 All responses use `Cache-Control: no-store`.
@@ -24,6 +24,34 @@ All responses use `Cache-Control: no-store`.
 | POST `/instances/{instance}/users/{nickUser}/keys` | users WRITE | Idempotent native Client key issuance |
 | POST `/instances/{instance}/users/{nickUser}/keys/{identifier}/rotate` | users WRITE | Issue replacement, retain original until explicit acknowledgement/revoke |
 | DELETE `/instances/{instance}/users/{nickUser}/keys/{identifier}` | users WRITE | Revoke only this extension's exact linked-account key |
+
+### Bulk upload URLs — Client API
+
+`POST /api/client/extensions/nickhosting/servers/{server}/upload-urls` accepts
+`{count:1..500}` and returns `{expiresAt:ISO8601,urls:string[]}`. `{server}` is the
+native short identifier or UUID. Capability discovery reports `bulkUploadUrls:true`.
+This route uses Blueprint's native Client authentication, IP restrictions and
+rate limiter, plus Pterodactyl's server-state middleware and `file.create`
+permission. Only a real account API token is accepted; browser sessions and
+Application tokens are rejected.
+
+The exact server must have a valid extension link, unchanged provider identity
+and owner, and a matching linked non-admin owner account in the same instance.
+Subusers and unrelated or invalidated resources cannot obtain bulk URLs.
+Native `NodeJWTService` generates a different `unique_id` for each upload, all
+with the same 15-minute expiry. There are no Wings calls or file mutations during
+issuance. The backend keeps these bearer URLs private; do not log, persist in
+public state or return them to browsers. Each URL is consumed once by Wings.
+Issue replacements for unused expired URLs; never replay an uncertain upload
+simply because a fresh token can be generated. A lost issuance response may be
+retried because issuance itself does not write files.
+
+Bulk issuance reduces repeated Panel HTTP/auth/bootstrap overhead without
+changing Wings transfer semantics, file overwrite behavior or transactional
+guarantees. Native signed upload URLs remain server-scoped, not filename-scoped;
+NickHosting's existing upload admission and manifest checks remain responsible
+for per-file access. As with native upload URLs, revoking the Client key does not
+revoke an already-issued Wings token before its expiry.
 
 Instance UUIDs must be unique per NickHosting environment/provider. An instance
 is pinned to the registering Application token's database ID. Changing that
@@ -168,7 +196,13 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.1.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.2.0/nickhosting.blueprint`.
+
+Version 1.2.0 adds no database migration. Its bounded upload tests use the installed
+native permission policy, server-state middleware and JWT service with isolated
+model data and an ephemeral signing key. They verify every returned signature,
+expiry and unique consumption ID without contacting Wings. The admin view lists
+the extension's six responsibilities in English and Italian.
 
 ## Upstream reference / licensing
 
@@ -176,6 +210,8 @@ existing output, and defaults to ignored `build/blueprint/1.1.0/nickhosting.blue
 - [Pinned installer](https://github.com/BlueprintFramework/framework/blob/beta-2025-09/scripts/commands/extensions/install.sh)
 - [Pterodactyl token API](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Models/Traits/HasAccessTokens.php)
 - [Pterodactyl events](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Observers/ServerObserver.php)
+- [Native upload URL controller](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Http/Controllers/Api/Client/Servers/FileUploadController.php)
+- [Native node JWT service](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Services/Nodes/NodeJWTService.php)
 
 Implementation independently uses existing public framework/model contracts.
 No Blueprint/PteroCA/closed-source implementation is copied or bundled; no new

@@ -32,6 +32,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   let f: Awaited<ReturnType<typeof managementFixture>>;
   let app: ReturnType<typeof createApp>;
+  let identity: ReturnType<typeof createIdentity>;
   let runtime: Awaited<ReturnType<typeof createManagementRuntime>>;
   let owner: AuthClient, user: AuthClient, peer: AuthClient, outsider: AuthClient;
   let userId: string, peerId: string, outsiderId: string;
@@ -194,7 +195,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     await f.db.deleteFrom('provider_accounts').where('user_id', '=', f.owner.actorUserId).execute();
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
-    const identity = createIdentity({
+    identity = createIdentity({
       pool: database.pool,
       baseURL: origin,
       authSecret: randomBytes(32).toString('base64url'),
@@ -283,6 +284,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       prepareUpload: vi.fn<PterodactylAdapter['prepareUpload']>(
         async (id, path) => (input) => uploadFile(id, path, input),
       ),
+      prepareUploadBatch: vi.fn<PterodactylAdapter['prepareUploadBatch']>(async () => null),
       getResources: vi.fn(async () => ({
         current_state: 'offline',
         is_suspended: false,
@@ -1548,6 +1550,13 @@ describe('M2 Hono API with real invitation, password and session authentication'
       samples = resources.mock.calls.length;
     const bothStarted = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>();
+    const bulk = vi.mocked(f.adapter.prepareUploadBatch);
+    const issued = bulk.mock.calls.length;
+    const singles = vi.mocked(f.adapter.prepareUpload).mock.calls.length;
+    bulk.mockImplementationOnce(async (identifier, paths) => ({
+      expiresAt: Date.now() + 900_000,
+      uploads: paths.map((path) => (input) => uploadFile(identifier, path, input)),
+    }));
     let active = 0,
       peak = 0;
     try {
@@ -1563,6 +1572,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       ).toBe(200);
       expect(list.mock.calls.length - reads).toBe(2);
       expect(resources.mock.calls.length - samples).toBe(1);
+      expect(bulk.mock.calls.length - issued).toBe(1);
       expect(
         (
           await request(outsider, `/v1/servers/${server}/files/upload-batches`, {
@@ -1644,6 +1654,8 @@ describe('M2 Hono API with real invitation, password and session authentication'
       );
       expect(timings).toHaveLength(49);
       expect(timings.every((record) => typeof record.data.signedUrlMs === 'number')).toBe(true);
+      expect(bulk.mock.calls.length - issued).toBe(1);
+      expect(vi.mocked(f.adapter.prepareUpload).mock.calls.length).toBe(singles);
     } finally {
       release.resolve();
       await vi.waitFor(() => expect(active).toBe(0));
@@ -1652,6 +1664,143 @@ describe('M2 Hono API with real invitation, password and session authentication'
       });
       list.mockImplementation(originalList ?? (async () => []));
       uploadFile.mockImplementation(originalUpload);
+    }
+  });
+
+  it('normalizes real bulk handoffs and coalesces cache restart refresh without sharing cancellation', async () => {
+    const server = await minecraftServer();
+    const batchId = randomUUID();
+    const originalApp = app;
+    const list = vi.mocked(f.adapter.listFiles),
+      bulk = vi.mocked(f.adapter.prepareUploadBatch);
+    const originalList = list.getMockImplementation(),
+      originalBulk = bulk.getMockImplementation();
+    const refreshStarted = Promise.withResolvers<void>(),
+      releaseRefresh = Promise.withResolvers<void>();
+    const abortFirst = new AbortController();
+    let issuances = 0;
+    const uploaded: string[] = [];
+    const pending: Promise<Response>[] = [];
+    const paths = ['world/first.bin', 'world/second.bin'];
+    const adapter = createPterodactylAdapter({
+      baseURL: 'https://panel.example.test',
+      applicationKey: 'isolated-application-key',
+      clientKey: 'isolated-owner-key',
+      uploadOrigins: ['https://wings.example.test'],
+      fetcher: async (url, init) => {
+        const target = new URL(String(url));
+        if (target.origin === 'https://panel.example.test') {
+          expect(target.pathname).toMatch(
+            /^\/api\/client\/extensions\/nickhosting\/servers\/[^/]+\/upload-urls$/,
+          );
+          expect(init?.method).toBe('POST');
+          expect(JSON.parse(String(init?.body))).toEqual({ count: 2 });
+          const issuance = ++issuances;
+          if (issuance === 2) {
+            refreshStarted.resolve();
+            await releaseRefresh.promise;
+          }
+          return Response.json({
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            urls: paths.map(
+              (_, index) =>
+                `https://wings.example.test/upload/file?token=isolated-${issuance}-${index}`,
+            ),
+          });
+        }
+        expect(target.origin).toBe('https://wings.example.test');
+        expect(target.pathname).toBe('/upload/file');
+        expect(target.searchParams.get('directory')).toBe('/world');
+        expect(new Headers(init?.headers).has('authorization')).toBe(false);
+        const content = await new Response(init?.body).text();
+        const filename = /filename="([^"]+)"/.exec(content)?.[1];
+        if (!filename) throw new Error('Missing multipart fixture filename');
+        uploaded.push(filename);
+        return new Response(null, { status: 204 });
+      },
+    });
+    list.mockImplementation(async (_identifier, directory = '') =>
+      directory === '' ? [fileEntry('world', { is_file: false })] : [],
+    );
+    bulk.mockImplementation((...args) => adapter.prepareUploadBatch(...args));
+    try {
+      const response = await request(user, `/v1/servers/${server}/files/upload-batches`, {
+        id: batchId,
+        files: paths.map((path, index) => ({
+          id: String(index),
+          path,
+          bytes: 1,
+          overwrite: false,
+        })),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).not.toMatch(/isolated-|wings\.example/);
+      expect(issuances).toBe(1);
+      expect(uploaded).toEqual([]);
+      expect(bulk.mock.lastCall?.[1]).toEqual(paths);
+
+      // A fresh API instance retains PostgreSQL claims but has no in-memory URLs.
+      app = createApp({
+        database,
+        identity: async () => identity,
+        codec,
+        origins: [origin],
+        env,
+        management: async () => runtime,
+      });
+      pending.push(
+        upload(user, server, new Uint8Array(1), 1, {}, abortFirst.signal, {
+          path: paths[0],
+          batchId,
+          entryId: '0',
+          overwrite: 'false',
+        }),
+      );
+      await Promise.race([
+        refreshStarted.promise,
+        delay(3000).then(() => {
+          throw new Error('Missing cache restart refresh');
+        }),
+      ]);
+      pending.push(
+        upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+          path: paths[1],
+          batchId,
+          entryId: '1',
+          overwrite: 'false',
+        }),
+      );
+      await vi.waitFor(async () => {
+        const claim = await f.db
+          .selectFrom('upload_ingestion_claims')
+          .select('scope')
+          .where('id', '=', batchId)
+          .executeTakeFirstOrThrow();
+        expect(claim.scope.batch?.files.map((file) => file.state)).toEqual(['active', 'active']);
+      });
+      abortFirst.abort();
+      releaseRefresh.resolve();
+      const completed = await Promise.all(pending);
+      expect(completed.map((item) => item.status)).toEqual([503, 204]);
+      expect(issuances).toBe(2);
+      expect(uploaded).toEqual(['second.bin']);
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .select('id')
+          .where('id', '=', batchId)
+          .execute(),
+      ).toEqual([]);
+    } finally {
+      abortFirst.abort();
+      releaseRefresh.resolve();
+      await Promise.allSettled(pending);
+      await request(user, `/v1/servers/${server}/files/upload-batches/${batchId}`, undefined, {
+        method: 'DELETE',
+      });
+      app = originalApp;
+      list.mockImplementation(originalList ?? (async () => []));
+      bulk.mockImplementation(originalBulk ?? (async () => null));
     }
   });
 

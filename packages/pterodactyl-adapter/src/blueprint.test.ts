@@ -14,6 +14,18 @@ const options = {
   clientKey: 'fixture-client',
 };
 describe('Blueprint extension discovery', () => {
+  it('recognizes bulk upload signing without requiring it from older extensions', async () => {
+    const current = {
+      ...capabilities,
+      capabilities: { ...capabilities.capabilities, bulkUploadUrls: true },
+    };
+    expect(
+      await discoverNickHostingExtension({
+        ...options,
+        fetcher: async () => Response.json(current),
+      }),
+    ).toEqual(current);
+  });
   it('uses only the Application transport and preserves unavailable capabilities', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(capabilities));
     expect(await discoverNickHostingExtension({ ...options, fetcher })).toEqual(capabilities);

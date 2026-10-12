@@ -221,6 +221,7 @@ foreach (['en','it'] as $locale) {
     check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
     check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
     check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
+    check(substr_count($html, '<li>') === 6 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
 }
 $instance = '11111111-1111-4111-8111-111111111111';
 // Technical-account tests use the installed native creation service with an isolated repository.
@@ -326,4 +327,95 @@ catch (RuntimeException $error) { check($error->getMessage()==='isolated reposit
 check(DB::transactionLevel()===0 && !DB::table('nickhosting_users')->where('nick_user_id','dddddddd-dddd-4ddd-8ddd-dddddddddddd')->exists(),'native nested transaction failure fully rolled back');
 $app->instance(Pterodactyl\Services\Users\UserCreationService::class,$service);
 check($controller->provisionUser(req(),$instance,'dddddddd-dddd-4ddd-8ddd-dddddddddddd')->getStatusCode()===200,'retry after native creation failure succeeds');
+
+// Native Client permissions, server-state middleware and native JWT signing are exercised
+// against in-memory models. No production bootstrap, Wings call or secret is used.
+$app['config']->set('app.url', 'https://panel.example');
+$gate = new Illuminate\Auth\Access\Gate($app, fn () => null);
+$gate->policy(Pterodactyl\Models\Server::class, Pterodactyl\Policies\ServerPolicy::class);
+$app->instance(Illuminate\Contracts\Auth\Access\Gate::class, $gate);
+$uploadServer = Pterodactyl\Models\Server::query()->withoutEagerLoads()->find(2);
+$uploadUser = Pterodactyl\Models\User::query()->find(2);
+$nodeSecret = random_bytes(32);
+$uploadNode = new Pterodactyl\Models\Node();
+$uploadNode->setRawAttributes(['id'=>1, 'scheme'=>'https', 'fqdn'=>'wings.example', 'daemonListen'=>443,
+    'daemon_token'=>encrypt($nodeSecret), 'maintenance_mode'=>false]);
+$uploadServer->setRelation('node', $uploadNode)->setRelation('transfer', null)->setRelation('subusers', collect());
+function uploadRequest(array $data, $server, $user, mixed $tokenType = 1) {
+    global $validator, $app;
+    $r=Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Requests\UploadUrlsRequest::create(
+        '/api/client/extensions/nickhosting/servers/'.$server->uuidShort.'/upload-urls', 'POST', $data);
+    $key = is_int($tokenType) ? new Pterodactyl\Models\ApiKey() : $tokenType;
+    if ($key instanceof Pterodactyl\Models\ApiKey) { $key->setRawAttributes(['key_type'=>$tokenType, 'user_id'=>$user->id]); }
+    $user=clone $user; $user->withAccessToken($key); $r->setUserResolver(fn () => $user);
+    $route = new Illuminate\Routing\Route('POST', '/api/client/extensions/nickhosting/servers/{server}/upload-urls', fn () => null);
+    $route->bind($r); $route->setParameter('server', $server); $r->setRouteResolver(fn () => $route);
+    $v=$validator->make($data, $r->rules()); $v->validate();
+    $r->setContainer($app); $r->setValidator($v);
+    return $r;
+}
+$uploads = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Http\Controllers\UploadUrlsController(new Pterodactyl\Services\Nodes\NodeJWTService());
+$uploadReq = uploadRequest(['count'=>49], $uploadServer, $uploadUser);
+check($uploadReq->authorize(), 'bulk upload authorizes native account token and file-create permission');
+check(!uploadRequest(['count'=>1], $uploadServer, $uploadUser, 2)->authorize(), 'bulk upload rejects Application token');
+check(!uploadRequest(['count'=>1], $uploadServer, $uploadUser, new Laravel\Sanctum\TransientToken())->authorize(), 'bulk upload rejects cookie token');
+check(!uploadRequest(['count'=>1], $uploadServer, $uploadUser, null)->authorize(), 'bulk upload rejects missing token');
+$unrelatedUser=clone $uploadUser; $unrelatedUser->id=900;
+check(!uploadRequest(['count'=>1], $uploadServer, $unrelatedUser)->authorize(), 'bulk upload denies missing native file-create permission');
+$subuser=new Pterodactyl\Models\Subuser(); $subuser->setRawAttributes(['user_id'=>900,'permissions'=>'["file.create"]']);
+$uploadServer->setRelation('subusers', collect([$subuser]));
+$subRequest=uploadRequest(['count'=>1], $uploadServer, $unrelatedUser);
+check($subRequest->authorize(), 'bulk upload applies native subuser file-create permission');
+denied(fn () => $uploads($subRequest,$uploadServer),403,'bulk upload requires exact registered owner credential');
+$uploadServer->setRelation('subusers', collect());
+$adminUser=clone $uploadUser; $adminUser->root_admin=true;
+denied(fn () => $uploads(uploadRequest(['count'=>1],$uploadServer,$adminUser),$uploadServer),403,'bulk upload rejects provider administrator');
+$access = new Pterodactyl\Http\Middleware\Api\Client\Server\AuthenticateServerAccess();
+check($access->handle($uploadReq, fn () => true)===true, 'bulk upload native current-server-state check passes');
+$uploadServer->status=Pterodactyl\Models\Server::STATUS_SUSPENDED;
+denied(fn () => $access->handle($uploadReq,fn () => true),409,'bulk upload rejects suspended server via native middleware');
+$uploadServer->status=null;
+$uploadNode->maintenance_mode=true;
+denied(fn () => $access->handle($uploadReq,fn () => true),409,'bulk upload rejects node maintenance via native middleware');
+$uploadNode->maintenance_mode=false;
+foreach ([[],['count'=>0],['count'=>501],['count'=>1.5],['count'=>'2'],['count'=>true]] as $invalid) {
+    try { $uploads(uploadRequest($invalid,$uploadServer,$uploadUser),$uploadServer); throw new LogicException('expected validation'); }
+    catch (Illuminate\Validation\ValidationException $e) { check(true,'bulk upload rejects invalid bounded count'); }
+}
+$response=$uploads($uploadReq,$uploadServer);
+$body=$response->getData(true);
+check($response->getStatusCode()===200 && $response->headers->get('Cache-Control')==='no-store, private'
+    && count($body['urls'])===49, 'bulk upload returns 49 private URLs in one response');
+$config=Lcobucci\JWT\Configuration::forSymmetricSigner(new Lcobucci\JWT\Signer\Hmac\Sha256(),Lcobucci\JWT\Signer\Key\InMemory::plainText($nodeSecret));
+$unique=[];
+foreach ($body['urls'] as $url) {
+    parse_str(parse_url($url,PHP_URL_QUERY),$query);
+    $jwt=$config->parser()->parse($query['token']);
+    if (!$config->validator()->validate($jwt,new Lcobucci\JWT\Validation\Constraint\SignedWith($config->signer(),$config->signingKey()))
+        || $jwt->claims()->get('server_uuid')!==$uploadServer->uuid
+        || $jwt->claims()->get('user_uuid')!==$uploadUser->uuid
+        || $jwt->claims()->get('exp')->getTimestamp()!==strtotime($body['expiresAt'])
+        || !str_starts_with($url,'https://wings.example:443/upload/file?token=')) { throw new RuntimeException('invalid native upload token'); }
+    $unique[]=$jwt->claims()->get('unique_id');
+}
+check(count(array_unique($unique))===49, 'bulk upload native signatures claims expiry and unique token consumption IDs');
+$ttl=strtotime($body['expiresAt'])-time();
+check($ttl>=898 && $ttl<=900, 'bulk upload URLs expire after native 15 minutes');
+check(count($uploads(uploadRequest(['count'=>500],$uploadServer,$uploadUser),$uploadServer)->getData(true)['urls'])===500,'bulk upload supports bounded 500-file group');
+DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['valid'=>false]);
+denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects invalidated server link');
+DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['valid'=>true]);
+$uploadServer->external_id='foreign';
+denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects exact server identity drift');
+$uploadServer->external_id='owner-test';
+DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['owner_id'=>1]);
+denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects unacknowledged owner handoff');
+DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['owner_id'=>2]);
+DB::table('nickhosting_users')->where('provider_id',2)->update(['provider_uuid'=>'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee']);
+denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects linked account identity drift');
+DB::table('nickhosting_users')->where('provider_id',2)->update(['provider_uuid'=>$uploadUser->uuid,'instance_id'=>'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee']);
+denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects cross-instance owner link');
+DB::table('nickhosting_users')->where('provider_id',2)->update(['instance_id'=>$instance]);
+DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->delete();
+denied(fn () => $uploads($uploadReq,$uploadServer),403,'bulk upload rejects server outside managed registry');
 echo "$count checks passed\n";

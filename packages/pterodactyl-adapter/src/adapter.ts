@@ -2,7 +2,12 @@ import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import { allocationInventory } from './allocations.js';
 import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
-import { createDownloadProxy, type DownloadProxyOptions } from './downloads.js';
+import {
+  allowedOrigin,
+  createDownloadProxy,
+  type DownloadProxyOptions,
+  signedTarget,
+} from './downloads.js';
 import { confirmInstallation } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
 import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
@@ -47,6 +52,10 @@ export interface PterodactylOptions extends TransportOptions {
   /** Separately approved exact Wings upload origins; never backup/S3 origins. */
   uploadOrigins?: string[];
 }
+export interface PreparedUploadBatch {
+  expiresAt: number;
+  uploads: Array<(input: UploadProxyOptions) => Promise<void>>;
+}
 export function createPterodactylAdapter(options: PterodactylOptions) {
   const transport = createTransport(options);
   const appServer = (id: number) => `servers/${numericId(id)}`;
@@ -56,6 +65,27 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     `${clientServer(identifier)}/backups/${parseInput(z.string().uuid(), backupId)}`;
   const download = createDownloadProxy(options);
   const upload = createUploadProxy(options);
+  const uploadOrigins = new Set(
+    (options.uploadOrigins ?? []).map((origin) => allowedOrigin(origin, ['http:', 'https:'])),
+  );
+  const uploadTarget = (url: string) => {
+    const target = signedTarget(url, uploadOrigins);
+    if (!target.pathname.endsWith('/upload/file'))
+      throw new PterodactylError('invalid_response', 'client', 'rejected');
+    return target;
+  };
+  const uploadHandoff = (url: string, path: string, expiresAt?: number) => {
+    uploadTarget(url);
+    let used = false;
+    return async (body: UploadProxyOptions) => {
+      if (used || (expiresAt !== undefined && Date.now() >= expiresAt)) {
+        void body.body.cancel().catch(() => {});
+        throw uploadNotDispatched(new DomainError('conflict'));
+      }
+      used = true;
+      return upload(url, path, body);
+    };
+  };
   const adapter = {
     getAccount: () =>
       transport.entity(
@@ -460,18 +490,77 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         } finally {
           guard.close();
         }
+        return uploadHandoff(result.url, path);
       } catch (error) {
         throw uploadNotDispatched(error);
       }
-      let used = false;
-      return async (body: UploadProxyOptions) => {
-        if (used) {
-          void body.body.cancel().catch(() => {});
-          throw uploadNotDispatched(new DomainError('conflict'));
+    },
+    /** Optional Blueprint acceleration. One signed credential per file remains
+     * private and single-use; native Wings transfers retain their usual guards. */
+    async prepareUploadBatch(
+      identifier: string,
+      paths: string[],
+      input: TransferOptions = {},
+    ): Promise<PreparedUploadBatch | null> {
+      try {
+        const normalized = parseInput(z.array(z.string()).min(1).max(500), paths).map((path) =>
+          relativePath(path).slice(1),
+        );
+        if (new Set(normalized).size !== normalized.length)
+          throw new DomainError('validation_failed');
+        const endpoint = `extensions/nickhosting/servers/${segment(identifier)}/upload-urls`;
+        const guard = createTransferGuard(input, 'rejected');
+        const startedAt = Date.now();
+        let result: { expiresAt: string; urls: string[] };
+        try {
+          await guard.run(() => guard.authorize(true));
+          try {
+            result = await guard.run(() =>
+              transport.json(
+                'client',
+                endpoint,
+                z
+                  .object({
+                    expiresAt: z.string().datetime({ offset: true }),
+                    urls: z.array(z.string().min(1).max(8192)).length(normalized.length),
+                  })
+                  .strict(),
+                'POST',
+                { count: normalized.length },
+              ),
+            );
+          } catch (error) {
+            // Missing old extension endpoint only. Access, throttling and broken
+            // responses are failures, not permission to bypass extension policy.
+            if (error instanceof PterodactylError && error.reason === 'not_found') return null;
+            throw error;
+          }
+        } finally {
+          guard.close();
         }
-        used = true;
-        return upload(result.url, path, body);
-      };
+        const expiresAt = Date.parse(result.expiresAt);
+        if (expiresAt <= Date.now() || expiresAt > startedAt + 16 * 60_000)
+          throw new PterodactylError('invalid_response', 'client', 'rejected');
+        // Validate the whole response before releasing any usable credential.
+        // Detect reuse even when the same token appears with another query/order.
+        const tokens = new Set<string>();
+        for (const url of result.urls) {
+          const target = uploadTarget(url);
+          const values = target.searchParams.getAll('token');
+          const token = values[0];
+          if (values.length !== 1 || !token || tokens.has(token))
+            throw new PterodactylError('invalid_response', 'client', 'rejected');
+          tokens.add(token);
+        }
+        return {
+          expiresAt,
+          uploads: normalized.map((path, index) =>
+            uploadHandoff(result.urls[index] as string, path, expiresAt),
+          ),
+        };
+      } catch (error) {
+        throw uploadNotDispatched(error);
+      }
     },
     async uploadFile(identifier: string, path: string, input: UploadProxyOptions): Promise<void> {
       let prepared: (body: UploadProxyOptions) => Promise<void>;

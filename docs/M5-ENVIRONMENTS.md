@@ -977,3 +977,14 @@ unused groups. Preserve any uncertain ingestion claims for the existing reviewed
 recovery process; do not delete claims or reset data merely to restore availability.
 Restore matching API/browser source together. The original single-file endpoint
 remains compatible, but older clients cannot resume a prepared group's entries.
+
+
+### Bulk upload credentials (2026-10-12)
+
+Blueprint 1.2.0 adds one Client API request for all signed URLs in a prepared
+upload group. It uses the existing resource owner's technical account; no new
+credential, setting, network, container or database migration is needed. The API
+source watcher loads the matching private-cache code. An older extension's absent
+endpoint retains the previous individual-URL behavior. Token expiry/API restart
+refreshes unused credentials, not completed uploads. See the
+[extension validation and rollback record](BLUEPRINT-EXTENSION.md#2026-10-12--120-bulk-upload-credentials).

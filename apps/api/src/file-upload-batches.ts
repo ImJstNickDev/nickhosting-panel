@@ -22,6 +22,7 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
+import { createUploadUrlCache, type UploadUrlCache } from './upload-url-cache.js';
 
 type C = Context<{ Variables: Variables }>;
 const fileSchema = z.strictObject({
@@ -46,6 +47,7 @@ export function registerUploadBatchRoutes(
   app: Hono<{ Variables: Variables }>,
   options: ServerRouteOptions,
 ) {
+  const urls = createUploadUrlCache();
   app.post('/v1/servers/:id/files/upload-batches', async (c) => {
     const started = performance.now();
     const context = await options.principal(c),
@@ -86,6 +88,8 @@ export function registerUploadBatchRoutes(
           serverId,
           async (identifier, connection, current, server) => {
             const bindingHash = service.uploadBatchBinding(server);
+            const credentialBinding = await service.consoleBindingForServer(serverId);
+            const cacheKey = `${input.id}:${bindingHash}:${credentialBinding}`;
             const previous = await readUploadBatch(
               connection,
               current,
@@ -95,6 +99,11 @@ export function registerUploadBatchRoutes(
             );
             if (previous) {
               if (previous.manifestHash !== manifestHash) throw new DomainError('conflict');
+              const queued = previous.files.filter((file) => file.state === 'queued');
+              if (queued.length)
+                await urls.warm(cacheKey, queued, (paths) =>
+                  service.adapter.prepareUploadBatch(identifier, paths),
+                );
               return previous;
             }
             await assertNoPendingUpload(connection, serverId);
@@ -165,14 +174,27 @@ export function registerUploadBatchRoutes(
               })(),
               service.adapter.getResources(identifier),
               getSettings(connection, options.env),
+              urls.warm(cacheKey, files, (paths) =>
+                service.adapter.prepareUploadBatch(identifier, paths),
+              ),
             ]);
-            const [prepared, observed, configured] = results;
-            if (prepared.status === 'rejected') throw prepared.reason;
-            if (observed.status === 'rejected') throw observed.reason;
-            if (configured.status === 'rejected') throw configured.reason;
+            const [prepared, observed, configured, tickets] = results;
+            if (
+              prepared.status === 'rejected' ||
+              observed.status === 'rejected' ||
+              configured.status === 'rejected' ||
+              tickets.status === 'rejected'
+            ) {
+              urls.forget(cacheKey);
+              for (const result of results) if (result.status === 'rejected') throw result.reason;
+              throw new DomainError('integration_unavailable');
+            }
             const concurrency = configured.value.values.uploadConcurrency;
             const { accepted, growth } = prepared.value;
-            if (!accepted.length) return { id: null, concurrency, rejected, files: [] };
+            if (!accepted.length) {
+              urls.forget(cacheKey);
+              return { id: null, concurrency, rejected, files: [] };
+            }
             const bytes = accepted.reduce((sum, file) => sum + file.bytes, 0);
             const maxBytes = server.limits.disk * 1024 * 1024;
             if (
@@ -217,6 +239,7 @@ export function registerUploadBatchRoutes(
               } catch {}
               return batch;
             } catch (error) {
+              urls.forget(cacheKey);
               await claim.rejectBeforeDispatch();
               throw error;
             } finally {
@@ -246,6 +269,8 @@ export function registerUploadBatchRoutes(
           context,
           serverId,
           async (_id, connection, current, server) => {
+            const cacheKey = `${batchId}:${service.uploadBatchBinding(server)}:${await service.consoleBindingForServer(serverId)}`;
+            if (action === 'close') urls.forget(cacheKey);
             // Completion already released the reservation: close is idempotent.
             const exists = await connection
               .selectFrom('upload_ingestion_claims')
@@ -274,9 +299,11 @@ export function registerUploadBatchRoutes(
     if (action === 'close') app.delete('/v1/servers/:id/files/upload-batches/:batchId', handler);
     else app.post('/v1/servers/:id/files/upload-batches/:batchId/cancel', handler);
   }
+  return (c: C, input: Parameters<typeof runBatchUpload>[2]) =>
+    runBatchUpload(c, options, input, urls);
 }
 
-export async function runBatchUpload(
+async function runBatchUpload(
   c: C,
   options: ServerRouteOptions,
   input: {
@@ -287,6 +314,7 @@ export async function runBatchUpload(
     context: AuthContext;
     service: ManagementRuntime;
   },
+  urls: UploadUrlCache,
 ) {
   const batchId = parse(z.uuid(), c.req.query('batchId'));
   const entryId = parse(z.string().min(1).max(128), c.req.query('entryId'));
@@ -311,21 +339,40 @@ export async function runBatchUpload(
       serverId,
       async (identifier, connection, current, server) => {
         durations.accessMs = Math.round((performance.now() - input.started) * 1000) / 1000;
-        // The private URL lookup overlaps local reservation/manifest admission.
-        // Neither branch sends a byte to Wings until both have succeeded.
+        const bindingHash = service.uploadBatchBinding(server);
+        const admission = measure('admissionMs', () =>
+          claimUploadBatchEntry(connection, current, serverId, batchId, {
+            bindingHash,
+            id: entryId,
+            path: relativePath(input.path),
+            bytes: input.contentLength,
+            overwrite: input.overwrite,
+          }),
+        );
         const [admitted, signed] = await Promise.allSettled([
-          measure('admissionMs', () =>
-            claimUploadBatchEntry(connection, current, serverId, batchId, {
-              bindingHash: service.uploadBatchBinding(server),
-              id: entryId,
-              path: relativePath(input.path),
-              bytes: input.contentLength,
-              overwrite: input.overwrite,
-            }),
-          ),
-          measure('signedUrlMs', () =>
-            service.adapter.prepareUpload(identifier, input.path, { signal: c.req.raw.signal }),
-          ),
+          admission,
+          measure('signedUrlMs', async () => {
+            const key = `${batchId}:${bindingHash}:${await service.consoleBindingForServer(serverId)}`;
+            const file = { id: entryId, path: relativePath(input.path) };
+            let send = await urls.take(key, file);
+            if (send === undefined) {
+              // Restart/expiry loses only disposable credentials. Reissue tokens
+              // for queued entries and this admitted entry, never replay a write.
+              const lease = await admission;
+              await urls.warm(
+                key,
+                lease.pendingFiles,
+                (paths) => service.adapter.prepareUploadBatch(identifier, paths),
+                entryId,
+              );
+              send = await urls.take(key, file);
+            }
+            if (send === undefined) throw new DomainError('conflict');
+            return (
+              send ??
+              service.adapter.prepareUpload(identifier, input.path, { signal: c.req.raw.signal })
+            );
+          }),
         ]);
         if (admitted.status === 'rejected') throw admitted.reason;
         const lease = admitted.value;

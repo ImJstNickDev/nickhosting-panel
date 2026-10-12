@@ -147,8 +147,17 @@ remain enforced. Generic non-upload mutations retain their existing checks.
 Each transfer takes shared lifecycle/claim locks, so disjoint group entries can
 run together while ordinary mutations, lifecycle work and Owner recovery remain
 excluded. SQL entry claims enforce the configured concurrency across requests/API
-instances. One-use signed URL issuance overlaps entry admission and explicitly
-bypasses GET coalescing: concurrent files must never share a Wings upload token.
+instances. Blueprint 1.2 issues distinct one-use URLs for the group in one Client
+API request during preparation, overlapping path/resource checks. Each credential
+is bound to one file in a private, disposable API-memory cache (maximum 32 groups);
+URLs never enter the durable manifest, browser, audit or logs. The cache key
+includes the managed identity and current owner's credential revision. Close,
+eviction, expiry (30-second safety margin), API restart or a changed credential
+binding discards this optimization, not durable admission. Remaining queued/active
+entries can receive fresh unused tokens together; completed/uncertain effects are
+never replayed. Shared issuance is independent of any individual file's abort.
+An older extension returning 404 selects the stock per-file signing endpoint;
+other errors remain errors. Concurrent files never share a Wings upload token.
 The actual Wings POST waits for admission. Binary bytes stream with bounded
 buffers; XHR100% is not completion. Only the successful provider response and
 local settlement mark an entry complete. No per-file post-upload listing/hash
@@ -176,7 +185,9 @@ Pending file bodies remain only in the browser tab.
 
 Privacy-safe `server.files_upload_prepared` traces count files/bytes and preparation
 duration. `server.files_upload` reports access, entry admission, signed-URL lookup,
-provider streaming/response and settlement separately. Signed-URL/admission times
+provider streaming/response and settlement separately. A warm group's signed-URL
+phase measures local credential/cache lookup, without another Panel request.
+Signed-URL/admission times
 overlap and must not be summed. Trace fields contain no paths, content, keys or
 URLs; these are backend timings, not browser byte-progress measurements. Legacy
 uploads retain their earlier path/resource timing fields.

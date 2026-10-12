@@ -664,6 +664,10 @@ export async function installBrowserFixtures(
       if (!bytes) throw new PterodactylError('not_found', 'client', 'rejected');
       return stream(bytes, input);
     },
+    prepareUploadBatch: async (id, paths, options) => ({
+      expiresAt: Date.now() + 900_000,
+      uploads: await Promise.all(paths.map((name) => adapter.prepareUpload(id, name, options))),
+    }),
     prepareUpload: async (id, name, options) => {
       check();
       remote(id);

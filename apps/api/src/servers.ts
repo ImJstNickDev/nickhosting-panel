@@ -48,7 +48,7 @@ import type { Variables } from './app.js';
 import { createConsoleCommandRelays } from './console-command-relays.js';
 import { registerFileBrowsingRoutes } from './file-browsing.js';
 import { registerFileOperationRoutes, validateFileMoves } from './file-operations.js';
-import { registerUploadBatchRoutes, runBatchUpload } from './file-upload-batches.js';
+import { registerUploadBatchRoutes } from './file-upload-batches.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 type C = Context<{ Variables: Variables }>;
@@ -77,7 +77,7 @@ export function registerServerRoutes(
   const commandRelays = createConsoleCommandRelays();
   registerFileBrowsingRoutes(app, options);
   registerFileOperationRoutes(app, options);
-  registerUploadBatchRoutes(app, options);
+  const runBatchUpload = registerUploadBatchRoutes(app, options);
   const owner = async (c: C) => {
     const context = await principal(c, true);
     ownerOnly(context);
@@ -421,7 +421,7 @@ export function registerServerRoutes(
     const path = c.req.query('path') ?? '';
     relativePath(path);
     if (c.req.query('batchId') !== undefined || c.req.query('entryId') !== undefined)
-      return runBatchUpload(c, options, {
+      return runBatchUpload(c, {
         path,
         overwrite,
         contentLength,

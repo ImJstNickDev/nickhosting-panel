@@ -15,6 +15,8 @@ FILES = (
     'app/Http/Controllers/BridgeController.php',
     'app/Http/Controllers/CapabilitiesController.php',
     'app/Http/Requests/CapabilitiesRequest.php',
+    'app/Http/Requests/UploadUrlsRequest.php',
+    'app/Http/Controllers/UploadUrlsController.php',
     'app/Jobs/DeliverChanges.php',
     'app/Providers/BridgeServiceProvider.php',
     'app/Services/ChangeFeed.php',
@@ -26,6 +28,7 @@ FILES = (
     'private/remove.sh',
     'private/migrations/2026_10_11_000002_nickhosting_settings.php',
     'routes/application.php',
+    'routes/client.php',
 )
 ROOT = Path(__file__).absolute().parent
 
@@ -68,6 +71,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.1.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.2.0/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

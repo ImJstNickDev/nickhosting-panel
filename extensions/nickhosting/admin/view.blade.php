@@ -2,8 +2,16 @@
     $italian = str_starts_with(app()->getLocale(), 'it');
 @endphp
 <div class="box box-primary">
-    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.1.0</small></h3></div>
+    <div class="box-header with-border"><h3 class="box-title">NickHosting <small>1.2.0</small></h3></div>
     <div class="box-body">
+        <ul>
+            <li>{{ $italian ? 'Crea account tecnici Pterodactyl separati per gli utenti NickHosting.' : 'Creates separate Pterodactyl technical accounts for NickHosting users.' }}</li>
+            <li>{{ $italian ? 'Genera, ruota e revoca le Client API key dei soli account collegati.' : 'Issues, rotates and revokes Client API keys for linked accounts only.' }}</li>
+            <li>{{ $italian ? 'Blocca accesso web e mail degli account tecnici.' : 'Blocks browser access and mail for technical accounts.' }}</li>
+            <li>{{ $italian ? 'Notifica le modifiche ai limiti e all’identità dei server collegati tramite webhook firmati.' : 'Reports linked-server limit and identity changes through signed webhooks.' }}</li>
+            <li>{{ $italian ? 'Fornisce snapshot dei limiti e stato delle notifiche per il recupero.' : 'Provides limit snapshots and notification status for recovery.' }}</li>
+            <li>{{ $italian ? 'Genera URL Wings firmati per più upload con una sola richiesta Client API.' : 'Generates signed Wings URLs for multiple uploads in one Client API request.' }}</li>
+        </ul>
         @if (session('nickhosting_saved'))
             <div class="alert alert-success" role="status">{{ $italian ? 'Impostazione salvata.' : 'Setting saved.' }}</div>
         @endif

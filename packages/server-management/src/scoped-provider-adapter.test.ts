@@ -27,6 +27,7 @@ describe('managed owner Client credential dispatch', () => {
     'downloadFile',
     'uploadFile',
     'prepareUpload',
+    'prepareUploadBatch',
     'relayConsole',
   ] as const)('scopes %s to the managed owner', async (method) => {
     const result = {};

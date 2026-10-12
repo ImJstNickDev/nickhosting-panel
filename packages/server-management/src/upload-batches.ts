@@ -217,6 +217,7 @@ export async function claimUploadBatchEntry(
   );
   if (!result.rows[0]?.acquired) throw new DomainError('conflict');
   let unlocked = false;
+  let pendingFiles: Array<{ id: string; path: string }> = [];
   async function unlock() {
     if (unlocked) return;
     unlocked = true;
@@ -247,6 +248,9 @@ export async function claimUploadBatchEntry(
         )
           throw new DomainError('operation_busy');
         file.state = 'active';
+        pendingFiles = batch.files
+          .filter((entry) => entry.state === 'queued' || entry.state === 'active')
+          .map(({ id, path }) => ({ id, path }));
       },
     );
   } catch (error) {
@@ -273,6 +277,7 @@ export async function claimUploadBatchEntry(
     return result;
   }
   return {
+    pendingFiles,
     complete: () => settle('complete', 'server.upload.confirmed'),
     /** Only after adapter proof that the external upload was never invoked. */
     rejectBeforeDispatch: () => settle('cancelled', 'server.upload.not_dispatched'),

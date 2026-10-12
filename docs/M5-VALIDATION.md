@@ -5808,3 +5808,49 @@ unchanged. Live latency improvement awaits the Owner's next upload, with separat
 preparation/token/stream traces. Rollback: drain/close groups, preserve uncertain
 claims for reviewed recovery, and revert matching API/browser changes together;
 no migration or data reset. PR#21 remains OPEN and unmerged.
+
+
+## 2026-10-12 — bulk signed upload URLs and extension function list
+
+Blueprint 1.2.0 replaces per-file URL issuance for prepared groups with one
+bounded Client API request. The Core API keeps distinct one-use, file-bound
+handoffs privately in memory; streaming, independent cancellation and the
+existing two-upload default are preserved. A missing older endpoint falls back
+to single-file issuance; permission/provider failures do not silently fall back.
+No browser receives signed URLs or provider credentials. The extension admin page
+now lists its six responsibilities in concise EN/IT bullets.
+
+Focused final results (no historical full-suite rerun):
+
+- Unit: **71 passed** across upload URL cache, adapter bulk uploads, Blueprint
+  capability parsing and scoped provider dispatch.
+- PostgreSQL/Hono: **80 passed** across `servers.integration.test.ts` and
+  `upload-batches.integration.test.ts`; real authentication, claims and recovery,
+  mocked external provider. Explicit cache-restart/cancellation regression also
+  passed separately before this affected-suite run.
+- Chromium: **18 passed** across file-upload cancellation and refresh suites;
+  actual application handlers/isolated database, simulated game provider.
+- Extension: **133 vendor-backed PHP checks**, **10 package tests**, expanded PHP
+  and shell syntax passed. Rendering reuses the SQLite-memory fixture and actual
+  Blade engine; production Panel application/database are not bootstrapped.
+- Root/WebPanel typecheck, changed-file lint/format and indexed governance passed.
+  The first typecheck exposed an incorrect test table shape (array rows spread as
+  arguments); corrected to object rows and reran the affected test and typecheck.
+- Independent code review caught and resolved canonical path conversion, shared
+  refresh snapshots and cancellation propagation. No remaining must-fix finding.
+- Actual Blade screenshots reviewed: [desktop EN](screenshots/m5/blueprint-bulk-uploads-desktop-en.png),
+  [mobile IT](screenshots/m5/blueprint-bulk-uploads-mobile-it.png); no overflow or
+  clipped controls, concise administrator-oriented copy.
+
+The already authorized extension update completed through the standard Blueprint
+installer, with a private pre-update backup. No migration was pending. Native
+Client middleware/route registration verified. Live protected-store smoke:
+**49 URLs / 1 request / 281.793 ms**, valid 900 seconds; **zero file uploads**.
+Anonymous/Application-key/invalid-count checks returned **401/403/422**. This is
+URL issuance timing only, not a new 49-file transfer benchmark. Previous upload
+measurements and failure history remain unchanged. API, worker, Vite and Panel
+were healthy afterward; no container restart, game command, game-file mutation,
+network change or database reset occurred. Issue #18 remains a release gate.
+
+Full commands, artifact hash, evidence boundaries and rollback are in the
+[extension record](BLUEPRINT-EXTENSION.md#2026-10-12--120-bulk-upload-credentials).

@@ -532,3 +532,85 @@ an assertion that the provider-user selector is absent. Its
 was inspected alongside the setup screenshot; no clipping or spacing regression
 was found. These desktop images do not claim fresh mobile/Italian coverage.
 The development HTTPS ingress returned 200 after migration.
+
+
+## 2026-10-12 — 1.2.0 bulk upload credentials
+
+The native Panel upload endpoint issues one locally signed, single-request Wings
+JWT. It has no bulk operation. The extension now exposes
+`POST /api/client/extensions/nickhosting/servers/{server}/upload-urls` with
+`{count: 1..500}`. One authenticated request returns that many distinct native
+15-minute tokens; no Wings request or game-file write occurs during issuance.
+The native Client middleware, file-create permission, non-admin technical owner,
+registered instance and exact managed-server identity remain required. Application
+keys, browser sessions, foreign accounts and stale bindings cannot issue tokens.
+
+NickHosting requests the group during existing upload preparation and retains
+file-bound handoffs only in bounded API memory. Actual files still use independent
+streaming requests and the configured concurrency. Expiry/restart may reissue
+unused credentials together without replaying completed or uncertain effects.
+Only an absent endpoint (404) permits the older single-URL path. The extension's
+admin page now lists its six functions in short English/Italian bullets.
+
+Source evidence: installed Panel 1.11.11 native Client middleware,
+`FileUploadController`/`NodeJWTService`, and Wings 1.11.13 upload handling. Tokens
+are single-use per request, not reusable credentials for a batch of requests.
+
+Focused verification:
+
+- Vendor-backed PHP/SQLite memory harness: **133 checks passed**. It covers native
+  token verification/uniqueness, count/ownership/permission rejection and the
+  existing technical-account/change-feed/settings functionality. No production
+  database bootstrap is used by this harness.
+- Package tests: **10 passed**; expanded PHP and shell-hook syntax passed.
+- Adapter, scoped dispatch and private cache unit suites: **71 passed**.
+- API/authenticated uploads and durable PostgreSQL batch integration: **80 passed**.
+  The real adapter with fixture HTTP proves canonical paths, one issuance for 49
+  uploads, cache loss, concurrent refresh, and one cancelled waiter while its
+  sibling completes. External file mutations in these tests are mocked.
+- Chromium upload/cancellation/refresh browser suites: **18 passed**, including
+  the 49-file queue, independent outcomes, navigation and Italian mobile controls.
+- TypeScript (Core/API and WebPanel), changed-file Biome and diff checks passed.
+- Independent review identified and resolved path normalization, recovery-snapshot
+  coalescing and shared-cancellation defects before rollout; no must-fix remained.
+
+Sanitized actual Blade fixture renders, reviewed at desktop/mobile sizes:
+[desktop English](screenshots/m5/blueprint-bulk-uploads-desktop-en.png) and
+[mobile Italian](screenshots/m5/blueprint-bulk-uploads-mobile-it.png). These are
+rendered extension views, not screenshots of the authenticated live Panel.
+
+Archive SHA-256:
+`5b106092327505c0af602d613414b904691562ea7be0ead974419bc825ef11b4`.
+A private scoped pre-update backup and exact 1.1.0 archive are retained. Rollback
+is the standard Blueprint update with that previous archive and reverting the
+NickHosting change; it preserves existing settings/accounts and needs no reverse
+schema migration. As before, rollback does not undo Blueprint's shared cache and
+ownership housekeeping. No new migration or infrastructure resource is added.
+
+
+The Owner-authorized standard Blueprint update completed successfully. Its hook
+reported **Nothing to migrate**. Installed route discovery confirms the native
+Blueprint Client auth/bindings, `api.client` throttle and server-access middleware.
+A live check from the existing dev API, resolving credentials through its normal
+protected store, returned extension **1.2.0** and `bulkUploadUrls:true`.
+Exactly **49 distinct URLs in one request took 281.793 ms** (one sample, not an
+end-to-end upload benchmark); adapter validation accepted the complete response.
+Anonymous, Application-key and invalid-count requests returned **401/403/422**.
+The unused tokens expire naturally; **zero files were uploaded**, and no game
+server, key, account, allocation, network or provider setting was changed.
+Panel/API/worker/Vite remained healthy without container restarts. An initial
+ad-hoc health probe used the wrong default API port and failed to connect; the
+actual configured `deploy/container-health.mjs api` check passed.
+
+Commands: `python3 extensions/nickhosting/tests/run_php_tests.py --container
+<existing-panel>`, `python3 -m unittest discover -s extensions/nickhosting/tests`,
+`python3 extensions/nickhosting/package.py --output build/blueprint/1.2.0/nickhosting.blueprint`,
+`pnpm exec vitest run` on the four affected unit files, and `pnpm exec tsx
+scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts
+apps/api/src/servers.integration.test.ts packages/server-management/src/upload-batches.integration.test.ts`.
+Browser command uses the same isolated environment wrapper with
+`--config vitest.browser.config.ts apps/web/tests/file-upload-cancel.browser.test.ts
+apps/web/tests/file-upload-refresh.browser.test.ts`. pnpm commands use `scripts/dev.sh`.
+The standard update was `blueprint -install nickhosting` in the existing Panel
+container after copying the hash-verified package and preserving the previous
+artifact. All private helper output excludes credentials and signed URLs.
