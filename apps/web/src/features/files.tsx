@@ -10,6 +10,8 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useBlocker } from 'react-router';
+import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
 import { api, download, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -20,7 +22,6 @@ import {
   Empty,
   ErrorNotice,
   Input,
-  Loading,
   Time,
   text,
 } from '../components/ui.js';
@@ -33,6 +34,7 @@ import {
   validMoveTarget,
   visibleFiles,
 } from './file-manager-model.js';
+import type { FileEditorControls } from './file-text-editor.js';
 
 const importEditor = () =>
   import('./file-text-editor.js').then((module) => ({ default: module.FileTextEditor }));
@@ -54,6 +56,7 @@ import {
   useTransfers,
 } from './service-contracts.js';
 import './files.css';
+import { FileIcon } from './file-icon.js';
 import { FilePathPicker } from './file-path-picker.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 
@@ -114,31 +117,40 @@ function FileListSkeleton({ view }: { view: 'list' | 'grid' }) {
   );
 }
 
-function FileIcon({ folder, archive = false }: { folder: boolean; archive?: boolean }) {
+function FileEditorSkeleton() {
+  const t = useT();
   return (
-    <svg
-      className={`fm-icon ${folder ? 'fm-icon-folder' : ''}`}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      aria-hidden="true"
-    >
-      {folder ? (
-        <path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10H3Z" />
-      ) : (
-        <>
-          <path d="M6 3h8l4 4v14H6Z M14 3v5h4" />
-          {archive ? <path d="M11 10h2m-2 3h2m-2 3h2" /> : <path d="M9 12h6m-6 4h6" />}
-        </>
-      )}
-    </svg>
+    <div className="fm-editor-skeleton" aria-busy="true">
+      <div className="fm-editor-skeleton-lines" aria-hidden="true">
+        {filePlaceholders.map(({ id, width }) => (
+          <div key={id}>
+            <span className="fm-skeleton fm-skeleton-check" />
+            <span className="fm-skeleton" style={{ width }} />
+          </div>
+        ))}
+      </div>
+      <span className="sr-only" role="status">
+        {t('file.editorLoading')}
+      </span>
+    </div>
   );
 }
 function ToolbarIcon({
   kind,
 }: {
-  kind: 'folder' | 'file' | 'upload' | 'uploadFolder' | 'refresh' | 'path';
+  kind:
+    | 'folder'
+    | 'file'
+    | 'upload'
+    | 'uploadFolder'
+    | 'refresh'
+    | 'path'
+    | 'rename'
+    | 'home'
+    | 'save'
+    | 'undo'
+    | 'redo'
+    | 'find';
 }) {
   return (
     <svg
@@ -150,7 +162,22 @@ function ToolbarIcon({
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      {kind === 'path' ? (
+      {kind === 'home' ? (
+        <path d="m3 11 9-8 9 8M5 10v11h5v-7h4v7h5V10" />
+      ) : kind === 'save' ? (
+        <path d="M4 3h13l3 3v15H4ZM8 3v6h8V3M8 21v-8h8v8" />
+      ) : kind === 'undo' ? (
+        <path d="m8 4-5 5 5 5M3 9h11a6 6 0 0 1 0 12" />
+      ) : kind === 'redo' ? (
+        <path d="m16 4 5 5-5 5M21 9H10a6 6 0 0 0 0 12" />
+      ) : kind === 'find' ? (
+        <>
+          <circle cx="10" cy="10" r="6" />
+          <path d="m15 15 6 6" />
+        </>
+      ) : kind === 'path' ? (
+        <path d="M3 6h7l2 3h9v11H3V6Zm5 9h8m-3-3 3 3-3 3" />
+      ) : kind === 'rename' ? (
         <path d="m15 5 4 4M4 20l5-1L20 8a2.8 2.8 0 0 0-4-4L5 15l-1 5Z" />
       ) : kind === 'refresh' ? (
         <path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
@@ -204,6 +231,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [mutating, setMutating] = useState(false);
   const [reading, setReading] = useState(false);
   const [readError, setReadError] = useState<unknown>();
+  const [saveError, setSaveError] = useState<unknown>();
+  const baseline = useRef('');
+  const [editorControls, setEditorControls] = useState<FileEditorControls>();
+  const managerRef = useRef<HTMLElement>(null);
+  const [inlineRename, setInlineRename] = useState(false);
+  const [editorAvailability, setEditorAvailability] =
+    useState<ReturnType<typeof fileEditorAvailability>>('text');
+  const editing = mode === 'edit' || mode === 'new';
+
   const [error, setError] = useState<unknown>();
   const [copied, setCopied] = useState(false);
   const [menu, setMenu] = useState<{ entry: ServerFile; left: number; top: number }>();
@@ -223,6 +259,16 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTrigger = useRef<HTMLElement | null>(null);
   const editorForm = useRef<HTMLDivElement>(null);
+  const activeFile = targets[0];
+  useEffect(() => {
+    if (!editing) return;
+    if (mode === 'new')
+      editorForm.current?.querySelector<HTMLInputElement>('input[name="name"]')?.focus();
+    else if (activeFile)
+      (
+        editorForm.current?.querySelector<HTMLElement>('.cm-content') ?? editorForm.current
+      )?.focus();
+  }, [editing, activeFile, mode]);
   const mutationRunning = useRef(false);
   const readAbort = useRef<AbortController | undefined>(undefined),
     readSequence = useRef(0);
@@ -262,7 +308,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setReading(false);
   }, []);
   useEffect(() => {
-    // Start fetching on tab entry, sharing the same promise with React.lazy.
+    // Preserve the Owner-requested lazy module warmup on Files tab entry.
     void loadEditor().catch(() => {});
     mounted.current = true;
     return () => {
@@ -276,7 +322,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const focusSearch = (event: globalThis.KeyboardEvent) => {
       const modifier = event.altKey && !event.ctrlKey && !event.metaKey;
       const pathRequest = modifier && event.code === 'KeyG';
-      const searchRequest = modifier && event.code === 'KeyK';
+      const searchRequest = modifier && event.code === 'KeyK' && !editing;
       if (
         event.defaultPrevented ||
         event.isComposing ||
@@ -296,7 +342,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
     document.addEventListener('keydown', focusSearch);
     return () => document.removeEventListener('keydown', focusSearch);
-  }, [editPath]);
+  }, [editPath, editing]);
   useEffect(() => {
     if (!menu) return;
     menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -321,6 +367,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
+  const navigationBlocker = useBlocker(
+    useCallback(() => dirty || mutationRunning.current, [dirty]),
+  );
+  useEffect(() => {
+    if (navigationBlocker.state !== 'blocked') return;
+    if (!mutationRunning.current && window.confirm(t('service.discardEdits')))
+      navigationBlocker.proceed();
+    else navigationBlocker.reset();
+  }, [navigationBlocker, t]);
   // A refreshed provider listing may remove files selected before another user's operation.
   useEffect(() => {
     if (files.data)
@@ -355,7 +410,18 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setDirty(false);
     setMode(undefined);
     setReadError(undefined);
-    queueMicrotask(() => menuTrigger.current?.isConnected && menuTrigger.current.focus());
+    requestAnimationFrame(() => {
+      if (menuTrigger.current?.isConnected) {
+        menuTrigger.current.focus();
+        return;
+      }
+      const entry = [
+        ...(managerRef.current?.querySelectorAll<HTMLButtonElement>('.fm-filename') ?? []),
+      ].find((button) => button.dataset.fileName === targets[0]);
+      (
+        entry ?? managerRef.current?.querySelector<HTMLButtonElement>('.fm-breadcrumb button')
+      )?.focus();
+    });
   }
   function chooseMode(value: Mode, names = selectedNames, folder = directory) {
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
@@ -365,7 +431,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setDestination(folder);
     setMode(value);
     setReadError(undefined);
+    setSaveError(undefined);
     if (value === 'new') {
+      baseline.current = '';
+      setEditorAvailability('text');
       setContent('');
       setNewName('');
       setRevision(null);
@@ -393,12 +462,19 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       controller = new AbortController();
     readAbort.current = controller;
     setTargets([entry.name]);
+    setEditorAvailability(fileEditorAvailability(entry));
+    setSaveError(undefined);
+    baseline.current = '';
     setMode('edit');
     setContent('');
     setRevision(null);
     setDirty(false);
     setReading(true);
     setReadError(undefined);
+    if (fileEditorAvailability(entry) !== 'text') {
+      setReading(false);
+      return;
+    }
     try {
       const value = await api<{ content: string; revision: string }>(
         `${serverPath(serverId)}/files/editor?path=${encodeURIComponent(join(folder, entry.name))}`,
@@ -406,6 +482,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       );
       if (sequence === readSequence.current && !controller.signal.aborted) {
         setContent(value.content);
+        baseline.current = value.content;
         setRevision(value.revision);
       }
     } catch (failure) {
@@ -436,6 +513,49 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setMode(undefined);
       setSelected(new Set());
       await files.refetch();
+    } finally {
+      mutationRunning.current = false;
+      setMutating(false);
+    }
+  }
+  async function saveEditor() {
+    if (
+      !canMutate ||
+      mutationRunning.current ||
+      reading ||
+      readError ||
+      editorAvailability !== 'text'
+    )
+      return;
+    const name = mode === 'new' ? newName : targets[0];
+    if (!name || /[/\\]/.test(name)) {
+      setSaveError({ messageKey: 'file.invalidPath' });
+      return;
+    }
+    mutationRunning.current = true;
+    setMutating(true);
+    setSaveError(undefined);
+    try {
+      const result = await api<{ revision: string }>(`${serverPath(serverId)}/files/editor`, {
+        method: 'PUT',
+        body: {
+          path: join(directory, name),
+          content,
+          expectedRevision: mode === 'new' ? null : revision,
+        },
+      });
+      baseline.current = content;
+      setRevision(result.revision);
+      setDirty(false);
+      setTargets([name]);
+      setMode('edit');
+      void files.refetch();
+    } catch (failure) {
+      setSaveError(
+        failure && typeof failure === 'object' && 'code' in failure && failure.code === 'conflict'
+          ? { messageKey: 'file.concurrentChange' }
+          : failure,
+      );
     } finally {
       mutationRunning.current = false;
       setMutating(false);
@@ -691,16 +811,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   return (
     <section
       className="file-manager"
+      ref={managerRef}
       aria-label={t('web.files')}
       onKeyDown={keyboard}
       onDragEnter={(event) => {
-        if (event.dataTransfer.types.includes('Files')) {
+        if (!editing && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(true);
         }
       }}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes('Files')) {
+        if (!editing && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           event.dataTransfer.dropEffect = uploadAvailable ? 'copy' : 'none';
         }
@@ -709,7 +830,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropActive(false);
       }}
       onDrop={(event) => {
-        if (event.dataTransfer.types.includes('Files')) {
+        if (!editing && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(false);
           if (
@@ -722,7 +843,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         }
       }}
     >
-      <div className="fm-toolbar">
+      <div className={`fm-toolbar ${editing ? 'fm-toolbar-editing' : ''}`}>
         {pathEditing ? (
           <FilePathPicker
             serverId={serverId}
@@ -740,7 +861,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   <button
                     type="button"
                     className="text-button"
-                    aria-current={index === all.length - 1 ? 'page' : undefined}
+                    aria-current={!editing && index === all.length - 1 ? 'page' : undefined}
                     onClick={() => navigate(part.path)}
                     onDragOver={dragOverFolder}
                     onDrop={(event) => dropFolder(event, part.path)}
@@ -749,172 +870,255 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   </button>
                 </li>
               ))}
+              {editing && (
+                <li>
+                  <span aria-current="page" className="fm-current-file">
+                    {mode === 'new' ? newName || t('service.newFile') : targets[0]}
+                    {dirty && <span aria-hidden="true"> *</span>}
+                  </span>
+                </li>
+              )}
             </ol>
-            <Tooltip placement="cursor" content={t('file.editPath', { shortcut: pathShortcut })}>
-              <button
-                type="button"
-                className="fm-tool fm-path-edit"
-                aria-keyshortcuts="Alt+G"
-                aria-label={t('file.editPath', { shortcut: pathShortcut })}
-                onClick={editPath}
-              >
-                <ToolbarIcon kind="path" />
-              </button>
-            </Tooltip>
+            {!editing ? (
+              <Tooltip placement="cursor" content={t('file.editPath', { shortcut: pathShortcut })}>
+                <button
+                  type="button"
+                  className="fm-tool fm-path-edit"
+                  aria-keyshortcuts="Alt+G"
+                  aria-label={t('file.editPath', { shortcut: pathShortcut })}
+                  onClick={editPath}
+                >
+                  <ToolbarIcon kind="path" />
+                </button>
+              </Tooltip>
+            ) : (
+              mode === 'edit' &&
+              canManage && (
+                <Tooltip
+                  placement="cursor"
+                  content={t(dirty ? 'file.saveBeforeRename' : 'service.rename')}
+                >
+                  <button
+                    type="button"
+                    className="fm-tool fm-path-edit"
+                    aria-label={t('service.rename')}
+                    disabled={!canMutate || dirty || reading || mutating}
+                    onClick={() => setInlineRename(true)}
+                  >
+                    <ToolbarIcon kind="rename" />
+                  </button>
+                </Tooltip>
+              )
+            )}
           </nav>
         )}
-        <div className="fm-search">
-          <input
-            ref={searchInput}
-            type="search"
-            aria-label={t('file.search')}
-            aria-keyshortcuts="Alt+K"
-            placeholder={t('file.searchLabel')}
-            value={search}
-            onFocus={() => setPathEditing(false)}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <span aria-hidden="true">
-            <kbd>{macKeyboard ? '⌥ + K' : 'ALT + K'}</kbd>
-          </span>
-        </div>
-        <div className="fm-tools">
-          <Tooltip placement="cursor" content={t('file.refresh')}>
-            <button
-              type="button"
-              className="fm-tool"
-              aria-label={t('file.refresh')}
-              disabled={files.isFetching}
-              onClick={() => void files.refetch()}
-            >
-              <ToolbarIcon kind="refresh" />
-            </button>
-          </Tooltip>
-          {canManage && (
-            <>
-              <Tooltip placement="cursor" content={t('service.newFolder')}>
-                <button
-                  type="button"
-                  className="fm-tool"
-                  aria-label={t('service.newFolder')}
-                  disabled={!canMutate || preparingFolder}
-                  onClick={() => chooseMode('mkdir', [])}
-                >
-                  <ToolbarIcon kind="folder" />
-                </button>
-              </Tooltip>
-              <Tooltip placement="cursor" content={t('service.newFile')}>
-                <button
-                  type="button"
-                  className="fm-tool"
-                  aria-label={t('service.newFile')}
-                  disabled={!canMutate || preparingFolder}
-                  onClick={() => chooseMode('new', [])}
-                >
-                  <ToolbarIcon kind="file" />
-                </button>
-              </Tooltip>
-              <Tooltip
-                placement="cursor"
-                content={
-                  !uploadAvailable
-                    ? t(uploadReason)
-                    : preparingFolder
-                      ? t('file.folderPreparing')
-                      : t('web.upload')
-                }
-              >
-                <button
-                  type="button"
-                  className="fm-tool"
-                  aria-label={t('web.upload')}
-                  aria-disabled={!uploadAvailable || preparingFolder}
-                  onClick={() => {
-                    if (uploadAvailable && !preparingFolder) fileInput.current?.click();
-                    else
-                      setError({
-                        messageKey: preparingFolder ? 'file.folderPreparing' : uploadReason,
-                      });
-                  }}
-                >
-                  <ToolbarIcon kind="upload" />
-                </button>
-              </Tooltip>
-              <Tooltip
-                placement="cursor"
-                content={
-                  !uploadAvailable
-                    ? t(uploadReason)
-                    : preparingFolder || uploadsBusy
-                      ? t('file.waitUploads')
-                      : t('file.uploadFolder')
-                }
-              >
-                <button
-                  type="button"
-                  className="fm-tool"
-                  aria-label={t('file.uploadFolder')}
-                  aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
-                  onClick={() => {
-                    if (uploadAvailable && !preparingFolder && !uploadRunning.current)
-                      folderInput.current?.click();
-                    else
-                      setError({
-                        messageKey: !uploadAvailable ? uploadReason : 'file.waitUploads',
-                      });
-                  }}
-                >
-                  <ToolbarIcon kind="uploadFolder" />
-                </button>
-              </Tooltip>
+        {!editing && (
+          <>
+            <div className="fm-search">
               <input
-                ref={fileInput}
-                type="file"
-                multiple
-                className="fm-file-input"
-                aria-label={t('service.selectFile')}
-                onChange={(event) => {
-                  acceptUploads([...(event.target.files ?? [])]);
-                  event.target.value = '';
-                }}
+                ref={searchInput}
+                type="search"
+                aria-label={t('file.search')}
+                aria-keyshortcuts="Alt+K"
+                placeholder={t('file.searchLabel')}
+                value={search}
+                onFocus={() => setPathEditing(false)}
+                onChange={(event) => setSearch(event.target.value)}
               />
-              <input
-                ref={folderInput}
-                type="file"
-                multiple
-                {...{ webkitdirectory: '' }}
-                className="fm-file-input"
-                aria-label={t('file.uploadFolder')}
-                onChange={(event) => {
-                  void acceptFolder([...(event.target.files ?? [])]);
-                  event.target.value = '';
-                }}
-              />
-            </>
-          )}
-        </div>
-        <fieldset className="fm-view" aria-label={t('file.view')}>
-          <button
-            type="button"
-            className="secondary fm-icon-button"
-            aria-label={t('file.list')}
-            aria-pressed={view === 'list'}
-            onClick={() => setView('list')}
-          >
-            ☰
-          </button>
-          <button
-            type="button"
-            className="secondary fm-icon-button"
-            aria-label={t('file.grid')}
-            aria-pressed={view === 'grid'}
-            onClick={() => setView('grid')}
-          >
-            ▦
-          </button>
-        </fieldset>
+              <span aria-hidden="true">
+                <kbd>{macKeyboard ? '⌥ + K' : 'ALT + K'}</kbd>
+              </span>
+            </div>
+            <div className="fm-tools">
+              <Tooltip placement="cursor" content={t('file.refresh')}>
+                <button
+                  type="button"
+                  className="fm-tool"
+                  aria-label={t('file.refresh')}
+                  disabled={files.isFetching}
+                  onClick={() => void files.refetch()}
+                >
+                  <ToolbarIcon kind="refresh" />
+                </button>
+              </Tooltip>
+              {canManage && (
+                <>
+                  <Tooltip placement="cursor" content={t('service.newFolder')}>
+                    <button
+                      type="button"
+                      className="fm-tool"
+                      aria-label={t('service.newFolder')}
+                      disabled={!canMutate || preparingFolder}
+                      onClick={() => chooseMode('mkdir', [])}
+                    >
+                      <ToolbarIcon kind="folder" />
+                    </button>
+                  </Tooltip>
+                  <Tooltip placement="cursor" content={t('service.newFile')}>
+                    <button
+                      type="button"
+                      className="fm-tool"
+                      aria-label={t('service.newFile')}
+                      disabled={!canMutate || preparingFolder}
+                      onClick={() => chooseMode('new', [])}
+                    >
+                      <ToolbarIcon kind="file" />
+                    </button>
+                  </Tooltip>
+                  <Tooltip
+                    placement="cursor"
+                    content={
+                      !uploadAvailable
+                        ? t(uploadReason)
+                        : preparingFolder
+                          ? t('file.folderPreparing')
+                          : t('web.upload')
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="fm-tool"
+                      aria-label={t('web.upload')}
+                      aria-disabled={!uploadAvailable || preparingFolder}
+                      onClick={() => {
+                        if (uploadAvailable && !preparingFolder) fileInput.current?.click();
+                        else
+                          setError({
+                            messageKey: preparingFolder ? 'file.folderPreparing' : uploadReason,
+                          });
+                      }}
+                    >
+                      <ToolbarIcon kind="upload" />
+                    </button>
+                  </Tooltip>
+                  <Tooltip
+                    placement="cursor"
+                    content={
+                      !uploadAvailable
+                        ? t(uploadReason)
+                        : preparingFolder || uploadsBusy
+                          ? t('file.waitUploads')
+                          : t('file.uploadFolder')
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="fm-tool"
+                      aria-label={t('file.uploadFolder')}
+                      aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
+                      onClick={() => {
+                        if (uploadAvailable && !preparingFolder && !uploadRunning.current)
+                          folderInput.current?.click();
+                        else
+                          setError({
+                            messageKey: !uploadAvailable ? uploadReason : 'file.waitUploads',
+                          });
+                      }}
+                    >
+                      <ToolbarIcon kind="uploadFolder" />
+                    </button>
+                  </Tooltip>
+                  <input
+                    ref={fileInput}
+                    type="file"
+                    multiple
+                    className="fm-file-input"
+                    aria-label={t('service.selectFile')}
+                    onChange={(event) => {
+                      acceptUploads([...(event.target.files ?? [])]);
+                      event.target.value = '';
+                    }}
+                  />
+                  <input
+                    ref={folderInput}
+                    type="file"
+                    multiple
+                    {...{ webkitdirectory: '' }}
+                    className="fm-file-input"
+                    aria-label={t('file.uploadFolder')}
+                    onChange={(event) => {
+                      void acceptFolder([...(event.target.files ?? [])]);
+                      event.target.value = '';
+                    }}
+                  />
+                </>
+              )}
+            </div>
+            <fieldset className="fm-view" aria-label={t('file.view')}>
+              <button
+                type="button"
+                className="secondary fm-icon-button"
+                aria-label={t('file.list')}
+                aria-pressed={view === 'list'}
+                onClick={() => setView('list')}
+              >
+                ☰
+              </button>
+              <button
+                type="button"
+                className="secondary fm-icon-button"
+                aria-label={t('file.grid')}
+                aria-pressed={view === 'grid'}
+                onClick={() => setView('grid')}
+              >
+                ▦
+              </button>
+            </fieldset>
+          </>
+        )}
+        {editing && (
+          <div className="fm-editor-toolbar" role="toolbar" aria-label={t('file.editor')}>
+            {(
+              [
+                { kind: 'home', label: 'file.backToFiles', disabled: mutating, run: closeEditor },
+                {
+                  kind: 'save',
+                  label: 'web.save',
+                  disabled:
+                    !canMutate ||
+                    reading ||
+                    mutating ||
+                    !!readError ||
+                    editorAvailability !== 'text' ||
+                    (!dirty && mode !== 'new'),
+                  run: saveShortcut,
+                },
+                {
+                  kind: 'undo',
+                  label: 'editor.undo',
+                  disabled: mutating || !editorControls?.canUndo,
+                  run: () => editorControls?.undo(),
+                },
+                {
+                  kind: 'redo',
+                  label: 'editor.redo',
+                  disabled: mutating || !editorControls?.canRedo,
+                  run: () => editorControls?.redo(),
+                },
+                {
+                  kind: 'find',
+                  label: 'editor.search',
+                  disabled: reading || !editorControls,
+                  run: () => editorControls?.find(),
+                },
+              ] as const
+            ).map((action) => (
+              <Tooltip key={action.kind} placement="cursor" content={t(action.label)}>
+                <button
+                  type="button"
+                  className="fm-tool"
+                  disabled={action.disabled}
+                  aria-label={t(action.label)}
+                  onClick={action.run}
+                >
+                  <ToolbarIcon kind={action.kind} />
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+        )}
       </div>
-      {totalSelected > 0 && (
+      {!editing && totalSelected > 0 && (
         <section className="fm-selection" aria-label={t('file.selection')}>
           <span>{t('file.selected', { count: totalSelected })}</span>
           {totalSelected > 100 && <span role="status">{t('file.selectionLimit')}</span>}
@@ -972,7 +1176,89 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           {t('file.pathCopied')}
         </span>
       )}
-      {files.isPending ? (
+      {editing ? (
+        <section
+          className="fm-editor-view"
+          ref={editorForm}
+          aria-label={t('file.editor')}
+          tabIndex={-1}
+        >
+          {!reading && editorAvailability === 'text' && !readError && (
+            <span className="fm-editor-state sr-only" role="status">
+              {t(mutating ? 'web.pending' : dirty ? 'file.unsaved' : 'file.saved')}
+            </span>
+          )}
+          {reading ? (
+            <FileEditorSkeleton />
+          ) : editorAvailability !== 'text' || readError ? (
+            <div className="fm-editor-unavailable">
+              {readError ? (
+                <ErrorNotice error={readError} />
+              ) : (
+                <p>{t(`file.editorUnavailable.${editorAvailability}`)}</p>
+              )}
+              <button
+                type="button"
+                className="secondary"
+                disabled={!transfers.data?.download.available}
+                onClick={() =>
+                  download(
+                    `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, targets[0] ?? ''))}`,
+                  )
+                }
+              >
+                {t('web.download')}
+              </button>
+            </div>
+          ) : (
+            <form
+              id="file-editor-form"
+              className="fm-inline-editor"
+              aria-busy={mutating}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveEditor();
+              }}
+            >
+              {mode === 'new' && (
+                <Input
+                  label={t('web.name')}
+                  name="name"
+                  value={newName}
+                  onChange={(event) => {
+                    setNewName(event.target.value);
+                    setDirty(true);
+                  }}
+                  required
+                  pattern="[^/\\\\]+"
+                  disabled={mutating}
+                />
+              )}
+              {Boolean(saveError) && <ErrorNotice error={saveError} />}
+              <Suspense fallback={<FileEditorSkeleton />}>
+                <FileTextEditor
+                  path={join(
+                    directory,
+                    mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
+                  )}
+                  value={content}
+                  onChange={(value) => {
+                    setContent(value);
+                    setDirty(value !== baseline.current || (mode === 'new' && newName.length > 0));
+                  }}
+                  onSave={saveShortcut}
+                  onControls={setEditorControls}
+                  readOnly={!canMutate || mutating || inlineRename}
+                  shouldAutoFocus={() =>
+                    mode === 'edit' && document.activeElement === editorForm.current
+                  }
+                  label={t('service.content')}
+                />
+              </Suspense>
+            </form>
+          )}
+        </section>
+      ) : files.isPending ? (
         <FileListSkeleton view={view} />
       ) : files.error ? (
         <>
@@ -1114,6 +1400,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   <button
                     type="button"
                     className="fm-filename"
+                    data-file-name={entry.name}
                     disabled={entry.is_symlink}
                     onClick={() => void open(entry)}
                     onKeyDown={(event) => {
@@ -1123,7 +1410,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       }
                     }}
                   >
-                    <FileIcon folder={!entry.is_file} archive={isArchive(entry.name)} />
+                    <FileIcon
+                      folder={!entry.is_file}
+                      name={entry.name}
+                      gameId={server.data?.gameId}
+                      archive={isArchive(entry.name)}
+                    />
                     <span>
                       {entry.name}
                       {entry.is_symlink && <small> · {t('service.symlink')}</small>}
@@ -1191,6 +1483,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               <button
                 type="button"
                 role="menuitem"
+                disabled={menu.entry.is_file && fileEditorAvailability(menu.entry) !== 'text'}
+                aria-describedby={
+                  menu.entry.is_file && fileEditorAvailability(menu.entry) !== 'text'
+                    ? 'file-edit-unavailable'
+                    : undefined
+                }
                 onClick={() => {
                   void open(menu.entry);
                   setMenu(undefined);
@@ -1198,6 +1496,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               >
                 {t(menu.entry.is_file ? 'web.edit' : 'service.openFolder')}
               </button>
+              {menu.entry.is_file && fileEditorAvailability(menu.entry) !== 'text' && (
+                <small id="file-edit-unavailable" className="fm-menu-reason">
+                  {t(`file.editorUnavailable.${fileEditorAvailability(menu.entry)}`)}
+                </small>
+              )}
               <button
                 type="button"
                 role="menuitem"
@@ -1363,190 +1666,169 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         </button>
       </Dialog>
       <Dialog
-        open={Boolean(mode)}
-        title={
-          mode === 'edit'
-            ? (targets[0] ?? t('web.edit'))
-            : t(
-                mode === 'mkdir'
-                  ? 'service.newFolder'
-                  : mode === 'new'
-                    ? 'service.newFile'
-                    : mode === 'rename'
-                      ? 'service.rename'
-                      : mode === 'delete'
-                        ? 'web.delete'
-                        : mode === 'move'
-                          ? 'file.move'
-                          : mode === 'copy'
-                            ? 'file.copy'
-                            : 'file.extract',
-              )
-        }
+        open={inlineRename}
+        title={t('service.rename')}
+        onClose={() => {
+          if (mutationRunning.current) return;
+          setInlineRename(false);
+          requestAnimationFrame(() => editorControls?.focus());
+        }}
+      >
+        <ActionForm
+          key={inlineRename ? targets[0] : 'closed'}
+          success={false}
+          onSubmit={async (data) => {
+            if (!canMutate || dirty || mutationRunning.current || reading)
+              throw { messageKey: 'errors.forbidden' };
+            const name = text(data, 'name');
+            if (!name || name === '.' || name === '..' || /[/\\]/.test(name))
+              throw { messageKey: 'file.invalidPath' };
+            const original = files.data?.find((entry) => entry.name === targets[0]);
+            if (!original) throw { messageKey: 'file.pathNotFound' };
+            mutationRunning.current = true;
+            setMutating(true);
+            try {
+              await api(`${serverPath(serverId)}/files`, {
+                method: 'POST',
+                body: {
+                  action: 'rename',
+                  root: directory,
+                  files: [{ from: targets[0], to: name }],
+                },
+              });
+              setInlineRename(false);
+              mutationRunning.current = false;
+              setMutating(false);
+              await open({ ...original, name });
+              void files.refetch();
+            } finally {
+              mutationRunning.current = false;
+              setMutating(false);
+            }
+          }}
+        >
+          <Input
+            label={t('web.name')}
+            name="name"
+            defaultValue={targets[0]}
+            required
+            pattern="[^/\\\\]+"
+          />
+        </ActionForm>
+      </Dialog>
+      <Dialog
+        open={Boolean(mode) && !editing}
+        title={t(
+          mode === 'mkdir'
+            ? 'service.newFolder'
+            : mode === 'rename'
+              ? 'service.rename'
+              : mode === 'delete'
+                ? 'web.delete'
+                : mode === 'move'
+                  ? 'file.move'
+                  : mode === 'copy'
+                    ? 'file.copy'
+                    : 'file.extract',
+        )}
         onClose={closeEditor}
       >
-        {mode === 'edit' && reading ? (
-          <Loading />
-        ) : mode === 'edit' && readError ? (
-          <>
-            <ErrorNotice error={readError} />
-            <button type="button" className="secondary" onClick={() => downloadNames(targets)}>
-              {t('web.download')}
-            </button>
-          </>
-        ) : (
-          <div
-            ref={editorForm}
-            className={
-              mode === 'edit' || mode === 'new'
-                ? `fm-editor-dialog ${!canMutate ? 'fm-readonly' : ''}`
-                : undefined
-            }
-          >
-            <ActionForm
-              key={`${mode}:${targets.join(',')}`}
-              success={false}
-              submitLabel={t(
-                mode === 'delete'
-                  ? 'web.delete'
-                  : mode === 'move'
-                    ? 'file.move'
-                    : mode === 'copy'
-                      ? 'file.copy'
-                      : mode === 'extract'
-                        ? 'file.extract'
-                        : 'web.save',
-              )}
-              onSubmit={async (data) => {
-                if (!canMutate) throw { messageKey: 'error.forbidden' };
-                if (mode === 'mkdir')
-                  await mutation({ action: 'mkdir', root: directory, name: text(data, 'name') });
-                else if (mode === 'delete')
-                  await mutation({
-                    action: 'delete',
-                    root: directory,
-                    files: targets,
-                    confirm: true,
-                  });
-                else if (mode === 'rename')
-                  await mutation({
-                    action: 'rename',
-                    root: directory,
-                    files: [{ from: targets[0], to: text(data, 'name') }],
-                  });
-                else if (mode === 'move' || mode === 'copy') {
-                  const folder = normalizeFilePath(text(data, 'destination'));
-                  if (folder === undefined || !validMoveTarget(directory, targets, folder))
-                    throw { messageKey: 'file.invalidMove' };
-                  if (mode === 'move')
-                    await mutation({
-                      action: 'rename',
-                      root: '',
-                      files: targets.map((name) => ({
-                        from: join(directory, name),
-                        to: join(folder, name),
-                      })),
-                    });
-                  else
-                    await mutation(
-                      { root: directory, files: targets, destination: folder },
-                      '/files/copy',
-                    );
-                } else if (mode === 'extract')
-                  await mutation(
-                    {
-                      root: directory,
-                      file: targets[0],
-                      destination: text(data, 'name'),
-                      confirm: true,
-                    },
-                    '/files/extract',
-                  );
-                else
-                  await mutation(
-                    {
-                      path: join(
-                        directory,
-                        mode === 'edit' ? (targets[0] ?? '') : text(data, 'name'),
-                      ),
-                      content,
-                      expectedRevision: mode === 'edit' ? revision : null,
-                    },
-                    '/files/editor',
-                    'PUT',
-                  );
-              }}
-            >
-              {(mode === 'mkdir' || mode === 'new' || mode === 'rename' || mode === 'extract') && (
-                <Input
-                  label={t(mode === 'extract' ? 'file.extractFolder' : 'web.name')}
-                  name="name"
-                  onChange={(event) => {
-                    if (mode === 'new') setNewName(event.target.value);
-                  }}
-                  required
-                  pattern="[^/\\\\]+"
-                  defaultValue={
-                    mode === 'rename'
-                      ? targets[0]
-                      : mode === 'extract'
-                        ? `${targets[0]?.replace(/\.(tar\.)?(gz|bz2|xz|zip|tar|tgz|tbz2|txz)$/i, '')}-extracted`
-                        : ''
-                  }
-                />
-              )}
-              {(mode === 'move' || mode === 'copy') && (
-                <>
-                  <p className="fm-targets">{targets.join(', ')}</p>
-                  <Input
-                    label={t('file.destination')}
-                    name="destination"
-                    defaultValue={`/${destination}`}
-                    required
-                  />
-                  <p className="muted">{t('file.noOverwrite')}</p>
-                </>
-              )}
-              {(mode === 'new' || mode === 'edit') && (
-                <>
-                  <div className="fm-editor-meta">
-                    <span>{t(dirty ? 'file.unsaved' : 'file.saved')}</span>
-                    <span>{t('file.saveShortcut')}</span>
-                  </div>
-                  <Suspense fallback={<Loading />}>
-                    <FileTextEditor
-                      path={join(
-                        directory,
-                        mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
-                      )}
-                      value={content}
-                      onChange={(value) => {
-                        setContent(value);
-                        setDirty(true);
-                      }}
-                      onSave={saveShortcut}
-                      readOnly={!canMutate || mutating}
-                      label={t('service.content')}
-                    />
-                  </Suspense>
-                </>
-              )}
-              {mode === 'new' && <Check required label={t('service.writeFileWarning')} />}
-              {mode === 'delete' && (
-                <>
-                  <p>{t('file.deleteWarning', { count: targets.length })}</p>
-                  <ul className="fm-targets">
-                    {targets.map((name) => (
-                      <li key={name}>{name}</li>
-                    ))}
-                  </ul>
-                  <Check label={t('web.confirm')} required />
-                </>
-              )}
-              {mode === 'extract' && <p>{t('file.extractWarning')}</p>}
-            </ActionForm>
-          </div>
-        )}
+        <ActionForm
+          key={`${mode}:${targets.join(',')}`}
+          success={false}
+          submitLabel={t(
+            mode === 'delete'
+              ? 'web.delete'
+              : mode === 'move'
+                ? 'file.move'
+                : mode === 'copy'
+                  ? 'file.copy'
+                  : mode === 'extract'
+                    ? 'file.extract'
+                    : 'web.save',
+          )}
+          onSubmit={async (data) => {
+            if (!canMutate) throw { messageKey: 'error.forbidden' };
+            if (mode === 'mkdir')
+              await mutation({ action: 'mkdir', root: directory, name: text(data, 'name') });
+            else if (mode === 'delete')
+              await mutation({ action: 'delete', root: directory, files: targets, confirm: true });
+            else if (mode === 'rename')
+              await mutation({
+                action: 'rename',
+                root: directory,
+                files: [{ from: targets[0], to: text(data, 'name') }],
+              });
+            else if (mode === 'move' || mode === 'copy') {
+              const folder = normalizeFilePath(text(data, 'destination'));
+              if (folder === undefined || !validMoveTarget(directory, targets, folder))
+                throw { messageKey: 'file.invalidMove' };
+              if (mode === 'move')
+                await mutation({
+                  action: 'rename',
+                  root: '',
+                  files: targets.map((name) => ({
+                    from: join(directory, name),
+                    to: join(folder, name),
+                  })),
+                });
+              else
+                await mutation(
+                  { root: directory, files: targets, destination: folder },
+                  '/files/copy',
+                );
+            } else if (mode === 'extract')
+              await mutation(
+                {
+                  root: directory,
+                  file: targets[0],
+                  destination: text(data, 'name'),
+                  confirm: true,
+                },
+                '/files/extract',
+              );
+          }}
+        >
+          {(mode === 'mkdir' || mode === 'rename' || mode === 'extract') && (
+            <Input
+              label={t(mode === 'extract' ? 'file.extractFolder' : 'web.name')}
+              name="name"
+              required
+              pattern="[^/\\\\]+"
+              defaultValue={
+                mode === 'rename'
+                  ? targets[0]
+                  : mode === 'extract'
+                    ? `${targets[0]?.replace(/\.(tar\.)?(gz|bz2|xz|zip|tar|tgz|tbz2|txz)$/i, '')}-extracted`
+                    : ''
+              }
+            />
+          )}
+          {(mode === 'move' || mode === 'copy') && (
+            <>
+              <p className="fm-targets">{targets.join(', ')}</p>
+              <Input
+                label={t('file.destination')}
+                name="destination"
+                defaultValue={`/${destination}`}
+                required
+              />
+              <p className="muted">{t('file.noOverwrite')}</p>
+            </>
+          )}
+          {mode === 'delete' && (
+            <>
+              <p>{t('file.deleteWarning', { count: targets.length })}</p>
+              <ul className="fm-targets">
+                {targets.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+              <Check label={t('web.confirm')} required />
+            </>
+          )}
+          {mode === 'extract' && <p>{t('file.extractWarning')}</p>}
+        </ActionForm>
       </Dialog>
     </section>
   );

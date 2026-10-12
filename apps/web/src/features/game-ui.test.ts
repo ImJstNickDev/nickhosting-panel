@@ -14,8 +14,9 @@ import { MemoryRouter } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import { gameUiWebMessages } from '../../../../packages/i18n/src/game-ui-web.js';
 import { webMessages } from '../../../../packages/i18n/src/web.js';
+import { FileIcon } from './file-icon.js';
 import { GameFields, GameSections } from './game-sections.js';
-import { gameUiRegistry, getGameAdmin, getGameArtwork } from './integrations.js';
+import { gameUiRegistry, getGameAdmin, getGameArtwork, getGameFileIcon } from './integrations.js';
 
 function render(element: ReactElement, cache?: QueryClient) {
   const messages = Object.fromEntries(
@@ -32,6 +33,24 @@ function render(element: ReactElement, cache?: QueryClient) {
   );
 }
 describe('trusted game frontend rendering', () => {
+  it('uses decorative integration file icons with generic fallbacks, independently of editor support', () => {
+    expect(getGameFileIcon('minecraft-java', '/server.PROPERTIES')).toMatch(
+      /minecraft-properties.svg/,
+    );
+    expect(getGameFileIcon('unknown-game', 'server.properties')).toBeUndefined();
+    expect(getGameFileIcon('minecraft-java', 'properties')).toBeUndefined();
+    expect(getGameFileIcon('minecraft-java', 'config.json')).toBeUndefined();
+    const icon = (name: string, gameId?: string, folder = false) =>
+      renderToStaticMarkup(h(FileIcon, { name, gameId, folder }));
+    expect(icon('server.properties', 'minecraft-java')).toContain('alt=""');
+    expect(icon('server.properties', 'minecraft-java')).toContain('fm-type-game');
+    expect(icon('server.properties', 'unknown-game')).toContain('fm-type-config');
+    expect(icon('config.json')).toContain('fm-type-json');
+    expect(icon('server.jar')).toContain('fm-type-jar');
+    expect(icon('json')).toContain('fm-type-text');
+    expect(icon('server.properties', 'minecraft-java', true)).toContain('fm-type-folder');
+    expect(icon('level.dat')).toContain('aria-hidden="true"');
+  });
   it('resolves only first-party artwork/admin routes with an absent-game fallback', () => {
     expect(getGameArtwork('minecraft-java')).toMatch(/minecraft-landscape.svg/);
     expect(getGameArtwork('unknown-game')).toBeUndefined();

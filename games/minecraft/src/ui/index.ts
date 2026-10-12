@@ -223,6 +223,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
   schemaVersion: 1,
   nameKey: k('name'),
   artwork: { assetId: 'landscape' },
+  fileIcons: [{ extensions: ['properties'], assetId: 'properties' }],
   creation: {
     defaults: {
       sourceMode: 'empty',
@@ -537,7 +538,10 @@ export function minecraftPropertyValues(
 export const minecraftUiModule = defineTrustedGameUiModule({
   descriptor: minecraftUiDescriptor,
   catalogs: minecraftUiCatalogs,
-  assets: { landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href },
+  assets: {
+    landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href,
+    properties: new URL('./assets/minecraft-properties.svg', import.meta.url).href,
+  },
   playerAppearance: {
     fallback: new URL('./assets/player-placeholder.svg', import.meta.url).href,
     avatarUrl: (name) => `https://api.mcheads.org/head/${encodeURIComponent(name)}/64`,

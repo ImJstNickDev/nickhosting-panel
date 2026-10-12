@@ -1,4 +1,27 @@
 export const serviceWebMessages: Record<string, readonly [string, string]> = {
+  'editor.matchCount': ['Matches', 'Corrispondenze'],
+  'editor.invalidPattern': ['Invalid pattern', 'Espressione non valida'],
+  'editor.replaceWith': ['Replace with', 'Sostituisci con'],
+  'file.saveBeforeRename': [
+    'Save changes before renaming.',
+    'Salva le modifiche prima di rinominare.',
+  ],
+  'file.editor': ['Text editor', 'Editor di testo'],
+  'file.editorLoading': ['Loading file editor…', 'Caricamento editor del file…'],
+  'file.backToFiles': ['Back to files', 'Torna ai file'],
+  'file.editorUnavailable.binary': [
+    'This is a binary file. Download it to open it with a compatible application.',
+    'Questo è un file binario. Scaricalo per aprirlo con un’applicazione compatibile.',
+  ],
+  'file.editorUnavailable.too_large': [
+    'This file is too large for the text editor. Download it to edit it locally.',
+    'Questo file è troppo grande per l’editor di testo. Scaricalo per modificarlo in locale.',
+  ],
+  'file.editorUnavailable.unavailable': [
+    'This item cannot be opened in the text editor.',
+    'Questo elemento non può essere aperto nell’editor di testo.',
+  ],
+
   'file.pathCandidates': ['Matching files and folders', 'File e cartelle corrispondenti'],
   'file.pathNoMatches': ['No matches', 'Nessun risultato'],
   'file.pathUnavailable': ['Could not load this folder.', 'Impossibile caricare questa cartella.'],

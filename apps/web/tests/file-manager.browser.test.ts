@@ -47,6 +47,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   const row = (name: string) =>
     user.locator('.fm-entry').filter({ has: user.getByRole('button', { name, exact: true }) });
   const dialog = () => user.getByRole('dialog');
+  const editorView = () => user.getByRole('region', { name: 'Text editor', exact: true });
   async function menu(name: string) {
     await row(name)
       .getByRole('button', { name: `Actions for ${name}`, exact: true })
@@ -281,33 +282,324 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect((await provider.files()).has('gamma.yaml')).toBe(true);
     await user.getByRole('button', { name: 'root', exact: true }).click();
   });
+  it('opens text inline with a stable skeleton and preserves dirty edits across breadcrumb and app navigation', async () => {
+    for (const locale of ['en', 'it'] as const) {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+      await user.setViewportSize(
+        locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+      );
+      await user.goto(base);
+      const manager = user.locator('.file-manager');
+      await browserExpect(row('beta.json')).toBeVisible();
+      let release = () => {};
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await user.route('**/files/editor?*', async (route) => {
+        await pending;
+        await route.continue();
+      });
+      try {
+        await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).focus();
+        await user.keyboard.press('Enter');
+        await browserExpect(user.locator('.fm-editor-view')).toBeFocused();
+        await browserExpect(user.getByRole('dialog')).toHaveCount(0);
+        const view = user.locator('.fm-editor-view');
+        await browserExpect(view.locator('.fm-editor-skeleton')).toHaveAttribute(
+          'aria-busy',
+          'true',
+        );
+        const rect = await view.boundingBox();
+        await browserExpect(user.locator('.fm-tools,.fm-search,.fm-view')).toHaveCount(0);
+        await browserExpect(view.getByRole('textbox')).toHaveCount(0);
+        await harness.screenshot(
+          user,
+          `file-inline-editor-loading-${locale === 'en' ? 'desktop-en' : 'mobile-it'}`,
+        );
+        release();
+        const editor = view.getByRole('textbox', {
+          name: locale === 'en' ? 'Contents' : 'Contenuto',
+          exact: true,
+        });
+        await browserExpect(editor).toContainText('enabled');
+        await browserExpect(editor).toBeFocused();
+        expect((await view.boundingBox())?.height).toBe(rect?.height);
+        const toolbar = user.getByRole('toolbar', {
+          name: locale === 'en' ? 'Text editor' : 'Editor di testo',
+          exact: true,
+        });
+        expect(
+          await toolbar
+            .getByRole('button')
+            .evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label'))),
+        ).toEqual(
+          locale === 'en'
+            ? ['Back to files', 'Save changes', 'Undo', 'Redo', 'Find']
+            : ['Torna ai file', 'Salva modifiche', 'Annulla', 'Ripristina', 'Cerca'],
+        );
+        await user.keyboard.press('Control+f');
+        await browserExpect(user.locator('.fm-search-panel input[name="search"]')).toBeFocused();
+        const searchPanel = user.getByRole('search', {
+          name: locale === 'en' ? 'Find' : 'Cerca',
+          exact: true,
+        });
+        await searchPanel
+          .getByRole('textbox', { name: locale === 'en' ? 'Find' : 'Cerca', exact: true })
+          .fill('enabled');
+        await browserExpect(searchPanel.locator('output')).toHaveText('0 / 1');
+        await searchPanel
+          .getByRole('button', { name: locale === 'en' ? 'Next' : 'Successivo', exact: true })
+          .click();
+        await browserExpect(searchPanel.locator('output')).toHaveText('1 / 1');
+        await browserExpect(searchPanel.getByRole('checkbox')).toHaveCount(0);
+        await searchPanel
+          .getByRole('button', {
+            name: locale === 'en' ? 'Match case' : 'Maiuscole e minuscole',
+            exact: true,
+          })
+          .click();
+        await browserExpect(
+          searchPanel.getByRole('button', {
+            name: locale === 'en' ? 'Match case' : 'Maiuscole e minuscole',
+            exact: true,
+          }),
+        ).toHaveAttribute('aria-pressed', 'true');
+        await user.mouse.move(0, 0);
+        await browserExpect(user.getByRole('tooltip')).toHaveCount(0);
+        // The query/content belong to isolated fixtures, so keep the search field visible for UX review.
+        await user.screenshot({
+          path: resolve(
+            '.codex/local/m5-browser/screenshots',
+            `file-inline-editor-search-${locale === 'en' ? 'desktop-en' : 'mobile-it'}.png`,
+          ),
+          fullPage: true,
+        });
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        expect(
+          (
+            await new AxeBuilder({ page: user })
+              .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+              .analyze()
+          ).violations.map((violation) => violation.id),
+        ).toEqual([]);
+        if (locale === 'it') {
+          await user.setViewportSize({ width: 320, height: 844 });
+          expect(
+            await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+          ).toBe(true);
+          await browserExpect(
+            searchPanel.getByRole('button', { name: 'Chiudi', exact: true }),
+          ).toBeInViewport();
+          await user.setViewportSize({ width: 390, height: 844 });
+        }
+        await searchPanel
+          .getByRole('button', { name: locale === 'en' ? 'Replace' : 'Sostituisci', exact: true })
+          .click();
+        await searchPanel
+          .getByRole('textbox', {
+            name: locale === 'en' ? 'Replace with' : 'Sostituisci con',
+            exact: true,
+          })
+          .fill('active');
+        await searchPanel
+          .getByRole('button', {
+            name: locale === 'en' ? 'Replace all' : 'Sostituisci tutto',
+            exact: true,
+          })
+          .click();
+        await browserExpect(editor).toContainText('active');
+        const searchInput = searchPanel.getByRole('textbox', {
+          name: locale === 'en' ? 'Find' : 'Cerca',
+          exact: true,
+        });
+        await searchInput.fill('not-present');
+        await browserExpect(searchPanel.locator('output')).toHaveText('0 / 0');
+        await searchPanel
+          .getByRole('button', {
+            name: locale === 'en' ? 'Whole words' : 'Parole intere',
+            exact: true,
+          })
+          .click();
+        await browserExpect(
+          searchPanel.getByRole('button', {
+            name: locale === 'en' ? 'Whole words' : 'Parole intere',
+            exact: true,
+          }),
+        ).toHaveAttribute('aria-pressed', 'true');
+        await searchPanel
+          .getByRole('button', {
+            name: locale === 'en' ? 'Regular expression' : 'Espressione regolare',
+            exact: true,
+          })
+          .click();
+        await searchInput.fill('[');
+        await browserExpect(searchInput).toHaveAttribute('aria-invalid', 'true');
+        await browserExpect(searchPanel.getByRole('status')).toHaveAccessibleName(
+          locale === 'en' ? 'Invalid pattern' : 'Espressione non valida',
+        );
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await searchPanel
+          .getByRole('button', { name: locale === 'en' ? 'Close' : 'Chiudi', exact: true })
+          .click();
+        await browserExpect(editor).toBeFocused();
+        await toolbar
+          .getByRole('button', { name: locale === 'en' ? 'Undo' : 'Annulla', exact: true })
+          .click();
+        await browserExpect(editor).toContainText('enabled');
+        await editor.fill('{"draft":true}');
+        user.once('dialog', (confirmation) => confirmation.dismiss());
+        await user.getByRole('button', { name: 'root', exact: true }).click();
+        await browserExpect(editor).toContainText('draft');
+        user.once('dialog', (confirmation) => confirmation.dismiss());
+        await user.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
+        await browserExpect(editor).toContainText('draft');
+        await editor.focus();
+        await user.keyboard.press('Alt+k');
+        await browserExpect(editor).toBeFocused();
+        await user.keyboard.press('Alt+g');
+        await browserExpect(
+          user.getByRole('combobox', { name: locale === 'en' ? 'Path' : 'Percorso', exact: true }),
+        ).toBeFocused();
+        await user.keyboard.press('Escape');
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(
+          audit.violations.map((violation) => ({
+            id: violation.id,
+            nodes: violation.nodes.map((node) => node.target),
+          })),
+        ).toEqual([]);
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await harness.screenshot(
+          user,
+          `file-inline-editor-${locale === 'en' ? 'desktop-en' : 'mobile-it'}`,
+        );
+        user.once('dialog', (confirmation) => confirmation.accept());
+        await user.getByRole('button', { name: 'root', exact: true }).click();
+        await browserExpect(manager.locator('.fm-list')).toBeVisible();
+      } finally {
+        release();
+        await user.unroute('**/files/editor?*');
+      }
+    }
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
+  });
+  it('renames the open file without leaving the editor and protects unsaved content', async () => {
+    await user.goto(base);
+    await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
+    await browserExpect(editor).toBeFocused();
+    await browserExpect(user.getByRole('button', { name: /Edit path/ })).toHaveCount(0);
+    await editor.fill('Unsaved rename draft');
+    await browserExpect(user.getByRole('button', { name: 'Rename', exact: true })).toBeDisabled();
+    await editor.press('Control+s');
+    await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
+    await user.getByRole('button', { name: 'Rename', exact: true }).click();
+    await dialog().getByLabel('Name', { exact: true }).fill('renamed-alpha.txt');
+    await dialog().getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(dialog()).toHaveCount(0);
+    await browserExpect(user.locator('.fm-current-file')).toHaveText('renamed-alpha.txt');
+    await browserExpect(editor).toHaveText('Unsaved rename draft');
+    await browserExpect(editor).toBeFocused();
+    await editor.fill('Saved after rename');
+    await editor.press('Control+s');
+    await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
+    expect((await provider.files()).get('renamed-alpha.txt')?.toString()).toBe(
+      'Saved after rename',
+    );
+    // Restore this isolated fixture through the same UI so later journeys retain their starting path.
+    await user.getByRole('button', { name: 'Rename', exact: true }).click();
+    await dialog().getByLabel('Name', { exact: true }).fill('alpha.txt');
+    await dialog().getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(user.locator('.fm-current-file')).toHaveText('alpha.txt');
+    await browserExpect(editor).toHaveText('Saved after rename');
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+  });
+  it('keeps edits when browser Back is cancelled and leaves only after confirmation', async () => {
+    await user.goto(base.replace(/files$/, 'console'));
+    await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+    await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
+    await editor.fill('Keep this draft');
+    user.once('dialog', (confirmation) => confirmation.dismiss());
+    await user.evaluate(() => history.back());
+    await browserExpect(editor).toContainText('Keep this draft');
+    await browserExpect(user).toHaveURL(base);
+    user.once('dialog', (confirmation) => confirmation.accept());
+    await user.evaluate(() => history.back());
+    await browserExpect(user).toHaveURL(base.replace(/files$/, 'console'));
+    await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+  });
+  it('keeps known binary jars and world data out of the text endpoint and mounted editor', async () => {
+    await user.goto(base);
+    let reads = 0;
+    const track = (request: import('@playwright/test').Request) => {
+      if (new URL(request.url()).pathname.endsWith('/files/editor') && request.method() === 'GET')
+        reads++;
+    };
+    user.on('request', track);
+    try {
+      await row('server.properties').scrollIntoViewIfNeeded();
+      await harness.screenshot(user, 'file-type-icons-desktop-en');
+      await menu('server.jar');
+      await browserExpect(user.getByRole('menuitem', { name: 'Edit', exact: true })).toBeDisabled();
+      await user.keyboard.press('Escape');
+      await row('server.jar').getByRole('button', { name: 'server.jar', exact: true }).click();
+      await browserExpect(user.locator('.fm-editor-view')).toContainText('binary file');
+      await browserExpect(user.locator('.file-text-editor')).toHaveCount(0);
+      await browserExpect(
+        user.getByRole('button', { name: 'Download', exact: true }),
+      ).toBeEnabled();
+      await user.getByRole('button', { name: 'root', exact: true }).click();
+      await row('world').getByRole('button', { name: 'world', exact: true }).click();
+      await row('level.dat').getByRole('button', { name: 'level.dat', exact: true }).click();
+      await browserExpect(user.locator('.fm-editor-view')).toContainText('binary file');
+      await browserExpect(user.locator('.file-text-editor')).toHaveCount(0);
+      expect(reads).toBe(0);
+      await harness.screenshot(user, 'file-inline-binary-unavailable-desktop-en');
+      await user.getByRole('button', { name: 'root', exact: true }).click();
+    } finally {
+      user.off('request', track);
+    }
+  });
   it('edits JSON with keyboard save and refuses concurrent overwrite while retaining the draft', async () => {
     const beforeNavigation = editorRequests;
     await user.goto(base);
     await browserExpect.poll(() => editorRequests).toBe(beforeNavigation + 1);
     const beforeEditor = editorRequests;
     await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
-    const editor = dialog().getByRole('textbox', { name: 'Contents', exact: true });
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
     await editor.fill('{"enabled":false}');
     await editor.press('Control+s');
-    await browserExpect(dialog()).not.toBeVisible();
+    await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
     expect((await provider.files()).get('beta.json')?.toString()).toBe('{"enabled":false}');
-    await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
     await editor.fill('{"local":true}');
     (await provider.files()).set('beta.json', Buffer.from('{"remote":true}'));
     await editor.press('Control+s');
-    await browserExpect(dialog().getByRole('alert')).toContainText('changed after you opened');
+    await browserExpect(editorView().getByRole('alert')).toContainText('changed after you opened');
     await browserExpect(editor).toContainText('"local":true');
     expect((await provider.files()).get('beta.json')?.toString()).toBe('{"remote":true}');
     expect(editorRequests).toBe(beforeEditor);
-    await harness.screenshot(user, 'file-manager-editor-conflict-desktop-en');
+    await harness.screenshot(user, 'file-inline-editor-conflict-desktop-en');
     user.once('dialog', (confirmation) => confirmation.accept());
-    await dialog().getByRole('button', { name: 'Close', exact: true }).click();
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+    await browserExpect(
+      row('beta.json').getByRole('button', { name: 'beta.json', exact: true }),
+    ).toBeFocused();
   });
   it('retains the open editor and prevents further editing until a save finishes', async () => {
-    await user.goto(base);
+    await user.goto(base.replace(/files$/, 'console'));
+    await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
-    const editor = dialog().getByRole('textbox', { name: 'Contents', exact: true });
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
     await editor.fill('Saved after pending request');
     let release: () => void = () => {};
     let started: () => void = () => {};
@@ -328,12 +620,16 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await editor.press('Control+s');
       await began;
       await browserExpect(editor).toHaveAttribute('contenteditable', 'false');
-      await dialog().getByRole('button', { name: 'Close', exact: true }).click();
-      await browserExpect(dialog()).toBeVisible();
-      await user.keyboard.press('Escape');
-      await browserExpect(dialog()).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: 'Back to files', exact: true }),
+      ).toBeDisabled();
+      await user.getByRole('button', { name: 'root', exact: true }).click();
+      await browserExpect(editorView()).toBeVisible();
+      await user.evaluate(() => history.back());
+      await browserExpect(user).toHaveURL(base);
+      await browserExpect(editorView()).toBeVisible();
       release();
-      await browserExpect(dialog()).not.toBeVisible();
+      await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
       expect((await provider.files()).get('alpha.txt')?.toString()).toBe(
         'Saved after pending request',
       );
@@ -430,11 +726,11 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       ).toBeVisible();
       await path.press('ArrowDown');
       await path.press('Enter');
-      const editor = dialog().getByRole('textbox', { name: 'Contents', exact: true });
+      const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
       await browserExpect(editor).toContainText('Nested original');
       await editor.fill('Nested saved');
       await editor.press('Control+s');
-      await browserExpect(dialog()).not.toBeVisible();
+      await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
       expect(remote.get('world/path notes.txt')?.toString()).toBe('Nested saved');
       expect(remote.get('path notes.txt')?.toString()).toBe('Root untouched');
       // Current folder and autocomplete share a cache; only entering world needs a listing.

@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
-import { DomainError } from '@nickhosting/core';
+import {
+  DomainError,
+  decodeEditableText,
+  FILE_EDITOR_MAX_BYTES,
+  fileEditorAvailability,
+} from '@nickhosting/core';
 import { recordAudit } from '@nickhosting/database';
 import {
   type PterodactylAdapter,
@@ -13,7 +18,12 @@ import { z } from 'zod';
 import type { Variables } from './app.js';
 import type { ServerRouteOptions } from './servers.js';
 
-export const editorMaxBytes = 1048576;
+export const editorMaxBytes = FILE_EDITOR_MAX_BYTES;
+function requireEditableFile(file: Parameters<typeof fileEditorAvailability>[0]) {
+  const availability = fileEditorAvailability(file);
+  if (availability === 'too_large') throw new DomainError('validation_failed', 413);
+  if (availability !== 'text') throw new DomainError('file_not_editable');
+}
 export function fileRevision(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -152,15 +162,9 @@ export function registerFileBrowsingRoutes(
     const result = await service.access(context, c.req.param('id'), false, async (id) => {
       const entry = await inspectFilePath(service.adapter, id, target);
       if (!entry?.is_file) throw new DomainError('not_found');
-      if (entry.size > editorMaxBytes) throw new DomainError('validation_failed', 413);
+      requireEditableFile(entry);
       const bytes = await service.adapter.readFile(id, target, editorMaxBytes);
-      let content: string;
-      try {
-        content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-      } catch {
-        throw new DomainError('validation_failed');
-      }
-      if (content.includes('\0')) throw new DomainError('validation_failed');
+      const content = decodeEditableText(bytes);
       return { content, revision: fileRevision(bytes) };
     });
     c.header('Cache-Control', 'no-store');
@@ -185,7 +189,7 @@ export function registerFileBrowsingRoutes(
     if (!result.success) throw new DomainError('validation_failed');
     const input = result.data,
       target = path(input.path);
-    if (Buffer.byteLength(input.content) > editorMaxBytes || input.content.includes('\0'))
+    if (Buffer.byteLength(input.content) > editorMaxBytes)
       throw new DomainError('validation_failed', 413);
     const revision = await service.access(
       context,
@@ -193,12 +197,21 @@ export function registerFileBrowsingRoutes(
       true,
       async (id, connection, current) => {
         await service.assertFileMutation(c.req.param('id'), [target], connection);
+        // Creation cannot bypass the same binary-type policy used for existing files.
+        requireEditableFile({ name: target });
+        const submitted = Buffer.from(input.content);
+        if (decodeEditableText(submitted) !== input.content)
+          throw new DomainError('file_not_editable');
         const entry = await inspectFilePath(service.adapter, id, target);
-        if (entry && (!entry.is_file || entry.size > editorMaxBytes))
-          throw new DomainError('conflict');
-        const before = entry
-          ? fileRevision(await service.adapter.readFile(id, target, editorMaxBytes))
-          : null;
+        if (entry && !entry.is_file) throw new DomainError('conflict');
+        if (entry) requireEditableFile(entry);
+        let before: string | null = null;
+        if (entry) {
+          const previous = await service.adapter.readFile(id, target, editorMaxBytes);
+          // A binary file renamed to .txt remains non-editable, even with a matching revision.
+          decodeEditableText(previous);
+          before = fileRevision(previous);
+        }
         if (before !== input.expectedRevision) throw new DomainError('conflict');
         await recordAudit(connection, current, 'server.files.requested', {
           serverId: c.req.param('id'),

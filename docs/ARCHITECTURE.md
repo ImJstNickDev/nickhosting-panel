@@ -191,6 +191,10 @@ of an unauthenticated grant, and the actor/subject distinction stays visible.
 No privileged provider URL/token is delivered to the browser.
 
 The file editor is bounded separately from streaming binary transfers. Browser
+and API share a pure text-file eligibility policy; the API validates actual bytes
+on reads and writes. The inline editor replaces the listing while retaining the
+breadcrumb and revision-protected draft. Trusted integration-owned file icons are
+decorative assets and cannot enable binary editing or bypass authorization. Browser
 uploads use Blob/XHR and native downloads avoid whole-file JavaScript buffering;
 existing upload admission and live authorization remain authoritative. Console
 SSE and displayed history have independent memory bounds. Telemetry carries real
@@ -198,6 +202,12 @@ units/timestamps; missing values remain missing. Job receipt never means success
 and an uncertain remote effect is not retried as a new side effect. Owner
 acknowledgement uses the existing remote identity/stopped-state proof and records
 failure without inventing rollback.
+
+The existing React Router route tree is mounted through its data router to use
+the supported [navigation blocker](https://reactrouter.com/api/hooks/useBlocker)
+for unsaved editor drafts and pending writes, including browser Back/Forward.
+This introduces no route loaders, new authentication path or server-side routing;
+hard reloads retain the separate browser unload warning.
 
 Migration 014 adds PostgreSQL schedules and occurrences. Due work commits its
 claim, admitted lifecycle intent and outbox atomically; Redis remains delivery.

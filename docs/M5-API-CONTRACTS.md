@@ -249,6 +249,11 @@ handlers. Registry validation rejects missing/duplicate handlers, invalid field
 bounds/dependencies and missing translation keys. API/Owner JSON cannot register
 code or arbitrary asset URLs.
 
+Optional `fileIcons` rules pair bounded lowercase filename extensions with
+registered bundled asset IDs. They are decorative metadata only; the shared file
+manager falls back to its generic type icons for unknown games/extensions. No rule
+registers a binary editor, grants a permission or changes the API's text policy.
+
 The shared shell owns identity, resources, projects, lifecycle, Activity, services,
 network and automation. Generic wizard/section renderers consume typed field
 constraints, conditional visibility, asynchronous choices, commands and capability
@@ -496,7 +501,7 @@ credential is returned to the browser.
 
 | Route | Request/result |
 | --- | --- |
-| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; symlinks and binary content rejected. |
+| `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; symlinks and binary content rejected. Known binary metadata returns `file_not_editable` (415) before reading the body. |
 | `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
 | `GET /archive?root=...&files=...` | JSON array of selected basenames; actual streamed ZIP, including folders/empty directories. At most100 selected roots,10,000 enumerated entries,64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
 | `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
@@ -508,6 +513,15 @@ Wings does not expose atomic compare-and-swap against external Panel/game writes
 a write in the comparison/write interval remains possible. A post-write mismatch
 is a conflict, not a claim of rollback. Browser drafts remain available on failure.
 JSON,YAML,TOML validation is local; scripts are highlighted, never executed.
+
+Browser and API share the metadata exclusion policy. Both editor reads and writes
+reject known binary formats, including JARs, archives, images and Minecraft world
+data. Unknown extensions or `application/octet-stream` alone do not prove a file
+binary: contents still undergo the 1 MiB bound, strict UTF-8 decoding, binary control
+character and signature checks. PUT validates submitted and existing bytes, so
+renaming a binary to `.txt` does not make it editable. Valid text keeps its Unicode,
+line endings and BOM. No binary-specific editors are supported today. Streaming
+downloads/uploads remain independent of this text-editor limit and policy.
 
 Copy/extraction failures after effects may leave partial files. They record
 `server.files.incomplete` and return `operation_uncertain`; inspect the destination

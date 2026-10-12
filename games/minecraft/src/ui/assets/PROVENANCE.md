@@ -14,3 +14,8 @@ installer on 2026-10-10: a brown-haired voxel face with white eyes, used as the
 requested Herobrine-style fallback. No skin texture or remote avatar was copied.
 Live player previews use the trusted module's MCHeads URL and send the entered
 player name to that service; they are decorative and never identity proof.
+
+`minecraft-properties.svg` is original SVG geometry authored on 2026-10-12:
+a small grass-topped voxel block with a configuration gear. It contains no copied
+game textures or logos. The integration contributes this decorative file icon
+through its trusted UI descriptor; the shared file manager has no Minecraft check.

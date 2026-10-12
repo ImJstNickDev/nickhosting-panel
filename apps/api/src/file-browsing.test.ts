@@ -161,6 +161,94 @@ describe('editor revisions', () => {
     );
     return { ...f, app };
   }
+  it.each(['server.jar', 'world.dat', 'r.0.0.mca', 'backup.zip', 'icon.png'])(
+    'rejects editing %s before downloading its body, even with text MIME',
+    async (name) => {
+      const f = appFixture();
+      f.entries.get('')?.push(file(name));
+      const response = await f.app.request(`/v1/servers/abc/files/editor?path=${name}`);
+      expect(response.status).toBe(415);
+      expect(await response.json()).toEqual({ code: 'file_not_editable' });
+      expect(f.adapter.readFile).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['server.jar', 'level.dat', 'backup.7z'])(
+    'refuses creating binary target %s through the text PUT endpoint',
+    async (name) => {
+      const f = appFixture();
+      const response = await f.app.request('/v1/servers/abc/files/editor', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: name, content: 'text', expectedRevision: null }),
+      });
+      expect(response.status).toBe(415);
+      expect(f.adapter.readFile).not.toHaveBeenCalled();
+      expect(f.adapter.writeFile).not.toHaveBeenCalled();
+    },
+  );
+  it.each([Buffer.from([0xc3, 0x28]), Buffer.from('binary\0data'), Buffer.from('%PDF-1.7\nhello')])(
+    'refuses binary bytes renamed to text on both read and matching-revision save',
+    async (bytes) => {
+      const f = appFixture();
+      f.contents.set('a.txt', bytes);
+      const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');
+      expect(response.status).toBe(415);
+      const save = await f.app.request('/v1/servers/abc/files/editor', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          path: 'a.txt',
+          content: 'replacement',
+          expectedRevision: fileRevision(bytes),
+        }),
+      });
+      expect(save.status).toBe(415);
+      expect(f.adapter.writeFile).not.toHaveBeenCalled();
+      expect(f.contents.get('a.txt')).toEqual(bytes);
+    },
+  );
+  it.each(['invalid\0data', 'control\x01data', '%PDF-1.7', '\ud800'])(
+    'refuses submitted binary controls, signatures and lossy surrogate encoding',
+    async (content) => {
+      const f = appFixture();
+      const save = await f.app.request('/v1/servers/abc/files/editor', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: 'new.txt', content, expectedRevision: null }),
+      });
+      expect(save.status).toBe(415);
+      expect(f.adapter.writeFile).not.toHaveBeenCalled();
+    },
+  );
+  it('allows genuine unknown-extension UTF-8/octet-stream files and preserves revision saves', async () => {
+    const f = appFixture();
+    const name = 'custom.unknown';
+    const content = '\ufeff# città 日本語\nkey=value';
+    f.entries.get('')?.push({ ...file(name), mimetype: 'application/octet-stream' });
+    f.contents.set(name, Buffer.from(content));
+    const read = await f.app.request(`/v1/servers/abc/files/editor?path=${name}`);
+    const loaded = await read.json();
+    expect(read.status).toBe(200);
+    expect(loaded.content).toBe(content);
+    const save = await f.app.request('/v1/servers/abc/files/editor', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: name,
+        content: `${content}\nnext=true`,
+        expectedRevision: loaded.revision,
+      }),
+    });
+    expect(save.status).toBe(200);
+    expect(f.contents.get(name)?.toString()).toBe(`${content}\nnext=true`);
+  });
+  it('retains the editor byte limit without reading a known oversize file', async () => {
+    const f = appFixture();
+    f.entries.set('', [file('huge.txt', true, 1048577)]);
+    const response = await f.app.request('/v1/servers/abc/files/editor?path=huge.txt');
+    expect(response.status).toBe(413);
+    expect(f.adapter.readFile).not.toHaveBeenCalled();
+  });
   it('reads a revision and rejects a changed provider file before writing', async () => {
     const f = appFixture();
     const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');

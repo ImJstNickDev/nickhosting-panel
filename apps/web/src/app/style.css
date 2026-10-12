@@ -31,6 +31,7 @@
     --muted: #536372;
     --blue: #164cb1;
     --surface: #fff;
+    --field-focus: #36556a;
   }
   a {
     color: var(--blue);
@@ -95,6 +96,31 @@
   :focus-visible {
     outline: 2px solid #36556a;
     outline-offset: 2px;
+  }
+  /* Text entry uses its existing border for focus, never a second outer rectangle. */
+  input:not(
+    [type="checkbox"],
+    [type="radio"],
+    [type="range"],
+    [type="color"],
+    [type="file"],
+    [type="button"],
+    [type="submit"],
+    [type="reset"],
+    [type="hidden"],
+    [type="image"]
+  ):focus,
+  textarea:focus {
+    outline: none;
+    box-shadow: none;
+    border-color: var(--field-focus);
+  }
+  @media (forced-colors: active) {
+    input:focus:focus-visible,
+    textarea:focus-visible {
+      outline: 1px solid Highlight;
+      outline-offset: 1px;
+    }
   }
   h1[tabindex="-1"]:focus,
   h2[tabindex="-1"]:focus,

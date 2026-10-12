@@ -19,6 +19,14 @@ export function getGameArtwork(gameId: string): string | undefined {
   const asset = module?.descriptor.artwork;
   return asset ? module?.assets?.[asset.assetId] : undefined;
 }
+/** Decorative metadata only; an icon never establishes editor support or permission. */
+export function getGameFileIcon(gameId: string | undefined, name: string): string | undefined {
+  const module = gameId ? gameUiRegistry.get(gameId) : undefined;
+  const filename = name.split('/').at(-1)?.toLowerCase() ?? '';
+  const extension = filename.includes('.') ? (filename.split('.').at(-1) ?? '') : '';
+  const icon = module?.descriptor.fileIcons?.find((rule) => rule.extensions.includes(extension));
+  return icon ? module?.assets?.[icon.assetId] : undefined;
+}
 
 // Owner executable contributions are also static first-party imports.
 import { OwnerMinecraftPage } from './minecraft-admin.js';

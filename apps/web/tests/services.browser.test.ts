@@ -45,19 +45,26 @@ describe('M5 browser files, backups, console and automation', () => {
     await user.goto(`${base}/files`);
     await user.getByRole('button', { name: 'New text file', exact: true }).click();
     const dialog = user.getByRole('dialog');
-    await dialog.getByLabel('Name', { exact: true }).fill('notes.txt');
-    await dialog.getByLabel('Contents', { exact: true }).fill('Original world notes');
-    await dialog.getByRole('checkbox').check();
-    await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
+    const editor = user.getByRole('region', { name: 'Text editor', exact: true });
+    await editor.getByLabel('Name', { exact: true }).fill('notes.txt');
+    await editor.getByLabel('Contents', { exact: true }).fill('Original world notes');
+    await user.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(editor.getByRole('status')).toHaveText('No unsaved changes');
+    await browserExpect(editor.getByLabel('Contents', { exact: true })).toBeFocused();
+    await user.keyboard.press('Control+f');
+    await browserExpect(user.locator('.fm-search-panel input[name="search"]')).toBeFocused();
+    await user.keyboard.press('Escape');
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
     await browserExpect(row('notes.txt')).toBeVisible();
     expect((await provider.files()).get('notes.txt')?.toString()).toBe('Original world notes');
     await row('notes.txt').getByRole('button', { name: 'notes.txt', exact: true }).click();
-    await dialog.getByLabel('Contents', { exact: true }).fill('Updated notes');
+    await editor.getByLabel('Contents', { exact: true }).fill('Updated notes');
     user.once('dialog', (confirmation) => confirmation.dismiss());
-    await user.keyboard.press('Escape');
-    await browserExpect(dialog.getByLabel('Contents', { exact: true })).toHaveText('Updated notes');
-    await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
-    await browserExpect(dialog).not.toBeVisible();
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+    await browserExpect(editor.getByLabel('Contents', { exact: true })).toHaveText('Updated notes');
+    await user.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(editor.getByRole('status')).toHaveText('No unsaved changes');
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
     expect((await provider.files()).get('notes.txt')?.toString()).toBe('Updated notes');
     await row('notes.txt')
       .getByRole('button', { name: 'Actions for notes.txt', exact: true })
@@ -139,16 +146,20 @@ describe('M5 browser files, backups, console and automation', () => {
       await user.reload();
       await row('first.txt').getByRole('button', { name: 'first.txt', exact: true }).click();
       await began;
-      await user.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+      await user.getByRole('button', { name: 'Back to files', exact: true }).click();
       await row('second.txt').getByRole('button', { name: 'second.txt', exact: true }).click();
       await browserExpect(
-        user.getByRole('dialog').getByLabel('Contents', { exact: true }),
+        user
+          .getByRole('region', { name: 'Text editor', exact: true })
+          .getByLabel('Contents', { exact: true }),
       ).toHaveText('Second file');
       release();
       await browserExpect(
-        user.getByRole('dialog').getByLabel('Contents', { exact: true }),
+        user
+          .getByRole('region', { name: 'Text editor', exact: true })
+          .getByLabel('Contents', { exact: true }),
       ).toHaveText('Second file');
-      await user.keyboard.press('Escape');
+      await user.getByRole('button', { name: 'Back to files', exact: true }).click();
     } finally {
       release();
       provider.adapter.readFile = original;

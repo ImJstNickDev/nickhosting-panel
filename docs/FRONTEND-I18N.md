@@ -506,8 +506,10 @@ the same desktop toolbar; small screens wrap these controls without overflow.
 The search field displays ALT + K on Windows/Linux and ⌥ + K on macOS, without
 parentheses; the shortcut focuses/selects the current-folder search. It is active
 only while Files is mounted and yields to open dialogs/editor shortcuts. The
-input also declares its platform-specific `aria-keyshortcuts`. Direct-path entry
-uses a small borderless pencil, with ALT + G or ⌥ + G in its localized tooltip.
+input also declares its platform-specific `aria-keyshortcuts`. In the listing,
+direct-path entry uses a small borderless folder/path icon, with ALT + G or ⌥ + G
+in its localized tooltip. Inside the editor, the pencil beside the filename means
+Rename; direct-path entry remains available through ALT + G or ⌥ + G.
 Search and direct-path inputs indicate focus through their existing border color,
 without an extra outline or shadow. Forced-colors mode uses the system highlight.
 
@@ -526,11 +528,50 @@ the path, including when the field is already open. These shortcuts yield to dia
 
 The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.
+Opening a text file replaces the listing in place, without a modal. The breadcrumb
+retains clickable parent directories and includes the current filename. List-only
+search, upload and view controls are hidden until returning to the directory.
+One compact row contains the path and icon actions in this order: Back to files
+(Home), Save, Undo, Redo, Find. Each action has a localized accessible name and
+custom tooltip; unavailable actions are disabled. Find opens CodeMirror's search.
+Search uses a compact input, current/total match count, previous/next actions and
+case/whole-word/regular-expression toggles. Options expose their pressed state and
+localized tooltips; replacement fields appear only when requested. Search and
+replacement use CodeMirror's engine, including invalid-pattern handling.
+The editor reserves the listing's bounded height; both content reads and lazy module
+loading use static code-line skeletons with a localized assistive loading status.
+Saving keeps the file open, updates its revision and marks the draft clean only
+after the API confirms success. Conflicts retain the draft. Breadcrumb/path changes,
+Back to files and ordinary application links warn before discarding edits; reload
+uses the browser's unload warning. Pending saves prevent these navigation actions.
+Browser Back/Forward uses the router's navigation blocker as well. Opening a file
+places focus in its text once ready, so Ctrl/Cmd+F invokes editor search; a deliberate
+focus move during loading must not be overridden. A new file starts in its name
+field. Returning to Files restores the original file's row when it still exists,
+otherwise the breadcrumb. The editor shows caret/active-line focus without a cyan
+outer frame; forced-colors mode retains a system focus indicator. Renaming uses
+the existing authorized file operation and keeps the editor open after confirmation.
+Unsaved edits must be saved before renaming, and pending writes block navigation.
 Entering Files preloads the lazy editor module once; subsequent editor opens use
 the same cached import. A failed preload can retry when the editor is opened.
 Editor content remains local while a conflict is resolved. Availability reasons
 are contextual; no empty full-size Upload panel is rendered.
 
+File icons distinguish text, JSON, JARs, configuration, scripts and other common
+types. Trusted game UI modules may declare bundled decorative icons by extension;
+Minecraft supplies an original voxel-and-gear icon for `.properties`. Filenames
+remain the accessible labels. Icons never establish editability. Known binary
+formats do not request editor content; their inline view explains the limitation
+and offers the existing download action. Unknown formats must pass the API's
+bounded strict UTF-8/content checks before text editing. There are currently no
+supported binary editor exceptions.
+
 Server tabs retain their active underline without programmatically focusing the
 active link on load or reload. Native keyboard focus remains visible; pointer
 navigation must not add a persistent focus outline.
+
+Text inputs and textareas indicate focus by strengthening their existing border,
+without adding a second outer rectangle or shadow. Other keyboard controls retain
+their focus outlines. Forced-colors mode restores an explicit system Highlight
+outline for text entry; component-specific states such as invalid fields remain
+visible. This is a shared field style, not an editor-only override.

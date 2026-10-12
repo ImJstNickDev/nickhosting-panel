@@ -106,6 +106,28 @@ function moduleFixture(): TrustedGameUiModule {
   };
 }
 describe('browser game UI descriptors', () => {
+  it('accepts file icon rules only for bounded extensions and registered static assets', () => {
+    const module = moduleFixture();
+    const descriptor = {
+      ...module.descriptor,
+      fileIcons: [{ extensions: ['properties'], assetId: 'configuration' }],
+    };
+    expect(() => defineTrustedGameUiModule({ ...module, descriptor })).toThrow('asset_missing');
+    const registered = defineTrustedGameUiModule({
+      ...module,
+      descriptor,
+      assets: { configuration: '/assets/config.svg' },
+    });
+    expect(registered.descriptor.fileIcons?.[0]?.extensions).toEqual(['properties']);
+    expect(Object.isFrozen(registered.descriptor.fileIcons?.[0]?.extensions)).toBe(true);
+    for (const fileIcons of [
+      [{ extensions: ['properties'], assetId: 'https://untrusted.invalid/icon.svg' }],
+      [{ extensions: ['../properties'], assetId: 'configuration' }],
+      [{ extensions: [], assetId: 'configuration' }],
+      [{ extensions: ['properties'], assetId: 'configuration', editor: 'executable' }],
+    ])
+      expect(gameUiDescriptorSchema.safeParse({ ...descriptor, fileIcons }).success).toBe(false);
+  });
   it('round-trips bounded serializable descriptors with alternate transport and connection modes', () => {
     const descriptor = fixture();
     expect(gameUiDescriptorSchema.parse(JSON.parse(JSON.stringify(descriptor)))).toEqual(

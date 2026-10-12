@@ -4978,3 +4978,86 @@ Rollback: revert this change; there are no migrations or persistent cache data.
 Final index governance passed: 605 text files, 155 review PNGs, 506 relative links,
 4 TOML files and 44 ignore cases. Secret scanning remains heuristic; this change
 adds no screenshots or private diagnostic artifacts.
+
+### 2026-10-12 — Inline Files editor, compact search and file-type eligibility
+
+The editor replaces the directory listing at the same bounded height. Breadcrumbs
+remain navigable; text reads and lazy CodeMirror loading use static skeleton lines.
+The single toolbar provides Home, Save, Undo, Redo and Find as localized icon actions.
+Saving remains in the editor with the confirmed revision; conflicts preserve the
+local draft. The filename pencil now means Rename, using the existing authorized
+file operation after saving pending edits. The listing uses a distinct path icon;
+ALT+G remains available in both views. Opening focuses the text editor when ready,
+without stealing a deliberate focus move during loading. New files focus Name,
+and saving them returns focus to the existing editor. Returning restores row focus.
+
+The existing route tree now uses React Router's data-router bootstrap solely to
+support its navigation blocker; route declarations/order and authentication remain
+unchanged. Dirty drafts and pending writes block browser Back/Forward as well as
+application navigation. Reload uses the existing browser unload warning.
+
+Search is a compact top panel with current/total matches, previous/next icons,
+case/whole-word/regex toggles, and an optional replacement row. It uses CodeMirror's
+native query/replace engine, not a second implementation. Display bookkeeping is
+bounded to 10,000 matches, indicates a lower-bound total with `+`, and uses an
+unknown marker when a selected match lies beyond that count. Invalid regex remains
+an accessible error. Text-field focus uses the existing border globally instead
+of a second outer rectangle; editor focus uses its caret/active line instead of a
+cyan surround. Buttons and forced-colors keyboard cues remain available.
+
+File icons distinguish JSON, JAR, configurations, scripts and other common formats.
+The Minecraft module owns its original `.properties` voxel/gear asset through
+validated decorative SDK rules. Icons cannot grant permissions or editor support.
+The shared browser/API metadata policy avoids body reads for known binary types;
+unknown files still require bounded strict UTF-8/content validation. Editor GET
+and PUT reject binary bytes, including renamed files, with localized HTTP415.
+No binary editor exception exists. Streaming uploads/downloads retain their
+independent limits and authorization. No migration or dependency was added.
+
+Validation, preserving full versus targeted boundaries:
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/file-content.test.ts apps/api/src/file-browsing.test.ts`: **79 passed** (49 policy,30 API). Covers metadata spoofing, renamed binary bytes, Unicode/BOM preservation, size bounds, revisions and authorization.
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/ui.test.ts apps/web/src/features/game-ui.test.ts apps/web/src/features/file-editor-model.test.ts apps/web/src/features/file-manager-model.test.ts apps/web/src/app/i18n.test.ts`: **39 passed,1 failed**. The failure is the unchanged creation test expecting the former modpack archive picker in Vanilla creation fields; the current baseline already omits that picker. New icon/SDK cases and file models/i18n passed. No unsupported wizard behavior was reintroduced to satisfy that stale expectation.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts`: **17 passed**, before later search/focus/rename refinements. Those refinements were verified with the same file and `-t 'opens text inline|renames the open file|retains the open editor|known binary'`: **4 passed** on the final behavior. Includes stable skeleton geometry, Ctrl/Cmd+F, native search/replace+undo, dirty navigation, rename/save, binary body-read exclusion, pending saves, EN/IT axe and320px reflow.
+- Prefix + `apps/web/tests/services.browser.test.ts -t 'creates, edits, renames|streams a 12 MiB|does not replace a second editor'`: **3 passed** after final focus changes. Real handlers confirm new-file save/focus,12MiB byte-preserving transfer and stale-response isolation.
+- Prefix + `apps/web/tests/services.browser.test.ts apps/web/tests/server-navigation.browser.test.ts -t 'creates, edits, renames|streams a 12 MiB|does not replace a second editor|opens Console|keeps Console first'`: **5 passed**, including the two bootstrap navigation regressions.
+- Prefix + `apps/web/tests/text-field-focus.browser.test.ts`: **1 passed** for pointer/keyboard text-entry borders, button focus and forced-colors indicators.
+- `scripts/dev.sh pnpm typecheck`: passed; after final frontend refinements, `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` and production build passed. `scripts/dev.sh pnpm i18n:check`: passed,1214 EN/IT/pseudo keys. Vite retains its existing bundle-size advisory; CodeMirror remains a lazy chunk.
+- Changed-file `scripts/dev.sh pnpm exec biome check`: passed with six existing warnings (three reduced-motion `!important` rules and three test non-null assertions). `git diff --check`: passed.
+
+A new320px browser assertion initially exposed the clipped search Close icon.
+Grid sizing corrected the issue; the final targeted run passed. Earlier broader
+browser execution was interrupted for Owner-requested UI refinements and is not
+claimed as a complete successful run or guaranteed cleanup. Completed runs disposed
+their isolated database schemas and test staging normally. No historical suite was
+repeated merely for cosmetic changes; unaffected evidence above remains distinct
+from final targeted checks.
+
+Independent technical, accessibility and rendered UX/content review found and
+resolved browser Back draft loss, focus restoration, count-cap honesty, narrow-screen
+clipping and an incorrect error translation key. No remaining must-fix finding in
+this change. This is focused evidence, not complete application WCAG certification.
+Provider calls were isolated fixtures behind actual Hono/auth/database handlers;
+there was no production API mutation, live game-server test, new Docker resource,
+container restart or production configuration change. Existing dev watchers load
+the source changes. No private configuration or credentials are included. Issue#18
+remains a separate release gate. External Panel/game writes can still race Wings'
+non-atomic comparison/write interval; no transactional CAS or rollback is claimed.
+
+Reviewed sanitized screenshots:
+[editor EN](screenshots/m5/file-inline-editor-desktop-en.png),
+[editor IT mobile](screenshots/m5/file-inline-editor-mobile-it.png),
+[loading EN](screenshots/m5/file-inline-editor-loading-desktop-en.png),
+[loading IT mobile](screenshots/m5/file-inline-editor-loading-mobile-it.png),
+[search EN](screenshots/m5/file-inline-editor-search-desktop-en.png),
+[search IT mobile](screenshots/m5/file-inline-editor-search-mobile-it.png),
+[binary state](screenshots/m5/file-inline-binary-unavailable-desktop-en.png),
+[file icons](screenshots/m5/file-type-icons-desktop-en.png).
+
+Rollback: revert this change and rebuild only if using compiled artifacts. There
+are no migrations, new packages or persistent-state conversions to undo. PR#21
+remains open and unmerged; this does not declare all M5 acceptance complete.
+Final index governance passed:611 text files,163 review PNGs,514 relative links,
+4 TOML files and44 ignore cases. Screenshots were visually inspected for fixture
+content before staging; automated secret scanning remains heuristic.

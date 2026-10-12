@@ -155,6 +155,20 @@ export const gameUiDescriptorSchema = z
     schemaVersion: z.literal(1),
     nameKey: key,
     artwork: z.object({ assetId: id, altKey: key.optional() }).strict().optional(),
+    fileIcons: z
+      .array(
+        z
+          .object({
+            extensions: z
+              .array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,15}$/))
+              .min(1)
+              .max(16),
+            assetId: id,
+          })
+          .strict(),
+      )
+      .max(32)
+      .optional(),
     creation: z
       .object({
         fields: z.array(uiFieldSchema).max(64),
@@ -543,6 +557,8 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
   const descriptor = gameUiDescriptorSchema.parse(module.descriptor);
   if (descriptor.artwork && !module.assets?.[descriptor.artwork.assetId])
     throw new Error('game_ui_asset_missing');
+  for (const icon of descriptor.fileIcons ?? [])
+    if (!module.assets?.[icon.assetId]) throw new Error('game_ui_asset_missing');
   const handlerIds = [
     ...descriptor.creation.pages.flatMap((p) => (p.lookupHandler ? [p.lookupHandler] : [])),
     ...[descriptor.creation, ...descriptor.sections.flatMap((s) => s.forms)].flatMap((f) =>
