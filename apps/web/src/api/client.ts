@@ -46,6 +46,14 @@ export function safeApiPath(path: string) {
   if (path.includes('\\') || /[\r\n]/.test(path)) throw new Error('invalid_api_path');
   return path;
 }
+/** Debug-only response metadata. No provider URLs or request payloads. */
+export interface ApiDebugTiming {
+  requestId: string;
+  status: number;
+  serverMs: number;
+  httpMs: number;
+}
+
 export async function api<T = unknown>(
   path: string,
   options: {
@@ -53,8 +61,10 @@ export async function api<T = unknown>(
     body?: unknown;
     signal?: AbortSignal;
     headers?: Record<string, string>;
+    onDebugTiming?: (timing: ApiDebugTiming) => void;
   } = {},
 ): Promise<T> {
+  const started = options.onDebugTiming ? performance.now() : 0;
   const response = await fetch(safeApiPath(path), {
     method: options.method ?? (options.body === undefined ? 'GET' : 'POST'),
     credentials: 'same-origin',
@@ -67,17 +77,40 @@ export async function api<T = unknown>(
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     redirect: 'error',
   });
-  if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
-  const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
-  if (method !== 'GET' && path.startsWith('/v1/owner/')) {
-    // Catalog visibility depends on Owner mappings, rollout and availability. Never retain
-    // inactive projections after a write; active views refetch under current identity.
-    await queryClient.cancelQueries({ queryKey: ['creation'] });
-    queryClient.removeQueries({ queryKey: ['creation'], type: 'inactive' });
-    await queryClient.invalidateQueries({ queryKey: ['creation'] });
+  try {
+    if (!response.ok) throw apiError(await response.json().catch(() => ({})), response.status);
+    const method = options.method ?? (options.body === undefined ? 'GET' : 'POST');
+    if (method !== 'GET' && path.startsWith('/v1/owner/')) {
+      // Catalog visibility depends on Owner mappings, rollout and availability. Never retain
+      // inactive projections after a write; active views refetch under current identity.
+      await queryClient.cancelQueries({ queryKey: ['creation'] });
+      queryClient.removeQueries({ queryKey: ['creation'], type: 'inactive' });
+      await queryClient.invalidateQueries({ queryKey: ['creation'] });
+    }
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  } finally {
+    // Include response body consumption, not just arrival of the HTTP headers.
+    // Only a debug-enabled API response opts this request into browser tracing.
+    if (options.onDebugTiming) {
+      try {
+        const match = response.headers
+          .get('server-timing')
+          ?.match(/(?:^|,)\s*nh-file;dur=(\d+(?:\.\d+)?)(?=\s*(?:,|$))/);
+        const requestId = response.headers.get('x-request-id');
+        const serverMs = match ? Number(match[1]) : Number.NaN;
+        if (requestId && /^[a-zA-Z0-9-]{1,80}$/.test(requestId) && Number.isFinite(serverMs))
+          options.onDebugTiming({
+            requestId,
+            status: response.status,
+            serverMs,
+            httpMs: performance.now() - started,
+          });
+      } catch {
+        // Timing observers cannot change a successful request or its original error.
+      }
+    }
   }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
 }
 export function idempotencyKey() {
   return crypto.randomUUID();

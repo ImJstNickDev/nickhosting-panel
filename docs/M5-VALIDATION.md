@@ -6748,3 +6748,77 @@ schemas use scoped cleanup. Live actions were limited to reading dev container
 status, logs and dev file-operation audit timestamps. No live server/file mutation,
 new infrastructure, container restart or Blueprint change occurred. Rollback is
 a source revert; PR #21 stays open/unmerged and SFTPGo #18 remains unchanged.
+
+### 2026-10-13 — Copy/paste and cut/paste timing breakdown
+
+This pass adds measurement only: no new provider calls, copy algorithm, identity
+policy, lock, retry or operation-order changes. The earlier **1,598 ms** live
+copy audit interval excludes planning/access before the requested audit and
+browser/refresh work afterwards; it is not an end-to-end paste measurement.
+
+With API logging at `debug`, copy and ordinary file mutations emit one bounded
+`server.file_operation` record per request, correlated by request ID. Fixed phase
+names/counts separate principal/runtime acquisition, access/identity/SQL checks,
+copy/move planning and directory calls, mutation guards, resource lookup,
+authorization, provider effects, ingestion claims, audit and cleanup. No file
+names, paths, contents, SQL, credentials or signed URLs enter these traces. At
+`info` or higher, there are no trace records/headers and the aggregate timer is a
+no-op. The debug `Server-Timing: nh-file;dur=...` response exposes only the total,
+not private provider or authorization details.
+
+The browser emits a single `files.transfer_timing` console-debug object only when
+that response timing and a request ID are present. It separates cached/fetched
+consent preflight, mutation HTTP/body consumption, the point where the UI lock is
+released, and background directory invalidation settlement. Capability/transfer
+refresh is not counted as directory refresh and remains asynchronous. No extra
+telemetry request, UI notification or persistent browser log buffer is added.
+These browser measurements stay in the browser; they are not in API logs.
+
+Interpretation boundaries:
+
+- Nested spans (`copy.access`, `copy.plan`, source/destination checks and their
+  directory reads, authorization and its SQL phases) must not be summed twice.
+- Adapter spans include scoped credential resolution and transport, not just wire
+  latency. Download negotiation ends at response headers; its lazy body streams
+  during the upload span. That span covers relay/upload setup and completion.
+- Route duration excludes earlier Hono middleware, proxy/browser processing and
+  screen rendering. Subtracting it from browser HTTP time does not prove pure
+  network latency. Directory invalidation settlement does not prove DOM paint or
+  even a network fetch for an inactive query, and can settle with a query error.
+- Each submission has its own trace; time spent deciding overwrite consent is
+  excluded. The new trace has not yet measured an Owner live paste at this HEAD.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-operation-trace.test.ts apps/api/src/file-operations.test.ts apps/web/src/api/client.test.ts`:
+  **74 passed**. The helper's first run exposed that setting a Hono context header
+  in `finally` does not update an already-created response. The final helper
+  attaches timing directly to that response; success, failure, disabled debug
+  and throwing diagnostic sinks/observers now pass.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run apps/api/src/file-operations.integration.test.ts`:
+  **32 passed** against the existing isolated test database, provider fixture.
+  Debug and non-debug copy perform the same **nine** provider directory reads for
+  one file between two child folders; move performs **three**, then one rename.
+  Those counts describe that fixture, not every possible tree/path.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-shortcuts.browser.test.ts -t 'reuses listed metadata|cuts files and folders|pastes a newly created'`:
+  **3 passed / 9 filtered**. Real browser plus isolated handlers; debug headers are
+  injected for the browser timing assertion. Held background directory reads
+  prove the controls unlock before refresh; the summary waits for settlement and
+  omits file names. Cut and body-focus paste regressions also pass.
+- Root TypeScript and WebPanel TypeScript checks passed. Focused formatting/lint
+  and staged governance are recorded in the PR update. No full historical suite
+  was rerun for this diagnostic-only change.
+
+Only normal dev source watchers reloaded the API/Vite code. Both existing
+containers remain healthy; read-only dev HTTPS health returned HTTP 200. No
+manual container restart, Panel/Blueprint/Wings change, live file mutation or
+new infrastructure was performed. Isolated test fixtures clean up their own
+schema/staging state. Production-release gate #18 is unchanged.
+
+Independent read-only review approved the final diff with no must-fix findings:
+operation/cleanup ordering, fresh identity semantics, error headers, bounded
+private logs, absence of extra provider calls, and background UI release are
+preserved. Staged governance passed: 672 text files, 209 existing review PNGs,
+582 relative links, four TOML files and 44 ignore cases; heuristic secret scan
+passed. Focused Biome passed with one pre-existing informational template-literal
+suggestion in the API client's old text-limit test.

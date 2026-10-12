@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { expect as browserExpect, type Page } from '@playwright/test';
+import { expect as browserExpect, type ConsoleMessage, type Page } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
@@ -287,6 +287,15 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     const refresh = user.getByRole('button', { name: 'Refresh files', exact: true });
     await browserExpect(refresh).toBeEnabled();
     let acknowledged = false;
+    const timings: Record<string, unknown>[] = [];
+    const captureTiming = (message: ConsoleMessage) => {
+      if (message.type() === 'debug' && message.text().startsWith('files.transfer_timing'))
+        void message
+          .args()[1]
+          ?.jsonValue()
+          .then((value) => timings.push(value));
+    };
+    user.on('console', captureTiming);
     const preliminaryReads: string[] = [];
     const heldReads: string[] = [];
     let release!: () => void;
@@ -299,7 +308,14 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
       if (request.method() === 'POST' && url.pathname === `${endpoint}/copy`) {
         const response = await route.fetch();
         acknowledged = true;
-        return route.fulfill({ response });
+        return route.fulfill({
+          response,
+          headers: {
+            ...response.headers(),
+            'server-timing': 'nh-file;dur=5',
+            'x-request-id': 'fixture-paste-timing',
+          },
+        });
       }
       if (request.method() === 'GET' && url.pathname === endpoint && !acknowledged)
         preliminaryReads.push(url.searchParams.get('path') ?? '');
@@ -324,6 +340,7 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
       await user.getByLabel('Search this folder', { exact: true }).fill('background');
       await user.getByRole('button', { name: 'New folder', exact: true }).click();
       await browserExpect(dialog()).toBeVisible();
+      expect(timings).toEqual([]);
       expect(preliminaryReads).toEqual([]);
       expect(writes).toHaveLength(1);
       expect((await provider.files()).has(`target/${name}`)).toBe(true);
@@ -331,7 +348,24 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     } finally {
       release();
     }
-    await browserExpect(nameButton(name)).toBeVisible();
+    try {
+      await browserExpect(nameButton(name)).toBeVisible();
+      await browserExpect.poll(() => timings.length).toBe(1);
+      expect(timings[0]).toMatchObject({
+        requestId: 'fixture-paste-timing',
+        action: 'copy',
+        count: 1,
+        outcome: 'succeeded',
+        preflightMs: expect.any(Number),
+        mutationMs: expect.any(Number),
+        controlsReleasedAfterMs: expect.any(Number),
+        directoryRefreshSettledMs: expect.any(Number),
+      });
+      expect(timings[0]?.directoryRefreshSettledMs).toBeGreaterThan(0);
+      expect(JSON.stringify(timings)).not.toContain(name);
+    } finally {
+      user.off('console', captureTiming);
+    }
   });
 
   it('requires new overwrite consent when a collision appears after the cached listing', async () => {

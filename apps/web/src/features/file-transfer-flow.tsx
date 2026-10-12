@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { api, queryClient } from '../api/client.js';
+import { type ApiDebugTiming, api, queryClient } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { Dialog, ErrorNotice } from '../components/ui.js';
 import { FileDestinationTree } from './file-destination-tree.js';
@@ -116,7 +116,7 @@ export function useFileTransfer(options: {
     // An acknowledged operation is complete independently of the next listing.
     // Invalidation still fences stale prefetches; observed queries report their
     // own refresh errors without turning a successful mutation into a failure.
-    void Promise.all([
+    const directories = Promise.all([
       ...(action === 'move'
         ? [queryClient.invalidateQueries({ queryKey: listings.source.queryKey, exact: true })]
         : []),
@@ -124,6 +124,11 @@ export function useFileTransfer(options: {
         queryKey: listings.destination.queryKey,
         exact: true,
       }),
+    ]).catch(() => {
+      // Query state retains refresh failures; settlement does not assert success.
+    });
+    void Promise.all([
+      directories,
       ...(action === 'copy'
         ? [
             // Copy temporarily owns an ingestion claim. A poll during that
@@ -141,6 +146,7 @@ export function useFileTransfer(options: {
     ]).catch(() => {
       // Query state retains the refresh error for its existing UI consumer.
     });
+    return directories;
   }
   async function inspect(
     plan: FileTransferPlan,
@@ -197,10 +203,25 @@ export function useFileTransfer(options: {
     update({ ...operation, phase: 'checking', error: undefined });
     const names = operation.plan.names.filter((name) => operation.decisions[name] !== 'skip');
     let submitted = false;
+    const started = performance.now();
+    let preflightMs = 0;
+    let mutationMs = 0;
+    let outcome = 'not_submitted';
+    let debugTiming: ApiDebugTiming | undefined;
+    let directoryRefresh: Promise<void> | undefined;
+    let directoryRefreshSettledMs: number | undefined;
+    const refreshAfterRequest = () => {
+      const refreshStarted = performance.now();
+      directoryRefresh = refresh(listings, operation.action).then(() => {
+        directoryRefreshSettledMs = performance.now() - refreshStarted;
+      });
+    };
     try {
       if (names.length) {
         // Consent remains per path; the API remains authoritative for new collisions.
+        const preflightStarted = performance.now();
         const collisions = await inspect(operation.plan, operation.decisions, listings);
+        preflightMs = performance.now() - preflightStarted;
         if (!isCurrent(operation, version)) throw { messageKey: 'errors.forbidden' };
         if (!canAct(operation.action)) throw { messageKey: 'errors.integration_unavailable' };
         if (collisions.length) {
@@ -211,33 +232,42 @@ export function useFileTransfer(options: {
         // A cut clipboard must not replay a move whose remote outcome is unknown.
         operation.onSubmitted?.();
         const overwrite = names.filter((name) => operation.decisions[name] === 'overwrite');
-        await api(
-          `${serverPath(options.serverId)}/files${operation.action === 'copy' ? '/copy' : ''}`,
-          {
-            method: 'POST',
-            body: {
-              ...(operation.action === 'copy'
-                ? {
-                    root: operation.plan.source,
-                    files: names,
-                    destination: operation.plan.destination,
-                  }
-                : {
-                    action: 'rename',
-                    root: '',
-                    files: names.map((name) => ({
-                      from: join(operation.plan.source, name),
-                      to: join(operation.plan.destination, name),
-                    })),
-                  }),
-              ...(overwrite.length
-                ? { overwrite: overwrite.map((name) => join(operation.plan.destination, name)) }
-                : {}),
+        const mutationStarted = performance.now();
+        try {
+          await api(
+            `${serverPath(options.serverId)}/files${operation.action === 'copy' ? '/copy' : ''}`,
+            {
+              method: 'POST',
+              onDebugTiming: (value) => {
+                debugTiming = value;
+              },
+              body: {
+                ...(operation.action === 'copy'
+                  ? {
+                      root: operation.plan.source,
+                      files: names,
+                      destination: operation.plan.destination,
+                    }
+                  : {
+                      action: 'rename',
+                      root: '',
+                      files: names.map((name) => ({
+                        from: join(operation.plan.source, name),
+                        to: join(operation.plan.destination, name),
+                      })),
+                    }),
+                ...(overwrite.length
+                  ? { overwrite: overwrite.map((name) => join(operation.plan.destination, name)) }
+                  : {}),
+              },
             },
-          },
-        );
+          );
+          outcome = 'succeeded';
+        } finally {
+          mutationMs = performance.now() - mutationStarted;
+        }
       }
-      if (submitted) refresh(listings, operation.action);
+      if (submitted) refreshAfterRequest();
       if (isCurrent(operation, version)) {
         update(undefined);
         latest.current.onComplete(names);
@@ -247,12 +277,13 @@ export function useFileTransfer(options: {
         update(undefined);
       }
     } catch (error) {
+      outcome = 'failed';
       if (!isCurrent(operation, version)) {
         if (mounted.current && generation.current === version) update(undefined);
         return;
       }
       if (submitted) {
-        refresh(listings, operation.action);
+        refreshAfterRequest();
       }
       const failure: TransferState = { ...operation, phase: 'failed', error, attempted: submitted };
       update(failure);
@@ -282,6 +313,26 @@ export function useFileTransfer(options: {
       }
     } finally {
       setWorking(false);
+      const controlsReleasedAfterMs = performance.now() - started;
+      if (debugTiming) {
+        const responseTiming = debugTiming;
+        // No extra requests, paths or telemetry transport. Invalidation settlement
+        // is not DOM paint (or a guarantee that an inactive directory was fetched).
+        void Promise.resolve(directoryRefresh).then(() => {
+          try {
+            console.debug('files.transfer_timing', {
+              ...responseTiming,
+              action: operation.action,
+              count: names.length,
+              outcome,
+              preflightMs,
+              mutationMs,
+              controlsReleasedAfterMs,
+              directoryRefreshSettledMs,
+            });
+          } catch {}
+        });
+      }
     }
   }
   function begin(

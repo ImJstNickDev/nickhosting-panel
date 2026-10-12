@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type AuthContext, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ServerFile } from '@nickhosting/pterodactyl-adapter';
 import { authorizeServer, type ManagementRuntime } from '@nickhosting/server-management';
@@ -19,6 +19,8 @@ let app: Hono<{ Variables: Variables }>;
 let files: Map<string, Buffer | null>;
 let service: ManagementRuntime;
 let stage: string;
+let debugTrace = false;
+let operationLogs: LogRecord[];
 afterEach(async () => {
   if (stage) await rm(stage, { recursive: true, force: true });
 });
@@ -29,6 +31,8 @@ afterAll(async () => {
   await database?.destroy();
 });
 beforeEach(async () => {
+  debugTrace = false;
+  operationLogs = [];
   f = await managementFixture(database.db, { interactive: true });
   serverId = await f.server();
   files = new Map([
@@ -134,6 +138,10 @@ beforeEach(async () => {
     principal: async () => f.context,
     management: async () => service,
     acquireUploadSlot: () => () => {},
+    logger: {
+      ...createLogger((record) => operationLogs.push(record), { level: 'debug' }),
+      isEnabled: (level) => level !== 'debug' || debugTrace,
+    },
   });
 });
 async function post(action: string, body: unknown, id = serverId) {
@@ -151,6 +159,93 @@ async function moveFiles(files: { from: string; to: string }[], overwrite?: stri
   });
 }
 describe('file operation handlers with isolated authoritative database', () => {
+  it('aggregates debug copy phases and exact provider listing counts without paths or content', async () => {
+    debugTrace = true;
+    const download = vi.mocked(service.adapter.downloadFile).getMockImplementation();
+    if (!download) throw new Error('Missing download fixture');
+    vi.spyOn(service.adapter, 'downloadFile').mockImplementation(async (...args) => {
+      await args[2]?.authorize?.();
+      return download(...args);
+    });
+    const upload = vi.mocked(service.adapter.uploadFile).getMockImplementation();
+    if (!upload) throw new Error('Missing upload fixture');
+    vi.spyOn(service.adapter, 'uploadFile').mockImplementation(async (...args) => {
+      await args[2].authorize?.();
+      return upload(...args);
+    });
+    const result = await post('copy', { root: 'source', files: ['a.txt'], destination: 'target' });
+    expect(result.status).toBe(200);
+    expect(result.headers.get('server-timing')).toMatch(/^nh-file;dur=\d/);
+    const records = operationLogs.filter((record) => record.event === 'server.file_operation');
+    expect(records).toHaveLength(1);
+    expect(records[0]?.data).toMatchObject({
+      operation: 'copy',
+      outcome: 'succeeded',
+      phases: {
+        'copy.planList': { count: 3 },
+        'copy.sourceList': { count: 2 },
+        'copy.destinationList': { count: 4 },
+        'copy.authorizeEntry': { count: 1 },
+        'copy.authorizeDownload': { count: 1 },
+        'copy.authorizeUpload': { count: 1 },
+        'copy.downloadNegotiation': { count: 1 },
+        'copy.uploadStream': { count: 1 },
+        'copy.reserveIngestion': { count: 1 },
+        'copy.completeIngestion': { count: 1 },
+        'copy.unlockIngestion': { count: 1 },
+        'copy.auditCompleted': { count: 1 },
+        'copy.releaseSlot': { count: 1 },
+      },
+    });
+    expect(service.adapter.listFiles).toHaveBeenCalledTimes(9);
+    const serialized = JSON.stringify(records);
+    for (const value of ['source/a.txt', 'target/a.txt', 'hello'])
+      expect(serialized).not.toContain(value);
+    expect(files.get('target/a.txt')?.toString()).toBe('hello');
+    expect(files.get('source/a.txt')?.toString()).toBe('hello');
+  });
+  it('records failed debug copy timing without changing the resource failure or dispatching writes', async () => {
+    debugTrace = true;
+    vi.mocked(service.adapter.getResources).mockRejectedValueOnce(
+      new DomainError('resources_unavailable'),
+    );
+    const result = await post('copy', { root: 'source', files: ['a.txt'], destination: 'target' });
+    expect(result.ok).toBe(false);
+    expect(await result.json()).toMatchObject({ code: 'resources_unavailable' });
+    expect(operationLogs.filter((record) => record.event === 'server.file_operation')).toHaveLength(
+      1,
+    );
+    expect(operationLogs[0]?.data).toMatchObject({
+      operation: 'copy',
+      outcome: 'failed',
+      phases: { 'copy.diskResources': { count: 1 }, 'copy.releaseSlot': { count: 1 } },
+    });
+    expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+    expect(service.adapter.createDirectory).not.toHaveBeenCalled();
+  });
+  it('leaves copy output unchanged and omits timing diagnostics when debug is disabled', async () => {
+    const result = await post('copy', { root: 'source', files: ['a.txt'], destination: 'target' });
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ completed: 1 });
+    expect(result.headers.get('server-timing')).toBeNull();
+    expect(operationLogs).toEqual([]);
+    expect(service.adapter.listFiles).toHaveBeenCalledTimes(9);
+  });
+  it('counts the existing cached move-plan listings under debug without adding provider requests', async () => {
+    debugTrace = true;
+    const result = await moveFiles([{ from: 'source/a.txt', to: 'target/a.txt' }]);
+    expect(result.status).toBe(204);
+    expect(result.headers.get('server-timing')).toMatch(/^nh-file;dur=\d/);
+    const records = operationLogs.filter((record) => record.event === 'server.file_operation');
+    expect(records).toHaveLength(1);
+    expect(records[0]?.data).toMatchObject({
+      operation: 'mutation',
+      outcome: 'succeeded',
+      phases: { 'move.listDirectory': { count: 3 } },
+    });
+    expect(service.adapter.listFiles).toHaveBeenCalledTimes(3);
+    expect(service.adapter.renameFiles).toHaveBeenCalledOnce();
+  });
   it('moves 1001 files in two bounded requests after complete preflight', async () => {
     const moves = Array.from({ length: 1001 }, (_, index) => {
       files.set(`source/file-${index}`, Buffer.from('data'));

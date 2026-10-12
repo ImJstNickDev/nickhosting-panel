@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { apiError, consumeEvents, download, readText, safeApiPath } from './client.js';
+import { api, apiError, consumeEvents, download, readText, safeApiPath } from './client.js';
 
 afterEach(() => vi.unstubAllGlobals());
 it('submits a large native POST download and removes its temporary form without fetching ZIP bytes', () => {
@@ -106,3 +106,88 @@ it('rejects non-API destinations and maps authentication failures without provid
   ).toBe('auth.invalid_credentials');
   expect(apiError({ error: { code: 'TOO_MANY_REQUESTS' } }).messageKey).toBe('errors.rate_limited');
 });
+
+it('observes debug response timing only after body consumption', async () => {
+  const observer = vi.fn();
+  let finish!: () => void;
+  const body = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const json = vi.fn(async () => {
+    await body;
+    return { completed: 1 };
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json,
+      headers: new Headers({
+        'Server-Timing': 'nh-file;dur=123.45',
+        'X-Request-ID': 'fixture-request',
+      }),
+    })),
+  );
+  const pending = api('/v1/servers/test/files/copy', { method: 'POST', onDebugTiming: observer });
+  await vi.waitFor(() => expect(json).toHaveBeenCalledOnce());
+  expect(observer).not.toHaveBeenCalled();
+  finish();
+  await expect(pending).resolves.toEqual({ completed: 1 });
+  expect(observer).toHaveBeenCalledExactlyOnceWith({
+    requestId: 'fixture-request',
+    status: 200,
+    serverMs: 123.45,
+    httpMs: expect.any(Number),
+  });
+});
+it.each([undefined, 'unrelated;dur=1', 'nh-file;dur=NaN', 'nh-file;dur=-4'])(
+  'does not emit browser diagnostics without valid API debug timing: %s',
+  async (timing) => {
+    const observer = vi.fn();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(null, {
+            status: 204,
+            headers: {
+              'X-Request-ID': 'fixture-request',
+              ...(timing ? { 'Server-Timing': timing } : {}),
+            },
+          }),
+      ),
+    );
+    await api('/v1/servers/test/files', { method: 'POST', onDebugTiming: observer });
+    expect(observer).not.toHaveBeenCalled();
+  },
+);
+it.each([204, 409])(
+  'preserves the HTTP result when a debug observer throws: %s',
+  async (status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            status === 204
+              ? null
+              : JSON.stringify({
+                  error: { code: 'conflict' },
+                }),
+            {
+              status,
+              headers: { 'Server-Timing': 'nh-file;dur=5', 'X-Request-ID': 'fixture-request' },
+            },
+          ),
+      ),
+    );
+    const observer = vi.fn(() => {
+      throw new Error('diagnostics failed');
+    });
+    const pending = api('/v1/servers/test/files', { method: 'POST', onDebugTiming: observer });
+    if (status === 204) await expect(pending).resolves.toBeUndefined();
+    else await expect(pending).rejects.toMatchObject({ code: 'conflict' });
+    expect(observer).toHaveBeenCalledOnce();
+  },
+);

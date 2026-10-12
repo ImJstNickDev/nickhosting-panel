@@ -22,11 +22,13 @@ import {
   getPlatformTransfers,
   parse,
   reserveUploadIngestion,
+  type UploadTiming,
 } from '@nickhosting/server-management';
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
 import { inspectFilePath } from './file-browsing.js';
+import { createFileOperationTrace } from './file-operation-trace.js';
 import type { ServerRouteOptions } from './servers.js';
 
 export const extractFormats = ['zip', 'tar', 'tar.gz', 'tgz'] as const;
@@ -255,6 +257,7 @@ export async function validateFileMoves(
   root: string,
   moves: { from: string; to: string }[],
   overwrite: string[] = [],
+  timing?: UploadTiming,
 ) {
   root = clean(root, true);
   const planned = moves.map((move) => ({
@@ -283,7 +286,11 @@ export async function validateFileMoves(
     if (selectedAncestor(target, sources)) throw new DomainError('conflict');
   for (const source of sources)
     if (selectedAncestor(source, sources, false)) throw new DomainError('conflict');
-  const directories = planningDirectory((path) => adapter.listFiles(id, path));
+  const directories = planningDirectory((path) =>
+    timing
+      ? timing.measure('move.listDirectory', () => adapter.listFiles(id, path))
+      : adapter.listFiles(id, path),
+  );
   async function inspect(path: string) {
     const parts = path.split('/');
     let entry: ServerFile | undefined;
@@ -494,146 +501,229 @@ export function registerFileOperationRoutes(
     return transfers;
   }
   app.post('/v1/servers/:id/files/copy', async (c) => {
-    const input = parse(
-      z.strictObject({
-        root: z.string(),
-        files: z.array(z.string()).min(1).max(maxEntries),
-        destination: z.string(),
-        overwrite: z.array(z.string()).max(maxEntries).optional(),
-      }),
-      await body(c.req.raw),
-    );
-    const context = await principal(c),
-      serverId = c.req.param('id'),
-      service = await management();
-    const transferLimits = await canWrite(serverId, context);
-    const release = options.acquireUploadSlot();
+    const trace = createFileOperationTrace(c, options.logger, 'copy');
+    const { timing } = trace;
+    let outcome: 'succeeded' | 'failed' = 'failed';
+    let response: Response | undefined;
     try {
-      return await service.access(
-        context,
-        serverId,
-        true,
-        async (id, connection, current, server) => {
-          const entries = await planFileCopy(
-            (path) => service.adapter.listFiles(id, path),
-            input.root,
-            input.files,
-            input.destination,
-            input.overwrite,
-          );
-          const approvedTargets = new Set(input.overwrite ?? []);
-          if (
-            entries.some(
-              (entry) =>
-                !entry.directory && entry.size > (transferLimits.upload.providerMaxFileBytes ?? 0),
-            )
-          )
-            throw new DomainError('validation_failed', 413);
-          await service.assertFileMutation(
-            serverId,
-            entries.map((entry) => entry.path),
-            connection,
-          );
-          const maxBytes = server.limits.disk * 1048576;
-          const resources = await service.adapter.getResources(id);
-          if (
-            resources.resources.disk_bytes +
-              entries.reduce((sum, entry) => sum + (entry.directory ? 0 : entry.size), 0) >
-            maxBytes
-          )
-            throw new DomainError('resources_unavailable');
-          let completed = 0;
-          await recordAudit(connection, current, 'server.files.requested', {
-            serverId,
-            action: 'copy',
-            count: entries.length,
-            overwrite: [...approvedTargets],
-          });
-          try {
-            for (const entry of entries) {
-              c.req.raw.signal.throwIfAborted();
-              await service.authorizeTransfer(current, serverId, true, connection);
-              await service.assertFileMutation(serverId, [entry.path], connection);
-              const parts = entry.path.split('/');
-              const name = parts.pop();
-              if (!name) throw new DomainError('validation_failed');
-              const root = parts.join('/');
-              const currentSource = await inspectFilePath(service.adapter, id, entry.source);
-              if (
-                !currentSource ||
-                currentSource.is_file === entry.directory ||
-                currentSource.size !== entry.size
-              )
-                throw new DomainError('conflict');
-              const checkDestination = async () => {
-                await assertCopyDirectory((path) => service.adapter.listFiles(id, path), root);
-                assertCopyDestination(
-                  await service.adapter.listFiles(id, root),
-                  entry.path,
-                  !entry.directory,
-                  approvedTargets,
-                );
-              };
-              await checkDestination();
-              if (entry.directory) await service.adapter.createDirectory(id, root, name);
-              else {
-                const claim = await reserveUploadIngestion(
-                  connection,
-                  current,
-                  serverId,
-                  entry.size,
-                  env,
-                );
-                try {
-                  const download = await service.adapter.downloadFile(id, entry.source, {
-                    signal: c.req.raw.signal,
-                    authorize: () =>
-                      service.authorizeTransfer(current, serverId, false, connection),
-                  });
-                  try {
-                    // Download negotiation may take time; recheck before the first write.
-                    await checkDestination();
-                    await service.adapter.uploadFile(id, entry.path, {
-                      body: download.body,
-                      contentLength: entry.size,
-                      maxBytes,
-                      signal: c.req.raw.signal,
-                      authorize: () =>
-                        service.authorizeTransfer(current, serverId, true, connection),
-                    });
-                  } finally {
-                    await download.body.cancel().catch(() => {});
-                  }
-                  await claim.complete();
-                } finally {
-                  await claim.unlock();
-                }
-              }
-              completed++;
-            }
-            await recordAudit(connection, current, 'server.files.completed', {
-              serverId,
-              action: 'copy',
-              completed,
-            });
-            return c.json({ completed });
-          } catch (error) {
-            await recordAudit(connection, current, 'server.files.incomplete', {
-              serverId,
-              action: 'copy',
-              completed,
-              outcome: 'partial_or_uncertain',
-            });
-            throw new DomainError('operation_uncertain', 409, {
-              completed,
-              fileReason: 'partial_or_uncertain',
-              cause: error instanceof DomainError ? error.code : 'provider_error',
-            });
-          }
-        },
+      const raw = await timing.measure('copy.body', () => body(c.req.raw));
+      const input = timing.measureSync('copy.parse', () =>
+        parse(
+          z.strictObject({
+            root: z.string(),
+            files: z.array(z.string()).min(1).max(maxEntries),
+            destination: z.string(),
+            overwrite: z.array(z.string()).max(maxEntries).optional(),
+          }),
+          raw,
+        ),
       );
+      const context = await timing.measure('copy.principal', () => principal(c)),
+        serverId = c.req.param('id'),
+        service = await timing.measure('copy.management', management);
+      const transferLimits = await timing.measure('copy.canWrite', () =>
+        canWrite(serverId, context),
+      );
+      const release = timing.measureSync('copy.acquireSlot', () => options.acquireUploadSlot());
+      try {
+        response = await timing.measure('copy.access', () =>
+          service.access(
+            context,
+            serverId,
+            true,
+            async (id, connection, current, server) => {
+              const entries = await timing.measure('copy.plan', () =>
+                planFileCopy(
+                  (path) =>
+                    timing.measure('copy.planList', () => service.adapter.listFiles(id, path)),
+                  input.root,
+                  input.files,
+                  input.destination,
+                  input.overwrite,
+                ),
+              );
+              const approvedTargets = new Set(input.overwrite ?? []);
+              if (
+                entries.some(
+                  (entry) =>
+                    !entry.directory &&
+                    entry.size > (transferLimits.upload.providerMaxFileBytes ?? 0),
+                )
+              )
+                throw new DomainError('validation_failed', 413);
+              await timing.measure('copy.planMutationCheck', () =>
+                service.assertFileMutation(
+                  serverId,
+                  entries.map((entry) => entry.path),
+                  connection,
+                ),
+              );
+              const maxBytes = server.limits.disk * 1048576;
+              const resources = await timing.measure('copy.diskResources', () =>
+                service.adapter.getResources(id),
+              );
+              if (
+                resources.resources.disk_bytes +
+                  entries.reduce((sum, entry) => sum + (entry.directory ? 0 : entry.size), 0) >
+                maxBytes
+              )
+                throw new DomainError('resources_unavailable');
+              let completed = 0;
+              await timing.measure('copy.auditRequested', () =>
+                recordAudit(connection, current, 'server.files.requested', {
+                  serverId,
+                  action: 'copy',
+                  count: entries.length,
+                  overwrite: [...approvedTargets],
+                }),
+              );
+              try {
+                for (const entry of entries) {
+                  c.req.raw.signal.throwIfAborted();
+                  await timing.measure('copy.authorizeEntry', () =>
+                    service.authorizeTransfer(
+                      current,
+                      serverId,
+                      true,
+                      connection,
+                      trace.enabled ? timing : undefined,
+                    ),
+                  );
+                  await timing.measure('copy.entryMutationCheck', () =>
+                    service.assertFileMutation(serverId, [entry.path], connection),
+                  );
+                  const parts = entry.path.split('/');
+                  const name = parts.pop();
+                  if (!name) throw new DomainError('validation_failed');
+                  const root = parts.join('/');
+                  const currentSource = await timing.measure('copy.sourceCheck', () =>
+                    inspectFilePath(
+                      {
+                        listFiles: (server, path) =>
+                          timing.measure('copy.sourceList', () =>
+                            service.adapter.listFiles(server, path),
+                          ),
+                      },
+                      id,
+                      entry.source,
+                    ),
+                  );
+                  if (
+                    !currentSource ||
+                    currentSource.is_file === entry.directory ||
+                    currentSource.size !== entry.size
+                  )
+                    throw new DomainError('conflict');
+                  const checkDestination = () =>
+                    timing.measure('copy.destinationCheck', async () => {
+                      await assertCopyDirectory(
+                        (path) =>
+                          timing.measure('copy.destinationList', () =>
+                            service.adapter.listFiles(id, path),
+                          ),
+                        root,
+                      );
+                      assertCopyDestination(
+                        await timing.measure('copy.destinationList', () =>
+                          service.adapter.listFiles(id, root),
+                        ),
+                        entry.path,
+                        !entry.directory,
+                        approvedTargets,
+                      );
+                    });
+                  await checkDestination();
+                  if (entry.directory)
+                    await timing.measure('copy.createDirectory', () =>
+                      service.adapter.createDirectory(id, root, name),
+                    );
+                  else {
+                    const claim = await timing.measure('copy.reserveIngestion', () =>
+                      reserveUploadIngestion(connection, current, serverId, entry.size, env),
+                    );
+                    try {
+                      const download = await timing.measure('copy.downloadNegotiation', () =>
+                        service.adapter.downloadFile(id, entry.source, {
+                          signal: c.req.raw.signal,
+                          authorize: () =>
+                            timing.measure('copy.authorizeDownload', () =>
+                              service.authorizeTransfer(
+                                current,
+                                serverId,
+                                false,
+                                connection,
+                                trace.enabled ? timing : undefined,
+                              ),
+                            ),
+                        }),
+                      );
+                      try {
+                        // Download negotiation may take time; recheck before the first write.
+                        await checkDestination();
+                        await timing.measure('copy.uploadStream', () =>
+                          service.adapter.uploadFile(id, entry.path, {
+                            body: download.body,
+                            contentLength: entry.size,
+                            maxBytes,
+                            signal: c.req.raw.signal,
+                            authorize: () =>
+                              timing.measure('copy.authorizeUpload', () =>
+                                service.authorizeTransfer(
+                                  current,
+                                  serverId,
+                                  true,
+                                  connection,
+                                  trace.enabled ? timing : undefined,
+                                ),
+                              ),
+                          }),
+                        );
+                      } finally {
+                        await timing.measure('copy.downloadCleanup', () =>
+                          download.body.cancel().catch(() => {}),
+                        );
+                      }
+                      await timing.measure('copy.completeIngestion', () => claim.complete());
+                    } finally {
+                      await timing.measure('copy.unlockIngestion', () => claim.unlock());
+                    }
+                  }
+                  completed++;
+                }
+                await timing.measure('copy.auditCompleted', () =>
+                  recordAudit(connection, current, 'server.files.completed', {
+                    serverId,
+                    action: 'copy',
+                    completed,
+                  }),
+                );
+                return timing.measureSync('copy.serialize', () => c.json({ completed }));
+              } catch (error) {
+                await timing.measure('copy.auditIncomplete', () =>
+                  recordAudit(connection, current, 'server.files.incomplete', {
+                    serverId,
+                    action: 'copy',
+                    completed,
+                    outcome: 'partial_or_uncertain',
+                  }),
+                );
+                throw new DomainError('operation_uncertain', 409, {
+                  completed,
+                  fileReason: 'partial_or_uncertain',
+                  cause: error instanceof DomainError ? error.code : 'provider_error',
+                });
+              }
+            },
+            trace.enabled ? timing : undefined,
+          ),
+        );
+      } finally {
+        timing.measureSync('copy.releaseSlot', release);
+      }
+      outcome = 'succeeded';
+      return response;
     } finally {
-      release();
+      trace.finish(outcome, response);
     }
   });
   app.post('/v1/servers/:id/files/extract', async (c) => {

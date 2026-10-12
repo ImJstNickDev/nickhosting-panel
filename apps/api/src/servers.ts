@@ -49,6 +49,7 @@ import { z } from 'zod';
 import type { Variables } from './app.js';
 import { createConsoleCommandRelays } from './console-command-relays.js';
 import { registerFileBrowsingRoutes } from './file-browsing.js';
+import { createFileOperationTrace } from './file-operation-trace.js';
 import {
   applyFileChunks,
   registerFileOperationRoutes,
@@ -591,77 +592,141 @@ export function registerServerRoutes(
     return c.body(null, 204);
   });
   app.post('/v1/servers/:id/files', async (c) => {
-    const context = await principal(c),
-      service = await management();
-    const input = parse(
-      z.discriminatedUnion('action', [
-        z
-          .object({ action: z.literal('write'), path: z.string(), content: z.string().max(60000) })
-          .strict(),
-        z.object({ action: z.literal('mkdir'), root: z.string(), name: z.string() }).strict(),
-        z
-          .object({
-            action: z.literal('delete'),
-            root: z.string(),
-            files: z.array(z.string()).min(1),
-            confirm: z.literal(true),
-          })
-          .strict(),
-        z
-          .object({
-            action: z.literal('rename'),
-            root: z.string(),
-            files: z.array(z.object({ from: z.string(), to: z.string() }).strict()).min(1),
-            overwrite: z.array(z.string()).optional(),
-          })
-          .strict(),
-      ]),
-      await body(c),
-    );
-    await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
-      const paths: string[] = [];
-      if (input.action === 'write') {
-        relativePath(input.path);
-        paths.push(input.path);
-      } else {
-        relativePath(input.root, true);
-        const names =
-          input.action === 'mkdir'
-            ? [input.name]
-            : input.action === 'delete'
-              ? input.files
-              : input.files.flatMap((file) => [file.from, file.to]);
-        for (const name of names) {
-          relativePath(name);
-          paths.push([input.root, name].filter(Boolean).join('/'));
-        }
-      }
-      if (input.action === 'delete') validateFileDeletes(input.root, input.files);
-      await service.assertFileMutation(c.req.param('id'), paths, connection);
-      await recordAudit(connection, current, 'server.files.requested', {
-        serverId: c.req.param('id'),
-        action: input.action,
-        ...(input.action === 'rename' ? { overwrite: input.overwrite ?? [] } : {}),
-      });
-      if (input.action === 'write') await service.adapter.writeFile(id, input.path, input.content);
-      else if (input.action === 'mkdir')
-        await service.adapter.createDirectory(id, input.root, input.name);
-      else if (input.action === 'delete')
-        await applyFileChunks(
-          input.files,
-          () => service.authorizeTransfer(current, c.req.param('id'), true, connection),
-          (files) => service.adapter.deleteFiles(id, input.root, files),
-        );
-      else {
-        await validateFileMoves(service.adapter, id, input.root, input.files, input.overwrite);
-        await applyFileChunks(
-          input.files,
-          () => service.authorizeTransfer(current, c.req.param('id'), true, connection),
-          (files) => service.adapter.renameFiles(id, input.root, files),
-        );
-      }
-    });
-    return c.body(null, 204);
+    const trace = createFileOperationTrace(c, options.logger, 'mutation');
+    const { timing } = trace;
+    let outcome: 'succeeded' | 'failed' = 'failed';
+    let response: Response | undefined;
+    try {
+      const context = await timing.measure('files.principal', () => principal(c)),
+        service = await timing.measure('files.management', management);
+      const input = parse(
+        z.discriminatedUnion('action', [
+          z
+            .object({
+              action: z.literal('write'),
+              path: z.string(),
+              content: z.string().max(60000),
+            })
+            .strict(),
+          z.object({ action: z.literal('mkdir'), root: z.string(), name: z.string() }).strict(),
+          z
+            .object({
+              action: z.literal('delete'),
+              root: z.string(),
+              files: z.array(z.string()).min(1),
+              confirm: z.literal(true),
+            })
+            .strict(),
+          z
+            .object({
+              action: z.literal('rename'),
+              root: z.string(),
+              files: z.array(z.object({ from: z.string(), to: z.string() }).strict()).min(1),
+              overwrite: z.array(z.string()).optional(),
+            })
+            .strict(),
+        ]),
+        await timing.measure('files.body', () => body(c)),
+      );
+      await timing.measure('files.access', () =>
+        service.access(
+          context,
+          c.req.param('id'),
+          true,
+          async (id, connection, current) => {
+            const paths: string[] = [];
+            if (input.action === 'write') {
+              relativePath(input.path);
+              paths.push(input.path);
+            } else {
+              relativePath(input.root, true);
+              const names =
+                input.action === 'mkdir'
+                  ? [input.name]
+                  : input.action === 'delete'
+                    ? input.files
+                    : input.files.flatMap((file) => [file.from, file.to]);
+              for (const name of names) {
+                relativePath(name);
+                paths.push([input.root, name].filter(Boolean).join('/'));
+              }
+            }
+            if (input.action === 'delete') validateFileDeletes(input.root, input.files);
+            await timing.measure('files.mutationGuard', () =>
+              service.assertFileMutation(c.req.param('id'), paths, connection),
+            );
+            await timing.measure('files.auditRequested', () =>
+              recordAudit(connection, current, 'server.files.requested', {
+                serverId: c.req.param('id'),
+                action: input.action,
+                ...(input.action === 'rename' ? { overwrite: input.overwrite ?? [] } : {}),
+              }),
+            );
+            if (input.action === 'write')
+              await timing.measure('files.write', () =>
+                service.adapter.writeFile(id, input.path, input.content),
+              );
+            else if (input.action === 'mkdir')
+              await timing.measure('files.mkdir', () =>
+                service.adapter.createDirectory(id, input.root, input.name),
+              );
+            else if (input.action === 'delete')
+              await applyFileChunks(
+                input.files,
+                () =>
+                  timing.measure('files.authorize', () =>
+                    service.authorizeTransfer(
+                      current,
+                      c.req.param('id'),
+                      true,
+                      connection,
+                      trace.enabled ? timing : undefined,
+                    ),
+                  ),
+                (files) =>
+                  timing.measure('files.delete', () =>
+                    service.adapter.deleteFiles(id, input.root, files),
+                  ),
+              );
+            else {
+              await timing.measure('files.movePlan', () =>
+                validateFileMoves(
+                  service.adapter,
+                  id,
+                  input.root,
+                  input.files,
+                  input.overwrite,
+                  trace.enabled ? timing : undefined,
+                ),
+              );
+              await applyFileChunks(
+                input.files,
+                () =>
+                  timing.measure('files.authorize', () =>
+                    service.authorizeTransfer(
+                      current,
+                      c.req.param('id'),
+                      true,
+                      connection,
+                      trace.enabled ? timing : undefined,
+                    ),
+                  ),
+                (files) =>
+                  timing.measure('files.rename', () =>
+                    service.adapter.renameFiles(id, input.root, files),
+                  ),
+              );
+            }
+          },
+          trace.enabled ? timing : undefined,
+        ),
+      );
+      outcome = 'succeeded';
+      response = c.body(null, 204);
+      return response;
+    } finally {
+      trace.finish(outcome, response);
+    }
   });
   app.get('/v1/servers/:id/backups', async (c) => {
     const context = await principal(c),
