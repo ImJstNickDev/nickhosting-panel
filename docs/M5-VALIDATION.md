@@ -6466,3 +6466,16 @@ throughput is not production capacity evidence. The report records current cache
 budgets, background signing amplification, the native 1,000-entry page limit and
 recommendations for visible-folder prefetch. No product behavior, Blueprint code
 or infrastructure was changed; recursive prefetch remains a proposal.
+
+### 2026-10-13 — Real-provider directory fixture benchmark
+
+The Owner explicitly authorized creating `dirscan-test` on their sole managed
+server. The [benchmark follow-up](M5-DIRECTORY-BENCHMARK.md#2026-10-13--owner-authorized-real-provider-fixture-test)
+records native setup writes, fixture-only provenance and 290 successful real
+directory GETs across 120 paths. The 111-directory recursive traversal took
+14.306 seconds at concurrency two. Concurrency four reduced a 24-folder batch to
+2.032–2.113 seconds but coincided with brief Panel CPU peaks above five cores;
+no claim of cost-free or indefinitely sustainable prefetch is made. No guard,
+error or rate limit fired. The fixture remains for scoped cleanup; no existing
+game content, power state, provider configuration or infrastructure was changed.
+This is benchmark evidence only, not an implementation of recursive prefetch.

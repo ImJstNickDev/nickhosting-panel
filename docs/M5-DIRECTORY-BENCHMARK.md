@@ -194,3 +194,114 @@ Independent review checked the request guards, counters, cache contracts and
 measurement methods. Its findings about fixture-runtime reuse, different tree
 populations, synthetic filename limits and statistical uncertainty are reflected
 above. No unresolved safety or reporting must-fix remained after integration.
+
+## 2026-10-13 — Owner-authorized real-provider fixture test
+
+The Owner subsequently authorized using their sole managed server and creating
+`dirscan-test` at its file root. This supersedes the earlier read-only setup scope
+**only for that fixture directory**. It does not make the Owner's server a
+Codex-owned disposable asset. Panel/Wings configuration, code, services, game
+power state, networking and pre-existing game files were not changed.
+
+Preflight corroborated the Owner role, sole active managed server, Application
+ID/UUID/external ID/provider user and Client owner identity. The directory did
+not exist; setup refuses any existing same-name entry. A durable private fixture
+ledger was written before mutation and updated after completion. A locally
+generated, path-validated ZIP with no symlinks or compressed payloads contains:
+
+- A ten-way tree through depth three: 1,111 directories including its subtree root.
+- A wide subtree with 500 child folders.
+- Two synthetic 128-byte files in every balanced/wide subtree directory, plus a
+  fixture marker at `dirscan-test` (which has no data-file pair).
+- Including `dirscan-test`: **1,613 directories**, 3,224 data files, marker and
+  retained source ZIP. The ZIP is **983,114 bytes**; data-file contents total
+  412,672 bytes. Filesystem block/directory overhead is additional, not measured.
+
+Setup used native create-folder, one signed upload, and the installed Panel's
+native decompress endpoint through the adapter package transport. The existing
+product adapter has no decompression convenience method; no new product method
+or Blueprint endpoint was introduced. Installed native FileController and
+DaemonFileRepository were inspected read-only, confirming directory listing uses
+Panel Client API → Wings `/files/list-directory`. Setup verified the extracted
+top level, a deepest leaf and the 500-child folder. It did not recursively read
+all generated entries to certify every file.
+
+Preflight made three GETs. Setup made ten requests, including the three scoped
+filesystem writes (mkdir/upload/extract) and one upload-credential issuance.
+The separate **benchmark made 292 successful GETs: two identity reads and 290
+directory listings**, covering **120 distinct paths**. No file-body download or
+signed-download issuance occurred. This is real synthetic data on the existing
+provider/filesystem, not a mock provider and not an exhaustive 1,613-folder crawl.
+
+| Real provider workload | Concurrency | Elapsed | Per-request p95, each run |
+| --- | ---: | ---: | ---: |
+| Same 24 distinct directories, two runs | 1 | 6.528 / 5.385 s | 323 / 300 ms |
+| Same 24 distinct directories, two runs | 2 | 3.198 / 3.519 s | 336 / 324 ms |
+| Same 24 distinct directories, two runs | 4 | 2.032 / 2.113 s | 413 / 441 ms |
+| Actual recursive traversal through depth two, 111 directories | 2 | 14.306 s | 350 ms |
+
+The 24-path sample mixes nested folders, the 502-entry wide directory and small
+wide children. Each stage has distinct paths, preventing same-path in-flight
+coalescing from inflating throughput. Discovery precedes fixed-order 1/2/4 runs,
+with eight-second pauses: these are **warm filesystem/provider comparisons**,
+not cold-cache tests or randomized saturation experiments. No caches were flushed.
+All 290 list responses were HTTP 200; no error, timeout or 429. Overall maximum
+latency was 462.30 ms. Final small/wide recovery reads took 230.78 / 276.16 ms.
+
+The real Client quota advertised 720 requests per its current rate-limit window.
+The conservatively retained minimum remaining header was **572**; this is not
+720 minus our request count because windows reset and other traffic exists.
+The harness retains separate Application/Client budgets and never bypasses them.
+
+Read-only resource monitoring sampled the exact Panel, Wings, database and cache
+containers approximately every two seconds, with five baseline observations:
+
+| Container | Baseline mean CPU | Whole-run mean CPU, including pauses | Peak CPU |
+| --- | ---: | ---: | ---: |
+| Panel | 27.79% | 144.17% | 571.64% |
+| Wings | 0.91% | 15.76% | 125.45% |
+| Provider database | 0.62% | 3.34% | 20.81% |
+| Provider cache | 0.36% | 0.92% | 4.41% |
+
+**Docker 100% is one CPU core**, so the Panel briefly used about 5.72 cores.
+The two largest samples coincide with the concurrency-four batches. These include
+existing workloads and are not a precise causal CPU allocation to our requests.
+They are nevertheless evidence that listing through Panel is not cheap. There
+were no three consecutive samples over the configured sustained threshold.
+Host CPU peaked at 61.08%; available memory stayed above 27.48 GiB. Panel reported
+1.251 → 1.286 GiB container memory and Wings 5.009 → 5.006 GiB; these are Docker
+usage observations from first baseline to last in-run sample, not isolated
+per-request allocation measurements.
+
+Guards: at most four simultaneous requests, 320 list calls / 340 total per run,
+five-minute self-deadline and independent monitor, five-second request timeout,
+stop dispatch after any error or listing over two seconds, conservative rate
+reserve, host-available-memory floor 4 GiB, sustained host CPU >85%, or sustained
+Panel/Wings CPU >max(300%, baseline +200 percentage points). No guard fired. The
+monitor collected 56 in-run samples and the child exited normally. Existing
+Wings/database Docker healthcheck failures were present before the benchmark;
+their probe outputs concern the configured probe target/credentials. Those
+checks were not repaired or treated as evidence of service health; actual API
+responses and resource observations establish this test's narrower result.
+
+Command, using ignored local input/helper files, for each of `preflight`, `setup`
+and `provider` (the latter uses `dirscan-bench-input.json`):
+
+```sh
+python3 .codex/local/dirscan-monitor.py --script .codex/local/directory-provider-bench.mjs --input .codex/local/dirscan-bench-input.json --output .codex/local/dirscan-provider
+```
+
+The fixture remains **only inside `dirscan-test`**, with its archive and provenance
+ledger retained for scoped cleanup/retesting. No deletion or power operation was
+performed. Temporary benchmark/monitor processes exited; no containers were
+created or restarted. Further cleanup must stay within verified fixture ownership.
+
+Conclusion: retain the proposed default of two low-priority prefetches, visible
+children plus a small margin, strict queue/cache budgets and foreground-only
+revalidation/download preparation. Four improves batch time but raises per-request
+latency and coincides with higher Panel CPU peaks. It is not a reason to recurse
+through hundreds of hidden folders. No product prefetch behavior was implemented
+during this benchmark. Independent review checked the harness before execution;
+scope-separated quotas, a self-deadline, extraction samples and baseline CPU guards
+were corrected before fixture writes. Final evidence review is recorded in the
+validation report and PR.
