@@ -8,7 +8,11 @@ import {
   minecraftReadinessSource,
   minecraftRuntimeMappingSchema,
 } from '@nickhosting/minecraft';
-import { type PterodactylAdapter, provisionPlanSchema } from '@nickhosting/pterodactyl-adapter';
+import {
+  type PterodactylAdapter,
+  provisionPlanSchema,
+  type ServerFile,
+} from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import type { Environment } from './admission.js';
 import type {
@@ -303,8 +307,18 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     const identifier = server.pterodactyl_identifier;
     if (!identifier) throw new DomainError('conflict');
     if (context && context.providerIdentifier !== identifier) throw new DomainError('conflict');
-    const listFiles =
+    const readDirectory =
       context?.listFiles ?? ((directory: string) => adapter.listFiles(identifier, directory));
+    // Share only this preflight's observations, never a later mutation's checks.
+    const directories = new Map<string, Promise<ServerFile[]>>();
+    const listFiles = (directory: string) => {
+      let listing = directories.get(directory);
+      if (!listing) {
+        listing = readDirectory(directory);
+        directories.set(directory, listing);
+      }
+      return listing;
+    };
     // An SFTP-created alias must not turn an otherwise ordinary browser path
     // into a write through a protected launch file or its parent directory.
     for (const path of paths) {

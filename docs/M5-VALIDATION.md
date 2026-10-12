@@ -5546,3 +5546,33 @@ No dev database repair, game-file mutation, provider write, explicit container
 restart or infrastructure change occurred; API/Vite remained healthy. No migration
 or dependency change. Rollback: code revert. PR#21 remains OPEN/unmerged and
 SFTPGo#18 remains a separate release gate.
+
+### 2026-10-12 — Deduplicate bulk file-mutation directory checks
+
+Bulk delete already sends one browser request and one provider `deleteFiles`
+request containing all selected names. The redundant work was Minecraft's
+preflight: it fetched every ancestor listing again for each selected path.
+A listing-Promise map now lives only inside that guard invocation. All paths
+retain protected-runtime, case-ambiguity and symlink checks; a later invocation
+reads fresh listings. Neither directory data nor mutation-result confirmation is
+cached across requests. Reads remain sequential, without a burst of provider calls.
+
+Regression fixtures verify 49 existing files need one listing at root, two under
+one top-level folder, or three under `world/data`, versus 49/98/147 before the fix.
+The authenticated API test confirms the nested case still sends exactly one delete
+batch with all 49 names. Late unsafe entries/ancestors, protected paths, mismatched
+provider context, failed reads and changed listings on the next invocation remain
+covered. These are request counts from isolated fixtures, not live deletion timings.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/game-modules.integration.test.ts apps/api/src/servers.integration.test.ts -t 'compiled first-party game module dispatch|Minecraft file mutation preflight|protects Minecraft launch inputs'`: **20 passed**,48 unrelated API cases skipped;10.13 seconds. Includes five existing dispatcher cases,14 guard cases and one extended API case.
+- `scripts/dev.sh pnpm typecheck`: passed. Backend `scripts/dev.sh pnpm exec tsc --noEmit` also checked the final API test addition.
+- Scoped Biome, diff and indexed governance checks passed. No historical full-suite, browser or production-build rerun for this backend-only change.
+
+Independent final review found no must-fix finding. Tests used existing approved
+isolated services and provider fixtures; their disposable schemas were cleaned up.
+No live game-file mutation, infrastructure change, new test server or explicit
+container restart occurred. No API-schema, migration or dependency changes.
+Rollback: revert this code change. PR#21 remains OPEN/unmerged; SFTPGo#18 remains
+a separate production-release gate.

@@ -1171,6 +1171,50 @@ describe('M2 Hono API with real invitation, password and session authentication'
         })
       ).status,
     ).toBe(204);
+    const files = Array.from({ length: 49 }, (_, index) => `file-${index}.dat`);
+    const entry = (name: string, isFile = true) => ({
+      name,
+      mode: '-rw-r--r--',
+      size: 1,
+      is_file: isFile,
+      is_symlink: false,
+      mimetype: 'application/octet-stream',
+      created_at: '2026-01-01T00:00:00Z',
+      modified_at: '2026-01-01T00:00:00Z',
+    });
+    const originalListFiles = f.adapter.listFiles;
+    const originalDeleteFiles = f.adapter.deleteFiles;
+    const listFiles = vi
+      .fn<PterodactylAdapter['listFiles']>()
+      .mockImplementation(async (_id, directory = '') => {
+        if (directory === '') return [entry('world', false)];
+        if (directory === 'world') return [entry('data', false)];
+        if (directory === 'world/data') return files.map((name) => entry(name));
+        return [];
+      });
+    const deleteFiles = vi.fn<PterodactylAdapter['deleteFiles']>().mockResolvedValue(undefined);
+    Object.assign(f.adapter, { listFiles, deleteFiles });
+    try {
+      expect(
+        (
+          await request(user, `/v1/servers/${server}/files`, {
+            action: 'delete',
+            root: 'world/data',
+            files,
+            confirm: true,
+          })
+        ).status,
+      ).toBe(204);
+      expect(listFiles.mock.calls.map(([, directory]) => directory)).toEqual([
+        '',
+        'world',
+        'world/data',
+      ]);
+      expect(deleteFiles).toHaveBeenCalledOnce();
+      expect(deleteFiles).toHaveBeenCalledWith(expect.any(String), 'world/data', files);
+    } finally {
+      Object.assign(f.adapter, { listFiles: originalListFiles, deleteFiles: originalDeleteFiles });
+    }
   });
   it('uploads binary data larger than the JSON/text limits through the authorized streaming route', async () => {
     const server = await f.server();

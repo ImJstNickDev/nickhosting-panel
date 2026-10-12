@@ -204,8 +204,16 @@ authorization remains authoritative on each listing. No directory contents,
 permission decisions or credentials are returned from this cache. Editor reads,
 downloads and mutations retain their existing fresh identity verification.
 
-Paths are validated and scoped through the adapter. File/command/backup-delete
-mutations share the lifecycle server lock and reject an active lifecycle job.
+Paths are validated and scoped through the adapter. Minecraft's file-mutation
+preflight reads each distinct ancestor directory once per guard invocation and
+reuses that listing for all selected paths. Every path still receives the protected
+runtime, case-ambiguity and symlink checks; observations are discarded afterward
+and never used as confirmation of a mutation. For one bulk request selecting 49
+files directly inside a top-level folder, guard listings fall from 98 to 2.
+Delete remains one provider request
+containing the selected names; no deletion is dispatched until preflight passes.
+File/command/backup-delete mutations share the lifecycle server lock and reject
+an active lifecycle job.
 Initial server-lock contention returns `409 operation_busy` before the callback or
 any provider effect, instead of waiting with a database connection. A shared
 per-pool upload gate leaves connections available for authentication, authorization
