@@ -4896,3 +4896,85 @@ Reviewed running-fixture screenshots:
 Independent source and four-screen UX/accessibility review: **no remaining must-fix**.
 The isolated harness cleaned its disposable test state. Public staging contains
 only the intended frontend/test/docs files and sanitized PNGs; no private data.
+
+## M5 directory-list identity reuse and early renewal — 2026-10-12
+
+Owner approved retaining Client API → Wings and removing repeated Application
+API identity lookup from folder navigation. Only directory GET now shares a
+bounded, process-local successful identity proof across per-request management
+runtimes. The proof has a fixed 60-second deadline and starts a background renewal
+at 55 seconds. Old proof remains usable until its deadline; replacement is
+published only after validation. No expired fallback, recursive indexing or
+directory-content cache was added. An unused renewed proof does not poll again.
+Current authentication/project permissions and Client API credential resolution
+remain mandatory; local provider/account/node/claim/Blueprint changes invalidate
+reuse. Mutations, downloads and editor reads keep fresh remote corroboration.
+See the [API contract](M2-API.md#console-files-and-backups) for the bounded
+out-of-band change-detection limitation.
+
+Independent review found and resolved a possible connection-pool deadlock:
+directory requests no longer pin a connection while awaiting pool-based renewal.
+A single-connection/concurrent-expiry regression proves progress. Shutdown guards
+prevent late proof/timer resurrection. A failed background renewal retains only
+the old deadline; a subsequent expired request retries freshly rather than
+reporting an old failure when the provider has already recovered. No remaining
+must-fix findings after these corrections and independent final source review.
+
+Focused validation (existing approved isolated M2 services, disposable schemas,
+real authorization handlers, external provider fixtures):
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts`:
+  **28 passed, 1 failed expectation**. The remaining case correctly rejected a
+  call after cache shutdown with `integration_unavailable`; the test expected
+  `conflict`. Corrected that expectation, then the same command with
+  `-t 'closing the cache'`: **1 passed, 28 skipped**. These establish 29 distinct
+  scenarios; this is not reported as a fresh 29/29 single-run result. Coverage
+  includes actual scheduled renewal callback/idle cessation, expiry, failed
+  renewal, single-flight, single-connection pool, provider binding/identity/claim/
+  credential/projection changes, in-flight invalidation, session/project revocation,
+  and unchanged strict read/write checks.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'revalidates .*pinned connection|blocks later interactive|keeps a two-connection pool|reuses directory identity|isolates unrelated users|applies current project'`:
+  **13 passed, 84 skipped**. Three folder GETs produce one identity GET and three
+  Client listings; an unrelated caller cannot reuse authorization, and a write
+  still verifies remotely. Existing regular/support revocation regressions pass.
+- `scripts/dev.sh pnpm exec tsc --noEmit`: passed.
+- `scripts/dev.sh pnpm exec biome check` on the seven changed TypeScript files:
+  passed. `git diff --check`: passed. No historical full-suite or UI screenshot
+  rerun: this change has no visual or browser-contract changes.
+
+Earlier test development exposed fixture mistakes (attempting to edit an
+immutable allocation claim, asynchronous deferred-proof ordering, and global
+fake timers affecting PostgreSQL disposal); fixtures were corrected without
+weakening product invariants. One aborted hook may have left its generated
+isolated test schema: no broad cleanup or claim of historical-schema cleanup.
+The final test runs disposed their generated schemas normally. One CLI attempt
+specified `-t` twice and was rejected before tests; the command above is the
+corrected, executed invocation.
+
+Read-only dev measurement used a temporary process inside the existing API
+container, the standard runtime/real per-user adapter, and PostgreSQL
+`default_transaction_read_only=on`. A first diagnostic import failed before
+connections; corrected workspace-source imports then produced:
+
+| Sample | Runtime + directory access | Provider GETs |
+| --- | ---: | --- |
+| Previous strict path, root | 1,174 ms | Identity + Client listing |
+| New path, initial root | 1,045 ms | Identity + Client listing |
+| New path, subsequent child | 476 ms | Client listing only |
+| New path, same child again | 419 ms | Client listing only |
+
+All six remote GETs returned HTTP 200. Root/child returned 13/1 entries; contents,
+names, identities and credentials were not logged. These are four diagnostic
+samples, not browser end-to-end timings or a latency guarantee; provider latency
+and cold initialization vary. They prove the redundant call is absent on warm
+navigation. They do not separately attribute Panel versus Wings processing time.
+
+Development API remained healthy and ingress `/healthz` returned HTTP 200. Source
+watchers load these backend edits; no Docker lifecycle/configuration operation,
+production mutation, game-server creation or restart was issued. Cache timers
+were closed before disposing the diagnostic process. No provider keys/private
+state are staged. Issue#18 and all production-release boundaries remain unchanged.
+Rollback: revert this change; there are no migrations or persistent cache data.
+Final index governance passed: 605 text files, 155 review PNGs, 506 relative links,
+4 TOML files and 44 ignore cases. Secret scanning remains heuristic; this change
+adds no screenshots or private diagnostic artifacts.

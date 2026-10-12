@@ -181,6 +181,29 @@ project clients should use the authorized per-server operation view above.
 | DELETE `/v1/servers/:id/backups/:backupId` | `{confirm:true}` → `204`. |
 | GET `/v1/servers/:id/backups/:backupId/download` | Backend-streamed attachment with no fixed total byte limit; no signed provider URL is returned. |
 
+Directory listing continues through the authenticated per-user Client API to
+Wings. Only this GET reuses a successful Application API identity verification:
+an API-process cache holds at most 1,024 proofs, with a fixed 60-second lifetime.
+A background renewal starts at 55 seconds; the old proof remains usable until
+its original deadline while the replacement is checked. Expired proofs never
+authorize a listing. A failed background request does not extend that deadline;
+the next request after expiry retries verification, or waits for a renewal still
+in progress. An unused renewed proof does not keep polling. Timers stop on API
+shutdown, and directory requests release DB connections between queries so a
+renewal cannot deadlock a saturated connection pool.
+
+Every directory request still checks the current session, role, project access
+and managed registry, and performs a fresh Client API listing. The proof is
+bound to provider URL/Application credentials, server/owner/provider identity,
+node and allocation claims, current provider-account/key revision, and local
+Blueprint projection identity/revision. Changes invalidate reuse; an explicit
+identity-invalidated event rejects access. Failures never fall back to stale
+proofs. Without a received event or changed local binding, out-of-band provider
+identity changes may take up to the 60-second lifetime to be detected. Client API
+authorization remains authoritative on each listing. No directory contents,
+permission decisions or credentials are returned from this cache. Editor reads,
+downloads and mutations retain their existing fresh identity verification.
+
 Paths are validated and scoped through the adapter. File/command/backup-delete
 mutations share the lifecycle server lock and reject an active lifecycle job.
 Contending interactive writes return `409` instead of waiting with a database

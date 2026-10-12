@@ -1,6 +1,7 @@
 export * from './admission.js';
 export * from './allocation-pool.js';
 export * from './configuration.js';
+export { createDirectoryIdentityCache } from './directory-identity.js';
 export * from './external.js';
 export * from './game-modules.js';
 export * from './gateway-orchestration.js';

@@ -359,11 +359,7 @@ export function registerServerRoutes(
   app.get('/v1/servers/:id/files', async (c) => {
     const context = await principal(c),
       service = await management();
-    return c.json(
-      await service.access(context, c.req.param('id'), false, (id) =>
-        service.adapter.listFiles(id, c.req.query('path') ?? ''),
-      ),
-    );
+    return c.json(await service.listFiles(context, c.req.param('id'), c.req.query('path') ?? ''));
   });
   app.get('/v1/servers/:id/files/content', async (c) => {
     const context = await principal(c),

@@ -15,7 +15,10 @@ import {
 } from '@nickhosting/database';
 import { renderMail } from '@nickhosting/i18n';
 import { createTransportCoordinator, validateConnection } from '@nickhosting/pterodactyl-adapter';
-import { createManagementRuntime } from '@nickhosting/server-management';
+import {
+  createDirectoryIdentityCache,
+  createManagementRuntime,
+} from '@nickhosting/server-management';
 import { createTransport } from 'nodemailer';
 import { createApp } from './app.js';
 
@@ -24,6 +27,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
   if (!env.DATABASE_URL) throw new DomainError('configuration_invalid');
   const database = createDatabase(env.DATABASE_URL);
   const transportCoordinator = createTransportCoordinator();
+  const directoryIdentityCache = createDirectoryIdentityCache();
   try {
     const setup = await database.pool.query('SELECT id FROM instance_setup WHERE id=1');
     const secrets = parseSecretEnvironment(env, { requireSetupToken: setup.rowCount === 0 });
@@ -114,7 +118,14 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       database,
       codec,
       management: () =>
-        createManagementRuntime({ db: database.db, codec, env, logger, transportCoordinator }),
+        createManagementRuntime({
+          db: database.db,
+          codec,
+          env,
+          logger,
+          transportCoordinator,
+          directoryIdentityCache,
+        }),
       logger,
       defaultLocale: async () => (await getSettings(database.db, env)).values.defaultLocale,
       identity,
@@ -126,8 +137,18 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       },
       log: (data) => logger.log('warn', 'api.request_failed', data),
     });
-    return { app, database, logger, config: initial.values, close: () => database.db.destroy() };
+    return {
+      app,
+      database,
+      logger,
+      config: initial.values,
+      close: () => {
+        directoryIdentityCache.close();
+        return database.db.destroy();
+      },
+    };
   } catch (error) {
+    directoryIdentityCache.close();
     await database.db.destroy();
     throw error;
   }

@@ -671,6 +671,34 @@ describe('M2 Hono API with real invitation, password and session authentication'
       ).status,
     ).toBe(400);
   });
+  it('reuses directory identity across paths over HTTP without caching listings or authorizing outsiders', async () => {
+    const server = await f.server();
+    const identity = vi.mocked(f.adapter.getApplicationServer);
+    const listing = vi.mocked(f.adapter.listFiles);
+    const identityBefore = identity.mock.calls.length;
+    const listingsBefore = listing.mock.calls.length;
+    for (const path of ['', 'world', 'world/playerdata']) {
+      const response = await request(user, `/v1/servers/${server}/files?path=${path}`);
+      expect(response.status).toBe(200);
+      expect((await response.json())[0].name).toBe('server.properties');
+      expect(listing.mock.lastCall?.[1]).toBe(path);
+    }
+    expect(identity.mock.calls.length - identityBefore).toBe(1);
+    expect(listing.mock.calls.length - listingsBefore).toBe(3);
+    expect((await request(outsider, `/v1/servers/${server}/files?path=world`)).status).toBe(403);
+    expect(listing.mock.calls.length - listingsBefore).toBe(3);
+    // A warm directory proof cannot substitute for a fresh write identity check.
+    expect(
+      (
+        await request(user, `/v1/servers/${server}/files`, {
+          action: 'write',
+          path: 'fixture.txt',
+          content: 'fixture',
+        })
+      ).status,
+    ).toBe(204);
+    expect(identity.mock.calls.length - identityBefore).toBe(2);
+  });
   it('isolates unrelated users from every server read and write surface before provider access', async () => {
     const server = await f.server();
     const reads = [

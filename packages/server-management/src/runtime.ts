@@ -19,6 +19,7 @@ import {
 import { type Kysely, sql } from 'kysely';
 import { type Environment, reserveInstallation, reserveStart } from './admission.js';
 import { resolveHostOverride } from './configuration.js';
+import { createDirectoryIdentityCache, directoryServerIdentity } from './directory-identity.js';
 import {
   cleanupServerExternalServices,
   type ExternalServiceOptions,
@@ -229,6 +230,7 @@ export interface ManagementOptions {
   env?: Environment;
   adapter?: PterodactylAdapter;
   transportCoordinator?: ReturnType<typeof createTransportCoordinator>;
+  directoryIdentityCache?: ReturnType<typeof createDirectoryIdentityCache>;
   containerObserver?: ContainerObserver;
   cleanupExternal?: (serverId: string, connection: Kysely<Database>) => Promise<void>;
   reconcileExternal?: (
@@ -265,6 +267,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     }
   }
   const { db } = options;
+  const directoryIdentityCache = options.directoryIdentityCache ?? createDirectoryIdentityCache();
   const env = options.env ?? {};
   const [{ values }, applicationKey] = await Promise.all([
     getSettings(db, env),
@@ -828,7 +831,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       throw new DomainError('conflict');
   }
   /** Direct file/command mutations share the lifecycle lock, so wipe/delete cannot race them. */
-  async function access<T>(
+  async function withAccess<T>(
     context: AuthContext,
     serverId: string,
     write: boolean,
@@ -838,8 +841,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
       current: AuthContext,
       server: Awaited<ReturnType<typeof authorizeServer>>,
     ) => Promise<T>,
+    directoryRead = false,
   ) {
-    return db.connection().execute(async (connection) => {
+    const run = async (connection: Kysely<Database>) => {
+      let identityAttempted = false;
       if (write) {
         const lock = await sql<{
           acquired: boolean;
@@ -860,28 +865,59 @@ export async function createManagementRuntime(options: ManagementOptions) {
           throw new DomainError('conflict');
         if (write && server.active_operation_id) throw new DomainError('conflict');
         if (write) await assertNoPendingUpload(connection, serverId);
-        await verifyManagedIdentity(
-          connection,
-          server,
-          await adapter.getApplicationServer(server.pterodactyl_id),
-        );
+        identityAttempted = true;
+        if (directoryRead && !write)
+          await directoryIdentityCache.verify(
+            connection,
+            server,
+            consoleProviderBinding,
+            () => adapter.getApplicationServer(server.pterodactyl_id as number),
+            db,
+          );
+        else
+          await verifyManagedIdentity(
+            connection,
+            server,
+            await adapter.getApplicationServer(server.pterodactyl_id),
+          );
         // Identity corroboration may itself wait on a remote API. Recheck directly
         // before the effect rather than extending an old authorization across it.
         const refreshed = await currentInteractiveContext(connection, current, env);
-        await authorizeServer(
+        const latest = await authorizeServer(
           connection,
           refreshed,
           serverId,
           write ? 'server:manage' : 'server:read',
         );
+        if (directoryRead && directoryServerIdentity(latest) !== directoryServerIdentity(server))
+          throw new DomainError('conflict');
         return await work(server.pterodactyl_identifier, connection, refreshed, server);
+      } catch (error) {
+        if (identityAttempted) directoryIdentityCache.invalidate(serverId);
+        throw error;
       } finally {
         if (write)
           await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`.execute(
             connection,
           );
       }
-    });
+    };
+    // Directory reads hold no lifecycle lock. Do not pin a pool connection while
+    // waiting for a background renewal that itself needs that pool (even max=1).
+    return directoryRead ? run(db) : db.connection().execute(run);
+  }
+  // Only directory GETs may reuse a proof. Existing access callers, especially
+  // mutations/downloads/editor reads, retain their fresh remote corroboration.
+  function access<T>(
+    context: AuthContext,
+    serverId: string,
+    write: boolean,
+    work: Parameters<typeof withAccess<T>>[3],
+  ) {
+    return withAccess(context, serverId, write, work);
+  }
+  function listFiles(context: AuthContext, serverId: string, path: string) {
+    return withAccess(context, serverId, false, (id) => adapter.listFiles(id, path), true);
   }
   return {
     adapter,
@@ -892,6 +928,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     process,
     reconcile,
     access,
+    listFiles,
     authorizeTransfer,
     lifecycle,
     externalOptions,
