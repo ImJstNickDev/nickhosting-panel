@@ -5083,3 +5083,32 @@ disposed their own schemas/staging; no live provider call, game-server asset,
 container restart, Docker resource creation or production mutation was performed.
 Rollback is a code revert; no state migration is required. PR#21 remains open and
 unmerged, and issue#18 remains a release gate.
+
+### 2026-10-12 — Sole path completion and indentation at the cursor
+
+Enter in the Files path field confirms an explicit selection, otherwise an exact
+name or the sole matching candidate. Files open at their actual parent path;
+folders complete with a trailing slash and preserve focus for further input.
+Enter on an already slash-terminated path opens that directory, without choosing
+its only child. Ambiguous prefixes, invalid paths and stale selections retain
+their existing protections. Exact folder names also complete with a slash now.
+
+Following the Owner's clarification, Tab with an empty selection inserts the
+configured indentation unit at the cursor, not at the start of its line. Selected
+lines retain native block indentation; Shift+Tab outdents lines. The read-only
+guard, undo history, cursor mapping and Escape/Tab focus exit remain intact.
+The current unit remains two spaces, avoiding an unsolicited literal tab in YAML.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'completes the sole path|completes actual folders|keeps path errors|navigates breadcrumbs|indents with Tab|retains the open editor'`: **6 passed**,14 unrelated skipped. Covers relative/nested completion, file opening, focus, trailing-slash navigation with one child, ambiguous/stale prefixes, ordinary navigation, indentation at a middle-of-line cursor, subsequent typing, block indentation, undo/redo, keyboard exit and pending-save protection.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-path-model.test.ts`: **15 passed**.
+- Web typecheck, i18n compile/check (1215 keys), changed-file Biome and `git diff --check`: passed.
+- Initial path browser run: **3 passed,1 failed** because the new fixture had file bytes but no parent-directory records. Fixture setup now creates those directories through isolated application handlers. Initial test tuple type errors were corrected. Final checks above passed; no backend change was required.
+
+Only focused checks were rerun. No visual layout changed; existing screenshots
+remain applicable. No production provider operation, server asset, infrastructure
+mutation or container restart occurred. Tests reused approved isolated services
+and disposed their own schemas/staging. Rollback is a code revert with no state
+migration. Historical results and release blockers remain as recorded above.
+Independent review found no remaining must-fix issue; index governance passed
+(611 text files,163 PNGs,514 links,4 TOML files,44 ignore cases). PR#21 stays open
+and unmerged.

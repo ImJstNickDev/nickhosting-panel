@@ -2,6 +2,7 @@ import {
   defaultKeymap,
   history,
   historyKeymap,
+  indentMore,
   indentWithTab,
   redo,
   redoDepth,
@@ -15,6 +16,7 @@ import { yaml } from '@codemirror/lang-yaml';
 import {
   bracketMatching,
   defaultHighlightStyle,
+  indentUnit,
   StreamLanguage,
   syntaxHighlighting,
 } from '@codemirror/language';
@@ -444,7 +446,21 @@ export function FileTextEditor({
                 return true;
               },
             },
-            indentWithTab,
+            {
+              ...indentWithTab,
+              run: (editor) => {
+                const { state } = editor;
+                if (state.readOnly) return false;
+                if (state.selection.ranges.some((range) => !range.empty)) return indentMore(editor);
+                editor.dispatch(
+                  state.update(state.replaceSelection(state.facet(indentUnit)), {
+                    scrollIntoView: true,
+                    userEvent: 'input.indent',
+                  }),
+                );
+                return true;
+              },
+            },
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,

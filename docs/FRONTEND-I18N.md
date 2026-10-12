@@ -518,8 +518,10 @@ button. Suggestions list actual folders and files from the authorized directory
 listing; filename typing filters that list locally, and changing the parent path
 loads its listing through the same query cache as Files. Up/Down selects a
 candidate; Enter or Space confirms an explicitly selected candidate. Space remains
-ordinary text when no candidate is selected. Selecting a folder completes the path
-and exposes its children; Enter on an exact folder opens it in Files. Selecting a
+ordinary text when no candidate is selected. Enter also confirms an exact name or,
+without one, the sole matching candidate; ambiguous prefixes require selection.
+Selecting a folder appends a slash, keeps input focus and exposes its children;
+Enter on a path ending in a slash opens that folder in Files. Selecting a
 file opens the existing editor at that file's actual parent path. Suggestions stay
 within a scrollable popup without pushing page content, with accessible active
 selection and honest loading, empty and error states. Escape returns to breadcrumbs.
@@ -528,8 +530,9 @@ the path, including when the field is already open. These shortcuts yield to dia
 
 The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.
-Tab indents the current or selected lines; Shift+Tab outdents, using native undoable
-CodeMirror commands. Escape followed by Tab or Shift+Tab leaves the editor; its
+Tab inserts the configured indentation unit at the cursor, or indents selected
+lines; Shift+Tab outdents lines. Both use CodeMirror's undo history and read-only
+protection. Escape followed by Tab or Shift+Tab leaves the editor; its
 localized accessible description explains this exit. Search fields retain normal
 Tab navigation, and indentation cannot modify a file while saving.
 Opening a text file replaces the listing in place, without a modal. The breadcrumb

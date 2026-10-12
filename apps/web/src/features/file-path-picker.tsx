@@ -144,10 +144,11 @@ export function FilePathPicker({
     if (query.isError) return setError('file.pathUnavailable');
     if (current) return choose(current);
     if (parsed.directoryInput) return onNavigate(parsed.path);
-    const exact = candidates.find((entry) => entry.name === parsed.prefix);
-    if (!exact) return setError('file.pathNotFound');
-    if (exact.is_file) onOpenFile(exact, parsed.parent);
-    else onNavigate(join(parsed.parent, exact.name));
+    const match =
+      candidates.find((entry) => entry.name === parsed.prefix) ??
+      (candidates.length === 1 ? candidates[0] : undefined);
+    if (!match) return setError('file.pathNotFound');
+    choose(match);
   };
 
   return (

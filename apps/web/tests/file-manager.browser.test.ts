@@ -66,7 +66,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     );
     await user.getByRole('button', { name: 'root', exact: true }).click();
     await user.getByRole('button', { name: 'Enter path (ALT + G)', exact: true }).click();
-    await user.getByLabel('Path', { exact: true }).fill('/world');
+    await user.getByLabel('Path', { exact: true }).fill('/world/');
     await user.getByLabel('Path', { exact: true }).press('Enter');
     await browserExpect(row('level.dat')).toBeVisible();
     await user.getByRole('button', { name: 'Parent folder', exact: true }).click();
@@ -614,10 +614,19 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
 
     await editor.press('ArrowRight');
+    await editor.press('Home');
+    await editor.press('ArrowRight');
+    await editor.press('ArrowRight');
     await editor.press('Tab');
-    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', '  second']);
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'se  cond']);
+    await editor.press('X');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'se  Xcond']);
+    await editor.press('Home');
+    await editor.press('Tab');
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', '  se  Xcond']);
     await editor.press('Shift+Tab');
-    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'second']);
+    await browserExpect(editor.locator('.cm-line')).toHaveText(['first', 'se  Xcond']);
+    await editor.fill('first\nsecond');
 
     await editor.press('Control+f');
     const search = user.locator('.fm-search-panel input[name=search]');
@@ -785,7 +794,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       // Saving refetches the active listing; there is still no listing per typed character.
       expect(listings.filter((query) => query === '?path=world').length).toBeLessThanOrEqual(2);
       await user.keyboard.press('Alt+g');
-      await path.fill('/world');
+      await path.fill('/world/');
       await path.press('Enter');
       await browserExpect(path).toHaveCount(0);
       await browserExpect(user.getByRole('navigation', { name: 'File location' })).toContainText(
@@ -793,6 +802,60 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       );
     } finally {
       user.off('request', track);
+    }
+  });
+  it('completes the sole path candidate on Enter and keeps folder input ready for nested paths', async () => {
+    const remote = await provider.files();
+    const paths = ['libraries/module/config.json', 'libraries/module/configuration.txt'] as const;
+    for (const [root, name] of [
+      ['', 'libraries'],
+      ['libraries', 'module'],
+    ])
+      await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
+        action: 'mkdir',
+        root,
+        name,
+      });
+    remote.set(paths[0], Buffer.from('{"nested":true}'));
+    remote.set(paths[1], Buffer.from('Another file'));
+    try {
+      await user.goto(base);
+      await browserExpect(row('libraries')).toBeVisible();
+      await user.keyboard.press('Alt+g');
+      const path = user.getByRole('combobox', { name: 'Path', exact: true });
+      await path.fill('lib');
+      await browserExpect(user.getByRole('option')).toHaveCount(1);
+      await path.press('Enter');
+      await browserExpect(path).toHaveValue('/libraries/');
+      await browserExpect(path).toBeFocused();
+      await browserExpect(user.getByRole('option', { name: 'module/', exact: true })).toBeVisible();
+      // A trailing slash opens this folder, even when it has only one child.
+      await path.press('Enter');
+      await browserExpect(path).toHaveCount(0);
+      await browserExpect(row('module')).toBeVisible();
+      await user.keyboard.press('Alt+g');
+      await path.press('End');
+      await path.pressSequentially('mo');
+      await path.press('Enter');
+      await browserExpect(path).toHaveValue('/libraries/module/');
+      await browserExpect(path).toBeFocused();
+      await browserExpect(user.getByRole('option')).toHaveCount(2);
+      await path.pressSequentially('con');
+      await path.press('Enter');
+      await browserExpect(path).toHaveValue('/libraries/module/con');
+      await browserExpect(
+        user.getByText('File or folder not found.', { exact: true }),
+      ).toBeVisible();
+      await path.pressSequentially('fig.j');
+      await browserExpect(user.getByRole('option')).toHaveCount(1);
+      await path.press('Enter');
+      await browserExpect(
+        editorView().getByRole('textbox', { name: 'Contents', exact: true }),
+      ).toContainText('"nested":true');
+      await browserExpect(path).toHaveCount(0);
+      await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+    } finally {
+      for (const path of paths) remote.delete(path);
     }
   });
   it('keeps path errors visible and never commits a stale candidate after editing the prefix', async () => {

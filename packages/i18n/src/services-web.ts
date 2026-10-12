@@ -213,8 +213,8 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'editor.redo': ['Redo', 'Ripristina'],
   'editor.invalidSyntax': ['Invalid syntax', 'Sintassi non valida'],
   'editor.indentKeys': [
-    'Tab indents; Shift+Tab outdents. Press Escape, then Tab or Shift+Tab to leave the editor.',
-    'Tab aumenta il rientro; Shift+Tab lo riduce. Premi Escape, poi Tab o Shift+Tab per uscire dall’editor.',
+    'Tab inserts indentation at the cursor or indents selected lines; Shift+Tab outdents. Press Escape, then Tab or Shift+Tab to leave the editor.',
+    'Tab inserisce un rientro al cursore o indenta le righe selezionate; Shift+Tab riduce il rientro. Premi Escape, poi Tab o Shift+Tab per uscire dall’editor.',
   ],
   'editor.validSyntax': ['Valid syntax', 'Sintassi valida'],
   'editor.line': ['Line {line}', 'Riga {line}'],
