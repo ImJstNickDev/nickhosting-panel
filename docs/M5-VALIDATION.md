@@ -5482,3 +5482,20 @@ issue after the pause-latch correction. No dependency, migration or endpoint-sch
 change. Rollback is a code revert; the audited incident recovery does not require
 recreating a stale claim. Genuine post-dispatch uncertainty still needs verified
 Owner recovery. PR#21 remains OPEN/unmerged; SFTPGo#18 remains a release gate.
+
+### 2026-10-12 — Centered empty-folder message
+
+Scoped `.fm-list > .empty` alignment centers the folder-empty/no-search-results
+message horizontally without changing its existing vertical spacing or the shared
+Empty component. A one-off real-browser inspection used the existing isolated
+harness/provider fixtures (no new regression test). EN desktop and IT mobile,
+list/grid: horizontal center error at most0.008px; before/after vertical delta0px
+and list height unchanged in all four cases. Fixture schema was disposed.
+Command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec tsx .codex/local/check-empty-folder-ui.ts`
+(private disposable inspection script). Reviewed [desktop](screenshots/m5/file-empty-centered-desktop-en.png)
+and [mobile](screenshots/m5/file-empty-centered-mobile-it.png) screenshots.
+`scripts/dev.sh pnpm exec biome check apps/web/src/features/files.css`, diff and
+staged governance checks passed. Independent scoped CSS review found no issue.
+No type/build/full-suite rerun for this CSS-only change, no infrastructure or
+provider interaction, no restart. Rollback: revert the scoped CSS rule.
+PR#21 remains open/unmerged; no new blockers.

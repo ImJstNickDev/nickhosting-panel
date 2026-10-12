@@ -178,6 +178,10 @@
   margin: 0;
   padding: 0;
 }
+.fm-list > .empty {
+  justify-items: center;
+  text-align: center;
+}
 .fm-entry,
 .fm-columns {
   display: grid;
