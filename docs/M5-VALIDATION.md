@@ -5254,3 +5254,30 @@ can race final preflight, and a failed provider operation may have partial effec
 no rollback guarantee or automatic retry is claimed. The new optional API field
 is backward-compatible. Rollback is a code revert with no migration or dependency
 change. PR#21 remains OPEN/unmerged and SFTPGo#18 remains a release gate.
+
+### 2026-10-12 — Compact selected-file actions
+
+The selection count remains visible, followed by icon-only ZIP download, Move,
+Copy and red Delete actions. A neutral X at the right clears selection and returns
+keyboard focus to the first selected checkbox. Existing EN/IT tooltips and
+accessible names explain each icon. The compact bar wraps at narrow widths;
+permission/capability guards, batch limits and deletion confirmation are unchanged.
+File size/date text was slightly darkened to meet contrast on selected rows.
+
+Focused validation:
+
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts`.
+- Prefix + `-t 'supports keyboard context menus|keeps bulk file actions' --reporter verbose --hideSkippedTests`: existing keyboard/multi-operation case passed; new visual case failed contrast. A diagnostic rerun identified selected-row metadata at 4.43:1. These failures are preserved here.
+- After the contrast correction, prefix + `-t 'keeps bulk file actions' --reporter verbose --hideSkippedTests`: **1 passed**,25 unrelated skipped. Covers EN desktop and IT at390/361/320px, compact height, no horizontal overflow, localized tooltip/labels, red destructive action, retained confirmation, keyboard clear/focus restoration and zero applicable axe violations.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` and `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed; existing bundle-size advisory remains.
+- Changed-file Biome, diff and staged governance checks passed. No historical full-suite rerun or new translation keys.
+
+Reviewed screenshots: [EN desktop](screenshots/m5/file-selection-toolbar-desktop-en.png),
+[IT mobile](screenshots/m5/file-selection-toolbar-mobile-it.png).
+Independent code/accessibility and rendered UX review found no remaining must-fix
+finding. Browser evidence uses real application handlers and isolated provider
+fixtures with approved test services; its own schemas/staging were disposed.
+No game-server asset, live-provider call, infrastructure change or container restart
+occurred. Development source watchers load the UI change. Rollback is a code revert;
+no migration, dependency or API change. PR#21 remains OPEN/unmerged and issue#18
+remains an independent production-release gate.

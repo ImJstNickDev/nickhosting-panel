@@ -163,7 +163,12 @@ function ToolbarIcon({
     | 'save'
     | 'undo'
     | 'redo'
-    | 'find';
+    | 'find'
+    | 'download'
+    | 'move'
+    | 'copy'
+    | 'delete'
+    | 'clear';
 }) {
   return (
     <svg
@@ -175,7 +180,17 @@ function ToolbarIcon({
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      {kind === 'home' ? (
+      {kind === 'download' ? (
+        <path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" />
+      ) : kind === 'move' ? (
+        <path d="M3 7V5h7l2 3h9v12H3V7Zm4 7h10m-3-3 3 3-3 3" />
+      ) : kind === 'copy' ? (
+        <path d="M9 8h12v13H9ZM5 16H3V3h12v2" />
+      ) : kind === 'delete' ? (
+        <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />
+      ) : kind === 'clear' ? (
+        <path d="m6 6 12 12M6 18 18 6" />
+      ) : kind === 'home' ? (
         <path d="m3 11 9-8 9 8M5 10v11h5v-7h4v7h5V10" />
       ) : kind === 'save' ? (
         <path d="M4 3h13l3 3v15H4ZM8 3v6h8V3M8 21v-8h8v8" />
@@ -1405,51 +1420,81 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       </div>
       {!editing && totalSelected > 0 && (
         <section className="fm-selection" aria-label={t('file.selection')}>
-          <span>{t('file.selected', { count: totalSelected })}</span>
-          {totalSelected > 100 && <span role="status">{t('file.selectionLimit')}</span>}
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => downloadZip(selectedNames)}
-            disabled={
-              totalSelected > 100 ||
-              selectedEntries.some((entry) => entry.is_symlink) ||
-              !transfers.data?.download.available
-            }
-          >
-            {t('file.downloadZip')}
-          </button>
-          {canManage && (
-            <>
+          <span className="fm-selection-count">{t('file.selected', { count: totalSelected })}</span>
+          <div className="fm-selection-actions">
+            <Tooltip placement="cursor" content={t('file.downloadZip')}>
               <button
                 type="button"
-                className="secondary"
-                disabled={!canMutate || totalSelected > 100}
-                onClick={() => chooseMode('move')}
+                className="fm-tool"
+                aria-label={t('file.downloadZip')}
+                onClick={() => downloadZip(selectedNames)}
+                disabled={
+                  totalSelected > 100 ||
+                  selectedEntries.some((entry) => entry.is_symlink) ||
+                  !transfers.data?.download.available
+                }
               >
-                {t('file.move')}
+                <ToolbarIcon kind="download" />
               </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!canMutate || totalSelected > 100 || capabilities.data?.copy !== true}
-                onClick={() => chooseMode('copy')}
-              >
-                {t('file.copy')}
-              </button>
-              <button
-                type="button"
-                className="secondary danger"
-                disabled={!canMutate || totalSelected > 100}
-                onClick={() => chooseMode('delete')}
-              >
-                {t('web.delete')}
-              </button>
-            </>
+            </Tooltip>
+            {canManage && (
+              <>
+                <Tooltip placement="cursor" content={t('file.move')}>
+                  <button
+                    type="button"
+                    className="fm-tool"
+                    aria-label={t('file.move')}
+                    disabled={!canMutate || totalSelected > 100}
+                    onClick={() => chooseMode('move')}
+                  >
+                    <ToolbarIcon kind="move" />
+                  </button>
+                </Tooltip>
+                <Tooltip placement="cursor" content={t('file.copy')}>
+                  <button
+                    type="button"
+                    className="fm-tool"
+                    aria-label={t('file.copy')}
+                    disabled={!canMutate || totalSelected > 100 || capabilities.data?.copy !== true}
+                    onClick={() => chooseMode('copy')}
+                  >
+                    <ToolbarIcon kind="copy" />
+                  </button>
+                </Tooltip>
+                <Tooltip placement="cursor" content={t('web.delete')}>
+                  <button
+                    type="button"
+                    className="fm-tool fm-selection-delete"
+                    aria-label={t('web.delete')}
+                    disabled={!canMutate || totalSelected > 100}
+                    onClick={() => chooseMode('delete')}
+                  >
+                    <ToolbarIcon kind="delete" />
+                  </button>
+                </Tooltip>
+              </>
+            )}
+          </div>
+          <Tooltip placement="cursor" content={t('file.clearSelection')}>
+            <button
+              type="button"
+              className="fm-tool fm-selection-clear"
+              aria-label={t('file.clearSelection')}
+              onClick={() => {
+                managerRef.current
+                  ?.querySelector<HTMLInputElement>('.fm-entry input[type="checkbox"]:checked')
+                  ?.focus({ preventScroll: true });
+                setSelected(new Set());
+              }}
+            >
+              <ToolbarIcon kind="clear" />
+            </button>
+          </Tooltip>
+          {totalSelected > 100 && (
+            <span className="fm-selection-limit" role="status">
+              {t('file.selectionLimit')}
+            </span>
           )}
-          <button type="button" className="text-button" onClick={() => setSelected(new Set())}>
-            {t('file.clearSelection')}
-          </button>
         </section>
       )}
       {Boolean(error) && <ErrorNotice error={error} />}

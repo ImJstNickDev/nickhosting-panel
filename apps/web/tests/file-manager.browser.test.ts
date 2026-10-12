@@ -249,6 +249,101 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     (await provider.files()).set('selection.zip', bytes);
     await user.getByRole('button', { name: 'Clear selection', exact: true }).click();
   });
+  it('keeps bulk file actions compact and labelled across desktop and mobile with keyboard clear', async () => {
+    try {
+      for (const [locale, width] of [
+        ['en', 1440],
+        ['it', 390],
+        ['it', 361],
+        ['it', 320],
+      ] as const) {
+        await journeyRequest(harness, user, '/api/auth/update-user', { locale });
+        await user.setViewportSize({ width, height: width > 760 ? 1000 : 844 });
+        await user.goto(base);
+        for (const name of ['alpha.txt', 'beta.json'])
+          await user
+            .getByRole('checkbox', {
+              name: `${locale === 'it' ? 'Seleziona' : 'Select'} ${name}`,
+              exact: true,
+            })
+            .check();
+        const selection = user.getByRole('region', {
+          name: locale === 'it' ? 'File selezionati' : 'Selected files',
+        });
+        await browserExpect(selection).toContainText(
+          locale === 'it' ? '2 selezionati' : '2 selected',
+        );
+        await browserExpect(selection.getByRole('button')).toHaveCount(5);
+        const labels =
+          locale === 'it'
+            ? ['Scarica ZIP', 'Sposta', 'Copia', 'Elimina', 'Deseleziona']
+            : ['Download ZIP', 'Move', 'Copy', 'Delete', 'Clear selection'];
+        for (const label of labels) {
+          const button = selection.getByRole('button', { name: label, exact: true });
+          await browserExpect(button).toBeVisible();
+          expect(await button.innerText()).toBe('');
+          await browserExpect(button.locator('svg')).toHaveAttribute('aria-hidden', 'true');
+        }
+        const remove = selection.getByRole('button', {
+          name: locale === 'it' ? 'Elimina' : 'Delete',
+          exact: true,
+        });
+        await remove.hover();
+        await browserExpect(user.getByRole('tooltip')).toHaveText(
+          locale === 'it' ? 'Elimina' : 'Delete',
+        );
+        expect(await remove.evaluate((button) => getComputedStyle(button).color)).toBe(
+          'rgb(155, 32, 32)',
+        );
+        await user.mouse.move(0, 0);
+        const rect = await selection.boundingBox();
+        expect(rect?.height).toBeLessThanOrEqual(width > 360 ? 48 : 88);
+        expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        const audit = await new AxeBuilder({ page: user })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze();
+        expect(
+          audit.violations.map(({ id, nodes }) => ({
+            id,
+            nodes: nodes.map(({ target, failureSummary }) => ({ target, failureSummary })),
+          })),
+        ).toEqual([]);
+        if (width === 1440 || width === 390)
+          await harness.screenshot(
+            user,
+            `file-selection-toolbar-${locale === 'it' ? 'mobile-it' : 'desktop-en'}`,
+          );
+        await remove.click();
+        await browserExpect(dialog()).toBeVisible();
+        await browserExpect(dialog()).toContainText('alpha.txt');
+        await browserExpect(dialog()).toContainText('beta.json');
+        await dialog()
+          .getByRole('button', { name: locale === 'it' ? 'Chiudi' : 'Close', exact: true })
+          .click();
+        const clear = selection.getByRole('button', {
+          name: locale === 'it' ? 'Deseleziona' : 'Clear selection',
+          exact: true,
+        });
+        await clear.focus();
+        await browserExpect(user.getByRole('tooltip')).toHaveText(
+          locale === 'it' ? 'Deseleziona' : 'Clear selection',
+        );
+        await clear.press('Enter');
+        await browserExpect(selection).toHaveCount(0);
+        const first = user.getByRole('checkbox', {
+          name: `${locale === 'it' ? 'Seleziona' : 'Select'} alpha.txt`,
+          exact: true,
+        });
+        await browserExpect(first).not.toBeChecked();
+        await browserExpect(first).toBeFocused();
+      }
+    } finally {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
   it('extracts a ZIP into a new folder and moves files by folder and breadcrumb drops', async () => {
     await user.reload();
     await menu('selection.zip');
