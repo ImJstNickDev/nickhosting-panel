@@ -555,6 +555,156 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(editor).toHaveText('Saved after rename');
     await user.getByRole('button', { name: 'Back to files', exact: true }).click();
   });
+  it('returns to the same editable cursor immediately during rename and preserves scroll and undo after confirmation', async () => {
+    const original = Array.from({ length: 120 }, (_, index) => `Line ${index + 1}: contents`).join(
+      '\n',
+    );
+    (await provider.files()).set('rename-position.txt', Buffer.from(original));
+    await user.goto(base);
+    await row('rename-position.txt')
+      .getByRole('button', { name: 'rename-position.txt', exact: true })
+      .click();
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
+    const scroller = user.locator('.cm-scroller');
+    await browserExpect(editor).toBeFocused();
+    await editor.press('Control+End');
+    await editor.press('ArrowLeft');
+    await editor.evaluate((element) => {
+      element.setAttribute('data-rename-preserve', 'yes');
+    });
+    const position = () =>
+      editor.evaluate(() => {
+        const selection = document.getSelection();
+        const anchor = selection?.anchorNode;
+        const line = anchor?.parentElement?.closest('.cm-line');
+        if (!anchor || !line || !selection) throw new Error('Missing editor caret');
+        const range = document.createRange();
+        range.setStart(line, 0);
+        range.setEnd(anchor, selection.anchorOffset);
+        return [line.textContent, range.toString().length, selection.isCollapsed];
+      });
+    const before = await position();
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let requests = 0;
+    await user.route('**/files', async (route) => {
+      if (
+        route.request().method() === 'POST' &&
+        route.request().postDataJSON()?.action === 'rename'
+      ) {
+        requests++;
+        await pending;
+      }
+      await route.continue();
+    });
+    try {
+      await user.getByRole('button', { name: 'Rename', exact: true }).click();
+      const rename = user.locator('.fm-inline-rename input');
+      await rename.fill('rename-position.jar');
+      await rename.press('Enter');
+      await browserExpect(user.locator('.fm-inline-rename-error-popup')).toContainText(
+        'Rename the file from the file list',
+      );
+      expect(requests).toBe(0);
+      await rename.fill('rename-position.properties');
+      await rename.press('Enter');
+      await browserExpect(editor).toBeFocused();
+      await browserExpect(editor).toHaveAttribute('contenteditable', 'true');
+      await browserExpect(rename).toHaveCount(0);
+      expect(await position()).toEqual(before);
+      await editor.press('x');
+      const whilePending = await position();
+      const scroll = await scroller.evaluate((element) => element.scrollTop);
+      expect(scroll).toBeGreaterThan(0);
+      await editor.press('Control+s');
+      await browserExpect(
+        user.getByRole('button', { name: 'Save changes', exact: true }),
+      ).toBeDisabled();
+      expect((await provider.files()).get('rename-position.txt')?.toString()).toBe(original);
+      await harness.screenshot(user, 'file-editor-rename-pending-desktop-en');
+      release();
+      await browserExpect(user.locator('.fm-current-file')).toHaveText(
+        'rename-position.properties *',
+      );
+      await browserExpect(editor).toHaveAttribute('data-rename-preserve', 'yes');
+      await browserExpect(editor).toBeFocused();
+      expect(await position()).toEqual(whilePending);
+      expect(await scroller.evaluate((element) => element.scrollTop)).toBe(scroll);
+      expect(requests).toBe(1);
+      expect((await provider.files()).get('rename-position.properties')?.toString()).toBe(original);
+      await editor.press('Control+z');
+      await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
+      expect(await position()).toEqual(before);
+      await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+    } finally {
+      release();
+      await user.unroute('**/files');
+    }
+  });
+  it('does not steal focus on blur rename completion or lose text on rename failure', async () => {
+    (await provider.files()).set('rename-focus.txt', Buffer.from('Keep this text'));
+    await user.goto(base);
+    await row('rename-focus.txt')
+      .getByRole('button', { name: 'rename-focus.txt', exact: true })
+      .click();
+    const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
+    for (const fails of [false, true]) {
+      let release = () => {};
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await user.route('**/files', async (route) => {
+        if (
+          route.request().method() === 'POST' &&
+          route.request().postDataJSON()?.action === 'rename'
+        ) {
+          await pending;
+          if (fails)
+            return route.fulfill({
+              status: 409,
+              json: { error: { code: 'conflict', messageKey: 'errors.conflict' } },
+            });
+        }
+        await route.continue();
+      });
+      try {
+        await user.getByRole('button', { name: 'Rename', exact: true }).click();
+        await user
+          .locator('.fm-inline-rename input')
+          .fill(fails ? 'failed-rename.txt' : 'renamed-focus.txt');
+        await user.getByRole('button', { name: 'Find', exact: true }).click();
+        const search = user.locator('.fm-search-panel-host input').first();
+        await browserExpect(search).toBeFocused();
+        if (fails) {
+          await editor.press('Control+End');
+          await editor.press('!');
+        }
+        release();
+        if (fails) {
+          await browserExpect(
+            user.locator('.fm-inline-rename-error-popup').getByRole('alert'),
+          ).toBeVisible();
+          await browserExpect(editor).toBeFocused();
+          await browserExpect(editor).toHaveText('Keep this text!');
+          expect((await provider.files()).get('renamed-focus.txt')?.toString()).toBe(
+            'Keep this text',
+          );
+          await user.locator('.fm-inline-rename input').press('Escape');
+          await editor.press('Control+z');
+        } else {
+          await browserExpect(user.locator('.fm-current-file')).toHaveText('renamed-focus.txt');
+          await browserExpect(search).toBeFocused();
+        }
+        await search.press('Escape');
+      } finally {
+        release();
+        await user.unroute('**/files');
+      }
+    }
+    await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+  });
   it('keeps inline rename compact on Italian mobile with keyboard cancel and visible validation', async () => {
     await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'it' });
     await user.setViewportSize({ width: 390, height: 844 });

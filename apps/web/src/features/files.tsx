@@ -261,8 +261,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [editorControls, setEditorControls] = useState<FileEditorControls>();
   const managerRef = useRef<HTMLElement>(null);
   const [inlineRename, setInlineRename] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const renamedFileFocus = useRef(false);
-  const restoreRenamedFocus = useRef(false);
   const [editorAvailability, setEditorAvailability] =
     useState<ReturnType<typeof fileEditorAvailability>>('text');
   const editing = mode === 'edit' || mode === 'new';
@@ -291,7 +291,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     if (!editing) return;
     if (renamedFileFocus.current) {
       renamedFileFocus.current = false;
-      if (restoreRenamedFocus.current) editorForm.current?.focus();
       return;
     }
     if (mode === 'new')
@@ -701,30 +700,33 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       name,
     );
   }
-  async function renameEditor(name: string) {
+  async function renameEditor(name: string, reason: 'enter' | 'blur') {
     if (!canMutate || dirty || mutationRunning.current || saving || reading)
       throw { messageKey: 'errors.forbidden' };
     if (!validFilename(name)) throw { messageKey: 'file.invalidName' };
     const original = files.data?.find((entry) => entry.name === targets[0]);
     if (!original) throw { messageKey: 'file.pathNotFound' };
+    if (fileEditorAvailability({ ...original, name }) !== 'text')
+      throw { messageKey: 'file.renameUneditable' };
     mutationRunning.current = true;
     setMutating(true);
+    setRenaming(true);
+    // Enter returns to the existing selection immediately. Blur preserves the
+    // user's chosen focus target, and completion must never focus the editor.
+    if (reason === 'enter') requestAnimationFrame(() => editorControls?.focus());
     try {
       await api(`${serverPath(serverId)}/files`, {
         method: 'POST',
         body: { action: 'rename', root: directory, files: [{ from: original.name, to: name }] },
       });
       renamedFileFocus.current = true;
-      restoreRenamedFocus.current = Boolean(
-        document.activeElement?.closest('.fm-inline-rename') ||
-          editorForm.current?.contains(document.activeElement),
-      );
       setTargets([name]);
       setEditorAvailability(fileEditorAvailability({ ...original, name }));
       void files.refetch();
     } finally {
       mutationRunning.current = false;
       setMutating(false);
+      setRenaming(false);
     }
   }
   function saveShortcut() {
@@ -1268,13 +1270,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 {
                   kind: 'undo',
                   label: 'editor.undo',
-                  disabled: mutating || !editorControls?.canUndo,
+                  disabled: (mutating && !renaming) || !editorControls?.canUndo,
                   run: () => editorControls?.undo(),
                 },
                 {
                   kind: 'redo',
                   label: 'editor.redo',
-                  disabled: mutating || !editorControls?.canRedo,
+                  disabled: (mutating && !renaming) || !editorControls?.canRedo,
                   run: () => editorControls?.redo(),
                 },
                 {
@@ -1419,6 +1421,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               {Boolean(saveError) && <ErrorNotice error={saveError} />}
               <Suspense fallback={<FileEditorSkeleton />}>
                 <FileTextEditor
+                  key={readSequence.current}
                   path={join(
                     directory,
                     mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
@@ -1437,7 +1440,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   }}
                   onSave={saveShortcut}
                   onControls={setEditorControls}
-                  readOnly={!canMutate || mutating || inlineRename}
+                  readOnly={!canMutate || (mutating && !renaming)}
                   shouldAutoFocus={() =>
                     mode === 'edit' && document.activeElement === editorForm.current
                   }

@@ -183,6 +183,10 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Enter a valid filename without slashes, control characters or %.',
     'Inserisci un nome valido, senza barre, caratteri di controllo o %.',
   ],
+  'file.renameUneditable': [
+    'This extension cannot be edited here. Rename the file from the file list.',
+    'Questa estensione non è modificabile qui. Rinomina il file dall’elenco dei file.',
+  ],
   'file.savePendingName': ['Saving {name}…', 'Salvataggio di {name}…'],
   'file.saveFailedName': [
     'Could not save {name}. Open draft',

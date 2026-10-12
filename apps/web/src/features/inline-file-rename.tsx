@@ -7,7 +7,7 @@ import './inline-file-rename.css';
 
 interface InlineFileRenameProps {
   name: string;
-  onCommit(name: string): Promise<void>;
+  onCommit(name: string, reason: 'enter' | 'blur'): Promise<void>;
   onCancel(): void;
   onComplete?(): void;
 }
@@ -102,7 +102,7 @@ export function InlineFileRename({ name, onCommit, onCancel, onComplete }: Inlin
     setInvalid(false);
     setError(undefined);
     try {
-      await onCommit(value);
+      await onCommit(value, reason);
       completed.current = true;
       if (mounted.current) onComplete?.();
     } catch (error) {
@@ -112,6 +112,16 @@ export function InlineFileRename({ name, onCommit, onCancel, onComplete }: Inlin
       if (mounted.current) setPending(false);
     }
   }
+
+  if (pending)
+    return (
+      <span className="fm-current-file" aria-current="page" aria-busy="true">
+        {name}
+        <span className="sr-only" role="status">
+          {t('web.pending')}
+        </span>
+      </span>
+    );
 
   return (
     <div className="fm-inline-rename" aria-busy={pending}>

@@ -573,6 +573,14 @@ errors preserve the proposed name. Renaming uses the existing authorized operati
 after confirmation it keeps the current text and revision without downloading it
 again. Subsequent content saves still compare that revision. Unsaved content must
 be saved before renaming; rename-in-progress blocks conflicting file operations.
+Submitting a valid rename returns to text immediately on Enter; blur retains the
+chosen focus target. Local typing, undo/redo and search stay available during the
+request, while content writes and navigation wait for its outcome. The confirmed
+filename changes only after success. CodeMirror reconfigures syntax in place,
+preserving cursor, scroll, history and search; completion never steals focus.
+Opening a different document resets that editor state. Destinations excluded from
+text editing must be renamed from the file list, so a late extension change cannot
+hide newly typed content. Failed renames preserve both text and the proposed name.
 Entering Files preloads the lazy editor module once; subsequent editor opens use
 the same cached import. A failed preload can retry when the editor is opened.
 Editor content remains local while a conflict is resolved. Availability reasons

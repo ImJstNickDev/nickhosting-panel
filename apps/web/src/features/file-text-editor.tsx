@@ -366,6 +366,7 @@ export function FileTextEditor({
   const view = useRef<EditorView | null>(null);
   const [searchPanel, setSearchPanel] = useState<SearchPanelState>();
   const configuration = useRef(new Compartment());
+  const syntaxConfiguration = useRef(new Compartment());
   const callbacks = useRef({ onChange, onSave, onControls, shouldAutoFocus, readOnly, t });
   callbacks.current = { onChange, onSave, onControls, shouldAutoFocus, readOnly, t };
   const initialValue = useRef(value);
@@ -422,21 +423,11 @@ export function FileTextEditor({
               };
             },
           }),
-          languageExtension(path),
           editorTheme,
           EditorView.lineWrapping,
           configuration.current.of([]),
+          syntaxConfiguration.current.of([]),
           lintGutter(),
-          linter(
-            (current) =>
-              (validateFileSyntax(path, current.state.doc.toString()) ?? []).map((issue) => ({
-                from: issue.from,
-                to: issue.to,
-                severity: 'error',
-                message: `${callbacks.current.t('editor.invalidSyntax')} · ${callbacks.current.t('editor.line', { line: issue.line })}`,
-              })),
-            { delay: 350 },
-          ),
           keymap.of([
             {
               key: 'Mod-s',
@@ -483,10 +474,29 @@ export function FileTextEditor({
       view.current = null;
       callbacks.current.onControls?.(undefined);
     };
-  }, [path]);
+  }, []);
 
-  // Both values invalidate configuration: a new path creates a new view and locale changes phrases.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: locale and path intentionally reconfigure the imperative editor.
+  // Renaming changes syntax without replacing the document, selection, history or search state.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: locale refreshes translated diagnostics.
+  useEffect(() => {
+    view.current?.dispatch({
+      effects: syntaxConfiguration.current.reconfigure([
+        languageExtension(path),
+        linter(
+          (current) =>
+            (validateFileSyntax(path, current.state.doc.toString()) ?? []).map((issue) => ({
+              from: issue.from,
+              to: issue.to,
+              severity: 'error',
+              message: `${callbacks.current.t('editor.invalidSyntax')} · ${callbacks.current.t('editor.line', { line: issue.line })}`,
+            })),
+          { delay: 350 },
+        ),
+      ]),
+    });
+  }, [path, locale]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: locale refreshes editor phrases.
   useEffect(() => {
     view.current?.dispatch({
       effects: configuration.current.reconfigure([
@@ -512,7 +522,7 @@ export function FileTextEditor({
         ),
       ]),
     });
-  }, [readOnly, label, locale, path]);
+  }, [readOnly, label, locale]);
 
   useEffect(() => {
     const editor = view.current;

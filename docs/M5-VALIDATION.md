@@ -5177,3 +5177,35 @@ or container restart occurred. Existing development watchers load source changes
 No private configuration is published. Rollback is a code revert; no migrations
 or dependencies were added. Issue#18 remains a separate release gate. PR#21 stays
 open and unmerged; this focused pass does not declare all M5 acceptance complete.
+
+
+### 2026-10-12 — Preserve editor position during asynchronous rename
+
+Follow-up to the preceding pass: content saves were nonblocking, but rename still
+made the editor read-only and changing its path recreated CodeMirror. That reset
+selection, scroll and undo history. Valid rename submission now returns to the
+existing cursor immediately on Enter; blur preserves the user's chosen target.
+Local typing/search/undo remain available. Content saves and navigation still wait
+for rename confirmation so they cannot race an uncertain path. A failed rename
+retains its proposed name and any newly typed text without stealing focus.
+
+CodeMirror keeps its document/view and reconfigures language/validation in place.
+An explicit document-session key resets state for another file or recovered draft,
+so history cannot cross documents. Known noneditable extensions are rejected before
+an editor rename with an actionable message; list rename remains available. This
+prevents a late binary-extension switch from hiding text typed during the request.
+
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts -t 'returns to the same editable cursor|does not steal focus on blur|saves in the background' --reporter verbose --hideSkippedTests`: **3 passed**,20 unrelated skipped. A held rename proves immediate editing at line120, stable DOM/cursor/scroll/undo through a text-to-properties extension change, content-save fencing, zero requests for a JAR target, preserved search focus, failed-rename draft retention and existing background-save recovery.
+- The prior inline rename/validation/width regression also passed in the first focused run. That run had two new-test failures: comparing DOM text-node offsets across syntax-token changes rather than the line-relative cursor, and using the wrong English Find selector. Both test assertions were corrected; the subsequent three-case run above passed.
+- Web source/test typecheck, production build, i18n compile/check (1220 EN/IT/pseudo keys), changed-file Biome and diff checks passed. The existing Vite chunk-size advisory remains. No backend or historical full-suite rerun was required.
+
+Independent review identified the late binary-extension draft-loss case; the
+preflight guard and zero-request regression resolve it. Final review found no
+remaining must-fix issue and inspected the [pending-rename screenshot](screenshots/m5/file-editor-rename-pending-desktop-en.png).
+Existing mobile layout is unchanged. Evidence uses real application handlers with
+isolated provider fixtures and approved test services, whose own schemas/staging
+were disposed. No production operation, game-server asset, container restart or
+new infrastructure resource occurred. Development source watchers remain in use.
+Rollback is a code revert, without migrations/dependencies. PR#21 remains OPEN and
+unmerged; SFTPGo#18 and other existing release boundaries are unchanged.
