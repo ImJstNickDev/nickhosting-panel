@@ -505,7 +505,7 @@ credential is returned to the browser.
 | `PUT /editor` | `{path, content, expectedRevision}`. Existing file requires its revision; new file requires `null` and absence. Changed content returns409 without intentionally overwriting it. Read-back verifies the result. |
 | `GET /archive?root=...&files=...` | JSON array of selected basenames; actual streamed ZIP, including folders/empty directories. At most100 selected roots,10,000 enumerated entries,64 directory levels. File bodies open lazily, one at a time; cancellation closes upstream. No whole-download browser buffer or fixed aggregate byte cap. |
 | `GET /capabilities` | `{copy,extract,extractFormats,zipDownload,reason}` gated by permissions and configured upload admission. Supported extraction formats: ZIP,TAR,TAR.GZ,TGZ. |
-| `POST /copy` | `{root,files,destination}`; copies selections recursively into an existing directory. Preflight rejects collisions, symlinks, self-descendants and protected targets. No overwrite. |
+| `POST /copy` | `{root,files,destination,overwrite?}`; copies selections recursively into an existing directory, preserving originals. Optional `overwrite: string[]` authorizes exact server-root-relative regular-file destinations; omission rejects collisions. Links, directory replacement/merging, ambiguous casing, overlapping paths and protected targets remain rejected. |
 | `POST /extract` | `{root,file,destination,confirm:true}`; destination is one new child directory. Validate/stage the entire archive before remote writes, then use existing upload admission and adapter streams. |
 
 ZIP attachments use `nhpanel-<server-name>-YYYY-MM-DD_HH_mm_ss.zip`, with the
@@ -527,13 +527,24 @@ preflight/rename interval: the current Client API contract has no atomic no-clob
 flag and multi-file renames are not transactional. No rollback or automatic retry
 is claimed after an ambiguous/partial provider failure.
 
-The WebPanel Move tree and drag/drop share a client-side decision flow over this
-same API. Per-file Skip removes that move and its overwrite path; Overwrite all
-approves only current eligible collisions, and Skip all skips current unresolved
+Copy uses the same exact-path consent semantics, with approvals scoped to the
+selected top-level files and validated before any writes. It rechecks source and
+destination metadata before each streamed upload and checks the destination again
+after download negotiation. Existing files are never deleted first. Replacements
+reserve full upload capacity without crediting the destination's size. Authorization, protected
+paths, upload admission and durable claims remain enforced; approved paths are
+audited. Concurrent external Wings writes can still race the final check/upload
+interval because the provider exposes no atomic compare-and-swap.
+
+The WebPanel Move/Copy tree and drag/drop share a client-side decision flow over
+their respective APIs. Per-file Skip removes that item and its overwrite path;
+Overwrite all approves only current eligible collisions, and Skip all skips current unresolved
 collisions. All decisions precede one batch; an all-skipped operation sends no
 POST. Metadata is refreshed before submission, so new collisions need consent.
 Session/support identity changes invalidate pending choices. Ambiguous failures
-require inspection rather than automatic replay. No API schema changes are needed.
+require inspection rather than automatic replay. Copy checks capability again
+before submission and refreshes transfer/capability queries after the response;
+its own active upload claim cannot discard a successful result.
 
 The editor serializes NickHosting writes and rechecks authorization before writing.
 Wings does not expose atomic compare-and-swap against external Panel/game writes:

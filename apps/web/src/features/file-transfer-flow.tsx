@@ -7,15 +7,17 @@ import { joinFilePath as join, validMoveTarget } from './file-manager-model.js';
 import { type ServerFile, serverPath } from './service-contracts.js';
 import './file-move-flow.css';
 
-export interface FileMovePlan {
+export interface FileTransferPlan {
   source: string;
   destination: string;
   names: string[];
 }
 type Choice = 'overwrite' | 'skip';
 type Collision = { name: string; canOverwrite: boolean };
-type MoveState = {
-  plan: FileMovePlan;
+type TransferAction = 'move' | 'copy';
+type TransferState = {
+  action: TransferAction;
+  plan: FileTransferPlan;
   phase: 'destination' | 'checking' | 'conflict' | 'failed';
   decisions: Record<string, Choice>;
   collisions: Collision[];
@@ -34,11 +36,12 @@ export function FileSelectionSummary({ names }: { names: string[] }) {
   );
 }
 
-/** One decision flow for toolbar/context-menu moves and internal drops. */
-export function useFileMove(options: {
+/** Shared destination and consent flow; copy and move retain separate API operations. */
+export function useFileTransfer(options: {
   serverId: string;
   identity: string | undefined;
   canMutate: boolean;
+  canCopy: boolean;
   isBusy: () => boolean;
   setBusy: (busy: boolean) => void;
   onClose: () => void;
@@ -48,7 +51,7 @@ export function useFileMove(options: {
   const latest = useRef(options);
   const conflictNameId = useId();
   latest.current = options;
-  const [state, setState] = useState<MoveState>();
+  const [state, setState] = useState<TransferState>();
   const stateRef = useRef(state);
   const [busy, setBusy] = useState(false);
   const working = useRef(false);
@@ -73,7 +76,7 @@ export function useFileMove(options: {
       generation.current++;
     };
   }, []);
-  function update(value: MoveState | undefined) {
+  function update(value: TransferState | undefined) {
     stateRef.current = value;
     if (mounted.current) setState(value);
   }
@@ -90,7 +93,10 @@ export function useFileMove(options: {
     update(undefined);
     latest.current.onClose();
   }
-  function isCurrent(operation: MoveState, version: number) {
+  function canAct(action: TransferAction) {
+    return latest.current.canMutate && (action !== 'copy' || latest.current.canCopy);
+  }
+  function isCurrent(operation: TransferState, version: number) {
     return (
       mounted.current &&
       generation.current === version &&
@@ -100,7 +106,7 @@ export function useFileMove(options: {
       latest.current.canMutate
     );
   }
-  async function refresh(plan: FileMovePlan) {
+  async function refresh(plan: FileTransferPlan, action: TransferAction) {
     await Promise.all([
       queryClient.invalidateQueries({
         queryKey: ['files', options.serverId, plan.source],
@@ -110,9 +116,21 @@ export function useFileMove(options: {
         queryKey: ['files', options.serverId, plan.destination],
         exact: true,
       }),
+      ...(action === 'copy'
+        ? [
+            queryClient.invalidateQueries({
+              queryKey: ['file-capabilities', options.serverId],
+              exact: true,
+            }),
+            queryClient.invalidateQueries({
+              queryKey: ['transfers', options.serverId],
+              exact: true,
+            }),
+          ]
+        : []),
     ]);
   }
-  async function inspect(plan: FileMovePlan, decisions: Record<string, Choice>) {
+  async function inspect(plan: FileTransferPlan, decisions: Record<string, Choice>) {
     const names = plan.names.filter((name) => decisions[name] !== 'skip');
     const [sources, destination] = await Promise.all([
       api<ServerFile[]>(
@@ -142,8 +160,8 @@ export function useFileMove(options: {
     }
     return collisions;
   }
-  async function execute(operation: MoveState) {
-    if (working.current || !latest.current.canMutate) return;
+  async function execute(operation: TransferState) {
+    if (working.current || !canAct(operation.action)) return;
     const version = generation.current;
     if (!isCurrent(operation, version)) return;
     setWorking(true);
@@ -155,28 +173,40 @@ export function useFileMove(options: {
         // Revalidate after decisions: new collisions never inherit blanket consent.
         const collisions = await inspect(operation.plan, operation.decisions);
         if (!isCurrent(operation, version)) throw { messageKey: 'errors.forbidden' };
+        if (!canAct(operation.action)) throw { messageKey: 'errors.integration_unavailable' };
         if (collisions.length) {
           update({ ...operation, phase: 'conflict', collisions, error: undefined });
           return;
         }
         submitted = true;
         const overwrite = names.filter((name) => operation.decisions[name] === 'overwrite');
-        await api(`${serverPath(options.serverId)}/files`, {
-          method: 'POST',
-          body: {
-            action: 'rename',
-            root: '',
-            files: names.map((name) => ({
-              from: join(operation.plan.source, name),
-              to: join(operation.plan.destination, name),
-            })),
-            ...(overwrite.length
-              ? { overwrite: overwrite.map((name) => join(operation.plan.destination, name)) }
-              : {}),
+        await api(
+          `${serverPath(options.serverId)}/files${operation.action === 'copy' ? '/copy' : ''}`,
+          {
+            method: 'POST',
+            body: {
+              ...(operation.action === 'copy'
+                ? {
+                    root: operation.plan.source,
+                    files: names,
+                    destination: operation.plan.destination,
+                  }
+                : {
+                    action: 'rename',
+                    root: '',
+                    files: names.map((name) => ({
+                      from: join(operation.plan.source, name),
+                      to: join(operation.plan.destination, name),
+                    })),
+                  }),
+              ...(overwrite.length
+                ? { overwrite: overwrite.map((name) => join(operation.plan.destination, name)) }
+                : {}),
+            },
           },
-        });
+        );
       }
-      await refresh(operation.plan);
+      await refresh(operation.plan, operation.action);
       if (isCurrent(operation, version)) {
         update(undefined);
         latest.current.onComplete(names);
@@ -191,7 +221,7 @@ export function useFileMove(options: {
         return;
       }
       if (submitted) {
-        await refresh(operation.plan);
+        await refresh(operation.plan, operation.action);
         // A proven API preflight conflict may acquire new explicit choices, but
         // a failed/unknown provider effect is never automatically replayed.
         if (
@@ -218,10 +248,15 @@ export function useFileMove(options: {
       setWorking(false);
     }
   }
-  function begin(plan: FileMovePlan, chooseDestination = true) {
-    if (!latest.current.canMutate || latest.current.isBusy() || working.current) return;
+  function begin(
+    plan: FileTransferPlan,
+    action: TransferAction = 'move',
+    chooseDestination = true,
+  ) {
+    if (!canAct(action) || latest.current.isBusy() || working.current) return;
     generation.current++;
-    const next: MoveState = {
+    const next: TransferState = {
+      action,
       plan,
       phase: chooseDestination ? 'destination' : 'checking',
       decisions: Object.create(null),
@@ -234,7 +269,7 @@ export function useFileMove(options: {
   function decide(choice: Choice, all = false) {
     const current = stateRef.current;
     if (current?.phase !== 'conflict' || working.current) return;
-    if (!isCurrent(current, generation.current)) return;
+    if (!isCurrent(current, generation.current) || !canAct(current.action)) return;
     const decisions = Object.assign(Object.create(null), current.decisions) as Record<
       string,
       Choice
@@ -258,6 +293,8 @@ export function useFileMove(options: {
   }, [state?.phase, currentCollision?.name]);
   const picker = state?.phase === 'destination';
   const conflict = state?.phase === 'conflict';
+  const actionAllowed = Boolean(state && canAct(state.action));
+  const actionLabel = t(state?.action === 'copy' ? 'file.copy' : 'file.move');
   return {
     begin,
     dialog: (
@@ -269,7 +306,7 @@ export function useFileMove(options: {
                 count: 1,
                 folder: state?.plan.destination.split('/').at(-1) || t('file.root'),
               })
-            : t('file.move')
+            : actionLabel
         }
         className={conflict ? 'fm-move-confirm fm-move-flow' : 'fm-move-flow'}
         closeIcon
@@ -288,7 +325,7 @@ export function useFileMove(options: {
                 onChange={(destination) =>
                   update({ ...state, plan: { ...state.plan, destination } })
                 }
-                disabled={busy}
+                disabled={busy || !actionAllowed}
               />
               <div className="fm-move-path">
                 <span>{t('file.destination')}</span>
@@ -299,12 +336,12 @@ export function useFileMove(options: {
                   type="button"
                   disabled={
                     busy ||
-                    !options.canMutate ||
+                    !actionAllowed ||
                     !validMoveTarget(state.plan.source, state.plan.names, state.plan.destination)
                   }
                   onClick={() => void execute(state)}
                 >
-                  {t('file.move')}
+                  {actionLabel}
                 </button>
               </div>
             </>
@@ -327,7 +364,7 @@ export function useFileMove(options: {
                   data-move-skip
                   aria-describedby={conflictNameId}
                   className="secondary"
-                  disabled={busy}
+                  disabled={busy || !actionAllowed}
                   onClick={() => decide('skip')}
                 >
                   {t('file.skip')}
@@ -336,7 +373,7 @@ export function useFileMove(options: {
                   type="button"
                   className="danger"
                   aria-describedby={conflictNameId}
-                  disabled={busy || !currentCollision.canOverwrite}
+                  disabled={busy || !actionAllowed || !currentCollision.canOverwrite}
                   onClick={() => decide('overwrite')}
                 >
                   {t('file.overwrite')}
@@ -344,7 +381,7 @@ export function useFileMove(options: {
                 <button
                   type="button"
                   className="secondary"
-                  disabled={busy}
+                  disabled={busy || !actionAllowed}
                   onClick={() => decide('skip', true)}
                   aria-describedby={conflictNameId}
                 >
@@ -353,7 +390,7 @@ export function useFileMove(options: {
                 <button
                   type="button"
                   className="danger"
-                  disabled={busy || !currentCollision.canOverwrite}
+                  disabled={busy || !actionAllowed || !currentCollision.canOverwrite}
                   onClick={() => decide('overwrite', true)}
                   aria-describedby={conflictNameId}
                 >
@@ -366,7 +403,13 @@ export function useFileMove(options: {
           {state?.phase === 'failed' && (
             <>
               <ErrorNotice error={state.error} />
-              {state.attempted && <p>{t('file.moveInspectFailure')}</p>}
+              {state.attempted && (
+                <p>
+                  {t(
+                    state.action === 'copy' ? 'file.copyInspectFailure' : 'file.moveInspectFailure',
+                  )}
+                </p>
+              )}
             </>
           )}
         </div>

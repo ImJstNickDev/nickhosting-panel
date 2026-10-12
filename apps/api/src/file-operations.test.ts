@@ -106,6 +106,78 @@ describe('safe file copy planning', () => {
       ),
     ).rejects.toThrow();
   });
+  const copyListing =
+    (targets: ServerFile[] = [file('a.txt')], sources = [file('a.txt')]) =>
+    async (path: string) =>
+      ({ '': [file('source', true), file('target', true)], source: sources, target: targets })[
+        path
+      ] ?? [];
+  it('allows only the explicitly approved regular-file collision at its exact root-relative path', async () => {
+    await expect(planFileCopy(copyListing(), 'source', ['a.txt'], 'target')).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(
+      await planFileCopy(copyListing(), 'source', ['a.txt'], 'target', ['target/a.txt']),
+    ).toEqual([{ source: 'source/a.txt', path: 'target/a.txt', directory: false, size: 4 }]);
+    expect(
+      await planFileCopy(copyListing([]), 'source', ['a.txt'], 'target', ['target/a.txt']),
+    ).toHaveLength(1);
+  });
+  it.each([
+    ['unrelated target', ['target/other.txt']],
+    ['relative to source instead of server root', ['a.txt']],
+    ['case mismatch', ['target/A.txt']],
+    ['duplicate approval', ['target/a.txt', 'target/a.txt']],
+    ['nested approval', ['target/a.txt/child']],
+  ])('rejects %s overwrite consent', async (_label, approvals) => {
+    await expect(
+      planFileCopy(copyListing(), 'source', ['a.txt'], 'target', approvals as string[]),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+  it.each([
+    ['directory target', [file('a.txt', true)], [file('a.txt')]],
+    ['symlink target', [file('a.txt', false, true)], [file('a.txt')]],
+    ['differently cased target', [file('A.txt')], [file('a.txt')]],
+    ['ambiguous target', [file('a.txt'), file('A.txt')], [file('a.txt')]],
+    ['directory source', [file('a.txt')], [file('a.txt', true)]],
+    ['symlink source', [file('a.txt')], [file('a.txt', false, true)]],
+    ['ambiguous source', [file('a.txt')], [file('a.txt'), file('A.txt')]],
+  ] as const)('rejects replacement with %s', async (_label, targets, sources) => {
+    await expect(
+      planFileCopy(copyListing([...targets], [...sources]), 'source', ['a.txt'], 'target', [
+        'target/a.txt',
+      ]),
+    ).rejects.toMatchObject({ code: 'conflict' });
+  });
+  it('preflights all collisions instead of accepting blanket consent', async () => {
+    await expect(
+      planFileCopy(
+        copyListing([file('a.txt'), file('b.txt')], [file('a.txt'), file('b.txt')]),
+        'source',
+        ['a.txt', 'b.txt'],
+        'target',
+        ['target/a.txt'],
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' });
+  });
+  it.each([
+    ['self', 'source', ['a.txt'], 'source', ['source/a.txt']],
+    ['descendant', '', ['source'], 'source/nested', []],
+    ['ancestor', 'source/nested', ['source'], '', ['source']],
+  ])(
+    'rejects %s overlap even with overwrite approval',
+    async (_label, root, names, target, approvals) => {
+      await expect(
+        planFileCopy(
+          copyListing(),
+          root as string,
+          names as string[],
+          target as string,
+          approvals as string[],
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    },
+  );
 });
 describe('validated file archive staging', () => {
   it.each(['zip', 'tar', 'tgz'] as const)(

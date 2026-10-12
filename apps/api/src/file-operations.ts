@@ -54,33 +54,69 @@ export interface CopyEntry {
   directory: boolean;
 }
 
+function assertCopyDestination(
+  listing: ServerFile[],
+  target: string,
+  sourceIsFile: boolean,
+  approved: ReadonlySet<string>,
+) {
+  const name = target.split('/').at(-1);
+  const matches = listing.filter((entry) => entry.name.toLowerCase() === name?.toLowerCase());
+  if (
+    matches.length > 0 &&
+    (!approved.has(target) ||
+      !sourceIsFile ||
+      matches.length !== 1 ||
+      matches[0]?.name !== name ||
+      !matches[0]?.is_file ||
+      matches[0]?.is_symlink)
+  )
+    throw new DomainError('conflict');
+}
+
+async function assertCopyDirectory(list: (path: string) => Promise<ServerFile[]>, path: string) {
+  const parts = path.split('/').filter(Boolean);
+  for (let index = 0; index < parts.length; index++) {
+    const matches = (await list(parts.slice(0, index).join('/'))).filter(
+      (entry) => entry.name.toLowerCase() === parts[index]?.toLowerCase(),
+    );
+    if (
+      matches.length !== 1 ||
+      matches[0]?.name !== parts[index] ||
+      matches[0]?.is_file ||
+      matches[0]?.is_symlink
+    )
+      throw new DomainError('conflict');
+  }
+}
+
 /** Enumerate the complete selection before the first destination mutation. */
 export async function planFileCopy(
   list: (path: string) => Promise<ServerFile[]>,
   root: string,
   names: string[],
   destination: string,
+  overwrite: string[] = [],
 ): Promise<CopyEntry[]> {
   root = clean(root, true);
   destination = clean(destination, true);
   const selected = names.map(child);
   if (new Set(selected.map((name) => name.toLowerCase())).size !== selected.length)
     throw new DomainError('validation_failed');
-  for (const path of [root, destination]) {
-    const parts = path.split('/').filter(Boolean);
-    for (let i = 0; i < parts.length; i++) {
-      const matches = (await list(parts.slice(0, i).join('/'))).filter(
-        (item) => item.name.toLowerCase() === parts[i]?.toLowerCase(),
-      );
-      if (
-        matches.length !== 1 ||
-        matches[0]?.is_file ||
-        matches[0]?.is_symlink ||
-        matches[0]?.name !== parts[i]
-      )
+  const approved = overwrite.map((path) => clean(path));
+  const targetPaths = selected.map((name) => pathJoin(destination, name));
+  if (
+    new Set(approved).size !== approved.length ||
+    approved.some((path) => !targetPaths.includes(path))
+  )
+    throw new DomainError('validation_failed');
+  const approvedTargets = new Set(approved);
+  const sources = selected.map((name) => pathJoin(root, name).toLowerCase());
+  for (const target of targetPaths.map((path) => path.toLowerCase()))
+    for (const source of sources)
+      if (target === source || target.startsWith(`${source}/`) || source.startsWith(`${target}/`))
         throw new DomainError('conflict');
-    }
-  }
+  for (const path of [root, destination]) await assertCopyDirectory(list, path);
   const targets = await list(destination);
   const entries: CopyEntry[] = [];
   let bytes = 0;
@@ -110,15 +146,15 @@ export async function planFileCopy(
   }
   const source = await list(root);
   for (const name of selected) {
-    const matches = source.filter((item) => item.name === name);
-    if (
-      matches.length !== 1 ||
-      targets.some((item) => item.name.toLowerCase() === name.toLowerCase())
-    )
-      throw new DomainError('conflict');
+    const matches = source.filter((item) => item.name.toLowerCase() === name.toLowerCase());
+    if (matches.length !== 1 || matches[0]?.name !== name) throw new DomainError('conflict');
     const selected = matches[0];
     if (!selected) throw new DomainError('conflict');
-    await visit(pathJoin(root, name), pathJoin(destination, name), selected, 0);
+    const target = pathJoin(destination, name);
+    if (approvedTargets.has(target) && (!selected.is_file || selected.is_symlink))
+      throw new DomainError('conflict');
+    assertCopyDestination(targets, target, selected.is_file, approvedTargets);
+    await visit(pathJoin(root, name), target, selected, 0);
   }
   return entries;
 }
@@ -361,6 +397,7 @@ export function registerFileOperationRoutes(
         root: z.string(),
         files: z.array(z.string()).min(1).max(100),
         destination: z.string(),
+        overwrite: z.array(z.string()).max(100).optional(),
       }),
       await body(c.req.raw),
     );
@@ -380,7 +417,9 @@ export function registerFileOperationRoutes(
             input.root,
             input.files,
             input.destination,
+            input.overwrite,
           );
+          const approvedTargets = new Set(input.overwrite ?? []);
           if (
             entries.some(
               (entry) =>
@@ -406,6 +445,7 @@ export function registerFileOperationRoutes(
             serverId,
             action: 'copy',
             count: entries.length,
+            overwrite: [...approvedTargets],
           });
           try {
             for (const entry of entries) {
@@ -416,10 +456,6 @@ export function registerFileOperationRoutes(
               const name = parts.pop();
               if (!name) throw new DomainError('validation_failed');
               const root = parts.join('/');
-              if (root) {
-                const parent = await inspectFilePath(service.adapter, id, root);
-                if (!parent || parent.is_file) throw new DomainError('conflict');
-              }
               const currentSource = await inspectFilePath(service.adapter, id, entry.source);
               if (
                 !currentSource ||
@@ -427,12 +463,16 @@ export function registerFileOperationRoutes(
                 currentSource.size !== entry.size
               )
                 throw new DomainError('conflict');
-              if (
-                (await service.adapter.listFiles(id, root)).some(
-                  (item) => item.name.toLowerCase() === name.toLowerCase(),
-                )
-              )
-                throw new DomainError('conflict');
+              const checkDestination = async () => {
+                await assertCopyDirectory((path) => service.adapter.listFiles(id, path), root);
+                assertCopyDestination(
+                  await service.adapter.listFiles(id, root),
+                  entry.path,
+                  !entry.directory,
+                  approvedTargets,
+                );
+              };
+              await checkDestination();
               if (entry.directory) await service.adapter.createDirectory(id, root, name);
               else {
                 const claim = await reserveUploadIngestion(
@@ -448,13 +488,20 @@ export function registerFileOperationRoutes(
                     authorize: () =>
                       service.authorizeTransfer(current, serverId, false, connection),
                   });
-                  await service.adapter.uploadFile(id, entry.path, {
-                    body: download.body,
-                    contentLength: entry.size,
-                    maxBytes,
-                    signal: c.req.raw.signal,
-                    authorize: () => service.authorizeTransfer(current, serverId, true, connection),
-                  });
+                  try {
+                    // Download negotiation may take time; recheck before the first write.
+                    await checkDestination();
+                    await service.adapter.uploadFile(id, entry.path, {
+                      body: download.body,
+                      contentLength: entry.size,
+                      maxBytes,
+                      signal: c.req.raw.signal,
+                      authorize: () =>
+                        service.authorizeTransfer(current, serverId, true, connection),
+                    });
+                  } finally {
+                    await download.body.cancel().catch(() => {});
+                  }
                   await claim.complete();
                 } finally {
                   await claim.unlock();

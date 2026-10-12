@@ -185,6 +185,10 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Some files may already have moved. Check the source and destination before trying again.',
     'Alcuni file potrebbero essere già stati spostati. Controlla origine e destinazione prima di riprovare.',
   ],
+  'file.copyInspectFailure': [
+    'Some files may already have been copied. Check the destination before trying again.',
+    'Alcuni file potrebbero essere già stati copiati. Controlla la destinazione prima di riprovare.',
+  ],
   'file.moveCollisionTitle': [
     '{count, plural, one {A file with the same name exists in {folder}} other {Files with the same names exist in {folder}}}',
     '{count, plural, one {File con lo stesso nome presente in {folder}} other {File con gli stessi nomi presenti in {folder}}}',

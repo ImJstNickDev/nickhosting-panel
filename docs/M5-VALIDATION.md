@@ -5384,3 +5384,42 @@ handlers, provider fixtures and existing approved isolated services; their own
 schemas/staging were disposed. No live-provider mutation, game-server asset,
 container restart or infrastructure change. No API, migration or dependency change;
 rollback is a code revert. PR#21 stays OPEN/unmerged; SFTPGo#18 remains a release gate.
+
+### 2026-10-12 — Shared Copy/Move destination and conflict flow
+
+Copy now uses Move's bounded folder tree, live destination path, three-name
+summary and Close icon. Both actions share one UI state machine, while Copy calls
+the existing streaming copy endpoint and preserves source files. Conflicts offer
+Skip/Overwrite and Skip all/Overwrite all; consent covers only reviewed exact
+regular-file destinations. Newly appearing names need a new decision. Folders,
+links and case-ambiguous replacements cannot be overwritten or merged.
+
+The additive `overwrite` API field is validated for the whole selection before
+effects and audited. Per-entry checks retain authorization, protected paths,
+streaming, full upload capacity and durable uncertainty. Destination metadata is
+rechecked after download negotiation. No destination is deleted first, no source
+is moved, and no failed/unknown effect is automatically replayed. Copy refreshes
+transfer availability after completion; its own claim cannot hide its result.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-operations.test.ts --reporter verbose`: **52 passed**. Covers scoped consent, unsafe replacements, overlaps and unchanged default collision refusal.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-operations.integration.test.ts --reporter verbose`: **23 passed**. Covers actual copies preserving source bytes, protected paths/revoked permissions, whole-batch preflight, late collisions, full capacity accounting, partial effects and retained uncertain claims. The initial run failed one new assertion that counted earlier cases' claims; scoped it to the current server and reran this handler file successfully. No production behavior was changed to satisfy the assertion.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/file-move.browser.test.ts apps/web/tests/file-manager.browser.test.ts -t 'M5 file move tree|supports keyboard context menus|asks only for file collisions|collision appears after drop preflight|clears move decisions on identity' --reporter verbose --hideSkippedTests`: **10 passed**,25 unrelated skipped. Preserves Move/drop identity invalidation, exact consent, uncertain-response behavior and existing ZIP/batch interactions.
+- Prefix + `apps/web/tests/file-copy.browser.test.ts`: initial **7 passed,1 failed**. A30s source-folder lookup timed out immediately after navigation, before any copy request. Prefix + that file + `-t 'copies a nested-source'`: **1 passed**,7 skipped. Prefix + that file + `-t 'uses the copy tree|copies a nested-source'`: **2 passed**,6 skipped. The navigation timeout did not reproduce; added failure-only navigation diagnostics, no retries or unrelated source change. All eight scenarios passed across these runs, not a single clean eight-case run. Covers desktop/mobile tree/menu/keyboard, original preservation, exact mixed consent, fresh conflicts after Overwrite all, all-skipped/no POST, unsafe replacements, revoked upload availability, own in-flight claim and an actual copy followed by lost response without replay.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm --filter @nickhosting/web build` and `scripts/dev.sh pnpm i18n:check`: passed;1233 EN/IT/pseudolocale keys. The existing bundle-size advisory remains. No historical full-suite rerun.
+- Final changed-file Biome and `scripts/dev.sh pnpm exec tsc -p apps/web/tsconfig.tests.json --noEmit` passed, including the failure-only browser diagnostics. Applicable axe scans reported no violations in all three captured states. Independent source/API/UX review found no must-fix issue; screenshots were inspected for desktop/mobile layout and EN/IT content.
+- `git diff --cached --check` and `python3 scripts/check-governance.py`: passed;625 text files,180 PNGs,531 relative links,4 TOML files and44 ignore cases checked. The credential scan remains heuristic.
+
+Reviewed screenshots: [EN desktop tree](screenshots/m5/file-copy-tree-desktop-en.png),
+[IT mobile tree](screenshots/m5/file-copy-tree-mobile-it.png),
+[IT mobile conflicts](screenshots/m5/file-copy-conflict-mobile-it.png).
+
+Tests use real application handlers, provider fixtures and the existing approved
+isolated services, disposing their own schemas/staging. No production provider
+request, game-server asset, configuration write, container restart or infrastructure
+change. No dependency or migration changes. The non-atomic interval against
+external Wings filesystem writers remains documented; partial copies have no
+automatic rollback guarantee. Rollback is a code revert. PR#21 stays OPEN/unmerged;
+SFTPGo#18 remains a separate production-release gate.

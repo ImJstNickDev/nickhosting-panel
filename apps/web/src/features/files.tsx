@@ -58,13 +58,13 @@ import {
   useFileSaveRecords,
 } from './file-background-save.js';
 import { FileIcon } from './file-icon.js';
-import { FileSelectionSummary, useFileMove } from './file-move-flow.js';
 import { FilePathPicker } from './file-path-picker.js';
+import { FileSelectionSummary, useFileTransfer } from './file-transfer-flow.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
 
-type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'copy' | 'extract';
+type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'extract';
 type UploadItem = {
   id: number;
   file: File;
@@ -252,7 +252,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }, []);
   const [mode, setMode] = useState<Mode>();
   const [targets, setTargets] = useState<string[]>([]);
-  const [destination, setDestination] = useState('');
   const [content, setContent] = useState('');
   const [newName, setNewName] = useState('');
   const [revision, setRevision] = useState<string | null>(null);
@@ -320,10 +319,19 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const uploadAvailable = transfers.data?.upload.available === true;
   const selectedNames = [...selected];
   const selectedEntries = files.data?.filter((entry) => selected.has(entry.name)) ?? [];
-  const moveFlow = useFileMove({
+  const capabilities = useQuery({
+    queryKey: ['file-capabilities', serverId],
+    refetchInterval: 10000,
+    queryFn: () =>
+      api<{ extractFormats: string[]; copy: boolean; extract: boolean }>(
+        `${serverPath(serverId)}/files/capabilities`,
+      ),
+  });
+  const transferFlow = useFileTransfer({
     serverId,
     identity: saveIdentity.current,
     canMutate,
+    canCopy: capabilities.data?.copy === true,
     isBusy: () => mutationRunning.current,
     setBusy: (busy) => {
       mutationRunning.current = busy;
@@ -339,14 +347,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     : transfers.isPending
       ? 'web.loading'
       : `file.uploadReason.${transfers.data?.upload.reason ?? 'configuration_invalid'}`;
-  const capabilities = useQuery({
-    queryKey: ['file-capabilities', serverId],
-    refetchInterval: 10000,
-    queryFn: () =>
-      api<{ extractFormats: string[]; copy: boolean; extract: boolean }>(
-        `${serverPath(serverId)}/files/capabilities`,
-      ),
-  });
   const archiveFormats = (capabilities.data?.extractFormats ?? []).map(
     (extension) => `.${extension}`,
   );
@@ -510,14 +510,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       )?.focus();
     });
   }
-  function chooseMode(value: Mode | 'move', names = selectedNames, folder = directory) {
+  function chooseMode(value: Mode | 'move' | 'copy', names = selectedNames, folder = directory) {
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     setError(undefined);
     setMenu(undefined);
     setTargets(names);
-    setDestination(folder);
-    if (value === 'move') {
-      moveFlow.begin({ source: directory, destination: folder, names });
+    if (value === 'move' || value === 'copy') {
+      transferFlow.begin({ source: directory, destination: folder, names }, value);
       return;
     }
     setMode(value);
@@ -820,7 +819,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       }
       setMenu(undefined);
       menuTrigger.current = document.activeElement as HTMLElement;
-      moveFlow.begin({ source: directory, destination: folder, names: payload.names }, false);
+      transferFlow.begin(
+        { source: directory, destination: folder, names: payload.names },
+        'move',
+        false,
+      );
     } catch {
       setError({ messageKey: 'file.invalidMove' });
     }
@@ -1916,7 +1919,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           {t('file.replaceUpload')}
         </button>
       </Dialog>
-      {moveFlow.dialog}
+      {transferFlow.dialog}
       <Dialog
         open={Boolean(mode) && !editing}
         className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
@@ -1927,9 +1930,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               ? 'service.rename'
               : mode === 'delete'
                 ? 'web.delete'
-                : mode === 'copy'
-                  ? 'file.copy'
-                  : 'file.extract',
+                : 'file.extract',
         )}
         onClose={closeEditor}
         closeIcon
@@ -1941,13 +1942,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           destructive={mode === 'delete'}
           onCancel={mode === 'delete' ? closeEditor : undefined}
           submitLabel={t(
-            mode === 'delete'
-              ? 'web.delete'
-              : mode === 'copy'
-                ? 'file.copy'
-                : mode === 'extract'
-                  ? 'file.extract'
-                  : 'web.save',
+            mode === 'delete' ? 'web.delete' : mode === 'extract' ? 'file.extract' : 'web.save',
           )}
           onSubmit={async (data) => {
             if (!canMutate) throw { messageKey: 'error.forbidden' };
@@ -1961,15 +1956,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 root: directory,
                 files: [{ from: targets[0], to: text(data, 'name') }],
               });
-            else if (mode === 'copy') {
-              const folder = normalizeFilePath(text(data, 'destination'));
-              if (folder === undefined || !validMoveTarget(directory, targets, folder))
-                throw { messageKey: 'file.invalidMove' };
-              await mutation(
-                { root: directory, files: targets, destination: folder },
-                '/files/copy',
-              );
-            } else if (mode === 'extract')
+            else if (mode === 'extract')
               await mutation(
                 {
                   root: directory,
@@ -1995,18 +1982,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     : ''
               }
             />
-          )}
-          {mode === 'copy' && (
-            <>
-              <FileSelectionSummary names={targets} />
-              <Input
-                label={t('file.destination')}
-                name="destination"
-                defaultValue={`/${destination}`}
-                required
-              />
-              <p className="muted">{t('file.noOverwrite')}</p>
-            </>
           )}
           {mode === 'delete' && (
             <>

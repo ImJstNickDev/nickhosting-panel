@@ -476,8 +476,8 @@ open directories or the editor. Each row has an accessible overflow menu and a
 desktop context menu; destructive actions require confirmation. Checkbox range
 selection, focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and
 explicit Move/Copy dialogs provide equivalent pointer and keyboard paths.
-Move opens a bounded, lazy folder tree with keyboard navigation, expand/collapse,
-loading/error/retry states and a live destination path. Root is selectable;
+Move and Copy use the same bounded, lazy folder tree with keyboard navigation,
+expand/collapse, loading/error/retry states and a live destination path. Root is selectable;
 the source and a selected folder's descendants cannot be destinations, but the
 source remains expandable. Only real folders are shown, not symlinks; leaf folders
 show no empty-state label. Summaries
@@ -491,8 +491,8 @@ checkbox is required. Initial focus stays on the safe Close control. Pending
 requests disable Cancel/Close/Delete and block Escape; failures remain visible
 without automatically repeating the deletion.
 
-Toolbar/context-menu moves and folder/parent/breadcrumb drops share one conflict
-flow. Drops move directly when fresh metadata has no collision. Otherwise the
+Toolbar/context-menu moves, copies and folder/parent/breadcrumb drops share one
+conflict flow. Drops move directly when fresh metadata has no collision. Otherwise the
 current conflicting filename and destination appear in a centered confirmation
 with Skip, Overwrite, Skip all and Overwrite all. Skip receives initial focus;
 Overwrite actions are red and all action targets are at least 48px high. Decisions
@@ -507,8 +507,12 @@ context discards the old choices and prevents a delayed preflight from submittin
 Backend validation remains authoritative. An API preflight conflict can reopen
 explicit choices, while an unknown/failed POST ends with a visible error and asks
 for source/destination inspection; it never retries automatically or claims rollback.
-Source/destination caches refresh after a mutation. Copy retains its existing
-no-overwrite behavior.
+Source/destination caches refresh after a mutation. Copy preserves originals and
+uses the existing streamed copy endpoint; explicit overwrite consent applies only
+to exact regular-file destinations. Copy also refreshes transfer availability and
+checks its upload capability before submission. An active claim from its own copy
+may temporarily disable new copies without hiding the in-flight result. Failed or
+uncertain copies ask for destination inspection; there is no automatic replay.
 Folders precede files for every sort; search filters the current directory only.
 Name, Size and Modified headers are sorting buttons in both list and grid views.
 The active non-default ordering has an up/down arrow; default Name ascending has

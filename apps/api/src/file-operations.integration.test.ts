@@ -280,6 +280,8 @@ describe('file operation handlers with isolated authoritative database', () => {
     expect(await result.clone().text()).toContain('completed');
     expect(result.status).toBe(200);
     expect(files.get('target/source/a.txt')?.toString()).toBe('hello');
+    expect(files.get('source/a.txt')?.toString()).toBe('hello');
+    expect(files.has('source/empty')).toBe(true);
     expect(files.has('target/source/empty')).toBe(true);
     expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toHaveLength(0);
     const events = await f.db
@@ -288,6 +290,177 @@ describe('file operation handlers with isolated authoritative database', () => {
       .where('action', '=', 'server.files.completed')
       .execute();
     expect(events.length).toBeGreaterThan(0);
+  });
+  it('copies mixed new and approved existing files without removing originals and audits exact approvals', async () => {
+    files.set('source/b.txt', Buffer.from('second'));
+    files.set('target/a.txt', Buffer.from('old target'));
+    const result = await post('copy', {
+      root: 'source',
+      files: ['a.txt', 'b.txt'],
+      destination: 'target',
+      overwrite: ['target/a.txt'],
+    });
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ completed: 2 });
+    expect(files.get('source/a.txt')?.toString()).toBe('hello');
+    expect(files.get('source/b.txt')?.toString()).toBe('second');
+    expect(files.get('target/a.txt')?.toString()).toBe('hello');
+    expect(files.get('target/b.txt')?.toString()).toBe('second');
+    expect(service.adapter.renameFiles).not.toHaveBeenCalled();
+    expect(service.assertFileMutation).toHaveBeenCalledWith(
+      serverId,
+      ['target/a.txt', 'target/b.txt'],
+      f.db,
+    );
+    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toHaveLength(0);
+    expect(
+      await f.db
+        .selectFrom('audit_events')
+        .select('metadata')
+        .where('action', '=', 'server.files.requested')
+        .execute(),
+    ).toContainEqual({
+      metadata: { serverId, action: 'copy', count: 2, overwrite: ['target/a.txt'] },
+    });
+  });
+  it('refuses unapproved, folder and out-of-scope copy replacements before any writes', async () => {
+    files.set('target/a.txt', Buffer.from('original'));
+    const input = { root: 'source', files: ['a.txt'], destination: 'target' };
+    expect((await post('copy', input)).status).toBe(409);
+    expect((await post('copy', { ...input, overwrite: ['target/other'] })).status).toBe(400);
+    files.set('target/a.txt', null);
+    expect((await post('copy', { ...input, overwrite: ['target/a.txt'] })).status).toBe(409);
+    expect(service.adapter.downloadFile).not.toHaveBeenCalled();
+    expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+    expect(service.adapter.createDirectory).not.toHaveBeenCalled();
+    expect(files.get('source/a.txt')?.toString()).toBe('hello');
+  });
+  it('validates the entire copy selection before replacing an approved file', async () => {
+    files.set('source/b.txt', Buffer.from('second'));
+    files.set('target/a.txt', Buffer.from('original a'));
+    files.set('target/b.txt', Buffer.from('original b'));
+    const result = await post('copy', {
+      root: 'source',
+      files: ['a.txt', 'b.txt'],
+      destination: 'target',
+      overwrite: ['target/a.txt'],
+    });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({ code: 'conflict' });
+    expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+    expect(files.get('target/a.txt')?.toString()).toBe('original a');
+  });
+  it.each(['protected path', 'revoked permission'])(
+    'retains %s enforcement for an approved copy overwrite',
+    async (reason) => {
+      files.set('target/a.txt', Buffer.from('original'));
+      const deny = async () => {
+        throw new DomainError('forbidden');
+      };
+      if (reason === 'protected path') service.assertFileMutation = deny;
+      else service.authorizeTransfer = deny;
+      const result = await post('copy', {
+        root: 'source',
+        files: ['a.txt'],
+        destination: 'target',
+        overwrite: ['target/a.txt'],
+      });
+      expect(result.status).toBe(reason === 'protected path' ? 403 : 409);
+      expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+      expect(files.get('target/a.txt')?.toString()).toBe('original');
+      expect(files.get('source/a.txt')?.toString()).toBe('hello');
+    },
+  );
+  it.each(['unapproved file', 'directory replacing approved file'])(
+    'rechecks a late %s after download negotiation and does not upload',
+    async (collision) => {
+      const approved = collision !== 'unapproved file';
+      if (approved) files.set('target/a.txt', Buffer.from('old destination'));
+      const download = vi.mocked(service.adapter.downloadFile).getMockImplementation();
+      if (!download) throw new Error('Missing download fixture');
+      vi.mocked(service.adapter.downloadFile).mockImplementationOnce(async (...args) => {
+        const response = await download(...args);
+        files.set('target/a.txt', approved ? null : Buffer.from('late arrival'));
+        return response;
+      });
+      const result = await post('copy', {
+        root: 'source',
+        files: ['a.txt'],
+        destination: 'target',
+        ...(approved ? { overwrite: ['target/a.txt'] } : {}),
+      });
+      expect(result.status).toBe(409);
+      expect(await result.json()).toMatchObject({ code: 'operation_uncertain' });
+      expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+      expect(files.get('target/a.txt')).toEqual(approved ? null : Buffer.from('late arrival'));
+      expect(files.get('source/a.txt')?.toString()).toBe('hello');
+    },
+  );
+  it('keeps full copy capacity accounting when replacing files', async () => {
+    files.set('target/a.txt', Buffer.from('hello'));
+    const server = await authorizeServer(f.db, f.context, serverId, 'server:manage');
+    vi.mocked(service.adapter.getResources).mockResolvedValueOnce({
+      resources: { disk_bytes: server.limits.disk * 1048576 },
+    } as Awaited<ReturnType<typeof service.adapter.getResources>>);
+    const result = await post('copy', {
+      root: 'source',
+      files: ['a.txt'],
+      destination: 'target',
+      overwrite: ['target/a.txt'],
+    });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({ code: 'resources_unavailable' });
+    expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+  });
+  it('reports a partial overwrite failure honestly while preserving source data and a durable claim', async () => {
+    files.set('source/b.txt', Buffer.from('second'));
+    files.set('target/a.txt', Buffer.from('old a'));
+    files.set('target/b.txt', Buffer.from('old b'));
+    const upload = vi.mocked(service.adapter.uploadFile).getMockImplementation();
+    if (!upload) throw new Error('Missing upload fixture');
+    vi.mocked(service.adapter.uploadFile)
+      .mockImplementationOnce(upload)
+      .mockImplementationOnce(async (_id, path, input) => {
+        files.set(path, Buffer.from(await new Response(input.body).arrayBuffer()));
+        throw new Error('lost response after write');
+      });
+    const result = await post('copy', {
+      root: 'source',
+      files: ['a.txt', 'b.txt'],
+      destination: 'target',
+      overwrite: ['target/a.txt', 'target/b.txt'],
+    });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toMatchObject({ code: 'operation_uncertain' });
+    expect(files.get('source/a.txt')?.toString()).toBe('hello');
+    expect(files.get('source/b.txt')?.toString()).toBe('second');
+    expect(files.get('target/a.txt')?.toString()).toBe('hello');
+    expect(files.get('target/b.txt')?.toString()).toBe('second');
+    expect(service.adapter.uploadFile).toHaveBeenCalledTimes(2);
+    expect(
+      await f.db
+        .selectFrom('upload_ingestion_claims')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toHaveLength(1);
+    expect(
+      await f.db
+        .selectFrom('audit_events')
+        .select('metadata')
+        .where('action', '=', 'server.files.incomplete')
+        .execute(),
+    ).toContainEqual({
+      metadata: { serverId, action: 'copy', completed: 1, outcome: 'partial_or_uncertain' },
+    });
+    expect(
+      await f.db
+        .selectFrom('audit_events')
+        .select('id')
+        .where('action', '=', 'server.files.completed')
+        .where(sql<boolean>`metadata ->> 'serverId' = ${serverId}`)
+        .execute(),
+    ).toHaveLength(0);
   });
   it('preserves a durable claim on interrupted upload and never declares success', async () => {
     vi.mocked(service.adapter.uploadFile).mockRejectedValueOnce(

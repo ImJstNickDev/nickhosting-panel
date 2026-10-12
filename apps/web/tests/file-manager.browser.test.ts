@@ -224,7 +224,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     ).toBeChecked();
     const selection = user.getByRole('region', { name: 'Selected files' });
     await selection.getByRole('button', { name: 'Copy', exact: true }).click();
-    await dialog().getByLabel('Destination folder', { exact: true }).fill('/world');
+    await dialog().getByRole('treeitem', { name: 'world', exact: true }).click();
     await dialog().getByRole('button', { name: 'Copy', exact: true }).click();
     await browserExpect(dialog()).not.toBeVisible();
     expect((await provider.files()).get('world/alpha.txt')?.toString()).toBe('Alpha notes');
