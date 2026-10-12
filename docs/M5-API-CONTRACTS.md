@@ -508,6 +508,12 @@ credential is returned to the browser.
 | `POST /copy` | `{root,files,destination}`; copies selections recursively into an existing directory. Preflight rejects collisions, symlinks, self-descendants and protected targets. No overwrite. |
 | `POST /extract` | `{root,file,destination,confirm:true}`; destination is one new child directory. Validate/stage the entire archive before remote writes, then use existing upload admission and adapter streams. |
 
+ZIP attachments use `nhpanel-<server-name>-YYYY-MM-DD_HH_mm_ss.zip`, with the
+request timestamp in UTC. The managed server name becomes lowercase ASCII:
+diacritics are removed, spaces/symbols become single hyphens, and the stem is
+trimmed/bounded to 100 characters (fallback `server`). Naming reuses the authorized
+server row and adds no provider request. Archive contents/paths are unchanged.
+
 `POST /v1/servers/:id/files` with `action:"rename"` also handles moves. Its optional
 `overwrite: string[]` identifies exact root-relative destination paths from the
 same `files:[{from,to}]` request. Omission retains no-overwrite preflight. Consent

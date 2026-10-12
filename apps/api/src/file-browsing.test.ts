@@ -30,7 +30,7 @@ const file = (name: string, is_file = true, size = 3): ServerFile => ({
   created_at: '2026-01-01T00:00:00Z',
   modified_at: '2026-01-01T00:00:00Z',
 });
-function fixture() {
+function fixture(serverName = 'Fixture server') {
   const entries = new Map([
     ['', [file('a.txt'), file('folder', false)]],
     ['folder', [file('b.txt')]],
@@ -52,7 +52,7 @@ function fixture() {
       _server: string,
       _write: boolean,
       work: (...args: unknown[]) => unknown,
-    ) => work('provider', {}, {}),
+    ) => work('provider', {}, {}, { name: serverName }),
   );
   const service = {
     adapter,
@@ -122,6 +122,55 @@ function minecraftGuard(f: ReturnType<typeof fixture>) {
 }
 vi.mock('@nickhosting/database', () => ({ recordAudit: vi.fn(async () => {}) }));
 describe('file browsing and streaming ZIP', () => {
+  it.each([
+    ['  Survival di Nic — Città 26.1!  ', 'survival-di-nic-citta-26-1'],
+    ['../"Server"\r\nName', 'server-name'],
+    ['🎮 日本語', 'server'],
+    ['ﬃ'.repeat(100), `${'ffi'.repeat(33)}f`],
+  ])(
+    'names ZIP attachments safely from the managed name %s and request time',
+    async (name, slug) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-01-02T03:04:05Z'));
+      try {
+        const f = fixture(name);
+        f.adapter.downloadFile = vi.fn(async () => ({
+          body: new Blob(['one']).stream(),
+          contentType: 'application/octet-stream' as const,
+          contentLength: 3,
+        }));
+        // Metadata enumeration may finish later; the filename keeps the request time.
+        f.adapter.listFiles = vi.fn(async (_id, directory = '') => {
+          vi.setSystemTime(new Date('2026-01-02T03:05:20Z'));
+          return f.entries.get(directory) ?? [];
+        });
+        const app = new Hono();
+        registerFileBrowsingRoutes(
+          app as never,
+          {
+            principal: async () => ({}),
+            management: async () => f.service,
+          } as unknown as ServerRouteOptions,
+        );
+        const response = await app.request(
+          `/v1/servers/abc/files/archive?files=${encodeURIComponent(JSON.stringify(['a.txt']))}`,
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-disposition')).toBe(
+          `attachment; filename="nhpanel-${slug}-2026-01-02_03_04_05.zip"`,
+        );
+        expect(response.headers.get('content-type')).toBe('application/zip');
+        const contents: string[] = [];
+        await visitArchive(Buffer.from(await response.arrayBuffer()), async (entry) => {
+          contents.push(`${entry.path}:${(await readArchiveFile(entry, 100)).toString()}`);
+        });
+        expect(contents).toEqual(['a.txt:one']);
+        expect(f.service.access).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
   it('collects selected trees once and includes empty directories', async () => {
     const f = fixture();
     f.entries.set('folder', []);

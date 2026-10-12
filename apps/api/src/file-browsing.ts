@@ -252,6 +252,7 @@ export function registerFileBrowsingRoutes(
     return c.json({ revision });
   });
   app.get('/v1/servers/:id/files/archive', async (c) => {
+    const requestedAt = new Date();
     const context = await principal(c),
       service = await management(),
       serverId = c.req.param('id');
@@ -264,12 +265,13 @@ export function registerFileBrowsingRoutes(
     const parsed = z.array(z.string().min(1).max(255)).min(1).max(100).safeParse(raw);
     if (!parsed.success) throw new DomainError('validation_failed');
     const authorize = () => service.authorizeTransfer(context, serverId, false);
-    const { id, entries } = await service.access(
+    const { id, serverName, entries } = await service.access(
       context,
       serverId,
       false,
-      async (id, connection, current) => ({
+      async (id, connection, current, server) => ({
         id,
+        serverName: server.name,
         entries: await collectArchiveEntries(
           service.adapter,
           id,
@@ -280,6 +282,17 @@ export function registerFileBrowsingRoutes(
         ),
       }),
     );
+    const name =
+      serverName
+        .normalize('NFKD')
+        .replace(/\p{M}/gu, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 100)
+        .replace(/-+$/g, '') || 'server';
+    const timestamp = requestedAt.toISOString().slice(0, 19).replace('T', '_').replaceAll(':', '_');
+    const filename = `nhpanel-${name}-${timestamp}.zip`;
     const stream = streamFileZip(
       entries,
       async (entry, signal) => {
@@ -304,7 +317,7 @@ export function registerFileBrowsingRoutes(
     return new Response(stream, {
       headers: {
         'content-type': 'application/zip',
-        'content-disposition': 'attachment; filename="files.zip"',
+        'content-disposition': `attachment; filename="${filename}"`,
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
       },

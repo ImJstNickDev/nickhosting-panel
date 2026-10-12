@@ -237,9 +237,20 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await dialog().getByRole('button', { name: 'Close', exact: true }).click();
     await user.getByRole('checkbox', { name: 'Select alpha.txt', exact: true }).check();
     await user.getByRole('checkbox', { name: 'Select beta.json', exact: true }).check();
+    const archiveRequestedAt = Date.now();
     const downloading = user.waitForEvent('download');
     await selection.getByRole('button', { name: 'Download ZIP', exact: true }).click();
     const downloaded = await downloading;
+    expect(downloaded.suggestedFilename()).toMatch(
+      /^nhpanel-survival-\d{4}-\d{2}-\d{2}_\d{2}_\d{2}_\d{2}\.zip$/,
+    );
+    const [date, hours, minutes, seconds] = downloaded
+      .suggestedFilename()
+      .slice('nhpanel-survival-'.length, -4)
+      .split('_');
+    const archiveTime = Date.parse(`${date}T${hours}:${minutes}:${seconds}Z`);
+    expect(archiveTime).toBeGreaterThanOrEqual(Math.floor(archiveRequestedAt / 1000) * 1000);
+    expect(archiveTime).toBeLessThanOrEqual(Date.now());
     const path = await downloaded.path();
     expect(path).toBeTruthy();
     const bytes = await readFile(path as string);

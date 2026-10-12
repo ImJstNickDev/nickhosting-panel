@@ -5305,3 +5305,24 @@ schemas/staging. No live provider call, game-server asset, infrastructure operat
 or explicit container restart occurred; existing dev source watchers load the fix.
 No secrets, migration or dependency changes. Rollback is a code revert. PR#21 stays
 OPEN/unmerged; SFTPGo#18 remains an independent production-release gate.
+
+### 2026-10-12 — Named ZIP exports
+
+ZIP downloads now use `nhpanel-<normalized-server-name>-YYYY-MM-DD_HH_mm_ss.zip`.
+The name comes from the already-authorized managed-server row, without additional
+DB/provider requests. The timestamp is captured at request start in UTC, so lengthy
+enumeration does not change it. The ASCII stem is lowercase, accent-folded,
+hyphen-separated and bounded to100 characters, with `server` as an empty fallback.
+Archive contents, paths, lazy streaming and authorization remain unchanged.
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts`: **40 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'supports keyboard context menus' --reporter verbose --hideSkippedTests`: **1 passed**,26 unrelated skipped. Confirms the actual browser filename, UTC request-time window and existing ZIP bytes/batch behavior through real application handlers.
+- Initial typecheck caught a new test fixture's MIME type differing from the adapter's literal `application/octet-stream` contract. Corrected the fixture only; final `scripts/dev.sh pnpm typecheck` passed. Reran only affected naming cases with `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts -t 'names ZIP attachments safely' --hideSkippedTests`: **4 passed**,36 skipped. These cover punctuation/accents, unsafe header characters, empty-normalized names, bounded Unicode expansion and request time surviving delayed enumeration.
+- Changed-file Biome, diff and staged governance checks passed. No full historical suite or visual screenshot rerun; rendered UI is unchanged.
+
+Independent review found no remaining must-fix issue after correcting the fixture
+contract. Tests used isolated provider fixtures and approved existing services,
+cleaning their own schemas/staging. No production interaction, live provider call,
+game-server asset, infrastructure change or explicit restart occurred. No migration
+or dependency change; rollback is a code revert. PR#21 stays OPEN/unmerged and
+SFTPGo#18 remains an independent production-release gate.
