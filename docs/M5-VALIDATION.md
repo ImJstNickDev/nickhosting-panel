@@ -6183,3 +6183,27 @@ No real game-server command/file mutation, new live asset, network change,
 credential change or production deployment. Test schemas are disposed by their
 fixtures. Rollback is a source revert, without migration/data reset. PR #21 stays
 open and unmerged; SFTPGo #18 remains a separate production-release blocker.
+
+### 2026-10-12 — completed-upload hints and folder restoration
+
+Fixed the browser-only upload/delete/reupload conflict: hidden completed queue
+entries were permanently treated as existing files. They are now retired after
+an already-required successful directory listing started after their completion.
+A delayed older listing, failed read or aborted navigation cannot discard newer
+completion hints. This adds no provider request or per-file verification. Folder
+paths are remembered per browser tab, server and authenticated actor/subject
+(including support-session identity); reload returns to the current folder.
+Blocked browser storage degrades to ordinary non-persistent navigation.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-refresh.browser.test.ts`: **9 passed**, 34.45 seconds. Real browser/application handlers and disposable database schema with fixture provider: root/nested upload→delete→reupload, nested-folder reload/root reset, delayed/failed listings, navigation, unmount and folder uploads. Existing true-overwrite consent regression preserved.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- Changed-file Biome, whitespace and indexed governance checks: passed.
+- Independent read-only review: no must-fix findings. Explicit browser-storage-denied and cross-identity persistence coverage remain optional additions, not claims of tested scenarios.
+
+Only the existing isolated test services were used; fixtures dispose their
+schemas and temporary test assets. No real server file operation, container
+restart, production/infrastructure change, or new resource. Development uses
+its existing Vite HMR. No layout change or new screenshot; no historical full
+suite rerun. PR #21 remains open and unmerged; rollback is a source revert.

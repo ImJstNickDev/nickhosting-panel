@@ -251,7 +251,30 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const searchInput = useRef<HTMLInputElement>(null);
   const server = useServer(serverId),
     transfers = useTransfers(serverId);
-  const [directory, setDirectory] = useState('');
+  const directoryKey = saveScope
+    ? JSON.stringify(['file-directory', ...saveScope, serverId])
+    : undefined;
+  const readDirectory = (key: string | undefined) => {
+    try {
+      const path = key ? sessionStorage.getItem(key) : null;
+      return path !== null && normalizeFilePath(path) !== undefined ? path : '';
+    } catch {
+      return '';
+    }
+  };
+  const [folder, setFolder] = useState(() => ({
+    key: directoryKey,
+    path: readDirectory(directoryKey),
+  }));
+  const directory = folder.key === directoryKey ? folder.path : readDirectory(directoryKey);
+  function setDirectory(path: string) {
+    setFolder({ key: directoryKey, path });
+    try {
+      if (directoryKey) sessionStorage.setItem(directoryKey, path);
+    } catch {
+      // Browsers may disable storage; folder navigation still works normally.
+    }
+  }
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<string>();
   const [search, setSearch] = useState('');
@@ -352,7 +375,35 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const mutationRunning = useRef(false);
   const readAbort = useRef<AbortController | undefined>(undefined),
     readSequence = useRef(0);
-  const files = useQuery(fileDirectoryQuery(serverId, directory));
+  const uploadSnapshot = useRef(uploads);
+  uploadSnapshot.current = uploads;
+  const directoryQuery = fileDirectoryQuery(serverId, directory);
+  const files = useQuery({
+    ...directoryQuery,
+    queryFn: async (context) => {
+      // Only retire hints for uploads completed BEFORE this listing started.
+      // An older in-flight listing cannot prove a just-uploaded file is absent.
+      const completed = new Set(
+        uploadSnapshot.current
+          .filter(
+            (item) =>
+              item.status === 'complete' &&
+              item.path.slice(0, Math.max(0, item.path.lastIndexOf('/'))) === directory,
+          )
+          .map((item) => item.id),
+      );
+      const identity = saveIdentity.current;
+      const entries = await directoryQuery.queryFn(context);
+      if (
+        completed.size &&
+        mounted.current &&
+        !context.signal.aborted &&
+        saveIdentity.current === identity
+      )
+        setUploads((previous) => previous.filter((item) => !completed.has(item.id)));
+      return entries;
+    },
+  });
   useEffect(() => {
     let active = true,
       dirty = false,
@@ -1401,7 +1452,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     } else activeUploads.current.get(id)?.abort();
   }
   const totalSelected = selected.size;
-  // Keep completed paths for overwrite confirmation when a listing is still stale;
+  // Keep completed paths only until a subsequent successful directory listing;
   // show only pending transfers and failures in the queue.
   const visibleUploads = uploads.filter(
     (item) => item.status !== 'complete' && item.status !== 'cancelled',

@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { expect as browserExpect, type Page, type Route } from '@playwright/test';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { prepareJourneyIdentities } from './journey-fixture.js';
+import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 describe('M5 uploads coalesce display refreshes without delaying file writes', () => {
@@ -47,6 +47,8 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
   afterEach(async () => {
     await user.unrouteAll({ behavior: 'ignoreErrors' });
     await user.goto(`${harness.origin}/servers`);
+    // Each case starts with a fresh tab preference, independent of saved folders.
+    await user.evaluate(() => sessionStorage.clear());
     expect(errors).toEqual([]);
   });
   afterAll(async () => {
@@ -107,6 +109,74 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
       },
     };
   }
+
+  it.each(['', 'world'])(
+    'uploads a deleted filename again without replacement consent in folder "%s"',
+    async (directory) => {
+      await open();
+      if (directory) {
+        await entry(directory).getByRole('button', { name: directory, exact: true }).click();
+        await browserExpect(entry('level.dat')).toBeVisible();
+      }
+      const files = batch(`reupload-${directory || 'root'}`, 1);
+      const file = files[0];
+      if (!file) throw new Error('Missing upload fixture');
+      const name = file.name;
+      const prefix = directory ? `${directory}/` : '';
+      await choose(files);
+      await completed(files, prefix);
+      await browserExpect(queue()).toHaveCount(0);
+      await browserExpect(entry(name)).toBeVisible();
+      await entry(name)
+        .getByRole('button', { name: `Actions for ${name}`, exact: true })
+        .click();
+      await user.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+      await user.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
+      await browserExpect(user.getByRole('dialog')).toHaveCount(0);
+      await browserExpect(entry(name)).toHaveCount(0);
+      expect((await provider.files()).has(`${prefix}${name}`)).toBe(false);
+
+      const replacement = [{ ...file, buffer: Buffer.from('Uploaded after deletion') }];
+      await choose(replacement);
+      await completed(replacement, prefix);
+      await browserExpect(queue()).toHaveCount(0);
+      await browserExpect(user.getByRole('dialog')).toHaveCount(0);
+      await browserExpect(entry(name)).toBeVisible();
+      expect(uploads).toEqual([
+        { path: `${prefix}${name}`, overwrite: null },
+        { path: `${prefix}${name}`, overwrite: null },
+      ]);
+    },
+  );
+
+  it('restores the current nested folder after reload and remembers returning to root', async () => {
+    await journeyRequest(harness, user, endpoint, {
+      action: 'mkdir',
+      root: 'world',
+      name: 'remembered-folder',
+    });
+    (await provider.files()).set('world/remembered-folder/nested.txt', Buffer.from('Nested file'));
+    await open();
+    await entry('world').getByRole('button', { name: 'world', exact: true }).click();
+    await entry('remembered-folder')
+      .getByRole('button', { name: 'remembered-folder', exact: true })
+      .click();
+    await browserExpect(entry('nested.txt')).toBeVisible();
+    await user.reload();
+    await browserExpect(entry('nested.txt')).toBeVisible();
+    await browserExpect(entry('world')).toHaveCount(0);
+    await browserExpect(user.getByRole('navigation', { name: 'File location' })).toContainText(
+      'remembered-folder',
+    );
+    await user.locator('.fm-breadcrumb').getByRole('button', { name: 'root', exact: true }).click();
+    await browserExpect(entry('world')).toBeVisible();
+    await user.reload();
+    await browserExpect(entry('world')).toBeVisible();
+    await browserExpect(entry('nested.txt')).toHaveCount(0);
+    await browserExpect(user.getByRole('navigation', { name: 'File location' })).not.toContainText(
+      'remembered-folder',
+    );
+  });
 
   it('finishes 49 parallel uploads while one listing is held and follows it with a fresh final listing', async () => {
     await open();
