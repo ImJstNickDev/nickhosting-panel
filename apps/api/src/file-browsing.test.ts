@@ -1,9 +1,16 @@
 import { Readable } from 'node:stream';
 import { readArchiveFile, visitArchive } from '@nickhosting/content-providers';
-import { DomainError } from '@nickhosting/core';
+import { DomainError, SecretCodec } from '@nickhosting/core';
+import type { Database } from '@nickhosting/database';
 import type { PterodactylAdapter, ServerFile } from '@nickhosting/pterodactyl-adapter';
 import { Hono } from 'hono';
+import type { Kysely } from 'kysely';
 import { describe, expect, it, vi } from 'vitest';
+import {
+  type FileMutationContext,
+  trustedGameModules,
+} from '../../../packages/server-management/src/game-modules.js';
+import { createMinecraftModuleRuntime } from '../../../packages/server-management/src/minecraft-module.js';
 import {
   collectArchiveEntries,
   fileRevision,
@@ -50,10 +57,68 @@ function fixture() {
   const service = {
     adapter,
     access,
-    assertFileMutation: vi.fn(async () => {}),
+    assertFileMutation: vi.fn(
+      async (
+        _server: string,
+        _paths: readonly string[],
+        _connection: unknown,
+        _context?: FileMutationContext,
+      ) => {},
+    ),
     authorizeTransfer: vi.fn(async () => {}),
   };
   return { entries, contents, adapter, service };
+}
+/** Exercise the real Minecraft filesystem guards; only database storage is isolated. */
+function minecraftGuard(f: ReturnType<typeof fixture>) {
+  expect(trustedGameModules.get('minecraft-java')).toBeDefined();
+  const rows: Record<string, unknown> = {
+    minecraft_server_profiles: {
+      combination_id: 'choice',
+      installed_manifest: [{ path: 'libraries/runtime.jar' }],
+    },
+    minecraft_combinations: {
+      binding: {
+        profile: 'vanilla',
+        release: '26.1',
+        image: 'fixture:java25',
+        imageJavaMajor: 25,
+        declaredEggVariables: [],
+        bindings: {},
+        fixedVariables: {},
+        installationKind: 'server-jar',
+        artifactPaths: { server: 'server.jar' },
+        supportedProperties: [],
+      },
+    },
+    managed_servers: { pterodactyl_identifier: 'provider' },
+  };
+  const db = {
+    selectFrom(table: string) {
+      const query = {
+        select: () => query,
+        selectAll: () => query,
+        where: () => query,
+        executeTakeFirst: async () => rows[table],
+        executeTakeFirstOrThrow: async () => rows[table],
+      };
+      return query;
+    },
+  } as unknown as Kysely<Database>;
+  const runtime = createMinecraftModuleRuntime({
+    db,
+    adapter: f.adapter,
+    env: {},
+    codec: new SecretCodec({ activeKeyId: 'fixture', keys: { fixture: Buffer.alloc(32) } }),
+    observedImageDigest: async () => null,
+    authorizeJob: async () => {
+      throw new Error('unused');
+    },
+  });
+  f.service.assertFileMutation.mockImplementation((server, paths, _connection, context) =>
+    runtime.assertFileMutation(server, paths, db, context),
+  );
+  return { runtime, db };
 }
 vi.mock('@nickhosting/database', () => ({ recordAudit: vi.fn(async () => {}) }));
 describe('file browsing and streaming ZIP', () => {
@@ -286,6 +351,96 @@ describe('editor revisions', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ revision: fileRevision(Buffer.from('new')) });
+  });
+  it('shares nested directory preflight between real Minecraft and generic guards, retaining read/write/read verification', async () => {
+    const f = appFixture();
+    minecraftGuard(f);
+    const response = await f.app.request('/v1/servers/abc/files/editor', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: 'folder/b.txt',
+        content: 'new',
+        expectedRevision: fileRevision(Buffer.from('two')),
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(f.adapter.listFiles).mock.calls).toEqual([
+      ['provider', ''],
+      ['provider', 'folder'],
+    ]);
+    expect(vi.mocked(f.adapter.readFile).mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      ['provider', 'folder/b.txt'],
+      ['provider', 'folder/b.txt'],
+    ]);
+    const reads = vi.mocked(f.adapter.readFile).mock.invocationCallOrder;
+    const write = vi.mocked(f.adapter.writeFile).mock.invocationCallOrder[0] ?? 0;
+    expect(reads[0]).toBeLessThan(write);
+    expect(reads[1]).toBeGreaterThan(write);
+    expect(await response.json()).toEqual({ revision: fileRevision(Buffer.from('new')) });
+
+    // A subsequent authorized request must see a newly introduced provider symlink.
+    f.entries.set('', [file('a.txt'), { ...file('folder', false), is_symlink: true }]);
+    const next = await f.app.request('/v1/servers/abc/files/editor', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: 'folder/b.txt',
+        content: 'next',
+        expectedRevision: fileRevision(Buffer.from('new')),
+      }),
+    });
+    expect(next.status).toBe(409);
+    expect(f.adapter.listFiles).toHaveBeenCalledTimes(3);
+    expect(f.adapter.writeFile).toHaveBeenCalledTimes(1);
+  });
+  it.each(['case-alias', 'duplicate-alias', 'symlink', 'file-ancestor'])(
+    'preserves %s rejection with shared preflight observations',
+    async (kind) => {
+      const f = appFixture();
+      minecraftGuard(f);
+      if (kind === 'case-alias') f.entries.set('', [file('Folder', false)]);
+      if (kind === 'duplicate-alias')
+        f.entries.set('', [file('folder', false), file('Folder', false)]);
+      if (kind === 'symlink') f.entries.set('', [{ ...file('folder', false), is_symlink: true }]);
+      if (kind === 'file-ancestor') f.entries.set('', [file('folder')]);
+      const response = await f.app.request('/v1/servers/abc/files/editor', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          path: 'folder/b.txt',
+          content: 'replacement',
+          expectedRevision: fileRevision(Buffer.from('two')),
+        }),
+      });
+      expect(response.status).toBe(kind === 'file-ancestor' ? 403 : 409);
+      expect(f.adapter.writeFile).not.toHaveBeenCalled();
+      expect(f.adapter.readFile).not.toHaveBeenCalled();
+    },
+  );
+  it('preserves protected runtime paths and refuses a preflight bound to another provider server', async () => {
+    const f = appFixture();
+    const { runtime, db } = minecraftGuard(f);
+    const listFiles = vi.fn(async () => [] as ServerFile[]);
+    await expect(
+      runtime.assertFileMutation('abc', ['folder/b.txt'], db, {
+        providerIdentifier: 'foreign',
+        listFiles,
+      }),
+    ).rejects.toThrow('conflict');
+    expect(listFiles).not.toHaveBeenCalled();
+    await expect(
+      runtime.assertFileMutation('abc', ['libraries'], db, {
+        providerIdentifier: 'provider',
+        listFiles,
+      }),
+    ).rejects.toMatchObject({
+      code: 'validation_failed',
+      details: { reason: 'minecraft_runtime_file_protected' },
+    });
+    expect(listFiles).not.toHaveBeenCalled();
+    expect(f.adapter.writeFile).not.toHaveBeenCalled();
   });
   it('rechecks authorization after remote reads and refuses a revoked write', async () => {
     const f = appFixture();

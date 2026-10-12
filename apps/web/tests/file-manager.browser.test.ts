@@ -503,8 +503,40 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await editor.press('Control+s');
     await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
     await user.getByRole('button', { name: 'Rename', exact: true }).click();
-    await dialog().getByLabel('Name', { exact: true }).fill('renamed-alpha.txt');
-    await dialog().getByRole('button', { name: 'Save changes', exact: true }).click();
+    const rename = user.locator('.fm-inline-rename input');
+    await browserExpect(rename).toBeFocused();
+    expect(
+      await rename.evaluate((input: HTMLInputElement) => [
+        input.selectionStart,
+        input.selectionEnd,
+      ]),
+    ).toEqual([0, 5]);
+    await browserExpect(dialog()).toHaveCount(0);
+    const width = await rename.evaluate((input) => {
+      const sizer = input.parentElement?.querySelector('.fm-inline-rename-sizer');
+      if (!sizer) throw new Error('Missing inline name sizer');
+      const range = document.createRange();
+      range.selectNodeContents(sizer);
+      return {
+        input: input.getBoundingClientRect().width,
+        text: range.getBoundingClientRect().width,
+      };
+    });
+    expect(width.input - width.text).toBeGreaterThanOrEqual(0);
+    expect(width.input - width.text).toBeLessThanOrEqual(8);
+    await user.screenshot({
+      path: resolve('.codex/local/m5-browser/screenshots/file-editor-inline-rename-desktop-en.png'),
+      fullPage: true,
+    });
+    await rename.fill('../invalid');
+    await rename.press('Enter');
+    await browserExpect(rename).toHaveAttribute('aria-invalid', 'true');
+    expect((await provider.files()).has('alpha.txt')).toBe(true);
+    await rename.fill('i.txt');
+    expect((await rename.boundingBox())?.width).toBeLessThan(width.input);
+    await rename.fill('renamed-alpha.txt');
+    expect((await rename.boundingBox())?.width).toBeGreaterThan(width.input);
+    await rename.press('Enter');
     await browserExpect(dialog()).toHaveCount(0);
     await browserExpect(user.locator('.fm-current-file')).toHaveText('renamed-alpha.txt');
     await browserExpect(editor).toHaveText('Unsaved rename draft');
@@ -517,11 +549,53 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     );
     // Restore this isolated fixture through the same UI so later journeys retain their starting path.
     await user.getByRole('button', { name: 'Rename', exact: true }).click();
-    await dialog().getByLabel('Name', { exact: true }).fill('alpha.txt');
-    await dialog().getByRole('button', { name: 'Save changes', exact: true }).click();
+    await rename.fill('alpha.txt');
+    await editor.click();
     await browserExpect(user.locator('.fm-current-file')).toHaveText('alpha.txt');
     await browserExpect(editor).toHaveText('Saved after rename');
     await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+  });
+  it('keeps inline rename compact on Italian mobile with keyboard cancel and visible validation', async () => {
+    await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'it' });
+    await user.setViewportSize({ width: 390, height: 844 });
+    try {
+      await user.goto(base);
+      await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
+      await user.getByRole('button', { name: 'Rinomina', exact: true }).click();
+      const name = user.locator('.fm-inline-rename input');
+      await browserExpect(name).toBeFocused();
+      await user.screenshot({
+        path: resolve(
+          '.codex/local/m5-browser/screenshots/file-editor-inline-rename-mobile-it.png',
+        ),
+        fullPage: true,
+      });
+      await name.fill('..');
+      await name.press('Enter');
+      await browserExpect(name).toHaveAttribute('aria-invalid', 'true');
+      await browserExpect(
+        user.locator('.fm-inline-rename-error-popup').getByRole('alert'),
+      ).toBeVisible();
+      const audit = await new AxeBuilder({ page: user })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze();
+      expect(audit.violations.map(({ id }) => id)).toEqual([]);
+      expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await user.screenshot({
+        path: resolve(
+          '.codex/local/m5-browser/screenshots/file-editor-inline-rename-invalid-mobile-it.png',
+        ),
+        fullPage: true,
+      });
+      await name.press('Escape');
+      await browserExpect(name).toHaveCount(0);
+      await browserExpect(user.locator('.fm-current-file')).toHaveText('alpha.txt');
+    } finally {
+      await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
   });
   it('keeps edits when browser Back is cancelled and leaves only after confirmation', async () => {
     await user.goto(base.replace(/files$/, 'console'));
@@ -648,51 +722,114 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     user.once('dialog', (confirmation) => confirmation.accept());
     await user.getByRole('button', { name: 'Back to files', exact: true }).click();
   });
-  it('retains the open editor and prevents further editing until a save finishes', async () => {
-    await user.goto(base.replace(/files$/, 'console'));
-    await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+  it('saves in the background while preserving new edits, navigation and recoverable failures', async () => {
+    await user.goto(base);
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
     const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
-    await editor.fill('Saved after pending request');
-    let release: () => void = () => {};
-    let started: () => void = () => {};
+    await editor.fill('Submitted snapshot');
+    let release = () => {};
+    let began = () => {};
+    let requests = 0;
     const pending = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const began = new Promise<void>((resolve) => {
-      started = resolve;
+    const started = new Promise<void>((resolve) => {
+      began = resolve;
     });
     await user.route('**/files/editor', async (route) => {
       if (route.request().method() === 'PUT') {
-        started();
+        requests++;
+        began();
         await pending;
       }
       await route.continue();
     });
     try {
       await editor.press('Control+s');
-      await began;
-      await browserExpect(editor).toHaveAttribute('contenteditable', 'false');
-      await editor.press('Tab');
-      await editor.press('Shift+Tab');
-      await browserExpect(editor).toHaveText('Saved after pending request');
-      await browserExpect(
-        user.getByRole('button', { name: 'Back to files', exact: true }),
-      ).toBeDisabled();
-      await user.getByRole('button', { name: 'root', exact: true }).click();
-      await browserExpect(editorView()).toBeVisible();
-      await user.evaluate(() => history.back());
-      await browserExpect(user).toHaveURL(base);
-      await browserExpect(editorView()).toBeVisible();
+      await started;
+      await browserExpect(editor).toHaveAttribute('contenteditable', 'true');
+      await editor.fill('Typed while saving');
+      await editor.press('Control+s');
+      expect(requests).toBe(1);
+      await harness.screenshot(user, 'file-editor-background-save-desktop-en');
       release();
+      await browserExpect(editorView().getByRole('status')).toHaveText('Unsaved changes');
+      await browserExpect(editor).toHaveText('Typed while saving');
+      expect((await provider.files()).get('alpha.txt')?.toString()).toBe('Submitted snapshot');
+      await editor.press('Control+s');
       await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
-      expect((await provider.files()).get('alpha.txt')?.toString()).toBe(
-        'Saved after pending request',
-      );
+      expect((await provider.files()).get('alpha.txt')?.toString()).toBe('Typed while saving');
     } finally {
       release();
       await user.unroute('**/files/editor');
     }
+
+    let fail = () => {};
+    let failureBegan = () => {};
+    const failurePending = new Promise<void>((resolve) => {
+      fail = resolve;
+    });
+    const failureStarted = new Promise<void>((resolve) => {
+      failureBegan = resolve;
+    });
+    await user.route('**/files/editor', async (route) => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      failureBegan();
+      await failurePending;
+      await route.fulfill({
+        status: 503,
+        json: {
+          error: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
+        },
+      });
+    });
+    try {
+      await editor.fill('Recoverable draft');
+      await editor.press('Control+s');
+      await failureStarted;
+      await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+      await user.locator('.file-save-notices').getByRole('link').click();
+      await browserExpect(editor).toHaveText('Recoverable draft');
+      await browserExpect(editorView().getByRole('status')).toHaveText('Saving…');
+      await user.getByRole('button', { name: 'Back to files', exact: true }).click();
+      await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
+      await browserExpect(editor).not.toContainText('Recoverable draft');
+      // Leaving Files must not drop the in-flight write or its eventual error.
+      await user.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
+      fail();
+      const notice = user.locator('.file-save-notices');
+      await browserExpect(notice).toContainText('Could not save alpha.txt');
+      await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
+      await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
+      await editor.fill('Another unsaved file');
+      let confirmations = 0;
+      const confirm = (dialog: import('@playwright/test').Dialog) => {
+        confirmations++;
+        void (confirmations === 2 ? dialog.accept() : dialog.dismiss());
+      };
+      user.on('dialog', confirm);
+      try {
+        await notice.getByRole('link').click();
+        await browserExpect(editor).toHaveText('Another unsaved file');
+        await browserExpect.poll(() => confirmations).toBe(1);
+        await notice.getByRole('link').click();
+        await browserExpect(editor).toHaveText('Recoverable draft');
+        await browserExpect.poll(() => confirmations).toBe(2);
+      } finally {
+        user.off('dialog', confirm);
+      }
+      await browserExpect(editor).toHaveText('Recoverable draft');
+      await browserExpect(editorView().getByRole('alert')).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: 'Save changes', exact: true }),
+      ).toBeEnabled();
+    } finally {
+      fail();
+      await user.unroute('**/files/editor');
+    }
+    await editor.press('Control+s');
+    await browserExpect(editorView().getByRole('status')).toHaveText('No unsaved changes');
+    await browserExpect(user.locator('.file-save-notices')).toHaveCount(0);
   });
   it('uploads multiple files sequentially and confirms replacement instead of silently overwriting', async () => {
     await user.goto(base);

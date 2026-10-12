@@ -514,6 +514,16 @@ a write in the comparison/write interval remains possible. A post-write mismatch
 is a conflict, not a claim of rollback. Browser drafts remain available on failure.
 JSON,YAML,TOML validation is local; scripts are highlighted, never executed.
 
+PUT preflight shares directory observations between the trusted game-specific
+protected-path guard and generic path inspection. The promise map is created
+inside the authorized request, bound to its provider identifier, and discarded
+afterward; there is no persistent metadata cache or reuse for post-write checks.
+Both guards retain their own validations. For a two-component Minecraft path,
+this removes two duplicate directory GETs (four become two). Identity and content
+revision/read-back checks remain unchanged; this is a request-count reduction,
+not a measured live-provider latency guarantee. The browser may continue editing
+or navigate while PUT completes, retaining submitted and newer drafts separately.
+
 Browser and API share the metadata exclusion policy. Both editor reads and writes
 reject known binary formats, including JARs, archives, images and Minecraft world
 data. Unknown extensions or `application/octet-stream` alone do not prove a file

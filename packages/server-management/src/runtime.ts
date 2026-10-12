@@ -27,6 +27,7 @@ import {
 } from './external.js';
 import {
   createGameRuntimeDispatcher,
+  type FileMutationContext,
   type RuntimeImageContext,
   trustedGameModules,
 } from './game-modules.js';
@@ -465,11 +466,13 @@ export async function createManagementRuntime(options: ManagementOptions) {
     serverId: string,
     paths: readonly string[],
     connection: Kysely<Database> = db,
+    context?: FileMutationContext,
   ) {
     await (await gameRuntime(connection, serverId))?.assertFileMutation(
       serverId,
       paths,
       connection,
+      context,
     );
   }
   const lifecycle = {

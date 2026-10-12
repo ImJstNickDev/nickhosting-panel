@@ -5112,3 +5112,68 @@ migration. Historical results and release blockers remain as recorded above.
 Independent review found no remaining must-fix issue; index governance passed
 (611 text files,163 PNGs,514 links,4 TOML files,44 ignore cases). PR#21 stays open
 and unmerged.
+
+
+### 2026-10-12 — Inline filename rename and nonblocking editor saves
+
+The editor rename action now replaces the breadcrumb filename with an inline
+field. It selects the basename without its last extension, commits on Enter or
+blur, cancels on Escape and rejects invalid names without a provider request.
+A hidden text mirror measures actual glyph width: the field grows and shrinks
+with the draft rather than reserving a character-count estimate. Validation uses
+a viewport-contained popup, avoiding breadcrumb overflow and mobile clipping.
+A confirmed rename retains editor text/revision without downloading it again.
+
+Content saves submit an immutable snapshot while the editor, search, indentation
+and navigation remain usable. Later typing stays unsaved after confirmation;
+responses cannot overwrite another file's editor. A compact cross-route notice
+reopens pending or failed drafts. One request per path is allowed at a time;
+conflicts and lost responses are never replayed automatically. Draft state is
+volatile browser memory scoped to actor/subject/support identity, with unload
+warnings, not a durable offline queue. Explicitly discarded additional typing
+is not presented as saved. Rename still excludes conflicting writes.
+
+The API now shares request-local directory observations between the Minecraft
+protected-path and generic file guards. A two-component path needs two directory
+GETs rather than four, preserving identity, symlink, binary-type, protected-file,
+revision and post-write checks. There is no cache across requests, no skipped
+verification and no claim of measured live-Panel milliseconds. Wings still does
+not provide atomic compare-and-swap; the existing documented write-race limitation
+remains.
+
+Focused checks (no full historical suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts packages/server-management/src/minecraft-content.test.ts`: **56 passed** (36 API,20 Minecraft). New cases cover directory request counts, protected paths/case aliases, provider-identifier mismatch and fresh observations on subsequent requests.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-background-save.test.ts apps/web/src/features/inline-file-rename-model.test.ts`: **26 passed**. Covers immutable submissions, duplicates, independent paths, failed-draft recovery, identity changes and late callbacks, filename selection and validation.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts`.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts -t 'renames the open file' --reporter verbose`: **1 passed**,20 unrelated skipped. Covers basename selection, no dialog, actual glyph-width bounds/growth/shrinkage, invalid-name rejection, Enter/blur, retained contents and editor focus.
+- Prefix + `apps/web/tests/file-manager.browser.test.ts -t 'saves in the background|inline rename compact|keeps edits when browser Back' --reporter verbose --hideSkippedTests`: final **3 passed**,18 unrelated skipped. Covers editable pending saves, preserved later typing, duplicate prevention, cross-route failure recovery, cancel/retry navigation, mobile IT validation, keyboard cancel and zero applicable axe violations.
+- The existing services create/edit/rename browser journey passed in an earlier combined focused run. It is separate evidence from the final three-case run, not a claim that all browser cases were rerun.
+- Root TypeScript, WebPanel source/test typecheck, production web build, i18n compile/check (1219 EN/IT/pseudo keys), changed-file Biome and diff checks passed. Biome reports three pre-existing Shell warnings; Vite retains its existing large-chunk advisory.
+
+Intermediate browser failures exposed focus restoration against an editor being
+recreated after rename and a repeated router-blocker effect causing duplicate
+confirmation/invalid state transitions. Both were corrected and covered by the
+final targeted runs. An earlier mobile screenshot exposed clipped validation;
+the portal correction is shown in the final screenshot. Initial new backend
+test import order and error assertion issues were corrected. These failed
+attempts are not reported as passing or as full-suite results.
+
+Independent technical, accessibility and rendered EN/IT UX review found no
+remaining must-fix issue. The reviewer checked the final navigation transition
+guard against the installed router, recovery isolation and the compact mobile
+validation layout. This is focused accessibility evidence, not a full WCAG audit.
+
+Reviewed sanitized browser screenshots:
+[rename EN](screenshots/m5/file-editor-inline-rename-desktop-en.png),
+[rename IT mobile](screenshots/m5/file-editor-inline-rename-mobile-it.png),
+[invalid name IT mobile](screenshots/m5/file-editor-inline-rename-invalid-mobile-it.png),
+[background save EN](screenshots/m5/file-editor-background-save-desktop-en.png).
+
+Tests used real application handlers and approved isolated services with provider
+fixtures, disposed their own schemas/staging, and did not create game-server
+assets. No live provider mutation, production interaction, Docker resource change
+or container restart occurred. Existing development watchers load source changes.
+No private configuration is published. Rollback is a code revert; no migrations
+or dependencies were added. Issue#18 remains a separate release gate. PR#21 stays
+open and unmerged; this focused pass does not declare all M5 acceptance complete.

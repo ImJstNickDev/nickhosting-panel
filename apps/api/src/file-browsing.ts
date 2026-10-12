@@ -32,7 +32,11 @@ function path(value: string, root = false) {
 }
 const join = (...parts: string[]) => parts.filter(Boolean).join('/');
 /** Check every component; the provider still owns the filesystem sandbox. */
-export async function inspectFilePath(adapter: PterodactylAdapter, id: string, value: string) {
+export async function inspectFilePath(
+  adapter: Pick<PterodactylAdapter, 'listFiles'>,
+  id: string,
+  value: string,
+) {
   const parts = path(value).split('/');
   let directory = '';
   let entry: ServerFile | undefined;
@@ -196,13 +200,31 @@ export function registerFileBrowsingRoutes(
       c.req.param('id'),
       true,
       async (id, connection, current) => {
-        await service.assertFileMutation(c.req.param('id'), [target], connection);
+        // Both game-specific and generic guards inspect the same preflight directory
+        // observations. Scope them to this authorized request, before any write.
+        const directories = new Map<string, Promise<ServerFile[]>>();
+        const listFiles = (directory: string) => {
+          let listing = directories.get(directory);
+          if (!listing) {
+            listing = service.adapter.listFiles(id, directory);
+            directories.set(directory, listing);
+          }
+          return listing;
+        };
+        await service.assertFileMutation(c.req.param('id'), [target], connection, {
+          providerIdentifier: id,
+          listFiles,
+        });
         // Creation cannot bypass the same binary-type policy used for existing files.
         requireEditableFile({ name: target });
         const submitted = Buffer.from(input.content);
         if (decodeEditableText(submitted) !== input.content)
           throw new DomainError('file_not_editable');
-        const entry = await inspectFilePath(service.adapter, id, target);
+        const entry = await inspectFilePath(
+          { listFiles: (_id, directory = '') => listFiles(directory) },
+          id,
+          target,
+        );
         if (entry && !entry.is_file) throw new DomainError('conflict');
         if (entry) requireEditableFile(entry);
         let before: string | null = null;

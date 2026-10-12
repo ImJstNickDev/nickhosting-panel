@@ -12,6 +12,7 @@ import { type PterodactylAdapter, provisionPlanSchema } from '@nickhosting/ptero
 import type { Kysely } from 'kysely';
 import type { Environment } from './admission.js';
 import type {
+  FileMutationContext,
   GameOperationAuthorization,
   GameRuntimeHooks,
   TrustedGameModule,
@@ -271,6 +272,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     serverId: string,
     paths: readonly string[],
     connection: Kysely<Database> = db,
+    context?: FileMutationContext,
   ) {
     const profile = await connection
       .selectFrom('minecraft_server_profiles')
@@ -298,14 +300,18 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
       .select('pterodactyl_identifier')
       .where('id', '=', serverId)
       .executeTakeFirstOrThrow();
-    if (!server.pterodactyl_identifier) throw new DomainError('conflict');
+    const identifier = server.pterodactyl_identifier;
+    if (!identifier) throw new DomainError('conflict');
+    if (context && context.providerIdentifier !== identifier) throw new DomainError('conflict');
+    const listFiles =
+      context?.listFiles ?? ((directory: string) => adapter.listFiles(identifier, directory));
     // An SFTP-created alias must not turn an otherwise ordinary browser path
     // into a write through a protected launch file or its parent directory.
     for (const path of paths) {
       const components = path.split('/');
       let directory = '';
       for (const component of components) {
-        const matches = (await adapter.listFiles(server.pterodactyl_identifier, directory)).filter(
+        const matches = (await listFiles(directory)).filter(
           (entry) => entry.name.toLowerCase() === component.toLowerCase(),
         );
         if (

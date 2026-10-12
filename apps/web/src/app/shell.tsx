@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { api, queryClient } from '../api/client.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
+import { fileSaveScope } from '../features/file-background-save.js';
+import { FileSaveNotices } from '../features/file-save-notices.js';
 import { useLocale, useT } from './i18n.js';
 import { identityChanged, isSignedOut, useSession, useWebConfig } from './session.js';
 
@@ -149,6 +151,7 @@ export function Shell() {
           </header>
           <main id="content">
             <Outlet />
+            <FileSaveNotices scope={fileSaveScope(current)} />
           </main>
         </div>
       </div>

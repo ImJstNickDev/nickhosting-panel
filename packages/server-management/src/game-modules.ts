@@ -1,7 +1,11 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
 import { type GameManifest, gameManifestSchema } from '@nickhosting/game-sdk';
-import type { ApplicationServer, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import type {
+  ApplicationServer,
+  PterodactylAdapter,
+  ServerFile,
+} from '@nickhosting/pterodactyl-adapter';
 import type { Kysely, Selectable } from 'kysely';
 import type { DB, Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
@@ -57,6 +61,12 @@ export interface RuntimeImageContext {
   /** Installed power checks validate actual launch identity, not the egg catalog. */
   validateEggMetadata?: boolean;
 }
+/** Trusted, request-local preflight observations, bound to the authorized provider server.
+ * Never retained across requests or reused to confirm the result of a mutation. */
+export interface FileMutationContext {
+  providerIdentifier: string;
+  listFiles(directory: string): Promise<ServerFile[]>;
+}
 export interface GameRuntimeHooks {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   verifyInitialInstallation?(
@@ -74,6 +84,7 @@ export interface GameRuntimeHooks {
     serverId: string,
     paths: readonly string[],
     connection: Kysely<Database>,
+    context?: FileMutationContext,
   ): Promise<void>;
   verifyProcessEpoch(
     serverId: string,

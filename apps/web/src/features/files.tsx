@@ -10,10 +10,11 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useBlocker } from 'react-router';
+import { useBlocker, useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
 import { api, download, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
+import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
@@ -56,9 +57,20 @@ import {
   useTransfers,
 } from './service-contracts.js';
 import './files.css';
+import {
+  discardFileSave,
+  type FileSaveRecord,
+  fileSaveScope,
+  getFileSave,
+  submitFileSave,
+  updateFileSaveDraft,
+  useFileSaveRecords,
+} from './file-background-save.js';
 import { FileIcon } from './file-icon.js';
 import { FilePathPicker } from './file-path-picker.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
+import { InlineFileRename } from './inline-file-rename.js';
+import { validFilename } from './inline-file-rename-model.js';
 
 type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'move' | 'copy' | 'extract';
 type UploadItem = {
@@ -203,6 +215,16 @@ export function FilesPage({ serverId }: { serverId: string }) {
 function FilesWorkspace({ serverId }: { serverId: string }) {
   const t = useT(),
     format = useFormat();
+  const session = useSession();
+  const saveScope = useMemo(
+    () => (session.data ? fileSaveScope(session.data) : undefined),
+    [session.data],
+  );
+  const saves = useFileSaveRecords(saveScope);
+  const location = useLocation();
+  const recoveredSave = useRef<string | undefined>(undefined);
+  const saveIdentity = useRef(saveScope?.join('\0'));
+  saveIdentity.current = saveScope?.join('\0');
   const macKeyboard = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
   const pathShortcut = `${macKeyboard ? '⌥' : 'ALT'} + G`;
   const searchInput = useRef<HTMLInputElement>(null);
@@ -229,13 +251,18 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [revision, setRevision] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [mutating, setMutating] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [reading, setReading] = useState(false);
   const [readError, setReadError] = useState<unknown>();
   const [saveError, setSaveError] = useState<unknown>();
   const baseline = useRef('');
+  const contentRef = useRef(content);
+  contentRef.current = content;
   const [editorControls, setEditorControls] = useState<FileEditorControls>();
   const managerRef = useRef<HTMLElement>(null);
   const [inlineRename, setInlineRename] = useState(false);
+  const renamedFileFocus = useRef(false);
+  const restoreRenamedFocus = useRef(false);
   const [editorAvailability, setEditorAvailability] =
     useState<ReturnType<typeof fileEditorAvailability>>('text');
   const editing = mode === 'edit' || mode === 'new';
@@ -262,6 +289,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const activeFile = targets[0];
   useEffect(() => {
     if (!editing) return;
+    if (renamedFileFocus.current) {
+      renamedFileFocus.current = false;
+      if (restoreRenamedFocus.current) editorForm.current?.focus();
+      return;
+    }
     if (mode === 'new')
       editorForm.current?.querySelector<HTMLInputElement>('input[name="name"]')?.focus();
     else if (activeFile)
@@ -367,15 +399,47 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
-  const navigationBlocker = useBlocker(
-    useCallback(() => dirty || mutationRunning.current, [dirty]),
-  );
+  const navigationGuard = useRef<() => boolean>(() => false);
+  navigationGuard.current = () => hasUnsubmittedChanges() || mutationRunning.current;
+  const navigationBlocker = useBlocker(useCallback(() => navigationGuard.current(), []));
+  const handledNavigation = useRef<(() => void) | undefined>(undefined);
   useEffect(() => {
-    if (navigationBlocker.state !== 'blocked') return;
-    if (!mutationRunning.current && window.confirm(t('service.discardEdits')))
-      navigationBlocker.proceed();
+    // A draft update may render again before the router applies reset/proceed.
+    // Handle each blocked transition once, including repeated Back attempts.
+    if (
+      navigationBlocker.state !== 'blocked' ||
+      handledNavigation.current === navigationBlocker.proceed
+    )
+      return;
+    handledNavigation.current = navigationBlocker.proceed;
+    if (!mutationRunning.current && confirmEditorExit()) navigationBlocker.proceed();
     else navigationBlocker.reset();
-  }, [navigationBlocker, t]);
+  });
+  function currentSave() {
+    return getFileSave(
+      saveScope,
+      serverId,
+      join(directory, mode === 'new' ? newName : (targets[0] ?? '')),
+    );
+  }
+  function hasUnsubmittedChanges() {
+    const pending = currentSave();
+    return pending?.status === 'pending' ? pending.submittedContent !== contentRef.current : dirty;
+  }
+  function confirmEditorExit() {
+    if (!hasUnsubmittedChanges()) return true;
+    if (!window.confirm(t('service.discardEdits'))) return false;
+    const pending = currentSave();
+    if (pending?.status === 'pending')
+      updateFileSaveDraft(saveScope, serverId, pending.path, pending.submittedContent);
+    else if (pending) discardFileSave(saveScope, serverId, pending.path);
+    if (pending?.status === 'pending') {
+      contentRef.current = pending.submittedContent;
+      setContent(pending.submittedContent);
+    }
+    setDirty(false);
+    return true;
+  }
   // A refreshed provider listing may remove files selected before another user's operation.
   useEffect(() => {
     if (files.data)
@@ -391,8 +455,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setError({ messageKey: 'file.invalidPath' });
       return;
     }
-    if (dirty && !window.confirm(t('service.discardEdits'))) return;
+    if (!confirmEditorExit()) return;
     cancelRead();
+    setSaving(false);
+    setInlineRename(false);
     setMode(undefined);
     setDirty(false);
     setDirectory(preserveName ? path : normalized);
@@ -405,8 +471,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }
   function closeEditor() {
     if (mutationRunning.current) return;
-    if (dirty && !window.confirm(t('service.discardEdits'))) return;
+    if (!confirmEditorExit()) return;
     cancelRead();
+    setSaving(false);
+    setInlineRename(false);
     setDirty(false);
     setMode(undefined);
     setReadError(undefined);
@@ -449,7 +517,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       navigate(join(folder, entry.name), true);
       return;
     }
-    if (dirty && !window.confirm(t('service.discardEdits'))) return;
+    if (!confirmEditorExit()) return;
+    const pending = getFileSave(saveScope, serverId, join(folder, entry.name));
+    if (pending) {
+      restoreSave(pending);
+      return;
+    }
     setPathEditing(false);
     if (folder !== directory) {
       setDirectory(folder);
@@ -458,6 +531,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setAnchor(undefined);
     }
     cancelRead();
+    setSaving(false);
+    setInlineRename(false);
     const sequence = ++readSequence.current,
       controller = new AbortController();
     readAbort.current = controller;
@@ -518,44 +593,135 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setMutating(false);
     }
   }
+  function restoreSave(record: FileSaveRecord) {
+    cancelRead();
+    const sequence = readSequence.current;
+    const separator = record.path.lastIndexOf('/');
+    const folder = separator < 0 ? '' : record.path.slice(0, separator);
+    const name = record.path.slice(separator + 1);
+    setDirectory(folder);
+    setTargets([name]);
+    setNewName(name);
+    setMode(record.expectedRevision === null ? 'new' : 'edit');
+    setPathEditing(false);
+    setInlineRename(false);
+    setEditorAvailability('text');
+    setReadError(undefined);
+    setSaveError(record.error);
+    baseline.current = '';
+    contentRef.current = record.content;
+    setContent(record.content);
+    setRevision(record.expectedRevision);
+    setDirty(true);
+    setSaving(record.status === 'pending');
+    if (record.status === 'pending')
+      void finishSave(record.completion, sequence, record.submittedContent, name);
+  }
+  useEffect(() => {
+    const id = location.state?.fileSaveId;
+    const attempt = `${location.key}:${id}`;
+    if (typeof id !== 'string' || recoveredSave.current === attempt) return;
+    const record = saves.find((item) => item.id === id && item.serverId === serverId);
+    if (!record || mutationRunning.current) return;
+    recoveredSave.current = attempt;
+    if (editing && currentSave()?.id === id) {
+      editorControls?.focus();
+      return;
+    }
+    if (confirmEditorExit()) restoreSave(record);
+  });
+  async function finishSave(
+    request: Promise<{ revision: string }>,
+    sequence: number,
+    submitted: string,
+    name: string,
+  ) {
+    const identity = saveIdentity.current;
+    try {
+      const result = await request;
+      if (
+        !mounted.current ||
+        sequence !== readSequence.current ||
+        identity !== saveIdentity.current
+      )
+        return;
+      baseline.current = submitted;
+      setRevision(result.revision);
+      setDirty(contentRef.current !== submitted);
+      setTargets([name]);
+      setMode('edit');
+    } catch (failure) {
+      if (
+        !mounted.current ||
+        sequence !== readSequence.current ||
+        identity !== saveIdentity.current
+      )
+        return;
+      setSaveError(
+        failure && typeof failure === 'object' && 'code' in failure && failure.code === 'conflict'
+          ? { messageKey: 'file.concurrentChange' }
+          : failure,
+      );
+      setDirty(true);
+    } finally {
+      if (mounted.current && sequence === readSequence.current && identity === saveIdentity.current)
+        setSaving(false);
+    }
+  }
   async function saveEditor() {
     if (
       !canMutate ||
+      !saveScope ||
       mutationRunning.current ||
+      saving ||
       reading ||
       readError ||
       editorAvailability !== 'text'
     )
       return;
     const name = mode === 'new' ? newName : targets[0];
-    if (!name || /[/\\]/.test(name)) {
-      setSaveError({ messageKey: 'file.invalidPath' });
+    if (!name || !validFilename(name)) {
+      setSaveError({ messageKey: 'file.invalidName' });
       return;
     }
+    if (getFileSave(saveScope, serverId, join(directory, name))?.status === 'pending') return;
+    const sequence = readSequence.current;
+    const submitted = contentRef.current;
+    setSaving(true);
+    setSaveError(undefined);
+    await finishSave(
+      submitFileSave(saveScope, {
+        serverId,
+        path: join(directory, name),
+        content: submitted,
+        expectedRevision: mode === 'new' ? null : revision,
+      }),
+      sequence,
+      submitted,
+      name,
+    );
+  }
+  async function renameEditor(name: string) {
+    if (!canMutate || dirty || mutationRunning.current || saving || reading)
+      throw { messageKey: 'errors.forbidden' };
+    if (!validFilename(name)) throw { messageKey: 'file.invalidName' };
+    const original = files.data?.find((entry) => entry.name === targets[0]);
+    if (!original) throw { messageKey: 'file.pathNotFound' };
     mutationRunning.current = true;
     setMutating(true);
-    setSaveError(undefined);
     try {
-      const result = await api<{ revision: string }>(`${serverPath(serverId)}/files/editor`, {
-        method: 'PUT',
-        body: {
-          path: join(directory, name),
-          content,
-          expectedRevision: mode === 'new' ? null : revision,
-        },
+      await api(`${serverPath(serverId)}/files`, {
+        method: 'POST',
+        body: { action: 'rename', root: directory, files: [{ from: original.name, to: name }] },
       });
-      baseline.current = content;
-      setRevision(result.revision);
-      setDirty(false);
-      setTargets([name]);
-      setMode('edit');
-      void files.refetch();
-    } catch (failure) {
-      setSaveError(
-        failure && typeof failure === 'object' && 'code' in failure && failure.code === 'conflict'
-          ? { messageKey: 'file.concurrentChange' }
-          : failure,
+      renamedFileFocus.current = true;
+      restoreRenamedFocus.current = Boolean(
+        document.activeElement?.closest('.fm-inline-rename') ||
+          editorForm.current?.contains(document.activeElement),
       );
+      setTargets([name]);
+      setEditorAvailability(fileEditorAvailability({ ...original, name }));
+      void files.refetch();
     } finally {
       mutationRunning.current = false;
       setMutating(false);
@@ -872,10 +1038,25 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               ))}
               {editing && (
                 <li>
-                  <span aria-current="page" className="fm-current-file">
-                    {mode === 'new' ? newName || t('service.newFile') : targets[0]}
-                    {dirty && <span aria-hidden="true"> *</span>}
-                  </span>
+                  {inlineRename && mode === 'edit' ? (
+                    <InlineFileRename
+                      name={targets[0] ?? ''}
+                      onCommit={renameEditor}
+                      onCancel={() => {
+                        const focused = document.activeElement?.closest('.fm-inline-rename');
+                        setInlineRename(false);
+                        if (focused) requestAnimationFrame(() => editorControls?.focus());
+                      }}
+                      onComplete={() => {
+                        setInlineRename(false);
+                      }}
+                    />
+                  ) : (
+                    <span aria-current="page" className="fm-current-file">
+                      {mode === 'new' ? newName || t('service.newFile') : targets[0]}
+                      {dirty && <span aria-hidden="true"> *</span>}
+                    </span>
+                  )}
                 </li>
               )}
             </ol>
@@ -902,7 +1083,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool fm-path-edit"
                     aria-label={t('service.rename')}
-                    disabled={!canMutate || dirty || reading || mutating}
+                    disabled={!canMutate || dirty || reading || mutating || saving || inlineRename}
                     onClick={() => setInlineRename(true)}
                   >
                     <ToolbarIcon kind="rename" />
@@ -1078,6 +1259,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     !canMutate ||
                     reading ||
                     mutating ||
+                    saving ||
                     !!readError ||
                     editorAvailability !== 'text' ||
                     (!dirty && mode !== 'new'),
@@ -1185,7 +1367,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         >
           {!reading && editorAvailability === 'text' && !readError && (
             <span className="fm-editor-state sr-only" role="status">
-              {t(mutating ? 'web.pending' : dirty ? 'file.unsaved' : 'file.saved')}
+              {t(mutating || saving ? 'web.pending' : dirty ? 'file.unsaved' : 'file.saved')}
             </span>
           )}
           {reading ? (
@@ -1214,7 +1396,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             <form
               id="file-editor-form"
               className="fm-inline-editor"
-              aria-busy={mutating}
+              aria-busy={mutating || saving}
               onSubmit={(event) => {
                 event.preventDefault();
                 void saveEditor();
@@ -1231,7 +1413,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   }}
                   required
                   pattern="[^/\\\\]+"
-                  disabled={mutating}
+                  disabled={mutating || saving}
                 />
               )}
               {Boolean(saveError) && <ErrorNotice error={saveError} />}
@@ -1243,8 +1425,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   )}
                   value={content}
                   onChange={(value) => {
+                    contentRef.current = value;
                     setContent(value);
                     setDirty(value !== baseline.current || (mode === 'new' && newName.length > 0));
+                    updateFileSaveDraft(
+                      saveScope,
+                      serverId,
+                      join(directory, mode === 'new' ? newName : (targets[0] ?? '')),
+                      value,
+                    );
                   }}
                   onSave={saveShortcut}
                   onControls={setEditorControls}
@@ -1664,57 +1853,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         <button type="button" onClick={() => queueUploads(pendingUploads)}>
           {t('file.replaceUpload')}
         </button>
-      </Dialog>
-      <Dialog
-        open={inlineRename}
-        title={t('service.rename')}
-        onClose={() => {
-          if (mutationRunning.current) return;
-          setInlineRename(false);
-          requestAnimationFrame(() => editorControls?.focus());
-        }}
-      >
-        <ActionForm
-          key={inlineRename ? targets[0] : 'closed'}
-          success={false}
-          onSubmit={async (data) => {
-            if (!canMutate || dirty || mutationRunning.current || reading)
-              throw { messageKey: 'errors.forbidden' };
-            const name = text(data, 'name');
-            if (!name || name === '.' || name === '..' || /[/\\]/.test(name))
-              throw { messageKey: 'file.invalidPath' };
-            const original = files.data?.find((entry) => entry.name === targets[0]);
-            if (!original) throw { messageKey: 'file.pathNotFound' };
-            mutationRunning.current = true;
-            setMutating(true);
-            try {
-              await api(`${serverPath(serverId)}/files`, {
-                method: 'POST',
-                body: {
-                  action: 'rename',
-                  root: directory,
-                  files: [{ from: targets[0], to: name }],
-                },
-              });
-              setInlineRename(false);
-              mutationRunning.current = false;
-              setMutating(false);
-              await open({ ...original, name });
-              void files.refetch();
-            } finally {
-              mutationRunning.current = false;
-              setMutating(false);
-            }
-          }}
-        >
-          <Input
-            label={t('web.name')}
-            name="name"
-            defaultValue={targets[0]}
-            required
-            pattern="[^/\\\\]+"
-          />
-        </ActionForm>
       </Dialog>
       <Dialog
         open={Boolean(mode) && !editing}

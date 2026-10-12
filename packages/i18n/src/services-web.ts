@@ -179,6 +179,16 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   ],
   'file.unsaved': ['Unsaved changes', 'Modifiche non salvate'],
   'file.saved': ['No unsaved changes', 'Nessuna modifica da salvare'],
+  'file.invalidName': [
+    'Enter a valid filename without slashes, control characters or %.',
+    'Inserisci un nome valido, senza barre, caratteri di controllo o %.',
+  ],
+  'file.savePendingName': ['Saving {name}…', 'Salvataggio di {name}…'],
+  'file.saveFailedName': [
+    'Could not save {name}. Open draft',
+    'Salvataggio di {name} non riuscito. Apri bozza',
+  ],
+  'file.discardSave': ['Discard draft', 'Scarta bozza'],
   'file.saveShortcut': ['Ctrl+S to save', 'Ctrl+S per salvare'],
   'file.deleteWarning': [
     '{count, plural, one {Delete this item and all its contents? This cannot be undone.} other {Delete these # items and all their contents? This cannot be undone.}}',

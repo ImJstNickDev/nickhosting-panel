@@ -534,7 +534,7 @@ Tab inserts the configured indentation unit at the cursor, or indents selected
 lines; Shift+Tab outdents lines. Both use CodeMirror's undo history and read-only
 protection. Escape followed by Tab or Shift+Tab leaves the editor; its
 localized accessible description explains this exit. Search fields retain normal
-Tab navigation, and indentation cannot modify a file while saving.
+Tab navigation; local editing and indentation remain usable during a save.
 Opening a text file replaces the listing in place, without a modal. The breadcrumb
 retains clickable parent directories and includes the current filename. List-only
 search, upload and view controls are hidden until returning to the directory.
@@ -547,18 +547,32 @@ localized tooltips; replacement fields appear only when requested. Search and
 replacement use CodeMirror's engine, including invalid-pattern handling.
 The editor reserves the listing's bounded height; both content reads and lazy module
 loading use static code-line skeletons with a localized assistive loading status.
-Saving keeps the file open, updates its revision and marks the draft clean only
-after the API confirms success. Conflicts retain the draft. Breadcrumb/path changes,
-Back to files and ordinary application links warn before discarding edits; reload
-uses the browser's unload warning. Pending saves prevent these navigation actions.
+Saving submits an immutable text/revision snapshot and leaves editing and navigation
+available. Only another save of the same file waits for that request to finish.
+Confirmation advances the saved baseline without replacing text typed afterward;
+that newer text stays unsaved. Compact status/error notices remain available across
+application routes and reopen the matching pending or failed draft. A late response
+cannot change another editor. Conflicts retain the draft and are not retried automatically.
+Breadcrumb/path changes, Back to files and application links warn before discarding
+edits that were not submitted; an in-flight submitted snapshot does not prevent
+navigation. Reload/closing the browser warns about pending saves or retained failed
+drafts. This state is browser memory scoped to actor, subject and support session,
+cleared on identity changes: it is not a durable offline queue or a guarantee that
+a save survives closing the browser.
 Browser Back/Forward uses the router's navigation blocker as well. Opening a file
 places focus in its text once ready, so Ctrl/Cmd+F invokes editor search; a deliberate
 focus move during loading must not be overridden. A new file starts in its name
 field. Returning to Files restores the original file's row when it still exists,
 otherwise the breadcrumb. The editor shows caret/active-line focus without a cyan
-outer frame; forced-colors mode retains a system focus indicator. Renaming uses
-the existing authorized file operation and keeps the editor open after confirmation.
-Unsaved edits must be saved before renaming, and pending writes block navigation.
+outer frame; forced-colors mode retains a system focus indicator. The editor's rename
+pencil replaces the filename with a compact inline input, initially selecting only
+the basename (excluding the last extension). Its width follows the rendered text.
+Enter or blur submits once; Escape cancels. No confirmation buttons or dialog appear.
+Invalid names remain editable with a contextual error and no request. Provider
+errors preserve the proposed name. Renaming uses the existing authorized operation;
+after confirmation it keeps the current text and revision without downloading it
+again. Subsequent content saves still compare that revision. Unsaved content must
+be saved before renaming; rename-in-progress blocks conflicting file operations.
 Entering Files preloads the lazy editor module once; subsequent editor opens use
 the same cached import. A failed preload can retry when the editor is opened.
 Editor content remains local while a conflict is resolved. Availability reasons
