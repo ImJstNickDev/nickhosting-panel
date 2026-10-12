@@ -110,11 +110,9 @@ export function useFileTransfer(options: {
     await Promise.all([
       queryClient.invalidateQueries({
         queryKey: ['files', options.serverId, plan.source],
-        exact: true,
       }),
       queryClient.invalidateQueries({
         queryKey: ['files', options.serverId, plan.destination],
-        exact: true,
       }),
       ...(action === 'copy'
         ? [

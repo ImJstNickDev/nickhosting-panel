@@ -178,6 +178,99 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
     );
   });
 
+  it('returns to root after leaving Files, including browser Back, but keeps cancelled navigation', async () => {
+    (await provider.files()).set('world/navigation.txt', Buffer.from('Keep this draft'));
+    await open();
+    const tabs = user.locator('.tabs');
+    const openWorld = async () => {
+      await entry('world').getByRole('button', { name: 'world', exact: true }).click();
+      await browserExpect(entry('level.dat')).toBeVisible();
+    };
+    await openWorld();
+    await tabs.getByRole('link', { name: 'Console', exact: true }).click();
+    await browserExpect(user).toHaveURL(base.replace(/\/files$/, '/console'));
+    await tabs.getByRole('link', { name: 'Files', exact: true }).click();
+    await browserExpect(entry('world')).toBeVisible();
+    await browserExpect(entry('level.dat')).toHaveCount(0);
+
+    await openWorld();
+    await tabs.getByRole('link', { name: 'Status', exact: true }).click();
+    await browserExpect(user).toHaveURL(base.replace(/\/files$/, '/status'));
+    await browserExpect(user.locator('.file-manager')).toHaveCount(0);
+    await user.goBack();
+    await browserExpect(entry('world')).toBeVisible();
+    await browserExpect(entry('level.dat')).toHaveCount(0);
+
+    await openWorld();
+    await entry('navigation.txt')
+      .getByRole('button', { name: 'navigation.txt', exact: true })
+      .click();
+    const editor = user.locator('.cm-content');
+    await browserExpect(editor).toBeVisible();
+    await editor.fill('Unsaved text');
+    await browserExpect(
+      user.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toBeEnabled();
+    const cancelled = user.waitForEvent('dialog');
+    user.once('dialog', (dialog) => dialog.dismiss());
+    await tabs.getByRole('link', { name: 'Console', exact: true }).click();
+    await cancelled;
+    await browserExpect(user).toHaveURL(base);
+    await browserExpect(editor).toHaveText('Unsaved text');
+    await browserExpect(user.getByRole('navigation', { name: 'File location' })).toContainText(
+      'world',
+    );
+    user.once('dialog', (dialog) => dialog.accept());
+    await tabs.getByRole('link', { name: 'Console', exact: true }).click();
+    await browserExpect(user).toHaveURL(base.replace(/\/files$/, '/console'));
+    await tabs.getByRole('link', { name: 'Files', exact: true }).click();
+    await browserExpect(entry('world')).toBeVisible();
+  });
+
+  it('shows the saved listing during reload and reconciles changed entries without replacing unchanged rows', async () => {
+    const remote = await provider.files();
+    remote.set('world/cache-keep.txt', Buffer.from('Unchanged'));
+    remote.set('world/cache-remove.txt', Buffer.from('Removed later'));
+    remote.set('world/cache-change.txt', Buffer.from('Old'));
+    await open();
+    await entry('world').getByRole('button', { name: 'world', exact: true }).click();
+    await browserExpect(entry('cache-keep.txt')).toBeVisible();
+    const oldSize = await entry('cache-change.txt').locator('.fm-size').textContent();
+    remote.delete('world/cache-remove.txt');
+    remote.set('world/cache-new.txt', Buffer.from('Added later'));
+    remote.set('world/cache-change.txt', Buffer.alloc(2048, 'x'));
+    let requested = false;
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await user.route(isListing, async (route) => {
+      requested = true;
+      await pending;
+      await route.continue().catch(() => {});
+    });
+    try {
+      await user.reload();
+      await browserExpect.poll(() => requested).toBe(true);
+      await browserExpect(entry('cache-keep.txt')).toBeVisible();
+      await browserExpect(entry('cache-remove.txt')).toBeVisible();
+      await browserExpect(entry('cache-new.txt')).toHaveCount(0);
+      await browserExpect(entry('cache-change.txt').locator('.fm-size')).toHaveText(oldSize ?? '');
+      await browserExpect(user.locator('.fm-loading')).toHaveCount(0);
+      const unchangedRow = await entry('cache-keep.txt').elementHandle();
+      expect(unchangedRow).not.toBeNull();
+      release();
+      await browserExpect(entry('cache-new.txt')).toBeVisible();
+      await browserExpect(entry('cache-remove.txt')).toHaveCount(0);
+      await browserExpect(entry('cache-change.txt').locator('.fm-size')).not.toHaveText(
+        oldSize ?? '',
+      );
+      expect(await unchangedRow?.evaluate((row) => row.isConnected)).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
   it('finishes 49 parallel uploads while one listing is held and follows it with a fresh final listing', async () => {
     await open();
     const files = batch('coalesced', 49);

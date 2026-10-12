@@ -127,7 +127,6 @@ export async function submitFileSave(
         : '';
       void queryClient.invalidateQueries({
         queryKey: ['files', input.serverId, directory],
-        exact: true,
       });
     }
     resolveCompletion(result);

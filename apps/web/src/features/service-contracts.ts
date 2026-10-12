@@ -1,3 +1,4 @@
+import type { AuthContext } from '@nickhosting/core';
 import { useQuery } from '@tanstack/react-query';
 import type {
   Backup,
@@ -21,7 +22,7 @@ import type {
   listScheduleOutcomes,
   listSchedules,
 } from '../../../../packages/server-management/src/schedules.js';
-import { api } from '../api/client.js';
+import { api, queryClient } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
 
 export type ServerInfo = Result<typeof getPlatformServer>;
@@ -43,8 +44,13 @@ export function platformPath(id: string) {
   return `/v1/platform/servers/${encodeURIComponent(id)}`;
 }
 export function fileDirectoryQuery(id: string, directory: string) {
+  const context = queryClient.getQueryData<{ context: AuthContext }>(['session'])?.context;
+  const identity = context
+    ? [context.actorUserId, context.subjectUserId, context.sessionType, context.support?.id ?? '']
+    : null;
   return {
-    queryKey: ['files', id, directory] as const,
+    // Keep all listing consumers on the same cache, without reusing another identity's data.
+    queryKey: ['files', id, directory, identity] as const,
     queryFn: ({ signal }: { signal: AbortSignal }) =>
       api<ServerFile[]>(`${serverPath(id)}/files?path=${encodeURIComponent(directory)}`, {
         signal,

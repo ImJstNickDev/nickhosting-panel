@@ -6402,3 +6402,57 @@ naturally. Rollback requires reverting NickHosting source and the retained prior
 Blueprint artifact through the approved update procedure; no schema rollback is
 needed. Further live restart/update operations retain their approval boundaries.
 PR #21 remains open/unmerged; SFTPGo #18 remains a separate production-release gate.
+
+### 2026-10-12 — Files entry reset and reload listing snapshot
+
+Leaving the Files workspace clears its saved folder; re-entry through a server
+tab or browser Back starts at root. Reload while still in Files keeps the folder.
+The symmetric storage effect survives StrictMode replay, and cancelled unsaved-edit
+navigation retains the folder/draft. Explicit save recovery remains unchanged.
+
+A bounded, tab-local snapshot of the latest folder metadata now supplies immediate
+placeholder rows on reload while the real listing request runs. No file contents,
+credentials or signed URLs are persisted. The snapshot is scoped to actor, subject,
+support session, server and directory; it is limited to 5000 entries / 1 MiB.
+Storage denial/corruption or larger listings use the existing skeleton. React
+Query structural sharing and filename row keys retain unchanged rows while applying
+additions, removals and metadata changes. Placeholder rows do not retire upload
+completion hints or count as a completed provider listing.
+
+Review identified and resolved two cache-identity problems: using `initialData`
+would retain snapshots as reset state, so the final implementation uses
+`placeholderData`; unscoped in-memory listing keys could relabel data after a
+session change, so the shared query factory now includes the identity context.
+Folder invalidation after save/copy/move uses prefixes matching the scoped keys.
+Identity changes and 401/403/404 listing responses discard the stored snapshot.
+Independent final review: no remaining must-fix findings.
+
+Focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-listing-cache.test.ts`:
+  **13 passed**, including metadata-only storage, identity/server/folder isolation,
+  empty folders, malformed snapshots, size limits and unavailable browser storage.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-refresh.browser.test.ts -t 'restores the current nested folder|returns to root after leaving Files|shows the saved listing'`:
+  final **3 passed, 8 skipped**, 16.74 seconds. Real application handlers and
+  isolated provider/database fixtures prove reload, root re-entry/Back, cancelled
+  and confirmed dirty navigation, visible stale rows during a held response, added/
+  changed/removed entries afterward, and unchanged row DOM identity.
+  Earlier attempts exposed test synchronization errors: Back was requested before
+  route unmount, editor navigation before dirty state committed, and the held
+  listing intercepted only the first StrictMode request. Those fixture waits and
+  interception were corrected; their failures are not counted as passes.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'supports keyboard context menus, range selection, batch copy/move and streamed ZIP download'`:
+  **1 passed, 29 skipped**, 16.50 seconds, including post-copy/move listing updates.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-directory-query.test.ts apps/web/src/features/file-background-save.test.ts apps/web/src/features/creation-catalog.test.ts`: **11 passed**, including identity changes and background-save regressions.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed. The first
+  final check found a type-only TSX import incompatible with the browser-test
+  compiler options; using the existing shared `AuthContext` type fixed it without
+  changing runtime behavior or compiler settings. Changed-file Biome passed.
+- Whitespace and indexed governance passed: 653 text files, 199 review PNGs,
+  561 relative links, 4 TOML files and 44 ignore cases; private state remains ignored.
+
+No layout/copy changes or new screenshots. No historical full-suite rerun, live
+game-file mutation, new infrastructure or manual container restart. Existing Vite
+HMR loads the frontend; API/Vite were observed healthy. Isolated schemas and test
+assets use existing fixture cleanup. Rollback is a source revert; the snapshot is
+optional browser state. PR #21 remains open/unmerged; SFTPGo #18 is unchanged.

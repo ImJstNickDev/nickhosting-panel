@@ -58,6 +58,7 @@ import {
   useFileSaveRecords,
 } from './file-background-save.js';
 import { FileIcon } from './file-icon.js';
+import { clearFileListing, readFileListing, writeFileListing } from './file-listing-cache.js';
 import { FilePathPicker } from './file-path-picker.js';
 import { FileSelectionSummary, useFileTransfer } from './file-transfer-flow.js';
 import { nextUpload, planUploadBatch, runUploadPool } from './file-upload-queue.js';
@@ -269,12 +270,24 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const directory = folder.key === directoryKey ? folder.path : readDirectory(directoryKey);
   function setDirectory(path: string) {
     setFolder({ key: directoryKey, path });
+  }
+  useEffect(() => {
+    if (!directoryKey) return;
     try {
-      if (directoryKey) sessionStorage.setItem(directoryKey, path);
+      sessionStorage.setItem(directoryKey, directory);
     } catch {
       // Browsers may disable storage; folder navigation still works normally.
     }
-  }
+    // A page reload retains storage; leaving Files unmounts the workspace.
+    // Writing on setup also preserves the path through StrictMode effect replay.
+    return () => {
+      try {
+        sessionStorage.removeItem(directoryKey);
+      } catch {
+        // Storage may be unavailable here as well.
+      }
+    };
+  }, [directoryKey, directory]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<string>();
   const [search, setSearch] = useState('');
@@ -378,8 +391,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const uploadSnapshot = useRef(uploads);
   uploadSnapshot.current = uploads;
   const directoryQuery = fileDirectoryQuery(serverId, directory);
+  const cachedListing = useMemo(
+    () => readFileListing(saveScope, serverId, directory),
+    [saveScope, serverId, directory],
+  );
   const files = useQuery({
     ...directoryQuery,
+    // A restored snapshot is display data, never evidence of a fresh listing.
+    placeholderData: cachedListing,
     queryFn: async (context) => {
       // Only retire hints for uploads completed BEFORE this listing started.
       // An older in-flight listing cannot prove a just-uploaded file is absent.
@@ -404,6 +423,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       return entries;
     },
   });
+  useEffect(() => {
+    if (files.error instanceof ApiError && [401, 403, 404].includes(files.error.status)) {
+      clearFileListing();
+    } else if (files.data && files.dataUpdatedAt > 0 && !files.error) {
+      writeFileListing(saveScope, serverId, directory, files.data);
+    }
+  }, [saveScope, serverId, directory, files.data, files.dataUpdatedAt, files.error]);
   useEffect(() => {
     let active = true,
       dirty = false,

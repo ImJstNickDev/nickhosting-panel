@@ -654,6 +654,21 @@ identity, project permissions, active-operation locks, protected-runtime-path
 checks, the existing adapter and live transfer authorization. No provider URL or
 credential is returned to the browser.
 
+The browser retains the current folder across a page reload, scoped to the server
+and authenticated actor/subject. Leaving Files clears that folder preference;
+returning through a tab or browser Back starts at root. Cancelling navigation
+because of unsaved edits preserves the current folder and draft. Explicit
+background-save recovery still opens the saved file's folder.
+One tab-local snapshot of the most recent folder listing also survives reload.
+It contains schema-approved metadata only (maximum 5000 entries / 1 MiB), scoped
+to the actor/subject/support session, server and folder. It is observer-only
+placeholder data while a fresh request runs, not fresh query data or authority
+for a mutation. Normal keyed row reconciliation preserves unchanged DOM rows.
+Identity changes and listing authorization/not-found failures clear the snapshot;
+unavailable storage or oversized listings fall back to the normal skeleton.
+In-memory listing keys carry the same identity boundary; mutation invalidation
+targets the folder prefix so all scoped variants become stale.
+
 | Route | Request/result |
 | --- | --- |
 | `GET /editor?path=...` | Bounded strict UTF-8 text and SHA-256 `revision`; known binary extensions rejected before reading, actual bytes validated afterward. Reuses the directory identity proof with fresh local authorization; a private one-use signed Wings URL (prepared from the listing when available), no ancestor listings. Wings contains the path and rejects final symlinks. |

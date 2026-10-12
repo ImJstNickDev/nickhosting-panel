@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
 import { ApiError, api, queryClient } from '../api/client.js';
+import { clearFileListing } from '../features/file-listing-cache.js';
 
 const user = z.object({
   id: z.string(),
@@ -57,6 +58,7 @@ export function useWebConfig() {
 }
 export async function identityChanged() {
   await queryClient.cancelQueries();
+  clearFileListing();
   queryClient.removeQueries({ type: 'inactive' });
   await queryClient.resetQueries({ type: 'active' });
 }
