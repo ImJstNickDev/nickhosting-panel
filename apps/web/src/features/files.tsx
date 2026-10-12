@@ -3,9 +3,11 @@ import {
   type DragEvent,
   type KeyboardEvent,
   lazy,
+  type MouseEvent,
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -18,10 +20,13 @@ import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import { ActionForm, Dialog, Empty, ErrorNotice, Input, Time, text } from '../components/ui.js';
 import {
+  type FileClipboard,
   type FileOrder,
   fileBreadcrumbs,
+  fileClipboardForScope,
   joinFilePath as join,
   normalizeFilePath,
+  selectFileClick,
   selectFileRange,
   validMoveTarget,
   visibleFiles,
@@ -291,6 +296,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }, [directoryKey, directory]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<string>();
+  const [clipboard, setClipboard] = useState<FileClipboard>();
+  const clipboardIdentity = saveIdentity.current;
+  useEffect(() => {
+    setClipboard((current) => fileClipboardForScope(current, clipboardIdentity, serverId));
+  }, [clipboardIdentity, serverId]);
+  const scopedClipboard = fileClipboardForScope(clipboard, clipboardIdentity, serverId);
   const [search, setSearch] = useState('');
   const [order, setOrder] = useState<FileOrder>('name');
   const [descending, setDescending] = useState(false);
@@ -317,6 +328,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   contentRef.current = content;
   const [editorControls, setEditorControls] = useState<FileEditorControls>();
   const managerRef = useRef<HTMLElement>(null);
+  const focusDirectory = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusDirectory.current) return;
+    const current = managerRef.current?.querySelector<HTMLButtonElement>(
+      '.fm-breadcrumb button[aria-current="page"]',
+    );
+    if (current) {
+      current.focus({ preventScroll: true });
+      focusDirectory.current = false;
+    }
+  });
   const [inlineRename, setInlineRename] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const renamedFileFocus = useRef(false);
@@ -552,6 +574,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     onComplete: (names) =>
       setSelected((current) => new Set([...current].filter((name) => !names.includes(name)))),
   });
+  const fileActionsBusy = mutating || transferFlow.active;
   const parent = directory.split('/').slice(0, -1).join('/');
   const uploadReason = transfers.error
     ? 'file.uploadReason.request'
@@ -698,13 +721,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       );
   }, [files.data]);
   function navigate(path: string, preserveName = false) {
-    if (mutationRunning.current) return;
+    if (mutationRunning.current || transferFlow.active) return;
     const normalized = normalizeFilePath(path);
     if (normalized === undefined) {
       setError({ messageKey: 'file.invalidPath' });
       return;
     }
     if (!confirmEditorExit()) return;
+    focusDirectory.current = true;
     cancelRead();
     setSaving(false);
     setInlineRename(false);
@@ -728,6 +752,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setMode(undefined);
     setReadError(undefined);
     requestAnimationFrame(() => {
+      if (!mounted.current) return;
+      // Native dialog restoration or a subsequent click may already have moved
+      // focus somewhere useful. Never pull it back out of the user's input.
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        active.isConnected &&
+        !active.closest('dialog:not([open])')
+      )
+        return;
       if (menuTrigger.current?.isConnected) {
         menuTrigger.current.focus();
         return;
@@ -741,6 +776,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     });
   }
   function chooseMode(value: Mode | 'move' | 'copy', names = selectedNames, folder = directory) {
+    if (mutationRunning.current || transferFlow.active) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     setError(undefined);
     setMenu(undefined);
@@ -762,7 +798,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
   }
   async function open(entry: ServerFile, folder = directory) {
-    if (mutationRunning.current) return;
+    if (mutationRunning.current || transferFlow.active) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     if (entry.is_symlink) return;
     if (!entry.is_file) {
@@ -1011,16 +1047,96 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }
   function keyboard(event: KeyboardEvent<HTMLElement>) {
     const target = event.target as HTMLElement;
-    if (target.closest('input:not([type="checkbox"]),textarea,[contenteditable="true"],dialog'))
+    if (
+      editing ||
+      event.defaultPrevented ||
+      event.nativeEvent.isComposing ||
+      target.closest(
+        'input:not([type="checkbox"]),textarea,select,[contenteditable]:not([contenteditable="false"]),dialog',
+      )
+    )
       return;
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
-      event.preventDefault();
-      setSelected(new Set(rows.filter((entry) => !entry.is_symlink).map((entry) => entry.name)));
-    }
     if (event.key === 'Escape') {
       setSelected(new Set());
       setMenu(undefined);
+      return;
     }
+    if (
+      event.repeat ||
+      event.altKey ||
+      mutationRunning.current ||
+      transferFlow.active ||
+      mode ||
+      menu ||
+      document.querySelector('dialog[open]') ||
+      window.getSelection()?.toString()
+    )
+      return;
+    const modifier = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (modifier && key === 'a') {
+      event.preventDefault();
+      setSelected(new Set(rows.filter((entry) => !entry.is_symlink).map((entry) => entry.name)));
+    } else if (modifier && (key === 'c' || key === 'x')) {
+      if (
+        !clipboardIdentity ||
+        !selectedNames.length ||
+        !canMutate ||
+        (key === 'c' && capabilities.data?.copy !== true)
+      )
+        return;
+      event.preventDefault();
+      setClipboard({
+        identity: clipboardIdentity,
+        serverId,
+        source: directory,
+        names: selectedNames,
+        action: key === 'x' ? 'move' : 'copy',
+      });
+    } else if (modifier && key === 'v' && scopedClipboard) {
+      if (!canMutate || (scopedClipboard.action === 'copy' && capabilities.data?.copy !== true))
+        return;
+      event.preventDefault();
+      if (!validMoveTarget(scopedClipboard.source, scopedClipboard.names, directory)) {
+        setError({ messageKey: 'file.invalidMove' });
+        return;
+      }
+      menuTrigger.current = document.activeElement as HTMLElement;
+      setError(undefined);
+      transferFlow.begin(
+        {
+          source: scopedClipboard.source,
+          destination: directory,
+          names: scopedClipboard.names,
+        },
+        scopedClipboard.action,
+        false,
+        {
+          quietChecking: true,
+          onSubmitted:
+            scopedClipboard.action === 'move'
+              ? () => setClipboard((current) => (current === scopedClipboard ? undefined : current))
+              : undefined,
+        },
+      );
+    } else if (!modifier && event.key === 'Delete' && selectedNames.length && canMutate) {
+      event.preventDefault();
+      chooseMode('delete');
+    }
+  }
+  function selectEntry(entry: ServerFile, event: MouseEvent<HTMLElement>) {
+    if (entry.is_symlink || mutationRunning.current || transferFlow.active) return;
+    const button = event.currentTarget.matches('.fm-filename')
+      ? event.currentTarget
+      : event.currentTarget.querySelector<HTMLButtonElement>('.fm-filename');
+    button?.focus();
+    setSelected((current) =>
+      selectFileClick(rows, current, anchor, entry.name, {
+        additive: event.ctrlKey || event.metaKey,
+        range: event.shiftKey,
+      }),
+    );
+    if (!event.shiftKey || !anchor) setAnchor(entry.name);
   }
   function dropFolder(event: DragEvent, folder: string) {
     if (!event.dataTransfer.types.includes(dragType) || !canMutate || mutationRunning.current)
@@ -1382,6 +1498,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     if (!uploadPause) void runUploads();
   }
   function acceptUploads(incoming: File[]) {
+    if (mutationRunning.current || transferFlow.active) return;
     if (folderPreparation.current) {
       setError({ messageKey: 'file.folderPreparing' });
       return;
@@ -1412,6 +1529,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     queueUploads(incoming);
   }
   async function acceptFolder(incoming: File[]) {
+    if (mutationRunning.current || transferFlow.active) return;
     if (!incoming.length) {
       setError({ messageKey: 'file.folderError.empty_selection' });
       return;
@@ -1505,7 +1623,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       aria-label={t('web.files')}
       onKeyDown={keyboard}
       onDragEnter={(event) => {
-        if (!editing && event.dataTransfer.types.includes('Files')) {
+        if (!editing && !fileActionsBusy && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(true);
         }
@@ -1513,7 +1631,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       onDragOver={(event) => {
         if (!editing && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
-          event.dataTransfer.dropEffect = uploadAvailable ? 'copy' : 'none';
+          event.dataTransfer.dropEffect = uploadAvailable && !fileActionsBusy ? 'copy' : 'none';
         }
       }}
       onDragLeave={(event) => {
@@ -1653,7 +1771,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       type="button"
                       className="fm-tool"
                       aria-label={t('service.newFolder')}
-                      disabled={!canMutate || preparingFolder}
+                      disabled={!canMutate || preparingFolder || fileActionsBusy}
                       onClick={() => chooseMode('mkdir', [])}
                     >
                       <ToolbarIcon kind="folder" />
@@ -1664,7 +1782,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       type="button"
                       className="fm-tool"
                       aria-label={t('service.newFile')}
-                      disabled={!canMutate || preparingFolder}
+                      disabled={!canMutate || preparingFolder || fileActionsBusy}
                       onClick={() => chooseMode('new', [])}
                     >
                       <ToolbarIcon kind="file" />
@@ -1684,6 +1802,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       type="button"
                       className="fm-tool"
                       aria-label={t('web.upload')}
+                      disabled={fileActionsBusy}
                       aria-disabled={!uploadAvailable || preparingFolder}
                       onClick={() => {
                         if (uploadAvailable && !preparingFolder) fileInput.current?.click();
@@ -1710,6 +1829,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       type="button"
                       className="fm-tool"
                       aria-label={t('file.uploadFolder')}
+                      disabled={fileActionsBusy}
                       aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
                       onClick={() => {
                         if (uploadAvailable && !preparingFolder && !uploadsBusy)
@@ -1849,7 +1969,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool"
                     aria-label={t('file.move')}
-                    disabled={!canMutate}
+                    disabled={!canMutate || fileActionsBusy}
                     onClick={() => chooseMode('move')}
                   >
                     <ToolbarIcon kind="move" />
@@ -1860,7 +1980,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool"
                     aria-label={t('file.copy')}
-                    disabled={!canMutate || capabilities.data?.copy !== true}
+                    disabled={!canMutate || fileActionsBusy || capabilities.data?.copy !== true}
                     onClick={() => chooseMode('copy')}
                   >
                     <ToolbarIcon kind="copy" />
@@ -1871,7 +1991,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-tool fm-selection-delete"
                     aria-label={t('web.delete')}
-                    disabled={!canMutate}
+                    disabled={!canMutate || fileActionsBusy}
                     onClick={() => chooseMode('delete')}
                   >
                     <ToolbarIcon kind="delete" />
@@ -2097,8 +2217,22 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   data-directory-path={
                     !entry.is_file && !entry.is_symlink ? join(directory, entry.name) : undefined
                   }
-                  className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''}`}
-                  draggable={canMutate && !entry.is_symlink}
+                  className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''} ${scopedClipboard?.action === 'move' && scopedClipboard.source === directory && scopedClipboard.names.includes(entry.name) ? 'fm-cut' : ''}`}
+                  onMouseDown={(event) => {
+                    // Modifier selection must not also create a browser text range.
+                    if (
+                      event.button === 0 &&
+                      (event.ctrlKey || event.metaKey || event.shiftKey) &&
+                      !(event.target as HTMLElement).closest('input,.fm-menu-trigger')
+                    )
+                      event.preventDefault();
+                  }}
+                  onClickCapture={(event) => {
+                    if ((event.target as HTMLElement).closest('button,input')) return;
+                    selectEntry(entry, event);
+                    event.currentTarget.querySelector<HTMLButtonElement>('.fm-filename')?.focus();
+                  }}
+                  draggable={canMutate && !entry.is_symlink && !fileActionsBusy}
                   onDragStart={(event) => {
                     const names = selected.has(entry.name) ? selectedNames : [entry.name];
                     event.dataTransfer.setData(
@@ -2127,7 +2261,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   <input
                     type="checkbox"
                     aria-label={t('file.select', { name: entry.name })}
-                    disabled={entry.is_symlink}
+                    disabled={entry.is_symlink || fileActionsBusy}
                     checked={selected.has(entry.name)}
                     onChange={() => {}}
                     onClick={(event) => {
@@ -2142,8 +2276,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     type="button"
                     className="fm-filename"
                     data-file-name={entry.name}
-                    disabled={entry.is_symlink}
-                    onClick={() => void open(entry)}
+                    disabled={entry.is_symlink || fileActionsBusy}
+                    onClick={(event) => {
+                      if (event.ctrlKey || event.metaKey || event.shiftKey)
+                        selectEntry(entry, event);
+                      else {
+                        setAnchor(entry.name);
+                        void open(entry);
+                      }
+                    }}
                     onKeyDown={(event) => {
                       if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
                         event.preventDefault();
@@ -2431,11 +2572,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         onClose={closeEditor}
         closeIcon
         closeDisabled={mutating}
+        initialFocusSelector={mode === 'delete' ? '[data-form-cancel]' : undefined}
       >
         <ActionForm
           key={`${mode}:${targets.join(',')}`}
           success={false}
           destructive={mode === 'delete'}
+          arrowActionNavigation={mode === 'delete'}
           onCancel={mode === 'delete' ? closeEditor : undefined}
           submitLabel={t(
             mode === 'delete' ? 'web.delete' : mode === 'extract' ? 'file.extract' : 'web.save',

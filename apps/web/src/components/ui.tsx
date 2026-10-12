@@ -193,6 +193,7 @@ export function ActionForm({
   className,
   onCancel,
   destructive = false,
+  arrowActionNavigation = false,
 }: {
   onSubmit: (data: FormData) => Promise<unknown>;
   children: ReactNode;
@@ -201,6 +202,7 @@ export function ActionForm({
   className?: string;
   onCancel?: () => void;
   destructive?: boolean;
+  arrowActionNavigation?: boolean;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -231,6 +233,24 @@ export function ActionForm({
       className={className ?? 'form'}
       onSubmit={submit}
       aria-busy={busy}
+      onKeyDown={(event) => {
+        if (
+          !arrowActionNavigation ||
+          event.nativeEvent.isComposing ||
+          !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)
+        )
+          return;
+        const buttons = [
+          ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+            '.form-footer > button:not(:disabled)',
+          ),
+        ];
+        const index = buttons.indexOf(event.target as HTMLButtonElement);
+        if (index < 0 || buttons.length < 2) return;
+        event.preventDefault();
+        const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
+        buttons[(index + direction + buttons.length) % buttons.length]?.focus();
+      }}
       onChange={() => setDone(false)}
     >
       {Boolean(error) && (
@@ -241,7 +261,13 @@ export function ActionForm({
       <fieldset disabled={busy}>{children}</fieldset>
       <div className="form-footer">
         {onCancel && (
-          <button type="button" className="secondary" disabled={busy} onClick={onCancel}>
+          <button
+            type="button"
+            data-form-cancel
+            className="secondary"
+            disabled={busy}
+            onClick={onCancel}
+          >
             {t('web.cancel')}
           </button>
         )}
@@ -262,6 +288,7 @@ export function Dialog({
   closeIcon = false,
   closeDisabled = false,
   className,
+  initialFocusSelector,
 }: {
   open: boolean;
   title: string;
@@ -271,15 +298,18 @@ export function Dialog({
   closeIcon?: boolean;
   closeDisabled?: boolean;
   className?: string;
+  initialFocusSelector?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const t = useT();
   useEffect(() => {
     const element = ref.current;
-    if (open && element && !element.open) element.showModal();
-    else if (!open && element?.open) element.close();
-  }, [open]);
+    if (open && element && !element.open) {
+      element.showModal();
+      if (initialFocusSelector) element.querySelector<HTMLElement>(initialFocusSelector)?.focus();
+    } else if (!open && element?.open) element.close();
+  }, [open, initialFocusSelector]);
   return (
     <dialog
       ref={ref}

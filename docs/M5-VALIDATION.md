@@ -6615,3 +6615,64 @@ rollback is required. Optional batch absence leaves foreground navigation intact
 Framework housekeeping is not reversed by code rollback. Private credentials,
 raw timings, scoped backups and archives remain untracked. PR #21 remains open
 and unmerged; SFTPGo #18 remains a separate production-release blocker.
+
+### 2026-10-13 — Explorer selection, clipboard and Delete shortcuts
+
+Ctrl/Cmd-click toggles files and folders without opening them. Shift-click selects
+a visible range; Ctrl/Cmd+Shift-click adds a range. Ctrl/Cmd+C and Ctrl/Cmd+X retain
+selection metadata without a request or destination dialog. Ctrl/Cmd+V uses the
+current folder and the existing copy/move handlers and overwrite-consent flow.
+No system clipboard contents or file bytes are stored by this feature. Metadata
+is scoped to the mounted Files workspace, exact identity and server; it is cleared
+on exit/reload. A submitted cut is consumed even when the response is uncertain,
+while cancelling conflict resolution before submission leaves it available.
+
+Delete/Canc opens the existing confirmation with Cancel focused. Arrow keys switch
+between Cancel and Delete; Enter activates the focused action. Inputs and the
+editor retain their own keyboard behavior. Paste uses no checking dialog but
+temporarily disables overlapping file mutations. Directory navigation retains
+keyboard focus; completion does not steal focus from an input the user has chosen.
+
+Focused checks (no historical full milestone suite):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-manager-model.test.ts`:
+  **8 passed**, covering toggle/range semantics, symlinks, path rules and clipboard
+  identity/server separation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-shortcuts.browser.test.ts apps/web/tests/file-manager.browser.test.ts -t 'M5 file explorer selection|confirms file deletion|supports keyboard context menus, range selection'`:
+  **10 passed, 28 skipped by filter**, final run **39.00 seconds**. Eight new cases
+  cover selection, copy to multiple destinations, cut of files/folders, overwrite
+  consent, delayed paste, unknown move outcome/no replay, cancelled conflict reuse,
+  editor/input isolation and EN/IT keyboard deletion. Two existing cases verify
+  toolbar/context-menu operations and pending deletion behavior.
+- `scripts/dev.sh pnpm typecheck`: passed. WebPanel and browser-test typechecks
+  were repeated after the final focus fix using
+  `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`.
+- Focused `biome check` on the eight changed TypeScript/CSS files and
+  `git diff --check`: passed. No dependencies, localization strings, database
+  schema or provider API contracts changed.
+- `python3 scripts/check-governance.py`: passed on the staged content — 670 text
+  files, 208 reviewed PNGs, 581 relative links, four TOML files and 44 ignore cases;
+  the heuristic secret scan passed.
+
+Initial browser tests exposed lost focus after folder navigation (three paste
+failures). Independent review also found overlapping actions during silent paste
+and insufficient contrast when dimming cut filenames. Corrected these by restoring
+breadcrumb focus before paint, guarding active transfers and dimming only the
+decorative file icon. The expanded run then exposed deferred focus restoration
+stealing focus from Search during paste completion (seven passed, one failed).
+A targeted diagnostic reproduced it; the final guard preserves an already-focused
+control. Final browser results above passed after these corrections. Temporary
+diagnostic output was removed. Independent final source, keyboard and rendered
+EN/IT review found no remaining must-fix.
+
+Reviewed actual browser screenshots:
+[desktop selection](screenshots/m5/files-keyboard-selection-desktop-en.png),
+[EN deletion](screenshots/m5/files-delete-keyboard-en.png),
+[mobile IT deletion](screenshots/m5/files-delete-keyboard-it.png).
+Tests use real application handlers and the existing isolated database, with
+external-provider fixtures; Ctrl and Cmd events were exercised in Chromium on
+Linux, not on a physical Mac. Temporary test schemas and file staging use their
+scoped cleanup. No live game files, provider resources, containers, networks or
+Blueprint extension were mutated or restarted. Rollback is a source revert;
+there is no persistent clipboard or migration to undo. PR #21 remains open and
+unmerged; SFTPGo #18 remains a separate production-release gate.

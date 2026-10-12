@@ -206,6 +206,9 @@
 .fm-entry.fm-selected {
   background: #edf3fa;
 }
+:where(.fm-cut .fm-filename) > .fm-icon {
+  opacity: 0.55;
+}
 .fm-entry input[type="checkbox"],
 .fm-columns input[type="checkbox"] {
   width: 17px;

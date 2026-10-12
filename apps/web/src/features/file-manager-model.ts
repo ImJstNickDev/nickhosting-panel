@@ -67,6 +67,52 @@ export function selectFileRange(
     else result.delete(item);
   return result;
 }
+/** Explorer name/row selection, separate from additive checkbox range selection. */
+export function selectFileClick(
+  visible: ServerFile[],
+  selected: Set<string>,
+  anchor: string | undefined,
+  name: string,
+  modifiers: { additive: boolean; range: boolean },
+): Set<string> {
+  if (modifiers.range)
+    return selectFileRange(
+      visible,
+      modifiers.additive ? selected : new Set(),
+      anchor,
+      name,
+      true,
+      true,
+    );
+  return selectFileRange(
+    visible,
+    modifiers.additive ? selected : new Set(),
+    anchor,
+    name,
+    false,
+    !modifiers.additive || !selected.has(name),
+  );
+}
+
+export interface FileClipboard {
+  identity: string;
+  serverId: string;
+  source: string;
+  names: string[];
+  action: 'copy' | 'move';
+}
+
+/** Internal metadata clipboard: never accepts data from the system clipboard. */
+export function fileClipboardForScope(
+  clipboard: FileClipboard | undefined,
+  identity: string | undefined,
+  serverId: string,
+): FileClipboard | undefined {
+  return identity && clipboard?.identity === identity && clipboard.serverId === serverId
+    ? clipboard
+    : undefined;
+}
+
 export function validMoveTarget(directory: string, names: string[], destination: string) {
   return (
     destination !== directory &&

@@ -537,7 +537,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           name: italian ? 'Chiudi' : 'Close',
           exact: true,
         });
-        await browserExpect(close).toBeFocused();
+        await browserExpect(
+          dialog().getByRole('button', { name: italian ? 'Annulla' : 'Cancel', exact: true }),
+        ).toBeFocused();
         await browserExpect(dialog()).toContainText(
           italian ? 'e un altro elemento' : 'and 1 other item',
         );

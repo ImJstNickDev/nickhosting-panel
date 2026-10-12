@@ -473,9 +473,20 @@ Files uses breadcrumbs rather than an always-visible path form. The direct-path
 button is available on touch; ALT + G (⌥ + G on macOS) opens direct-path entry while
 Files is mounted, outside dialogs. Ctrl+L remains the browser address-bar shortcut. Names
 open directories or the editor. Each row has an accessible overflow menu and a
-desktop context menu; destructive actions require confirmation. Checkbox range
-selection, focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and
-explicit Move/Copy dialogs provide equivalent pointer and keyboard paths.
+desktop context menu; destructive actions require confirmation. Ctrl/Cmd-click toggles
+selection without opening the item; Shift-click selects a visible range and
+Ctrl/Cmd+Shift-click adds that range to the selection. Checkbox range selection,
+focused-manager Ctrl/Cmd+A, folder/breadcrumb/parent drop targets and explicit
+Move/Copy dialogs provide equivalent pointer and keyboard paths.
+
+Ctrl/Cmd+C and Ctrl/Cmd+X retain only selection metadata in the mounted file manager,
+scoped to the current session/identity and server. They open no picker and perform
+no mutation. After folder navigation, Ctrl/Cmd+V copies or moves into the current
+folder, using the existing conflict flow. Copy can be pasted again; cut is consumed
+when the move is submitted, including when its outcome is uncertain. Dismissing a
+conflict before submission leaves the cut available. This clipboard does not read
+or overwrite the operating-system clipboard and does not survive leaving Files or
+reloading. Inputs, dialogs, the editor and selected text retain their own shortcuts.
 Move and Copy use the same bounded, lazy folder tree with keyboard navigation,
 expand/collapse, loading/error/retry states and a live destination path. Root is selectable;
 the source and a selected folder's descendants cannot be destinations, but the
@@ -487,7 +498,9 @@ use a compact X with an accessible Close label.
 Delete uses the same centered confirmation layout: bounded name summary, explicit
 irreversible-content warning, neutral Cancel and red Delete buttons with 48px
 targets. The Delete button itself confirms the operation; no additional generic
-checkbox is required. Initial focus stays on the safe Close control. Pending
+checkbox is required. Delete/Canc opens the confirmation with Cancel focused;
+arrow keys switch between Cancel and Delete, and Enter activates the focused
+button. Pending
 requests disable Cancel/Close/Delete and block Escape; failures remain visible
 without automatically repeating the deletion.
 

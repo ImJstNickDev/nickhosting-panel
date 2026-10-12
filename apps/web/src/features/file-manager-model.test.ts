@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   fileBreadcrumbs,
+  fileClipboardForScope,
   normalizeFilePath,
+  selectFileClick,
   selectFileRange,
   validMoveTarget,
   visibleFiles,
@@ -47,5 +49,46 @@ describe('file manager navigation and selection', () => {
     expect(validMoveTarget('world', ['region'], 'world')).toBe(false);
     expect(validMoveTarget('world', ['region'], 'world/region/sub')).toBe(false);
     expect(validMoveTarget('world', ['region'], '')).toBe(true);
+  });
+  it('toggles additive clicks without clearing the other selections', () => {
+    const rows = ['a', 'b', 'c'].map((name) => file(name));
+    const modifiers = { additive: true, range: false };
+    const selected = selectFileClick(rows, new Set(['a']), 'a', 'c', modifiers);
+    expect([...selected]).toEqual(['a', 'c']);
+    expect([...selectFileClick(rows, selected, 'c', 'a', modifiers)]).toEqual(['c']);
+  });
+  it('replaces the range for Shift and adds it for Ctrl/Command+Shift in visible order', () => {
+    const rows = ['z', 'n', 'c', 'a'].map((name) => file(name));
+    const selected = new Set(['hidden', 'a']);
+    expect([
+      ...selectFileClick(rows, selected, 'n', 'z', { additive: false, range: true }),
+    ]).toEqual(['z', 'n']);
+    expect([...selectFileClick(rows, selected, 'n', 'c', { additive: true, range: true })]).toEqual(
+      ['hidden', 'a', 'n', 'c'],
+    );
+  });
+  it('falls back to one selected row without a visible anchor and omits symlinks', () => {
+    const rows = [file('a'), { ...file('b'), is_symlink: true }, file('c')];
+    expect([
+      ...selectFileClick(rows, new Set(['a']), 'hidden', 'c', { additive: false, range: true }),
+    ]).toEqual(['c']);
+    expect([
+      ...selectFileClick(rows, new Set(), 'a', 'c', { additive: false, range: true }),
+    ]).toEqual(['a', 'c']);
+  });
+  it('keeps clipboard metadata scoped to the exact actor/session and server', () => {
+    const clipboard = {
+      identity: 'session:actor:subject',
+      serverId: 'server-a',
+      source: 'world',
+      names: ['level.dat'],
+      action: 'move' as const,
+    };
+    expect(fileClipboardForScope(clipboard, clipboard.identity, clipboard.serverId)).toBe(
+      clipboard,
+    );
+    expect(fileClipboardForScope(clipboard, 'other-session', clipboard.serverId)).toBeUndefined();
+    expect(fileClipboardForScope(clipboard, undefined, clipboard.serverId)).toBeUndefined();
+    expect(fileClipboardForScope(clipboard, clipboard.identity, 'server-b')).toBeUndefined();
   });
 });

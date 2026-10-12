@@ -24,6 +24,8 @@ type TransferState = {
   error?: unknown;
   attempted?: boolean;
   identity: string | undefined;
+  onSubmitted?: () => void;
+  quietChecking?: boolean;
 };
 
 export function FileSelectionSummary({ names }: { names: string[] }) {
@@ -183,6 +185,8 @@ export function useFileTransfer(options: {
           return;
         }
         submitted = true;
+        // A cut clipboard must not replay a move whose remote outcome is unknown.
+        operation.onSubmitted?.();
         const overwrite = names.filter((name) => operation.decisions[name] === 'overwrite');
         await api(
           `${serverPath(options.serverId)}/files${operation.action === 'copy' ? '/copy' : ''}`,
@@ -256,6 +260,7 @@ export function useFileTransfer(options: {
     plan: FileTransferPlan,
     action: TransferAction = 'move',
     chooseDestination = true,
+    interaction?: { onSubmitted?: () => void; quietChecking?: boolean },
   ) {
     if (!canAct(action) || latest.current.isBusy() || working.current) return;
     generation.current++;
@@ -266,6 +271,7 @@ export function useFileTransfer(options: {
       decisions: Object.create(null),
       collisions: [],
       identity: latest.current.identity,
+      ...interaction,
     };
     update(next);
     if (!chooseDestination) void execute(next);
@@ -301,9 +307,10 @@ export function useFileTransfer(options: {
   const actionLabel = t(state?.action === 'copy' ? 'file.copy' : 'file.move');
   return {
     begin,
+    active: Boolean(state),
     dialog: (
       <Dialog
-        open={Boolean(state)}
+        open={Boolean(state && !(state.quietChecking && state.phase === 'checking'))}
         title={
           conflict
             ? t('file.moveCollisionTitle', {
