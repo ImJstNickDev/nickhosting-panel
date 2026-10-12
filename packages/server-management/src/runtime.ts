@@ -844,8 +844,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
       current: AuthContext,
       server: Awaited<ReturnType<typeof authorizeServer>>,
     ) => Promise<T>,
-    directoryRead = false,
+    identityMode: 'fresh' | 'directory' | 'upload' = 'fresh',
   ) {
+    const reuseIdentity = identityMode !== 'fresh';
     const run = async (connection: Kysely<Database>) => {
       let identityAttempted = false;
       if (write) {
@@ -870,7 +871,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         if (write && server.active_operation_id) throw new DomainError('conflict');
         if (write) await assertNoPendingUpload(connection, serverId);
         identityAttempted = true;
-        if (directoryRead && !write)
+        if (reuseIdentity)
           await directoryIdentityCache.verify(
             connection,
             server,
@@ -893,7 +894,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
           serverId,
           write ? 'server:manage' : 'server:read',
         );
-        if (directoryRead && directoryServerIdentity(latest) !== directoryServerIdentity(server))
+        if (reuseIdentity && directoryServerIdentity(latest) !== directoryServerIdentity(server))
           throw new DomainError('conflict');
         return await work(server.pterodactyl_identifier, connection, refreshed, server);
       } catch (error) {
@@ -908,10 +909,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
     };
     // Directory reads hold no lifecycle lock. Do not pin a pool connection while
     // waiting for a background renewal that itself needs that pool (even max=1).
-    return directoryRead ? run(db) : db.connection().execute(run);
+    return identityMode === 'directory' ? run(db) : db.connection().execute(run);
   }
-  // Only directory GETs may reuse a proof. Existing access callers, especially
-  // mutations/downloads/editor reads, retain their fresh remote corroboration.
+  // Existing generic access callers keep fresh remote corroboration. Uploads
+  // explicitly reuse identity only; authorization, locks and file checks remain fresh.
   function access<T>(
     context: AuthContext,
     serverId: string,
@@ -921,7 +922,16 @@ export async function createManagementRuntime(options: ManagementOptions) {
     return withAccess(context, serverId, write, work);
   }
   function listFiles(context: AuthContext, serverId: string, path: string) {
-    return withAccess(context, serverId, false, (id) => adapter.listFiles(id, path), true);
+    return withAccess(context, serverId, false, (id) => adapter.listFiles(id, path), 'directory');
+  }
+  function uploadAccess<T>(
+    context: AuthContext,
+    serverId: string,
+    work: Parameters<typeof withAccess<T>>[3],
+  ) {
+    // The API upload gate reserves pool capacity for background proof renewals
+    // and transfer authorization while this write holds its pinned connection.
+    return withAccess(context, serverId, true, work, 'upload');
   }
   return {
     adapter,
@@ -932,6 +942,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     process,
     reconcile,
     access,
+    uploadAccess,
     listFiles,
     authorizeTransfer,
     lifecycle,

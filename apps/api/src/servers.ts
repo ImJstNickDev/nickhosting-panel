@@ -396,6 +396,7 @@ export function registerServerRoutes(
     });
   });
   app.put('/v1/servers/:id/files/upload', async (c) => {
+    const started = performance.now();
     const context = await principal(c),
       service = await management();
     const declared = c.req.header('x-nh-upload-length');
@@ -422,8 +423,20 @@ export function registerServerRoutes(
     const name = path.slice(slash + 1);
     const serverId = c.req.param('id');
     const release = options.acquireUploadSlot();
+    const durations: Record<string, number> = {};
+    const milliseconds = (since: number) => Math.round((performance.now() - since) * 1000) / 1000;
+    const measure = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {
+      const since = performance.now();
+      try {
+        return await work();
+      } finally {
+        durations[stage] = milliseconds(since);
+      }
+    };
+    let outcome = 'failed';
     try {
-      await service.access(context, serverId, true, async (id, connection, current) => {
+      await service.uploadAccess(context, serverId, async (id, connection, current) => {
+        durations.accessMs = milliseconds(started);
         const directories = new Map<string, Promise<ServerFile[]>>();
         const listFiles = (root: string) => {
           let listing = directories.get(root);
@@ -444,7 +457,7 @@ export function registerServerRoutes(
           return listing;
         };
         const [preflight, observed] = await Promise.allSettled([
-          (async () => {
+          measure('pathsMs', async () => {
             await service.assertFileMutation(serverId, [path], connection, {
               providerIdentifier: id,
               listFiles,
@@ -454,8 +467,8 @@ export function registerServerRoutes(
             if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
               throw new DomainError('validation_failed', 413);
             return { maxBytes, files: await listFiles(directory) };
-          })(),
-          Promise.resolve().then(() => service.adapter.getResources(id)),
+          }),
+          measure('resourcesMs', () => service.adapter.getResources(id)),
         ]);
         // Drain every started read before the pinned connection/server lock can be released.
         // Game/authorization failures keep precedence over the independent resource read.
@@ -476,28 +489,26 @@ export function registerServerRoutes(
           action: 'upload',
           bytes: contentLength,
         });
-        const claim = await reserveUploadIngestion(
-          connection,
-          current,
-          serverId,
-          contentLength,
-          env,
+        const claim = await measure('admissionMs', () =>
+          reserveUploadIngestion(connection, current, serverId, contentLength, env),
         );
         try {
-          await service.adapter.uploadFile(id, path, {
-            body:
-              c.req.raw.body ??
-              new ReadableStream({
-                start(controller) {
-                  controller.close();
-                },
-              }),
-            contentLength,
-            maxBytes,
-            signal: c.req.raw.signal,
-            authorize: () => service.authorizeTransfer(current, serverId, true, connection),
-          });
-          await claim.complete();
+          await measure('providerMs', () =>
+            service.adapter.uploadFile(id, path, {
+              body:
+                c.req.raw.body ??
+                new ReadableStream({
+                  start(controller) {
+                    controller.close();
+                  },
+                }),
+              contentLength,
+              maxBytes,
+              signal: c.req.raw.signal,
+              authorize: () => service.authorizeTransfer(current, serverId, true, connection),
+            }),
+          );
+          await measure('settlementMs', () => claim.complete());
         } catch (error) {
           if (isUploadNotDispatched(error)) await claim.rejectBeforeDispatch();
           throw error;
@@ -509,8 +520,21 @@ export function registerServerRoutes(
           bytes: contentLength,
         });
       });
+      outcome = 'succeeded';
     } finally {
       release();
+      // One diagnostic per transfer, with no paths, content or upstream URLs.
+      // Overlapping path/resource durations must not be summed as elapsed time.
+      try {
+        options.logger?.log('info', 'server.files_upload', {
+          requestId: c.get('requestId'),
+          serverId,
+          bytes: contentLength,
+          outcome,
+          ...durations,
+          durationMs: milliseconds(started),
+        });
+      } catch {}
     }
     return c.body(null, 204);
   });

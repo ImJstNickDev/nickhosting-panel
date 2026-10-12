@@ -281,6 +281,95 @@ describe('Minecraft file mutation preflight', () => {
       expect(listFiles).toHaveBeenCalledTimes(root ? root.split('/').length + 1 : 1);
     },
   );
+  it('overlaps fresh ancestry reads with at most four active requests and deduplicates 49 paths', async () => {
+    const { listings, paths } = tree('world/data/region/one/two/three');
+    const { runtime, serverId, listFiles } = await guardFixture(listings);
+    const fourStarted = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let active = 0;
+    let maximum = 0;
+    listFiles.mockImplementation(async (_id, directory = '') => {
+      active++;
+      maximum = Math.max(maximum, active);
+      if (active === 4) fourStarted.resolve();
+      await release.promise;
+      active--;
+      return listings.get(directory) ?? [];
+    });
+    const checking = runtime.assertFileMutation(serverId, paths, f.db);
+    await fourStarted.promise;
+    expect(listFiles).toHaveBeenCalledTimes(4);
+    release.resolve();
+    await checking;
+    expect(maximum).toBe(4);
+    expect(active).toBe(0);
+    expect(listFiles.mock.calls.map(([, directory]) => directory)).toEqual([...listings.keys()]);
+  });
+  it('drains a speculative descendant failure before rejecting its unsafe ancestor', async () => {
+    const { listings, paths } = tree('world/data');
+    listings.set('', [entry('world', { is_file: false, is_symlink: true })]);
+    const { runtime, serverId, listFiles } = await guardFixture(listings);
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let descendantSettled = false;
+    listFiles.mockImplementation(async (_id, directory = '') => {
+      if (directory === 'world/data') {
+        started.resolve();
+        await release.promise;
+        descendantSettled = true;
+        throw new DomainError('file_exists');
+      }
+      return listings.get(directory) ?? [];
+    });
+    let settled = false;
+    const checking = runtime.assertFileMutation(serverId, paths, f.db).then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await started.promise;
+    expect(settled).toBe(false);
+    release.resolve();
+    expect(await checking).toMatchObject({ code: 'conflict' });
+    expect(descendantSettled).toBe(true);
+    expect(listFiles).toHaveBeenCalledTimes(3);
+  });
+  it('preserves ancestor-first provider error precedence when descendant reads fail sooner', async () => {
+    const { listings, paths } = tree('world/data');
+    const { runtime, serverId, listFiles } = await guardFixture(listings);
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const failure = new DomainError('integration_unavailable');
+    listFiles.mockImplementation(async (_id, directory = '') => {
+      if (directory === '') {
+        await release.promise;
+        throw failure;
+      }
+      started.resolve();
+      throw new DomainError('not_found');
+    });
+    const checking = runtime.assertFileMutation(serverId, paths, f.db).catch((error) => error);
+    await started.promise;
+    release.resolve();
+    expect(await checking).toBe(failure);
+    expect(listFiles).toHaveBeenCalledTimes(3);
+  });
+  it('ignores descendant not-found results after a missing ancestor, as sequential checks do', async () => {
+    const { listings, paths } = tree('new/deep');
+    listings.set('', []);
+    const { runtime, serverId, listFiles } = await guardFixture(listings);
+    listFiles.mockImplementation(async (_id, directory = '') => {
+      if (directory) throw new DomainError('not_found');
+      return [];
+    });
+    await runtime.assertFileMutation(serverId, paths, f.db);
+    expect(listFiles.mock.calls.map(([, directory]) => directory)).toEqual(['', 'new', 'new/deep']);
+  });
   it('uses the supplied provider-bound observations and still shares repeated directories', async () => {
     const { listings, paths } = tree('mods');
     const { runtime, serverId, identifier, listFiles } = await guardFixture(listings);
@@ -332,7 +421,11 @@ describe('Minecraft file mutation preflight', () => {
       await expect(
         runtime.assertFileMutation(serverId, [...paths.slice(0, -1), 'unsafe/file.dat'], f.db),
       ).rejects.toThrow('conflict');
-      expect(listFiles.mock.calls.map(([, directory]) => directory)).toEqual(['', 'safe']);
+      expect(listFiles.mock.calls.map(([, directory]) => directory)).toEqual([
+        '',
+        'safe',
+        'unsafe',
+      ]);
     },
   );
   it.each(['server.jar', 'libraries', 'fabric-server-launcher.properties'])(

@@ -309,23 +309,48 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
     if (context && context.providerIdentifier !== identifier) throw new DomainError('conflict');
     const readDirectory =
       context?.listFiles ?? ((directory: string) => adapter.listFiles(identifier, directory));
-    // Share only this preflight's observations, never a later mutation's checks.
-    const directories = new Map<string, Promise<ServerFile[]>>();
-    const listFiles = (directory: string) => {
-      let listing = directories.get(directory);
-      if (!listing) {
-        listing = readDirectory(directory);
-        directories.set(directory, listing);
+    // These independent reads are fresh for this mutation. Deduplicate every
+    // ancestor and bound concurrency, including large multi-file operations.
+    const requested = new Set<string>();
+    for (const path of paths) {
+      let directory = '';
+      for (const component of path.split('/')) {
+        requested.add(directory);
+        directory = [directory, component].filter(Boolean).join('/');
       }
-      return listing;
-    };
+    }
+    const pending = [...requested];
+    const directories = new Map<string, PromiseSettledResult<ServerFile[]>>();
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(4, pending.length) }, async () => {
+        for (;;) {
+          const directory = pending[next++];
+          if (directory === undefined) return;
+          try {
+            directories.set(directory, {
+              status: 'fulfilled',
+              value: await readDirectory(directory),
+            });
+          } catch (reason) {
+            directories.set(directory, { status: 'rejected', reason });
+          }
+        }
+      }),
+    );
     // An SFTP-created alias must not turn an otherwise ordinary browser path
     // into a write through a protected launch file or its parent directory.
+    // Validate in the original order only after all started reads have drained:
+    // a missing ancestor makes descendant errors irrelevant, and an unsafe
+    // ancestor takes precedence over a speculative destination failure.
     for (const path of paths) {
       const components = path.split('/');
       let directory = '';
       for (const component of components) {
-        const matches = (await listFiles(directory)).filter(
+        const listing = directories.get(directory);
+        if (!listing) throw new DomainError('integration_unavailable');
+        if (listing.status === 'rejected') throw listing.reason;
+        const matches = listing.value.filter(
           (entry) => entry.name.toLowerCase() === component.toLowerCase(),
         );
         if (

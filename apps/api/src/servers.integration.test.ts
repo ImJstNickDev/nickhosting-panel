@@ -1351,7 +1351,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
         failure === 'protected-runtime' ? 'validation_failed' : 'conflict',
       );
       expect(files.mock.calls.slice(before).map(([, directory]) => directory)).toEqual(
-        failure === 'protected-runtime' ? [] : [''],
+        failure === 'protected-runtime' ? [] : ['', 'mods'],
       );
       expect(uploadFile.mock.calls).toHaveLength(uploads);
       expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
@@ -1405,6 +1405,73 @@ describe('M2 Hono API with real invitation, password and session authentication'
       }
     },
   );
+
+  it('reuses the browsing identity for 49 uploads while retaining fresh path and quota observations', async () => {
+    const server = await minecraftServer();
+    const identity = vi.mocked(f.adapter.getApplicationServer);
+    const list = vi.mocked(f.adapter.listFiles);
+    const original = list.getMockImplementation();
+    const before = identity.mock.calls.length;
+    const uploaded = uploadFile.mock.calls.length;
+    let unsafe = false;
+    list.mockImplementation(async (_id, directory = '') =>
+      directory === '' ? [fileEntry('world', { is_file: false, is_symlink: unsafe })] : [],
+    );
+    try {
+      expect((await request(user, `/v1/servers/${server}/files`)).status).toBe(200);
+      const reads = list.mock.calls.length;
+      const resources = vi.mocked(f.adapter.getResources).mock.calls.length;
+      for (let index = 0; index < 49; index++)
+        expect(
+          (
+            await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+              path: `world/private-fixture-${index}.txt`,
+              overwrite: 'false',
+            })
+          ).status,
+        ).toBe(204);
+      expect(identity.mock.calls).toHaveLength(before + 1);
+      expect(uploadFile.mock.calls).toHaveLength(uploaded + 49);
+      expect(list.mock.calls).toHaveLength(reads + 98);
+      expect(vi.mocked(f.adapter.getResources).mock.calls).toHaveLength(resources + 49);
+      const timings = timingRecords.filter(
+        (record) => record.event === 'server.files_upload' && record.data.serverId === server,
+      );
+      expect(timings).toHaveLength(49);
+      for (const { data } of timings) {
+        expect(data).toMatchObject({
+          outcome: 'succeeded',
+          bytes: 1,
+          accessMs: expect.any(Number),
+          pathsMs: expect.any(Number),
+          resourcesMs: expect.any(Number),
+          admissionMs: expect.any(Number),
+          providerMs: expect.any(Number),
+          settlementMs: expect.any(Number),
+          durationMs: expect.any(Number),
+          requestId: expect.any(String),
+        });
+        expect(JSON.stringify(data)).not.toMatch(/private-fixture|private-token|wings\.example/);
+      }
+      // Changing an ancestor outside NickHosting must not inherit cached path safety.
+      unsafe = true;
+      const rejected = await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+        path: 'world/private-fixture-late.txt',
+        overwrite: 'false',
+      });
+      expect(rejected.status).toBe(409);
+      expect((await rejected.json()).error.code).toBe('conflict');
+      expect(uploadFile.mock.calls).toHaveLength(uploaded + 49);
+      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+      expect(
+        timingRecords.findLast(
+          (record) => record.event === 'server.files_upload' && record.data.serverId === server,
+        )?.data.outcome,
+      ).toBe('failed');
+    } finally {
+      list.mockImplementation(original ?? (async () => []));
+    }
+  });
 
   it('overlaps resource sampling with game directory checks before starting an upload', async () => {
     const server = await minecraftServer();

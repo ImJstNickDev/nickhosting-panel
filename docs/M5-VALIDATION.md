@@ -5640,3 +5640,57 @@ mutation, new infrastructure/test server or explicit container restart occurred.
 No migration/dependency change. Indexed hygiene/governance checks passed. Rollback:
 revert this commit's API/browser/catalog changes together. PR#21 remains OPEN and
 unmerged; SFTPGo#18 remains a separate production-release gate.
+
+### 2026-10-12 — Reuse upload identity and overlap fresh path checks
+
+The preceding read-only diagnosis examined49 recent upload audit sequences:
+reservation-to-confirmation was205 ms median, confirmation-to-final-audit5 ms,
+and previous completion to the next completed preflight723 ms. Audit timestamps
+are transaction timestamps, not exact browser/provider stage traces. Three separate
+read-only adapter probes measured identity190–306 ms, root listing231–245 ms,
+child listing201–212 ms and resource reads206–251 ms. Browser XHR100% can occur
+before these checks finish; it does not mean Wings has completed the write.
+These are pre-change observations, not claimed post-change timings.
+
+Binary uploads now reuse the same bounded identity proof as directory browsing,
+so opening Files prepares identity for subsequent uploads. The proof still expires
+at60 seconds and renews in the background at55; local identity, account/key,
+allocation and Blueprint drift invalidate reuse. Fresh session/manage authority,
+active-operation/pending-upload checks, the exclusive server lock and final identity
+comparison remain per request. General mutations keep their existing fresh remote
+identity verification. No new API endpoint, browser token, persistent batch state,
+permission cache, migration or dependency is introduced.
+
+Minecraft ancestor listings now overlap with at most four requests in flight,
+deduplicated within each mutation. They remain fresh between uploads: external
+SFTP changes can introduce in-root symlinks, so caching path safety across files
+would weaken runtime-file protection. All reads settle before validation returns;
+original-order validation preserves ancestor errors and missing-ancestor behavior.
+The destination guard shares these same observations. Resource sampling remains
+parallel and current; local disk allowance may differ from the provider allowance.
+Physical upload admission, cancellation, unresolved claims and confirmed-success
+semantics remain unchanged.
+
+The API emits one privacy-safe `server.files_upload` timing event for requests
+that acquired an upload slot, separating access, path/resource reads, admission,
+provider transfer and settlement. Paths/content/signed URLs/credentials are absent.
+Parallel durations must not be summed. This allows the next Owner upload to be
+measured without repeating live writes merely for benchmarking.
+
+Validation on pinned Node/pnpm:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/game-modules.integration.test.ts`: **23 passed**,5.83 seconds. Covers49-file deduplication, bounded overlap, fresh unsafe ancestors, protected runtime paths, deterministic error precedence and draining failed speculative reads.
+- The same integration prefix with `packages/server-management/src/directory-identity.integration.test.ts`: initial **45 passed,1 failed**. A new project fixture incorrectly used `operator` instead of the required `manager`; production permission checks correctly denied its upload. After correcting the fixture and adding the contention case, the targeted rerun passed **2 tests**,45 skipped. All47 scenarios passed across those runs; no single clean47-case run is claimed. Coverage includes49 uploads sharing one identity proof, cold/expired proofs,55-second renewal, drift and revocation, pending claims, fail-fast locks and an actual two-connection pool during renewal.
+- The same integration prefix with `apps/api/src/servers.integration.test.ts`: **64 passed**,0 skipped,63.81 seconds. A real-handler49-upload fixture uses one remote identity read, while all49 quota checks and98 root/child observations remain fresh. A later injected symlink is rejected without upload/claim; timing fields and absence of private filenames/tokens are asserted. Existing streaming, origin/permission, cancellation, pool-capacity and uncertain-effect coverage passes.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-refresh.browser.test.ts apps/web/tests/file-upload-cancel.browser.test.ts`: **14 passed**,0 skipped,74.99 seconds. Real browser/handler fixtures cover49-file continuation, cancellation, busy retry/exhaustion, uncertainty, folder collisions, failed/coalesced display refreshes and navigation/unmount isolation.
+- `scripts/dev.sh pnpm typecheck`: passed. Scoped `biome check`, `biome format` and `git diff --check` passed for all six source/test files. No frontend layout/catalog/dependency changes; no production build or historical full-suite rerun was necessary.
+
+Independent source/security review found no must-fix findings. Existing approved
+isolated services were reused; fixture schemas/assets were cleaned by their normal
+teardown. No live game-file upload, server mutation, new infrastructure, data reset
+or explicit container restart occurred. API/Vite source watchers remain in use.
+The actual post-change live latency is pending the Owner's next upload; request
+counts and concurrency are proven through isolated fixtures. No new screenshot
+was required for this backend-only behavior change. Rollback: revert this change;
+no data migration. PR#21 remains OPEN/unmerged; SFTPGo#18 remains a separate
+production-release gate.

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDirectoryIdentityCache } from './directory-identity.js';
 import { createProject, setProjectMember } from './registry.js';
 import { createManagementRuntime } from './runtime.js';
-import { managementFixture } from './test-fixtures.js';
+import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
 describe('directory browsing identity proof reuse', () => {
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -25,6 +25,7 @@ describe('directory browsing identity proof reuse', () => {
   const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
   const remote = vi.fn<() => Promise<ApplicationServer>>();
   const listing = vi.fn(async (_identifier: string, _directory = '') => []);
+  const uploaded = vi.fn(async () => 'isolated upload');
 
   async function identity(): Promise<ApplicationServer> {
     const server = await f.db
@@ -67,6 +68,7 @@ describe('directory browsing identity proof reuse', () => {
   const runtime = (adapter = f.adapter) =>
     createManagementRuntime({ db: f.db, codec, adapter, directoryIdentityCache: cache });
   const browse = async (path = '') => (await runtime()).listFiles(f.context, serverId, path);
+  const upload = async () => (await runtime()).uploadAccess(f.context, serverId, uploaded);
 
   beforeEach(async () => {
     database = await createTestDatabase();
@@ -77,6 +79,7 @@ describe('directory browsing identity proof reuse', () => {
     cache = createDirectoryIdentityCache(() => clock);
     remote.mockReset().mockImplementation(identity);
     listing.mockClear();
+    uploaded.mockReset().mockResolvedValue('isolated upload');
     f.adapter.getApplicationServer = remote;
     f.adapter.listFiles = listing;
   });
@@ -92,6 +95,25 @@ describe('directory browsing identity proof reuse', () => {
     for (const path of ['', 'world', 'world/playerdata']) await browse(path);
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing.mock.calls.map((call) => call[1])).toEqual(['', 'world', 'world/playerdata']);
+  });
+
+  it('reuses a browsed identity across 49 uploads without reusing upload callbacks', async () => {
+    await browse();
+    for (let index = 0; index < 49; index++) await upload();
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(uploaded).toHaveBeenCalledTimes(49);
+    expect(listing).toHaveBeenCalledTimes(1);
+  });
+
+  it('also prepares a cold upload identity once and expires it without extending TTL', async () => {
+    await upload();
+    clock = 54_999;
+    await upload();
+    expect(remote).toHaveBeenCalledTimes(1);
+    clock = 60_000;
+    await upload();
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(uploaded).toHaveBeenCalledTimes(3);
   });
 
   it('keeps proof across non-identity metadata, telemetry and feed heartbeat updates', async () => {
@@ -228,6 +250,41 @@ describe('directory browsing identity proof reuse', () => {
     }
   });
 
+  it('waits for expired background proof renewal with the upload gate minimum two-connection pool', async () => {
+    const small = createDatabase(process.env.NH_TEST_DATABASE_URL as string, {
+      max: 2,
+      options: `-c search_path=${database.schema}`,
+    });
+    const renewal = deferredProof();
+    let request: Promise<unknown> | undefined;
+    try {
+      const service = await createManagementRuntime({
+        db: small.db,
+        codec,
+        adapter: f.adapter,
+        directoryIdentityCache: cache,
+      });
+      await service.uploadAccess(f.context, serverId, uploaded);
+      clock = 55_000;
+      remote.mockReturnValueOnce(renewal.promise);
+      await service.uploadAccess(f.context, serverId, uploaded);
+      await vi.waitFor(() => expect(remote).toHaveBeenCalledTimes(2));
+      clock = 60_000;
+      request = service.uploadAccess(f.context, serverId, uploaded);
+      await delay(30);
+      expect(uploaded).toHaveBeenCalledTimes(2);
+      renewal.resolve(await identity());
+      await request;
+      expect(uploaded).toHaveBeenCalledTimes(3);
+      expect(remote).toHaveBeenCalledTimes(2);
+    } finally {
+      renewal.resolve(await identity());
+      await request?.catch(() => {});
+      cache.close();
+      await small.db.destroy();
+    }
+  });
+
   it('closing the cache rejects an in-flight proof without listing or resurrection', async () => {
     const proof = deferredProof();
     remote.mockReturnValueOnce(proof.promise);
@@ -260,16 +317,18 @@ describe('directory browsing identity proof reuse', () => {
     expect(remote).toHaveBeenCalledTimes(2);
   });
 
-  it.each([
-    'identity',
-    'node',
-    'claim',
-    'credential',
-    'account-status',
-    'feed-enabled',
-    'projection-revision',
-    'projection-valid',
-  ] as const)('invalidates a warm proof after %s changes', async (change) => {
+  it.each(
+    [
+      'identity',
+      'node',
+      'claim',
+      'credential',
+      'account-status',
+      'feed-enabled',
+      'projection-revision',
+      'projection-valid',
+    ].flatMap((change) => ['directory', 'upload'].map((mode) => ({ change, mode }))),
+  )('invalidates a warm $mode proof after $change changes', async ({ change, mode }) => {
     const account = await f.db
       .selectFrom('provider_accounts')
       .selectAll()
@@ -355,7 +414,8 @@ describe('directory browsing identity proof reuse', () => {
         .execute();
     // The injected adapter isolates proof invalidation; credential resolution itself
     // remains covered by provider-account/scoped-adapter integration tests.
-    await browse('world');
+    if (mode === 'upload') await upload();
+    else await browse('world');
     expect(remote).toHaveBeenCalledTimes(2);
   });
 
@@ -379,7 +439,9 @@ describe('directory browsing identity proof reuse', () => {
       })
       .execute();
     await expect(browse('world')).rejects.toThrow('provenance_mismatch');
+    await expect(upload()).rejects.toThrow('provenance_mismatch');
     expect(listing).toHaveBeenCalledTimes(1);
+    expect(uploaded).not.toHaveBeenCalled();
   });
 
   it('does not cache failed remote identity reads or serve expired proofs on error', async () => {
@@ -409,8 +471,10 @@ describe('directory browsing identity proof reuse', () => {
       .where('id', '=', f.context[authSessionId] as string)
       .execute();
     await expect(browse('world')).rejects.toThrow('unauthenticated');
+    await expect(upload()).rejects.toThrow('unauthenticated');
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing).toHaveBeenCalledTimes(1);
+    expect(uploaded).not.toHaveBeenCalled();
   });
 
   it('denies revoked project membership even with a warm proof', async () => {
@@ -422,16 +486,67 @@ describe('directory browsing identity proof reuse', () => {
       .execute();
     await setProjectMember(f.db, f.owner, project.id, {
       userId: f.context.subjectUserId,
-      role: 'viewer',
+      role: 'manager',
     });
     await browse();
+    await upload();
     await setProjectMember(f.db, f.owner, project.id, {
       userId: f.context.subjectUserId,
       role: null,
     });
     await expect(browse('world')).rejects.toThrow('forbidden');
+    await expect(upload()).rejects.toThrow('forbidden');
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing).toHaveBeenCalledTimes(1);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['active-operation', 'pending-upload'] as const)(
+    'rejects uploads with %s even with a warm identity proof',
+    async (blocker) => {
+      await browse();
+      if (blocker === 'pending-upload') await pendingUploadFixture(f.db, serverId);
+      else
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: randomUUID() })
+          .where('id', '=', serverId)
+          .execute();
+      await expect(upload()).rejects.toThrow(
+        blocker === 'pending-upload' ? 'operation_uncertain' : 'conflict',
+      );
+      expect(uploaded).not.toHaveBeenCalled();
+      expect(remote).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('invalidates reused identity after an unknown upload failure without replaying it', async () => {
+    await browse();
+    uploaded.mockRejectedValueOnce(new Error('isolated uncertain upload'));
+    await expect(upload()).rejects.toThrow('isolated uncertain upload');
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    await browse();
+    expect(remote).toHaveBeenCalledTimes(2);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps upload lock contention fail-fast despite a warm identity proof', async () => {
+    await browse();
+    const held = Promise.withResolvers<void>();
+    const entered = vi.fn(async () => held.promise);
+    const request = (await runtime()).uploadAccess(f.context, serverId, entered);
+    try {
+      await vi.waitFor(() => expect(entered).toHaveBeenCalledTimes(1));
+      await expect(upload()).rejects.toThrow('operation_busy');
+      expect(uploaded).not.toHaveBeenCalled();
+      expect(remote).toHaveBeenCalledTimes(1);
+    } finally {
+      held.resolve();
+      await request;
+    }
+    await upload();
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    expect(remote).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])(
@@ -446,13 +561,17 @@ describe('directory browsing identity proof reuse', () => {
     },
   );
 
-  it.each(['identity', 'credential', 'session'] as const)(
-    'rejects %s changes while the remote proof is in flight',
-    async (change) => {
+  it.each(
+    ['identity', 'credential', 'session'].flatMap((change) =>
+      ['directory', 'upload'].map((mode) => ({ change, mode })),
+    ),
+  )(
+    'rejects $change changes while the remote $mode proof is in flight',
+    async ({ change, mode }) => {
       const snapshot = await identity();
       const proof = deferredProof();
       remote.mockReturnValueOnce(proof.promise);
-      const request = browse();
+      const request = mode === 'upload' ? upload() : browse();
       const rejected = expect(request).rejects.toThrow(
         change === 'session' ? 'unauthenticated' : 'conflict',
       );
@@ -478,6 +597,7 @@ describe('directory browsing identity proof reuse', () => {
       proof.resolve(snapshot);
       await rejected;
       expect(listing).not.toHaveBeenCalled();
+      expect(uploaded).not.toHaveBeenCalled();
     },
   );
 });

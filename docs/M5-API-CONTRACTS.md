@@ -114,6 +114,32 @@ transport has closed.
 File, backup, console, metrics and DNS actions reuse M2 endpoints. Browser uploads
 send `Blob` through XHR with declared `X-NH-Upload-Length`, observable byte progress
 and cancellation; server admission/stream verification remains authoritative.
+The browser's byte-progress 100% is not a Wings completion receipt. Small bodies
+can finish transmission before API preflight has completed. Only a successful
+upload response marks a file complete; uploads remain sequential.
+
+Uploads share the bounded identity proof already warmed by directory browsing
+([M2 identity contract](M2-API.md)), including proactive renewal and local
+identity/credential/Blueprint invalidation. No new browser token, batch endpoint
+or long-lived permission grant is introduced. Actual directory listings remain
+fresh per upload and run with bounded parallelism; they are shared only within
+that request's game/destination guards. Cached ancestry could miss an external
+SFTP change to an in-root symlink targeting protected runtime files. Therefore
+path checks are not carried across files. The resource snapshot overlaps those
+reads; local disk limits can differ from Wings limits, so each file still receives
+quota and physical staging admission. Cancellation/uncertain effects still retain
+their durable claims.
+
+The API emits one `server.files_upload` diagnostic for requests that acquired an upload slot:
+`requestId`, `serverId`, declared `bytes`, `outcome`, `durationMs` and completed or
+failed stage durations. `accessMs` includes request authentication/runtime setup
+and identity access; `pathsMs` and `resourcesMs` overlap and must not be summed.
+`admissionMs` covers storage reservation; `providerMs` includes signed-URL lookup,
+streaming, transfer authorization and the provider response; `settlementMs` covers
+durable claim completion. Total time also includes audits and unlocking. Paths,
+file bodies, signed URLs and credentials are never logged. These are server-side
+timings, not browser progress or network round-trip measurements.
+
 Cancellation targets one queue entry. The specific `409 operation_busy` response
 means initial lock/slot contention before provider effects. The upload queue keeps
 that exact file and retries at most five attempts, with cancellable 250/500/1000/2000 ms
