@@ -35,6 +35,23 @@ export interface UploadScope {
   pterodactylServerUuid: string;
   externalId: string;
   policy: UploadPolicy;
+  /** Bounded multi-file reservation; absent on legacy single-file claims. */
+  batch?: {
+    actorUserId: string;
+    subjectUserId: string;
+    sessionId: string;
+    bindingHash: string;
+    manifestHash?: string;
+    rejected?: Array<{ id: string; code: 'file_exists' | 'conflict' }>;
+    concurrency: number;
+    files: Array<{
+      id: string;
+      path: string;
+      bytes: number;
+      overwrite: boolean;
+      state: 'queued' | 'active' | 'complete' | 'cancelled' | 'uncertain';
+    }>;
+  };
 }
 export interface ServerLimits {
   memory: number;

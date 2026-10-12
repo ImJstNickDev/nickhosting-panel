@@ -29,6 +29,7 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   downloadBackup: 0,
   downloadFile: 0,
   uploadFile: 0,
+  prepareUpload: 0,
   relayConsole: 0,
 };
 export function createScopedProviderAdapter(

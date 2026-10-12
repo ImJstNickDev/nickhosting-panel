@@ -112,50 +112,75 @@ is unresolved; credential deletion is not an assurance that an established SSH
 transport has closed.
 
 File, backup, console, metrics and DNS actions reuse M2 endpoints. Browser uploads
-send `Blob` through XHR with declared `X-NH-Upload-Length`, observable byte progress
-and cancellation; server admission/stream verification remains authoritative.
-The browser's byte-progress 100% is not a Wings completion receipt. Small bodies
-can finish transmission before API preflight has completed. Only a successful
-upload response marks a file complete; uploads remain sequential.
+prepare a bounded group with `POST /v1/servers/:id/files/upload-batches`, then send
+independent binary XHR requests to `/files/upload?batchId=…&entryId=…&path=…`.
+Preparation accepts `{id: UUID,files:[{id,path,bytes,overwrite}]}` (maximum 500
+entries per group). Its private durable manifest binds the exact files, actor,
+subject, session and managed provider identity. The reply includes `id`,
+`concurrency`, `files` with states, and per-entry `rejected` collision results;
+`id:null` means no entry was admitted. Repeating preparation with the same ID and
+manifest reuses that reservation. A completed ID cannot create another group.
+No signed URL or provider credential is returned to the browser.
 
-Uploads share the bounded identity proof already warmed by directory browsing
-([M2 identity contract](M2-API.md)), including proactive renewal and local
-identity/credential/Blueprint invalidation. No new browser token, batch endpoint
-or long-lived permission grant is introduced. Actual directory listings remain
-fresh per upload and run with bounded parallelism; they are shared only within
-that request's game/destination guards. Cached ancestry could miss an external
-SFTP change to an in-root symlink targeting protected runtime files. Therefore
-path checks are not carried across files. The resource snapshot overlaps those
-reads; local disk limits can differ from Wings limits, so each file still receives
-quota and physical staging admission. Cancellation/uncertain effects still retain
-their durable claims.
+The Owner setting `uploadConcurrency` defaults to 2, accepts 1–6 and follows
+normal settings precedence (`NH_UPLOAD_CONCURRENCY`). Transfer descriptors expose
+`concurrency`, `batchMaxFiles` and `batchMaxBytes`; the browser partitions larger
+queues by the configured storage budget. This does not impose a fixed total-size
+cap on the user's selection. One slot starts the largest pending file (large
+means at least 16 MiB); other slots take small files first. All-small queues keep
+selection order; all-large queues fill available slots largest first. Each free
+slot refills immediately. There is no artificial bandwidth split or promised
+network bandwidth allocation.
 
-The API emits one `server.files_upload` diagnostic for requests that acquired an upload slot:
-`requestId`, `serverId`, declared `bytes`, `outcome`, `durationMs` and completed or
-failed stage durations. `accessMs` includes request authentication/runtime setup
-and identity access; `pathsMs` and `resourcesMs` overlap and must not be summed.
-`admissionMs` covers storage reservation; `providerMs` includes signed-URL lookup,
-streaming, transfer authorization and the provider response; `settlementMs` covers
-durable claim completion. Total time also includes audits and unlocking. Paths,
-file bodies, signed URLs and credentials are never logged. These are server-side
-timings, not browser progress or network round-trip measurements.
+Preparation reads each distinct destination/ancestor once, shares those reads
+with the game guard, and overlaps them with one resource snapshot. It rejects
+unsafe/protected paths, checks aggregate disk growth without credit from future
+shrinking overwrites, and reserves physical/staging space for the whole group.
+**Path/collision observations are made at preparation only.** The Owner explicitly
+accepted removing repeated remote path checks: an external SFTP/game/provider
+change during the group can race these observations. This is neither an atomic
+no-clobber filesystem operation nor continuous protection against externally
+introduced in-root aliases. Current local authorization, managed identity proof,
+exact entry binding, streaming byte limits and native Wings filesystem policy
+remain enforced. Generic non-upload mutations retain their existing checks.
 
-Cancellation targets one queue entry. The specific `409 operation_busy` response
-means initial lock/slot contention before provider effects. The upload queue keeps
-that exact file and retries at most five attempts, with cancellable 250/500/1000/2000 ms
-waits; this retry loop adds no availability polling. Existing view refreshes remain. Exhaustion pauses with the same
-file still queued; Check and resume includes it. Each new attempt runs normal
-current authorization and admission. Generic conflicts, provider/network errors
-and unknown outcomes are never automatically replayed.
-After other submitted failures/cancellations,
-fresh transfer/capability reads precede further uploads. A shared-state failure
-(`conflict`, `operation_uncertain`, `integration_unavailable`) pauses untouched
-entries even if those advisory reads report availability: an earlier request may
-still hold the preflight lock before inserting its claim. Check and resume retries
-admission, never the failed/uncertain file. Pending files remain only in the current
-browser tab. Adapter proof that the Wings POST was never invoked permits releasing
-that exact claim with `server.upload.not_dispatched`; any failure after invocation
-retains the durable claim and existing Owner recovery requirements.
+Each transfer takes shared lifecycle/claim locks, so disjoint group entries can
+run together while ordinary mutations, lifecycle work and Owner recovery remain
+excluded. SQL entry claims enforce the configured concurrency across requests/API
+instances. One-use signed URL issuance overlaps entry admission and explicitly
+bypasses GET coalescing: concurrent files must never share a Wings upload token.
+The actual Wings POST waits for admission. Binary bytes stream with bounded
+buffers; XHR100% is not completion. Only the successful provider response and
+local settlement mark an entry complete. No per-file post-upload listing/hash
+verification is added.
+
+The existing host ingestion claim stores batch metadata; no migration is needed.
+Conservative reservation is twice total declared bytes plus 65,536 bytes per
+possible concurrent multipart request. It remains charged until all entries are
+complete/cancelled. Browser groups are bounded to this budget. Successful files
+are not replayed. `POST /files/upload-batches/:batchId/cancel` with `{entryId}`
+cancels only an unstarted entry; `DELETE /files/upload-batches/:batchId` abandons
+queued entries. An active/uncertain entry retains its reservation and consumes a
+slot; other entries can use remaining slots. Provider failure/cancellation after
+dispatch is not an atomic rollback. Owner recovery retains its existing explicit
+external-completion evidence requirements. Process loss is conservative, not an
+automatic retry. The previous non-batch binary route remains available for older
+clients and uses its original per-request checks.
+
+The queue retries only definitive pre-effect `409 operation_busy`, with bounded
+250/500/1000/2000 ms backoff. Other failures are shown per entry; queued siblings
+within the admitted group remain independent. Browser navigation/identity changes
+abort active transfers and close unstarted entries. A lost preparation response
+retains the original ID for retry rather than inventing a second reservation.
+Pending file bodies remain only in the browser tab.
+
+Privacy-safe `server.files_upload_prepared` traces count files/bytes and preparation
+duration. `server.files_upload` reports access, entry admission, signed-URL lookup,
+provider streaming/response and settlement separately. Signed-URL/admission times
+overlap and must not be summed. Trace fields contain no paths, content, keys or
+URLs; these are backend timings, not browser byte-progress measurements. Legacy
+uploads retain their earlier path/resource timing fields.
+
 Downloads use a native same-origin link, without creating a whole-file browser
 JavaScript blob. The CodeMirror editor alone caps UTF-8 content at 1 MiB, including
 its provider read. Binary transfers have no such editor cap. Legacy text routes

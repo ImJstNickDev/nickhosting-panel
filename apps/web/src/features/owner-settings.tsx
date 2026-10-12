@@ -51,7 +51,8 @@ const groupFor = (key: string) =>
             ? 'sftp'
             : /dns|cloudflare|staticGame/.test(key)
               ? 'network'
-              : /defaultUser|storage|Servers|Provisions|observation/.test(key)
+              : key === 'uploadConcurrency' ||
+                  /defaultUser|storage|Servers|Provisions|observation/.test(key)
                 ? 'resources'
                 : 'general';
 const groups = [

@@ -5694,3 +5694,117 @@ counts and concurrency are proven through isolated fixtures. No new screenshot
 was required for this backend-only behavior change. Rollback: revert this change;
 no data migration. PR#21 remains OPEN/unmerged; SFTPGo#18 remains a separate
 production-release gate.
+
+### 2026-10-12 — Prepared upload groups and concurrent streaming
+
+The Owner requested removing repeated directory/resource observations and using
+configurable concurrent uploads. The preceding live49-file sample (3,952,843bytes)
+took31.576seconds from first request start to last completion. Mean backend time
+was587.69ms/file: access17.26ms, paths304.42ms and resources245.16ms overlapping,
+admission19.56ms, provider226.49ms, settlement8.38ms and other work11.58ms.
+Provider time included signed-URL issuance, not just file bytes. Mean gap between
+requests was57.9ms. These remain baseline measurements, not new performance claims.
+
+The browser now prepares bounded groups and streams independent files with
+**two concurrent slots by default**, Owner-configurable1–6. It starts the largest
+file first (large threshold16MiB), uses other slots for small files, and refills
+freed slots immediately. All-small queues keep selection order; all-large queues
+fill the slots largest first. There is no artificial bandwidth throttle. Group
+partitioning respects existing storage budgets and at most500entries; it does
+not impose a new fixed cap on the whole selection.
+
+Preparation performs shared path checks and one quota snapshot. The real-handler
+49-file fixture now proves **2 directory reads and1 resource read**, replacing
+98 and49 respectively for the same root/child paths. No directory/resource read
+is required between admitted files. Single-use private upload URL issuance
+runs alongside local entry admission; bytes wait for both. GET coalescing is
+explicitly disabled for token issuance, avoiding accidental reuse of the same
+Wings token by two concurrent files. Separate timing fields expose signed-URL
+latency and streaming/provider response latency for the next live comparison.
+
+Existing ingestion records hold the group manifest and independent file states;
+no migration/dependency/service change is needed. Shared lifecycle locks permit
+parallel uploads while excluding other mutations. Current authorization, managed
+identity binding, streaming bounds, atomic concurrency claims and conservative
+physical reservation remain. Cancel/error affects its entry, and confirmed
+siblings continue. Uncertain effects retain their claim and consume a slot;
+there is no blind replay or invented rollback. Lost preparation responses reuse
+their original identity; abandoned queued entries release only unused groups.
+Directory/collision observations are now made **once at preparation**: external
+SFTP/game/provider changes can race them. This accepted boundary is documented
+in [M5 upload contracts](M5-API-CONTRACTS.md), not presented as atomic no-clobber
+or continuous protection against externally introduced filesystem aliases.
+
+Validation (pinned runtime, actual handlers and existing approved isolated
+PostgreSQL/Redis services; external file effects use provider fixtures):
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts packages/server-management/src/upload-batches.integration.test.ts packages/server-management/src/upload-admission.integration.test.ts packages/server-management/src/directory-identity.integration.test.ts packages/server-management/src/platform-queries.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'requests a private upload URL'
+scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/transfers.test.ts packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/transport.test.ts packages/server-management/src/scoped-provider-adapter.test.ts
+scripts/dev.sh pnpm exec vitest run packages/core/src/core.test.ts apps/web/src/features/file-upload-queue.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-cancel.browser.test.ts apps/web/tests/file-upload-refresh.browser.test.ts
+```
+
+- Final affected integration run: **165 passed across5files**,155.59seconds.
+  The subsequently added signed-URL/admission-overlap test passed separately:
+  **1 passed,66 skipped**,7.00seconds. This is not a claimed single166-test run.
+- Adapter/transport/scoped-credential units: **131 passed across4files**,3.41seconds.
+  Distinct single-use tokens are asserted across two scoped adapters sharing the
+  same transport coordinator. Scheduler/configuration units: **54 passed**.
+- Initial affected browser run: **15 passed,2 failed** across17scenarios. One
+  busy-backoff assertion allowed5seconds for up to3.75seconds of retry delay plus
+  handler overhead; its bounded test wait is now10seconds. A case-insensitive
+  collision incorrectly returned generic conflict; the API now reports the
+  specific existing-file result without blocking unrelated entries.
+- Targeted busy/collision/mobile rerun: **3 passed**. The actual protected Owner
+  settings journey then passed after correcting test locators to `Saved setting`
+  and `Save changes`; it saves3 and verifies3 active uploads and independent
+  queued cancellation. A new eighteenth scenario checks cancelling every queued
+  entry after a lost preparation response releases the unused reservation.
+- Final targeted browser command used the same browser prefix with
+  `apps/web/tests/file-upload-cancel.browser.test.ts -t 'unused reservation|prepared batch after unmount|lost preparation response with'`:
+  **3 passed,9 skipped**,12.64seconds. **All18 distinct scenarios passed across
+  these runs**, not a single clean18-case run. Coverage includes49 files with a
+  held first transfer, large/small scheduling, independent errors/cancellation,
+  lost responses, unmount, final listing freshness and existing content protection.
+- One intermediate browser invocation failed in Owner setup with HTTP500 before
+  any test executed. The cause remains unproven; safe fixture diagnostics were
+  retained. It did not recur in the final targeted run after other integration
+  suites finished. No external-provider error is inferred from that fixture event.
+- An earlier API run had43passes/23failures after a new fixture omitted deletion
+  `confirm:true`, received400 instead of the expected409, and left its prepared
+  claim for subsequent cases. Corrected input/final cleanup passed targeted3cases
+  and the final165-test run. Coordinator fixture corrections covered JSONB key
+  order and a strict input accidentally containing persisted state. Historical
+  failures are not rewritten as successful production executions.
+
+`scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build` and
+`scripts/dev.sh pnpm i18n:check` passed (1242EN/IT/pseudolocale keys). The existing
+bundle-size advisory remains. Scoped Biome lint/format and indexed governance
+checks cover the final changed files. No historical M1–M5 full-suite rerun or
+real-server benchmark was performed. The SFTPGo retained-SSH-transport regressions
+were not rerun or claimed fixed; issue#18 remains a production-release gate.
+
+Independent technical review found one pool-headroom issue in preparation;
+reusing the existing upload-slot gate resolved it, with a small-pool regression.
+No remaining must-fix finding was reported after review of authorization, group
+claims, recovery, scheduler and token isolation. Actual browser screenshots were
+reviewed for EN desktop/IT mobile progress, completion truthfulness and cancellation:
+
+- [English desktop uploads](screenshots/m5/file-upload-parallel-complete-en-desktop.png)
+- [Italian mobile uploads](screenshots/m5/file-upload-parallel-it-mobile.png)
+- [Owner concurrency setting](screenshots/m5/file-upload-concurrency-owner-en-desktop.png)
+
+Mobile axe reported0violations and no page overflow; upload rows wrap so the
+cancel control remains visible. This is focused evidence, not a new whole-app
+accessibility certification. The screenshots contain isolated fixture identities.
+
+API/Vite source watchers picked up the changes; dev services remain healthy and
+the HTTPS ingress returned200. No explicit container restart, real game-file
+write, production resource mutation, new infrastructure or test server occurred.
+Isolated schemas/fixtures used normal teardown; development accounts/data remain
+unchanged. Live latency improvement awaits the Owner's next upload, with separate
+preparation/token/stream traces. Rollback: drain/close groups, preserve uncertain
+claims for reviewed recovery, and revert matching API/browser changes together;
+no migration or data reset. PR#21 remains OPEN and unmerged.

@@ -5,7 +5,7 @@ import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
 import { createDownloadProxy, type DownloadProxyOptions } from './downloads.js';
 import { confirmInstallation } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
-import { createTransferGuard } from './transfer-guard.js';
+import { createTransferGuard, type TransferOptions } from './transfer-guard.js';
 import {
   createTransport,
   numericId,
@@ -433,7 +433,13 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       );
       return download(result.url, input);
     },
-    async uploadFile(identifier: string, path: string, input: UploadProxyOptions) {
+    /** Private, single-use upload handoff. URL lookup may overlap read-only
+     * preflight; no Wings mutation occurs until the returned function is called. */
+    async prepareUpload(
+      identifier: string,
+      path: string,
+      input: TransferOptions = {},
+    ): Promise<(body: UploadProxyOptions) => Promise<void>> {
       let result: { url: string };
       try {
         relativePath(path);
@@ -445,16 +451,37 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
               'client',
               `${clientServer(identifier)}/files/upload`,
               z.object({ url: z.string() }),
+              'GET',
+              undefined,
+              // This GET issues a single-use credential, not a shareable observation.
+              false,
             ),
           );
         } finally {
           guard.close();
         }
       } catch (error) {
-        void input.body.cancel().catch(() => {});
         throw uploadNotDispatched(error);
       }
-      return upload(result.url, path, input);
+      let used = false;
+      return async (body: UploadProxyOptions) => {
+        if (used) {
+          void body.body.cancel().catch(() => {});
+          throw uploadNotDispatched(new DomainError('conflict'));
+        }
+        used = true;
+        return upload(result.url, path, body);
+      };
+    },
+    async uploadFile(identifier: string, path: string, input: UploadProxyOptions): Promise<void> {
+      let prepared: (body: UploadProxyOptions) => Promise<void>;
+      try {
+        prepared = await adapter.prepareUpload(identifier, path, input);
+      } catch (error) {
+        void input.body.cancel().catch(() => {});
+        throw error;
+      }
+      return prepared(input);
     },
     async relayConsole(identifier: string, input: ConsoleRelayOptions) {
       const server = await adapter.getClientServer(identifier);

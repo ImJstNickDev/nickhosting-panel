@@ -844,17 +844,21 @@ export async function createManagementRuntime(options: ManagementOptions) {
       current: AuthContext,
       server: Awaited<ReturnType<typeof authorizeServer>>,
     ) => Promise<T>,
-    identityMode: 'fresh' | 'directory' | 'upload' = 'fresh',
+    identityMode: 'fresh' | 'directory' | 'upload' | 'upload-batch' | 'upload-prepare' = 'fresh',
   ) {
     const reuseIdentity = identityMode !== 'fresh';
     const run = async (connection: Kysely<Database>) => {
       let identityAttempted = false;
       if (write) {
-        const lock = await sql<{
-          acquired: boolean;
-        }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`.execute(
-          connection,
-        );
+        const shared = identityMode === 'upload-batch';
+        const lock = await (shared
+          ? sql<{
+              acquired: boolean;
+            }>`select pg_try_advisory_lock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
+          : sql<{
+              acquired: boolean;
+            }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0)) as acquired`
+        ).execute(connection);
         // This request has not entered the callback or started any provider effect.
         if (!lock.rows[0]?.acquired) throw new DomainError('operation_busy');
       }
@@ -869,7 +873,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
         if (write && server.active_operation_id) throw new DomainError('conflict');
-        if (write) await assertNoPendingUpload(connection, serverId);
+        if (write && identityMode !== 'upload-batch' && identityMode !== 'upload-prepare')
+          await assertNoPendingUpload(connection, serverId);
         identityAttempted = true;
         if (reuseIdentity)
           await directoryIdentityCache.verify(
@@ -902,9 +907,10 @@ export async function createManagementRuntime(options: ManagementOptions) {
         throw error;
       } finally {
         if (write)
-          await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`.execute(
-            connection,
-          );
+          await (identityMode === 'upload-batch'
+            ? sql`select pg_advisory_unlock_shared(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
+            : sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${serverId}`},0))`
+          ).execute(connection);
       }
     };
     // Directory reads hold no lifecycle lock. Do not pin a pool connection while
@@ -933,6 +939,29 @@ export async function createManagementRuntime(options: ManagementOptions) {
     // and transfer authorization while this write holds its pinned connection.
     return withAccess(context, serverId, true, work, 'upload');
   }
+  /** The callback must validate/consume its durable batch entry before sending
+   * bytes. Shared upload locks still exclude lifecycle and ordinary mutations. */
+  function uploadBatchAccess<T>(
+    context: AuthContext,
+    serverId: string,
+    work: Parameters<typeof withAccess<T>>[3],
+    prepare = false,
+  ) {
+    return withAccess(context, serverId, true, work, prepare ? 'upload-prepare' : 'upload-batch');
+  }
+  function uploadBatchBinding(server: Parameters<typeof directoryServerIdentity>[0]) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          directoryServerIdentity(server),
+          consoleProviderBinding,
+          values.pterodactylUploadOrigins,
+          server.limits,
+          server.mapping_id,
+        ]),
+      )
+      .digest('hex');
+  }
   return {
     adapter,
     consoleProviderBinding,
@@ -943,6 +972,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     reconcile,
     access,
     uploadAccess,
+    uploadBatchAccess,
+    uploadBatchBinding,
     listFiles,
     authorizeTransfer,
     lifecycle,

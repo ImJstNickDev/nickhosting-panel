@@ -71,6 +71,7 @@ export const platformConfigSchema = z
     pterodactylWebSocketOrigins: z.array(origin(['ws:', 'wss:'])).max(50),
     pterodactylDownloadOrigins: z.array(origin(['http:', 'https:'])).max(50),
     pterodactylUploadOrigins: z.array(origin(['http:', 'https:'])).max(50),
+    uploadConcurrency: z.number().int().min(1).max(6),
     registrationInviteTtlSeconds: z.number().int().min(60).max(31_536_000),
     supportIdleTtlSeconds: z.number().int().min(60).max(900),
     supportAbsoluteTtlSeconds: z.number().int().min(60).max(3600),
@@ -163,6 +164,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   pterodactylWebSocketOrigins: [],
   pterodactylDownloadOrigins: [],
   pterodactylUploadOrigins: [],
+  uploadConcurrency: 2,
   registrationInviteTtlSeconds: 86_400,
   supportIdleTtlSeconds: 300,
   supportAbsoluteTtlSeconds: 900,
@@ -216,6 +218,7 @@ export const configEnvironmentKeys = {
   pterodactylWebSocketOrigins: 'NH_PTERODACTYL_WEBSOCKET_ORIGINS',
   pterodactylDownloadOrigins: 'NH_PTERODACTYL_DOWNLOAD_ORIGINS',
   pterodactylUploadOrigins: 'NH_PTERODACTYL_UPLOAD_ORIGINS',
+  uploadConcurrency: 'NH_UPLOAD_CONCURRENCY',
   registrationInviteTtlSeconds: 'NH_INVITE_TTL_SECONDS',
   supportIdleTtlSeconds: 'NH_SUPPORT_IDLE_TTL_SECONDS',
   supportAbsoluteTtlSeconds: 'NH_SUPPORT_ABSOLUTE_TTL_SECONDS',
@@ -276,6 +279,7 @@ export const configEnvironmentKeys = {
 } as const satisfies Record<PlatformConfigKey, string>;
 
 const numericKeys = new Set<PlatformConfigKey>([
+  'uploadConcurrency',
   'registrationInviteTtlSeconds',
   'supportIdleTtlSeconds',
   'supportAbsoluteTtlSeconds',

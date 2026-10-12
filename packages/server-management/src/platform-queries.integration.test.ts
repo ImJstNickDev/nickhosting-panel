@@ -847,7 +847,20 @@ describe('M5 platform browser queries and metadata', () => {
       .where('id', '=', f.hostId)
       .execute();
     const result = await getPlatformTransfers(f.db, f.context, id, env);
-    expect(result.upload).toMatchObject({ available: true, providerMaxFileBytes: 5_000_000_000 });
+    expect(result.upload).toMatchObject({
+      available: true,
+      providerMaxFileBytes: 5_000_000_000,
+      concurrency: 2,
+      batchMaxFiles: 500,
+      batchMaxBytes: Math.min(
+        result.upload.serverDiskBytes,
+        Math.floor((20_000_000_000 - 65536 * 2) / 2),
+      ),
+    });
+    expect(
+      (await getPlatformTransfers(f.db, f.context, id, { ...env, NH_UPLOAD_CONCURRENCY: '4' }))
+        .upload.concurrency,
+    ).toBe(4);
     await f.db.updateTable('provider_change_feeds').set({ enabled: false }).execute();
     expect((await getPlatformTransfers(f.db, f.context, id, env)).upload.available).toBe(false);
     await f.db.updateTable('provider_change_feeds').set({ enabled: true }).execute();

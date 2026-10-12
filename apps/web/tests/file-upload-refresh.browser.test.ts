@@ -97,7 +97,7 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
     };
   }
 
-  it('finishes 49 sequential uploads while one listing is held and follows it with a fresh final listing', async () => {
+  it('finishes 49 parallel uploads while one listing is held and follows it with a fresh final listing', async () => {
     await open();
     const files = batch('coalesced', 49);
     const listing = await holdFirstListing();
@@ -265,7 +265,7 @@ describe('M5 uploads coalesce display refreshes without delaying file writes', (
       await browserExpect(queue().getByText('Completed', { exact: true })).toHaveCount(7);
       await browserExpect(queue().getByText('Failed', { exact: true })).toHaveCount(1);
       await browserExpect(queue().getByRole('alert')).toContainText('already exists');
-      expect(uploads).toHaveLength(8);
+      expect(uploads).toHaveLength(7);
       expect(uploads.every((request) => request.overwrite === 'false')).toBe(true);
       expect(listings.every((path) => path === '')).toBe(true);
       const remote = await provider.files();

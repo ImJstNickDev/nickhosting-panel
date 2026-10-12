@@ -239,7 +239,7 @@ and observed usage, accounting for an existing regular file when overwriting.
 Native provider filesystem quotas remain authoritative against concurrent game
 writes. Uploading onto a directory or symlink is refused.
 
-Upload preflight shares request-local directory observations between the game
+The legacy non-batch upload preflight shares request-local directory observations between the game
 guard and destination checks; it does not list the destination twice. Resource
 usage is read concurrently with independent path checks. All started branches
 settle before the server lock/database connection can be released on failure.
@@ -249,6 +249,20 @@ ingestion claim. Folder uploads use this server-side preflight instead of a
 separate browser listing before each file. This is not an atomic no-clobber
 filesystem operation: concurrent game/SFTP/provider writes can still race it.
 Existing locking, storage admission and uncertain-outcome recovery are unchanged.
+
+The WebPanel uses the [M5 prepared upload group contract](M5-API-CONTRACTS.md#transfer-network-telemetry-and-sleep-descriptors):
+`POST /v1/servers/:id/files/upload-batches`, independent binary PUTs with
+`batchId`/`entryId`, per-entry cancellation and group close. Common path/quota
+preflight runs once for the bounded group; external filesystem changes may race
+that observation. Per-file authorization and durable admission still apply.
+`uploadConcurrency` defaults to 2 (Owner setting or `NH_UPLOAD_CONCURRENCY`, 1–6).
+Group entries hold shared lifecycle and ingestion locks; generic writes keep
+exclusive locks. The existing single host claim stores the group ledger and full
+conservative reservation, with multipart overhead for every concurrent slot.
+Uncertain entries retain space and a slot; already-admitted siblings may continue
+in remaining slots. Other groups remain excluded until the claim is resolved.
+There is no database migration or provider configuration change. Legacy single
+uploads below retain their original behavior.
 
 Uploads stream one generated multipart `files` part to the private Wings signed
 upload URL; the body is never accumulated in `FormData` or a full-file buffer.
@@ -554,6 +568,7 @@ optional overrides; do not seed its example values into PostgreSQL.
 | `observationMaxAgeSeconds` | `NH_OBSERVATION_MAX_AGE_SECONDS` | `4`; admission caps effective age at `4` seconds (smaller configured values still apply) |
 | `pterodactylWebSocketOrigins` | `NH_PTERODACTYL_WEBSOCKET_ORIGINS` | `[]`, JSON array of exact `ws`/`wss` origins |
 | `pterodactylDownloadOrigins` | `NH_PTERODACTYL_DOWNLOAD_ORIGINS` | `[]`, JSON array of exact HTTP(S) origins |
+| `uploadConcurrency` | `NH_UPLOAD_CONCURRENCY` | `2`, integer 1–6; bounded concurrent entries in a prepared upload group |
 | `pterodactylUploadOrigins` | `NH_PTERODACTYL_UPLOAD_ORIGINS` | `[]`, separate exact HTTP(S) Wings upload origins |
 | `sftpgoBaseUrl`, `sftpgoDataRoot`, `sftpgoInstanceId` | `NH_SFTPGO_BASE_URL`, `NH_SFTPGO_DATA_ROOT`, `NH_SFTPGO_INSTANCE_ID` | Unset; absolute provider-visible root, instance UUID |
 | `sftpCredentialTtlSeconds` | `NH_SFTP_CREDENTIAL_TTL_SECONDS` | `3600`, range 60–86400 |

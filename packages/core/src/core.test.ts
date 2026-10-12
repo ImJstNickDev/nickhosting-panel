@@ -18,6 +18,20 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('bounds concurrent uploads and honors Owner/environment precedence', () => {
+    expect(resolveConfig().values.uploadConcurrency).toBe(2);
+    expect(resolveConfig({ uploadConcurrency: 3 }).values.uploadConcurrency).toBe(3);
+    const result = resolveConfig({ uploadConcurrency: 3 }, { NH_UPLOAD_CONCURRENCY: '6' });
+    expect(result.values.uploadConcurrency).toBe(6);
+    expect(result.sources.uploadConcurrency).toBe('environment');
+    expect(() => assertConfigWritable({ uploadConcurrency: 2 }, result)).toThrow('conflict');
+    for (const value of [0, 7, 1.5, -1])
+      expect(() => resolveConfig({ uploadConcurrency: value })).toThrow('configuration_invalid');
+    for (const value of ['0', '7', '1.5', '-1', '', 'true'])
+      expect(() => resolveConfig({}, { NH_UPLOAD_CONCURRENCY: value })).toThrow(
+        'configuration_invalid',
+      );
+  });
   it('resolves inherited idle defaults with environment precedence and rejects invalid timeouts', () => {
     expect(resolveConfig().values.gameIdleTimeouts).toEqual({});
     expect(resolveConfig().values.defaultIdleTimeoutSeconds).toBe(-1);

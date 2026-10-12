@@ -445,7 +445,7 @@
 .fm-uploads ul {
   list-style: none;
   margin: 10px 0 0;
-  padding: 0;
+  padding: 0 4px;
   max-height: 230px;
   overflow: auto;
 }
@@ -466,6 +466,20 @@
 }
 .fm-uploads .notice small {
   color: inherit;
+}
+@media (max-width: 560px) {
+  .fm-upload-name {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+  }
+  .fm-upload-name span {
+    grid-column: 1;
+  }
+  .fm-upload-name button {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
 }
 .fm-uploads progress {
   width: 100%;

@@ -989,6 +989,19 @@ export async function getPlatformTransfers(
       reason,
       providerMaxFileBytes: policy?.providerMaxFileBytes ?? null,
       serverDiskBytes: server.limits.disk * 1048576,
+      concurrency: settings.values.uploadConcurrency,
+      batchMaxFiles: 500,
+      batchMaxBytes: policy
+        ? Math.max(
+            0,
+            Math.min(
+              server.limits.disk * 1048576,
+              Math.floor(
+                (policy.temporaryDiskBudgetBytes - 65536 * settings.values.uploadConcurrency) / 2,
+              ),
+            ),
+          )
+        : null,
       streaming: true,
     },
     download: {

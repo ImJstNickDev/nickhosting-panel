@@ -955,3 +955,25 @@ The Owner approved and completed this scoped activation on2026-10-12. API/Vite
 are healthy; HTTPS and HMR were verified. Existing web/Gateway/worker/data-service
 containers and network attachments were preserved. See the dated Files section
 in [M5 validation](M5-VALIDATION.md) for results and remaining upload configuration.
+
+### Concurrent file uploads (2026-10-12)
+
+Owner **Settings → Resource policy → Simultaneous uploads** controls prepared
+upload groups: default2, range1–6. `NH_UPLOAD_CONCURRENCY` is an optional explicit
+environment override; leaving it unset keeps the Owner setting editable. This
+limit applies per prepared group, with the existing API/database-pool and physical
+storage admission limits still bounding total work. Upload origins and host
+ingestion policy remain required; this setting does not replace them.
+
+This change uses existing source watchers, dependencies and ingestion tables.
+No image rebuild, migration, service restart, network change or data reset is
+required. Preparation observes directories and storage once per group; individual
+requests stream concurrently, with independent progress and cancellation. See
+the [upload contract](M5-API-CONTRACTS.md) for scheduling and the accepted boundary
+around external filesystem changes after preparation.
+
+Before rolling back the API/browser change, let active transfers finish and close
+unused groups. Preserve any uncertain ingestion claims for the existing reviewed
+recovery process; do not delete claims or reset data merely to restore availability.
+Restore matching API/browser source together. The original single-file endpoint
+remains compatible, but older clients cannot resume a prepared group's entries.

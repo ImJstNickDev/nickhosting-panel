@@ -664,6 +664,17 @@ export async function installBrowserFixtures(
       if (!bytes) throw new PterodactylError('not_found', 'client', 'rejected');
       return stream(bytes, input);
     },
+    prepareUpload: async (id, name, options) => {
+      check();
+      remote(id);
+      options?.signal?.throwIfAborted();
+      let used = false;
+      return async (input) => {
+        if (used) throw new DomainError('conflict');
+        used = true;
+        return adapter.uploadFile(id, name, input);
+      };
+    },
     uploadFile: async (id, name, input) => {
       const r = remote(id);
       let size = 0;

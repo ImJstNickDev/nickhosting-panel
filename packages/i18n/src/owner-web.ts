@@ -138,6 +138,7 @@ const settingNames: Record<string, readonly [string, string]> = {
   pterodactylWebSocketOrigins: ['Allowed console origins', 'Origini console consentite'],
   pterodactylDownloadOrigins: ['Allowed download origins', 'Origini download consentite'],
   pterodactylUploadOrigins: ['Allowed upload origins', 'Origini upload consentite'],
+  uploadConcurrency: ['Simultaneous uploads', 'Caricamenti simultanei'],
   registrationInviteTtlSeconds: ['Invitation lifetime (seconds)', 'Durata inviti (secondi)'],
   supportIdleTtlSeconds: ['Assistance idle limit (seconds)', 'Inattività assistenza (secondi)'],
   supportAbsoluteTtlSeconds: [

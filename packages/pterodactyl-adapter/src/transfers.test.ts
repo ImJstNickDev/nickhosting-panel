@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createPterodactylAdapter } from './adapter.js';
 import { createDownloadProxy } from './downloads.js';
 import { createTransferGuard } from './transfer-guard.js';
-import { PterodactylError } from './transport.js';
+import { createTransportCoordinator, PterodactylError } from './transport.js';
 import { isUploadNotDispatched } from './upload-dispatch.js';
 import { createUploadProxy } from './uploads.js';
 
@@ -48,6 +48,84 @@ function bytes(length: number, onPull?: (produced: number) => void) {
 }
 
 describe('real HTTP streaming transfers', () => {
+  it('never coalesces one-use upload URL issuance across parallel scoped adapters', async () => {
+    let lookups = 0;
+    const used = new Set<string>();
+    const base = 'https://wings.example.test';
+    const coordinator = createTransportCoordinator();
+    const configuration = {
+      ...options,
+      baseURL: base,
+      uploadOrigins: [base],
+      coordinator,
+      fetcher: async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes('/api/client/')) {
+          const token = String(++lookups);
+          await delay(15);
+          return Response.json({ attributes: { url: `${base}/upload/file?token=${token}` } });
+        }
+        const token = new URL(String(url)).searchParams.get('token');
+        if (!token) throw new Error('Missing fixture token');
+        expect(used.has(token)).toBe(false);
+        used.add(token);
+        await new Response(init?.body).arrayBuffer();
+        return new Response(null, { status: 204 });
+      },
+    };
+    const adapters = [
+      createPterodactylAdapter(configuration),
+      createPterodactylAdapter(configuration),
+    ];
+    const sends = await Promise.all(
+      adapters.map((adapter, index) => adapter.prepareUpload('fixture', `file-${index}.bin`)),
+    );
+    expect(lookups).toBe(2);
+    await Promise.all(sends.map((send) => send({ body: bytes(1), contentLength: 1, maxBytes: 1 })));
+    expect(used.size).toBe(2);
+  });
+  it('prepares a private single-use handoff without writing, then rechecks authorization before streaming', async () => {
+    let writes = 0,
+      lookups = 0;
+    const base = 'https://wings.example.test';
+    const adapter = createPterodactylAdapter({
+      ...options,
+      baseURL: base,
+      uploadOrigins: [base],
+      fetcher: async (url, init) => {
+        if (String(url).includes('/api/client/')) {
+          lookups++;
+          return Response.json({
+            object: 'signed_url',
+            attributes: { url: `${base}/upload/file?token=private-fixture` },
+          });
+        }
+        expect(new Headers(init?.headers).has('authorization')).toBe(false);
+        writes++;
+        await new Response(init?.body).arrayBuffer();
+        return new Response(null, { status: 204 });
+      },
+    });
+    const send = await adapter.prepareUpload('fixture', 'world/file.bin');
+    expect(lookups).toBe(1);
+    expect(writes).toBe(0);
+    expect(typeof send).toBe('function');
+    await send({ body: bytes(10), contentLength: 10, maxBytes: 10 });
+    expect(writes).toBe(1);
+    await expect(send({ body: bytes(1), contentLength: 1, maxBytes: 1 })).rejects.toThrow();
+    expect(writes).toBe(1);
+    const revoked = await adapter.prepareUpload('fixture', 'world/other.bin');
+    await expect(
+      revoked({
+        body: bytes(1),
+        contentLength: 1,
+        maxBytes: 1,
+        authorize: async () => {
+          throw new Error('revoked');
+        },
+      }),
+    ).rejects.toThrow();
+    expect(writes).toBe(1);
+  });
   it('downloads more than 1 GiB with bounded buffers and slow-consumer backpressure', async () => {
     const length = 1024 ** 3 + 64 * 1024;
     let produced = 0;

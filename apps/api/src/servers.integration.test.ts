@@ -16,7 +16,11 @@ import {
   PterodactylError,
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
-import { createManagementRuntime, reconcileManagedServer } from '@nickhosting/server-management';
+import {
+  createManagementRuntime,
+  lockResources,
+  reconcileManagedServer,
+} from '@nickhosting/server-management';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
 import { createDownloadProxy } from '../../../packages/pterodactyl-adapter/src/downloads.js';
@@ -68,7 +72,12 @@ describe('M2 Hono API with real invitation, password and session authentication'
     length: number,
     headers: Record<string, string> = {},
     signal?: AbortSignal,
-    query: { path?: string; overwrite?: string | string[] } = {},
+    query: {
+      path?: string;
+      overwrite?: string | string[];
+      batchId?: string;
+      entryId?: string;
+    } = {},
   ) {
     const requestHeaders = client?.headers() ?? new Headers({ origin });
     requestHeaders.set('content-type', 'application/octet-stream');
@@ -84,6 +93,8 @@ describe('M2 Hono API with real invitation, password and session authentication'
     const parameters = new URLSearchParams({ path: query.path ?? 'world.bin' });
     const overwrite = typeof query.overwrite === 'string' ? [query.overwrite] : query.overwrite;
     for (const value of overwrite ?? []) parameters.append('overwrite', value);
+    if (query.batchId) parameters.set('batchId', query.batchId);
+    if (query.entryId) parameters.set('entryId', query.entryId);
     return app.request(`${origin}/v1/servers/${server}/files/upload?${parameters}`, init);
   }
   function fileEntry(name: string, patch: Partial<ServerFile> = {}): ServerFile {
@@ -269,6 +280,9 @@ describe('M2 Hono API with real invitation, password and session authentication'
         })('https://panel.example.test/file?token=private-fixture', input),
       ),
       uploadFile,
+      prepareUpload: vi.fn<PterodactylAdapter['prepareUpload']>(
+        async (id, path) => (input) => uploadFile(id, path, input),
+      ),
       getResources: vi.fn(async () => ({
         current_state: 'offline',
         is_suspended: false,
@@ -1513,6 +1527,243 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
   });
 
+  it('prepares 49 files once, transfers two concurrently and rejects replay without repeating remote checks', async () => {
+    const server = await minecraftServer();
+    const list = vi.mocked(f.adapter.listFiles),
+      resources = vi.mocked(f.adapter.getResources);
+    const originalList = list.getMockImplementation(),
+      originalUpload = uploadFile.getMockImplementation();
+    if (!originalUpload) throw new Error('Missing upload fixture');
+    list.mockImplementation(async (_id, directory = '') =>
+      directory === '' ? [fileEntry('world', { is_file: false })] : [],
+    );
+    const batchId = randomUUID();
+    const files = Array.from({ length: 49 }, (_, index) => ({
+      id: String(index),
+      path: `world/batch-${index}.txt`,
+      bytes: 1,
+      overwrite: false,
+    }));
+    const reads = list.mock.calls.length,
+      samples = resources.mock.calls.length;
+    const bothStarted = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let active = 0,
+      peak = 0;
+    try {
+      const prepared = await request(user, `/v1/servers/${server}/files/upload-batches`, {
+        id: batchId,
+        files,
+      });
+      expect(prepared.status).toBe(200);
+      expect(await prepared.json()).toMatchObject({ id: batchId, concurrency: 2, rejected: [] });
+      expect(
+        (await request(user, `/v1/servers/${server}/files/upload-batches`, { id: batchId, files }))
+          .status,
+      ).toBe(200);
+      expect(list.mock.calls.length - reads).toBe(2);
+      expect(resources.mock.calls.length - samples).toBe(1);
+      expect(
+        (
+          await request(outsider, `/v1/servers/${server}/files/upload-batches`, {
+            id: batchId,
+            files,
+          })
+        ).status,
+      ).toBe(403);
+      uploadFile.mockImplementation(async (...args) => {
+        active++;
+        peak = Math.max(peak, active);
+        if (active === 2) bothStarted.resolve();
+        try {
+          await release.promise;
+          await originalUpload(...args);
+        } finally {
+          active--;
+        }
+      });
+      const send = (index: number) =>
+        upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+          path: files[index]?.path,
+          overwrite: 'false',
+          batchId,
+          entryId: String(index),
+        });
+      const pending = [send(0), send(1)];
+      try {
+        await Promise.race([
+          bothStarted.promise,
+          delay(3000).then(() => {
+            throw new Error('Uploads serialized');
+          }),
+        ]);
+        const busy = await send(2);
+        expect(busy.status).toBe(409);
+        expect((await busy.json()).error.code).toBe('operation_busy');
+        // Generic mutations cannot race the active shared transfer locks.
+        expect(
+          (
+            await request(user, `/v1/servers/${server}/files`, {
+              action: 'delete',
+              root: '',
+              files: ['world'],
+              confirm: true,
+            })
+          ).status,
+        ).toBe(409);
+      } finally {
+        release.resolve();
+      }
+      expect((await Promise.all(pending)).map((response) => response.status)).toEqual([204, 204]);
+      expect(peak).toBe(2);
+      expect((await send(0)).status).toBe(409);
+      for (let index = 2; index < 49; index += 2)
+        expect(
+          (await Promise.all([send(index), ...(index + 1 < 49 ? [send(index + 1)] : [])])).every(
+            (response) => response.status === 204,
+          ),
+        ).toBe(true);
+      expect(list.mock.calls.length - reads).toBe(2);
+      expect(resources.mock.calls.length - samples).toBe(1);
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .selectAll()
+          .where('server_id', '=', server)
+          .execute(),
+      ).toEqual([]);
+      expect(
+        (await request(user, `/v1/servers/${server}/files/upload-batches`, { id: batchId, files }))
+          .status,
+      ).toBe(409);
+      const timings = timingRecords.filter(
+        (record) =>
+          record.event === 'server.files_upload' &&
+          record.data.serverId === server &&
+          record.data.outcome === 'succeeded',
+      );
+      expect(timings).toHaveLength(49);
+      expect(timings.every((record) => typeof record.data.signedUrlMs === 'number')).toBe(true);
+    } finally {
+      release.resolve();
+      await vi.waitFor(() => expect(active).toBe(0));
+      await request(user, `/v1/servers/${server}/files/upload-batches/${batchId}`, undefined, {
+        method: 'DELETE',
+      });
+      list.mockImplementation(originalList ?? (async () => []));
+      uploadFile.mockImplementation(originalUpload);
+    }
+  });
+
+  it('prepares unaffected siblings, checks total growth once and validates the initial ancestor', async () => {
+    const server = await minecraftServer();
+    const list = vi.mocked(f.adapter.listFiles),
+      original = list.getMockImplementation();
+    const files = [
+      { id: 'existing', path: 'world/present.txt', bytes: 1, overwrite: false },
+      { id: 'new', path: 'world/new.txt', bytes: 1, overwrite: false },
+    ];
+    list.mockImplementation(async (_id, directory = '') =>
+      directory === '' ? [fileEntry('world', { is_file: false })] : [fileEntry('present.txt')],
+    );
+    try {
+      const batchId = randomUUID();
+      const prepared = await request(user, `/v1/servers/${server}/files/upload-batches`, {
+        id: batchId,
+        files,
+      });
+      expect(prepared.status).toBe(200);
+      expect(await prepared.json()).toMatchObject({
+        id: batchId,
+        rejected: [{ id: 'existing', code: 'file_exists' }],
+        files: [{ id: 'new' }],
+      });
+      expect(
+        (
+          await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+            path: 'world/different.txt',
+            overwrite: 'false',
+            batchId,
+            entryId: 'new',
+          })
+        ).status,
+      ).toBe(409);
+      expect(
+        (
+          await request(user, `/v1/servers/${server}/files/upload-batches/${batchId}`, undefined, {
+            method: 'DELETE',
+          })
+        ).status,
+      ).toBe(204);
+      list.mockImplementation(async (_id, directory = '') =>
+        directory === '' ? [fileEntry('world', { is_file: false, is_symlink: true })] : [],
+      );
+      expect(
+        (
+          await request(user, `/v1/servers/${server}/files/upload-batches`, {
+            id: randomUUID(),
+            files,
+          })
+        ).status,
+      ).toBe(409);
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .selectAll()
+          .where('server_id', '=', server)
+          .execute(),
+      ).toEqual([]);
+    } finally {
+      list.mockImplementation(original ?? (async () => []));
+    }
+  });
+
+  it('requests a private upload URL while entry admission waits, without dispatching before admission', async () => {
+    const server = await f.server();
+    const batchId = randomUUID();
+    const files = [{ id: 'one', path: 'prefetched.txt', bytes: 1, overwrite: true }];
+    expect(
+      (await request(user, `/v1/servers/${server}/files/upload-batches`, { id: batchId, files }))
+        .status,
+    ).toBe(200);
+    const locked = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    const blocker = f.db.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+    const ready = Promise.withResolvers<void>();
+    const prepare = vi.mocked(f.adapter.prepareUpload),
+      original = prepare.getMockImplementation();
+    if (!original) throw new Error('Missing preparation fixture');
+    prepare.mockImplementationOnce(async (...args) => {
+      ready.resolve();
+      return original(...args);
+    });
+    const writes = uploadFile.mock.calls.length;
+    const pending = upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+      path: 'prefetched.txt',
+      batchId,
+      entryId: 'one',
+    });
+    try {
+      await Promise.race([
+        ready.promise,
+        delay(3000).then(() => {
+          throw new Error('Signed URL lookup waited for admission');
+        }),
+      ]);
+      expect(uploadFile.mock.calls).toHaveLength(writes);
+    } finally {
+      release.resolve();
+      await blocker;
+    }
+    expect((await pending).status).toBe(204);
+    expect(uploadFile.mock.calls).toHaveLength(writes + 1);
+  });
+
   it.each(['game-guard', 'listing', 'resources'])(
     'drains concurrent preflight reads and retains the lock after %s fails',
     async (failure) => {
@@ -2263,6 +2514,20 @@ describe('M2 Hono API with real invitation, password and session authentication'
       expect(uploadFile.mock.calls).toHaveLength(beforeContenders);
       const jsonHeaders = client.headers();
       jsonHeaders.set('content-type', 'application/json');
+      // Batch preparation must leave the same pool headroom as binary transfers.
+      const preparation = await sibling.request(
+        `${origin}/v1/servers/${second}/files/upload-batches`,
+        {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            id: randomUUID(),
+            files: [{ id: 'one', path: 'one.txt', bytes: 1, overwrite: true }],
+          }),
+        },
+      );
+      expect(preparation.status).toBe(409);
+      expect((await preparation.json()).error.code).toBe('operation_busy');
       const write = await sibling.request(`${origin}/v1/servers/${first}/files`, {
         method: 'POST',
         headers: jsonHeaders,

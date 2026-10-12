@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { useBlocker, useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
-import { ApiError, api, download, queryClient, upload } from '../api/client.js';
+import { ApiError, api, apiError, download, queryClient, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -60,6 +60,7 @@ import {
 import { FileIcon } from './file-icon.js';
 import { FilePathPicker } from './file-path-picker.js';
 import { FileSelectionSummary, useFileTransfer } from './file-transfer-flow.js';
+import { nextUpload, planUploadBatch, runUploadPool } from './file-upload-queue.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
@@ -298,8 +299,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [pendingUploads, setPendingUploads] = useState<File[]>([]);
   const uploadId = useRef(0),
     uploadRunning = useRef(false);
-  const activeUpload = useRef<{ id: number; controller: AbortController } | undefined>(undefined);
-  const uploadNeedsAdmission = useRef(false);
+  const activeUploads = useRef(new Map<number, AbortController>());
+  const preparingUploadBatch = useRef<AbortController | undefined>(undefined);
+  const activeUploadBatch = useRef<{ id: string; entryIds: Set<number> } | undefined>(undefined);
+  const pendingUploadBatch = useRef<{ id: string; items: UploadItem[] } | undefined>(undefined);
   const uploadQueue = useRef<UploadItem[]>([]);
   const uploadIdentity = saveScope?.join('\0');
   const previousUploadIdentity = useRef(uploadIdentity);
@@ -310,6 +313,24 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const displayDirectory = useRef(directory);
   displayDirectory.current = directory;
   const mounted = useRef(true);
+  const abandonPendingUploadBatch = useCallback(() => {
+    const planned = pendingUploadBatch.current;
+    // An in-flight preparation owns cleanup after its response. A lost response
+    // retained for manual retry can be closed by its known id without sending files.
+    if (!planned || preparingUploadBatch.current) return;
+    const identity = saveIdentity.current;
+    void api(`${serverPath(serverId)}/files/upload-batches/${planned.id}`, { method: 'DELETE' })
+      .then(() => {
+        if (pendingUploadBatch.current === planned) pendingUploadBatch.current = undefined;
+        if (mounted.current && saveIdentity.current === identity) {
+          void queryClient.invalidateQueries({ queryKey: ['transfers', serverId] });
+          void queryClient.invalidateQueries({ queryKey: ['server', serverId] });
+        }
+      })
+      .catch((failure) => {
+        if (mounted.current && saveIdentity.current === identity) setError(failure);
+      });
+  }, [serverId]);
   const folderInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -466,20 +487,24 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      activeUpload.current?.controller.abort();
+      for (const controller of activeUploads.current.values()) controller.abort();
+      abandonPendingUploadBatch();
+      preparingUploadBatch.current?.abort();
       folderPreparation.current?.abort();
       readAbort.current?.abort();
     };
-  }, []);
+  }, [abandonPendingUploadBatch]);
   useEffect(() => {
     if (previousUploadIdentity.current === uploadIdentity) return;
     previousUploadIdentity.current = uploadIdentity;
-    activeUpload.current?.controller.abort();
+    for (const controller of activeUploads.current.values()) controller.abort();
+    abandonPendingUploadBatch();
+    preparingUploadBatch.current?.abort();
     uploadQueue.current = [];
-    uploadNeedsAdmission.current = true;
+    pendingUploadBatch.current = undefined;
     setUploads([]);
     setUploadPause(undefined);
-  }, [uploadIdentity]);
+  }, [uploadIdentity, abandonPendingUploadBatch]);
   useEffect(() => {
     const focusSearch = (event: globalThis.KeyboardEvent) => {
       const modifier = event.altKey && !event.ctrlKey && !event.metaKey;
@@ -966,114 +991,231 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
     uploadDisplayRefresh.current(final);
   }
-  async function runUploads() {
+  function runUploads() {
+    const descriptor = transfers.data?.upload;
+    return descriptor?.batchMaxBytes && descriptor.batchMaxBytes > 0
+      ? runParallelUploads(descriptor.batchMaxBytes, descriptor.batchMaxFiles ?? 500)
+      : Promise.resolve().then(() =>
+          setError({ messageKey: 'file.uploadReason.configuration_invalid' }),
+        );
+  }
+  async function runParallelUploads(maxBytes: number, maxFiles: number) {
     if (uploadRunning.current) return;
     const identity = saveIdentity.current;
     const isCurrent = () => mounted.current && identity === saveIdentity.current;
     if (!identity || !isCurrent()) return;
-    let pauseAfterRefresh = false;
-    const busyAttempts = new Map<number, number>();
     uploadRunning.current = true;
+    const endpoint = `${serverPath(serverId)}/files/upload-batches`;
+    const closeBatch = (id: string) => api(`${endpoint}/${id}`, { method: 'DELETE' });
+    let pause = false;
+    let pauseState: 'busy' | 'blocked' | undefined;
     try {
-      while (uploadQueue.current.length && isCurrent()) {
-        if (uploadNeedsAdmission.current) {
-          setUploadPause('checking');
-          // An aborted browser request can leave an upstream write unresolved.
-          // Only fresh admission reads can allow untouched queued files to proceed.
-          const [availability, fileCapabilities] = await Promise.all([
-            transfers.refetch(),
-            capabilities.refetch(),
-          ]);
-          if (!isCurrent()) break;
-          if (
-            pauseAfterRefresh ||
-            !availability.isSuccess ||
-            !fileCapabilities.isSuccess ||
-            availability.data.upload.available !== true
-          ) {
-            setUploadPause(uploadQueue.current.length ? 'blocked' : undefined);
-            break;
-          }
-          uploadNeedsAdmission.current = false;
-          setUploadPause(undefined);
-        }
-        const item = uploadQueue.current.shift();
-        if (!item) break;
-        const controller = new AbortController();
-        activeUpload.current = { id: item.id, controller };
-        const start = performance.now();
-        updateUpload(item.id, { status: 'uploading' });
-        try {
-          if (!isCurrent()) break;
-          updateUpload(item.id, { submitted: true });
-          await upload(
-            `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}${item.exclusive ? '&overwrite=false' : ''}`,
-            item.file,
-            {
-              signal: controller.signal,
-              onProgress: (sent) => {
-                if (!isCurrent()) return;
-                updateUpload(item.id, {
-                  sent,
-                  speed: sent / Math.max(0.1, (performance.now() - start) / 1000),
-                  status: sent === item.file.size ? 'confirming' : 'uploading',
-                });
-              },
-            },
-          );
-          if (!isCurrent()) break;
-          updateUpload(item.id, { status: 'complete', sent: item.file.size });
-          refreshUploadDisplay();
-        } catch (failure) {
-          if (!isCurrent()) break;
-          if (
-            !controller.signal.aborted &&
-            failure instanceof ApiError &&
-            failure.code === 'operation_busy'
-          ) {
-            // This explicit response proves rejection before effects. The queue
-            // alone retries it; generic conflicts and uncertain writes never retry.
-            const attempt = (busyAttempts.get(item.id) ?? 0) + 1;
-            busyAttempts.set(item.id, attempt);
-            const delay = uploadBusyRetryDelays[attempt - 1];
-            updateUpload(item.id, {
-              status: delay === undefined ? 'queued' : 'waiting',
-              submitted: false,
-              sent: 0,
-              speed: 0,
-              error: undefined,
-            });
-            if (delay === undefined) {
-              uploadQueue.current.unshift(item);
-              uploadNeedsAdmission.current = true;
-              setUploadPause('busy');
-              break;
-            }
-            await waitForUploadRetry(delay, controller.signal);
-            if (!isCurrent()) break;
-            if (controller.signal.aborted) updateUpload(item.id, { status: 'cancelled' });
-            else uploadQueue.current.unshift(item);
-            continue;
-          }
+      setUploadPause(undefined);
+      setError(undefined);
+      while (uploadQueue.current.length && isCurrent() && !pause) {
+        // Oversized files remain visible as failures; they do not prevent small
+        // siblings from proceeding. The server still enforces authoritative limits.
+        for (const item of [...uploadQueue.current]) {
+          if (item.file.size <= maxBytes) continue;
+          uploadQueue.current = uploadQueue.current.filter((other) => other.id !== item.id);
           updateUpload(item.id, {
-            status: controller.signal.aborted ? 'cancelled' : 'failed',
-            error: controller.signal.aborted ? undefined : failure,
+            status: 'failed',
+            error: new ApiError('storage_exhausted', 'errors.storage_exhausted'),
           });
-          // Never replay the submitted file, including an uncertain failed write.
-          uploadNeedsAdmission.current = true;
-          // Availability cannot expose every in-flight provider preflight/lock.
-          // A shared-state rejection must stop this run even if reads say ready.
-          pauseAfterRefresh =
-            !controller.signal.aborted &&
-            failure instanceof ApiError &&
-            ['conflict', 'operation_uncertain', 'integration_unavailable'].includes(failure.code);
+        }
+        const planned = pendingUploadBatch.current ?? {
+          id: crypto.randomUUID(),
+          items: planUploadBatch(uploadQueue.current, maxBytes, Math.min(500, maxFiles)),
+        };
+        if (!planned.items.length) break;
+        pendingUploadBatch.current = planned;
+        const preparation = new AbortController();
+        preparingUploadBatch.current = preparation;
+        let prepared:
+          | { id: string | null; concurrency: number; rejected: { id: string; code: string }[] }
+          | undefined;
+        try {
+          for (let attempt = 0; ; attempt++) {
+            try {
+              // Keep the small manifest request alive through navigation so a
+              // created reservation can be closed from its actual response.
+              prepared = await api(endpoint, {
+                body: {
+                  id: planned.id,
+                  files: planned.items.map((item) => ({
+                    id: String(item.id),
+                    path: item.path,
+                    bytes: item.file.size,
+                    overwrite: !item.exclusive,
+                  })),
+                },
+              });
+              break;
+            } catch (failure) {
+              const delay = uploadBusyRetryDelays[attempt];
+              if (!isCurrent() || preparation.signal.aborted) throw failure;
+              if (
+                !(failure instanceof ApiError) ||
+                failure.code !== 'operation_busy' ||
+                delay === undefined
+              )
+                throw failure;
+              for (const item of planned.items)
+                if (uploadQueue.current.some((other) => other.id === item.id))
+                  updateUpload(item.id, { status: 'waiting' });
+              await waitForUploadRetry(delay, preparation.signal);
+              if (preparation.signal.aborted) throw failure;
+            }
+          }
+        } catch (failure) {
+          if (isCurrent()) {
+            for (const item of planned.items)
+              if (uploadQueue.current.some((other) => other.id === item.id))
+                updateUpload(item.id, { status: 'queued' });
+            setError(failure);
+            pauseState =
+              failure instanceof ApiError && failure.code === 'operation_busy' ? 'busy' : 'blocked';
+          }
+          break;
         } finally {
-          activeUpload.current = undefined;
+          if (preparingUploadBatch.current === preparation)
+            preparingUploadBatch.current = undefined;
+        }
+        if (!prepared) break;
+        if (pendingUploadBatch.current === planned) pendingUploadBatch.current = undefined;
+        if (!isCurrent()) {
+          if (prepared.id) await closeBatch(prepared.id).catch(() => {});
+          break;
+        }
+        for (const rejection of prepared.rejected) {
+          const item = planned.items.find((entry) => String(entry.id) === rejection.id);
+          if (!item || !uploadQueue.current.some((entry) => entry.id === item.id)) continue;
+          uploadQueue.current = uploadQueue.current.filter((entry) => entry.id !== item.id);
+          updateUpload(item.id, {
+            status: 'failed',
+            error: apiError({ code: rejection.code, messageKey: `errors.${rejection.code}` }),
+          });
+        }
+        if (!prepared.id) continue;
+        const batch = { id: prepared.id, entryIds: new Set(planned.items.map((item) => item.id)) };
+        activeUploadBatch.current = batch;
+        try {
+          const cancelled = planned.items.filter(
+            (item) =>
+              !prepared.rejected.some((entry) => entry.id === String(item.id)) &&
+              !uploadQueue.current.some((entry) => entry.id === item.id),
+          );
+          await Promise.all(
+            cancelled.map((item) =>
+              api(`${endpoint}/${batch.id}/cancel`, { body: { entryId: String(item.id) } }),
+            ),
+          );
+          await runUploadPool({
+            concurrency: prepared.concurrency,
+            next: (active: readonly UploadItem[]) => {
+              if (!isCurrent() || pause) return undefined;
+              const item = nextUpload(
+                uploadQueue.current.filter((entry) => batch.entryIds.has(entry.id)),
+                active,
+              );
+              if (item) uploadQueue.current.splice(uploadQueue.current.indexOf(item), 1);
+              return item;
+            },
+            run: async (item) => {
+              const controller = new AbortController();
+              activeUploads.current.set(item.id, controller);
+              try {
+                for (let attempt = 0; isCurrent() && !controller.signal.aborted; attempt++) {
+                  const start = performance.now();
+                  updateUpload(item.id, { status: 'uploading', submitted: true, error: undefined });
+                  try {
+                    await upload(
+                      `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}${item.exclusive ? '&overwrite=false' : ''}&batchId=${encodeURIComponent(batch.id)}&entryId=${item.id}`,
+                      item.file,
+                      {
+                        signal: controller.signal,
+                        onProgress: (sent) => {
+                          if (isCurrent())
+                            updateUpload(item.id, {
+                              sent,
+                              speed: sent / Math.max(0.1, (performance.now() - start) / 1000),
+                              status: sent === item.file.size ? 'confirming' : 'uploading',
+                            });
+                        },
+                      },
+                    );
+                    if (isCurrent()) {
+                      updateUpload(item.id, { status: 'complete', sent: item.file.size });
+                      refreshUploadDisplay();
+                    }
+                    return;
+                  } catch (failure) {
+                    if (!isCurrent()) return;
+                    if (
+                      !controller.signal.aborted &&
+                      failure instanceof ApiError &&
+                      failure.code === 'operation_busy'
+                    ) {
+                      const delay = uploadBusyRetryDelays[attempt];
+                      updateUpload(item.id, {
+                        status: delay === undefined ? 'queued' : 'waiting',
+                        submitted: false,
+                        sent: 0,
+                        speed: 0,
+                      });
+                      if (delay === undefined) {
+                        uploadQueue.current.unshift(item);
+                        pause = true;
+                        pauseState = 'busy';
+                        return;
+                      }
+                      await waitForUploadRetry(delay, controller.signal);
+                      continue;
+                    }
+                    // An unknown write belongs to this entry only. Never replay it;
+                    // the batch reservation already covers every remaining sibling.
+                    updateUpload(item.id, {
+                      status: controller.signal.aborted ? 'cancelled' : 'failed',
+                      error: controller.signal.aborted ? undefined : failure,
+                    });
+                    return;
+                  }
+                }
+                if (isCurrent() && controller.signal.aborted)
+                  updateUpload(item.id, { status: 'cancelled' });
+              } finally {
+                activeUploads.current.delete(item.id);
+              }
+            },
+          });
+        } catch (failure) {
+          pause = true;
+          if (isCurrent()) {
+            setError(failure);
+            pauseState = 'blocked';
+          }
+        } finally {
+          if (activeUploadBatch.current === batch) activeUploadBatch.current = undefined;
+          try {
+            await closeBatch(batch.id);
+          } catch (failure) {
+            pause = true;
+            if (isCurrent()) {
+              setError(failure);
+              pauseState = 'blocked';
+            }
+          }
         }
       }
     } finally {
       uploadRunning.current = false;
-      if (isCurrent()) refreshUploadDisplay(true);
+      if (isCurrent()) {
+        // Resume only after active requests and reservation cleanup have settled.
+        setUploadPause(uploadQueue.current.length ? pauseState : undefined);
+        refreshUploadDisplay(true);
+        void queryClient.invalidateQueries({ queryKey: ['transfers', serverId] });
+        void queryClient.invalidateQueries({ queryKey: ['server', serverId] });
+      } else if (mounted.current && uploadQueue.current.length) void runUploads();
     }
   }
   function queueUploads(incoming: File[], target = directory, paths?: string[]) {
@@ -1188,8 +1330,18 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     if (index !== -1) {
       uploadQueue.current.splice(index, 1);
       updateUpload(id, { status: 'cancelled' });
-      if (!uploadQueue.current.length) setUploadPause(undefined);
-    } else if (activeUpload.current?.id === id) activeUpload.current.controller.abort();
+      if (!uploadQueue.current.length) {
+        setUploadPause(undefined);
+        abandonPendingUploadBatch();
+      }
+      const batch = activeUploadBatch.current;
+      if (batch?.entryIds.has(id))
+        void api(`${serverPath(serverId)}/files/upload-batches/${batch.id}/cancel`, {
+          body: { entryId: String(id) },
+        }).catch((failure) => {
+          if (mounted.current) setError(failure);
+        });
+    } else activeUploads.current.get(id)?.abort();
   }
   const totalSelected = selected.size;
   const uploadsBusy = uploads.some((item) =>

@@ -256,6 +256,7 @@ export function createTransport(options: TransportOptions) {
     schema: z.ZodType<T>,
     method = 'GET',
     body?: unknown,
+    coalesce = true,
   ): Promise<T> {
     async function readJson(): Promise<string> {
       // Request errors preserve rate-limit metadata and mutation uncertainty.
@@ -271,7 +272,7 @@ export function createTransport(options: TransportOptions) {
       }
     }
     let text: string;
-    if (method === 'GET' && body === undefined) {
+    if (coalesce && method === 'GET' && body === undefined) {
       const pendingJson = state(scope).pendingJson;
       const identity = path;
       let pending = pendingJson.get(identity);
@@ -313,8 +314,10 @@ export function createTransport(options: TransportOptions) {
     schema: z.ZodType<T>,
     method = 'GET',
     body?: unknown,
+    coalesce = true,
   ): Promise<T> {
-    return (await json(scope, path, z.object({ attributes: schema }), method, body)).attributes;
+    return (await json(scope, path, z.object({ attributes: schema }), method, body, coalesce))
+      .attributes;
   }
   async function list<T>(scope: CredentialScope, path: string, schema: z.ZodType<T>): Promise<T[]> {
     const entries: T[] = [];
