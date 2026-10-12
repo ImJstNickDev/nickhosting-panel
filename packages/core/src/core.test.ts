@@ -337,6 +337,8 @@ describe('structured error and logging safety', () => {
     expect(redact(data)).toEqual({ self: '[Circular]' });
     const records: LogRecord[] = [];
     const logger = createLogger((record) => records.push(record), { now: () => new Date(0) });
+    expect(logger.isEnabled('debug')).toBe(false);
+    expect(logger.isEnabled('info')).toBe(true);
     logger.log('debug', 'event.debug');
     logger.log('warn', 'auth.failure', { token: 'private' });
     expect(records).toEqual([
@@ -348,6 +350,22 @@ describe('structured error and logging safety', () => {
       },
     ]);
     expect(() => logger.log('info', 'user-supplied token value')).toThrow();
+  });
+  it('exposes the effective configured level before collecting diagnostic payloads', () => {
+    for (const level of ['debug', 'info', 'warn', 'error'] as const) {
+      const records: LogRecord[] = [];
+      const logger = createLogger((entry) => records.push(entry), { level });
+      let measurements = 0;
+      if (logger.isEnabled('debug')) {
+        measurements++;
+        logger.log('debug', 'server.files_upload', { durationMs: 1, token: 'private' });
+      }
+      logger.log('error', 'request.failed', { code: 'conflict' });
+      expect(measurements).toBe(level === 'debug' ? 1 : 0);
+      expect(records.filter((entry) => entry.level === 'debug')).toHaveLength(measurements);
+      expect(records.at(-1)?.event).toBe('request.failed');
+      expect(JSON.stringify(records)).not.toContain('private');
+    }
   });
 });
 

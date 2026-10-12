@@ -205,8 +205,15 @@ abort active transfers and close unstarted entries. A lost preparation response
 retains the original ID for retry rather than inventing a second reservation.
 Pending file bodies remain only in the browser tab.
 
-Privacy-safe `server.files_upload_prepared` traces count files/bytes and preparation
-duration. `server.files_upload` reports access, entry admission, signed-URL lookup,
+Upload timing diagnostics require the effective API `logLevel=debug`
+(`NH_LOG_LEVEL=debug` for an explicit environment override). At the default
+`info` level, no upload stage/atomic times are collected and these diagnostic
+payloads are not built or emitted. Durable audit records and request errors are
+unchanged. The API reads its logger level at startup; applying a new level needs
+the normal API process reload.
+
+Privacy-safe `server.files_upload_prepared` debug traces count files/bytes and
+preparation duration. `server.files_upload` reports access, entry admission, signed-URL lookup,
 provider streaming/response and settlement separately. A warm group's signed-URL
 phase measures local credential/cache lookup, without another Panel request.
 Signed-URL/admission times
@@ -214,8 +221,8 @@ overlap and must not be summed. Trace fields contain no paths, content, keys or
 URLs; these are backend timings, not browser byte-progress measurements. Legacy
 uploads retain their earlier path/resource timing fields.
 
-Prepared-file traces also include request-local `atomic` aggregates when a logger
-is configured: `{label:{count,totalMs,maxMs}}`, maximum 64 code-defined labels.
+Prepared-file debug traces also include request-local `atomic` aggregates:
+`{label:{count,totalMs,maxMs}}`, maximum 64 code-defined labels.
 They separate principal/runtime lookup, pinned connection acquisition/release,
 server lock, session and permission reads, identity proof, owner/key
 lookup and decryption, cached handoff, claim lock, transaction entry, resource

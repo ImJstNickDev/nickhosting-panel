@@ -10,6 +10,13 @@ Secrets (Better Auth session secret, encryption key, Discord secret, Pterodactyl
 
 Do not use database seeding to create accounts or default live instance data. Migrations create schema only; initial Owner and Pterodactyl connection are created by a one-time protected setup wizard.
 
+The API logger uses the effective `logLevel` setting at process startup (default
+`info`). Detailed upload timings are collected and emitted only at `debug`;
+use `NH_LOG_LEVEL=debug` for a temporary diagnostic override, then restore the
+normal level after the investigation. Applying a logger-level change requires an
+API process reload. Normal request errors and durable audit records remain
+available without upload timing diagnostics.
+
 ## Local environment context (never published)
 
 Keep machine-specific observations in `.codex/local/INFRASTRUCTURE.md`, excluded from Git. AGENTS.md directs Codex to read it before authorized infrastructure work. The local notes preserve the actual host, resolver, external network, current/stale installation paths and deployment hostnames; none are product defaults or approval to change infrastructure. A fresh clone needs Owner-supplied local context before infrastructure access. Never store credentials in documentation.

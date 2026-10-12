@@ -399,10 +399,10 @@ export function registerServerRoutes(
     });
   });
   app.put('/v1/servers/:id/files/upload', async (c) => {
-    const started = performance.now();
+    const trace = options.logger?.isEnabled('debug') ?? false;
+    const started = trace ? performance.now() : 0;
     const timing =
-      options.logger &&
-      (c.req.query('batchId') !== undefined || c.req.query('entryId') !== undefined)
+      trace && (c.req.query('batchId') !== undefined || c.req.query('entryId') !== undefined)
         ? createUploadTiming()
         : undefined;
     const context = await (timing
@@ -446,6 +446,7 @@ export function registerServerRoutes(
     const durations: Record<string, number> = {};
     const milliseconds = (since: number) => Math.round((performance.now() - since) * 1000) / 1000;
     const measure = async <T>(stage: string, work: () => Promise<T>): Promise<T> => {
+      if (!trace) return work();
       const since = performance.now();
       try {
         return await work();
@@ -456,7 +457,7 @@ export function registerServerRoutes(
     let outcome = 'failed';
     try {
       await service.uploadAccess(context, serverId, async (id, connection, current) => {
-        durations.accessMs = milliseconds(started);
+        if (trace) durations.accessMs = milliseconds(started);
         const directories = new Map<string, Promise<ServerFile[]>>();
         const listFiles = (root: string) => {
           let listing = directories.get(root);
@@ -546,14 +547,15 @@ export function registerServerRoutes(
       // One diagnostic per transfer, with no paths, content or upstream URLs.
       // Overlapping path/resource durations must not be summed as elapsed time.
       try {
-        options.logger?.log('info', 'server.files_upload', {
-          requestId: c.get('requestId'),
-          serverId,
-          bytes: contentLength,
-          outcome,
-          ...durations,
-          durationMs: milliseconds(started),
-        });
+        if (trace)
+          options.logger?.log('debug', 'server.files_upload', {
+            requestId: c.get('requestId'),
+            serverId,
+            bytes: contentLength,
+            outcome,
+            ...durations,
+            durationMs: milliseconds(started),
+          });
       } catch {}
     }
     return c.body(null, 204);

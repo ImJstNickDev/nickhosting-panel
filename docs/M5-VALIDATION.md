@@ -5966,3 +5966,29 @@ The live performance improvement remains to be measured with the Owner's next
 upload; removed spans must not be summed as guaranteed wall-clock savings.
 Rollback is a source revert with no migration/data reset. PR #21 remains open and
 unmerged; the SFTPGo issue #18 production-release gate is unchanged.
+
+## 2026-10-12 — upload timing diagnostics opt in through debug logging
+
+Following the Owner's decision to close upload performance tuning, preparation,
+per-file stage and atomic timing diagnostics now use the existing effective API
+`logLevel=debug` (`NH_LOG_LEVEL=debug` as an explicit environment override).
+Default `info` skips collection, snapshots, payload construction and emission;
+it does not merely filter an already-collected trace. Request errors and durable
+audit records remain unchanged. Enabling diagnostics requires the normal API
+process reload. No new setting, schema, provider operation or request is added.
+Earlier measurements and failed attempts above remain historical evidence.
+Gateway and lifecycle diagnostics are outside this upload-only cleanup.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/core.test.ts packages/server-management/src/upload-timing.test.ts`: **54 passed**. Covers effective log levels, redaction and the existing timing collector.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'omits upload diagnostics|49 uploads|prepares 49 files once'`: **3 passed, 70 intentionally skipped**. Uses real handlers/authentication and the existing approved isolated PostgreSQL/Redis stack with provider fixtures. Both batch and legacy uploads succeed at `info`, without collectors/traces; durable upload audits and failed-request errors remain. Both 49-file diagnostic paths still emit their timings at `debug`.
+- `scripts/dev.sh pnpm typecheck`: root and WebPanel passed. Changed-file Biome, diff and indexed governance checks passed.
+- Independent read-only technical review found no must-fix: authorization, locks, streaming order, audit and error handling are unchanged. No browser or historical milestone suite rerun; no UI or transfer behavior change.
+
+Read-only dev checks confirm effective API log level **info**, healthy API/worker
+and zero container restart counts. Existing source watchers load the changes;
+no manual restart/rebuild, production-provider call, game-file mutation, new
+test asset or infrastructure change. The disposable integration schema is
+cleaned by its fixture. Rollback is a source revert with no migration/data reset.
+PR #21 remains open and unmerged; SFTPGo issue #18 is unchanged.

@@ -50,7 +50,8 @@ export function registerUploadBatchRoutes(
 ) {
   const urls = createUploadUrlCache();
   app.post('/v1/servers/:id/files/upload-batches', async (c) => {
-    const started = performance.now();
+    const trace = options.logger?.isEnabled('debug') ?? false;
+    const started = trace ? performance.now() : 0;
     const context = await options.principal(c),
       service = await options.management();
     const input = parse(
@@ -230,13 +231,14 @@ export function registerUploadBatchRoutes(
                 rejected,
               });
               try {
-                options.logger?.log('info', 'server.files_upload_prepared', {
-                  requestId: c.get('requestId'),
-                  serverId,
-                  files: accepted.length,
-                  bytes,
-                  durationMs: Math.round((performance.now() - started) * 1000) / 1000,
-                });
+                if (trace)
+                  options.logger?.log('debug', 'server.files_upload_prepared', {
+                    requestId: c.get('requestId'),
+                    serverId,
+                    files: accepted.length,
+                    bytes,
+                    durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+                  });
               } catch {}
               return batch;
             } catch (error) {
@@ -328,6 +330,7 @@ async function runBatchUpload(
   let outcome = 'failed';
   const durations: Record<string, number> = {};
   const measure = async <T>(key: string, work: () => Promise<T>) => {
+    if (!timing) return work();
     const since = performance.now();
     try {
       return await work();
@@ -340,7 +343,8 @@ async function runBatchUpload(
       context,
       serverId,
       async (identifier, connection, current, server) => {
-        durations.accessMs = Math.round((performance.now() - input.started) * 1000) / 1000;
+        if (timing)
+          durations.accessMs = Math.round((performance.now() - input.started) * 1000) / 1000;
         const bindingHash = service.uploadBatchBinding(server);
         const admission = measure('admissionMs', () =>
           claimUploadBatchEntry(
@@ -431,16 +435,17 @@ async function runBatchUpload(
   } finally {
     release();
     try {
-      options.logger?.log('info', 'server.files_upload', {
-        requestId: c.get('requestId'),
-        serverId,
-        bytes: input.contentLength,
-        outcome,
-        batch: true,
-        ...durations,
-        durationMs: Math.round((performance.now() - input.started) * 1000) / 1000,
-        atomic: timing?.snapshot(),
-      });
+      if (timing)
+        options.logger?.log('debug', 'server.files_upload', {
+          requestId: c.get('requestId'),
+          serverId,
+          bytes: input.contentLength,
+          outcome,
+          batch: true,
+          ...durations,
+          durationMs: Math.round((performance.now() - input.started) * 1000) / 1000,
+          atomic: timing?.snapshot(),
+        });
     } catch {}
   }
   return c.body(null, 204);

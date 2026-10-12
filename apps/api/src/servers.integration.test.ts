@@ -42,7 +42,12 @@ describe('M2 Hono API with real invitation, password and session authentication'
   const password = 'Isolated-API-password-593!';
   const mails: IdentityMail[] = [],
     logs: unknown[] = [];
-  const timingRecords: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
+  const timingRecords: Array<{
+    level: string;
+    event: string;
+    data: Readonly<Record<string, unknown>>;
+  }> = [];
+  const diagnosticOptions: { level: 'debug' | 'info' } = { level: 'debug' };
   const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
   const providerSecret = randomBytes(32).toString('base64url');
   const instanceId = randomUUID();
@@ -371,11 +376,14 @@ describe('M2 Hono API with real invitation, password and session authentication'
       revokeCredential: async () => {},
     });
     app = createApp({
-      logger: createLogger((entry) =>
-        timingRecords.push({
-          event: entry.event,
-          data: entry.data as Readonly<Record<string, unknown>>,
-        }),
+      logger: createLogger(
+        (entry) =>
+          timingRecords.push({
+            level: entry.level,
+            event: entry.event,
+            data: entry.data as Readonly<Record<string, unknown>>,
+          }),
+        diagnosticOptions,
       ),
       database,
       identity: async () => identity,
@@ -1684,6 +1692,52 @@ describe('M2 Hono API with real invitation, password and session authentication'
     },
   );
 
+  it('omits upload diagnostics at info without suppressing uploads, durable audits or request errors', async () => {
+    const server = await f.server();
+    const batchId = randomUUID();
+    const tracesBefore = timingRecords.length;
+    const access = vi.spyOn(runtime, 'uploadBatchAccess');
+    diagnosticOptions.level = 'info';
+    try {
+      const prepared = await request(user, `/v1/servers/${server}/files/upload-batches`, {
+        id: batchId,
+        files: [{ id: 'one', path: 'quiet-upload.bin', bytes: 1, overwrite: false }],
+      });
+      expect(prepared.status).toBe(200);
+      expect(
+        (
+          await upload(user, server, new Uint8Array(1), 1, {}, undefined, {
+            batchId,
+            entryId: 'one',
+            path: 'quiet-upload.bin',
+            overwrite: 'false',
+          })
+        ).status,
+      ).toBe(204);
+      expect(access.mock.calls.every((args) => args[4] === undefined)).toBe(true);
+      expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(204);
+      const failed = await upload(null, server, new Uint8Array(1), 1);
+      expect(failed.status).toBe(401);
+      expect(
+        timingRecords
+          .slice(tracesBefore)
+          .filter((entry) => entry.event.startsWith('server.files_upload')),
+      ).toEqual([]);
+      const audit = await f.db
+        .selectFrom('audit_events')
+        .select('action')
+        .where('metadata', '@>', { serverId: server })
+        .execute();
+      expect(audit.filter((entry) => entry.action === 'server.files.uploaded')).toHaveLength(2);
+      expect(logs).toContainEqual(
+        expect.objectContaining({ event: 'request.failed', code: 'unauthenticated' }),
+      );
+    } finally {
+      access.mockRestore();
+      diagnosticOptions.level = 'debug';
+    }
+  });
+
   it('prepares 49 files once, transfers two concurrently and rejects replay without repeating remote checks', async () => {
     const server = await minecraftServer();
     const list = vi.mocked(f.adapter.listFiles),
@@ -1809,6 +1863,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       );
       expect(timings).toHaveLength(49);
       expect(timings.every((record) => typeof record.data.signedUrlMs === 'number')).toBe(true);
+      expect(timings.every((record) => record.level === 'debug')).toBe(true);
       for (const { data } of timings) {
         const atomic = data.atomic as Record<
           string,
