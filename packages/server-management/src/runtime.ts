@@ -311,22 +311,30 @@ export async function createManagementRuntime(options: ManagementOptions) {
   };
   const adapter =
     options.adapter ??
-    createScopedProviderAdapter(createPterodactylAdapter(adapterOptions), async (identifier) => {
-      const server = await db
-        .selectFrom('managed_servers')
-        .select('id')
-        .where('pterodactyl_identifier', '=', identifier)
-        .where('deleted_at', 'is', null)
-        .executeTakeFirst();
-      if (!server) throw new DomainError('provenance_mismatch');
-      const credential = await resolveProviderCredential(
-        db,
-        options.codec,
-        { serverId: server.id },
-        adapterOptions.baseURL,
-      );
-      return createPterodactylAdapter({ ...adapterOptions, clientKey: credential.clientApiKey });
-    });
+    createScopedProviderAdapter(
+      createPterodactylAdapter(adapterOptions),
+      async (identifier, timing) => {
+        const read = () =>
+          db
+            .selectFrom('managed_servers')
+            .select('id')
+            .where('pterodactyl_identifier', '=', identifier)
+            .where('deleted_at', 'is', null)
+            .executeTakeFirst();
+        const server = timing ? await timing.measure('file.serverRead', read) : await read();
+        if (!server) throw new DomainError('provenance_mismatch');
+        const credential = await resolveProviderCredential(
+          db,
+          options.codec,
+          { serverId: server.id },
+          adapterOptions.baseURL,
+          timing,
+        );
+        const create = () =>
+          createPterodactylAdapter({ ...adapterOptions, clientKey: credential.clientApiKey });
+        return timing ? timing.measureSync('file.adapterCreate', create) : create();
+      },
+    );
   async function consoleBindingForServer(serverId: string, timing?: UploadTiming) {
     if (options.adapter) return consoleProviderBinding;
     const credential = await resolveProviderCredential(

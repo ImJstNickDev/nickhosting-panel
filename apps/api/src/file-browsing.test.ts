@@ -447,6 +447,9 @@ describe('editor revisions', () => {
       });
     expect(JSON.stringify(record)).not.toMatch(/folder|b\.txt|two/);
     expect(f.service.fileReadAccess.mock.calls[0]?.[3]).toBeDefined();
+    expect(vi.mocked(f.adapter.readFile).mock.calls[0]?.[3]).toBe(
+      f.service.fileReadAccess.mock.calls[0]?.[3],
+    );
   });
   it.each(['info', 'warn', 'error'] as const)(
     'does not trace editor reads at %s',
@@ -456,6 +459,7 @@ describe('editor revisions', () => {
       expect((await f.app.request('/v1/servers/abc/files/editor?path=a.txt')).status).toBe(200);
       expect(sink).not.toHaveBeenCalled();
       expect(f.service.fileReadAccess.mock.calls[0]?.[3]).toBeUndefined();
+      expect(vi.mocked(f.adapter.readFile).mock.calls[0]?.[3]).toBeUndefined();
     },
   );
   it('records a failed read without logging provider errors or changing the error response', async () => {
@@ -582,7 +586,12 @@ describe('editor revisions', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ content: 'two' });
     expect(f.adapter.listFiles).not.toHaveBeenCalled();
-    expect(f.adapter.readFile).toHaveBeenCalledExactlyOnceWith('provider', 'folder/b.txt', 1048576);
+    expect(f.adapter.readFile).toHaveBeenCalledExactlyOnceWith(
+      'provider',
+      'folder/b.txt',
+      1048576,
+      undefined,
+    );
   });
   it('reports a file removed after browsing as not found', async () => {
     const f = appFixture();

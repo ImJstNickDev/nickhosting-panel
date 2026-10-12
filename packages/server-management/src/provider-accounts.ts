@@ -148,7 +148,7 @@ export async function resolveProviderCredential(
   codec: SecretCodec,
   target: { userId?: string; serverId?: string },
   providerUrl: string,
-  timing?: UploadTiming,
+  timing?: Pick<UploadTiming, 'measure' | 'measureSync'>,
 ) {
   const timed = <T>(name: string, work: () => Promise<T>) =>
     timing ? timing.measure(name, work) : work();

@@ -1,6 +1,7 @@
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { describe, expect, it, vi } from 'vitest';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
+import { createUploadTiming } from './upload-timing.js';
 
 describe('managed owner Client credential dispatch', () => {
   it.each([
@@ -36,6 +37,26 @@ describe('managed owner Client credential dispatch', () => {
     const scoped = createScopedProviderAdapter({} as PterodactylAdapter, resolve);
     expect(await Reflect.apply(scoped[method], scoped, ['managed-identifier'])).toBe(result);
     expect(resolve).toHaveBeenCalledWith('managed-identifier');
+  });
+
+  it('keeps concurrent read timings request-local through credential resolution and content dispatch', async () => {
+    const body = new Uint8Array([1]);
+    const readFile = vi.fn(async () => body);
+    const resolve = vi.fn(async () => ({ readFile }) as unknown as PterodactylAdapter);
+    const scoped = createScopedProviderAdapter({} as PterodactylAdapter, resolve);
+    const first = createUploadTiming(),
+      second = createUploadTiming();
+    await Promise.all([
+      scoped.readFile('server-a', 'a.txt', 100, first),
+      scoped.readFile('server-b', 'b.txt', 100, second),
+    ]);
+    expect(resolve).toHaveBeenCalledWith('server-a', first);
+    expect(resolve).toHaveBeenCalledWith('server-b', second);
+    expect(readFile).toHaveBeenCalledWith('server-a', 'a.txt', 100, first);
+    expect(readFile).toHaveBeenCalledWith('server-b', 'b.txt', 100, second);
+    await scoped.readFile('server-a', 'a.txt');
+    expect(resolve).toHaveBeenLastCalledWith('server-a');
+    expect(readFile).toHaveBeenLastCalledWith('server-a', 'a.txt');
   });
 
   it('discovers Application scopes without probing a nonexistent shared Client key', async () => {

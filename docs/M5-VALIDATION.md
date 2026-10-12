@@ -6269,3 +6269,31 @@ operation, new infrastructure, credential change or manual container restart.
 Existing watcher loaded the API; read-only health check was healthy with container
 restart count zero. Rollback is a source revert. PR #21 stays open/unmerged;
 SFTPGo #18 remains a separate production-release gate.
+
+### 2026-10-12 — editor provider-read timing breakdown
+
+The first optimized Owner opening succeeded in **238.379 ms** for 10 KiB, versus
+778.194 ms before: 217.167 ms content read, 6.864 ms cached identity proof and
+14.348 ms other handler work. These are individual backend observations, not a
+browser/render benchmark. The content-read aggregate is now split, only in debug,
+into `file.serverRead`, existing resolver labels `url.ownerRead`, `url.accountRead`
+and `url.decrypt`, `file.adapterCreate`, `file.httpHeaders` and `file.bodyRead`.
+No additional queries/requests or credential caching were introduced. The timing
+object is passed per read through the scoped adapter, never stored globally.
+Header timing includes transport preparation, remote response and status checks;
+body timing includes bounded consumption/cancellation. Neither separates the
+remote Panel from Wings or measures pure network latency. All remain nested in
+`editor.readContent`; do not add parent and child totals together.
+
+Checks: `scripts/dev.sh pnpm exec vitest run apps/api/src/file-browsing.test.ts packages/server-management/src/scoped-provider-adapter.test.ts packages/server-management/src/upload-timing.test.ts`
+**100 passed**; `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/adapter.test.ts`
+**56 passed**, including deterministic separated header/body waits, failures,
+oversize responses and untimed behavior. TypeScript (`scripts/dev.sh pnpm exec tsc --noEmit`),
+changed-file Biome, whitespace and indexed governance passed. Independent source
+review found no must-fix. No full integration/browser suite rerun for diagnostics.
+
+Existing dev debug logging/source watcher retained; API observed healthy with zero
+container restarts. No real file mutation, new test asset, manual restart,
+production/configuration change or infrastructure operation. Awaiting the next
+Owner opening for the new phase measurements. Rollback is a source revert; PR #21
+remains open/unmerged and SFTPGo #18 remains unchanged.

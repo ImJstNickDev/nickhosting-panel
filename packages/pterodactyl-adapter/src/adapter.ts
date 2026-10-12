@@ -57,6 +57,11 @@ export interface PreparedUploadBatch {
   expiresAt: number;
   uploads: Array<(input: UploadProxyOptions) => Promise<void>>;
 }
+/** Optional caller-owned debug timing; the adapter never logs or starts its own clock. */
+export interface FileReadTiming {
+  measure<T>(name: string, work: () => Promise<T>): Promise<T>;
+  measureSync<T>(name: string, work: () => T): T;
+}
 export function createPterodactylAdapter(options: PterodactylOptions) {
   const transport = createTransport(options);
   const appServer = (id: number) => `servers/${numericId(id)}`;
@@ -322,14 +327,23 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
         fileSchema,
       );
     },
-    async readFile(identifier: string, path: string, maxBytes = 1048576): Promise<Uint8Array> {
+    async readFile(
+      identifier: string,
+      path: string,
+      maxBytes = 1048576,
+      timing?: FileReadTiming,
+    ): Promise<Uint8Array> {
       parseInput(z.number().int().min(1).max(1048576), maxBytes);
-      const response = await transport.request(
-        'client',
-        `${clientServer(identifier)}/files/contents?file=${filePath(path)}`,
-      );
+      // Includes transport preparation/status validation, not only network latency.
+      const request = () =>
+        transport.request(
+          'client',
+          `${clientServer(identifier)}/files/contents?file=${filePath(path)}`,
+        );
+      const response = timing ? await timing.measure('file.httpHeaders', request) : await request();
       try {
-        return await readBounded(response, maxBytes);
+        const read = () => readBounded(response, maxBytes);
+        return timing ? await timing.measure('file.bodyRead', read) : await read();
       } catch (error) {
         if (error instanceof ResponseTooLargeError) throw new DomainError('validation_failed', 413);
         throw new PterodactylError('invalid_response', 'client', 'rejected');

@@ -3,7 +3,12 @@ import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { ConsoleEvent, ConsoleRelay } from './console.js';
-import { createPterodactylAdapter, type ProvisionPlan, PterodactylError } from './index.js';
+import {
+  createPterodactylAdapter,
+  type FileReadTiming,
+  type ProvisionPlan,
+  PterodactylError,
+} from './index.js';
 
 export const fixtureUUID = 'f729c8a1-6773-467a-af3f-a7ea8704f0bd';
 export const limits = { memory: 128, swap: 0, disk: 256, io: 500, cpu: 25, threads: null };
@@ -88,6 +93,32 @@ const config = {
   applicationKey: 'app-fixture-secret',
   clientKey: 'client-fixture-secret',
 };
+
+function fileReadTiming(onStart: (name: string) => void = () => {}) {
+  let now = 0;
+  const durations: Record<string, number> = {};
+  const timing: FileReadTiming = {
+    async measure(name, work) {
+      const start = now;
+      onStart(name);
+      try {
+        return await work();
+      } finally {
+        durations[name] = now - start;
+      }
+    },
+    measureSync(name, work) {
+      const start = now;
+      onStart(name);
+      try {
+        return work();
+      } finally {
+        durations[name] = now - start;
+      }
+    },
+  };
+  return { timing, durations, advance: (ms: number) => (now += ms) };
+}
 
 describe('typed Pterodactyl boundary', () => {
   it('accepts installed Panel null_resource configuration on an egg without inheritance', async () => {
@@ -395,6 +426,122 @@ describe('typed Pterodactyl boundary', () => {
 });
 
 describe('files and backup credential isolation', () => {
+  it('separates delayed file response headers from delayed body reception', async () => {
+    const headers = Promise.withResolvers<Response>();
+    const bodyStarted = Promise.withResolvers<void>();
+    const phases: string[] = [];
+    const trace = fileReadTiming((name) => {
+      phases.push(name);
+      if (name === 'file.bodyRead') bodyStarted.resolve();
+    });
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+        },
+      }),
+    );
+    const fetcher = vi.fn<typeof fetch>().mockReturnValue(headers.promise);
+    const reading = createPterodactylAdapter({ ...config, fetcher }).readFile(
+      'f729c8a1',
+      'fixture.txt',
+      16,
+      trace.timing,
+    );
+    expect(phases).toEqual(['file.httpHeaders']);
+    trace.advance(170);
+    headers.resolve(response);
+    await bodyStarted.promise;
+    expect(trace.durations).toEqual({ 'file.httpHeaders': 170 });
+    trace.advance(47);
+    bodyController.enqueue(new TextEncoder().encode('fixture'));
+    bodyController.close();
+    expect(new TextDecoder().decode(await reading)).toBe('fixture');
+    expect(phases).toEqual(['file.httpHeaders', 'file.bodyRead']);
+    expect(trace.durations).toEqual({ 'file.httpHeaders': 170, 'file.bodyRead': 47 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('finishes header timing on provider rejection without starting body timing', async () => {
+    const trace = fileReadTiming();
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      trace.advance(30);
+      return new Response('private provider details', { status: 403 });
+    });
+    await expect(
+      createPterodactylAdapter({ ...config, fetcher }).readFile(
+        'f729c8a1',
+        'fixture.txt',
+        16,
+        trace.timing,
+      ),
+    ).rejects.toMatchObject({ reason: 'permission_denied', scope: 'client' });
+    expect(trace.durations).toEqual({ 'file.httpHeaders': 30 });
+  });
+  it.each(['declared-overflow', 'stream-overflow', 'body-error'] as const)(
+    'records body timing without changing %s error handling',
+    async (failure) => {
+      const trace = fileReadTiming();
+      const cancelled = vi.fn();
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            trace.advance(20);
+            if (failure === 'body-error') controller.error(new Error('private stream details'));
+            else controller.enqueue(new TextEncoder().encode('too much data'));
+          },
+          cancel: cancelled,
+        },
+        { highWaterMark: 0 },
+      );
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+        trace.advance(10);
+        return new Response(body, {
+          headers: failure === 'declared-overflow' ? { 'content-length': '13' } : {},
+        });
+      });
+      await expect(
+        createPterodactylAdapter({ ...config, fetcher }).readFile(
+          'f729c8a1',
+          'fixture.txt',
+          4,
+          trace.timing,
+        ),
+      ).rejects.toMatchObject(
+        failure === 'body-error'
+          ? { reason: 'invalid_response', scope: 'client' }
+          : { code: 'validation_failed', status: 413 },
+      );
+      expect(trace.durations).toEqual({
+        'file.httpHeaders': 10,
+        'file.bodyRead': failure === 'declared-overflow' ? 0 : 20,
+      });
+      expect(cancelled).toHaveBeenCalledTimes(failure === 'body-error' ? 0 : 1);
+    },
+  );
+  it('reads without a debug timer and preserves Client API credentials and request path', async () => {
+    const clock = vi.spyOn(performance, 'now');
+    try {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('fixture'));
+      const contents = await createPterodactylAdapter({ ...config, fetcher }).readFile(
+        'f729c8a1',
+        'config/fixture.txt',
+      );
+      expect(new TextDecoder().decode(contents)).toBe('fixture');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+        'https://panel.example.com/api/client/servers/f729c8a1/files/contents?file=%2Fconfig%2Ffixture.txt',
+      );
+      expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+        method: 'GET',
+        headers: { Authorization: `Bearer ${config.clientKey}` },
+        redirect: 'error',
+      });
+      expect(clock).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it.each([
     '../secret',
     '/etc/passwd',

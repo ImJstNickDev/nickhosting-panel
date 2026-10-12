@@ -35,7 +35,10 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
 };
 export function createScopedProviderAdapter(
   application: PterodactylAdapter,
-  resolve: (identifier: string) => Promise<PterodactylAdapter>,
+  resolve: (
+    identifier: string,
+    timing?: Parameters<PterodactylAdapter['readFile']>[3],
+  ) => Promise<PterodactylAdapter>,
 ): PterodactylAdapter {
   return new Proxy(application, {
     get(target, property, receiver) {
@@ -54,7 +57,11 @@ export function createScopedProviderAdapter(
         return async (...args: unknown[]) => {
           const identifier = args[index];
           if (typeof identifier !== 'string' || !identifier) throw new DomainError('forbidden');
-          const scoped = await resolve(identifier);
+          const timing =
+            property === 'readFile'
+              ? (args[3] as Parameters<PterodactylAdapter['readFile']>[3])
+              : undefined;
+          const scoped = timing ? await resolve(identifier, timing) : await resolve(identifier);
           const method = Reflect.get(scoped, property);
           return Reflect.apply(method, scoped, args);
         };
