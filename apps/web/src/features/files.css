@@ -460,6 +460,9 @@
   color: #657284;
   font-size: 0.8rem;
 }
+.fm-uploads .notice small {
+  color: inherit;
+}
 .fm-uploads progress {
   width: 100%;
   height: 5px;

@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { useBlocker, useLocation } from 'react-router';
 import { fileEditorAvailability } from '../../../../packages/core/src/file-content.js';
-import { api, download, upload } from '../api/client.js';
+import { ApiError, api, download, upload } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -71,6 +71,7 @@ type UploadItem = {
   directory: string;
   path: string;
   exclusive: boolean;
+  submitted: boolean;
   sent: number;
   speed: number;
   status: 'queued' | 'uploading' | 'confirming' | 'complete' | 'cancelled' | 'failed';
@@ -278,14 +279,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [menu, setMenu] = useState<{ entry: ServerFile; left: number; top: number }>();
   const [dropActive, setDropActive] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [uploadPause, setUploadPause] = useState<'checking' | 'blocked'>();
   const [preparingFolder, setPreparingFolder] = useState(false);
   const folderPreparation = useRef<AbortController | undefined>(undefined);
   const [pendingUploads, setPendingUploads] = useState<File[]>([]);
   const uploadId = useRef(0),
     uploadRunning = useRef(false);
-  const uploadAbort = useRef<AbortController | undefined>(undefined);
-  const cancelledUploads = useRef(new Set<number>());
+  const activeUpload = useRef<{ id: number; controller: AbortController } | undefined>(undefined);
+  const uploadNeedsAdmission = useRef(false);
   const uploadQueue = useRef<UploadItem[]>([]);
+  const uploadIdentity = saveScope?.join('\0');
+  const previousUploadIdentity = useRef(uploadIdentity);
   const mounted = useRef(true);
   const folderInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -364,11 +368,20 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      uploadAbort.current?.abort();
+      activeUpload.current?.controller.abort();
       folderPreparation.current?.abort();
       readAbort.current?.abort();
     };
   }, []);
+  useEffect(() => {
+    if (previousUploadIdentity.current === uploadIdentity) return;
+    previousUploadIdentity.current = uploadIdentity;
+    activeUpload.current?.controller.abort();
+    uploadQueue.current = [];
+    uploadNeedsAdmission.current = true;
+    setUploads([]);
+    setUploadPause(undefined);
+  }, [uploadIdentity]);
   useEffect(() => {
     const focusSearch = (event: globalThis.KeyboardEvent) => {
       const modifier = event.altKey && !event.ctrlKey && !event.metaKey;
@@ -410,7 +423,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }, [menu]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (dirty || uploadRunning.current || mutationRunning.current || folderPreparation.current) {
+      if (
+        dirty ||
+        uploadRunning.current ||
+        uploadQueue.current.length ||
+        mutationRunning.current ||
+        folderPreparation.current
+      ) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -842,54 +861,95 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }
   async function runUploads() {
     if (uploadRunning.current) return;
+    const identity = saveIdentity.current;
+    const isCurrent = () => mounted.current && identity === saveIdentity.current;
+    if (!identity || !isCurrent()) return;
+    let pauseAfterRefresh = false;
     uploadRunning.current = true;
-    while (uploadQueue.current.length && mounted.current) {
-      const item = uploadQueue.current.shift();
-      if (!item) break;
-      if (cancelledUploads.current.has(item.id)) continue;
-      const controller = new AbortController();
-      uploadAbort.current = controller;
-      const start = performance.now();
-      updateUpload(item.id, { status: 'uploading' });
-      try {
-        if (item.exclusive) {
-          const parent = item.path.split('/').slice(0, -1).join('/');
-          const listing = await api<ServerFile[]>(
-            `${serverPath(serverId)}/files?path=${encodeURIComponent(parent)}`,
-            { signal: controller.signal },
-          );
+    try {
+      while (uploadQueue.current.length && isCurrent()) {
+        if (uploadNeedsAdmission.current) {
+          setUploadPause('checking');
+          // An aborted browser request can leave an upstream write unresolved.
+          // Only fresh admission reads can allow untouched queued files to proceed.
+          const [availability, fileCapabilities] = await Promise.all([
+            transfers.refetch(),
+            capabilities.refetch(),
+          ]);
+          if (!isCurrent()) break;
           if (
-            listing.some(
-              (entry) => entry.name.toLocaleLowerCase() === item.file.name.toLocaleLowerCase(),
-            )
-          )
-            throw { messageKey: 'file.folderFileExists' };
+            pauseAfterRefresh ||
+            !availability.isSuccess ||
+            !fileCapabilities.isSuccess ||
+            availability.data.upload.available !== true
+          ) {
+            setUploadPause(uploadQueue.current.length ? 'blocked' : undefined);
+            break;
+          }
+          uploadNeedsAdmission.current = false;
+          setUploadPause(undefined);
         }
-        await upload(
-          `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}`,
-          item.file,
-          {
-            signal: controller.signal,
-            onProgress: (sent) =>
-              updateUpload(item.id, {
-                sent,
-                speed: sent / Math.max(0.1, (performance.now() - start) / 1000),
-                status: sent === item.file.size ? 'confirming' : 'uploading',
-              }),
-          },
-        );
-        updateUpload(item.id, { status: 'complete', sent: item.file.size });
-        await files.refetch();
-      } catch (failure) {
-        updateUpload(item.id, {
-          status: controller.signal.aborted ? 'cancelled' : 'failed',
-          error: controller.signal.aborted ? undefined : failure,
-        });
-      } finally {
-        uploadAbort.current = undefined;
+        const item = uploadQueue.current.shift();
+        if (!item) break;
+        const controller = new AbortController();
+        activeUpload.current = { id: item.id, controller };
+        const start = performance.now();
+        updateUpload(item.id, { status: 'uploading' });
+        try {
+          if (item.exclusive) {
+            const parent = item.path.split('/').slice(0, -1).join('/');
+            const listing = await api<ServerFile[]>(
+              `${serverPath(serverId)}/files?path=${encodeURIComponent(parent)}`,
+              { signal: controller.signal },
+            );
+            if (
+              listing.some(
+                (entry) => entry.name.toLocaleLowerCase() === item.file.name.toLocaleLowerCase(),
+              )
+            )
+              throw { messageKey: 'file.folderFileExists' };
+          }
+          if (!isCurrent()) break;
+          updateUpload(item.id, { submitted: true });
+          await upload(
+            `${serverPath(serverId)}/files/upload?path=${encodeURIComponent(item.path)}`,
+            item.file,
+            {
+              signal: controller.signal,
+              onProgress: (sent) => {
+                if (!isCurrent()) return;
+                updateUpload(item.id, {
+                  sent,
+                  speed: sent / Math.max(0.1, (performance.now() - start) / 1000),
+                  status: sent === item.file.size ? 'confirming' : 'uploading',
+                });
+              },
+            },
+          );
+          if (!isCurrent()) break;
+          updateUpload(item.id, { status: 'complete', sent: item.file.size });
+          await files.refetch();
+        } catch (failure) {
+          if (!isCurrent()) break;
+          updateUpload(item.id, {
+            status: controller.signal.aborted ? 'cancelled' : 'failed',
+            error: controller.signal.aborted ? undefined : failure,
+          });
+          // Never replay the submitted file, including an uncertain failed write.
+          uploadNeedsAdmission.current = true;
+          // Availability cannot expose every in-flight provider preflight/lock.
+          // A shared-state rejection must stop this run even if reads say ready.
+          pauseAfterRefresh =
+            !controller.signal.aborted &&
+            failure instanceof ApiError &&
+            ['conflict', 'operation_uncertain', 'integration_unavailable'].includes(failure.code);
+        } finally {
+          activeUpload.current = undefined;
+        }
       }
+    } finally {
+      uploadRunning.current = false;
     }
-    uploadRunning.current = false;
   }
   function queueUploads(incoming: File[], target = directory, paths?: string[]) {
     const items = incoming.map((file, index) => ({
@@ -898,6 +958,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       directory: target,
       path: paths?.[index] ?? join(target, file.name),
       exclusive: Boolean(paths),
+      submitted: false,
       sent: 0,
       speed: 0,
       status: 'queued' as const,
@@ -905,7 +966,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setUploads((previous) => [...previous, ...items]);
     uploadQueue.current.push(...items);
     setPendingUploads([]);
-    void runUploads();
+    if (!uploadPause) void runUploads();
   }
   function acceptUploads(incoming: File[]) {
     if (folderPreparation.current) {
@@ -946,7 +1007,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setError({ messageKey: uploadReason });
       return;
     }
-    if (uploadRunning.current || folderPreparation.current) {
+    if (uploadRunning.current || uploadQueue.current.length || folderPreparation.current) {
       setError({ messageKey: 'file.waitUploads' });
       return;
     }
@@ -997,11 +1058,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       }
     }
   }
-  function cancelUpload(item: UploadItem) {
-    if (item.status === 'queued') {
-      cancelledUploads.current.add(item.id);
-      updateUpload(item.id, { status: 'cancelled' });
-    } else uploadAbort.current?.abort();
+  function cancelUpload(id: number) {
+    const index = uploadQueue.current.findIndex((item) => item.id === id);
+    if (index !== -1) {
+      uploadQueue.current.splice(index, 1);
+      updateUpload(id, { status: 'cancelled' });
+      if (!uploadQueue.current.length) setUploadPause(undefined);
+    } else if (activeUpload.current?.id === id) activeUpload.current.controller.abort();
   }
   const totalSelected = selected.size;
   const uploadsBusy = uploads.some((item) =>
@@ -1221,7 +1284,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       aria-label={t('file.uploadFolder')}
                       aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
                       onClick={() => {
-                        if (uploadAvailable && !preparingFolder && !uploadRunning.current)
+                        if (uploadAvailable && !preparingFolder && !uploadsBusy)
                           folderInput.current?.click();
                         else
                           setError({
@@ -1865,18 +1928,43 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               {t('file.clearFinished')}
             </button>
           </header>
+          {uploadPause && (
+            <div className="notice">
+              <p role="status">
+                {t(
+                  uploadPause === 'checking'
+                    ? 'file.uploadQueueChecking'
+                    : 'file.uploadQueuePaused',
+                )}
+              </p>
+              <button
+                type="button"
+                className="text-button"
+                disabled={uploadPause === 'checking'}
+                onClick={() => void runUploads()}
+              >
+                {t('file.resumeUploads')}
+              </button>
+            </div>
+          )}
           <ul>
             {uploads.map((item) => (
               <li key={item.id}>
                 <div className="fm-upload-name">
                   <span>{item.path.slice(item.directory ? item.directory.length + 1 : 0)}</span>
-                  <span>{t(`file.upload.${item.status}`)}</span>
+                  <span>
+                    {t(
+                      item.status === 'cancelled' && !item.submitted
+                        ? 'file.upload.cancelledQueued'
+                        : `file.upload.${item.status}`,
+                    )}
+                  </span>
                   {['queued', 'uploading', 'confirming'].includes(item.status) && (
                     <button
                       type="button"
                       className="text-button"
                       aria-label={t('file.cancelUpload', { name: item.file.name })}
-                      onClick={() => cancelUpload(item)}
+                      onClick={() => cancelUpload(item.id)}
                     >
                       {t('web.cancel')}
                     </button>

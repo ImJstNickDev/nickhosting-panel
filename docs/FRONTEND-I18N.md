@@ -518,8 +518,15 @@ Name, Size and Modified headers are sorting buttons in both list and grid views.
 The active non-default ordering has an up/down arrow; default Name ascending has
 no arrow. Header controls remain keyboard accessible on mobile.
 List is default; Grid is optional. External file drops use the same upload queue
-as the toolbar, with per-file progress, speed, cancellation and errors. Directory
-uploads are not silently flattened.
+as the toolbar, with per-file progress, speed, cancellation and errors. Cancellation
+is bound to an entry ID; cancelling a queued item never aborts another active file.
+Submitted failures/cancellations refresh admission before continuing. Shared-state
+failures pause the untouched queue even when availability reads look ready; the
+localized Check and resume action checks admission again without replaying failed
+or uncertain writes. A paused queue stays in the current Files view and warns before tab close/reload;
+in-app navigation away also discards it. It is not durable across reloads. Queued cancellation does not imply partial remote
+files, while submitted cancellation keeps that caution. Directory uploads are not
+silently flattened.
 
 Initial and uncached-directory loads use noninteractive skeleton rows/tiles for
 the selected view, without a visible Loading paragraph. The listing and count

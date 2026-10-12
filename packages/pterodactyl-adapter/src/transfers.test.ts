@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createPterodactylAdapter } from './adapter.js';
 import { createDownloadProxy } from './downloads.js';
 import { createTransferGuard } from './transfer-guard.js';
+import { PterodactylError } from './transport.js';
+import { isUploadNotDispatched } from './upload-dispatch.js';
 import { createUploadProxy } from './uploads.js';
 
 async function withHttp(
@@ -301,6 +303,108 @@ describe('real HTTP streaming transfers', () => {
 });
 
 describe('stream validation and provider isolation', () => {
+  it('does not treat a generic rejected provider error as proof of no upload dispatch', () => {
+    expect(isUploadNotDispatched(new PterodactylError('unavailable', 'client', 'rejected'))).toBe(
+      false,
+    );
+  });
+  it.each(['aborted', 'invalid-target', 'authorization-failed', 'authorization-aborted'])(
+    'proves no POST was dispatched for %s and cancels the unused source',
+    async (failure) => {
+      const controller = new AbortController();
+      const cancel = vi.fn();
+      const fetcher = vi.fn<typeof fetch>();
+      if (failure === 'aborted') controller.abort();
+      const error = await createUploadProxy({
+        ...options,
+        baseURL: 'https://panel.example.test',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      })(
+        failure === 'invalid-target'
+          ? 'https://untrusted.example.test/upload/file'
+          : 'https://wings.example.test/upload/file',
+        'file.bin',
+        {
+          body: new ReadableStream({ cancel }, { highWaterMark: 0 }),
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+          authorize: async () => {
+            if (failure === 'authorization-failed') throw new Error('revoked');
+            if (failure === 'authorization-aborted') controller.abort();
+          },
+        },
+      ).catch((error: unknown) => error);
+      expect(isUploadNotDispatched(error)).toBe(true);
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['failed', 'aborted'])(
+    'proves no upload was dispatched when signed URL acquisition is %s',
+    async (failure) => {
+      const controller = new AbortController();
+      const waiting = Promise.withResolvers<Response>();
+      const cancel = vi.fn();
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+        if (failure === 'failed') return new Response(null, { status: 403 });
+        controller.abort();
+        return waiting.promise;
+      });
+      const adapter = createPterodactylAdapter({
+        ...options,
+        baseURL: 'https://panel.example.test',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      });
+      const error = await adapter
+        .uploadFile('fixture', 'file.bin', {
+          body: new ReadableStream({ cancel }, { highWaterMark: 0 }),
+          contentLength: 1,
+          maxBytes: 1,
+          signal: controller.signal,
+        })
+        .catch((error: unknown) => error);
+      expect(isUploadNotDispatched(error)).toBe(true);
+      waiting.resolve(
+        Response.json({ attributes: { url: 'https://wings.example.test/upload/file' } }),
+      );
+      await delay(1);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher.mock.calls[0]?.[1]?.method).toBe('GET');
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['synchronous-throw', 'lost-response', 'abort', 'timeout', 'early-success'])(
+    'retains uncertainty after invoking the upload POST for %s',
+    async (failure) => {
+      const controller = new AbortController();
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(() => {
+        if (failure === 'synchronous-throw') throw new Error('not proof of delivery');
+        if (failure === 'lost-response') return Promise.reject(new Error('response lost'));
+        if (failure === 'early-success')
+          return Promise.resolve(new Response(null, { status: 204 }));
+        if (failure === 'abort') controller.abort();
+        return new Promise<Response>(() => {});
+      });
+      const error = await createUploadProxy({
+        ...options,
+        baseURL: 'https://panel.example.test',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      })('https://wings.example.test/upload/file', 'file.bin', {
+        body: bytes(1),
+        contentLength: 1,
+        maxBytes: 1,
+        signal: controller.signal,
+        idleTimeoutMs: 10,
+      }).catch((error: unknown) => error);
+      expect(error).toMatchObject({ outcome: 'unknown' });
+      expect(isUploadNotDispatched(error)).toBe(false);
+      expect(fetcher).toHaveBeenCalledOnce();
+    },
+  );
   it('handles already-aborted downloads and uploads without invoking work or leaking rejected promises', async () => {
     const rejections: unknown[] = [];
     const observe = (reason: unknown) => {

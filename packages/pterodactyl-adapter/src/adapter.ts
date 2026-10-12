@@ -5,6 +5,7 @@ import { type ConsoleRelayOptions, createConsoleRelay } from './console.js';
 import { createDownloadProxy, type DownloadProxyOptions } from './downloads.js';
 import { confirmInstallation } from './installation.js';
 import { type StopConfirmationOptions, stopWithConfirmation } from './power.js';
+import { createTransferGuard } from './transfer-guard.js';
 import {
   createTransport,
   numericId,
@@ -35,6 +36,7 @@ import {
   type StartupUpdate,
   userSchema,
 } from './types.js';
+import { uploadNotDispatched } from './upload-dispatch.js';
 import { createUploadProxy, type UploadProxyOptions } from './uploads.js';
 
 export interface PterodactylOptions extends TransportOptions {
@@ -432,13 +434,26 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
       return download(result.url, input);
     },
     async uploadFile(identifier: string, path: string, input: UploadProxyOptions) {
-      if (input.signal?.aborted) throw new PterodactylError('unavailable', 'client', 'rejected');
-      relativePath(path);
-      const result = await transport.entity(
-        'client',
-        `${clientServer(identifier)}/files/upload`,
-        z.object({ url: z.string() }),
-      );
+      let result: { url: string };
+      try {
+        relativePath(path);
+        const guard = createTransferGuard(input, 'rejected');
+        try {
+          await guard.run(() => guard.authorize(true));
+          result = await guard.run(() =>
+            transport.entity(
+              'client',
+              `${clientServer(identifier)}/files/upload`,
+              z.object({ url: z.string() }),
+            ),
+          );
+        } finally {
+          guard.close();
+        }
+      } catch (error) {
+        void input.body.cancel().catch(() => {});
+        throw uploadNotDispatched(error);
+      }
       return upload(result.url, path, input);
     },
     async relayConsole(identifier: string, input: ConsoleRelayOptions) {

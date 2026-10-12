@@ -9,7 +9,12 @@ import { authSessionId, createLogger, DomainError, SecretCodec } from '@nickhost
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftManifest } from '@nickhosting/minecraft';
-import type { ConsoleRelayOptions, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import {
+  type ConsoleRelayOptions,
+  createPterodactylAdapter,
+  type PterodactylAdapter,
+  PterodactylError,
+} from '@nickhosting/pterodactyl-adapter';
 import { createManagementRuntime } from '@nickhosting/server-management';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
@@ -61,6 +66,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     data: Uint8Array | ReadableStream<Uint8Array>,
     length: number,
     headers: Record<string, string> = {},
+    signal?: AbortSignal,
   ) {
     const requestHeaders = client?.headers() ?? new Headers({ origin });
     requestHeaders.set('content-type', 'application/octet-stream');
@@ -71,6 +77,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       headers: requestHeaders,
       body: data as BodyInit,
       duplex: 'half',
+      signal,
     };
     return app.request(`${origin}/v1/servers/${server}/files/upload?path=world.bin`, init);
   }
@@ -1184,6 +1191,130 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(JSON.stringify(audits)).not.toMatch(/private-token|a5a5/);
     expect(JSON.stringify(logs)).not.toMatch(/private-token/);
   });
+
+  it.each([
+    'already-aborted',
+    'token-failed',
+    'token-aborted',
+    'invalid-target',
+    'authorization-failed',
+  ])(
+    'releases the ingestion claim after %s before POST and accepts the next upload',
+    async (failure) => {
+      const server = await f.server();
+      const controller = new AbortController();
+      if (failure === 'already-aborted') controller.abort();
+      const waiting = Promise.withResolvers<Response>();
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+        expect(init?.method).toBe('GET');
+        if (failure === 'token-failed') return new Response(null, { status: 403 });
+        if (failure === 'token-aborted') {
+          controller.abort();
+          return waiting.promise;
+        }
+        return Response.json({
+          attributes: { url: 'https://untrusted.example.test/upload/file?token=private-token' },
+        });
+      });
+      const adapter = createPterodactylAdapter({
+        baseURL: 'https://panel.example.test',
+        applicationKey: 'isolated-key',
+        clientKey: 'isolated-client-key',
+        uploadOrigins: ['https://wings.example.test'],
+        fetcher,
+      });
+      uploadFile.mockImplementationOnce((id, path, input) =>
+        adapter.uploadFile(id, path, {
+          ...input,
+          ...(failure === 'authorization-failed'
+            ? {
+                authorize: async () => {
+                  throw new DomainError('forbidden');
+                },
+              }
+            : {}),
+        }),
+      );
+      const response = await upload(user, server, new Uint8Array(1), 1, {}, controller.signal);
+      expect(response.status).toBe(503);
+      expect(await response.text()).not.toMatch(/private-token|wings.example|untrusted.example/);
+      waiting.resolve(
+        Response.json({ attributes: { url: 'https://wings.example.test/upload/file' } }),
+      );
+      await delay(1);
+      expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+      expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
+      const audits = (
+        await f.db.selectFrom('audit_events').select(['action', 'metadata']).execute()
+      ).filter((audit) => (audit.metadata as { serverId?: string }).serverId === server);
+      expect(audits.some((audit) => audit.action === 'server.upload.not_dispatched')).toBe(true);
+      expect(
+        audits.some((audit) =>
+          ['server.upload.confirmed', 'server.files.uploaded', 'server.upload.recovered'].includes(
+            audit.action,
+          ),
+        ),
+      ).toBe(false);
+      expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(204);
+    },
+  );
+
+  it.each(['abort', 'synchronous-throw', 'early-success', 'generic-rejected'])(
+    'keeps the ingestion claim and blocks the next upload after %s without pre-dispatch proof',
+    async (failure) => {
+      const server = await f.server();
+      const controller = new AbortController();
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(() => {
+        if (failure === 'synchronous-throw') throw new Error('unknown delivery');
+        if (failure === 'early-success')
+          return Promise.resolve(new Response(null, { status: 204 }));
+        controller.abort();
+        return new Promise<Response>(() => {});
+      });
+      if (failure === 'generic-rejected') {
+        uploadFile.mockRejectedValueOnce(new PterodactylError('unavailable', 'client', 'rejected'));
+      } else {
+        const proxy = createUploadProxy({
+          baseURL: 'https://panel.example.test',
+          applicationKey: 'isolated-key',
+          uploadOrigins: ['https://wings.example.test'],
+          fetcher,
+        });
+        uploadFile.mockImplementationOnce((_id, path, input) =>
+          proxy('https://wings.example.test/upload/file', path, input),
+        );
+      }
+      expect((await upload(user, server, new Uint8Array(1), 1, {}, controller.signal)).status).toBe(
+        503,
+      );
+      if (failure !== 'generic-rejected') expect(fetcher).toHaveBeenCalledOnce();
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .selectAll()
+          .where('server_id', '=', server)
+          .execute(),
+      ).toHaveLength(1);
+      const before = uploadFile.mock.calls.length;
+      const blocked = await upload(user, server, new Uint8Array(1), 1);
+      expect(blocked.status).toBe(409);
+      expect((await blocked.json()).error.code).toBe('operation_uncertain');
+      expect(uploadFile.mock.calls).toHaveLength(before);
+      const audits = (
+        await f.db.selectFrom('audit_events').select(['action', 'metadata']).execute()
+      ).filter((audit) => (audit.metadata as { serverId?: string }).serverId === server);
+      expect(
+        audits.some((audit) =>
+          [
+            'server.upload.not_dispatched',
+            'server.upload.confirmed',
+            'server.files.uploaded',
+          ].includes(audit.action),
+        ),
+      ).toBe(false);
+      await recoverFixtureUploads();
+    },
+  );
 
   it('enforces binary upload authentication, current project permissions and origin', async () => {
     const project = await (

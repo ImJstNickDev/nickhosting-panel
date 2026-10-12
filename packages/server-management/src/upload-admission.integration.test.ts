@@ -181,6 +181,37 @@ describe('durable multipart ingestion admission', () => {
     });
     expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual([]);
   });
+  it('releases proven pre-dispatch failures with a distinct audit and admits the next upload', async () => {
+    const server = await f.server();
+    await configure();
+    await f.db.connection().execute(async (connection) => {
+      const claim = await reserveUploadIngestion(connection, f.context, server, 123, env, enough);
+      try {
+        await claim.rejectBeforeDispatch();
+        await expect(claim.complete()).rejects.toMatchObject({ code: 'conflict' });
+      } finally {
+        await claim.unlock();
+      }
+      await expect(claim.rejectBeforeDispatch()).rejects.toMatchObject({ code: 'conflict' });
+      expect(await connection.selectFrom('upload_ingestion_claims').selectAll().execute()).toEqual(
+        [],
+      );
+      const next = await reserveUploadIngestion(connection, f.context, server, 123, env, enough);
+      try {
+        await next.rejectBeforeDispatch();
+      } finally {
+        await next.unlock();
+      }
+    });
+    const audits = await f.db
+      .selectFrom('audit_events')
+      .select(['action', 'metadata'])
+      .where('action', 'in', ['server.upload.confirmed', 'server.upload.not_dispatched'])
+      .execute();
+    expect(audits).toHaveLength(2);
+    expect(audits.every((audit) => audit.action === 'server.upload.not_dispatched')).toBe(true);
+    expect(audits[0]?.metadata).toMatchObject({ serverId: server, claimId: expect.any(String) });
+  });
   it('serializes simultaneous claims on one physical host including sibling nodes', async () => {
     const first = await f.server(),
       second = await f.server();

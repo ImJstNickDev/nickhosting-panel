@@ -62,4 +62,5 @@ export type { TransferOptions } from './transfer-guard.js';
 export type { CredentialScope, RemoteOutcome } from './transport.js';
 export { createTransportCoordinator, PterodactylError, relativePath } from './transport.js';
 export * from './types.js';
+export { isUploadNotDispatched } from './upload-dispatch.js';
 export type { UploadProxyOptions } from './uploads.js';

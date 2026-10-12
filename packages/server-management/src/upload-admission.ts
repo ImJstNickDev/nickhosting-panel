@@ -201,23 +201,30 @@ export async function reserveUploadIngestion(
     throw error;
   }
   let released = false;
+  async function settle(action: 'server.upload.confirmed' | 'server.upload.not_dispatched') {
+    if (released) throw new DomainError('conflict');
+    await connection.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      const claim = await tx
+        .deleteFrom('upload_ingestion_claims')
+        .where('id', '=', claimId)
+        .where('server_id', '=', serverId)
+        .returning('id')
+        .executeTakeFirst();
+      if (!claim) throw new DomainError('conflict');
+      await recordAudit(tx, context, action, { claimId, serverId });
+    });
+  }
   return {
     id: claimId,
     async complete() {
-      if (released) throw new DomainError('conflict');
-      await connection.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        const claim = await tx
-          .deleteFrom('upload_ingestion_claims')
-          .where('id', '=', claimId)
-          .where('server_id', '=', serverId)
-          .returning('id')
-          .executeTakeFirst();
-        if (!claim) throw new DomainError('conflict');
-        await recordAudit(tx, context, 'server.upload.confirmed', { claimId, serverId });
-      });
+      await settle('server.upload.confirmed');
     },
-    /** Failure, cancellation or process loss must leave the durable claim intact. */
+    /** Only call with adapter proof that the Wings upload POST was never invoked. */
+    async rejectBeforeDispatch() {
+      await settle('server.upload.not_dispatched');
+    },
+    /** Unproven failure, cancellation or process loss leaves the durable claim intact. */
     async unlock() {
       if (released) return;
       released = true;

@@ -252,9 +252,13 @@ no overwrite credit. The multipart tempfile can coexist with the destination
 copy. The temporary budget and both free-space observations minus headroom must
 cover this conservative peak; destination headroom is at least the host disk
 headroom. Known RAM-backed staging/data filesystems are rejected. Sibling
-nodes share the host claim. Provider success after complete transfer releases it;
-abort, timeout, crash or uncertain completion retains it without a timer-based
-expiry. Further uploads on that host and mutations of the affected server fail
+nodes share the host claim. Provider success after complete transfer releases it.
+The direct upload route also releases its exact claim when the adapter proves the
+Wings POST was never invoked (including cancellation during signed-URL lookup),
+auditing `server.upload.not_dispatched` rather than success. The proof is internal
+to the adapter, not inferred from HTTP status or browser cancellation. Once POST
+is invoked, abort, timeout, crash or uncertain completion retains the claim without
+a timer-based expiry. Further uploads on that host and mutations of the affected server fail
 closed. Existing game/provider writes can still consume space concurrently;
 the Owner's staging budget and headroom must account for these workloads.
 

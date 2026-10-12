@@ -1,7 +1,7 @@
 import { posix } from 'node:path';
 import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
-import { relativePath } from '@nickhosting/pterodactyl-adapter';
+import { isUploadNotDispatched, relativePath } from '@nickhosting/pterodactyl-adapter';
 import {
   assignServerDns,
   authorizeServer,
@@ -460,6 +460,9 @@ export function registerServerRoutes(
             authorize: () => service.authorizeTransfer(current, serverId, true, connection),
           });
           await claim.complete();
+        } catch (error) {
+          if (isUploadNotDispatched(error)) await claim.rejectBeforeDispatch();
+          throw error;
         } finally {
           await claim.unlock();
         }

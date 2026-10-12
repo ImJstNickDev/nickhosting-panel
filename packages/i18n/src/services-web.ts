@@ -152,10 +152,20 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
   'file.dropHere': ['Drop files to upload', 'Rilascia i file per caricarli'],
   'file.clearFinished': ['Clear finished uploads', 'Rimuovi caricamenti conclusi'],
   'file.cancelUpload': ['Cancel upload of {name}', 'Annulla caricamento di {name}'],
+  'file.uploadQueueChecking': [
+    'Checking upload availability…',
+    'Verifica della disponibilità dei caricamenti…',
+  ],
+  'file.uploadQueuePaused': [
+    'Uploads paused. Queued files stay in this tab. If the block persists, ask the Owner to check the previous upload.',
+    'Caricamenti in pausa. I file in coda restano in questa scheda. Se il blocco persiste, chiedi all’Owner di verificare il caricamento precedente.',
+  ],
+  'file.resumeUploads': ['Check and resume', 'Verifica e riprendi'],
   'file.upload.queued': ['Queued', 'In coda'],
   'file.upload.uploading': ['Uploading', 'Caricamento'],
   'file.upload.confirming': ['Confirming upload', 'Conferma caricamento'],
   'file.upload.complete': ['Completed', 'Completato'],
+  'file.upload.cancelledQueued': ['Cancelled', 'Annullato'],
   'file.upload.cancelled': [
     'Cancelled · verify partial files',
     'Annullato · verifica eventuali file parziali',

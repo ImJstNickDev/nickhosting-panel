@@ -5423,3 +5423,62 @@ change. No dependency or migration changes. The non-atomic interval against
 external Wings filesystem writers remains documented; partial copies have no
 automatic rollback guarantee. Rollback is a code revert. PR#21 stays OPEN/unmerged;
 SFTPGo#18 remains a separate production-release gate.
+
+### 2026-10-12 — Upload cancellation, preserved queue and scoped recovery
+
+The reported 49-file batch exposed two related defects: a cancellation/failure
+before Wings POST could leave an ingestion claim, and the browser continued
+submitting untouched files into that blocked admission. This produced misleading
+changed-item errors and blocked later folder deletion. The adapter now carries
+internal proof of no POST invocation; only that proof releases the captured claim
+with `server.upload.not_dispatched`. Cancellation during signed-URL acquisition
+cannot dispatch a later POST. Once POST is invoked, lost responses, synchronous
+fetch failures, cancellation and timeout still retain uncertainty. No partial-file
+rollback or successful upload is inferred from cancellation.
+
+Cancellation is bound to the exact queue-entry ID. Fresh admission reads precede
+continuation; shared-state failures pause untouched entries even if availability
+looks ready, since a preflight lock may exist before the durable claim. Check and
+resume never resubmits a failed/uncertain file. Pending files stay in the current
+tab, not across reloads. The UI distinguishes queued cancellation from a submitted
+request that may have partial effects.
+
+Focused evidence (pinned Node24.21.0/pnpm10.33.0):
+
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/transfers.test.ts`: **40 passed**. Covers cancellation before/during signed-URL lookup, invalid destinations and revoked authorization without POST; retains uncertainty after actual invocation, lost/early responses and timeout. Independent review also ran this file successfully.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts packages/server-management/src/upload-admission.integration.test.ts`: **65 passed**. Real handlers/database cover exact-claim release, distinct audit, subsequent admission, unknown outcomes remaining blocked, permissions and streaming regressions.
+- Browser prefix: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-upload-cancel.browser.test.ts`.
+- The initial four-case browser file passed after correcting the upload notice's small-text contrast. Covers cancelling file11 after ten completions in a49-file batch, preserving38 queued entries, eventual48 completions without replay; queued-only cancellation; automatic continuation when admission is available; and repeated blocked recovery/queue cancellation on Italian mobile.
+- Independent review found a remaining preflight-lock race despite successful availability reads. Added a fifth regression, rerun with prefix + `-t 'pauses after one conflicting submission'`: **1 passed**. The real handler holds the lock with zero claims, the next PUT returns409, and six untouched entries remain queued until explicit resume. Neither submitted file is replayed. The fixture initially waited on a browser request event that arrived after preflight; removed that event dependency and asserted the real409 explicitly.
+- Final screenshot cases rerun with prefix + `-t 'cancels file 11|keeps queued files'`: **2 passed**. Applicable mobile axe scan has zero violations; desktop/mobile screenshots were inspected. Resetting screenshot scroll after focus removed a capture-only floating skip-link artifact, without product CSS changes. These are targeted final reruns, not one final five-case suite run.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm exec tsc -p apps/web/tsconfig.tests.json --noEmit`, `scripts/dev.sh pnpm i18n:check`: passed;1237 EN/IT/pseudolocale keys.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed with the existing bundle-size advisory. Scoped Biome checked all13 changed code/test files; diff checks passed. No historical full-suite rerun.
+- `git diff --cached --check` and `python3 scripts/check-governance.py`: passed;627 text files,182 PNGs,533 relative links,4 TOML files and44 ignore cases. The credential scan remains heuristic.
+
+An initial backend invocation accidentally used the system Node20: two adapter
+cases failed because that unsupported runtime lacks `Promise.withResolvers`; its
+integration attempt was interrupted. The pinned-runtime runs above passed. The
+interrupted attempt may have left an unidentified disposable schema in the approved
+isolated test database: its random identity was not logged/persisted, so no guessed
+schema or broad cleanup was attempted. Completed fixture runs disposed their own
+schemas/staging. Initial failures are retained here rather than reported as passes.
+
+Read-only incident inspection matched the API failure to one dev ingestion claim.
+Ten successful signed-URL/upload pairs preceded it; no further matching provider
+upload request followed in the incident interval. The claim had no active advisory
+lock/query, and Wings temporary-directory metadata showed no multipart files.
+The Owner-requested repair used the existing recovery service with exact stored
+claim/provider identity, current Owner authorization and audit reason/evidence.
+Only that NickHosting dev claim was released; post-check showed zero pending
+claims and upload availability true. Neither the folder nor its ten completed
+files was deleted or changed. Private recovery evidence and logs remain ignored.
+API, Vite and web containers were running/healthy; no explicit container restart,
+provider mutation, production configuration change or new game-server asset occurred.
+
+Reviewed screenshots: [EN desktop queue](screenshots/m5/file-upload-cancel-49-paused-en-desktop.png)
+and [IT mobile recovery](screenshots/m5/file-upload-cancel-blocked-it-mobile.png).
+Independent final source/accessibility/content review found no remaining must-fix
+issue after the pause-latch correction. No dependency, migration or endpoint-schema
+change. Rollback is a code revert; the audited incident recovery does not require
+recreating a stale claim. Genuine post-dispatch uncertainty still needs verified
+Owner recovery. PR#21 remains OPEN/unmerged; SFTPGo#18 remains a release gate.

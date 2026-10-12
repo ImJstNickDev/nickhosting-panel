@@ -114,6 +114,15 @@ transport has closed.
 File, backup, console, metrics and DNS actions reuse M2 endpoints. Browser uploads
 send `Blob` through XHR with declared `X-NH-Upload-Length`, observable byte progress
 and cancellation; server admission/stream verification remains authoritative.
+Cancellation targets one queue entry. After a submitted failure/cancellation,
+fresh transfer/capability reads precede further uploads. A shared-state failure
+(`conflict`, `operation_uncertain`, `integration_unavailable`) pauses untouched
+entries even if those advisory reads report availability: an earlier request may
+still hold the preflight lock before inserting its claim. Check and resume retries
+admission, never the failed/uncertain file. Pending files remain only in the current
+browser tab. Adapter proof that the Wings POST was never invoked permits releasing
+that exact claim with `server.upload.not_dispatched`; any failure after invocation
+retains the durable claim and existing Owner recovery requirements.
 Downloads use a native same-origin link, without creating a whole-file browser
 JavaScript blob. The CodeMirror editor alone caps UTF-8 content at 1 MiB, including
 its provider read. Binary transfers have no such editor cap. Legacy text routes
