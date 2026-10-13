@@ -57,8 +57,8 @@ Screenshots: [grid](screenshots/m5/server-browser-grid-desktop-en.png),
 ## List status strip
 
 List rows replace the runtime badge with a 6 px rounded vertical strip, inset
-8 px from the right/top/bottom. Dark red means offline with Gateway wake disabled;
-lighter red means offline with configured Gateway wake enabled. Startup/shutdown,
+8 px from the right/top/bottom. Red means offline with Gateway wake disabled;
+blue means offline with configured Gateway wake enabled. Startup/shutdown,
 installation, active operations and game loading use amber; running uses green.
 Unknown telemetry remains neutral gray. A blocked wake policy alone does not
 claim work is progressing. Grid and Home badges remain unchanged.
@@ -74,7 +74,7 @@ Reduced-motion disables the transition. The existing tooltip includes the exact
 status; a screen-reader description preserves status independently of color.
 
 Validation: 31 platform-query integration tests and 6 server-browser tests passed,
-including both offline tones, starting/stopping, online/unknown, keyboard tooltip,
+including red/blue offline states, starting/stopping, online/unknown, keyboard tooltip,
 hover, reduced motion, grid/list separation and desktop/mobile resource bounds.
 Root/web TypeScript and targeted Biome passed; independent review completed.
 No infrastructure/configuration changes, restarts or provider test assets.

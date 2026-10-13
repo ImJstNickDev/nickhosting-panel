@@ -272,7 +272,7 @@
     --server-state-color: #8d2435;
   }
   .server-browser-results .server-card[data-list-state="sleeping"] {
-    --server-state-color: #d94b53;
+    --server-state-color: #327ac7;
   }
   .server-browser-results .server-card[data-list-state="pending"] {
     --server-state-color: #ad800e;
