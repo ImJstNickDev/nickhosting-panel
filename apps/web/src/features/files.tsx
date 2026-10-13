@@ -7,6 +7,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -74,6 +75,7 @@ import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import {
   availableViewers,
   preferredViewer,
+  selectableViewers,
   type ViewerId,
   type ViewerSource,
 } from './viewer-engine/core/registry.js';
@@ -84,6 +86,7 @@ import {
   viewerCapabilitiesQuery,
   viewerPreferencesQuery,
 } from './viewer-engine/preferences.js';
+import { readViewerBookmark, writeViewerBookmark } from './viewer-engine/session.js';
 import './viewer-engine/viewer.css';
 
 const FileViewer = lazy(() =>
@@ -282,6 +285,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const directoryKey = saveScope
     ? JSON.stringify(['file-directory', ...saveScope, serverId])
     : undefined;
+  const viewerKey = directoryKey ? `viewer:${directoryKey}` : undefined;
+  const reloadViewer = useMemo(() => readViewerBookmark(viewerKey), [viewerKey]);
+  const restoreAttempt = useRef<string | undefined>(undefined);
+  const [restoredViewerKey, setRestoredViewerKey] = useState<string>();
   const readDirectory = (key: string | undefined) => {
     try {
       const path = key ? sessionStorage.getItem(key) : null;
@@ -751,6 +758,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           new Set([...previous].filter((name) => files.data.some((entry) => entry.name === name))),
       );
   }, [files.data]);
+  function discardReloadViewer() {
+    restoreAttempt.current = viewerKey;
+    setRestoredViewerKey(viewerKey);
+  }
   function navigate(path: string, preserveName = false) {
     if (mutationRunning.current || transferFlow.active) return;
     const normalized = normalizeFilePath(path);
@@ -759,6 +770,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       return;
     }
     if (!confirmEditorExit()) return;
+    discardReloadViewer();
     focusDirectory.current = true;
     cancelRead();
     setSaving(false);
@@ -776,6 +788,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   function closeEditor() {
     if (mutationRunning.current) return;
     if (!confirmEditorExit()) return;
+    discardReloadViewer();
     cancelRead();
     setSaving(false);
     setInlineRename(false);
@@ -816,6 +829,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       transferFlow.begin({ source: directory, destination: folder, names }, value);
       return;
     }
+    discardReloadViewer();
     setMode(value);
     setReadError(undefined);
     setSaveError(undefined);
@@ -851,6 +865,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       return;
     }
     if (!confirmEditorExit()) return;
+    discardReloadViewer();
     const pending = getFileSave(saveScope, serverId, join(folder, entry.name));
     if (pending) {
       restoreSave(pending);
@@ -939,6 +954,70 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       if (sequence === readSequence.current) setReading(false);
     }
   }
+  const reopenViewer = useEffectEvent((entry: ServerFile, folder: string, choice?: ViewerId) =>
+    open(entry, folder, choice),
+  );
+  useEffect(() => {
+    if (!viewerKey || restoreAttempt.current === viewerKey) return;
+    // Explicit save recovery/navigation wins over a reload bookmark.
+    if (!reloadViewer || mode || location.state?.fileSaveId) {
+      restoreAttempt.current = viewerKey;
+      setRestoredViewerKey(viewerKey);
+      return;
+    }
+    const separator = reloadViewer.path.lastIndexOf('/');
+    const folder = separator < 0 ? '' : reloadViewer.path.slice(0, separator);
+    if (folder !== directory) {
+      restoreAttempt.current = viewerKey;
+      setRestoredViewerKey(viewerKey);
+      return;
+    }
+    if (!server.data || (!files.data && !files.error) || files.isPlaceholderData) return;
+    restoreAttempt.current = viewerKey;
+    const entry = files.data?.find(
+      (item) =>
+        item.is_file && !item.is_symlink && join(directory, item.name) === reloadViewer.path,
+    );
+    if (!entry) {
+      setRestoredViewerKey(viewerKey);
+      return;
+    }
+    const source = {
+      path: reloadViewer.path,
+      name: entry.name,
+      size: entry.size,
+      gameId: server.data.gameId,
+    };
+    const choice = selectableViewers(source).some((item) => item.id === reloadViewer.viewerId)
+      ? reloadViewer.viewerId
+      : undefined;
+    void reopenViewer(entry, directory, choice).finally(() => {
+      if (mounted.current) setRestoredViewerKey(viewerKey);
+    });
+  }, [
+    viewerKey,
+    reloadViewer,
+    directory,
+    files.data,
+    files.error,
+    files.isPlaceholderData,
+    server.data,
+    mode,
+    location.state?.fileSaveId,
+  ]);
+  useEffect(() => {
+    if (restoredViewerKey !== viewerKey) return;
+    writeViewerBookmark(
+      viewerKey,
+      viewing && viewed
+        ? { path: viewed.source.path, viewerId: viewed.viewerId ?? 'text' }
+        : mode === 'edit' && activeFile
+          ? { path: join(directory, activeFile), viewerId: 'text' }
+          : undefined,
+    );
+  }, [viewerKey, restoredViewerKey, viewing, viewed, mode, directory, activeFile]);
+  useEffect(() => () => writeViewerBookmark(viewerKey), [viewerKey]);
+
   async function mutation(body: unknown, endpoint = '/files', method = 'POST') {
     if (mutationRunning.current) return;
     mutationRunning.current = true;
@@ -2196,11 +2275,16 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       {viewing && viewed ? (
         <Suspense fallback={<FileEditorSkeleton />}>
           <FileViewer
-            key={`${viewerIdentity}:${viewed.source.path}:${viewed.viewerId}`}
+            key={`${viewerIdentity}:${viewed.source.path}`}
             source={viewed.source}
             viewerId={viewed.viewerId}
             serverId={serverId}
             identity={viewerIdentity}
+            onViewerChange={(viewerId) =>
+              setViewed((current) =>
+                current && current.viewerId !== viewerId ? { ...current, viewerId } : current,
+              )
+            }
             actionTargets={{ beforeHome: viewerBeforeHome, afterHome: viewerAfterHome }}
             onText={() => void open(viewed.entry, directory, 'text')}
             onExtract={

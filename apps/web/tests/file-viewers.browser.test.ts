@@ -420,6 +420,8 @@ describe('M5 builtin file viewers', () => {
   });
   async function open(name: string) {
     await page.goto(base);
+    // Opening a different fixture is explicit navigation, not a refresh restore.
+    await root();
     await page
       .locator('.fm-filename')
       .filter({ hasText: name })
@@ -504,6 +506,81 @@ describe('M5 builtin file viewers', () => {
     await browserExpect.poll(async () => (await frameGeometry()).scale).toBeGreaterThan(1);
     await page.getByRole('button', { name: 'Actual size', exact: true }).click();
     expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    expect(errors).toEqual([]);
+  });
+
+  it('restores the open viewer on refresh but clears it when leaving Files', async () => {
+    preferences.length = 0;
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await open('viewer.svg');
+    await browserExpect(page.locator('.ve-svg-surface')).toBeVisible();
+    await page.reload();
+    await browserExpect(page.locator('.ve-svg-surface')).toBeVisible();
+    await browserExpect(page.locator('.fm-breadcrumb')).toContainText('viewer.svg');
+
+    // A one-time non-text choice is stored independently of personal extension defaults.
+    await root();
+    await page.locator('.fm-filename').getByText('forced.dat', { exact: true }).click();
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    const chooser = page.getByRole('dialog');
+    await chooser.getByRole('button', { name: 'Show all', exact: true }).click();
+    await chooser.getByRole('button', { name: 'JSON Tree', exact: true }).click();
+    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    expect(preferences).toEqual([]);
+    await page.reload();
+    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await browserExpect(page.locator('.fm-breadcrumb')).toContainText('forced.dat');
+    expect(preferences).toEqual([]);
+
+    await root();
+    await page.locator('.fm-filename').getByText('viewer.json', { exact: true }).click();
+    await browserExpect(page.locator('.ve-json')).toBeVisible();
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Scribe', exact: true }).click();
+    await browserExpect(page.locator('.cm-content')).toContainText('9007199254740993123456789');
+    expect(preferences).toEqual([]);
+    await page.reload();
+    await browserExpect(page.locator('.cm-content')).toContainText('9007199254740993123456789');
+    await browserExpect(page.locator('.ve-json')).toHaveCount(0);
+    expect(preferences).toEqual([]);
+
+    await root();
+    await page.locator('.fm-filename').getByText('readable.txt', { exact: true }).click();
+    const editor = page.locator('.cm-content');
+    await browserExpect(editor).toContainText('Text editing remains available.');
+    await editor.fill('Saved refresh fixture');
+    await editor.press('Control+s');
+    await browserExpect
+      .poll(() => remote.get('readable.txt')?.toString())
+      .toBe('Saved refresh fixture');
+    await browserExpect(
+      page.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toBeDisabled();
+    await page.reload();
+    await browserExpect(editor).toHaveText('Saved refresh fixture');
+    await editor.fill('Unsaved refresh draft must not persist');
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.reload();
+    await browserExpect(editor).toHaveText('Saved refresh fixture');
+    expect(await page.evaluate(() => JSON.stringify({ ...sessionStorage }))).not.toContain(
+      'Unsaved refresh draft',
+    );
+
+    const tabs = page.locator('.tabs');
+    await tabs.getByRole('link', { name: 'Console', exact: true }).click();
+    await browserExpect(page).toHaveURL(base.replace(/\/files$/, '/console'));
+    await tabs.getByRole('link', { name: 'Files', exact: true }).click();
+    await browserExpect(
+      page.locator('.fm-filename').getByText('readable.txt', { exact: true }),
+    ).toBeVisible();
+    await browserExpect(page.locator('.cm-content')).toHaveCount(0);
+    await browserExpect(page.locator('.ve-svg-surface')).toHaveCount(0);
+    await page.reload();
+    await browserExpect(
+      page.locator('.fm-filename').getByText('readable.txt', { exact: true }),
+    ).toBeVisible();
+    await browserExpect(page.locator('.cm-content')).toHaveCount(0);
+    remote.set('readable.txt', Buffer.from('Text editing remains available.'));
     expect(errors).toEqual([]);
   });
 

@@ -834,6 +834,15 @@ only the open directory. Leaving Files still resets the folder to root; reloadin
 within Files restores that folder and its bounded, tab-local snapshot. Unchanged
 rows retain their identity while additions, removals and metadata changes reconcile.
 
+Refreshing an open file restores its viewer, including a one-time Open with choice,
+or reopens the text editor against the saved server content. The tab-local bookmark
+contains only a file path and compiled viewer ID, scoped to the current identity
+and server. It reuses the folder listing and normal authorized file reads; it does
+not store file contents, signed URLs or unsaved drafts. Home/breadcrumb navigation
+clears the open-file bookmark, and leaving Files clears it with the folder state.
+Archive containers reopen at their root; internal archive navigation, playback
+position and zoom are not restored.
+
 Visible folder rows seed optional Blueprint directory batches. Work is limited
 to three levels below the open folder, 96 candidate directories per navigation,
 and one batch of at most 48 paths in flight. Visibility and per-depth budgets

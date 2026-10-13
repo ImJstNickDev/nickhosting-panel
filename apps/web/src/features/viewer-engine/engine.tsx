@@ -29,11 +29,13 @@ export function FileViewer({
   identity,
   onText,
   onExtract,
+  onViewerChange,
   actionTargets,
 }: Omit<ViewerProps, 'onOpen'> & {
   viewerId?: ViewerId;
   onText: () => void;
   onExtract?: () => void;
+  onViewerChange?: (viewerId: ViewerId) => void;
   actionTargets: { beforeHome: HTMLElement | null; afterHome: HTMLElement | null };
 }) {
   const t = useT();
@@ -54,6 +56,7 @@ export function FileViewer({
       return;
     }
     setViewer(id);
+    if (!source.entry) onViewerChange?.(id);
   }
   const props: ViewerProps = {
     source,

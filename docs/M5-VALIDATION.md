@@ -7832,3 +7832,30 @@ the Owner's Firefox/audio device. Layout and copy are unchanged; existing Wave
 screenshots remain representative. No production/provider interactions, persistent
 test assets, dependencies or container restarts; development uses Vite HMR.
 Rollback is a revert of this UI/test change. PR #21 remains open and unmerged.
+
+### Open viewer restoration after refresh (2026-10-13)
+
+Files previously remembered only the directory, losing its open viewer at Ctrl+R.
+A bounded, tab-local bookmark now retains the file path and selected compiled
+viewer ID, scoped to the existing user/support identity and server. Restoration
+reuses the current folder listing and normal open/read flow; missing files return
+to the listing. Explicit navigation and save recovery take precedence. Leaving
+Files clears the bookmark; returning to the tab still starts at root.
+
+No contents, drafts, credentials or signed URLs are persisted. Text refresh reads
+the saved file; accepting a reload with an unsaved draft still discards that draft.
+Archive containers reopen at their root, without restoring inner paths, playback
+position or zoom. No visual layout/copy changes or new network endpoints.
+
+Validation commands:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'restores the open viewer' --silent=false`: final Chromium 1/1 pass (26.60 s). Image, one-time JSON-to-text selection, forced non-text JSON Tree selection, saved text, unsaved-draft exclusion, tab exit and subsequent reload covered. The earlier narrower version passed 1/1 in 28.59 s before adding non-text selection coverage.
+- Same command with `apps/web/tests/file-upload-refresh.browser.test.ts -t 'restores the current nested folder|returns to root after leaving Files'`: 2/2 pass (15.49 s), preserving directory reload, root return, browser Back and cancelled unsaved navigation.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: pass.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: pass; existing app/editor chunk-size warnings remain.
+- Scoped Biome, diff whitespace and indexed governance checks: pass.
+
+Independent review found no must-fix; its suggested non-text viewer callback
+coverage was added and passed. Isolated browser fixtures only; no real provider
+mutation, persistent test assets, dependency changes or container restarts. Vite
+HMR applies the change. Rollback: revert this UI/session change. PR #21 stays open.
