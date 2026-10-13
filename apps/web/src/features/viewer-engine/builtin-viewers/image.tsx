@@ -61,6 +61,7 @@ export default function ImageViewer({ serverId, source }: ViewerProps) {
       key={image.url}
       image={image}
       name={source.name}
+      vector={source.name.toLowerCase().endsWith('.svg')}
       framePicker={
         resource.value.length > 1 && (
           <label>
@@ -89,14 +90,17 @@ export default function ImageViewer({ serverId, source }: ViewerProps) {
 function FrameViewport({
   image,
   name,
+  vector,
   framePicker,
 }: {
   image: ImageFrame;
   name: string;
+  vector: boolean;
   framePicker: ReactNode;
 }) {
   const t = useT();
   const format = useFormat();
+  const maximum = vector ? imageZoom.svgMax : imageZoom.max;
   const root = useRef<HTMLDivElement>(null);
   const stage = useRef<HTMLElement>(null);
   const dimensions = useRef<ImageSize | undefined>(undefined);
@@ -123,13 +127,16 @@ function FrameViewport({
     const viewport = stage.current;
     const size = dimensions.current;
     if (!viewport || !size || !viewport.clientWidth || !viewport.clientHeight) return;
-    update(() => fitImage(size, { width: viewport.clientWidth, height: viewport.clientHeight }));
-  }, [update]);
+    update(() =>
+      fitImage(size, { width: viewport.clientWidth, height: viewport.clientHeight }, maximum),
+    );
+  }, [maximum, update]);
   const zoom = useCallback(
     (factor: number, anchor?: { x: number; y: number }) => {
-      if (dimensions.current) update((value) => zoomImage(value, value.scale * factor, anchor));
+      if (dimensions.current)
+        update((value) => zoomImage(value, value.scale * factor, anchor, maximum));
     },
-    [update],
+    [maximum, update],
   );
   // Native listeners permit cancelling browser/page zoom only over this viewport.
   // Refs carry the latest transform across batched wheel events without stale deltas.
@@ -309,7 +316,8 @@ function FrameViewport({
                     return;
                   }
                   // Confirming the displayed rounded value must not lose internal precision.
-                  if (scale !== displayedPercent / 100) update((value) => zoomImage(value, scale));
+                  if (scale !== displayedPercent / 100)
+                    update((value) => zoomImage(value, scale, undefined, maximum));
                   finishPercent();
                 } else if (event.key === 'Escape') {
                   event.preventDefault();
@@ -329,7 +337,7 @@ function FrameViewport({
           type="button"
           className="fm-tool"
           aria-label={t('viewer.zoomIn')}
-          disabled={!natural || view.scale >= imageZoom.max}
+          disabled={!natural || view.scale >= maximum}
           onClick={() => zoom(1.25)}
         >
           +
@@ -382,10 +390,11 @@ function FrameViewport({
           alt={name}
           draggable={false}
           style={{
-            width: natural?.width,
-            height: natural?.height,
+            // Size vectors at their displayed resolution; CSS scaling can enlarge a rasterized layer.
+            width: natural ? natural.width * (vector ? view.scale : 1) : undefined,
+            height: natural ? natural.height * (vector ? view.scale : 1) : undefined,
             visibility: natural ? 'visible' : 'hidden',
-            transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+            transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px)${vector ? '' : ` scale(${view.scale})`}`,
           }}
           onLoad={(event) => {
             const element = event.currentTarget;

@@ -668,7 +668,11 @@ Optional viewer metadata failures do not prevent independent text editing.
 Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard and
 gestures; its percentage is displayed as a rounded integer while calculations
 retain full precision. Confirming an unchanged rounded draft preserves the scale.
-Zoom is bounded to 1–5000%, including Fit, typed values and gestures. Fit enlarges
+Zoom is bounded to 1–5000% for raster images/ICO and 1–25000% for SVG, including
+Fit, typed values and gestures. SVG uses displayed CSS dimensions with translation
+only, so the browser paints vectors at the zoomed resolution rather than enlarging
+a composited bitmap. It remains an inert image, never inline SVG or an embedded
+document; scripts and external resources remain disabled. Fit enlarges
 small images and ICO frames or shrinks large ones to the viewport, using the full
 canvas including transparent padding. Actual size always restores 100%. Fit follows
 viewport resizing; manual zoom preserves scale and reclamps position. An image

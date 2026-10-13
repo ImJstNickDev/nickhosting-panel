@@ -7392,3 +7392,48 @@ Reviewed [transparent PNG fixture](screenshots/m5/file-viewer-frame-transparent-
 Only sanitized fixtures are published; private helpers/credentials remain ignored.
 Concurrent Owner changes and issue18 are preserved.
 Independent final code/test/screenshot review found no must-fix issues.
+
+## 2026-10-13 — Frame SVG rendering and 25000% zoom
+
+SVG now supports 1–25000%; raster images and ICO retain 1–5000%. SVG zoom changes
+the image's displayed CSS dimensions, with translation only, instead of enlarging
+it with CSS scale. Native image rendering retains the vector source and avoids
+depending on compositor scaling of an existing rasterized layer. The same image
+URL and inert `<img>` boundary remain; no inline SVG, object/iframe, new parser,
+server conversion or zoom-sized canvas. See the browser's documented
+[SVG image restrictions](https://developer.mozilla.org/en-US/docs/Web/SVG/Guides/SVG_as_an_image).
+
+Validation on final source:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/image-viewport.test.ts`:
+  6/6 passed, including distinct raster/vector limits, Fit and typed zoom bounds.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts
+  -t 'renders SVG'`: 1/1 passed, 15 skipped, 20.99s. Four SVG fixtures cover
+  explicit dimensions plus viewBox, dimensions without viewBox, viewBox only,
+  and a 1000×480 image. At 25000%, translation matrix scale remains 1 and CSS
+  dimensions reflect 250× magnification. Screenshot pixels show narrow vector
+  antialiasing (at most four intermediate pixels across a diagonal), not enlarged
+  source pixels. Embedded script and external image requests remain blocked.
+- The same browser command with `-t 'opens SVG|small transparent|Frame'`:
+  5/5 passed, 11 skipped, 21.37s. Fit/Actual, raster maximum, SVG maximum, ICO,
+  keyboard, pointer, pinch, bounds, resize and mobile accessibility regressions.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, targeted Biome on
+  the four changed TS/TSX files, and `git diff --check`: passed.
+- Owner-authorized read-only real dataset check found a 1000×480 SVG containing
+  vector shapes and no embedded raster images. Actual dev UI in Chromium
+  confirmed 25000% (250000×120000 CSS dimensions, translation only), Fit and
+  Actual size. No real file or server mutation.
+
+Reviewed the sanitized [25000% vector fixture](screenshots/m5/file-viewer-frame-svg-25000-en.png).
+A small standalone Chromium comparison did not reproduce the previously reported
+blur under CSS scale; the new path explicitly removes that dependency. Firefox
+and Safari rendering have not been certified by these checks. Embedded raster
+content inside other SVG files cannot gain vector detail through zoom.
+Only existing approved isolated test services were used; no new container,
+restart, network, Blueprint or API change. Private live screenshots and helpers
+remain ignored. Historical suites were not rerun; concurrent Owner work and
+issue18 are unchanged.
+Independent final code/security/geometry/screenshot review found no must-fix
+issues. Index governance passed: 739 text files, 225 PNGs, 623 relative links,
+4 TOML files and 44 ignore cases (heuristic secret scan).

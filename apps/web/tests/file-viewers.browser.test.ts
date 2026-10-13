@@ -106,6 +106,19 @@ describe('M5 builtin file viewers', () => {
       start += frame.length;
     });
     remote.set('viewer.ico', Buffer.concat([ico, ...frames]));
+    for (const [name, attributes, width, height] of [
+      ['sharp.svg', 'width="32" height="32" viewBox="0 0 32 32"', 32, 32],
+      ['sharp-no-viewbox.svg', 'width="32" height="32"', 32, 32],
+      ['sharp-viewbox-only.svg', 'viewBox="0 0 32 32"', 32, 32],
+      ['sharp-large.svg', 'width="1000" height="480" viewBox="0 0 1000 480"', 1000, 480],
+    ] as const) {
+      remote.set(
+        name,
+        Buffer.from(
+          `<svg xmlns="http://www.w3.org/2000/svg" ${attributes}><rect width="${width}" height="${height}" fill="white"/><path d="M0 0H${width}L0 ${height}Z" fill="black"/><script>window.viewerScriptRan=true;fetch("/viewer-script-must-not-run")</script><image href="/viewer-script-must-not-run" width="1" height="1"/></svg>`,
+        ),
+      );
+    }
     const transparentPng = await page.evaluate(() => {
       const canvas = document.createElement('canvas');
       canvas.width = canvas.height = 256;
@@ -327,6 +340,73 @@ describe('M5 builtin file viewers', () => {
     await page.getByRole('button', { name: 'Fit', exact: true }).click();
     expect((await frameGeometry()).scale).toBeCloseTo(fitted.scale, 5);
     await harness.screenshot(page, 'file-viewer-frame-transparent-fit-en');
+    await page.locator('.ve-zoom-value').click();
+    await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('99999');
+    await page.keyboard.press('Enter');
+    expect((await frameGeometry()).scale).toBe(50);
+    await browserExpect(page.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled();
+    expect(errors).toEqual([]);
+  });
+
+  it('renders SVG vectors sharply at twenty-five thousand percent without enabling embedded content', async () => {
+    for (const name of [
+      'sharp.svg',
+      'sharp-no-viewbox.svg',
+      'sharp-viewbox-only.svg',
+      'sharp-large.svg',
+    ]) {
+      await open(name);
+      await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+      await page.locator('.ve-zoom-value').click();
+      await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('25000');
+      await page.keyboard.press('Enter');
+      expect((await frameGeometry()).scale).toBeCloseTo(250, 4);
+      const rendering = await page.locator('.ve-image-stage img').evaluate((element) => {
+        const image = element as HTMLImageElement;
+        const style = getComputedStyle(image);
+        const transform = new DOMMatrixReadOnly(style.transform);
+        return {
+          x: transform.a,
+          y: transform.d,
+          width: Number.parseFloat(style.width),
+          naturalWidth: image.naturalWidth,
+        };
+      });
+      expect(rendering.x).toBe(1);
+      expect(rendering.y).toBe(1);
+      expect(rendering.width / rendering.naturalWidth).toBeCloseTo(250, 4);
+      const screenshot = await page.locator('.ve-image-stage').screenshot();
+      const pixels = await page.evaluate(async (base64) => {
+        const blob = await (await fetch(`data:image/png;base64,${base64}`)).blob();
+        const image = await createImageBitmap(blob);
+        // Decode only the viewport screenshot, never a zoom-sized canvas.
+        const canvas = document.createElement('canvas');
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('canvas');
+        context.drawImage(image, 0, 0);
+        const row = context.getImageData(0, Math.floor(canvas.height / 2), canvas.width, 1).data;
+        let gray = 0,
+          black = 0,
+          white = 0;
+        for (let index = 0; index < row.length; index += 4) {
+          const red = row[index] ?? 0;
+          if (red <= 8) black++;
+          else if (red >= 247) white++;
+          else gray++;
+        }
+        image.close();
+        return { gray, black, white, width: canvas.width };
+      }, screenshot.toString('base64'));
+      // A vector diagonal has only a narrow antialiased edge, not enlarged source pixels.
+      expect(pixels.gray, name).toBeLessThanOrEqual(4);
+      expect(pixels.black, name).toBeGreaterThan(pixels.width / 4);
+      expect(pixels.white, name).toBeGreaterThan(pixels.width / 4);
+      expect(await page.evaluate(() => 'viewerScriptRan' in window)).toBe(false);
+      expect(scriptRequests).toBe(0);
+      if (name === 'sharp.svg') await harness.screenshot(page, 'file-viewer-frame-svg-25000-en');
+    }
     expect(errors).toEqual([]);
   });
 
@@ -419,7 +499,7 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
-  it('keeps Frame within image edges and zoom between one and five thousand percent', async () => {
+  it('keeps Frame within image edges and SVG zoom between one and twenty-five thousand percent', async () => {
     await open('frame-large.svg');
     const stage = page.locator('.ve-image-stage');
     await page.getByRole('button', { name: 'Actual size', exact: true }).click();
@@ -478,7 +558,7 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(page.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled();
     await stage.focus();
     await page.keyboard.press('Control+Equal');
-    expect((await frameGeometry()).scale).toBe(50);
+    expect((await frameGeometry()).scale).toBe(250);
     const corners = await page.locator('.ve-body').evaluate((element) => {
       const style = getComputedStyle(element);
       return [

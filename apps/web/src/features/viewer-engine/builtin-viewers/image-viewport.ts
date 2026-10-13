@@ -9,14 +9,18 @@ export interface ImageTransform {
   fit: boolean;
 }
 
-export const imageZoom = { min: 0.01, max: 50 } as const;
+export const imageZoom = { min: 0.01, max: 50, svgMax: 250 } as const;
 export const initialImageTransform: ImageTransform = { scale: 1, x: 0, y: 0, fit: true };
 
-export function fitImage(image: ImageSize, viewport: ImageSize): ImageTransform {
+export function fitImage(
+  image: ImageSize,
+  viewport: ImageSize,
+  maximum: number = imageZoom.max,
+): ImageTransform {
   return {
     scale: Math.max(
       imageZoom.min,
-      Math.min(imageZoom.max, viewport.width / image.width, viewport.height / image.height),
+      Math.min(maximum, viewport.width / image.width, viewport.height / image.height),
     ),
     x: 0,
     y: 0,
@@ -44,8 +48,9 @@ export function zoomImage(
   view: ImageTransform,
   requested: number,
   anchor = { x: 0, y: 0 },
+  maximum: number = imageZoom.max,
 ): ImageTransform {
-  const scale = Math.max(imageZoom.min, Math.min(imageZoom.max, requested));
+  const scale = Math.max(imageZoom.min, Math.min(maximum, requested));
   const ratio = scale / view.scale;
   return {
     scale,
