@@ -8014,3 +8014,23 @@ Sources: [supported formats](https://mediabunny.dev/guide/supported-formats-and-
 [CanvasSink](https://mediabunny.dev/api/CanvasSink),
 [reading and disposal](https://mediabunny.dev/guide/reading-media-files).
 The Owner will review before Motion development begins.
+
+### Wave restart after manual endpoint seek (2026-10-13)
+
+Owner reported first-Play immediate pause at a manually selected endpoint, and
+looped playback with the visual position stuck at the end. Play previously relied
+entirely on the browser's own EOF rewind. It now explicitly rewinds through the
+existing timeline seek path when native ended or currentTime reaches the effective
+(decoded, where available) endpoint. This cancels visual skip animation and resets
+native and predictive clocks before play(), including Repeat. No artificial wait
+or widening of normal mid-file seek behavior was added. The exact Owner-browser
+native event ordering was not captured; this fix handles the endpoint explicitly.
+
+Targeted browser regressions **2 passed, 28 skipped** (19.00 s): actual WAV paused
+at its endpoint with Repeat off/on must restart native audio, slider and waveform
+on the first Play; the controlled decoded18/native20 duration case also restarts
+at the effective endpoint. Command:
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'restarts Wave audio|aligns Wave playback' --silent=false`.
+Independent read-only review found no blockers. This adds no provider operations,
+API changes, dependencies or infrastructure restart. Revert the frontend change
+for rollback. Motion remains investigation only.

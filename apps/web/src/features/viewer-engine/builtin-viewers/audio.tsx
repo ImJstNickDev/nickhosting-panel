@@ -97,6 +97,11 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
     }
     if (failed || !state.ready) return;
     try {
+      // Seeking to the endpoint does not always set native `ended` until Play.
+      // ADTS can also report an estimated native duration beyond our decoded end.
+      // Rewind both clocks explicitly, rather than consuming the first Play at EOF.
+      if (audio.ended || (duration > 0 && audio.currentTime >= duration - 0.001))
+        timeline.current?.skipTo(0, false);
       const playing = audio.play();
       // paused changes synchronously; do not wait for the queued play event.
       sync();

@@ -1668,6 +1668,15 @@ describe('M5 builtin file viewers', () => {
       await browserExpect
         .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
         .toBe(18);
+      // The decoded endpoint is already the end even while native metadata estimates 20s.
+      await player.getByRole('button', { name: 'Play', exact: true }).click();
+      await page.waitForTimeout(350);
+      expect(await audio.evaluate((element: HTMLAudioElement) => element.paused)).toBe(false);
+      expect(await audio.evaluate((element: HTMLAudioElement) => element.currentTime)).toBeLessThan(
+        2,
+      );
+      expect(Number(await position.inputValue())).toBeLessThan(2);
+      await player.getByRole('button', { name: 'Pause', exact: true }).click();
       await audio.evaluate((element: HTMLAudioElement) => {
         element.currentTime = 20;
         element.dispatchEvent(new Event('ended'));
@@ -1694,6 +1703,39 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(
       page.getByRole('slider', { name: 'Playback position', exact: true }),
     ).toHaveAttribute('max', '1');
+    expect(errors).toEqual([]);
+  });
+
+  it('restarts Wave audio and visuals on the first Play after seeking to the end', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await open('wave-long.wav');
+    const player = page.locator('.ve-audio-player');
+    const audio = player.locator('audio');
+    const position = player.getByRole('slider', { name: 'Playback position', exact: true });
+    await browserExpect(position).toHaveAttribute('max', '60');
+    for (const repeat of [false, true]) {
+      await position.focus();
+      await page.keyboard.press('End');
+      await browserExpect
+        .poll(() => audio.evaluate((media: HTMLAudioElement) => media.currentTime))
+        .toBe(60);
+      if (repeat) await player.getByRole('button', { name: 'Repeat', exact: true }).click();
+      await player.getByRole('button', { name: 'Play', exact: true }).click();
+      await page.waitForTimeout(350);
+      const progress = await player.evaluate((element) => ({
+        paused: element.querySelector('audio')?.paused,
+        native: element.querySelector('audio')?.currentTime ?? -1,
+        visual: Number(element.querySelector<HTMLInputElement>('.wave-seek-input')?.value),
+        clip: Number(element.querySelector('.wave-envelope clipPath rect')?.getAttribute('width')),
+      }));
+      expect(progress.paused).toBe(false);
+      expect(progress.native).toBeGreaterThan(0);
+      expect(progress.native).toBeLessThan(2);
+      expect(progress.visual).toBeGreaterThan(0);
+      expect(progress.visual).toBeLessThan(2);
+      expect(progress.clip).toBeLessThan(40);
+      await player.getByRole('button', { name: 'Pause', exact: true }).click();
+    }
     expect(errors).toEqual([]);
   });
 

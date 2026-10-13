@@ -870,7 +870,8 @@ bounded to 100 ms of wall time at the playback rate; small clock differences are
 corrected gradually rather than snapping on each quantized reading. Pausing,
 waiting, seeking, errors and ending snap to native time; playing resumes the
 clock, and rate/loop/background changes re-anchor it. Native playback remains
-authoritative. Only the timeline subtree updates on those frames; playback
+authoritative. Play at the effective endpoint explicitly rewinds both audio and
+visual clocks first, including after manual end seeks and with Repeat enabled. Only the timeline subtree updates on those frames; playback
 controls and their formatters do not. Play synchronizes the native paused state
 immediately after calling play(), without waiting for its queued event.
 Wave shortcuts use Left/Right for five seconds and Shift+Left/Right for ten.
@@ -882,7 +883,7 @@ menus/dialogs retain their keys. Repeated Space does not retrigger playback.
 Ten-second skip buttons seek the audio immediately while the playhead and played
 waveform travel together for 280 ms with cubic ease-in-out. Repeated skips retarget
 from the currently displayed position; the endpoint follows ongoing playback.
-Dragging/keyboard seeking remain direct and cancel this transition. Reduced
+Dragging/direct slider seeking remain direct and cancel this transition. Reduced
 motion disables the skip animation. Dragging previews the seek position and
 commits on release. Playback uses the
 existing authenticated, same-origin Range stream; leaving the viewer releases it.
