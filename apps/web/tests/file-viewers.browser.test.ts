@@ -16,6 +16,7 @@ describe('M5 builtin file viewers', () => {
   let remote: Map<string, Buffer>;
   const preferences: { scope: string; extension: string; viewerId: string }[] = [];
   const reads: string[] = [];
+  const waveformReads: string[] = [];
   const errors: string[] = [];
   let scriptRequests = 0;
   let viewerAvailable = true;
@@ -24,6 +25,8 @@ describe('M5 builtin file viewers', () => {
   let viewerMetadataFailure: 'capabilities' | 'preferences' | undefined;
   let rejectPreference = false;
   let holdPreference: Promise<void> | undefined;
+  let holdWaveRequest: Promise<void> | undefined;
+  let rejectWave = false;
 
   beforeAll(async () => {
     harness = await browserHarness({
@@ -80,6 +83,21 @@ describe('M5 builtin file viewers', () => {
     wav.write('data', 36);
     wav.writeUInt32LE(wav.length - 44, 40);
     remote.set('viewer.wav', wav);
+    const longWav = Buffer.alloc(44 + 60 * 8000 * 2);
+    wav.copy(longWav, 0, 0, 44);
+    longWav.writeUInt32LE(longWav.length - 8, 4);
+    longWav.writeUInt32LE(longWav.length - 44, 40);
+    for (let index = 0; index < 60 * 8000; index++) {
+      const section = Math.floor(index / 8000) % 6;
+      const amplitude = [0.1, 0.5, 0.8, 0.25, 0, 0.05][section] ?? 0;
+      longWav.writeInt16LE(
+        Math.round(32767 * amplitude * Math.sin((2 * Math.PI * 440 * index) / 8000)),
+        44 + index * 2,
+      );
+    }
+    remote.set('wave-long.wav', longWav);
+    remote.set('wave-loading.wav', longWav);
+    remote.set('wave-error.wav', longWav);
     const pngs = await page.evaluate(() =>
       [16, 32, 128, 256].map((size) => {
         const canvas = document.createElement('canvas');
@@ -209,6 +227,14 @@ describe('M5 builtin file viewers', () => {
         return;
       }
       reads.push(`${action}:${path}:${url.searchParams.get('entry') ?? ''}`);
+      if (path.startsWith('wave-') && path.endsWith('.wav')) {
+        if (action === '/content' && request.resourceType() === 'fetch') waveformReads.push(path);
+        if (holdWaveRequest) await holdWaveRequest;
+        if (rejectWave) {
+          await route.fulfill({ status: 503, body: 'Isolated media fixture unavailable' });
+          return;
+        }
+      }
       if (action === '/archive') {
         const directory = url.searchParams.get('directory') ?? '';
         const entries = directory
@@ -266,6 +292,23 @@ describe('M5 builtin file viewers', () => {
             : path.endsWith('.avi')
               ? 'video/x-msvideo'
               : 'application/octet-stream';
+      const range = request.headers().range?.match(/^bytes=(\d+)-(\d*)$/);
+      if (path.endsWith('.wav') && range) {
+        const start = Number(range[1]);
+        const end = Math.min(range[2] ? Number(range[2]) : body.length - 1, body.length - 1);
+        await route.fulfill({
+          status: 206,
+          body: body.subarray(start, end + 1),
+          contentType,
+          headers: {
+            'Accept-Ranges': 'bytes',
+            'Content-Range': `bytes ${start}-${end}/${body.length}`,
+            'Content-Length': String(end - start + 1),
+            'Cache-Control': 'no-store',
+          },
+        });
+        return;
+      }
       await route.fulfill({
         body,
         contentType,
@@ -378,7 +421,12 @@ describe('M5 builtin file viewers', () => {
     await picker.click();
     await harness.screenshot(page, 'file-viewer-ico-picker-en');
     expect(
-      (await new AxeBuilder({ page }).include('.ve-image-viewer').analyze()).violations,
+      (
+        await new AxeBuilder({ page })
+          .include('.ve-image-viewer')
+          .include('.ve-select-options')
+          .analyze()
+      ).violations,
     ).toEqual([]);
     // Sample every paint opportunity, not just the settled transform after the load event.
     await page.evaluate(() => {
@@ -441,7 +489,12 @@ describe('M5 builtin file viewers', () => {
     expect(bounds).not.toBeNull();
     expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390).toBe(true);
     expect(
-      (await new AxeBuilder({ page }).include('.ve-image-viewer').analyze()).violations,
+      (
+        await new AxeBuilder({ page })
+          .include('.ve-image-viewer')
+          .include('.ve-select-options')
+          .analyze()
+      ).violations,
     ).toEqual([]);
     await page.getByRole('option', { name: '16 × 16 32 bit', exact: true }).click();
     await browserExpect(picker).toContainText('16 × 16');
@@ -1140,7 +1193,7 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
-  it('displays typed SQLite values read-only, native audio and truthful unsupported video', async () => {
+  it('displays typed SQLite values read-only, browser-decoded audio and truthful unsupported video', async () => {
     await open('viewer.sqlite');
     await page.getByLabel('Tables', { exact: true }).selectOption('players');
     await browserExpect(page.locator('.ve-table-scroll')).toContainText('9007199254740993123');
@@ -1157,6 +1210,402 @@ describe('M5 builtin file viewers', () => {
         'The browser cannot play this file, or the file is unavailable. Download it to open it locally.',
       ),
     ).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  it('runs Wave controls through real browser audio playback and releases the stream on exit', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await open('wave-long.wav');
+    const player = page.locator('.ve-audio-player');
+    const audio = player.locator('audio');
+    const position = player.getByRole('slider', { name: 'Playback position', exact: true });
+    await browserExpect(player).toBeVisible();
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.duration))
+      .toBe(60);
+    expect(
+      await audio.evaluate((element: HTMLAudioElement) => ({
+        controls: element.controls,
+        autoplay: element.autoplay,
+        paused: element.paused,
+        preload: element.preload,
+        source: element.currentSrc,
+      })),
+    ).toEqual({
+      controls: false,
+      autoplay: false,
+      paused: true,
+      preload: 'metadata',
+      source: expect.stringContaining(`${endpoint}/content?`),
+    });
+    const envelope = player.locator('.wave-envelope');
+    await browserExpect(envelope).toHaveAttribute('data-waveform-state', 'ready');
+    const heights = await envelope
+      .locator('.wave-envelope-unplayed .wave-envelope-bar')
+      .evaluateAll((bars) => bars.map((bar) => Number(bar.getAttribute('data-height'))));
+    expect(heights.length).toBeGreaterThan(10);
+    expect(new Set(heights.map((value) => Math.round(value))).size).toBeGreaterThan(3);
+    expect(Math.max(...heights) - Math.min(...heights)).toBeGreaterThan(20);
+    const analysisReads = waveformReads.length;
+    expect(analysisReads).toBeGreaterThan(0);
+    // Metadata refinement is simulated; the actual waveform above comes from the browser-decoded WAV.
+    await audio.evaluate((element) => {
+      Object.defineProperty(element, 'duration', { configurable: true, value: 59.9 });
+      element.dispatchEvent(new Event('durationchange'));
+    });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await audio.evaluate((element) => {
+      Reflect.deleteProperty(element, 'duration');
+      element.dispatchEvent(new Event('durationchange'));
+    });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await browserExpect(envelope).toHaveAttribute('data-waveform-state', 'ready');
+    expect(waveformReads.length).toBe(analysisReads);
+    const panelBounds = await player.boundingBox();
+    const transportBounds = await player.locator('.wave-transport').boundingBox();
+    if (!panelBounds || !transportBounds) throw new Error('Missing Wave transport');
+    expect(
+      Math.abs(
+        panelBounds.x + panelBounds.width / 2 - transportBounds.x - transportBounds.width / 2,
+      ),
+    ).toBeLessThan(1);
+    const source = new URL(await audio.evaluate((element: HTMLAudioElement) => element.currentSrc));
+    expect(source.origin).toBe(harness.origin);
+    expect([...source.searchParams.keys()]).toEqual(['path']);
+    await player.getByRole('button', { name: 'Play', exact: true }).focus();
+    await page.keyboard.press('Space');
+    await browserExpect(player.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+      .toBeGreaterThan(0);
+    // Hold the media clock and suppress timeupdate to prove frame-sampled progress, not its coarse event cadence.
+    await audio.evaluate((element) => {
+      const block = (event: Event) => {
+        if (event.target === element) event.stopImmediatePropagation();
+      };
+      window.addEventListener('timeupdate', block, true);
+      Object.assign(element, { waveTestTimeUpdateBlock: block });
+      Object.defineProperty(element, 'currentTime', { configurable: true, value: 12.3 });
+    });
+    try {
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+            ),
+          ),
+      );
+      expect(Number(await position.inputValue())).toBeCloseTo(12.3, 5);
+    } finally {
+      await audio.evaluate((element) => {
+        const block = (element as HTMLAudioElement & { waveTestTimeUpdateBlock: EventListener })
+          .waveTestTimeUpdateBlock;
+        window.removeEventListener('timeupdate', block, true);
+        Reflect.deleteProperty(element, 'waveTestTimeUpdateBlock');
+        Reflect.deleteProperty(element, 'currentTime');
+      });
+    }
+    await player.getByRole('button', { name: 'Pause', exact: true }).click();
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.paused)).toBe(true);
+    const pausedTime = await audio.evaluate((element: HTMLAudioElement) => element.currentTime);
+    const track = await position.boundingBox();
+    if (!track) throw new Error('Missing Wave position slider');
+    await page.mouse.move(track.x + track.width * 0.3, track.y + track.height / 2);
+    await page.mouse.down();
+    try {
+      await page.mouse.move(track.x + track.width * 0.8, track.y + track.height / 2, { steps: 12 });
+      expect(Number(await position.inputValue())).toBeGreaterThan(40);
+      // Dragging previews the destination; it must not trigger one media seek per pixel.
+      expect(await audio.evaluate((element: HTMLAudioElement) => element.currentTime)).toBeCloseTo(
+        pausedTime,
+        5,
+      );
+    } finally {
+      await page.mouse.up();
+    }
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+      .toBeGreaterThan(40);
+    await position.focus();
+    await page.keyboard.press('Home');
+    await page.keyboard.press('ArrowRight');
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+      .toBeGreaterThan(0);
+    await player.getByRole('button', { name: 'Forward 10 seconds', exact: true }).click();
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+      .toBeGreaterThanOrEqual(10);
+    await player.getByRole('button', { name: 'Back 10 seconds', exact: true }).click();
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+      .toBeLessThan(2);
+    const volume = player.getByRole('slider', { name: 'Volume', exact: true });
+    await volume.focus();
+    await page.keyboard.press('Home');
+    await page.keyboard.press('ArrowRight');
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.volume)).toBeGreaterThan(0);
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.volume)).toBeLessThan(1);
+    await player.getByRole('button', { name: 'Mute', exact: true }).click();
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.muted)).toBe(true);
+    await player.getByRole('button', { name: 'Unmute', exact: true }).click();
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.muted)).toBe(false);
+    const repeat = player.getByRole('button', { name: 'Repeat', exact: true });
+    await repeat.click();
+    await browserExpect(repeat).toHaveAttribute('aria-pressed', 'true');
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.loop)).toBe(true);
+    await repeat.click();
+    await browserExpect(repeat).toHaveAttribute('aria-pressed', 'false');
+    const speed = player.getByRole('combobox', { name: /^Playback speed/ });
+    await speed.click();
+    await page.getByRole('option', { name: '1.5×', exact: true }).click();
+    expect(await audio.evaluate((element: HTMLAudioElement) => element.playbackRate)).toBe(1.5);
+    await harness.screenshot(page, 'file-viewer-wave-desktop-en');
+    expect(
+      (await new AxeBuilder({ page }).include('.ve-audio-player').analyze()).violations,
+    ).toEqual([]);
+    // A real one-second WAV naturally reaches ended; no fabricated play/end events.
+    await open('viewer.wav');
+    await player.getByRole('button', { name: 'Play', exact: true }).click();
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.ended))
+      .toBe(true);
+    await browserExpect(player.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+    await open('wave-long.wav');
+    await player.getByRole('button', { name: 'Play', exact: true }).click();
+    const detached = await audio.elementHandle();
+    if (!detached) throw new Error('Missing Wave media element');
+    await root();
+    expect(
+      await detached.evaluate((element: HTMLAudioElement) => ({
+        paused: element.paused,
+        source: element.getAttribute('src'),
+      })),
+    ).toEqual({ paused: true, source: null });
+    await detached.dispose();
+    expect(errors).toEqual([]);
+  });
+
+  it('shows Wave loading and buffering truthfully and retries failed media requests', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    let release: () => void = () => {};
+    holdWaveRequest = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await open('wave-loading.wav');
+      await browserExpect(page.getByText('Loading audio…', { exact: true })).toBeVisible();
+      await browserExpect(page.getByRole('button', { name: 'Play', exact: true })).toBeDisabled();
+      const envelope = page.locator('.wave-envelope');
+      await browserExpect(envelope).toHaveAttribute('data-waveform-state', 'loading');
+      const initialBars = await envelope
+        .locator('.wave-envelope-unplayed .wave-envelope-bar')
+        .evaluateAll((bars) => bars.map((bar) => Number(bar.getAttribute('data-height'))));
+      expect(initialBars.length).toBeGreaterThan(10);
+      expect(initialBars.every((height) => height === 2)).toBe(true);
+      expect(await envelope.innerText()).toBe('');
+      await envelope.evaluate((element) => {
+        const record = { partial: false, observer: undefined as MutationObserver | undefined };
+        const observer = new MutationObserver(() => {
+          const bars = [...element.querySelectorAll('.wave-envelope-unplayed .wave-envelope-bar')];
+          const amplitudes = bars.map((bar) => Number(bar.getAttribute('data-amplitude')));
+          if (
+            element.getAttribute('data-waveform-state') === 'loading' &&
+            amplitudes.some((value) => value > 0) &&
+            amplitudes.some((value) => value === 0)
+          )
+            record.partial = true;
+        });
+        record.observer = observer;
+        Object.assign(element, { waveTestProgress: record });
+        observer.observe(element, { subtree: true, attributes: true, childList: true });
+      });
+      await harness.screenshot(page, 'file-viewer-wave-loading-en');
+    } finally {
+      holdWaveRequest = undefined;
+      release();
+    }
+    const player = page.locator('.ve-audio-player');
+    const audio = player.locator('audio');
+    await browserExpect
+      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.duration))
+      .toBe(60);
+    await browserExpect(player.locator('.wave-envelope')).toHaveAttribute(
+      'data-waveform-state',
+      'ready',
+    );
+    expect(
+      await player.locator('.wave-envelope').evaluate((element) => {
+        const record = (
+          element as HTMLElement & {
+            waveTestProgress: { partial: boolean; observer: MutationObserver };
+          }
+        ).waveTestProgress;
+        record.observer.disconnect();
+        Reflect.deleteProperty(element, 'waveTestProgress');
+        return record.partial;
+      }),
+    ).toBe(true);
+    // Transport stalls are injected only to exercise transient UI, not claimed as live network evidence.
+    await audio.evaluate((element) => element.dispatchEvent(new Event('waiting')));
+    await browserExpect(page.getByText('Buffering…', { exact: true })).toBeVisible();
+    await audio.evaluate((element) => element.dispatchEvent(new Event('canplay')));
+    await browserExpect(page.getByText('Buffering…', { exact: true })).not.toBeVisible();
+    rejectWave = true;
+    try {
+      await open('wave-error.wav');
+      const retry = player.getByRole('button', { name: 'Retry', exact: true });
+      await browserExpect(retry).toBeVisible();
+      await browserExpect(player.locator('.wave-envelope')).toHaveAttribute(
+        'data-waveform-state',
+        'unavailable',
+      );
+      await harness.screenshot(page, 'file-viewer-wave-error-en');
+      rejectWave = false;
+      await retry.click();
+      await browserExpect
+        .poll(() => audio.evaluate((element: HTMLAudioElement) => element.duration))
+        .toBe(60);
+      await browserExpect(player.getByRole('button', { name: 'Play', exact: true })).toBeEnabled();
+      await browserExpect(retry).not.toBeVisible();
+    } finally {
+      rejectWave = false;
+    }
+    // Isolated browser-policy rejection fixture; playback itself is tested with a real WAV above.
+    await audio.evaluate((element) =>
+      Object.defineProperty(element, 'play', {
+        configurable: true,
+        value: () =>
+          Promise.reject(new DOMException('Fixture playback restriction', 'NotAllowedError')),
+      }),
+    );
+    try {
+      await player.getByRole('button', { name: 'Play', exact: true }).click();
+      await browserExpect(
+        player.getByText('Playback could not start. Press Play to try again.', { exact: true }),
+      ).toBeVisible();
+      await browserExpect(player.getByRole('button', { name: 'Play', exact: true })).toBeEnabled();
+    } finally {
+      await audio.evaluate((element) => Reflect.deleteProperty(element, 'play'));
+    }
+    await player.getByRole('button', { name: 'Play', exact: true }).click();
+    await browserExpect(player.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
+    await browserExpect(
+      player.getByText('Playback could not start. Press Play to try again.', { exact: true }),
+    ).not.toBeVisible();
+    await player.getByRole('button', { name: 'Pause', exact: true }).click();
+    expect(errors).toEqual([]);
+  });
+
+  it('keeps Wave mobile Italian controls reachable without overflow', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open('wave-long.wav');
+    const player = page.locator('.ve-audio-player');
+    await browserExpect
+      .poll(() => player.locator('audio').evaluate((element: HTMLAudioElement) => element.duration))
+      .toBe(60);
+    await browserExpect(
+      player.getByRole('button', { name: 'Riproduci', exact: true }),
+    ).toBeEnabled();
+    await browserExpect(
+      player.getByRole('slider', { name: 'Posizione di riproduzione', exact: true }),
+    ).toBeVisible();
+    await player.getByRole('combobox', { name: /^Velocità di riproduzione/ }).click();
+    await page.getByRole('option', { name: '1,25×', exact: true }).click();
+    expect(
+      await player.locator('audio').evaluate((element: HTMLAudioElement) => element.playbackRate),
+    ).toBe(1.25);
+    await browserExpect(player.locator('.wave-envelope')).toHaveAttribute(
+      'data-waveform-state',
+      'ready',
+    );
+    const panelBounds = await player.boundingBox();
+    const transportBounds = await player.locator('.wave-transport').boundingBox();
+    if (!panelBounds || !transportBounds) throw new Error('Missing mobile Wave transport');
+    expect(
+      Math.abs(
+        panelBounds.x + panelBounds.width / 2 - transportBounds.x - transportBounds.width / 2,
+      ),
+    ).toBeLessThan(1);
+    await harness.screenshot(page, 'file-viewer-wave-mobile-it');
+    expect(
+      (await new AxeBuilder({ page }).include('.ve-audio-player').analyze()).violations,
+    ).toEqual([]);
+    await page.setViewportSize({ width: 320, height: 740 });
+    const bounds = await player.evaluate((element) => ({
+      width: element.clientWidth,
+      content: element.scrollWidth,
+    }));
+    expect(
+      bounds.content,
+      bounds.content > bounds.width
+        ? JSON.stringify(
+            await player.evaluate((element) =>
+              [...element.querySelectorAll('.wave-controls, .wave-controls *')].map((child) => ({
+                className: child.getAttribute('class'),
+                x: child.getBoundingClientRect().x,
+                width: child.getBoundingClientRect().width,
+              })),
+            ),
+          )
+        : undefined,
+    ).toBeLessThanOrEqual(bounds.width);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    const compactPanel = await player.boundingBox();
+    const compactTransport = await player.locator('.wave-transport').boundingBox();
+    if (!compactPanel || !compactTransport) throw new Error('Missing compact Wave transport');
+    expect(
+      Math.abs(
+        compactPanel.x + compactPanel.width / 2 - compactTransport.x - compactTransport.width / 2,
+      ),
+    ).toBeLessThan(1);
+    await harness.screenshot(page, 'file-viewer-wave-320-it');
+    await player.getByRole('combobox', { name: /^Velocità di riproduzione/ }).click();
+    const fastest = page.getByRole('option', { name: '2×', exact: true });
+    await browserExpect(fastest).toBeVisible();
+    const optionBounds = await fastest.boundingBox();
+    if (!optionBounds) throw new Error('Missing Wave speed option');
+    expect(optionBounds.x).toBeGreaterThanOrEqual(0);
+    expect(optionBounds.y).toBeGreaterThanOrEqual(0);
+    expect(optionBounds.x + optionBounds.width).toBeLessThanOrEqual(320);
+    expect(optionBounds.y + optionBounds.height).toBeLessThanOrEqual(740);
+    expect(
+      await fastest.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return element.contains(
+          document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
+        );
+      }),
+    ).toBe(true);
+    await harness.screenshot(page, 'file-viewer-wave-speed-320-it');
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .include('.ve-audio-player')
+          .include('.ve-select-options')
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await fastest.click();
+    expect(
+      await player.locator('audio').evaluate((element: HTMLAudioElement) => element.playbackRate),
+    ).toBe(2);
     expect(errors).toEqual([]);
   });
 

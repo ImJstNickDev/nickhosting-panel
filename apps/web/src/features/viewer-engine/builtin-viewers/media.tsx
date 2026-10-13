@@ -3,12 +3,17 @@ import { useT } from '../../../app/i18n.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { viewerPath } from '../core/access.js';
 import type { ViewerProps } from '../core/types.js';
+import AudioViewer from './audio.js';
 
-export default function MediaViewer({
-  serverId,
-  source,
-  kind,
-}: ViewerProps & { kind: 'audio' | 'video' }) {
+export default function MediaViewer(props: ViewerProps & { kind: 'audio' | 'video' }) {
+  return props.kind === 'audio' ? (
+    <AudioViewer key={viewerPath(props.serverId, props.source)} {...props} />
+  ) : (
+    <NativeVideo {...props} />
+  );
+}
+
+function NativeVideo({ serverId, source }: ViewerProps) {
   const t = useT();
   const ref = useRef<HTMLMediaElement | null>(null);
   const [failed, setFailed] = useState(false);
@@ -32,10 +37,10 @@ export default function MediaViewer({
     'aria-label': source.name,
   } as const;
   return (
-    <div className={`ve-media ve-${kind}`}>
+    <div className="ve-media ve-video">
       {failed ? (
         <ErrorNotice error={{ messageKey: 'viewer.mediaUnsupported' }} />
-      ) : kind === 'video' ? (
+      ) : (
         <video
           {...props}
           ref={(element) => {
@@ -43,15 +48,8 @@ export default function MediaViewer({
           }}
           playsInline
         />
-      ) : (
-        <audio
-          {...props}
-          ref={(element) => {
-            ref.current = element;
-          }}
-        />
       )}
-      <span className="sr-only">{t(`viewer.${kind}`)}</span>
+      <span className="sr-only">{t('viewer.video')}</span>
     </div>
   );
 }

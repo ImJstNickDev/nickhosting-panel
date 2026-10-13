@@ -7565,3 +7565,92 @@ The final Firefox `-t 'renders SVG vectors sharply'` check passed (1/1,
 18 skipped, 36.09s), including the plain `50000%` label and refreshed SVG screenshot.
 Index governance passed: 742 text files, 228 review PNGs, 627 relative links,
 4 TOML files and 44 ignore cases (heuristic secret scan).
+
+## 2026-10-13 — Wave custom controls and waveform
+
+Wave replaces native audio controls with centered transport controls, repeat on the
+left, speed on the right and centered volume below. The seekable SVG envelope uses
+actual decoded amplitude peaks in the existing palette. Playback position samples
+native `currentTime` on animation frames while playing; pointer seeking previews
+immediately and commits once on release. The shared custom selector also serves
+ICO, with a viewport-positioned portal so menus are not clipped on small screens.
+
+Analysis is independent of playback: one extra full-content read, at most 32 MiB
+and ten minutes, 8 kHz decode, 1024 retained peaks. Duration refinement within those
+bounds does not repeat analysis. Reads abort on exit; non-abortable native decodes
+are serialized and obsolete results discarded. This is not a hard browser-decoder
+memory cap. Larger/longer/undecodable files retain playback/seek with a neutral
+fallback. No server transcoding, new API, dependency or provider credential path.
+See [browser decoding requirements](https://developer.mozilla.org/en-US/docs/Web/API/BaseAudioContext/decodeAudioData).
+
+Targeted commands/evidence (existing approved isolated browser services only):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform-model.test.ts`:
+  4/4 pass, bounds, silence, stereo phase, peak reduction and invalid samples.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'Wave|switches ICO|opens SVG|typed SQLite'`:
+  Chromium 6/6 pass, 16 skipped, 43.24s. Real browser WAV playback/seek/end/release,
+  actual decoded peaks, centered geometry, keyboard, pointer scrub, mute/volume,
+  repeat, speed, failed media/retry, loading, EN/IT and 320/390 px layouts. Scoped
+  axe covers the viewer and portaled options. Shared ICO and native Motion/SQLite
+  behavior remain covered. Desktop/mobile/loading/error screenshots are sanitized fixtures.
+- A subsequent `-t 'runs Wave'` regression passed 1/1, 20.02s: simulated metadata
+  refinement 59.9→60 seconds preserves ready peaks without another analysis fetch.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: pass; existing >500 kB
+  main/editor chunk warnings remain. No new library or codec bundle.
+- `scripts/dev.sh pnpm i18n:check`: pass, 1384 keys across EN/IT/pseudolocale.
+
+Historical failures are retained: the initial typecheck caught an untyped tuple in
+new waveform tests (fixed). Review caught a speed popup clipped by the viewer
+(fixed via the shared portal) and repeated analysis on duration refinement (fixed).
+The Firefox `-t 'Wave|switches ICO'` attempt was 2 pass/2 fail: unmuted playback
+failed with native code 3 `OnMediaSinkAudioError`, despite decoded readyState 4;
+the headless host has no usable audio sink. A standalone test-only mock-sink
+preference was unavailable in that browser build; no system services were changed.
+The separate loading assertion passed when isolated; retry reused Firefox's
+same-URL decoded media cache, so loading/error fixtures now use distinct URLs.
+Do not interpret these attempts as Firefox audio playback certification. Chromium
+executes native playback; injected rejected play promises and waiting/canplay
+cover only the stated UI error/buffering states.
+
+No infrastructure changes, restarts, game-server operations or real file mutation.
+No new test assets on Pterodactyl. Concurrent account/storage work is excluded.
+Issue #18 and the existing M5/production-release boundaries remain unchanged.
+
+The final interaction pass adds animation-frame playhead sampling and rearranges
+repeat/transport/speed with volume underneath. Targeted `-t 'Wave'`: two tests
+passed (playback and loading/recovery), including a controlled native-clock change
+with `timeupdate` suppressed, proving the playhead updates on rAF. The mobile case
+caught an actual 320 px overflow after that layout change; compact spacing and
+speed-selector sizing correct it. Only the affected mobile case is rerun below.
+Web typecheck and scoped Biome pass. Final production build also passes with the
+same main/editor size warnings. No full historical suite was rerun.
+
+Final mobile reruns: Chromium 1/1 passed (14.25s), Firefox 1/1 passed (18.92s),
+using `-t 'keeps Wave mobile'` and `NH_BROWSER=firefox` respectively. Firefox
+successfully decodes the real WAV waveform offline, without an output sink; this
+establishes waveform/UI behavior, not unmuted playback. The final 320 px menu also
+passes bounds, hit testing and scoped axe. Independent code/accessibility/visual
+review found no remaining must-fix findings.
+
+Screenshots: [desktop EN](screenshots/m5/file-viewer-wave-desktop-en.png),
+[loading](screenshots/m5/file-viewer-wave-loading-en.png),
+[error/retry](screenshots/m5/file-viewer-wave-error-en.png) (Chromium);
+[mobile IT](screenshots/m5/file-viewer-wave-mobile-it.png),
+[320 px](screenshots/m5/file-viewer-wave-320-it.png),
+[speed menu](screenshots/m5/file-viewer-wave-speed-320-it.png) (Firefox).
+Final screenshot inspection also corrected the waveform's loading label after a
+native media failure: failed media now exposes the unavailable state and cancels
+analysis rather than leaving an indefinite loading indication.
+The final `-t 'shows Wave'` regression passed 1/1 in Chromium (17.84s), with
+loading/error screenshots refreshed and an explicit unavailable-waveform assertion.
+Final web typecheck, 12-file scoped Biome and catalog checks pass.
+
+Owner's final visual amendment: flat initial bars, no waveform loading caption;
+real peak snapshots emitted every 64 computed bins expand each band from its
+center (160 ms transition, respecting reduced motion). This occurs after complete
+native decoding, not during network streaming. Independent two-file review found
+no must-fix. Final `-t 'Wave'`: Chromium 3/3 pass, 34.51s, including observed
+partial peaks during analysis, flat initial state, smooth native-clock progress,
+seek, metadata refinement, errors and mobile/axe checks. All linked screenshots
+were refreshed in Chromium for this last amendment (superseding earlier Firefox
+captures); prior Firefox mobile evidence applies to the preceding rendering.

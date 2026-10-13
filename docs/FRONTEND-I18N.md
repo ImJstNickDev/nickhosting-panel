@@ -843,3 +843,24 @@ Identity/session/server scopes remain isolated. Background listings do not prepa
 signed URLs; only the open folder does so. No new banner, progress label, toast,
 marketing copy or notification accompanies prefetch. Optional failures silently
 leave ordinary navigation available; foreground errors are still reported.
+
+Wave uses centered custom playback controls and a seekable, real amplitude
+waveform, not decorative peaks. Play/pause, ten-second skips, repeat, speed and
+volume retain native media behavior and keyboard controls with EN/IT labels.
+The playhead follows native currentTime on animation frames while playing.
+Dragging previews the seek position and commits on release. Playback uses the
+existing authenticated, same-origin Range stream; leaving the viewer releases it.
+The waveform is analyzed asynchronously after duration metadata: at most 32 MiB
+and ten minutes, decoded at 8 kHz and reduced to 1024 peaks. Analysis requires one
+additional bounded full-content read because browser `decodeAudioData` requires
+complete data. It does not delay playback. Reads abort on exit; native decoding
+cannot abort, so analysis is serialized and obsolete results discarded. Encoded
+bytes/PCM are not retained as a cache. These limits are not a hard cap on the
+browser decoder's internal memory. Larger/longer or unsupported files keep playback
+and seeking with a neutral rail and truthful waveform-unavailable state.
+
+Wave starts with flat bars, without a waveform loading caption. After the native
+decoder completes, each batch of 64 actual peak bins is published; bars expand
+from the center with a short transition (disabled for reduced motion). This is
+incremental peak calculation after download/decode, not streaming decoding or
+a simulated download-progress animation.
