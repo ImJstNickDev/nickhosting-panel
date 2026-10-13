@@ -14,6 +14,7 @@ import type { ViewerProps } from '../core/types.js';
 import { ViewerIcon } from '../viewer-icon.js';
 import { ViewerSelect } from '../viewer-select.js';
 import { AudioWaveform } from './audio-waveform.js';
+import { waveformLimits } from './audio-waveform-model.js';
 import './audio.css';
 
 const initial = {
@@ -44,9 +45,20 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
   const [seekDraft, setSeekDraft] = useState<number | null>(null);
   const [state, setState] = useState(initial);
   const [buffering, setBuffering] = useState(false);
+  const [showBuffering, setShowBuffering] = useState(false);
   const [failed, setFailed] = useState(false);
   const [playError, setPlayError] = useState(false);
   const [repeat, setRepeat] = useState(false);
+  useEffect(() => {
+    if (!buffering) {
+      setShowBuffering(false);
+      return;
+    }
+    // Brief decoder/seek transitions should not flash a loading announcement.
+    // This delays only feedback; play() is never held behind the timer.
+    const timer = window.setTimeout(() => setShowBuffering(true), 200);
+    return () => window.clearTimeout(timer);
+  }, [buffering]);
   const sync = useCallback(() => {
     const audio = media.current;
     if (!audio) return;
@@ -155,7 +167,9 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
         <audio
           ref={media}
           src={src}
-          preload="metadata"
+          // Warm bounded previews before Play; avoid downloading large media
+          // merely because its viewer was opened. Browsers may limit preloading.
+          preload={source.size > 0 && source.size <= waveformLimits.bytes ? 'auto' : 'metadata'}
           hidden
           onLoadedMetadata={sync}
           onDurationChange={sync}
@@ -351,7 +365,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
             <span role="status">
               {!state.ready
                 ? t('viewer.audioLoading')
-                : buffering
+                : buffering && showBuffering
                   ? t('viewer.audioBuffering')
                   : ''}
             </span>

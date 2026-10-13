@@ -850,6 +850,10 @@ volume retain native media behavior and keyboard controls with EN/IT labels.
 The playhead follows native currentTime on animation frames while playing.
 Dragging previews the seek position and commits on release. Playback uses the
 existing authenticated, same-origin Range stream; leaving the viewer releases it.
+Audio previews up to 32 MiB request native automatic preloading; larger files
+request metadata only. Browser policy may limit preloading. Brief buffering
+transitions do not flash a label: the notice appears only after 200 ms of
+continuous waiting. This grace period never delays the Play command.
 Waveform analysis runs in a dedicated browser Worker using Mediabunny 1.61.4.
 It reads the existing authorized same-origin content endpoint with HTTP Range,
 then reduces decoded samples directly into 1024 peaks. Actual partial peaks are

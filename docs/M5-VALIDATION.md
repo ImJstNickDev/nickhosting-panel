@@ -7793,3 +7793,19 @@ The final test typecheck initially caught the browser's wider CSSNumericValue
 animation-duration type; the test observer now uses the native getTiming return
 type. Final web source/test typecheck passes. Scoped Biome and indexed governance
 pass (782 text files, 239 PNGs, 638 links, four TOML files, 44 ignore cases).
+
+### Wave Play feedback (2026-10-13)
+
+The player previously requested only metadata before Play and displayed every
+native waiting event immediately. Bounded audio previews (positive size <=32 MiB)
+now request native automatic preloading; larger media remains metadata-only.
+This is a browser hint, not a promise of instant network/decoder availability.
+A 200 ms continuous-wait threshold applies only to the buffering label; Play is
+still issued immediately. Recovery, pause, errors and exit cancel the notice.
+
+Targeted Chromium `-t 'runs Wave|shows Wave'`: 2/2 pass (24.94 s), exercising real
+WAV playback, a 50 ms injected wait with no transient announcement, persistent
+waiting feedback, error/retry and the preload attribute. Injected waiting events
+prove UI behavior, not real-provider timing. Web typecheck and scoped Biome pass;
+independent review found no must-fix. No infrastructure, restart, dependency,
+provider or real file changes. No full suite rerun for this presentation fix.

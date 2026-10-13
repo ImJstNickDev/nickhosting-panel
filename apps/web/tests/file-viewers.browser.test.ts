@@ -1546,7 +1546,7 @@ describe('M5 builtin file viewers', () => {
       controls: false,
       autoplay: false,
       paused: true,
-      preload: 'metadata',
+      preload: 'auto',
       source: expect.stringContaining(`${endpoint}/content?`),
     });
     const envelope = player.locator('.wave-envelope');
@@ -1769,7 +1769,27 @@ describe('M5 builtin file viewers', () => {
         return record.partial;
       }),
     ).toBe(true);
+    await browserExpect(audio).toHaveAttribute('preload', 'auto');
     // Transport stalls are injected only to exercise transient UI, not claimed as live network evidence.
+    const announcedBriefStall = await player.evaluate(async (element) => {
+      const media = element.querySelector('audio');
+      if (!media) throw new Error('Missing Wave audio element');
+      let announced = false;
+      const observer = new MutationObserver(() => {
+        if (element.textContent?.includes('Buffering…')) announced = true;
+      });
+      observer.observe(element, { subtree: true, childList: true, characterData: true });
+      try {
+        media.dispatchEvent(new Event('waiting'));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        media.dispatchEvent(new Event('canplay'));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return announced;
+      } finally {
+        observer.disconnect();
+      }
+    });
+    expect(announcedBriefStall).toBe(false);
     await audio.evaluate((element) => element.dispatchEvent(new Event('waiting')));
     await browserExpect(page.getByText('Buffering…', { exact: true })).toBeVisible();
     await audio.evaluate((element) => element.dispatchEvent(new Event('canplay')));
