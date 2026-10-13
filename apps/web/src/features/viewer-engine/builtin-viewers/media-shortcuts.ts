@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 
 /** Viewer-wide shortcuts, while retaining native keyboard control navigation. */
-export function useAudioShortcuts(
+export function useMediaShortcuts(
   toggle: () => void,
   skip: (seconds: number, animated: boolean) => void,
 ) {
@@ -40,7 +40,7 @@ export function useAudioShortcuts(
         event.stopPropagation();
         if (!event.repeat) actions.current.toggle();
       } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-        if (keyboardNavigation && interactive && !target?.matches('.wave-seek-input')) return;
+        if (keyboardNavigation && interactive && !target?.matches('[data-media-seek]')) return;
         event.preventDefault();
         event.stopPropagation();
         actions.current.skip(

@@ -24,7 +24,7 @@ describe('file viewer Escape navigation', () => {
     '.ve-json',
     '.ve-image-viewer',
     '.ve-wave',
-    '.ve-video',
+    '.motion-player',
     '.ve-archive',
     '.ve-database',
   ];

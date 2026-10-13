@@ -13,9 +13,9 @@ import { viewerPath } from '../core/access.js';
 import type { ViewerProps } from '../core/types.js';
 import { ViewerIcon } from '../viewer-icon.js';
 import { ViewerSelect } from '../viewer-select.js';
-import { useAudioShortcuts } from './audio-shortcuts.js';
 import { AudioTimeline, type AudioTimelineHandle } from './audio-timeline.js';
 import { waveformLimits } from './audio-waveform-model.js';
+import { useMediaShortcuts } from './media-shortcuts.js';
 import './audio.css';
 
 const initial = {
@@ -136,7 +136,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
     setState((value) => ({ ...value, duration: 0, ready: false, paused: true }));
     audio.load();
   }
-  useAudioShortcuts(
+  useMediaShortcuts(
     () => void toggle(),
     (seconds, animated) =>
       timeline.current?.skipTo((media.current?.currentTime ?? 0) + seconds, animated),

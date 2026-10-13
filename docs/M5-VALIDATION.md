@@ -8034,3 +8034,66 @@ at the effective endpoint. Command:
 Independent read-only review found no blockers. This adds no provider operations,
 API changes, dependencies or infrastructure restart. Revert the frontend change
 for rollback. Motion remains investigation only.
+
+### Motion custom video player (2026-10-13)
+
+Owner-authorized implementation follows the earlier AVI/trickplay investigation.
+Motion now uses native video playback with its own compact transport controls,
+real buffered ranges, display-frame timeline interpolation, repeat, volume,
+speed, fullscreen and capability-gated Picture-in-Picture. Keyboard behavior is
+shared with Wave: Space, ±5 seconds with arrows, ±10 with Shift, held-arrow
+repeat and native keyboard navigation in controls. Escape preserves transient
+menus/fullscreen before leaving the viewer. No autoplay, server transcoding,
+provider API changes or game-file mutation were introduced.
+
+Optional timeline thumbnails use Mediabunny's existing dependency in a dedicated
+lazy worker. Authenticated same-origin Range reads select preceding keyframes,
+not a full-video analysis. Work has a single pending position, bounded byte/time
+budgets, a 32-image LRU and cancellation on pointer exit, hidden document or viewer
+exit. Thumbnail decoding failure leaves playback and timestamp seeking usable.
+Native codec support still determines whether a video plays: the previously
+inspected AVI/MPEG-4 Part 2 file is not made compatible by this UI change.
+
+Independent review found and resolved: mobile fullscreen controls clipping,
+preview work continuing after pointer exit, predictive timeline advancement
+during buffering, and error-message contrast. Browser interaction additionally
+caught stage focus revealing controls before the click immediately hid them;
+stage pointer focus no longer races the click. The first five-case browser pass
+preceded these expanded checks; intermediate expanded runs failed on contrast,
+that real focus defect and test setup assumptions. Those failures are retained
+here rather than described as successful validation.
+
+The browser fixture is original generated artwork (60-second VP9/WebM, moving
+circle and timestamp), stored as text base64 for reproducibility. It exercises
+native decoding and the real worker against an isolated HTTP Range handler;
+provider data and authorization sessions come from the existing isolated M2 test
+harness. This does not certify every container/codec, actual touch hardware,
+all assistive technologies or the Owner's 240 Hz display.
+
+Independent visual/content review inspected real rendered desktop English and
+320 px Italian screenshots: controls remain legible and unclipped, layout and
+copy are compact, no decorative dashboard/card layer or unsupported success
+state is added. One existing application theme; fullscreen/mobile/error/loading
+states are also captured. No new Docker resources, container restart, Panel/Wings
+change, real server operation or production interaction was needed. Development
+uses existing Vite HMR. Rollback is a frontend/source revert; no migration or
+persistent-data rollback is involved. SFTPGo issue #18 remains unchanged.
+
+Focused validation (no historical full-suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/app/i18n.test.ts apps/web/src/features/viewer-engine/builtin-viewers/audio-playback-clock.test.ts`: **13 passed**.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/video-thumbnail-model.test.ts`: **8 passed**, including cancellation retaining cache, coalescing, eviction and streamed-read budget.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass**, app and browser-test TypeScript.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **pass**, existing large app/editor chunk warnings remain. Media UI is 31.65 kB (9.29 kB gzip); the 258.79 kB thumbnail worker is loaded on demand.
+- Scoped `scripts/dev.sh pnpm exec biome check` over all changed TS/TSX/CSS files: **pass**. `git diff --check`: **pass**.
+- `scripts/dev.sh pnpm i18n:compile`: **1402 complete EN/IT keys**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts --silent=false`: final Chromium **8/8 passed**, 29.34 s. Covers real VP9 playback and thumbnails, Range cancellation, buffering-clock hold, transport and keyboard, repeat/end replay, speed/volume, fullscreen portals, conditional PiP, loading/error/retry, cleanup, automated axe and responsive screenshots.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewer-escape.browser.test.ts --silent=false`: **3/3 passed** after the video selector update.
+
+Reviewed screenshots: [desktop with thumbnail](screenshots/m5/file-viewer-motion-preview-desktop-en.png), [mobile Italian](screenshots/m5/file-viewer-motion-mobile-it.png), [320 px Italian](screenshots/m5/file-viewer-motion-320-it.png), [fullscreen](screenshots/m5/file-viewer-motion-fullscreen-en.png), [430 px fullscreen](screenshots/m5/file-viewer-motion-fullscreen-430-it.png), [loading](screenshots/m5/file-viewer-motion-loading-en.png), [error](screenshots/m5/file-viewer-motion-error-en.png).
+
+Firefox command: `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts --silent=false`: final **8/8 passed**, 41.27 s. Both browsers decoded actual VP9 frames through native playback and the Mediabunny worker; neither used the time-only thumbnail fallback in this fixture. A first Firefox run passed 7/8 with a test-helper navigation/session-restore race; explicitly closing the previous viewer corrected the helper, with no product-code workaround. Fullscreen entry/exit and the speed menu portal were verified. PiP coverage requires either actual API success with enter/exit state or an honest localized rejection; it does not certify a visible OS PiP window on every platform.
+
+Shared-keyboard regression: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'routes Wave shortcuts|runs Wave' --silent=false`: **2 passed, 28 intentionally skipped**, 24.87 s. Independent review reports no remaining must-fix findings. [Firefox rendered preview](screenshots/m5/file-viewer-motion-preview-desktop-en-firefox.png) also confirms real thumbnail decoding; its “Pop out this video” overlay is browser-owned Firefox UI.
+
+`python3 scripts/check-governance.py`: pass on the final index, including documentation links, TOML, ignore fixtures, tracked-content hygiene and reviewed PNGs (secret detection remains heuristic). Test harnesses closed; no real Pterodactyl test assets were created or changed. PR #21 remains open and unmerged.

@@ -268,7 +268,7 @@ export function Tooltip({
           <div ref={popup} id={id} role="tooltip" className="tooltip">
             {content}
           </div>,
-          document.body,
+          document.fullscreenElement ?? document.body,
         )}
     </>
   );

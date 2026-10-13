@@ -201,6 +201,7 @@ export function AudioTimeline({
         />
         <input
           className="wave-range wave-seek-input"
+          data-media-seek
           type="range"
           aria-label={t('viewer.audioPosition')}
           aria-valuetext={t('viewer.audioTime', {

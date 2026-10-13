@@ -702,9 +702,9 @@ The CodeMirror editor supports search, line numbers, undo/redo, Ctrl/Cmd+S and
 unsaved-change protection; EN/IT includes editor search/validation controls.
 Tab inserts the configured indentation unit at the cursor, or indents selected
 lines; Shift+Tab outdents lines. Both use CodeMirror's undo history and read-only
-protection. Escape followed by Tab or Shift+Tab leaves the editor; its
-localized accessible description explains this exit. Search fields retain normal
-Tab navigation; local editing and indentation remain usable during a save.
+protection. Escape closes an editor search panel first, otherwise returns to
+the directory through the unsaved-change confirmation when needed. Search fields
+retain normal Tab navigation; local editing and indentation remain usable during a save.
 Opening a text file replaces the listing in place, without a modal. The breadcrumb
 retains clickable parent directories and includes the current filename. List-only
 search, upload and view controls are hidden until returning to the directory.
@@ -924,3 +924,35 @@ codec support and container metadata determine how early decoding can begin.
 Unsupported decoding or eligibility limits preserve native playback/seek and the
 truthful waveform-unavailable fallback. This introduces no server transcoding,
 provider credentials, game-file changes or new backend endpoint.
+
+Motion keeps video playback native, with custom controls over the video rather
+than browser-specific controls or a surrounding summary card. The shared Files
+path/Open with/Home/Download row remains the entry and exit point. Play/pause,
+ten-second skips, repeat, volume and speed follow Wave's visual vocabulary;
+Left/Right seek five seconds, Shift doubles that, and Space respects pointer
+versus keyboard-navigation context. Timeline scrubbing is direct. Fullscreen and
+Picture-in-Picture are offered only when the browser exposes their APIs.
+
+The control strip stays visible while paused, loading, seeking, using a menu or
+navigating controls with the keyboard, and hides during uninterrupted playback.
+Touch reveals controls without making tiny hover targets mandatory. The seek
+bar shows actual buffered ranges, elapsed/total time, and a hover timestamp with
+an optional thumbnail. Unsupported thumbnail decoding must never disable native
+playback. Unsupported native video retains Open with/Download; no browser codec
+support is fabricated and no server transcoding is introduced.
+
+Timeline previews are browser-worker work requested only while exploring the
+seek bar. They use authenticated same-origin Range reads, sparse keyframe access,
+one pending position and a small bounded cache. They are approximate previews
+of the preceding keyframe, not a guarantee of the exact hovered frame. Decoder,
+source-cache and image resources are released when the source/viewer closes.
+No full-video pre-analysis or decorative/fake thumbnail content is allowed.
+
+Motion retains at most 32 thumbnail object URLs and 128 time-bucket aliases per
+open video. A worker uses a 2 MiB source cache, one fetch/decode at a time and an
+8 MiB streamed-read budget per request, with a six-second watchdog. These bound
+optional preview work, not the browser's native video buffering or total decoder
+memory. Leaving the timeline or hiding the tab cancels active preview work;
+previously decoded images remain reusable until eviction or viewer exit. A
+missing index, unsupported WebCodecs decoder or exhausted budget leaves the
+normal timestamp preview and native playback available.
