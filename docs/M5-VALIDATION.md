@@ -7934,3 +7934,28 @@ real Firefox probe, rather than claiming a physical 240 Hz browser test.
 The [player screenshot](screenshots/m5/wave-interpolated-playhead.png) was reviewed;
 layout and controls are unchanged. No game files or server state were mutated.
 Rollback: revert this frontend-only change; no migrations or data cleanup.
+
+### Wave ten-second skip animation (2026-10-13)
+
+Back/forward buttons still change native playback time immediately. Only the
+playhead and played-waveform overlay travel, together, using a 280 ms cubic
+ease-in-out. The destination follows the playback clock, avoiding a completion
+snap while audio is playing. Repeated skips accumulate from native time and
+retarget from the drawn position. Direct pointer/keyboard seeking cancels the
+tween; reduced motion disables it. Hidden documents, media errors/source teardown
+and unmount release the animation. No backend, dependency or infrastructure
+changes. Independent read-only review found no blocking findings.
+
+The existing playback-clock unit suite passed **9/9** (864 ms), with the same
+command documented above. Source/test typecheck and focused formatting checks
+are run for this frontend-only change; no historical integration-suite rerun.
+
+Final targeted browser run: **4 passed, 24 skipped** (36.70 s): immediate native
+seek versus intermediate visual positions in both directions, waveform/cursor
+alignment, repeated skips, direct keyboard cancellation and reduced motion,
+plus the existing AAC duration, quantized-clock lifecycle and real Wave controls.
+Command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'animates Wave skip|aligns Wave playback|interpolates quantized Wave|runs Wave' --silent=false`.
+Final web typecheck and scoped Biome passed. Static layout is unchanged; the
+existing player screenshot remains representative, while frame samples prove
+the new motion. No production mutations, restarts or test assets were required.
+Rollback: revert this frontend-only commit.

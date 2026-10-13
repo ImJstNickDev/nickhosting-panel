@@ -1836,6 +1836,106 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
+  it('animates Wave skip visuals while seeking audio immediately and respects reduced motion', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    try {
+      await open('wave-long.wav');
+      const player = page.locator('.ve-audio-player');
+      const audio = player.locator('audio');
+      const position = player.getByRole('slider', { name: 'Playback position', exact: true });
+      await browserExpect(player.locator('.wave-envelope')).toHaveAttribute(
+        'data-waveform-state',
+        'ready',
+      );
+      await audio.evaluate((media: HTMLAudioElement) => {
+        media.currentTime = 20;
+        media.dispatchEvent(new Event('timeupdate'));
+      });
+      await browserExpect.poll(() => position.inputValue()).toBe('20');
+      const result = await player.evaluate(async (element) => {
+        const media = element.querySelector('audio');
+        const slider = element.querySelector<HTMLInputElement>('.wave-seek-input');
+        const clip = element.querySelector('.wave-envelope clipPath rect');
+        const forward = element.querySelector<HTMLButtonElement>(
+          '[aria-label="Forward 10 seconds"]',
+        );
+        const backward = element.querySelector<HTMLButtonElement>('[aria-label="Back 10 seconds"]');
+        if (!media || !slider || !clip || !forward || !backward)
+          throw new Error('Missing Wave skip controls');
+        const snapshot = () => ({
+          position: Number(slider.value),
+          clip: Number(clip.getAttribute('width')),
+        });
+        const collect = async (button: HTMLButtonElement, repeated = false) => {
+          button.click();
+          const nativeImmediately = media.currentTime;
+          const initial = snapshot();
+          const samples = [];
+          let second: { before: number; after: number; native: number } | undefined;
+          const start = performance.now();
+          while (performance.now() - start < 600) {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            samples.push(snapshot());
+            if (repeated && samples.length === 4) {
+              const before = Number(slider.value);
+              button.click();
+              second = { before, after: Number(slider.value), native: media.currentTime };
+            }
+          }
+          return { nativeImmediately, initial, samples, second };
+        };
+        return {
+          forward: await collect(forward),
+          backward: await collect(backward),
+          repeated: await collect(forward, true),
+        };
+      });
+      const assertTravel = (travel: typeof result.forward, from: number, destination: number) => {
+        expect(travel.initial.position).toBe(from);
+        expect(
+          travel.samples.some(
+            ({ position }) =>
+              position > Math.min(from, destination) && position < Math.max(from, destination),
+          ),
+        ).toBe(true);
+        for (const sample of travel.samples) {
+          expect(sample.position).toBeGreaterThanOrEqual(Math.min(from, destination));
+          expect(sample.position).toBeLessThanOrEqual(Math.max(from, destination));
+          expect(sample.clip).toBeCloseTo((sample.position / 60) * 1000, 1);
+        }
+        expect(travel.samples.at(-1)?.position).toBe(destination);
+      };
+      expect(result.forward.nativeImmediately).toBe(30);
+      assertTravel(result.forward, 20, 30);
+      expect(result.backward.nativeImmediately).toBe(20);
+      assertTravel(result.backward, 30, 20);
+      expect(result.repeated.nativeImmediately).toBe(30);
+      assertTravel(result.repeated, 20, 40);
+      expect(result.repeated.second?.native).toBe(40);
+      expect(result.repeated.second?.before).toBeGreaterThan(20);
+      expect(result.repeated.second?.before).toBeLessThan(30);
+      expect(result.repeated.second?.after).toBe(result.repeated.second?.before);
+      // Direct keyboard seeking cancels an in-flight button tween.
+      await player
+        .getByRole('button', { name: 'Forward 10 seconds', exact: true })
+        .evaluate((button: HTMLButtonElement) => button.click());
+      await position.press('Home');
+      await browserExpect
+        .poll(() => audio.evaluate((media: HTMLAudioElement) => media.currentTime))
+        .toBe(0);
+      await page.waitForTimeout(350);
+      expect(await position.inputValue()).toBe('0');
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await player.getByRole('button', { name: 'Forward 10 seconds', exact: true }).click();
+      expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(10);
+      expect(await position.inputValue()).toBe('10');
+      expect(errors).toEqual([]);
+    } finally {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    }
+  });
+
   it('runs Wave controls through real browser audio playback and releases the stream on exit', async () => {
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
     await page.setViewportSize({ width: 1440, height: 1000 });

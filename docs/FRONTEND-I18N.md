@@ -871,7 +871,12 @@ clock, and rate/loop/background changes re-anchor it. Native playback remains
 authoritative. Only the timeline subtree updates on those frames; playback
 controls and their formatters do not. Play synchronizes the native paused state
 immediately after calling play(), without waiting for its queued event.
-Dragging previews the seek position and commits on release. Playback uses the
+Ten-second skip buttons seek the audio immediately while the playhead and played
+waveform travel together for 280 ms with cubic ease-in-out. Repeated skips retarget
+from the currently displayed position; the endpoint follows ongoing playback.
+Dragging/keyboard seeking remain direct and cancel this transition. Reduced
+motion disables the skip animation. Dragging previews the seek position and
+commits on release. Playback uses the
 existing authenticated, same-origin Range stream; leaving the viewer releases it.
 Audio previews up to 32 MiB request native automatic preloading; larger files
 request metadata only. Browser policy may limit preloading. Brief buffering

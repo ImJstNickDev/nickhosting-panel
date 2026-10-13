@@ -1,7 +1,9 @@
 import {
   type CSSProperties,
+  type Ref,
   type RefObject,
   useCallback,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
@@ -17,9 +19,12 @@ const clock = (seconds: number) => {
   return `${hours ? `${hours}:` : ''}${String(Math.floor(value / 60) % 60).padStart(hours ? 2 : 1, '0')}:${String(value % 60).padStart(2, '0')}`;
 };
 
+export type AudioTimelineHandle = { skipTo: (seconds: number) => void };
+
 /** The playback clock updates this subtree only, never the transport controls. */
 export function AudioTimeline({
   media,
+  ref,
   onDuration,
   src,
   size,
@@ -28,6 +33,7 @@ export function AudioTimeline({
   failed,
 }: {
   media: RefObject<HTMLAudioElement | null>;
+  ref: Ref<AudioTimelineHandle>;
   onDuration: (duration: number) => void;
   src: string;
   size: number;
@@ -37,13 +43,26 @@ export function AudioTimeline({
 }) {
   const t = useT();
   const [time, setTime] = useState(0);
+  const [skipPosition, setSkipPosition] = useState<number | null>(null);
+  const skipFrame = useRef(0);
+  const visibleTime = useRef(0);
+  const targetTime = useRef(0);
   const [seekDraft, setSeekDraft] = useState<number | null>(null);
   const scrubbing = useRef(false);
   const playbackClock = useRef(new AudioPlaybackClock());
+  const publishTime = useCallback((value: number) => {
+    targetTime.current = value;
+    setTime(value);
+  }, []);
+  const cancelSkip = useCallback(() => {
+    cancelAnimationFrame(skipFrame.current);
+    skipFrame.current = 0;
+    setSkipPosition(null);
+  }, []);
   const sync = useCallback(() => {
     if (media.current)
-      setTime(playbackClock.current.reset(media.current.currentTime, performance.now()));
-  }, [media]);
+      publishTime(playbackClock.current.reset(media.current.currentTime, performance.now()));
+  }, [media, publishTime]);
   useLayoutEffect(() => {
     const audio = media.current;
     if (!audio) return;
@@ -61,7 +80,7 @@ export function AudioTimeline({
         stop();
         return;
       }
-      setTime(
+      publishTime(
         playbackClock.current.sample(audio.currentTime, performance.now(), audio.playbackRate),
       );
       frame = requestAnimationFrame(update);
@@ -80,11 +99,14 @@ export function AudioTimeline({
       if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) start();
     };
     const visibility = () => {
+      cancelSkip();
       stop();
       if (!document.hidden && audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) start();
     };
     const holds = ['pause', 'waiting', 'seeking', 'ended', 'emptied', 'error'];
     for (const event of holds) audio.addEventListener(event, stop);
+    audio.addEventListener('error', cancelSkip);
+    audio.addEventListener('emptied', cancelSkip);
     audio.addEventListener('playing', start);
     audio.addEventListener('seeked', reanchor);
     audio.addEventListener('ratechange', sync);
@@ -95,6 +117,8 @@ export function AudioTimeline({
     return () => {
       cancelAnimationFrame(frame);
       for (const event of holds) audio.removeEventListener(event, stop);
+      audio.removeEventListener('error', cancelSkip);
+      audio.removeEventListener('emptied', cancelSkip);
       audio.removeEventListener('playing', start);
       audio.removeEventListener('seeked', reanchor);
       audio.removeEventListener('ratechange', sync);
@@ -102,9 +126,47 @@ export function AudioTimeline({
       audio.removeEventListener('timeupdate', observe);
       document.removeEventListener('visibilitychange', visibility);
     };
-  }, [failed, media, sync]);
+  }, [failed, media, sync, publishTime, cancelSkip]);
+  useLayoutEffect(() => {
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const change = () => {
+      if (motion.matches) cancelSkip();
+    };
+    motion.addEventListener('change', change);
+    return () => {
+      cancelAnimationFrame(skipFrame.current);
+      motion.removeEventListener('change', change);
+    };
+  }, [cancelSkip]);
+  useImperativeHandle(ref, () => ({
+    skipTo(value) {
+      const audio = media.current;
+      if (!audio || !seekable) return;
+      const from = visibleTime.current;
+      // Seek the actual audio immediately; only its visual playhead travels.
+      seek(value);
+      if (document.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      const started = performance.now();
+      setSkipPosition(from);
+      const animate = () => {
+        const progress = Math.min(1, (performance.now() - started) / 280);
+        // Cubic ease-in-out, without overshoot. Follow the advancing clock so
+        // finishing the tween does not snap back or freeze playing audio.
+        const eased = progress < 0.5 ? 4 * progress ** 3 : 1 - (-2 * progress + 2) ** 3 / 2;
+        const destination = Math.max(0, Math.min(duration, targetTime.current));
+        setSkipPosition(from + (destination - from) * eased);
+        if (progress < 1) skipFrame.current = requestAnimationFrame(animate);
+        else {
+          skipFrame.current = 0;
+          setSkipPosition(null);
+        }
+      };
+      skipFrame.current = requestAnimationFrame(animate);
+    },
+  }));
   function seek(value: number) {
     if (!media.current || !seekable) return;
+    cancelSkip();
     media.current.currentTime = Math.max(0, Math.min(duration, value));
     sync();
   }
@@ -118,7 +180,9 @@ export function AudioTimeline({
     scrubbing.current = false;
     setSeekDraft(null);
   }
-  const displayedTime = seekDraft ?? Math.max(0, Math.min(duration || Infinity, time));
+  const displayedTime =
+    seekDraft ?? skipPosition ?? Math.max(0, Math.min(duration || Infinity, time));
+  visibleTime.current = displayedTime;
   return (
     <div className="wave-timeline">
       <div className="wave-seek">
@@ -150,6 +214,7 @@ export function AudioTimeline({
           }
           onPointerDown={(event) => {
             if (event.button !== 0) return;
+            cancelSkip();
             scrubbing.current = true;
             event.currentTarget.setPointerCapture(event.pointerId);
           }}

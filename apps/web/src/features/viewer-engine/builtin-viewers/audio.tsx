@@ -13,7 +13,7 @@ import { viewerPath } from '../core/access.js';
 import type { ViewerProps } from '../core/types.js';
 import { ViewerIcon } from '../viewer-icon.js';
 import { ViewerSelect } from '../viewer-select.js';
-import { AudioTimeline } from './audio-timeline.js';
+import { AudioTimeline, type AudioTimelineHandle } from './audio-timeline.js';
 import { waveformLimits } from './audio-waveform-model.js';
 import './audio.css';
 
@@ -32,6 +32,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
     format = useFormat();
   const src = viewerPath(serverId, source);
   const media = useRef<HTMLAudioElement>(null);
+  const timeline = useRef<AudioTimelineHandle>(null);
   const generation = useRef(0);
   const lastVolume = useRef(1);
   const [state, setState] = useState(initial);
@@ -109,12 +110,6 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
   const duration =
     decodedDuration ?? (Number.isFinite(state.duration) && state.duration > 0 ? state.duration : 0);
   const seekable = state.ready && duration > 0 && !failed;
-  function seek(value: number) {
-    const audio = media.current;
-    if (!audio || !seekable) return;
-    audio.currentTime = Math.max(0, Math.min(duration, value));
-    sync();
-  }
   function mute() {
     const audio = media.current;
     if (!audio) return;
@@ -196,6 +191,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
           </div>
         </div>
         <AudioTimeline
+          ref={timeline}
           media={media}
           onDuration={setDecodedDuration}
           src={src}
@@ -221,7 +217,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
             <AudioButton
               label={t('viewer.audioBack')}
               disabled={!seekable}
-              onClick={() => seek((media.current?.currentTime ?? 0) - 10)}
+              onClick={() => timeline.current?.skipTo((media.current?.currentTime ?? 0) - 10)}
             >
               <AudioIcon kind="back" />
             </AudioButton>
@@ -236,7 +232,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
             <AudioButton
               label={t('viewer.audioForward')}
               disabled={!seekable}
-              onClick={() => seek((media.current?.currentTime ?? 0) + 10)}
+              onClick={() => timeline.current?.skipTo((media.current?.currentTime ?? 0) + 10)}
             >
               <AudioIcon kind="forward" />
             </AudioButton>
