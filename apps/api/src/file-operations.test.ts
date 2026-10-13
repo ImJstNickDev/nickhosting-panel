@@ -1,9 +1,10 @@
 import { createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { createGzip, gzipSync } from 'node:zlib';
+import { createGzip, gzipSync, zstdCompressSync } from 'node:zlib';
 import type { PterodactylAdapter, ServerFile } from '@nickhosting/pterodactyl-adapter';
 import { pack } from 'tar-stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +16,7 @@ import {
   validateFileDeletes,
   validateFileMoves,
 } from './file-operations.js';
+import { rar5, tarBz2, tarXz } from './viewer-archive-fixtures.js';
 
 const roots: string[] = [];
 describe('bounded provider file batches', () => {
@@ -279,7 +281,7 @@ describe('safe file copy planning', () => {
   );
 });
 describe('validated file archive staging', () => {
-  it.each(['zip', 'tar', 'tgz'] as const)(
+  it.each(['zip', 'tar', 'tgz', 'tar.bz2', 'tar.xz', 'tar.zst', '7z', 'rar'] as const)(
     'returns a validation error for malformed %s data',
     async (format) => {
       const f = await fixture();
@@ -290,6 +292,80 @@ describe('validated file archive staging', () => {
       });
     },
   );
+
+  it.each([
+    ['tar.xz', tarXz, 'folder/hello.txt', 'hello'],
+    ['tar.bz2', tarBz2, 'folder/hello.txt', 'hello'],
+    ['rar', rar5, 'helloworld.txt', 'hello libarchive test suite!\n'],
+  ] as const)(
+    'stages %s using the shared decoder with exact output',
+    async (format, bytes, path, expected) => {
+      const f = await fixture();
+      const archive = join(f.root, `source.${format}`);
+      await writeFile(archive, Buffer.from(bytes, 'base64'));
+      const result = await stageFileArchive(archive, format, f.stage, undefined, {
+        minimumFreeBytes: 0,
+        minimumFreePercent: 0,
+      });
+      expect(await readFile(result.find((entry) => entry.path === path)?.local ?? '', 'utf8')).toBe(
+        expected,
+      );
+    },
+  );
+
+  it('stages Zstandard TAR with the existing validation and no decoded TAR copy', async () => {
+    const f = await fixture();
+    const raw = await tar(f.root, [{ name: 'nested/settings.txt', content: 'safe zstd' }]);
+    const archive = join(f.root, 'source.tar.zst');
+    await writeFile(archive, zstdCompressSync(await readFile(raw)));
+    const result = await stageFileArchive(archive, 'tar.zst', f.stage, undefined, {
+      minimumFreeBytes: 0,
+      minimumFreePercent: 0,
+    });
+    expect(await readFile(result[0]?.local ?? '', 'utf8')).toBe('safe zstd');
+  });
+
+  it('stages an LZMA2 7z archive and preserves nested files and empty directories', async () => {
+    const f = await fixture();
+    const factory = createRequire(import.meta.url)('sevenzip-wasm') as (
+      options: object,
+    ) => Promise<{
+      FS: {
+        mkdir(path: string): void;
+        writeFile(path: string, bytes: Uint8Array): void;
+        readFile(path: string): Uint8Array;
+      };
+      callMain(args: string[]): number;
+    }>;
+    const module = await factory({ print() {}, printErr() {} });
+    module.FS.mkdir('/folder');
+    module.FS.mkdir('/empty');
+    module.FS.writeFile('/folder/hello.txt', Buffer.from('hello 7z'));
+    expect(module.callMain(['a', '-t7z', '/fixture.7z', '/folder', '/empty'])).toBe(0);
+    const archive = join(f.root, 'source.7z');
+    await writeFile(archive, module.FS.readFile('/fixture.7z'));
+    const result = await stageFileArchive(archive, '7z', f.stage, undefined, {
+      minimumFreeBytes: 0,
+      minimumFreePercent: 0,
+    });
+    expect(result).toContainEqual({ path: 'empty', size: 0, directory: true, local: '' });
+    expect(
+      await readFile(
+        result.find((entry) => entry.path === 'folder/hello.txt')?.local ?? '',
+        'utf8',
+      ),
+    ).toBe('hello 7z');
+  });
+
+  it('rejects dangerous members through the additional compressed TAR decoder', async () => {
+    const f = await fixture();
+    const raw = await tar(f.root, [{ name: '../escape', content: 'unsafe' }]);
+    const archive = join(f.root, 'source.tar.zst');
+    await writeFile(archive, zstdCompressSync(await readFile(raw)));
+    await expect(stageFileArchive(archive, 'tar.zst', f.stage)).rejects.toMatchObject({
+      code: 'validation_failed',
+    });
+  });
 
   it('preserves empty directories in ZIP and TAR archives', async () => {
     const f = await fixture();

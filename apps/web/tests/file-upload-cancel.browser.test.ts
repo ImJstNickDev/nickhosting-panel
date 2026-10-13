@@ -300,7 +300,12 @@ describe('M5 parallel file upload batches', () => {
       await completed(next);
     } catch (failure) {
       throw new Error(
-        JSON.stringify({ requests, queue: await queue().innerText().catch(() => '') }),
+        JSON.stringify({
+          requests,
+          queue: await queue()
+            .innerText()
+            .catch(() => ''),
+        }),
         { cause: failure },
       );
     }

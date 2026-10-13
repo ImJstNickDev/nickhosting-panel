@@ -988,3 +988,19 @@ source watcher loads the matching private-cache code. An older extension's absen
 endpoint retains the previous individual-URL behavior. Token expiry/API restart
 refreshes unused credentials, not completed uploads. See the
 [extension validation and rollback record](BLUEPRINT-EXTENSION.md#2026-10-12--120-bulk-upload-credentials).
+
+## Optional private file viewers — 2026-10-13
+
+The shared viewer engine uses a separate read-only SFTPGo account class and
+transport configuration. It does not unlock external SFTP or reuse its secrets.
+The [reviewable deployment proposal](M5-VIEWER-DEPLOYMENT.md) adds one private
+service and an explicitly approved read-only Wings-data mount. It is not active
+merely because the real Pterodactyl adapter is configured. No Blueprint update or
+Panel/Wings configuration edit is required.
+
+Until that transport is configured, existing text editing and downloads continue;
+new preview dependencies load lazily and do not prevent API startup. New npm
+packages require rebuilding/recreating API/Vite, and migration024 must be applied
+explicitly to development before activating personal viewer preferences. No dev
+database reset is needed. All activation steps, source permissions, risks and
+rollback are documented in the linked proposal and require its exact approval.

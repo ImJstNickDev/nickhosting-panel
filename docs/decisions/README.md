@@ -29,3 +29,5 @@ status and amendment before applying historical milestone numbers.
 - [0015 — Per-user provider technical accounts](0015-provider-technical-accounts.md)
 
 - [0016 — Declared provider readiness and responder continuity](0016-provider-readiness.md)
+
+- [0017 — Shared file viewers and private range access](0017-shared-file-viewers.md)

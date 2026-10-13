@@ -6935,3 +6935,117 @@ No visual, API or infrastructure change is involved.
 - `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` and focused Biome:
   passed. Only existing isolated browser fixtures were used; no live file writes,
   manual restart, provider or infrastructure changes.
+
+### 2026-10-13 — Shared file viewer engine, first pass (issue #26)
+
+Implemented the shared lazy viewer engine, personal Open with defaults, reusable
+private SFTP transport and readonly range endpoints. Existing CodeMirror editing,
+files/downloads and optimized provider paths remain in place. Builtins now cover
+images/ICO, browser-native media, JSON/JSONC/JSON5, SQLite and archive virtual
+folders. Archive extraction extends the existing staging pipeline. See
+[ADR0017](decisions/0017-shared-file-viewers.md),
+[format/dependency evidence](M5-VIEWER-FORMATS.md) and
+[the exact activation proposal](M5-VIEWER-DEPLOYMENT.md).
+
+Validation on the implemented source:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-cache.test.ts apps/api/src/viewer-archive.test.ts apps/api/src/viewer-sqlite.test.ts apps/api/src/viewer-http.test.ts apps/api/src/viewer-access-watch.test.ts apps/api/src/file-operations.test.ts packages/external-services/src/viewer-sftp.test.ts packages/external-services/src/viewer-sftpgo.test.ts packages/external-services/src/external.test.ts packages/core/src/viewer-config.test.ts packages/game-sdk/src/viewers.test.ts apps/web/src/features/viewer-engine`:
+  **169 passed, 14 files, 21.53s**. This is the focused affected suite, not the
+  historical complete M1–M5 matrix. Subsequent narrow transport/layout changes
+  have their affected reruns recorded below.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-viewers.integration.test.ts apps/api/src/viewer-service.integration.test.ts packages/external-services/src/viewer-sftpgo.integration.test.ts apps/api/src/file-operations.integration.test.ts`:
+  **53 passed, 4 files, 18.22s**. PostgreSQL uses generated isolated schemas;
+  SFTPGo uses fresh marked accounts/directories in the existing approved M2 test
+  stack. Cleanup removed only those fixtures. Service and handler tests isolate
+  external providers where stated in their fixtures; they do not prove a live
+  Wings mount. Real SFTP tests prove ranges, read-only permissions, cross-server
+  and symlink confinement, retained local transport revocation, and no home
+  initialization or owner/mode changes on login.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts`:
+  **6 passed, 28.30s**. Actual React/browser rendering with isolated identity and
+  fixture viewer HTTP responses: SVG script isolation, ICO frame selection,
+  JSON integer preservation/defaults, archive navigation/text preview, readonly
+  SQLite, real WAV playback, unsupported AVI feedback, Italian mobile chooser,
+  keyboard dismissal and unconfigured fallback without preference-table reads.
+  Axe scan of the mobile chooser: **zero violations**. This is not a claim that
+  every media codec or every WCAG criterion has been verified.
+- After visual review found the archive parent row right-aligned, one CSS selector
+  was corrected. Only its archive browser journey was rerun: **1 passed**, five
+  unrelated viewer journeys skipped; screenshot regenerated and reviewed.
+- `scripts/dev.sh pnpm typecheck`: passed for backend, WebPanel and browser tests.
+- `scripts/dev.sh pnpm build` and `scripts/dev.sh pnpm build:runtime`: passed.
+  Viewer modules are separate lazy chunks; existing editor/application chunks
+  retain Vite's size warning. Runtime build did not start services or migrate DBs.
+- `scripts/dev.sh pnpm exec biome check . --diagnostic-level=error --max-diagnostics=20`:
+  passed, 559 files. An initial full lint run found two pre-existing blockers:
+  formatting in upload-cancellation diagnostics and a decorative avatar SVG
+  missing explicit accessibility semantics. Both received minimal corrections;
+  no functional upload or game behavior changed. Existing warning-level
+  diagnostics are not described as eliminated.
+- `scripts/dev.sh pnpm format:check`: passed, 555 files.
+- `scripts/dev.sh pnpm i18n:compile`: 1,288 keys, EN/IT/pseudolocale parity.
+- Combined current development Compose overlays plus `compose.dev.viewers.yaml`
+  parsed successfully with fixture-only viewer environment values; no resources
+  were created. Preparation-script shell syntax and boundaries were reviewed.
+
+Independent review found and resolved: deceptive ICO DIB dimensions bypassing
+pixel limits; cancelled SQLite queries poisoning a retained shared worker;
+full archive-member reads skipping EOF/CRC validation; insufficient pooled-handle
+headroom; request-bound cancellation of shared snapshots; and retention of old
+credential identities during rotation. Added targeted regression coverage. Final
+review reports no remaining must-fix in the reviewed source/configuration. It
+explicitly retains the expired-account cleanup limitation documented with issue26.
+
+Sanitized browser screenshots, reviewed by the coordinator and independent UI
+reviewer: [image](screenshots/m5/file-viewer-image-desktop-en.png),
+[JSON](screenshots/m5/file-viewer-json-desktop-en.png),
+[archive](screenshots/m5/file-viewer-archive-desktop-en.png),
+[SQLite](screenshots/m5/file-viewer-sqlite-desktop-en.png),
+[Italian mobile](screenshots/m5/file-viewer-json-mobile-it.png), and
+[Open with](screenshots/m5/file-viewer-open-with-mobile-it.png).
+
+Development continuity: source hot reload initially exposed missing new packages
+in the existing API image, causing HTTP502. Optional parser/broker loading was
+made lazy; API recovered through its existing watcher, without any Docker restart.
+The API container is healthy and public `/v1/setup` returns HTTP200. The existing
+file/text path works while private viewers remain unconfigured. No development
+accounts/data were reset. No live Panel/Wings/game-server writes, Blueprint
+installation, network changes, new containers, or new Wings mounts occurred.
+
+Activation remains pending the exact Owner approval in the deployment proposal:
+new private SFTPGo service/read-only mount, scoped empty state preparation,
+API/Vite dependency rebuild/recreation and explicit additive development migration.
+Single compressed streams and game-specific viewers remain outside this first
+pass. 7z/RAR limits, native media codec variability and SQLite snapshot uncertainty
+are explicit. SFTPGo issue18 remains a separate production-release gate; its three
+retained-transport regressions were not rerun or reported as security passes.
+
+Viewer transport benchmark and final narrow rerun:
+
+- Private reproducible command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec tsx .codex/local/viewer-cold-warm.ts`. Existing isolated SFTPGo2.7.6,
+  new 1MiB fixture file, one cold and twenty warm OPEN/FSTAT +64KiB READ operations.
+  Exactly one SSH connection and one SFTP channel served all21 operations. Account
+  issuance was measured separately; each run removed its own account/directory.
+- First run: cold626.72ms; warm min219.78, median227.67, mean227.17, max240.82ms.
+  Repeating44ms steps prompted inspection of the installed ssh2 client, which
+  created a socket without enabling TCP_NODELAY.
+- The broker now calls the documented
+  [ssh2 `setNoDelay(true)` method](https://github.com/mscdex/ssh2#client-methods)
+  once after connecting. Identical second run: cold131.40ms; warm min2.25,
+  median3.32, mean3.48, max5.86ms. Warm median OPEN/FSTAT1.45ms, READ1.89ms,
+  CLOSE0.76ms. No server, Docker-network or kernel setting changed.
+- Only affected tests were repeated after that fix: transport **11/11 passed**
+  (14.30s), real isolated SFTPGo **4/4 passed**, scoped Biome passed. The new
+  regression asserts the client's no-delay setting.
+- These measurements exclude HTTP/browser latency, NickHosting authorization,
+  production Wings storage and large-file throughput. They are not a claim that
+  every viewer opens in3ms. The first benchmark remains recorded rather than
+  being replaced by the faster result.
+
+Publication checks: `git diff --cached --check` and
+`python3 scripts/check-governance.py` passed: 737 indexed text files,215 reviewed
+PNGs,604 relative links,4 TOML files and44 ignored-path cases. The secret scan is
+heuristic; private ledgers, environments, SFTP state and benchmarks stay untracked.
+Final `pnpm lint` passed with39 pre-existing/advisory warnings and2 informational
+diagnostics; format check passed. Concurrent account-menu/sidebar edits in the
+shared workspace are not part of this viewer delivery and were preserved unstaged.

@@ -893,3 +893,41 @@ Download URL preparation remains best-effort: if opening a directory shares an
 already-running metadata-only path/tree query, that response does not sign URLs.
 The existing on-demand editor/download issuance handles a cold cache. No extra
 directory request is made solely to warm signed URLs in this uncommon case.
+
+### File viewer contracts (2026-10-13)
+
+All routes below require the existing authenticated principal and `server:read`
+on the managed server. They reuse the ordinary Origin/session restrictions. Viewer
+preferences do not authorize bytes or make a game integration available. No SSH
+credentials, signed provider URLs, host filesystem paths or management keys are
+returned to the browser.
+
+| Route under `/v1/servers/:id/files/viewer` | Contract |
+| --- | --- |
+| `GET /capabilities` | `available` and small image/ICO/JSON preview budgets. Optional transport can remain unconfigured without preventing ordinary text editing or downloads. |
+| `GET /preferences` | Current actor's server/game/global extension preferences. Assisted access does not read or rewrite the subject's preferences. |
+| `PUT /preferences` | `{scope, extension, viewerId}`; builtin or namespaced compiled first-party identifier. One preference per actor/scope/extension. |
+| `DELETE /preferences` | `{scope, extension}` removes only that actor's preference. |
+| `GET ?path=...` | Authorized file size and modification time. |
+| `GET /content?path=...` | Bounded stream with single HTTP Range/HEAD, 206/416 semantics, no-store, nosniff and sandboxed SVG response. `download=true` adds a safe filename. |
+| `GET /archive?path=...&directory=...&offset=0&limit=200` | Retained virtual-folder index, total and next offset. Maximum page size 500. |
+| `GET /archive/content?path=...&entry=...` | Chosen member only, with stream/range/download handling. Compressed-member seeking may decode preceding bytes. |
+| `GET /sqlite?path=...&table=...&offset=0` | Table names, snapshot consistency and an optional page of 100 rows. No arbitrary SQL. Typed cells preserve integer precision and label truncation/BLOB sizes. |
+
+Migration `024_file_viewers.sql` adds personal preferences and encrypted private
+SFTP credential intent/state. Settings `fileViewers` and write-only secret
+`viewerSftpgoApiKey` are independent of external-user SFTP configuration and follow
+existing Owner/environment precedence. Credential retirement retains its identity
+record; changing transport identity never silently reuses an old account.
+
+HTTP cancellation releases a subscriber; parsed archive/SQLite sessions retain
+shared source handles for bounded reuse. A shared local authorization watch checks
+active session/server access and credential/configuration revocation each second,
+not each chunk. Loss of authoritative permission checks aborts further reads.
+Disk cache keys include the authorizing session so revoking one principal cannot
+cancel another principal's cache population. There is no background game-file
+crawl or preview download for unopened files.
+
+See [format limits and evidence](M5-VIEWER-FORMATS.md) and
+[deployment approval/rollback](M5-VIEWER-DEPLOYMENT.md). Browser fixtures and isolated
+SFTP transport tests do not establish a live Wings mount or production readiness.

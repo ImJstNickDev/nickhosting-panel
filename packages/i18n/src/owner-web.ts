@@ -1,4 +1,5 @@
 export const ownerWebMessages: Record<string, readonly [string, string]> = {
+  'owner.config.fileViewers': ['Private file viewers', 'Visualizzatori file privati'],
   'owner.readOnlySettings': [
     'Your role can view these settings. Only the Owner can change them.',
     'Il tuo ruolo può consultare queste impostazioni. Solo l’Owner può modificarle.',
@@ -225,6 +226,7 @@ const secretLabels: Record<string, readonly [string, string]> = {
   discordClientSecret: ['Discord client secret', 'Segreto client Discord'],
   smtpPassword: ['SMTP password', 'Password SMTP'],
   sftpgoApiKey: ['SFTPGo API key', 'Chiave API SFTPGo'],
+  viewerSftpgoApiKey: ['File viewer SFTPGo API key', 'Chiave API SFTPGo per i visualizzatori'],
   cloudflareApiToken: ['Cloudflare API token', 'Token API Cloudflare'],
   gatewayControlToken: ['Gateway control token', 'Token controllo Gateway'],
   curseforgeApiKey: ['CurseForge API key', 'Chiave API CurseForge'],

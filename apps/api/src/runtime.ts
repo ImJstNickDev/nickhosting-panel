@@ -21,6 +21,7 @@ import {
 } from '@nickhosting/server-management';
 import { createTransport } from 'nodemailer';
 import { createApp } from './app.js';
+import { closeFileViewers, closeViewerArchives } from './file-viewers.js';
 
 /** Explicit factory: importing API modules never opens sockets or changes the DB. */
 export async function createRuntime(env: Readonly<Record<string, string | undefined>>) {
@@ -142,8 +143,10 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       database,
       logger,
       config: initial.values,
-      close: () => {
+      close: async () => {
         directoryIdentityCache.close();
+        await closeViewerArchives(database.db);
+        await closeFileViewers(database.db);
         return database.db.destroy();
       },
     };

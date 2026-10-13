@@ -71,8 +71,26 @@ import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './fold
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
+import {
+  availableViewers,
+  preferredViewer,
+  type ViewerId,
+  type ViewerSource,
+} from './viewer-engine/core/registry.js';
+import { OpenWith } from './viewer-engine/open-with.js';
+import {
+  useViewerCapabilities,
+  useViewerPreferences,
+  viewerCapabilitiesQuery,
+  viewerPreferencesQuery,
+} from './viewer-engine/preferences.js';
+import './viewer-engine/viewer.css';
 
-type Mode = 'mkdir' | 'new' | 'edit' | 'rename' | 'delete' | 'extract';
+const FileViewer = lazy(() =>
+  import('./viewer-engine/engine.js').then((module) => ({ default: module.FileViewer })),
+);
+
+type Mode = 'mkdir' | 'new' | 'edit' | 'view' | 'rename' | 'delete' | 'extract';
 type UploadItem = {
   id: number;
   file: File;
@@ -258,6 +276,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const searchInput = useRef<HTMLInputElement>(null);
   const server = useServer(serverId),
     transfers = useTransfers(serverId);
+  const viewerIdentity = saveScope?.join('\0') ?? '';
+  const viewerCapabilities = useViewerCapabilities(serverId, viewerIdentity);
+  const viewerPreferences = useViewerPreferences(serverId, viewerIdentity);
   const directoryKey = saveScope
     ? JSON.stringify(['file-directory', ...saveScope, serverId])
     : undefined;
@@ -313,6 +334,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setPathFocusSignal((value) => value + 1);
   }, []);
   const [mode, setMode] = useState<Mode>();
+  const [viewed, setViewed] = useState<{
+    entry: ServerFile;
+    source: ViewerSource;
+    viewerId?: ViewerId;
+  }>();
+  const [openWith, setOpenWith] = useState<{ entry: ServerFile; source: ViewerSource }>();
   const [targets, setTargets] = useState<string[]>([]);
   const [content, setContent] = useState('');
   const [newName, setNewName] = useState('');
@@ -345,6 +372,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [editorAvailability, setEditorAvailability] =
     useState<ReturnType<typeof fileEditorAvailability>>('text');
   const editing = mode === 'edit' || mode === 'new';
+  const viewing = mode === 'view';
+  const displaying = editing || viewing;
 
   const [error, setError] = useState<unknown>();
   const [copied, setCopied] = useState(false);
@@ -545,7 +574,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     identity: JSON.stringify(directoryQuery.queryKey[3]),
     container: managerRef,
     rows,
-    enabled: Boolean(saveScope && files.data && !files.error && !editing),
+    enabled: Boolean(saveScope && files.data && !files.error && !displaying),
   });
   const canManage = server.data?.permissions.manage === true;
   const canMutate = canManage && server.data?.availableActions.files === true;
@@ -620,7 +649,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const focusSearch = (event: globalThis.KeyboardEvent) => {
       const modifier = event.altKey && !event.ctrlKey && !event.metaKey;
       const pathRequest = modifier && event.code === 'KeyG';
-      const searchRequest = modifier && event.code === 'KeyK' && !editing;
+      const searchRequest = modifier && event.code === 'KeyK' && !displaying;
       if (
         event.defaultPrevented ||
         event.isComposing ||
@@ -640,7 +669,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
     document.addEventListener('keydown', focusSearch);
     return () => document.removeEventListener('keydown', focusSearch);
-  }, [editPath, editing]);
+  }, [editPath, displaying]);
   useEffect(() => {
     if (!menu) return;
     menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -797,7 +826,21 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       setDirty(false);
     }
   }
-  async function open(entry: ServerFile, folder = directory) {
+  function viewerSource(entry: ServerFile, folder = directory): ViewerSource {
+    return {
+      path: join(folder, entry.name),
+      name: entry.name,
+      size: entry.size,
+      gameId: server.data?.gameId,
+    };
+  }
+  const menuCanOpen =
+    menu &&
+    (!menu.entry.is_file ||
+      availableViewers(viewerSource(menu.entry)).some(
+        (choice) => choice.id === 'text' || viewerCapabilities.data?.available === true,
+      ));
+  async function open(entry: ServerFile, folder = directory, forcedViewer?: ViewerId) {
     if (mutationRunning.current || transferFlow.active) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     if (entry.is_symlink) return;
@@ -809,6 +852,44 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const pending = getFileSave(saveScope, serverId, join(folder, entry.name));
     if (pending) {
       restoreSave(pending);
+      return;
+    }
+    const source = viewerSource(entry, folder);
+    let viewerId = forcedViewer;
+    if (!viewerId && availableViewers(source).some((choice) => choice.id !== 'text')) {
+      const sequence = ++readSequence.current;
+      const identity = saveIdentity.current;
+      try {
+        const capabilities = await queryClient.ensureQueryData(
+          viewerCapabilitiesQuery(serverId, viewerIdentity),
+        );
+        if (capabilities.available) {
+          const preferences =
+            viewerPreferences.data?.preferences ??
+            (await queryClient.ensureQueryData(viewerPreferencesQuery(serverId, viewerIdentity)))
+              .preferences;
+          viewerId = preferredViewer(source, preferences);
+        }
+      } catch (failure) {
+        setError(failure);
+        return;
+      }
+      if (
+        !mounted.current ||
+        sequence !== readSequence.current ||
+        identity !== saveIdentity.current
+      )
+        return;
+    }
+    if (viewerId && viewerId !== 'text') {
+      cancelRead();
+      setPathEditing(false);
+      setDirectory(folder);
+      setTargets([entry.name]);
+      setDirty(false);
+      setViewed({ entry, source, viewerId });
+      setMode('view');
+      setMenu(undefined);
       return;
     }
     setPathEditing(false);
@@ -1067,7 +1148,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const modifier = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
     if (
-      editing ||
+      displaying ||
       event.defaultPrevented ||
       ('nativeEvent' in event ? event.nativeEvent.isComposing : event.isComposing) ||
       target.closest(
@@ -1641,13 +1722,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       tabIndex={-1}
       onKeyDown={keyboard}
       onDragEnter={(event) => {
-        if (!editing && !fileActionsBusy && event.dataTransfer.types.includes('Files')) {
+        if (!displaying && !fileActionsBusy && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(true);
         }
       }}
       onDragOver={(event) => {
-        if (!editing && event.dataTransfer.types.includes('Files')) {
+        if (!displaying && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           event.dataTransfer.dropEffect = uploadAvailable && !fileActionsBusy ? 'copy' : 'none';
         }
@@ -1656,7 +1737,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropActive(false);
       }}
       onDrop={(event) => {
-        if (!editing && event.dataTransfer.types.includes('Files')) {
+        if (!displaying && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(false);
           if (
@@ -1669,7 +1750,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         }
       }}
     >
-      <div className={`fm-toolbar ${editing ? 'fm-toolbar-editing' : ''}`}>
+      <div className={`fm-toolbar ${displaying ? 'fm-toolbar-editing' : ''}`}>
         {pathEditing ? (
           <FilePathPicker
             serverId={serverId}
@@ -1687,7 +1768,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   <button
                     type="button"
                     className="text-button"
-                    aria-current={!editing && index === all.length - 1 ? 'page' : undefined}
+                    aria-current={!displaying && index === all.length - 1 ? 'page' : undefined}
                     onClick={() => navigate(part.path)}
                     onDragOver={dragOverFolder}
                     onDrop={(event) => dropFolder(event, part.path)}
@@ -1696,7 +1777,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   </button>
                 </li>
               ))}
-              {editing && (
+              {displaying && (
                 <li>
                   {inlineRename && mode === 'edit' ? (
                     <InlineFileRename
@@ -1720,7 +1801,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 </li>
               )}
             </ol>
-            {!editing ? (
+            {!displaying ? (
               <Tooltip placement="cursor" content={t('file.editPath', { shortcut: pathShortcut })}>
                 <button
                   type="button"
@@ -1753,7 +1834,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             )}
           </nav>
         )}
-        {!editing && (
+        {!displaying && (
           <>
             <div className="fm-search">
               <input
@@ -1909,6 +1990,20 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             </fieldset>
           </>
         )}
+        {viewing && (
+          <div className="fm-editor-toolbar">
+            <Tooltip placement="cursor" content={t('file.backToFiles')}>
+              <button
+                type="button"
+                className="fm-tool"
+                aria-label={t('file.backToFiles')}
+                onClick={closeEditor}
+              >
+                <ToolbarIcon kind="home" />
+              </button>
+            </Tooltip>
+          </div>
+        )}
         {editing && (
           <div className="fm-editor-toolbar" role="toolbar" aria-label={t('file.editor')}>
             {(
@@ -1959,10 +2054,27 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 </button>
               </Tooltip>
             ))}
+            {mode === 'edit' && (
+              <button
+                type="button"
+                className="text-button"
+                disabled={dirty || saving || reading || mutating}
+                onClick={() => {
+                  const entry = files.data?.find((item) => item.name === targets[0]);
+                  if (entry)
+                    setOpenWith({
+                      entry,
+                      source: viewerSource(entry),
+                    });
+                }}
+              >
+                {t('viewer.openWith')}
+              </button>
+            )}
           </div>
         )}
       </div>
-      {!editing && totalSelected > 0 && (
+      {!displaying && totalSelected > 0 && (
         <section className="fm-selection" aria-label={t('file.selection')}>
           <span className="fm-selection-count">{t('file.selected', { count: totalSelected })}</span>
           <div className="fm-selection-actions">
@@ -2044,7 +2156,24 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           {t('file.pathCopied')}
         </span>
       )}
-      {editing ? (
+      {viewing && viewed ? (
+        <Suspense fallback={<FileEditorSkeleton />}>
+          <FileViewer
+            key={`${viewerIdentity}:${viewed.source.path}:${viewed.viewerId}`}
+            source={viewed.source}
+            viewerId={viewed.viewerId}
+            serverId={serverId}
+            identity={viewerIdentity}
+            onText={() => void open(viewed.entry, directory, 'text')}
+            onExtract={
+              canMutate &&
+              /\.(?:zip|jar|tar|tgz|tar\.(?:gz|bz2|xz|zst)|7z|rar)$/i.test(viewed.entry.name)
+                ? () => chooseMode('extract', [viewed.entry.name])
+                : undefined
+            }
+          />
+        </Suspense>
+      ) : editing ? (
         <section
           className="fm-editor-view"
           ref={editorForm}
@@ -2394,23 +2523,34 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               <button
                 type="button"
                 role="menuitem"
-                disabled={menu.entry.is_file && fileEditorAvailability(menu.entry) !== 'text'}
-                aria-describedby={
-                  menu.entry.is_file && fileEditorAvailability(menu.entry) !== 'text'
-                    ? 'file-edit-unavailable'
-                    : undefined
-                }
+                disabled={!menuCanOpen}
+                aria-describedby={!menuCanOpen ? 'file-edit-unavailable' : undefined}
                 onClick={() => {
                   void open(menu.entry);
                   setMenu(undefined);
                 }}
               >
-                {t(menu.entry.is_file ? 'web.edit' : 'service.openFolder')}
+                {t(menu.entry.is_file ? 'viewer.open' : 'service.openFolder')}
               </button>
-              {menu.entry.is_file && fileEditorAvailability(menu.entry) !== 'text' && (
+              {!menuCanOpen && (
                 <small id="file-edit-unavailable" className="fm-menu-reason">
                   {t(`file.editorUnavailable.${fileEditorAvailability(menu.entry)}`)}
                 </small>
+              )}
+              {menu.entry.is_file && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenWith({
+                      entry: menu.entry,
+                      source: viewerSource(menu.entry),
+                    });
+                    setMenu(undefined);
+                  }}
+                >
+                  {t('viewer.openWith')}
+                </button>
               )}
               <button
                 type="button"
@@ -2492,6 +2632,19 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             </button>
           )}
         </div>
+      )}
+      {openWith && (
+        <OpenWith
+          serverId={serverId}
+          source={openWith.source}
+          available={viewerCapabilities.data?.available === true}
+          onClose={() => setOpenWith(undefined)}
+          onChoose={(id) => {
+            const chosen = openWith;
+            setOpenWith(undefined);
+            void open(chosen.entry, directory, id);
+          }}
+        />
       )}
       {preparingFolder && (
         <div className="fm-folder-progress" role="status">
@@ -2587,7 +2740,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       </Dialog>
       {transferFlow.dialog}
       <Dialog
-        open={Boolean(mode) && !editing}
+        open={Boolean(mode) && !displaying}
         className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
         title={t(
           mode === 'mkdir'
@@ -2646,7 +2799,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 mode === 'rename'
                   ? targets[0]
                   : mode === 'extract'
-                    ? `${targets[0]?.replace(/\.(tar\.)?(gz|bz2|xz|zip|tar|tgz|tbz2|txz)$/i, '')}-extracted`
+                    ? `${targets[0]?.replace(/\.(tar\.)?(gz|bz2|xz|zst|zip|jar|tar|tgz|tbz2|txz|7z|rar)$/i, '')}-extracted`
                     : ''
               }
             />

@@ -47,7 +47,7 @@ const groupFor = (key: string) =>
         ? 'gateway'
         : key.startsWith('minecraft')
           ? 'content'
-          : key.startsWith('sftp')
+          : key.startsWith('sftp') || key === 'fileViewers'
             ? 'sftp'
             : /dns|cloudflare|staticGame/.test(key)
               ? 'network'

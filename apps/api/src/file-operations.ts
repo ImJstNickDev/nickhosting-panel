@@ -32,7 +32,18 @@ import { createFileDirectoryPlan, fileDirectoryAncestors } from './file-director
 import { createFileOperationTrace } from './file-operation-trace.js';
 import type { ServerRouteOptions } from './servers.js';
 
-export const extractFormats = ['zip', 'tar', 'tar.gz', 'tgz'] as const;
+export const extractFormats = [
+  'zip',
+  'jar',
+  'tar',
+  'tar.gz',
+  'tgz',
+  'tar.bz2',
+  'tar.xz',
+  'tar.zst',
+  '7z',
+  'rar',
+] as const;
 const maxEntries = 20_000;
 const maxDepth = 64;
 const maxArchiveBytes = 8 * 1024 ** 3;
@@ -398,7 +409,7 @@ export async function stageFileArchive(
     files.push({ path, size, local });
   }
   try {
-    if (format === 'zip') {
+    if (format === 'zip' || format === 'jar') {
       await visitArchive(
         archive,
         async (entry) => {
@@ -417,6 +428,64 @@ export async function stageFileArchive(
           files.push({ path, size: 0, local: '', directory: true });
         },
       );
+    } else if (format === '7z' || format === 'rar') {
+      // Reuse the bounded isolated decoder. Only temporary local files are touched;
+      // the existing caller dispatches provider writes after the entire staging pass.
+      const [{ createArchiveViewer }, { ViewerCache, cachedFileSource, viewerNodeReadable }] =
+        await Promise.all([import('./viewer-archive.js'), import('./viewer-cache.js')]);
+      const cacheRoot = await mkdtemp(join(dirname(stage), 'archive-decoder-'));
+      const decoderBytes = 64 * 1024 ** 2;
+      const cache = new ViewerCache({
+        root: cacheRoot,
+        maxFileBytes: decoderBytes,
+        maxBytes: decoderBytes * 3,
+      });
+      let viewer: Awaited<ReturnType<typeof createArchiveViewer>> | undefined;
+      try {
+        await assertContentDiskSpace(stage, Math.min(archiveSize, decoderBytes), diskPolicy);
+        viewer = await createArchiveViewer(cachedFileSource(archive, archiveSize, 0), {
+          name: `source.${format}`,
+          key: archive,
+          cache,
+          signal,
+          limits: {
+            maxEntries,
+            maxEntryBytes: maxArchiveBytes,
+            maxExpandedBytes,
+            maxCompressionRatio,
+          },
+        });
+        const entries: { path: string; size: number; directory: boolean }[] = [];
+        const directories = [''];
+        while (directories.length) {
+          const directory = directories.pop() as string;
+          let offset = 0;
+          while (true) {
+            const page = viewer.list({ directory, offset, limit: 200 });
+            for (const entry of page.entries) {
+              const path = validate(entry.path, entry.size, entry.directory);
+              if (!entry.directory && entry.size > decoderBytes) badArchive('archive_budget');
+              entries.push({ path, size: entry.size, directory: entry.directory });
+              if (entry.directory) directories.push(path);
+            }
+            if (page.nextOffset === null) break;
+            offset = page.nextOffset;
+          }
+        }
+        for (const entry of entries) {
+          if (entry.directory) files.push({ ...entry, local: '' });
+          else {
+            // One cached decoder output plus its staged copy may coexist.
+            await assertContentDiskSpace(stage, entry.size * 2, diskPolicy);
+            const opened = await viewer.open(entry.path, signal);
+            await stageEntry(entry.path, entry.size, viewerNodeReadable(opened.stream));
+          }
+        }
+      } finally {
+        viewer?.close();
+        await cache.close();
+        await rm(cacheRoot, { recursive: true, force: true });
+      }
     } else {
       const { extract } = await import('tar-stream');
       const parser = extract();
@@ -456,10 +525,32 @@ export async function stageFileArchive(
         },
       });
       if (format === 'tar') await pipeline(input, expansionGuard, parser, { signal });
-      else await pipeline(input, createGunzip(), expansionGuard, parser, { signal });
+      else if (format === 'tar.gz' || format === 'tgz')
+        await pipeline(input, createGunzip(), expansionGuard, parser, { signal });
+      else {
+        // Keep TAR extraction streaming: share the viewer's codec without creating
+        // a second full decoded TAR on disk just to stage its selected files.
+        const [{ createTarDecoder }, { viewerNodeReadable }] = await Promise.all([
+          import('./viewer-archive.js'),
+          import('./viewer-cache.js'),
+        ]);
+        const decode = await createTarDecoder(format);
+        await pipeline(
+          viewerNodeReadable(decode(Readable.toWeb(input) as ReadableStream<Uint8Array>, signal)),
+          expansionGuard,
+          parser,
+          { signal },
+        );
+      }
     }
   } catch (error) {
     if (error instanceof DomainError) throw error;
+    if (
+      ['viewer_file_too_large', 'viewer_archive_budget', 'viewer_cache_busy'].includes(
+        (error as { code?: string })?.code ?? '',
+      )
+    )
+      badArchive('archive_budget');
     if ((error as NodeJS.ErrnoException)?.code === 'ENOSPC')
       throw new DomainError('resources_unavailable');
     badArchive('archive_invalid');

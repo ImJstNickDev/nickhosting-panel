@@ -28,6 +28,23 @@ export interface Database
     HealthTables,
     ProviderFeedTables,
     ProviderAccountTables {
+  viewer_sftp_credentials: {
+    id: string;
+    server_id: string;
+    binding: string;
+    envelope: EncryptedSecret;
+    expires_at: Date;
+    status: 'pending' | 'ready' | 'revoked' | 'retired';
+    external_user_id: number | null;
+    created_at: Generated<Date>;
+  };
+  file_viewer_preferences: {
+    user_id: string;
+    scope: 'server' | 'game' | 'global';
+    scope_id: string;
+    extension: string;
+    viewer_id: string;
+  };
   platform_settings: {
     key: string;
     value: Partial<PlatformConfig>;

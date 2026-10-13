@@ -1,0 +1,334 @@
+.ve-engine {
+  min-width: 0;
+}
+.ve-engine:focus {
+  outline: none;
+}
+.ve-toolbar,
+.ve-controls,
+.ve-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+.ve-toolbar {
+  min-height: 3rem;
+  padding: 0.35rem 0 0.6rem;
+}
+.ve-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+.ve-toolbar .secondary {
+  padding: 0.4rem 0.65rem;
+  background: transparent;
+  border-color: transparent;
+}
+.ve-toolbar .secondary:hover {
+  background: var(--surface-hover, #f1f2f4);
+}
+.ve-current-entry {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(38rem, 70vw);
+  white-space: nowrap;
+  font-size: 0.875rem;
+}
+.ve-body {
+  min-height: min(60vh, 34rem);
+  border: 1px solid var(--border, #dddfe4);
+  border-radius: 0.65rem;
+  background: var(--surface, #fff);
+  overflow: hidden;
+}
+.ve-body > .notice {
+  margin: 1rem;
+}
+.ve-controls {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border, #dddfe4);
+}
+.ve-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.875rem;
+}
+.ve-controls select {
+  padding: 0.35rem 0.5rem;
+  width: auto;
+  max-width: 22rem;
+}
+.ve-controls output {
+  font-variant-numeric: tabular-nums;
+  min-width: 3.5rem;
+  text-align: center;
+  font-size: 0.875rem;
+}
+.ve-controls .text-button {
+  color: inherit;
+  text-decoration: none;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 0.35rem;
+}
+.ve-controls .text-button:hover {
+  background: var(--surface-hover, #f1f2f4);
+}
+.ve-image-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: min(65vh, 42rem);
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  background: #f1f2f4;
+}
+.ve-image-stage:active {
+  cursor: grabbing;
+}
+.ve-image-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+  user-select: none;
+  flex-shrink: 0;
+}
+.ve-image-stage .ve-natural-size {
+  max-width: none;
+  max-height: none;
+}
+.ve-media {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: min(55vh, 30rem);
+  padding: 1rem;
+}
+.ve-media video {
+  width: 100%;
+  max-height: 65vh;
+  background: #111;
+}
+.ve-media audio {
+  width: min(100%, 40rem);
+}
+.ve-loading {
+  min-height: min(60vh, 34rem);
+  padding: 1rem;
+}
+.ve-loading > div {
+  width: 100%;
+  min-height: min(54vh, 30rem);
+  border-radius: 0.5rem;
+  opacity: 0.55;
+}
+.ve-json {
+  height: min(65vh, 42rem);
+  overflow: auto;
+  padding: 0.75rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+.ve-json ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 1.25rem;
+}
+.ve-json > ul {
+  padding-left: 0;
+}
+.ve-json li {
+  padding: 0.2rem 0;
+}
+.ve-json summary {
+  cursor: pointer;
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.ve-json summary small {
+  color: var(--muted, #636977);
+}
+.ve-json details > ul {
+  border-left: 1px solid var(--border, #dddfe4);
+  margin-left: 0.3rem;
+}
+.ve-json-value {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.ve-json-value > code {
+  color: #265f50;
+  background: none;
+}
+.ve-archive-breadcrumb {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border, #dddfe4);
+}
+.ve-kind,
+.ve-snapshot {
+  font-size: 0.8rem;
+  color: var(--muted, #636977);
+  margin-left: auto;
+}
+.ve-archive-list,
+.ve-table-scroll {
+  max-height: min(60vh, 38rem);
+  overflow: auto;
+}
+.ve-archive table,
+.ve-database table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.ve-archive th,
+.ve-archive td,
+.ve-database th,
+.ve-database td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border, #dddfe4);
+  text-align: left;
+}
+.ve-archive th:last-child,
+.ve-archive td:last-child:not([colspan]) {
+  text-align: right;
+}
+.ve-archive th,
+.ve-database th {
+  position: sticky;
+  top: 0;
+  background: var(--surface, #fff);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.ve-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0.25rem;
+  font-size: 0.875rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ve-entry:hover {
+  background: var(--surface-hover, #f1f2f4);
+}
+.ve-entry svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.ve-empty {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: var(--muted, #636977);
+}
+.ve-pagination {
+  justify-content: flex-end;
+  padding: 0.75rem;
+  font-size: 0.85rem;
+}
+.ve-database td > span {
+  display: block;
+  max-width: 26rem;
+  max-height: 6rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+}
+.ve-database td {
+  vertical-align: top;
+}
+.ve-chooser {
+  width: min(28rem, calc(100vw - 2rem));
+}
+.ve-chooser-filename {
+  overflow-wrap: anywhere;
+  color: var(--muted, #636977);
+  font-size: 0.875rem;
+}
+.ve-viewer-options {
+  display: grid;
+  gap: 0.35rem;
+  border: 0;
+  padding: 0;
+  margin: 0.75rem 0 1rem;
+}
+.ve-viewer-options label {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid var(--border, #dddfe4);
+  border-radius: 0.5rem;
+  padding: 0.8rem;
+  cursor: pointer;
+}
+.ve-viewer-options label:has(:checked) {
+  border-color: var(--accent, #3c65af);
+  background: #f3f6fb;
+}
+.ve-viewer-options input[type="radio"],
+.ve-remember input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+  margin: 0;
+  flex: 0 0 1rem;
+}
+.ve-viewer-options label > span {
+  flex: 1;
+}
+.ve-remember {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.875rem;
+}
+.ve-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.8rem 0;
+  font-size: 0.875rem;
+}
+.ve-scope select {
+  width: auto;
+  flex: 1;
+}
+.ve-chooser-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+.ve-text .cm-editor {
+  height: min(65vh, 42rem);
+}
+@media (max-width: 640px) {
+  .ve-toolbar {
+    align-items: flex-start;
+  }
+  .ve-current-entry {
+    max-width: 100%;
+    flex-basis: 100%;
+  }
+  .ve-controls {
+    gap: 0.4rem;
+  }
+  .ve-controls select {
+    max-width: 60vw;
+  }
+  .ve-pagination {
+    justify-content: space-between;
+  }
+}

@@ -30,6 +30,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { z } from 'zod';
+import { registerFileViewerRoutes } from './file-viewers.js';
 import { availableGameCatalog, registerGameModuleRoutes } from './game-modules.js';
 import { registerGatewayRoutes } from './gateway.js';
 import { registerHealthRoutes } from './health.js';
@@ -518,6 +519,19 @@ export function createApp(options: Options) {
     logger: options.logger,
     db,
     env,
+    principal,
+    acquireUploadSlot,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerFileViewerRoutes(app, {
+    logger: options.logger,
+    db,
+    env,
+    codec: options.codec,
     principal,
     acquireUploadSlot,
     management:

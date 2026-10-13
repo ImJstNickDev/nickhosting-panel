@@ -254,3 +254,17 @@ NickHosting actor authorization. No frontend credential, shared Client fallback
 or automatic foreign-server import is introduced. Existing server ownership
 changes require a scoped, audited handoff; Gateway reachability proof remains
 bound to its current provider identity.
+
+### Shared file viewers (M5)
+
+The file manager's lazy viewer engine owns selection, personal defaults and shared
+read access. Builtin views cover text, images, browser-playable media, archive
+virtual folders and read-only JSON/SQLite. Trusted game modules use validated SDK
+viewer descriptors; they do not replace common file authorization or transports.
+A server-side SFTP broker reuses the managed-server access proof, pinned pooled
+connections and local revocation watches. Parser indexes and temporary snapshots
+have explicit memory/disk/session budgets; ordinary directory caching remains
+separate. Existing edits/uploads/extraction use the existing Wings operation path.
+See [ADR 0017](decisions/0017-shared-file-viewers.md),
+[format evidence and limitations](M5-VIEWER-FORMATS.md) and the
+[approval-required deployment proposal](M5-VIEWER-DEPLOYMENT.md).

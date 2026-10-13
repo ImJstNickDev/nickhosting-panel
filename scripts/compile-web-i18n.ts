@@ -6,6 +6,7 @@ import { ownerInfraWebMessages } from '../packages/i18n/src/owner-infra-web.js';
 import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
 import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
 import { serviceWebMessages } from '../packages/i18n/src/services-web.js';
+import { viewerWebMessages } from '../packages/i18n/src/viewers-web.js';
 import { webMessages } from '../packages/i18n/src/web.js';
 
 const catalogs: Record<string, Record<string, string>> = { en: { ...en }, it: { ...it } };
@@ -16,6 +17,7 @@ for (const [key, pair] of Object.entries({
   ...ownerWebMessages,
   ...gameUiWebMessages,
   ...ownerInfraWebMessages,
+  ...viewerWebMessages,
 })) {
   if (!pair[0] || !pair[1]) throw new Error(`Missing translation: ${key}`);
   catalogs.en![key] = pair[0];

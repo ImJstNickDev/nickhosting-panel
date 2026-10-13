@@ -659,3 +659,4 @@ export interface UiSectionData {
   editableFields?: readonly string[];
   metadata?: Readonly<Record<string, unknown>>;
 }
+export * from './viewers.js';

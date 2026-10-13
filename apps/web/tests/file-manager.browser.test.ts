@@ -38,6 +38,14 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     files.set('alpha.txt', Buffer.from('Alpha notes'));
     files.set('beta.json', Buffer.from('{"enabled":true}'));
     files.set('gamma.yaml', Buffer.from('enabled: true'));
+    // This suite exercises the existing editor; the viewer suite proves JSON's tree default.
+    await journeyRequest(
+      harness,
+      user,
+      `/v1/servers/${provider.ids.serverId}/files/viewer/preferences`,
+      { scope: 'server', extension: 'json', viewerId: 'text' },
+      'PUT',
+    );
   });
   afterAll(async () => {
     provider?.dispose();
@@ -982,11 +990,13 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         expect(
           await toolbar
             .getByRole('button')
-            .evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label'))),
+            .evaluateAll((buttons) =>
+              buttons.map((button) => button.getAttribute('aria-label') ?? button.textContent),
+            ),
         ).toEqual(
           locale === 'en'
-            ? ['Back to files', 'Save changes', 'Undo', 'Redo', 'Find']
-            : ['Torna ai file', 'Salva modifiche', 'Annulla', 'Ripristina', 'Cerca'],
+            ? ['Back to files', 'Save changes', 'Undo', 'Redo', 'Find', 'Open with']
+            : ['Torna ai file', 'Salva modifiche', 'Annulla', 'Ripristina', 'Cerca', 'Apri con'],
         );
         await user.keyboard.press('Control+f');
         await browserExpect(user.locator('.fm-search-panel input[name="search"]')).toBeFocused();
@@ -1425,7 +1435,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await row('server.properties').scrollIntoViewIfNeeded();
       await harness.screenshot(user, 'file-type-icons-desktop-en');
       await menu('server.jar');
-      await browserExpect(user.getByRole('menuitem', { name: 'Edit', exact: true })).toBeDisabled();
+      await browserExpect(user.getByRole('menuitem', { name: 'Open', exact: true })).toBeDisabled();
       await user.keyboard.press('Escape');
       await row('server.jar').getByRole('button', { name: 'server.jar', exact: true }).click();
       await browserExpect(user.locator('.fm-editor-view')).toContainText('binary file');

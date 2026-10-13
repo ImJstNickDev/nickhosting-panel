@@ -94,6 +94,20 @@ export const platformConfigSchema = z
     sftpgoBaseUrl: httpUrl.optional(),
     sftpgoDataRoot: z.string().startsWith('/').optional(),
     sftpgoInstanceId: z.uuid().optional(),
+    fileViewers: z
+      .strictObject({
+        managementUrl: httpUrl,
+        dataRoot: z.string().regex(/^\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+$/),
+        instanceId: z.uuid(),
+        host: z.union([z.hostname(), z.ipv4(), z.ipv6()]),
+        port: z.number().int().min(1).max(65535).default(2022),
+        hostFingerprint: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}=?$/),
+        cacheRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+        cacheBytes: z.number().int().min(1048576).max(107374182400).default(1073741824),
+        maxSnapshotBytes: z.number().int().min(1048576).max(10737418240).default(268435456),
+        maxConnections: z.number().int().min(1).max(64).default(16),
+      })
+      .optional(),
     // Public SSH endpoint is explicitly configured, never inferred from the
     // private SFTPGo HTTP management URL or the Wings filesystem mapping.
     sftpPublicHostname: z.union([z.hostname(), z.ipv4(), z.ipv6()]).optional(),
@@ -241,6 +255,7 @@ export const configEnvironmentKeys = {
   sftpgoBaseUrl: 'NH_SFTPGO_BASE_URL',
   sftpgoDataRoot: 'NH_SFTPGO_DATA_ROOT',
   sftpgoInstanceId: 'NH_SFTPGO_INSTANCE_ID',
+  fileViewers: 'NH_FILE_VIEWERS',
   sftpPublicHostname: 'NH_SFTP_PUBLIC_HOSTNAME',
   sftpPublicPort: 'NH_SFTP_PUBLIC_PORT',
   sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
@@ -338,6 +353,7 @@ export function resolveConfig(
       key === 'pterodactylUploadOrigins' ||
       [
         'gameIdleTimeouts',
+        'fileViewers',
         'gatewayNetworkPolicy',
         'gatewayObserver',
         'gatewayNodeProbes',
