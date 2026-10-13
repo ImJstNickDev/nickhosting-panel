@@ -862,10 +862,15 @@ leave ordinary navigation available; foreground errors are still reported.
 Wave uses centered custom playback controls and a seekable, real amplitude
 waveform, not decorative peaks. Play/pause, ten-second skips, repeat, speed and
 volume retain native media behavior and keyboard controls with EN/IT labels.
-The playhead follows native currentTime on animation frames while playing.
-Only the timeline subtree updates on those frames; playback controls and their
-formatters do not. Play synchronizes the native paused state immediately after
-calling play(), without waiting for its queued event or fabricating elapsed time.
+The playhead interpolates native currentTime between observations on display
+animation frames (including high-refresh displays). Prediction is visual only,
+bounded to 100 ms of wall time at the playback rate; small clock differences are
+corrected gradually rather than snapping on each quantized reading. Pausing,
+waiting, seeking, errors and ending snap to native time; playing resumes the
+clock, and rate/loop/background changes re-anchor it. Native playback remains
+authoritative. Only the timeline subtree updates on those frames; playback
+controls and their formatters do not. Play synchronizes the native paused state
+immediately after calling play(), without waiting for its queued event.
 Dragging previews the seek position and commits on release. Playback uses the
 existing authenticated, same-origin Range stream; leaving the viewer releases it.
 Audio previews up to 32 MiB request native automatic preloading; larger files

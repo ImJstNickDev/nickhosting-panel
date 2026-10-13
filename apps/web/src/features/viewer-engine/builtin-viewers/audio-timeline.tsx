@@ -7,6 +7,7 @@ import {
   useState,
 } from 'react';
 import { useT } from '../../../app/i18n.js';
+import { AudioPlaybackClock } from './audio-playback-clock.js';
 import { AudioWaveform } from './audio-waveform.js';
 
 const clock = (seconds: number) => {
@@ -24,7 +25,6 @@ export function AudioTimeline({
   size,
   duration,
   seekable,
-  paused,
   failed,
 }: {
   media: RefObject<HTMLAudioElement | null>;
@@ -33,38 +33,76 @@ export function AudioTimeline({
   size: number;
   duration: number;
   seekable: boolean;
-  paused: boolean;
   failed: boolean;
 }) {
   const t = useT();
   const [time, setTime] = useState(0);
   const [seekDraft, setSeekDraft] = useState<number | null>(null);
   const scrubbing = useRef(false);
+  const playbackClock = useRef(new AudioPlaybackClock());
   const sync = useCallback(() => {
-    if (media.current) setTime(media.current.currentTime);
+    if (media.current)
+      setTime(playbackClock.current.reset(media.current.currentTime, performance.now()));
   }, [media]);
   useLayoutEffect(() => {
     const audio = media.current;
     if (!audio) return;
-    const events = ['timeupdate', 'seeking', 'seeked', 'loadedmetadata', 'ended', 'emptied'];
-    for (const event of events) audio.addEventListener(event, sync);
+    let frame = 0;
+    let playing = false;
+    const stop = () => {
+      playing = false;
+      cancelAnimationFrame(frame);
+      frame = 0;
+      sync();
+    };
+    const update = () => {
+      frame = 0;
+      if (!playing || audio.paused || audio.ended || audio.seeking) {
+        stop();
+        return;
+      }
+      setTime(
+        playbackClock.current.sample(audio.currentTime, performance.now(), audio.playbackRate),
+      );
+      frame = requestAnimationFrame(update);
+    };
+    const start = () => {
+      if (failed || document.hidden || audio.paused || audio.ended || audio.seeking) return;
+      playing = true;
+      sync();
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+    const observe = () => {
+      if (!playing) sync();
+    };
+    const reanchor = () => {
+      sync();
+      if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) start();
+    };
+    const visibility = () => {
+      stop();
+      if (!document.hidden && audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) start();
+    };
+    const holds = ['pause', 'waiting', 'seeking', 'ended', 'emptied', 'error'];
+    for (const event of holds) audio.addEventListener(event, stop);
+    audio.addEventListener('playing', start);
+    audio.addEventListener('seeked', reanchor);
+    audio.addEventListener('ratechange', sync);
+    audio.addEventListener('loadedmetadata', observe);
+    audio.addEventListener('timeupdate', observe);
+    document.addEventListener('visibilitychange', visibility);
     sync();
     return () => {
-      for (const event of events) audio.removeEventListener(event, sync);
+      cancelAnimationFrame(frame);
+      for (const event of holds) audio.removeEventListener(event, stop);
+      audio.removeEventListener('playing', start);
+      audio.removeEventListener('seeked', reanchor);
+      audio.removeEventListener('ratechange', sync);
+      audio.removeEventListener('loadedmetadata', observe);
+      audio.removeEventListener('timeupdate', observe);
+      document.removeEventListener('visibilitychange', visibility);
     };
-  }, [media, sync]);
-  useLayoutEffect(() => {
-    sync();
-    if (paused || failed) return;
-    let frame = 0;
-    const update = () => {
-      sync();
-      if (media.current && !media.current.paused && !media.current.ended)
-        frame = requestAnimationFrame(update);
-    };
-    frame = requestAnimationFrame(update);
-    return () => cancelAnimationFrame(frame);
-  }, [paused, failed, media, sync]);
+  }, [failed, media, sync]);
   function seek(value: number) {
     if (!media.current || !seekable) return;
     media.current.currentTime = Math.max(0, Math.min(duration, value));

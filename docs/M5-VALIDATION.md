@@ -7898,3 +7898,39 @@ versus decoded 18 s: slider/labels use 18, position 9 maps to 50%, skips clamp t
 18, native ended at 20 stays at 18/100%, and a new file resets the duration.
 This synthetic UI regression complements the separate real AAC check above.
 Final source/test typecheck, scoped Biome, whitespace and indexed governance pass.
+
+### Wave playhead interpolation (2026-10-13)
+
+The visual clock now bridges quantized native media observations on each display
+animation frame. It never writes playback time: small phase corrections are
+bounded to 10% of playback speed, prediction to 100 ms of wall time at the current
+rate. Pause/waiting/seek/end/error reset to native time; playing resumes it.
+Rate changes, loops and background gaps re-anchor the clock. No dependencies,
+API calls, provider changes or infrastructure restarts were added.
+
+Read-only Firefox probe on the same 1.8 s WAV and 600 px seek bar: before,
+63 repeated native readings and 63 repeated UI positions; after, 63 repeated
+native readings and **zero repeated UI positions**. Median RAF interval 17.04 ms,
+positive native step 40.24 ms, UI step 17 ms (maximum 20 ms). This is headless
+Firefox evidence, not a measurement on the Owner's 240 Hz monitor. The pure clock
+regression simulates 60/120/144/240 Hz over 30 seconds, verifies monotonic steps
+and bounded drift, and covers rate changes, stalled clocks, seeks, loops and
+frame gaps: **9/9 passed** (682 ms). Command:
+`scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/audio-playback-clock.test.ts`.
+
+Web source/test typecheck passed via
+`scripts/dev.sh pnpm --filter @nickhosting/web typecheck`; focused Biome checks
+passed. Independent read-only clock/event review found no must-fix findings.
+
+Focused Chromium browser run: **2 passed, 25 skipped** (29.04 s), covering the
+quantized-clock lifecycle and existing real WAV transport/stream-release test:
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'interpolates quantized Wave|runs Wave' --silent=false`.
+The first run passed the new test but exposed an existing fixture withholding
+`playing` permanently; it now redelivers that intentionally withheld event before
+asserting playback-clock behavior. The new fixture covers waiting/canplay hold,
+playing resume, pause, seeking, rate changes and document visibility; native
+currentTime remains unchanged. These controlled events complement the separate
+real Firefox probe, rather than claiming a physical 240 Hz browser test.
+The [player screenshot](screenshots/m5/wave-interpolated-playhead.png) was reviewed;
+layout and controls are unchanged. No game files or server state were mutated.
+Rollback: revert this frontend-only change; no migrations or data cleanup.

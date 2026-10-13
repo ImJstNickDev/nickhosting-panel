@@ -202,7 +202,6 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
           size={source.size}
           duration={duration}
           seekable={seekable}
-          paused={state.paused}
           failed={failed}
         />
         <div className="wave-controls">

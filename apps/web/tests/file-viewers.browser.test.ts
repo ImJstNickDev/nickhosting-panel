@@ -1697,6 +1697,145 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
+  it('interpolates quantized Wave media readings and follows transport lifecycle events', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await open('wave-long.wav');
+    const player = page.locator('.ve-audio-player');
+    await browserExpect
+      .poll(() => player.locator('audio').evaluate((element: HTMLAudioElement) => element.duration))
+      .toBe(60);
+    await browserExpect(player.locator('.wave-envelope')).toHaveAttribute(
+      'data-waveform-state',
+      'ready',
+    );
+    // The WAV loads and decodes normally; only media clock readings/events are controlled.
+    // Actual browser RAFs exercise DOM interpolation, not a claim about physical refresh rates.
+    const result = await player.evaluate(async (element) => {
+      const media = element.querySelector('audio');
+      const position = element.querySelector<HTMLInputElement>('.wave-seek-input');
+      const clip = element.querySelector('.wave-envelope clipPath rect');
+      if (!media || !position || !clip) throw new Error('Missing Wave timeline');
+      const state = { time: 12, paused: false, seeking: false, rate: 1, writes: 0 };
+      const descriptors: PropertyDescriptorMap = {
+        currentTime: {
+          get: () => state.time,
+          set: (value: number) => {
+            state.writes++;
+            state.time = value;
+          },
+        },
+        paused: { get: () => state.paused },
+        seeking: { get: () => state.seeking },
+        ended: { value: false },
+        readyState: { value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+        playbackRate: { get: () => state.rate },
+      };
+      for (const descriptor of Object.values(descriptors)) descriptor.configurable = true;
+      Object.defineProperties(media, descriptors);
+      const emit = (name: string) => media.dispatchEvent(new Event(name));
+      const frames = async (count = 12) => {
+        const samples: number[] = [];
+        for (let index = 0; index < count; index++) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          samples.push(Number(position.value));
+        }
+        return samples;
+      };
+      try {
+        emit('play');
+        emit('playing');
+        const playing = await frames();
+        const waveform = Number(clip.getAttribute('width'));
+        // A repeated coarse reading must cap, then the next native tick advances the clock.
+        state.time = 12.1;
+        emit('timeupdate');
+        const nextTick = await frames();
+        emit('waiting');
+        const waiting = await frames(4);
+        emit('canplay');
+        const canplay = await frames(4);
+        emit('playing');
+        const resumed = await frames();
+        state.paused = true;
+        state.time = 12.15;
+        emit('pause');
+        const paused = await frames(4);
+        state.seeking = true;
+        state.time = 33;
+        emit('seeking');
+        const seeking = await frames(4);
+        state.seeking = false;
+        emit('seeked');
+        const seeked = await frames(4);
+        state.paused = false;
+        emit('play');
+        emit('playing');
+        state.rate = 2;
+        emit('ratechange');
+        const faster = await frames();
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+        const hidden = await frames(4);
+        Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+        document.dispatchEvent(new Event('visibilitychange'));
+        const visible = await frames();
+        return {
+          playing,
+          waveform,
+          nextTick,
+          waiting,
+          canplay,
+          resumed,
+          paused,
+          seeking,
+          seeked,
+          faster,
+          hidden,
+          visible,
+          nativeTime: media.currentTime,
+          writes: state.writes,
+        };
+      } finally {
+        Reflect.deleteProperty(document, 'hidden');
+        state.paused = true;
+        emit('pause');
+        for (const name of Object.keys(descriptors)) Reflect.deleteProperty(media, name);
+        emit('timeupdate');
+      }
+    });
+    const advancing = (samples: number[], nativeTime: number, allowance: number) => {
+      expect(new Set(samples).size).toBeGreaterThan(2);
+      expect(
+        samples.every((value) => value >= nativeTime && value <= nativeTime + allowance + 0.000001),
+      ).toBe(true);
+      expect(samples.every((value, index) => value >= (samples[index - 1] ?? nativeTime))).toBe(
+        true,
+      );
+      expect(samples.at(-1)).toBeCloseTo(nativeTime + allowance, 3);
+    };
+    advancing(result.playing, 12, 0.1);
+    expect(result.waveform).toBeCloseTo((12.1 / 60) * 1000, 2);
+    advancing(result.nextTick, 12.1, 0.1);
+    expect(result.waiting).toEqual([12.1, 12.1, 12.1, 12.1]);
+    expect(result.canplay).toEqual(result.waiting);
+    advancing(result.resumed, 12.1, 0.1);
+    expect(result.paused).toEqual([12.15, 12.15, 12.15, 12.15]);
+    expect(result.seeking).toEqual([33, 33, 33, 33]);
+    expect(result.seeked).toEqual(result.seeking);
+    advancing(result.faster, 33, 0.2);
+    expect(result.hidden).toEqual([33, 33, 33, 33]);
+    advancing(result.visible, 33, 0.2);
+    expect(result.nativeTime).toBe(33);
+    expect(result.writes).toBe(0);
+    await player.locator('audio').evaluate((media: HTMLAudioElement) => {
+      media.currentTime = 12.1;
+      media.dispatchEvent(new Event('timeupdate'));
+    });
+    await browserExpect.poll(() => player.locator('.wave-seek-input').inputValue()).toBe('12.1');
+    await player.screenshot({ path: 'docs/screenshots/m5/wave-interpolated-playhead.png' });
+    expect(errors).toEqual([]);
+  });
+
   it('runs Wave controls through real browser audio playback and releases the stream on exit', async () => {
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -1790,6 +1929,8 @@ describe('M5 builtin file viewers', () => {
         for (const name of ['play', 'playing', 'timeupdate'])
           window.removeEventListener(name, block, true);
         Reflect.deleteProperty(element, 'waveTestPlayBlock');
+        // Deliver the playing notification withheld above before checking the visual clock.
+        element.dispatchEvent(new Event('playing'));
       });
     }
     // Hold the media clock and suppress timeupdate to prove frame-sampled progress, not its coarse event cadence.
@@ -1822,7 +1963,9 @@ describe('M5 builtin file viewers', () => {
             ),
           ),
       );
-      expect(Number(await position.inputValue())).toBeCloseTo(12.3, 5);
+      expect(Number(await position.inputValue())).toBeGreaterThanOrEqual(12.3);
+      expect(Number(await position.inputValue())).toBeLessThanOrEqual(12.4);
+      expect(await audio.evaluate((element: HTMLAudioElement) => element.currentTime)).toBe(12.3);
       // Clock-only updates must not rebuild the six playback-speed labels.
       expect(
         await audio.evaluate(
