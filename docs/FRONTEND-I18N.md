@@ -669,7 +669,7 @@ Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard 
 gestures; its percentage is displayed as a rounded integer while calculations
 retain full precision. Confirming an unchanged rounded draft preserves the scale.
 Zoom is bounded to 1–5000% for raster images/ICO and 1–50000% for SVG, including
-Fit, typed values and gestures. Thousands use a raised dot (50·000%); calculations
+Fit, typed values and gestures. Thousands use a high dot (U+02D9: 50˙000%); calculations
 retain full precision. SVG uses a native vector document in a viewport-sized,
 non-interactive iframe, with scripts and external requests denied by sandbox/CSP.
 Source markup is never injected into the application document or trusted srcdoc.

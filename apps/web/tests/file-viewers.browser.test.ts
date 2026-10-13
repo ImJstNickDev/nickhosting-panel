@@ -400,7 +400,7 @@ describe('M5 builtin file viewers', () => {
       await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('50000');
       await page.keyboard.press('Enter');
       expect((await frameGeometry()).scale).toBeCloseTo(500, 4);
-      await browserExpect(page.locator('.ve-zoom-value')).toHaveText('50·000%');
+      await browserExpect(page.locator('.ve-zoom-value')).toHaveText('50˙000%');
       const rendering = await page.locator('.ve-svg-surface').evaluate((element) => {
         const frame = element as HTMLIFrameElement;
         const root = frame.contentDocument?.documentElement;

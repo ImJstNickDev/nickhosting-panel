@@ -314,7 +314,7 @@ function FrameViewport({
   const exactPercent = view.scale * 100;
   // Compensate multiplication noise at half percentages (e.g. 1.255 × 100).
   const displayedPercent = Math.round(exactPercent + Number.EPSILON * exactPercent);
-  const percent = String(displayedPercent).replace(/\B(?=(\d{3})+(?!\d))/g, '·');
+  const percent = String(displayedPercent).replace(/\B(?=(\d{3})+(?!\d))/g, '˙');
   return (
     <div className="ve-image-viewer" ref={root}>
       <div className="ve-controls" role="toolbar" aria-label={t('viewer.imageControls')}>

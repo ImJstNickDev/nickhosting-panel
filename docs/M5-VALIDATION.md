@@ -7515,3 +7515,13 @@ security boundary. Issue #18 and PR #21's unmerged status remain unchanged.
 Independent final code/security/geometry and Firefox screenshot review found no
 remaining must-fix issues. Index governance passed: 741 text files, 226 PNGs,
 625 relative links, 4 TOML files and 44 ignore cases (heuristic secret scan).
+
+## 2026-10-13 — Frame high-dot separator correction
+
+The preceding separator was a middle dot, not the requested high dot. Frame now
+uses U+02D9 (`50˙000%`); zoom calculations and bounds are unchanged. The existing
+Firefox rendering test was rerun alone with `NH_BROWSER=firefox` and the browser
+command above, filtered to `-t 'renders SVG vectors sharply'`: 1 passed,
+17 skipped, 27.47s. The screenshot was refreshed and visually inspected. Targeted
+Biome and independent scoped review passed. No infrastructure/provider interaction,
+restart or new test resources; previous full rendering evidence remains valid.
