@@ -641,9 +641,13 @@ Tab navigation; local editing and indentation remain usable during a save.
 Opening a text file replaces the listing in place, without a modal. The breadcrumb
 retains clickable parent directories and includes the current filename. List-only
 search, upload and view controls are hidden until returning to the directory.
-One compact row contains the path and icon actions in this order: Back to files
-(Home), Save, Undo, Redo, Find. Each action has a localized accessible name and
-custom tooltip; unavailable actions are disabled. Find opens CodeMirror's search.
+One compact row contains the path on the left and Open with, Back to files
+(Home), Download on the right, shared by every viewer. Text editing retains
+Save, Undo, Redo and Find before those common actions. Narrow screens use an
+Open with icon and prioritize the current filename over parent breadcrumb
+segments; Home still returns to the file list. Each action has a localized
+accessible name and custom tooltip; unavailable actions are disabled. Find opens
+CodeMirror's search. Archive entries keep their own download/chooser target.
 Search uses a compact input, current/total match count, previous/next actions and
 case/whole-word/regular-expression toggles. Options expose their pressed state and
 localized tooltips; replacement fields appear only when requested. Search and

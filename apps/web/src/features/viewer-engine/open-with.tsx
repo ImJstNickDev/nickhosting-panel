@@ -10,6 +10,26 @@ import {
 } from './core/registry.js';
 import { setViewerPreference } from './preferences.js';
 
+export function OpenWithIcon() {
+  return (
+    <svg
+      className="fm-viewer-action-icon"
+      viewBox="0 0 24 24"
+      width="20"
+      height="20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <path d="M14 17.5h7m-3.5-3.5 3.5 3.5-3.5 3.5" />
+    </svg>
+  );
+}
+
 export function OpenWith({
   serverId,
   source,

@@ -1039,3 +1039,59 @@ dialog.fm-delete-confirm {
     padding-inline: 0.75rem;
   }
 }
+
+.fm-viewer-action-slot {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.fm-viewer-action {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 6px 8px;
+  min-height: 32px;
+  font-size: 0.875rem;
+}
+.fm-viewer-action:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.fm-viewer-action-icon {
+  display: none;
+}
+@media (max-width: 760px) {
+  .fm-viewer-open-with {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 29px;
+    height: 32px;
+    padding: 0;
+  }
+  .fm-viewer-open-with .fm-viewer-action-label {
+    display: none;
+  }
+  .fm-viewer-open-with .fm-viewer-action-icon {
+    display: block;
+  }
+  .fm-toolbar-editing .fm-breadcrumb ol {
+    flex: 1;
+  }
+  .fm-toolbar-editing .fm-breadcrumb li:not(:last-child) {
+    display: none;
+  }
+  .fm-toolbar-editing .fm-breadcrumb li:last-child {
+    flex: 1 1 0;
+  }
+  .fm-toolbar-editing .fm-breadcrumb li:last-child::before {
+    display: none;
+  }
+}
+@media (max-width: 380px) {
+  .fm-editor-toolbar .fm-tool,
+  .fm-editor-toolbar .fm-viewer-open-with {
+    width: 24px;
+    min-width: 24px;
+  }
+}

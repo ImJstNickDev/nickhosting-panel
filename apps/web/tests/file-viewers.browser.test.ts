@@ -196,6 +196,27 @@ describe('M5 builtin file viewers', () => {
       .filter({ hasText: name })
       .getByText(name, { exact: true })
       .click();
+    const header = page.locator('.fm-toolbar-editing');
+    const actions = header.locator('.fm-editor-toolbar');
+    await browserExpect(
+      actions.getByRole('button', { name: /^(Open with|Apri con)$/ }),
+    ).toBeVisible();
+    const labels = await actions
+      .getByRole('button')
+      .evaluateAll((buttons) =>
+        buttons.map((button) => button.getAttribute('aria-label') ?? button.textContent),
+      );
+    expect(labels.slice(-3)).toEqual(
+      labels.includes('Apri con')
+        ? ['Apri con', 'Torna ai file', 'Scarica']
+        : ['Open with', 'Back to files', 'Download'],
+    );
+    const breadcrumb = await header.locator('.fm-breadcrumb').boundingBox();
+    const bar = await actions.boundingBox();
+    if (!breadcrumb || !bar) throw new Error('Missing file header');
+    expect(breadcrumb.width).toBeGreaterThan(25);
+    expect(Math.abs(breadcrumb.y + breadcrumb.height / 2 - bar.y - bar.height / 2)).toBeLessThan(2);
+    await browserExpect(page.locator('.ve-engine > .ve-toolbar')).toHaveCount(0);
   }
   async function root() {
     await page.getByRole('button', { name: 'root', exact: true }).click();
@@ -262,6 +283,23 @@ describe('M5 builtin file viewers', () => {
     await page.locator('.ve-entry').getByText('config', { exact: true }).click();
     await page.locator('.ve-entry').getByText('settings.json', { exact: true }).click();
     await browserExpect(page.locator('.ve-json')).toContainText('ok: true');
+    const openWith = page
+      .locator('.fm-toolbar-editing')
+      .getByRole('button', { name: 'Open with', exact: true });
+    await openWith.click();
+    await browserExpect(page.getByRole('dialog').locator('.ve-chooser-filename')).toHaveText(
+      'settings.json',
+    );
+    await page.keyboard.press('Escape');
+    await browserExpect(openWith).toBeFocused();
+    const downloaded = page.waitForEvent('download');
+    await page
+      .locator('.fm-toolbar-editing')
+      .getByRole('button', { name: 'Download', exact: true })
+      .click();
+    const downloadedUrl = new URL((await downloaded).url());
+    expect(downloadedUrl.searchParams.get('path')).toBe('viewer.zip');
+    expect(downloadedUrl.searchParams.get('entry')).toBe('config/settings.json');
     await page.getByRole('button', { name: 'Back to archive', exact: true }).click();
     await browserExpect(page.locator('.ve-archive-breadcrumb')).toContainText('config');
     await browserExpect(

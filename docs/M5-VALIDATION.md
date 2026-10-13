@@ -7121,3 +7121,44 @@ check passed (736 indexed text files,215 review PNGs,604 links,4 TOML files and4
 ignore cases before staging this record). Biome does not process Markdown/YAML
 in this repository: its targeted invocation reported no files processed, not a
 formatting pass. No TypeScript application source changed during activation.
+
+## 2026-10-13 — One-row viewer actions
+
+The shared file header now places the path left and Open with → Home → Download
+right. Actions remain owned by the current viewer through stable header slots,
+so archive-entry downloads and chooser options refer to the entry, not its outer
+archive. Root viewers no longer render a separate action row. Text editing keeps
+Save/Undo/Redo/Find before the common actions; unavailable/binary text fallbacks
+use the same header download. Narrow screens use a labeled Open with icon and
+prioritize the current filename, including 320px layouts. No API, dependency,
+provider, authorization or infrastructure changes.
+
+Validation was targeted:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm exec biome check` on the seven changed TSX/CSS/test files:
+  passed; `git diff --check` passed.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts`:
+  initial run5/6 passed; the added Escape-focus assertion exposed missing chooser
+  focus restoration, which was fixed. The first archive-only rerun then exposed a
+  test harness assumption: native downloads need Playwright's download event,
+  not a page request event. The final affected archive/mobile rerun passed both
+  journeys, including entry-specific download/chooser, keyboard and axe checks.
+- Same browser command for `apps/web/tests/file-manager.browser.test.ts -t
+  'opens text inline|keeps known binary'`: both passed initially. Added320px coverage
+  caught filename clipping; compact controls fixed it. Mobile navigation tests now
+  use Home when parent breadcrumbs are collapsed; the path shortcut uses its
+  declared physical KeyG. Final editor-only rerun passed in19.63s, including
+  desktop/390px/320px, unsaved changes, search, keyboard and accessibility checks.
+  The binary fallback journey also passed. No full historical-suite rerun.
+
+Screenshots reviewed: [desktop JSON](screenshots/m5/file-viewer-json-desktop-en.png),
+[Italian mobile](screenshots/m5/file-viewer-json-mobile-it.png),
+[archive](screenshots/m5/file-viewer-archive-desktop-en.png),
+[320px editor](screenshots/m5/file-viewer-editor-header-320-it.png), and
+[390px editor](screenshots/m5/file-inline-editor-mobile-it.png).
+Independent read-only code/UX review reports no remaining must-fix. The tests use
+existing isolated services and temporary test schemas; no live provider mutation,
+new Docker resource, restart or game-file write. Vite applies the UI through HMR.
+Concurrent Owner UI changes remain unstaged; only the shared-header documentation
+paragraph from FRONTEND-I18N.md belongs to this change.

@@ -16,20 +16,6 @@
   min-height: 3rem;
   padding: 0.35rem 0 0.6rem;
 }
-.ve-toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-left: auto;
-}
-.ve-toolbar .secondary {
-  padding: 0.4rem 0.65rem;
-  background: transparent;
-  border-color: transparent;
-}
-.ve-toolbar .secondary:hover {
-  background: var(--surface-hover, #f1f2f4);
-}
 .ve-current-entry {
   overflow: hidden;
   text-overflow: ellipsis;

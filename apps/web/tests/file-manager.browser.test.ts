@@ -995,9 +995,34 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
             ),
         ).toEqual(
           locale === 'en'
-            ? ['Back to files', 'Save changes', 'Undo', 'Redo', 'Find', 'Open with']
-            : ['Torna ai file', 'Salva modifiche', 'Annulla', 'Ripristina', 'Cerca', 'Apri con'],
+            ? ['Save changes', 'Undo', 'Redo', 'Find', 'Open with', 'Back to files', 'Download']
+            : [
+                'Salva modifiche',
+                'Annulla',
+                'Ripristina',
+                'Cerca',
+                'Apri con',
+                'Torna ai file',
+                'Scarica',
+              ],
         );
+        if (locale === 'it') {
+          await user.setViewportSize({ width: 320, height: 844 });
+          const filename = user.locator('.fm-current-file');
+          await browserExpect(filename).toBeInViewport();
+          const visible = await filename.evaluate((element) => {
+            const file = element.getBoundingClientRect();
+            const parent = element.closest('ol')?.getBoundingClientRect();
+            if (!parent) return 0;
+            return Math.min(file.right, parent.right) - Math.max(file.left, parent.left);
+          });
+          expect(visible).toBeGreaterThan(35);
+          expect(
+            await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+          ).toBe(true);
+          await harness.screenshot(user, 'file-viewer-editor-header-320-it');
+          await user.setViewportSize({ width: 390, height: 844 });
+        }
         await user.keyboard.press('Control+f');
         await browserExpect(user.locator('.fm-search-panel input[name="search"]')).toBeFocused();
         const searchPanel = user.getByRole('search', {
@@ -1113,7 +1138,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await browserExpect(editor).toContainText('enabled');
         await editor.fill('{"draft":true}');
         user.once('dialog', (confirmation) => confirmation.dismiss());
-        await user.getByRole('button', { name: 'root', exact: true }).click();
+        await user
+          .getByRole('button', { name: locale === 'en' ? 'root' : 'Torna ai file', exact: true })
+          .click();
         await browserExpect(editor).toContainText('draft');
         user.once('dialog', (confirmation) => confirmation.dismiss());
         await user.locator('.tabs').getByRole('link', { name: 'Console', exact: true }).click();
@@ -1121,7 +1148,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await editor.focus();
         await user.keyboard.press('Alt+k');
         await browserExpect(editor).toBeFocused();
-        await user.keyboard.press('Alt+g');
+        await user.keyboard.press('Alt+KeyG');
         await browserExpect(
           user.getByRole('combobox', { name: locale === 'en' ? 'Path' : 'Percorso', exact: true }),
         ).toBeFocused();
@@ -1143,7 +1170,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
           `file-inline-editor-${locale === 'en' ? 'desktop-en' : 'mobile-it'}`,
         );
         user.once('dialog', (confirmation) => confirmation.accept());
-        await user.getByRole('button', { name: 'root', exact: true }).click();
+        await user
+          .getByRole('button', { name: locale === 'en' ? 'root' : 'Torna ai file', exact: true })
+          .click();
         await browserExpect(manager.locator('.fm-list')).toBeVisible();
       } finally {
         release();

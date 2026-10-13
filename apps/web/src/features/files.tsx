@@ -77,7 +77,7 @@ import {
   type ViewerId,
   type ViewerSource,
 } from './viewer-engine/core/registry.js';
-import { OpenWith } from './viewer-engine/open-with.js';
+import { OpenWith, OpenWithIcon } from './viewer-engine/open-with.js';
 import {
   useViewerCapabilities,
   useViewerPreferences,
@@ -339,6 +339,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     source: ViewerSource;
     viewerId?: ViewerId;
   }>();
+  const [viewerBeforeHome, setViewerBeforeHome] = useState<HTMLSpanElement | null>(null);
+  const [viewerAfterHome, setViewerAfterHome] = useState<HTMLSpanElement | null>(null);
   const [openWith, setOpenWith] = useState<{ entry: ServerFile; source: ViewerSource }>();
   const [targets, setTargets] = useState<string[]>([]);
   const [content, setContent] = useState('');
@@ -1992,6 +1994,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         )}
         {viewing && (
           <div className="fm-editor-toolbar">
+            <span className="fm-viewer-action-slot" ref={setViewerBeforeHome} />
             <Tooltip placement="cursor" content={t('file.backToFiles')}>
               <button
                 type="button"
@@ -2002,13 +2005,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 <ToolbarIcon kind="home" />
               </button>
             </Tooltip>
+            <span className="fm-viewer-action-slot" ref={setViewerAfterHome} />
           </div>
         )}
         {editing && (
           <div className="fm-editor-toolbar" role="toolbar" aria-label={t('file.editor')}>
             {(
               [
-                { kind: 'home', label: 'file.backToFiles', disabled: mutating, run: closeEditor },
                 {
                   kind: 'save',
                   label: 'web.save',
@@ -2055,21 +2058,53 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               </Tooltip>
             ))}
             {mode === 'edit' && (
+              <Tooltip placement="cursor" content={t('viewer.openWith')}>
+                <button
+                  type="button"
+                  className="fm-viewer-action fm-viewer-open-with"
+                  aria-label={t('viewer.openWith')}
+                  disabled={dirty || saving || reading || mutating}
+                  onClick={() => {
+                    const entry = files.data?.find((item) => item.name === targets[0]);
+                    if (entry)
+                      setOpenWith({
+                        entry,
+                        source: viewerSource(entry),
+                      });
+                  }}
+                >
+                  <OpenWithIcon />
+                  <span className="fm-viewer-action-label">{t('viewer.openWith')}</span>
+                </button>
+              </Tooltip>
+            )}
+            <Tooltip placement="cursor" content={t('file.backToFiles')}>
               <button
                 type="button"
-                className="text-button"
-                disabled={dirty || saving || reading || mutating}
-                onClick={() => {
-                  const entry = files.data?.find((item) => item.name === targets[0]);
-                  if (entry)
-                    setOpenWith({
-                      entry,
-                      source: viewerSource(entry),
-                    });
-                }}
+                className="fm-tool"
+                aria-label={t('file.backToFiles')}
+                disabled={mutating}
+                onClick={closeEditor}
               >
-                {t('viewer.openWith')}
+                <ToolbarIcon kind="home" />
               </button>
+            </Tooltip>
+            {mode === 'edit' && (
+              <Tooltip placement="cursor" content={t('web.download')}>
+                <button
+                  type="button"
+                  className="fm-tool"
+                  aria-label={t('web.download')}
+                  disabled={!transfers.data?.download.available}
+                  onClick={() =>
+                    download(
+                      `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, targets[0] ?? ''))}`,
+                    )
+                  }
+                >
+                  <ToolbarIcon kind="download" />
+                </button>
+              </Tooltip>
             )}
           </div>
         )}
@@ -2164,6 +2199,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             viewerId={viewed.viewerId}
             serverId={serverId}
             identity={viewerIdentity}
+            actionTargets={{ beforeHome: viewerBeforeHome, afterHome: viewerAfterHome }}
             onText={() => void open(viewed.entry, directory, 'text')}
             onExtract={
               canMutate &&
@@ -2194,18 +2230,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               ) : (
                 <p>{t(`file.editorUnavailable.${editorAvailability}`)}</p>
               )}
-              <button
-                type="button"
-                className="secondary"
-                disabled={!transfers.data?.download.available}
-                onClick={() =>
-                  download(
-                    `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, targets[0] ?? ''))}`,
-                  )
-                }
-              >
-                {t('web.download')}
-              </button>
             </div>
           ) : (
             <form
