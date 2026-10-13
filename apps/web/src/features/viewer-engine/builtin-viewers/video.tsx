@@ -26,7 +26,7 @@ import './video.css';
 
 const initial = { duration: 0, paused: true, volume: 1, muted: false, rate: 1, ready: false };
 const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
-const hidePointerRadius = 36;
+const hidePointerRadius = 72;
 const clock = (seconds: number) => {
   const value = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
   const hours = Math.floor(value / 3600);
