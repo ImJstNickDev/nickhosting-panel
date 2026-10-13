@@ -49,6 +49,7 @@ import { z } from 'zod';
 import type { Variables } from './app.js';
 import { createConsoleCommandRelays } from './console-command-relays.js';
 import { registerFileBrowsingRoutes } from './file-browsing.js';
+import { createFileDirectoryPlan, fileDirectoryAncestors } from './file-directory-plan.js';
 import { createFileOperationTrace } from './file-operation-trace.js';
 import {
   applyFileChunks,
@@ -596,6 +597,7 @@ export function registerServerRoutes(
     const { timing } = trace;
     let outcome: 'succeeded' | 'failed' = 'failed';
     let response: Response | undefined;
+    let release: (() => void) | undefined;
     try {
       const context = await timing.measure('files.principal', () => principal(c)),
         service = await timing.measure('files.management', management);
@@ -628,12 +630,12 @@ export function registerServerRoutes(
         ]),
         await timing.measure('files.body', () => body(c)),
       );
+      release = options.acquireUploadSlot();
       await timing.measure('files.access', () =>
-        service.access(
+        service.fileMutationAccess(
           context,
           c.req.param('id'),
-          true,
-          async (id, connection, current) => {
+          async (id, connection, current, server) => {
             const paths: string[] = [];
             if (input.action === 'write') {
               relativePath(input.path);
@@ -652,8 +654,30 @@ export function registerServerRoutes(
               }
             }
             if (input.action === 'delete') validateFileDeletes(input.root, input.files);
+            const directories =
+              input.action === 'rename'
+                ? createFileDirectoryPlan({
+                    batch: (paths) =>
+                      service.fileDirectoryBatch(id, server, paths, c.req.raw.signal),
+                    single: (path) => service.adapter.listFiles(id, path),
+                    timing: trace.enabled ? timing : undefined,
+                  })
+                : undefined;
+            if (directories)
+              await timing.measure('files.directories', () =>
+                directories.prime(
+                  fileDirectoryAncestors(
+                    paths.map((path) => path.split('/').slice(0, -1).join('/')),
+                  ),
+                ),
+              );
             await timing.measure('files.mutationGuard', () =>
-              service.assertFileMutation(c.req.param('id'), paths, connection),
+              service.assertFileMutation(
+                c.req.param('id'),
+                paths,
+                connection,
+                directories ? { providerIdentifier: id, listFiles: directories.list } : undefined,
+              ),
             );
             await timing.measure('files.auditRequested', () =>
               recordAudit(connection, current, 'server.files.requested', {
@@ -688,10 +712,10 @@ export function registerServerRoutes(
                     service.adapter.deleteFiles(id, input.root, files),
                   ),
               );
-            else {
+            else if (directories) {
               await timing.measure('files.movePlan', () =>
                 validateFileMoves(
-                  service.adapter,
+                  { listFiles: (_identifier, path = '') => directories.list(path) },
                   id,
                   input.root,
                   input.files,
@@ -725,6 +749,7 @@ export function registerServerRoutes(
       response = c.body(null, 204);
       return response;
     } finally {
+      release?.();
       trace.finish(outcome, response);
     }
   });
@@ -799,12 +824,13 @@ export function registerServerRoutes(
   app.get('/v1/servers/:id/console', async (c) => {
     const context = await principal(c),
       service = await management();
-    const { identifier, identity } = await service.access(
+    const { identifier, identity, server } = await service.access(
       context,
       c.req.param('id'),
       false,
       async (id, _connection, _current, server) => ({
         identifier: id,
+        server,
         identity: JSON.stringify([
           id,
           server.pterodactyl_id,
@@ -846,6 +872,7 @@ export function registerServerRoutes(
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       try {
         const providerBinding = await service.consoleBindingForServer(c.req.param('id'));
+        const observeDisk = service.observeConsoleDisk(server, providerBinding);
         const relay = await service.adapter.relayConsole(identifier, {
           canSendCommands,
           authorizeCommand: async () => {
@@ -872,7 +899,10 @@ export function registerServerRoutes(
                 event: 'error',
                 data: JSON.stringify({ type: 'error', code: 'forbidden' }),
               });
-            else output.send({ event: event.type, data: JSON.stringify(event) });
+            else {
+              observeDisk(event);
+              output.send({ event: event.type, data: JSON.stringify(event) });
+            }
             if (event.type === 'closed') {
               relayClosed = true;
               unregister();

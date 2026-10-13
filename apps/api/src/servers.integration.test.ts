@@ -266,6 +266,9 @@ describe('M2 Hono API with real invitation, password and session authentication'
             updated_at: new Date().toISOString(),
           };
         }),
+      getDirectoryBatchSettings: vi.fn(async () => {
+        throw new PterodactylError('not_found', 'client', 'rejected', 404);
+      }),
       listFiles: vi.fn(async () => [
         {
           name: 'server.properties',
@@ -3349,7 +3352,8 @@ describe('M2 Hono API with real invitation, password and session authentication'
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  });
+    // Two 10-second heartbeats already consume the default 20-second test budget.
+  }, 30000);
 
   it('streams binary uploads and downloads through the actual Node/Hono HTTP bridge', async () => {
     const serverId = await f.server();

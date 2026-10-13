@@ -6822,3 +6822,102 @@ preserved. Staged governance passed: 672 text files, 209 existing review PNGs,
 582 relative links, four TOML files and 44 ignore cases; heuristic secret scan
 passed. Focused Biome passed with one pre-existing informational template-literal
 suggestion in the API client's old text-limit test.
+
+### 2026-10-13 — Shared copy/move preflight and Wings observations
+
+The Owner's live pre-change debug sample measured **2,761.496 ms** for copy and
+**955.032 ms** for move inside the API route. Copy included 183.268 ms identity,
+466.166 ms planning, 432.114 ms in two protected-path guards, 154.312 ms disk REST,
+305.489 ms source recheck, 918.620 ms destination rechecks, 29.865 ms download
+negotiation, 218.091 ms relay/upload and 53.571 ms remaining work. These are
+non-overlapping categories; nested directory spans are not summed again. The
+private trace remains local. This is the baseline, not a post-change benchmark
+or an end-to-end browser measurement.
+
+Changes:
+
+- Ordinary file mutations and copy reuse the existing identity proof (60-second
+  deadline, renewal at 55 seconds), with fresh local permissions, exclusive
+  lifecycle locking and pending-upload fences. Pool admission preserves capacity
+  for proof renewal. No frontend-only authorization is trusted.
+- Copy/move use one bounded, fresh request-local directory snapshot across
+  planning, protected-runtime guards and collision checks. Blueprint reads the
+  distinct paths in batches, honoring extension limits. Only absent optional
+  endpoints permit native fallback; authorization/transient/path failures do not.
+  Sources/destinations are not relisted at every stage or after download issuance.
+- Copy uses recent authenticated disk measurements from the already-open Wings
+  console relay when available. Samples expire after 30 seconds, are scoped to
+  managed/provider identity, and are invalidated around filesystem effects.
+  Missing/offline/stale observations use the existing resources API; no new socket
+  or background polling is introduced. Physical staging reservations remain.
+- Wings contains paths, opens sources and enforces its disk quota. NickHosting
+  retains its own permissions, protected runtime files, overwrite consent,
+  bounded streams, staging admission and partial/uncertain failure reporting.
+  The single preflight is not atomic against external Panel/SFTP/game writes;
+  those can race subsequent effects. No rollback is invented.
+
+Read-only installed-source research confirmed Panel 1.11.11's copy adapter accepts
+only a source `location`. The installed Wings binary reports 1.11.13; the current
+image's recorded upstream revision is `71c5338549801ca1dde46919f3ea81500269264d`.
+[Wings 1.11.13 copy](https://github.com/pterodactyl/wings/blob/v1.11.13/server/filesystem/filesystem.go)
+duplicates one regular file in its current directory, generates a suffix and does
+not return the chosen name. It cannot replace arbitrary-folder/recursive paste
+or implement explicit overwrite consent. Copy therefore keeps the existing
+private backend stream; no file downloads through the user's PC, copy/guess/rename
+sequence, new provider endpoint or installed extension update was introduced.
+The [filesystem containment code](https://github.com/pterodactyl/wings/blob/v1.11.13/internal/ufs/fs_unix.go)
+and [disk quota implementation](https://github.com/pterodactyl/wings/blob/v1.11.13/server/filesystem/disk_space.go)
+were reference evidence, not modified production source.
+
+Focused execution evidence (no full historical milestone suite):
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/file-operations.test.ts apps/api/src/file-browsing.test.ts apps/api/src/file-directory-plan.test.ts packages/server-management/src/file-disk-usage.test.ts`:
+  **160 passed**. The directory helper subsequently added all-settled failure
+  coverage; `scripts/dev.sh pnpm exec vitest run apps/api/src/file-directory-plan.test.ts`
+  passed **23/23** on its final source. The disk suite separately passed **13/13**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/directory-identity.integration.test.ts`:
+  **87/87 passed**, 125.25 seconds. Covers proof reuse/expiry, permission loss,
+  lifecycle/pending-upload fences, exclusive locks, settings reuse and disk
+  cache invalidation/identity drift.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run apps/api/src/file-operations.integration.test.ts`:
+  **30 passed, 2 failed** initially because old guard assertions omitted the new
+  shared-context argument. Both assertions were updated;
+  `-t 'requires exact overwrite|copies mixed'` then passed **2/2** (30 filtered).
+  All 32 cases thus passed across those runs, not one final full run. The same
+  one-file/two-child-folder fixture drops from nine directory reads to three
+  distinct directories through one batch, with one whole-plan runtime guard.
+  Coverage includes protected paths, explicit collisions, source open/size
+  failures, mixed copies and incomplete effects.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run apps/api/src/servers.integration.test.ts -t 'protects Minecraft launch inputs|rechecks logout|console relay|console authorization|newly opened console|idle console HTTP|foreign|origin'`:
+  initially **8 passed, 2 failed**, 66 filtered. The legacy provider fixture lacked
+  optional batch-settings discovery; it now returns the extension's 404 contract.
+  The real heartbeat test waited for two 10-second heartbeats inside the global
+  20-second test timeout; its test-only budget is now 30 seconds. Rerunning
+  `-t 'protects Minecraft launch inputs|keeps an idle console HTTP'` passed
+  **2/2**, 74 filtered, 27.40 seconds. Product heartbeat timings did not change.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-shortcuts.browser.test.ts apps/web/tests/file-manager.browser.test.ts -t 'copies without|cuts files|reuses listed metadata|requires new overwrite consent|asks only for file collisions|requests consent when a collision|clears move decisions'`:
+  **7 passed**, 35 filtered, 48.07 seconds. Real browser + isolated handlers prove
+  copy/cut/paste, UI release before refresh, consent and actor-change behavior.
+- `scripts/dev.sh pnpm typecheck`: root and WebPanel passed after correcting
+  initially inferred callback/promise and fixture parameter types. Focused Biome
+  checked all ten changed TypeScript files successfully.
+- `python3 scripts/check-governance.py`: passed on staged content — 676 text
+  files, 209 existing review PNGs, 583 relative links, four TOML files and 44
+  ignore cases; heuristic secret scan passed. `git diff --cached --check` passed.
+
+Independent source review found no remaining must-fix across authorization,
+identity proof, directory batching/fallback budgets, runtime protection, scoped
+resource observations, invalidation and partial-failure behavior. Browser tests
+use provider fixtures, not live file mutations. Existing approved isolated test
+services were reused; their per-test schemas/staging state are cleaned by fixtures.
+No containers, networks, live game files or test servers were created/removed.
+Only the normal dev source watchers reloaded code; API and Vite remained healthy,
+and HTTPS `/v1/setup` returned HTTP 200 with `application/json`. Panel inspection
+was read-only. No manual
+restart, Pterodactyl/Wings/Blueprint change, credentials change or production
+interaction with side effects occurred. Issue #18 remains unchanged.
+
+An Owner live copy/cut comparison is still needed for actual post-change latency;
+provider call counts alone do not establish a millisecond result. Rollback is a
+source revert through the existing dev watcher; no schema/configuration migration
+is involved. PR #21 remains open and unmerged.

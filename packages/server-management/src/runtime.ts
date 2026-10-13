@@ -29,6 +29,7 @@ import {
   type ExternalServiceOptions,
   reconcileExternalServices,
 } from './external.js';
+import { createFileDiskUsageCache, trackFileDiskMutations } from './file-disk-usage.js';
 import {
   createGameRuntimeDispatcher,
   type FileMutationContext,
@@ -245,6 +246,10 @@ export interface ManagementOptions {
 }
 
 const injectedAdapterBindings = new WeakMap<PterodactylAdapter, string>();
+const fileDiskUsageCaches = new WeakMap<
+  Kysely<Database>,
+  ReturnType<typeof createFileDiskUsageCache>
+>();
 // Performance settings only, never authorization or directory contents. Runtime
 // instances are request-scoped, so retain bounded metadata across those instances.
 const directoryBatchSettings = new WeakMap<
@@ -319,7 +324,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
     uploadOrigins: values.pterodactylUploadOrigins,
     containerObserver,
   };
-  const adapter =
+  const diskUsageCache = fileDiskUsageCaches.get(db) ?? createFileDiskUsageCache();
+  fileDiskUsageCaches.set(db, diskUsageCache);
+  const rawAdapter =
     options.adapter ??
     createScopedProviderAdapter(
       createPterodactylAdapter(adapterOptions),
@@ -353,6 +360,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         return timing ? timing.measureSync('file.adapterCreate', create) : create();
       },
     );
+  const adapter = trackFileDiskMutations(rawAdapter, diskUsageCache);
   async function consoleBindingForServer(serverId: string, timing?: UploadTiming) {
     if (options.adapter) return consoleProviderBinding;
     const credential = await resolveProviderCredential(
@@ -372,6 +380,31 @@ export async function createManagementRuntime(options: ManagementOptions) {
         ]),
       )
       .digest('hex');
+  }
+  function diskScope(server: Parameters<typeof directoryServerIdentity>[0], binding: string) {
+    return JSON.stringify([directoryServerIdentity(server), binding]);
+  }
+  /** Feed only authenticated provider events accepted by the existing relay. */
+  function observeConsoleDisk(
+    server: Parameters<typeof directoryServerIdentity>[0],
+    providerBinding: string,
+  ) {
+    return diskUsageCache.observe(
+      server.pterodactyl_identifier ?? '',
+      diskScope(server, providerBinding),
+    );
+  }
+  async function fileDiskUsage(
+    server: Parameters<typeof directoryServerIdentity>[0],
+    identifier: string,
+    timing?: UploadTiming,
+  ) {
+    const binding = await consoleBindingForServer(server.id, timing);
+    const cached = diskUsageCache.read(diskScope(server, binding));
+    if (cached !== undefined) return cached;
+    const read = () => adapter.getResources(identifier);
+    const resources = timing ? await timing.measure('copy.diskFallback', read) : await read();
+    return resources.resources.disk_bytes;
   }
   const externalOptions: ExternalServiceOptions = {
     codec: options.codec,
@@ -1024,6 +1057,69 @@ export async function createManagementRuntime(options: ManagementOptions) {
     }
     return files;
   }
+  /** Already-authorized callers share the bounded settings/chunk transport without
+   * entering access a second time. Directory contents stay operation-local. */
+  async function fileDirectoryBatch(
+    identifier: string,
+    server: Parameters<typeof directoryServerIdentity>[0],
+    directories: string[],
+    signal?: AbortSignal,
+  ): Promise<DirectoryBatchResult[]> {
+    signal?.throwIfAborted();
+    let cache = directoryBatchSettings.get(db);
+    if (!cache) {
+      cache = new Map();
+      directoryBatchSettings.set(db, cache);
+    }
+    const key = JSON.stringify([consoleProviderBinding, directoryServerIdentity(server)]);
+    let settings = cache.get(key);
+    if (!settings || settings.expiresAt <= performance.now()) {
+      cache.delete(key);
+      if (cache.size >= 256) cache.delete(cache.keys().next().value as string);
+      settings = {
+        expiresAt: performance.now() + 60_000,
+        value: adapter.getDirectoryBatchSettings(identifier),
+      };
+      cache.set(key, settings);
+    }
+    let configuration: DirectoryBatchSettings;
+    try {
+      configuration = await settings.value;
+    } catch (error) {
+      // Missing optional endpoints need a cooldown; transient outages must
+      // not disable prefetch for a full minute after the provider recovers.
+      if (
+        !(error instanceof PterodactylError && [404, 405].includes(error.upstreamStatus ?? 0)) &&
+        cache.get(key) === settings
+      )
+        cache.delete(key);
+      throw error;
+    }
+    const { directoryBatchLimit, directoryTimeoutSeconds } = configuration;
+    const deadline = performance.now() + directoryTimeoutSeconds * 1000;
+    const results: DirectoryBatchResult[] = [];
+    let responseBytes = 0;
+    for (let offset = 0; offset < directories.length; offset += directoryBatchLimit) {
+      signal?.throwIfAborted();
+      if (performance.now() >= deadline) {
+        results.push(
+          ...directories
+            .slice(offset)
+            .map((directory) => ({ directory, error: 'deadline_exceeded' as const })),
+        );
+        break;
+      }
+      const chunk = await adapter.listDirectoriesBatch(
+        identifier,
+        directories.slice(offset, offset + directoryBatchLimit),
+      );
+      // Splitting for a lower Owner limit must not multiply the response budget.
+      responseBytes += Buffer.byteLength(JSON.stringify(chunk), 'utf8');
+      if (responseBytes > 8 * 1024 * 1024) throw new DomainError('integration_unavailable');
+      results.push(...chunk);
+    }
+    return results;
+  }
   async function listDirectories(
     context: AuthContext,
     serverId: string,
@@ -1049,61 +1145,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       false,
       async (identifier, _connection, _current, server) => {
         try {
-          signal?.throwIfAborted();
-          let cache = directoryBatchSettings.get(db);
-          if (!cache) {
-            cache = new Map();
-            directoryBatchSettings.set(db, cache);
-          }
-          const key = JSON.stringify([consoleProviderBinding, directoryServerIdentity(server)]);
-          let settings = cache.get(key);
-          if (!settings || settings.expiresAt <= performance.now()) {
-            cache.delete(key);
-            if (cache.size >= 256) cache.delete(cache.keys().next().value as string);
-            settings = {
-              expiresAt: performance.now() + 60_000,
-              value: adapter.getDirectoryBatchSettings(identifier),
-            };
-            cache.set(key, settings);
-          }
-          let configuration: DirectoryBatchSettings;
-          try {
-            configuration = await settings.value;
-          } catch (error) {
-            // Missing optional endpoints need a cooldown; transient outages must
-            // not disable prefetch for a full minute after the provider recovers.
-            if (
-              !(
-                error instanceof PterodactylError && [404, 405].includes(error.upstreamStatus ?? 0)
-              ) &&
-              cache.get(key) === settings
-            )
-              cache.delete(key);
-            throw error;
-          }
-          const { directoryBatchLimit, directoryTimeoutSeconds } = configuration;
-          const deadline = performance.now() + directoryTimeoutSeconds * 1000;
-          const results: DirectoryBatchResult[] = [];
-          let responseBytes = 0;
-          for (let offset = 0; offset < directories.length; offset += directoryBatchLimit) {
-            signal?.throwIfAborted();
-            if (performance.now() >= deadline) {
-              results.push(
-                ...directories
-                  .slice(offset)
-                  .map((directory) => ({ directory, error: 'deadline_exceeded' as const })),
-              );
-              break;
-            }
-            const chunk = await adapter.listDirectoriesBatch(
-              identifier,
-              directories.slice(offset, offset + directoryBatchLimit),
-            );
-            // Splitting for a lower Owner limit must not multiply the response budget.
-            responseBytes += Buffer.byteLength(JSON.stringify(chunk), 'utf8');
-            if (responseBytes > 8 * 1024 * 1024) throw new DomainError('integration_unavailable');
-            results.push(...chunk);
-          }
+          const results = await fileDirectoryBatch(identifier, server, directories, signal);
           // Optional metadata prefetch must never issue download URLs, fetch file
           // contents, or fan out to native listings when Blueprint is unavailable.
           return { results };
@@ -1132,6 +1174,16 @@ export async function createManagementRuntime(options: ManagementOptions) {
     timing?: UploadTiming,
   ) {
     return withAccess(context, serverId, false, work, 'directory', timing);
+  }
+  function fileMutationAccess<T>(
+    context: AuthContext,
+    serverId: string,
+    work: Parameters<typeof withAccess<T>>[3],
+    timing?: UploadTiming,
+  ) {
+    // Reuse the same bounded identity proof as browsing/uploads, while retaining
+    // fresh authorization, exclusive lifecycle locking and pending-upload fences.
+    return withAccess(context, serverId, true, work, 'upload', timing);
   }
   function uploadAccess<T>(
     context: AuthContext,
@@ -1180,6 +1232,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     adapter,
     consoleProviderBinding,
     consoleBindingForServer,
+    observeConsoleDisk,
+    fileDiskUsage,
     containerObserver,
     refreshObservations,
     process,
@@ -1191,6 +1245,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     listFiles,
     listDirectories,
     fileReadAccess,
+    fileMutationAccess,
+    fileDirectoryBatch,
     authorizeTransfer,
     lifecycle,
     externalOptions,

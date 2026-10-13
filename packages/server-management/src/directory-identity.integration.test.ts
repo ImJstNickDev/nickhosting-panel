@@ -75,6 +75,8 @@ describe('directory browsing identity proof reuse', () => {
     createManagementRuntime({ db: f.db, codec, adapter, directoryIdentityCache: cache });
   const browse = async (path = '') => (await runtime()).listFiles(f.context, serverId, path);
   const upload = async () => (await runtime()).uploadAccess(f.context, serverId, uploaded);
+  const mutateFiles = async (timing = createUploadTiming()) =>
+    (await runtime()).fileMutationAccess(f.context, serverId, uploaded, timing);
   const readFile = async (timing = createUploadTiming()) =>
     (await runtime()).fileReadAccess(f.context, serverId, read, timing);
   const batchUpload = async (
@@ -413,6 +415,72 @@ describe('directory browsing identity proof reuse', () => {
     expect(remote).toHaveBeenCalledTimes(1);
     expect(uploaded).toHaveBeenCalledTimes(49);
     expect(listing).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses browsing identity for file mutations while retaining authorization and exclusive locks', async () => {
+    await browse();
+    const timing = createUploadTiming();
+    await mutateFiles(timing);
+    expect(remote).toHaveBeenCalledTimes(1);
+    expect(uploaded).toHaveBeenCalledTimes(1);
+    for (const phase of [
+      'access.identityProof',
+      'access.sessionSecond',
+      'access.permissionSecond',
+      'access.serverLock',
+      'access.serverUnlock',
+    ])
+      expect(timing.snapshot()[phase]?.count).toBe(1);
+    clock = 60_000;
+    await mutateFiles();
+    expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares Owner batch settings between browsing and already-authorized file operations', async () => {
+    const settings = vi.fn(async () => ({
+      directoryBatchLimit: 1,
+      directoryConcurrency: 2,
+      directoryTimeoutSeconds: 8,
+    }));
+    const batch = vi.fn<PterodactylAdapter['listDirectoriesBatch']>(async (_id, paths) =>
+      paths.map((directory) => ({ directory, files: [] })),
+    );
+    Object.assign(f.adapter, { getDirectoryBatchSettings: settings, listDirectoriesBatch: batch });
+    await (await runtime()).listDirectories(f.context, serverId, ['world']);
+    const service = await runtime();
+    await service.fileMutationAccess(f.context, serverId, (id, _connection, _current, server) =>
+      service.fileDirectoryBatch(id, server, ['', 'world']),
+    );
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls.map((call) => call[1])).toEqual([['world'], [''], ['world']]);
+    expect(remote).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses recent Wings disk samples across runtimes with REST fallback after writes or identity drift', async () => {
+    const getResources = vi.fn(async () => ({ resources: { disk_bytes: 500 } }));
+    f.adapter.getResources = getResources as unknown as PterodactylAdapter['getResources'];
+    f.adapter.writeFile = vi.fn(async () => {});
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const service = await runtime();
+    const id = server.pterodactyl_identifier as string;
+    const observe = service.observeConsoleDisk(
+      server,
+      await service.consoleBindingForServer(serverId),
+    );
+    observe({ type: 'status', data: 'running' });
+    observe({ type: 'stats', data: { disk_bytes: 100, memory_bytes: 0, cpu_absolute: 0 } });
+    expect(await (await runtime()).fileDiskUsage(server, id)).toBe(100);
+    expect(getResources).not.toHaveBeenCalled();
+    expect(await service.fileDiskUsage({ ...server, owner_id: randomUUID() }, id)).toBe(500);
+    const changedProvider = await runtime({ ...f.adapter });
+    expect(await changedProvider.fileDiskUsage(server, id)).toBe(500);
+    await service.adapter.writeFile(id, 'test.txt', 'fixture');
+    expect(await (await runtime()).fileDiskUsage(server, id)).toBe(500);
+    expect(getResources).toHaveBeenCalledTimes(3);
   });
 
   it('reuses browsing proof for file reads while retaining fresh authorization and timing', async () => {
@@ -957,6 +1025,7 @@ describe('directory browsing identity proof reuse', () => {
     await expect(browse('world')).rejects.toThrow('forbidden');
     await expect(upload()).rejects.toThrow('forbidden');
     await expect(readFile()).rejects.toThrow('forbidden');
+    await expect(mutateFiles()).rejects.toThrow('forbidden');
     expect(remote).toHaveBeenCalledTimes(1);
     expect(listing).toHaveBeenCalledTimes(1);
     expect(uploaded).toHaveBeenCalledTimes(1);
@@ -975,6 +1044,9 @@ describe('directory browsing identity proof reuse', () => {
           .where('id', '=', serverId)
           .execute();
       await expect(upload()).rejects.toThrow(
+        blocker === 'pending-upload' ? 'operation_uncertain' : 'conflict',
+      );
+      await expect(mutateFiles()).rejects.toThrow(
         blocker === 'pending-upload' ? 'operation_uncertain' : 'conflict',
       );
       expect(uploaded).not.toHaveBeenCalled();
@@ -1000,6 +1072,7 @@ describe('directory browsing identity proof reuse', () => {
     try {
       await vi.waitFor(() => expect(entered).toHaveBeenCalledTimes(1));
       await expect(upload()).rejects.toThrow('operation_busy');
+      await expect(mutateFiles()).rejects.toThrow('operation_busy');
       expect(uploaded).not.toHaveBeenCalled();
       expect(remote).toHaveBeenCalledTimes(1);
     } finally {

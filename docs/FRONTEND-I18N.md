@@ -538,7 +538,14 @@ explicit choices, while an unknown/failed POST ends with a visible error and ask
 for source/destination inspection; it never retries automatically or claims rollback.
 Source/destination caches refresh after a mutation. Copy preserves originals and
 uses the existing streamed copy endpoint; explicit overwrite consent applies only
-to exact regular-file destinations. Copy also refreshes transfer availability and
+to exact regular-file destinations. Copy/move planning, protected-path checks and
+collisions share one fresh backend directory snapshot; the browser cache is not
+mutation authority. Each distinct directory is read once, using the optional
+Blueprint batch transport. Identity uses the existing bounded proof with fresh
+local permissions. External game/SFTP/Panel writes after preflight can still race
+it; this is not an atomic filesystem transaction. Wings' native same-folder copy
+cannot implement the chosen destination/overwrite contract, so copy bytes still
+stream privately through the backend. Copy also refreshes transfer availability and
 checks its upload capability before submission. An active claim from its own copy
 may temporarily disable new copies without hiding the in-flight result. Failed or
 uncertain copies ask for destination inspection; there is no automatic replay.

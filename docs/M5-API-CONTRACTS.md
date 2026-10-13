@@ -707,8 +707,11 @@ reauthorizing before each batch. Unknown/partial dispatch failure stops the sequ
 with `operation_uncertain`; confirmed prior-entry counts are only a lower bound,
 not proof that the failed batch had no effects. No batch is automatically replayed.
 Pre-dispatch authorization failures retain their normal error when nothing ran.
-Planning reuses directory indexes only inside that request; copy's subsequent
-source/destination checks remain fresh before writes.
+Planning, protected-path validation and collision checks share one fresh,
+request-local directory snapshot. Blueprint batches read each directory once;
+only a missing optional extension permits the bounded native-listing fallback.
+The existing 60-second identity proof is reused with fresh local permissions and
+exclusive lifecycle locking; expired or changed bindings cannot authorize access.
 There is no delete-before-move. Destination names appearing after browser preflight
 are checked again by the API. Provider filesystem changes can still race the final
 preflight/rename interval: the current Client API contract has no atomic no-clobber
@@ -716,13 +719,20 @@ flag and multi-file renames are not transactional. No rollback or automatic retr
 is claimed after an ambiguous/partial provider failure.
 
 Copy uses the same exact-path consent semantics, with approvals scoped to the
-selected top-level files and validated before any writes. It rechecks source and
-destination metadata before each streamed upload and checks the destination again
-after download negotiation. Existing files are never deleted first. Replacements
-reserve full upload capacity without crediting the destination's size. Authorization, protected
-paths, upload admission and durable claims remain enforced; approved paths are
-audited. Concurrent external Wings writes can still race the final check/upload
-interval because the provider exposes no atomic compare-and-swap.
+selected top-level files and validated before any writes. Source/destination
+metadata and runtime guards use that same snapshot, without repeated listings
+per file or after download negotiation. Wings opens the source; a returned content
+length inconsistent with the plan rejects the copy, and streaming retains its
+bounds. Existing files are never deleted first. Replacements reserve full upload
+capacity without crediting the destination's size. Recent authenticated Wings
+console disk samples may replace the resources API lookup; missing/stale samples
+fall back to REST. Authorization, protected paths, upload admission and durable
+claims remain enforced; approved paths are audited. Concurrent external Wings
+writes after preflight can still race the upload because the provider exposes no
+atomic compare-and-swap. Native Wings copy cannot target another directory or
+implement explicit overwrite consent; the backend-streamed relay remains.
+See [file access and copy contracts](M2-API.md) for cache bounds
+and observation invalidation.
 
 The WebPanel Move/Copy tree and drag/drop share a client-side decision flow over
 their respective APIs. Per-file Skip removes that item and its overwrite path;

@@ -182,7 +182,8 @@ project clients should use the authorized per-server operation view above.
 | GET `/v1/servers/:id/backups/:backupId/download` | Backend-streamed attachment with no fixed total byte limit; no signed provider URL is returned. |
 
 Directory listing continues through the authenticated per-user Client API to
-Wings. Directory GET and binary upload PUT reuse a successful Application API identity verification:
+Wings. Directory/editor GET, binary upload PUT, streamed copy and ordinary file
+mutations reuse a successful Application API identity verification:
 an API-process cache holds at most 1,024 proofs, with a fixed 60-second lifetime.
 A background renewal starts at 55 seconds; the old proof remains usable until
 its original deadline while the replacement is checked. Expired proofs never
@@ -205,8 +206,11 @@ permission decisions or credentials are returned from this cache. Uploads retain
 fresh session/manage authorization, lifecycle/pending-claim checks, server locks,
 path validation and storage admission for each file. Editor GET reads reuse the
 same identity proof with fresh local session/read authorization and no pinned DB
-connection while waiting for renewal. Downloads and other mutations retain their
-existing fresh identity verification. Editor reads request contents directly:
+connection while waiting for renewal. File writes, directory creation, renames,
+deletes and streamed copies retain exclusive lifecycle locking, pending-upload
+fences and fresh local authorization, while reusing the same identity proof.
+The shared admission gate reserves DB pool capacity for proof renewal. Other
+service operations retain their existing identity policies. Editor reads request contents directly:
 Wings enforces path containment at open time; no ancestor directory listing is
 made. Missing files remain errors, and the editor byte/text limits still apply.
 
@@ -221,6 +225,42 @@ and never used as confirmation of a mutation. For one bulk request selecting 49
 files directly inside a top-level folder, guard listings fall from 98 to 2.
 Delete remains one provider request
 containing the selected names; no deletion is dispatched until preflight passes.
+Copy and move share one fresh, request-local directory plan across selection,
+ancestor/runtime protection and collision checks. Distinct directories are read
+once through Blueprint batches of up to 48 (further split for a lower Owner
+extension limit); only a missing extension endpoint (404/405) falls back to two
+concurrent Client API reads. Authorization, transient and individual path errors
+never trigger a fallback. The plan is bounded to 20,000 directories and 32 MiB
+of retained metadata, with an 8 MiB response budget per batch. It contains no file
+contents, signed URLs or browser-cached observations. Primed reads settle before
+a failed operation releases its access context.
+
+Copy validates the whole selection before effects instead of relisting each
+source/destination at each stage. Wings opens the source and enforces filesystem
+containment; a returned source content length that differs from the planned size
+rejects the copy before upload. Upload streaming remains bounded. This preflight
+is not an atomic no-clobber operation: direct Panel, SFTP or game writes after the
+snapshot can race it. Successful earlier effects are not rolled back or replayed
+on a later failure, and uncertain outcomes remain explicit.
+
+For copy quota preflight, authenticated disk statistics from the existing console
+relay may be reused for at most 30 seconds. The process-local cache holds at most
+1,024 samples scoped to the managed identity and provider credential binding;
+unknown/offline status cannot establish a zero-usage sample. Actual file/restore/
+reinstall mutations invalidate observations before and after their effects, and
+samples received during writes are ignored. Missing/stale observations fall back
+to the existing resources API. There is no extra WebSocket or polling loop. Wings
+still enforces its quota, and NickHosting retains physical upload/staging capacity
+reservations independently of this observation.
+
+Native Wings 1.11.13 copy accepts only a source location, duplicates one regular
+file in the same directory with a generated suffix, and returns no chosen name.
+It cannot implement arbitrary-folder paste, recursive copy or explicit overwrite
+consent. The existing backend-streamed relay remains for these operations; no
+file contents pass through the browser during copy. See the verified
+[Wings copy implementation](https://github.com/pterodactyl/wings/blob/v1.11.13/server/filesystem/filesystem.go)
+and [Panel adapter](https://github.com/pterodactyl/panel/blob/v1.11.11/app/Repositories/Wings/DaemonFileRepository.php).
+
 File/command/backup-delete mutations share the lifecycle server lock and reject
 an active lifecycle job.
 Background reconciliation collects provider/host observations without holding

@@ -28,6 +28,7 @@ import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
 import { inspectFilePath } from './file-browsing.js';
+import { createFileDirectoryPlan, fileDirectoryAncestors } from './file-directory-plan.js';
 import { createFileOperationTrace } from './file-operation-trace.js';
 import type { ServerRouteOptions } from './servers.js';
 
@@ -95,7 +96,7 @@ function directoryIndex(entries: ServerFile[]) {
   return index;
 }
 
-/** Cache only this read-only plan, never later destination checks or writes. */
+/** Reuse listings and name indexes within one operation; never cache mutation results. */
 function planningDirectory(list: (path: string) => Promise<ServerFile[]>) {
   const listings = new Map<string, Promise<ServerFile[]>>();
   const indexes = new Map<string, Promise<ReturnType<typeof directoryIndex>>>();
@@ -252,7 +253,7 @@ export async function planFileCopy(
 
 /** Batch renames are not transactional upstream. Reject predictable collisions before any effect. */
 export async function validateFileMoves(
-  adapter: PterodactylAdapter,
+  adapter: Pick<PterodactylAdapter, 'listFiles'>,
   id: string,
   root: string,
   moves: { from: string; to: string }[],
@@ -527,15 +528,23 @@ export function registerFileOperationRoutes(
       const release = timing.measureSync('copy.acquireSlot', () => options.acquireUploadSlot());
       try {
         response = await timing.measure('copy.access', () =>
-          service.access(
+          service.fileMutationAccess(
             context,
             serverId,
-            true,
             async (id, connection, current, server) => {
+              const directories = createFileDirectoryPlan({
+                batch: (paths) => service.fileDirectoryBatch(id, server, paths, c.req.raw.signal),
+                single: (path) => service.adapter.listFiles(id, path),
+                timing: trace.enabled ? timing : undefined,
+              });
+              await timing.measure('copy.directories', () =>
+                directories.prime(
+                  fileDirectoryAncestors([clean(input.root, true), clean(input.destination, true)]),
+                ),
+              );
               const entries = await timing.measure('copy.plan', () =>
                 planFileCopy(
-                  (path) =>
-                    timing.measure('copy.planList', () => service.adapter.listFiles(id, path)),
+                  directories.list,
                   input.root,
                   input.files,
                   input.destination,
@@ -556,14 +565,15 @@ export function registerFileOperationRoutes(
                   serverId,
                   entries.map((entry) => entry.path),
                   connection,
+                  { providerIdentifier: id, listFiles: directories.list },
                 ),
               );
               const maxBytes = server.limits.disk * 1048576;
-              const resources = await timing.measure('copy.diskResources', () =>
-                service.adapter.getResources(id),
+              const diskBytes = await timing.measure('copy.diskResources', () =>
+                service.fileDiskUsage(server, id, trace.enabled ? timing : undefined),
               );
               if (
-                resources.resources.disk_bytes +
+                diskBytes +
                   entries.reduce((sum, entry) => sum + (entry.directory ? 0 : entry.size), 0) >
                 maxBytes
               )
@@ -589,50 +599,13 @@ export function registerFileOperationRoutes(
                       trace.enabled ? timing : undefined,
                     ),
                   );
-                  await timing.measure('copy.entryMutationCheck', () =>
-                    service.assertFileMutation(serverId, [entry.path], connection),
-                  );
                   const parts = entry.path.split('/');
                   const name = parts.pop();
                   if (!name) throw new DomainError('validation_failed');
                   const root = parts.join('/');
-                  const currentSource = await timing.measure('copy.sourceCheck', () =>
-                    inspectFilePath(
-                      {
-                        listFiles: (server, path) =>
-                          timing.measure('copy.sourceList', () =>
-                            service.adapter.listFiles(server, path),
-                          ),
-                      },
-                      id,
-                      entry.source,
-                    ),
-                  );
-                  if (
-                    !currentSource ||
-                    currentSource.is_file === entry.directory ||
-                    currentSource.size !== entry.size
-                  )
-                    throw new DomainError('conflict');
-                  const checkDestination = () =>
-                    timing.measure('copy.destinationCheck', async () => {
-                      await assertCopyDirectory(
-                        (path) =>
-                          timing.measure('copy.destinationList', () =>
-                            service.adapter.listFiles(id, path),
-                          ),
-                        root,
-                      );
-                      assertCopyDestination(
-                        await timing.measure('copy.destinationList', () =>
-                          service.adapter.listFiles(id, root),
-                        ),
-                        entry.path,
-                        !entry.directory,
-                        approvedTargets,
-                      );
-                    });
-                  await checkDestination();
+                  // The fresh operation plan and game guard share one metadata snapshot.
+                  // Wings authoritatively opens sources and confines writes; never relist
+                  // the same ancestors for each stage or each file.
                   if (entry.directory)
                     await timing.measure('copy.createDirectory', () =>
                       service.adapter.createDirectory(id, root, name),
@@ -658,8 +631,11 @@ export function registerFileOperationRoutes(
                         }),
                       );
                       try {
-                        // Download negotiation may take time; recheck before the first write.
-                        await checkDestination();
+                        if (
+                          download.contentLength !== undefined &&
+                          download.contentLength !== entry.size
+                        )
+                          throw new DomainError('conflict');
                         await timing.measure('copy.uploadStream', () =>
                           service.adapter.uploadFile(id, entry.path, {
                             body: download.body,

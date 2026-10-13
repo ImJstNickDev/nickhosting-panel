@@ -125,6 +125,23 @@ beforeEach(async () => {
       return work('fixture', f.db, context, server);
     },
   } as unknown as ManagementRuntime;
+  service.fileMutationAccess = (context, id, work, timing) =>
+    service.access(context, id, true, work, timing);
+  service.fileDiskUsage = async (_server, identifier) =>
+    (await service.adapter.getResources(identifier)).resources.disk_bytes;
+  service.fileDirectoryBatch = vi.fn(
+    async (
+      identifier: string,
+      _server: Parameters<ManagementRuntime['fileDirectoryBatch']>[1],
+      directories: string[],
+    ) =>
+      Promise.all(
+        directories.map(async (directory) => ({
+          directory,
+          files: await service.adapter.listFiles(identifier, directory),
+        })),
+      ),
+  );
   app = new Hono<{ Variables: Variables }>();
   app.onError((error, c) =>
     c.json(
@@ -182,9 +199,8 @@ describe('file operation handlers with isolated authoritative database', () => {
       operation: 'copy',
       outcome: 'succeeded',
       phases: {
-        'copy.planList': { count: 3 },
-        'copy.sourceList': { count: 2 },
-        'copy.destinationList': { count: 4 },
+        'directory.batch': { count: 1 },
+        'copy.planMutationCheck': { count: 1 },
         'copy.authorizeEntry': { count: 1 },
         'copy.authorizeDownload': { count: 1 },
         'copy.authorizeUpload': { count: 1 },
@@ -197,7 +213,8 @@ describe('file operation handlers with isolated authoritative database', () => {
         'copy.releaseSlot': { count: 1 },
       },
     });
-    expect(service.adapter.listFiles).toHaveBeenCalledTimes(9);
+    expect(service.adapter.listFiles).toHaveBeenCalledTimes(3);
+    expect(service.fileDirectoryBatch).toHaveBeenCalledOnce();
     const serialized = JSON.stringify(records);
     for (const value of ['source/a.txt', 'target/a.txt', 'hello'])
       expect(serialized).not.toContain(value);
@@ -229,7 +246,8 @@ describe('file operation handlers with isolated authoritative database', () => {
     expect(await result.json()).toEqual({ completed: 1 });
     expect(result.headers.get('server-timing')).toBeNull();
     expect(operationLogs).toEqual([]);
-    expect(service.adapter.listFiles).toHaveBeenCalledTimes(9);
+    expect(service.adapter.listFiles).toHaveBeenCalledTimes(3);
+    expect(service.fileDirectoryBatch).toHaveBeenCalledOnce();
   });
   it('counts the existing cached move-plan listings under debug without adding provider requests', async () => {
     debugTrace = true;
@@ -351,6 +369,7 @@ describe('file operation handlers with isolated authoritative database', () => {
       serverId,
       ['source/a.txt', 'target/a.txt'],
       f.db,
+      { providerIdentifier: 'fixture', listFiles: expect.any(Function) },
     );
     const audit = await f.db
       .selectFrom('audit_events')
@@ -481,6 +500,7 @@ describe('file operation handlers with isolated authoritative database', () => {
       serverId,
       ['target/a.txt', 'target/b.txt'],
       f.db,
+      { providerIdentifier: 'fixture', listFiles: expect.any(Function) },
     );
     expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toHaveLength(0);
     expect(
@@ -541,28 +561,26 @@ describe('file operation handlers with isolated authoritative database', () => {
       expect(files.get('source/a.txt')?.toString()).toBe('hello');
     },
   );
-  it.each(['unapproved file', 'directory replacing approved file'])(
-    'rechecks a late %s after download negotiation and does not upload',
-    async (collision) => {
-      const approved = collision !== 'unapproved file';
-      if (approved) files.set('target/a.txt', Buffer.from('old destination'));
+  it.each(['missing', 'size changed'])(
+    'rejects a source that Wings reports as %s without relisting directories',
+    async (failure) => {
       const download = vi.mocked(service.adapter.downloadFile).getMockImplementation();
       if (!download) throw new Error('Missing download fixture');
       vi.mocked(service.adapter.downloadFile).mockImplementationOnce(async (...args) => {
+        if (failure === 'missing') throw new DomainError('not_found');
         const response = await download(...args);
-        files.set('target/a.txt', approved ? null : Buffer.from('late arrival'));
-        return response;
+        return { ...response, contentLength: 100 };
       });
       const result = await post('copy', {
         root: 'source',
         files: ['a.txt'],
         destination: 'target',
-        ...(approved ? { overwrite: ['target/a.txt'] } : {}),
       });
       expect(result.status).toBe(409);
       expect(await result.json()).toMatchObject({ code: 'operation_uncertain' });
       expect(service.adapter.uploadFile).not.toHaveBeenCalled();
-      expect(files.get('target/a.txt')).toEqual(approved ? null : Buffer.from('late arrival'));
+      expect(service.fileDirectoryBatch).toHaveBeenCalledOnce();
+      expect(service.adapter.listFiles).toHaveBeenCalledTimes(3);
       expect(files.get('source/a.txt')?.toString()).toBe('hello');
     },
   );
