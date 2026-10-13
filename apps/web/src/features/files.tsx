@@ -1340,11 +1340,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         )
       )
         return;
-      if (!validMoveTarget(directory, payload.names, folder)) {
-        setError({ messageKey: 'file.invalidMove' });
-        return;
-      }
+      // A drop onto the source or a selected folder cannot move anything.
+      // Ignore it like a cancelled drag instead of showing a page-wide error.
+      if (!validMoveTarget(directory, payload.names, folder)) return;
       setMenu(undefined);
+      setError(undefined);
       menuTrigger.current = document.activeElement as HTMLElement;
       transferFlow.begin(
         { source: directory, destination: folder, names: payload.names },
@@ -1352,7 +1352,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         false,
       );
     } catch {
-      setError({ messageKey: 'file.invalidMove' });
+      // Ignore missing or malformed drag data; no file operation was started.
     }
   }
   function dragOverFolder(event: DragEvent) {

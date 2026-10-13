@@ -639,6 +639,28 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect((await provider.files()).has('gamma.yaml')).toBe(true);
     await user.getByRole('button', { name: 'root', exact: true }).click();
   });
+  it('ignores an impossible drop without an alert and moves selected items into an unselected folder', async () => {
+    const endpoint = `/v1/servers/${provider.ids.serverId}/files`;
+    for (const name of ['drag-source', 'drag-destination'])
+      await journeyRequest(harness, user, endpoint, { action: 'mkdir', root: '', name });
+    const remote = await provider.files();
+    remote.set('drag-file.txt', Buffer.from('Dragged file'));
+    await user.goto(base);
+
+    await user.getByRole('checkbox', { name: 'Select drag-source', exact: true }).check();
+    await row('drag-source').dragTo(user.getByRole('button', { name: 'root', exact: true }));
+    await browserExpect(user.getByRole('alert')).toHaveCount(0);
+    await browserExpect(row('drag-source')).toBeVisible();
+    await row('drag-source').dragTo(row('drag-destination'));
+    await browserExpect(row('drag-source')).toHaveCount(0);
+    await browserExpect(user.getByRole('alert')).toHaveCount(0);
+
+    await user.getByRole('checkbox', { name: 'Select drag-file.txt', exact: true }).check();
+    await row('drag-file.txt').dragTo(row('drag-destination'));
+    await browserExpect(row('drag-file.txt')).toHaveCount(0);
+    await browserExpect(user.getByRole('alert')).toHaveCount(0);
+    expect(remote.has('drag-destination/drag-file.txt')).toBe(true);
+  });
   it('asks only for file collisions on drop, supports cancellation and scopes overwrite to freshly confirmed names', async () => {
     await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {
       action: 'mkdir',
