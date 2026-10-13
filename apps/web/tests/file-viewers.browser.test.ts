@@ -21,6 +21,7 @@ describe('M5 builtin file viewers', () => {
   let viewerAvailable = true;
   let preferenceReads = 0;
   let preferenceWrites = 0;
+  let viewerMetadataFailure: 'capabilities' | 'preferences' | undefined;
   let rejectPreference = false;
   let holdPreference: Promise<void> | undefined;
 
@@ -45,6 +46,8 @@ describe('M5 builtin file viewers', () => {
         '{"large":9007199254740993123456789,"players":[{"name":"Alex","active":true}],"same":1,"same":2}',
       ),
     );
+    remote.set('forced.dat', Buffer.from('{"forced":true}'));
+    remote.set('readable.txt', Buffer.from('Text editing remains available.'));
     remote.set('viewer.json5', Buffer.from("{ // comment\n name:'Alex', limit:0x10, }"));
     remote.set(
       'viewer.svg',
@@ -106,6 +109,10 @@ describe('M5 builtin file viewers', () => {
       const url = new URL(request.url());
       const path = url.searchParams.get('path') ?? '';
       const action = url.pathname.slice(endpoint.length);
+      if (request.method() === 'GET' && action === `/${viewerMetadataFailure}`) {
+        await route.fulfill({ status: 503, json: { code: 'internal_error' } });
+        return;
+      }
       if (action === '/preferences') {
         if (request.method() === 'GET') preferenceReads++;
         if (request.method() === 'PUT') {
@@ -365,6 +372,76 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
+  it('offers all viewers and honors a forced default for an unmatched extension', async () => {
+    preferences.length = 0;
+    await open('forced.dat');
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(0);
+    const before = reads.length;
+    await dialog.getByRole('button', { name: 'Show all', exact: true }).click();
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(7);
+    expect(reads.length).toBe(before);
+    await dialog.getByRole('combobox').selectOption('server');
+    await harness.screenshot(page, 'file-viewer-all-desktop-en');
+    await dialog.getByRole('button', { name: 'JSON Tree', exact: true }).click();
+    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await root();
+    await page
+      .locator('.fm-filename')
+      .getByText('forced.dat', { exact: true })
+      .click({ button: 'right' });
+    await browserExpect(page.getByRole('menuitem', { name: 'Open', exact: true })).toBeEnabled();
+    await page.getByRole('menuitem', { name: 'Open', exact: true }).click();
+    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(7);
+    await dialog.getByRole('button', { name: 'Show suggested', exact: true }).click();
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    preferences.length = 0;
+    expect(errors).toEqual([]);
+  });
+
+  it('offers all viewers without pretending mismatched content is readable', async () => {
+    await open('viewer.json');
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: 'Show all', exact: true }).click();
+    const frame = dialog.getByRole('button', { name: 'Frame', exact: true });
+    await frame.focus();
+    await page.keyboard.press('Enter');
+    await browserExpect(dialog).not.toBeVisible();
+    await browserExpect(
+      page.getByText('The image cannot be displayed. Check its format or download it.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(7);
+    await dialog.getByRole('button', { name: 'JSON Tree', exact: true }).click();
+    await browserExpect(page.locator('.ve-json')).toContainText('9007199254740993123456789');
+    expect(errors).toEqual([]);
+  });
+
+  it('keeps text editing available when optional viewer metadata is unavailable', async () => {
+    try {
+      for (const endpoint of ['capabilities', 'preferences'] as const) {
+        viewerMetadataFailure = endpoint;
+        await open('readable.txt');
+        await browserExpect(page.locator('.cm-content')).toContainText(
+          'Text editing remains available.',
+        );
+        await browserExpect(page.getByRole('alert')).toContainText(
+          'The request failed. Try again or check Activity.',
+        );
+      }
+    } finally {
+      viewerMetadataFailure = undefined;
+    }
+    expect(errors).toEqual([]);
+  });
+
   it('navigates archives as virtual folders, previews entries and returns to the same directory', async () => {
     preferences.length = 0;
     await open('viewer.zip');
@@ -378,6 +455,11 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(page.getByRole('dialog').locator('.ve-chooser-filename')).toHaveText(
       'settings.json',
     );
+    await page.getByRole('dialog').getByRole('button', { name: 'Show all', exact: true }).click();
+    await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(5);
+    await browserExpect(
+      page.getByRole('dialog').getByRole('button', { name: /^(Atlas|Data Grid)$/ }),
+    ).toHaveCount(0);
     await page.keyboard.press('Escape');
     await browserExpect(openWith).toBeFocused();
     const downloaded = page.waitForEvent('download');
@@ -445,6 +527,26 @@ describe('M5 builtin file viewers', () => {
       .evaluate((element) => ({ width: element.clientWidth, content: element.scrollWidth }));
     expect(bounds.content).toBeLessThanOrEqual(bounds.width);
     await harness.screenshot(page, 'file-viewer-open-with-320-it');
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Mostra tutti', exact: true })
+      .click();
+    await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(7);
+    await harness.screenshot(page, 'file-viewer-all-320-it');
+    await page.getByRole('dialog').getByRole('button', { name: 'Frame', exact: true }).focus();
+    for (let index = 0; index < 6; index++) await page.keyboard.press('Tab');
+    const scribe = page.getByRole('dialog').getByRole('button', { name: 'Scribe', exact: true });
+    await browserExpect(scribe).toBeFocused();
+    const card = await scribe.boundingBox();
+    const grid = await page.locator('.ve-viewer-options-all').boundingBox();
+    if (!card || !grid) throw new Error('Missing expanded viewer list');
+    expect(card.y + card.height).toBeLessThanOrEqual(grid.y + grid.height + 1);
+    const allAccessibility = await new AxeBuilder({ page }).include('.ve-chooser').analyze();
+    expect(allAccessibility.violations).toEqual([]);
+    const expanded = await page
+      .getByRole('dialog')
+      .evaluate((element) => ({ width: element.clientWidth, content: element.scrollWidth }));
+    expect(expanded.content).toBeLessThanOrEqual(expanded.width);
     await page.keyboard.press('Escape');
     await browserExpect(page.getByRole('dialog')).not.toBeVisible();
     expect(
@@ -464,6 +566,9 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(chooser.locator('.ve-viewer-card')).toHaveCount(1);
     await browserExpect(chooser.getByRole('button', { name: 'Scribe', exact: true })).toBeEnabled();
     await browserExpect(chooser.getByRole('combobox')).toHaveCount(0);
+    await browserExpect(chooser.getByRole('button', { name: 'Show all', exact: true })).toHaveCount(
+      0,
+    );
     const card = await chooser.locator('.ve-viewer-card').boundingBox();
     const grid = await chooser.locator('.ve-viewer-options').boundingBox();
     if (!card || !grid) throw new Error('Missing single viewer card');

@@ -11,6 +11,8 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
   'viewer.truncated': ['truncated', 'troncato'],
   'viewer.open': ['Open', 'Apri'],
   'viewer.openWith': ['Open with', 'Apri con'],
+  'viewer.showAll': ['Show all', 'Mostra tutti'],
+  'viewer.showSuggested': ['Show suggested', 'Mostra suggeriti'],
   'viewer.image': ['Image', 'Immagine'],
   'viewer.audio': ['Audio', 'Audio'],
   'viewer.video': ['Video', 'Video'],

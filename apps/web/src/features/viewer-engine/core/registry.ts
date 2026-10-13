@@ -78,17 +78,22 @@ export function viewerExtension(name: string) {
   );
   return compound ?? (lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : '');
 }
-export function availableViewers(source: ViewerSource): ViewerDefinition[] {
-  const extension = viewerExtension(source.name);
+/** Known runnable modules for this context; filename matches are only suggestions. */
+export function selectableViewers(source: ViewerSource): ViewerDefinition[] {
   const gameViewers: ViewerDefinition[] = gameViewerRegistry
-    .forFile(source.gameId, extension)
+    .forGame(source.gameId)
     .map(({ descriptor }) => ({
       id: descriptor.id as ViewerId,
       label: descriptor.labelKey,
       extensions: descriptor.extensions,
     }));
-  return [...gameViewers, ...builtinViewers].filter((viewer) => {
-    if (source.entry && ['archive', 'sqlite'].includes(viewer.id)) return false;
+  return [...gameViewers, ...builtinViewers].filter(
+    (viewer) => !source.entry || !['archive', 'sqlite'].includes(viewer.id),
+  );
+}
+export function availableViewers(source: ViewerSource): ViewerDefinition[] {
+  const extension = viewerExtension(source.name);
+  return selectableViewers(source).filter((viewer) => {
     if (viewer.id === 'text')
       return (
         fileEditorAvailability({ name: source.name, size: source.size, is_file: true }) === 'text'
@@ -100,13 +105,13 @@ export function preferredViewer(
   source: ViewerSource,
   preferences: readonly ViewerPreference[] = [],
 ): ViewerId | undefined {
-  const available = availableViewers(source);
+  const selectable = selectableViewers(source);
   for (const scope of ['server', 'game', 'global'] as const) {
     const preference = preferences.find(
       (item) => item.scope === scope && item.extension === viewerExtension(source.name),
     );
-    if (preference && available.some((item) => item.id === preference.viewerId))
+    if (preference && selectable.some((item) => item.id === preference.viewerId))
       return preference.viewerId;
   }
-  return available[0]?.id;
+  return availableViewers(source)[0]?.id;
 }

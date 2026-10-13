@@ -278,6 +278,23 @@
   border-color: var(--line);
   border-radius: 0.5rem;
 }
+.ve-chooser-filter {
+  display: flex;
+  justify-content: flex-end;
+  margin: -0.25rem 0 0.5rem;
+}
+.ve-chooser-filter .text-button {
+  font-size: 0.85rem;
+  min-height: 32px;
+  text-decoration: none;
+  color: var(--muted);
+}
+.ve-viewer-options.ve-viewer-options-all {
+  padding: 3px;
+  max-height: min(32rem, 48dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .ve-viewer-options {
   border: 0;
   padding: 0;

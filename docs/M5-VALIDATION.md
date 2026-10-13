@@ -7213,3 +7213,46 @@ change was needed. An HTTPS GET of the dev Vite module returned 200 and confirme
 the new cards, scope control and accessible descriptions are served through HMR.
 Issue18 and existing production-release boundaries remain unchanged. Concurrent
 Owner UI changes were preserved; no broad historical suite was rerun.
+
+## 2026-10-13 — Show all and explicit viewer attempts
+
+Open with offers Show all / Show suggested. Expansion is local metadata only;
+no content is fetched until a card is chosen. The bounded scrollable grid exposes
+compiled builtin and same-game viewers beyond filename matches. Explicit personal
+defaults now survive unmatched extensions and apply in normal/context-menu opens.
+SDK `forGame` enumerates trusted modules without executing their lazy loaders.
+Existing transport, editor/size and decoder constraints remain. Nested archive/
+SQLite readers stay excluded for archive entries because they target the outer
+file. Atlas still recognizes archive formats by supported suffix; forcing a viewer
+is an attempt, not format conversion or a compatibility guarantee.
+
+Validation:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed on final code.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/core/registry.test.ts packages/game-sdk/src/viewers.test.ts`:
+  5/5 passed (forced defaults, unknown IDs, scope precedence, nested exclusions,
+  memory limits and trusted same-game discovery).
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'offers all|preserves JSON|keeps Italian mobile|keeps the existing editor|navigates archives'`:
+  6/6 targeted journeys passed, 4 intentionally skipped, in 32.59s. Covers a JSON
+  payload named .dat, remembered reopening/context menu, wrong-image error and
+  recovery, nested entries and unavailable transport.
+- Independent review caught a newly introduced dependency on optional viewer
+  metadata for ordinary text opens. Fixed by retaining the visible lookup error
+  while allowing the independent text editor. Same browser command with
+  `-t 'offers all|keeps Italian mobile|keeps text editing'`: all 4 affected journeys
+  passed in 29.14s, 7 intentionally skipped. Both capabilities 503 and preferences 503
+  tested; keyboard reaches the last card through scrolling; expanded 320px chooser
+  has zero axe violations and no horizontal overflow.
+- `scripts/dev.sh pnpm i18n:compile`, `scripts/dev.sh pnpm i18n:check`, targeted
+  Biome on the nine changed TS/TSX/CSS files and `git diff --check`: passed.
+
+Reviewed [desktop](screenshots/m5/file-viewer-all-desktop-en.png) and
+[320px Italian](screenshots/m5/file-viewer-all-320-it.png) screenshots. Independent
+review reports no remaining must-fix. Actual app/browser handlers use isolated
+provider fixtures and disposable schemas on existing approved test services;
+no live game mutations, new infrastructure or restarts. No full historical suite
+rerun. Production release restrictions and issue18 are unchanged.
+
+Index governance passed: 737 text files, 221 review PNGs, 617 links, 4 TOML files
+and 44 ignore cases (heuristic secret scan). Read-only HTTPS smoke returned 200
+and confirmed the new toggle and expanded list are served by Vite in dev.

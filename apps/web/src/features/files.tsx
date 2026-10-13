@@ -839,9 +839,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const menuCanOpen =
     menu &&
     (!menu.entry.is_file ||
-      availableViewers(viewerSource(menu.entry)).some(
-        (choice) => choice.id === 'text' || viewerCapabilities.data?.available === true,
-      ));
+      (viewerCapabilities.data?.available === true
+        ? Boolean(preferredViewer(viewerSource(menu.entry), viewerPreferences.data?.preferences))
+        : availableViewers(viewerSource(menu.entry)).some((choice) => choice.id === 'text')));
   async function open(entry: ServerFile, folder = directory, forcedViewer?: ViewerId) {
     if (mutationRunning.current || transferFlow.active) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
@@ -858,7 +858,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
     const source = viewerSource(entry, folder);
     let viewerId = forcedViewer;
-    if (!viewerId && availableViewers(source).some((choice) => choice.id !== 'text')) {
+    if (!viewerId) {
       const sequence = ++readSequence.current;
       const identity = saveIdentity.current;
       try {
@@ -874,7 +874,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         }
       } catch (failure) {
         setError(failure);
-        return;
+        // Optional viewer metadata must not disable the independent text editor.
+        // Keep the failed lookup visible instead of claiming a default was applied.
+        if (fileEditorAvailability(entry) !== 'text') return;
       }
       if (
         !mounted.current ||

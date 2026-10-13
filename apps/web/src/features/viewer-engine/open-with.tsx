@@ -3,6 +3,7 @@ import { useT } from '../../app/i18n.js';
 import { Dialog, ErrorNotice } from '../../components/ui.js';
 import {
   availableViewers,
+  selectableViewers,
   type ViewerId,
   type ViewerPreference,
   type ViewerSource,
@@ -48,7 +49,12 @@ export function OpenWith({
 }) {
   const t = useT();
   const descriptionId = useId();
-  const choices = availableViewers(source).filter((choice) => available || choice.id === 'text');
+  const suggested = availableViewers(source).filter((choice) => available || choice.id === 'text');
+  const all = selectableViewers(source).filter((choice) => available || choice.id === 'text');
+  const [showAll, setShowAll] = useState(
+    Boolean(selected && !suggested.some((item) => item.id === selected)),
+  );
+  const choices = showAll ? all : suggested;
   const extension = viewerExtension(source.name);
   const [scope, setScope] = useState<ViewerPreference['scope'] | 'once'>('once');
   const [pending, setPending] = useState<ViewerId>();
@@ -103,7 +109,24 @@ export function OpenWith({
           </select>
         </label>
       )}
-      <fieldset className="ve-viewer-options">
+      {all.length > suggested.length && (
+        <div className="ve-chooser-filter">
+          <button
+            type="button"
+            className="text-button"
+            aria-expanded={showAll}
+            aria-controls={`${descriptionId}-choices`}
+            disabled={Boolean(pending)}
+            onClick={() => setShowAll((value) => !value)}
+          >
+            {t(showAll ? 'viewer.showSuggested' : 'viewer.showAll')}
+          </button>
+        </div>
+      )}
+      <fieldset
+        id={`${descriptionId}-choices`}
+        className={`ve-viewer-options${showAll ? ' ve-viewer-options-all' : ''}`}
+      >
         <legend className="sr-only">{t('viewer.choose')}</legend>
         {choices.map((item) => (
           <button

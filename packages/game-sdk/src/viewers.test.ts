@@ -12,6 +12,10 @@ describe('compiled first-party file viewers', () => {
       readOnly: true,
     };
     const registry = createTrustedViewerRegistry([defineTrustedGameViewer(descriptor, load)]);
+    expect(registry.forGame('other-game')).toEqual([]);
+    expect(registry.forGame(undefined)).toEqual([]);
+    expect(registry.forGame('fixture-game')).toHaveLength(1);
+    expect(registry.forFile('fixture-game', 'txt')).toEqual([]);
     expect(registry.forFile('other-game', 'dat')).toEqual([]);
     expect(registry.forFile('fixture-game', 'DAT')).toHaveLength(1);
     expect(load).not.toHaveBeenCalled();

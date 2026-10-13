@@ -57,12 +57,13 @@ export function createTrustedViewerRegistry<T>(viewers: readonly TrustedGameView
       throw new TypeError('Duplicate or untrusted viewer module.');
     modules.set(parsed.id, viewer);
   }
+  const forGame = (gameId: string | undefined) =>
+    [...modules.values()].filter((viewer) => viewer.descriptor.gameId === gameId);
   return {
+    forGame,
     forFile: (gameId: string | undefined, extension: string) =>
-      [...modules.values()].filter(
-        (viewer) =>
-          viewer.descriptor.gameId === gameId &&
-          viewer.descriptor.extensions.includes(extension.toLowerCase()),
+      forGame(gameId).filter((viewer) =>
+        viewer.descriptor.extensions.includes(extension.toLowerCase()),
       ),
     get: (id: string) => modules.get(id),
   };

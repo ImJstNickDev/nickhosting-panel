@@ -657,6 +657,13 @@ saves an explicitly requested preference before opening, retaining the dialog on
 failure. Only X/Escape closes the chooser; no radio selectors or confirmation footer.
 Keyboard activation, functional screen-reader descriptions and pending-save guards
 are shared across builtins and trusted integration viewers.
+Show all expands a bounded, scrollable card list beyond extension suggestions;
+Show suggested restores filtering. Explicit personal choices may use a viewer not
+suggested by the filename and are honored on reopening and in the context menu.
+Only compiled viewers for this game and builtins are selectable. Unsupported
+nested archive/database readers, unavailable transports and existing editor/parser
+limits remain enforced; decoder failure keeps Open with available for recovery.
+Optional viewer metadata failures do not prevent independent text editing.
 Search uses a compact input, current/total match count, previous/next actions and
 case/whole-word/regular-expression toggles. Options expose their pressed state and
 localized tooltips; replacement fields appear only when requested. Search and
