@@ -42,6 +42,10 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
   'viewer.videoPip': ['Picture in picture', 'Picture-in-picture'],
   'viewer.videoExitPip': ['Exit picture in picture', 'Esci da picture-in-picture'],
   'viewer.videoControls': ['Playback controls', 'Controlli di riproduzione'],
+  'viewer.videoGestures': [
+    'Video: click the center to play or pause, hold left for 2× speed, click right to hide controls.',
+    'Video: premi al centro per riprodurre o mettere in pausa, tieni premuto a sinistra per 2×, premi a destra per nascondere i controlli.',
+  ],
   'viewer.videoDisplayFailed': [
     'Could not change the video display mode. Try again.',
     'Non è stato possibile cambiare la modalità di visualizzazione. Riprova.',

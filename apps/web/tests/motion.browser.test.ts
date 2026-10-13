@@ -173,12 +173,10 @@ describe('M5 Motion video viewer', () => {
     await page.keyboard.down('ArrowRight');
     await page.keyboard.up('ArrowRight');
     await browserExpect.poll(time).toBeCloseTo(30, 1);
-    await page.keyboard.down('Space');
-    await page.keyboard.down('Space');
+    await page.keyboard.press('Space');
     await browserExpect
       .poll(() => video.evaluate((element: HTMLVideoElement) => element.paused))
       .toBe(false);
-    await page.keyboard.up('Space');
     await page.keyboard.press('Space');
     await browserExpect
       .poll(() => video.evaluate((element: HTMLVideoElement) => element.paused))
@@ -199,6 +197,116 @@ describe('M5 Motion video viewer', () => {
     ).toBeGreaterThan(0);
     await browserExpect(player.locator('.motion-buffered').first()).toBeVisible();
     expect(requests.some((request) => request.destination === 'video' && request.range)).toBe(true);
+  });
+
+  it('uses three stage zones, temporary 2x holds, and F/M without stealing input keys', async () => {
+    await open();
+    await ready();
+    const player = page.locator('.motion-player');
+    const video = player.locator('video');
+    const stage = player.locator('.motion-stage-toggle');
+    const bounds = await stage.boundingBox();
+    if (!bounds) throw new Error('Missing Motion stage');
+    const x = (fraction: number) => bounds.x + bounds.width * fraction;
+    const y = bounds.y + bounds.height * 0.3;
+    const rate = () => video.evaluate((element: HTMLVideoElement) => element.playbackRate);
+    const paused = () => video.evaluate((element: HTMLVideoElement) => element.paused);
+    await page.mouse.click(x(0.5), y);
+    await browserExpect.poll(paused).toBe(false);
+    await player.getByRole('combobox', { name: /^Playback speed/ }).click();
+    await page.getByRole('option', { name: '1.5×', exact: true }).click();
+    await page.mouse.move(x(0.1), y);
+    await page.mouse.down();
+    await browserExpect.poll(rate).toBe(2);
+    await page.mouse.move(x(0.8), y);
+    await page.mouse.up();
+    await browserExpect.poll(rate).toBe(1.5);
+    expect(await paused()).toBe(false);
+    await page.keyboard.down('Space');
+    await page.waitForTimeout(320);
+    await browserExpect.poll(rate).toBe(2);
+    await page.keyboard.up('Space');
+    await browserExpect.poll(rate).toBe(1.5);
+    expect(await paused()).toBe(false);
+    await page.keyboard.press('Space');
+    await browserExpect.poll(paused).toBe(true);
+    await page.mouse.click(x(0.9), y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    expect(await paused()).toBe(true);
+    await page.mouse.click(x(0.5), y);
+    await browserExpect.poll(paused).toBe(false);
+    await page.keyboard.press('m');
+    await browserExpect
+      .poll(() => video.evaluate((element: HTMLVideoElement) => element.muted))
+      .toBe(true);
+    await page.keyboard.press('m');
+    await browserExpect
+      .poll(() => video.evaluate((element: HTMLVideoElement) => element.muted))
+      .toBe(false);
+    await page.keyboard.press('f');
+    await browserExpect
+      .poll(() => page.evaluate(() => Boolean(document.fullscreenElement)))
+      .toBe(true);
+    await page.keyboard.press('f');
+    await browserExpect
+      .poll(() => page.evaluate(() => Boolean(document.fullscreenElement)))
+      .toBe(false);
+    // Losing the window must restore the rate even when no keyup reaches it.
+    await page.keyboard.down('Space');
+    await page.waitForTimeout(320);
+    await browserExpect.poll(rate).toBe(2);
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await browserExpect.poll(rate).toBe(1.5);
+    await page.keyboard.up('Space');
+    expect(await paused()).toBe(false);
+    // Cancellation of a captured pointer also restores the selected speed.
+    await stage.evaluate((element) => {
+      element.addEventListener(
+        'pointerdown',
+        (event) => {
+          element.setAttribute('data-test-pointer', String((event as PointerEvent).pointerId));
+        },
+        { once: true },
+      );
+    });
+    await page.mouse.move(x(0.1), y);
+    await page.mouse.down();
+    await browserExpect.poll(rate).toBe(2);
+    await stage.dispatchEvent('pointercancel', {
+      pointerId: Number(await stage.getAttribute('data-test-pointer')),
+    });
+    await browserExpect.poll(rate).toBe(1.5);
+    await page.mouse.up();
+    await page.evaluate(() => {
+      const input = document.createElement('input');
+      input.id = 'motion-shortcut-input';
+      document.body.append(input);
+      input.focus();
+    });
+    await page.keyboard.type('fm ');
+    await browserExpect(page.locator('#motion-shortcut-input')).toHaveValue('fm ');
+    expect(await video.evaluate((element: HTMLVideoElement) => element.muted)).toBe(false);
+    expect(await page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+    await page.locator('#motion-shortcut-input').evaluate((element) => element.remove());
+    await page.mouse.click(x(0.5), y);
+    await browserExpect.poll(paused).toBe(true);
+    await page.keyboard.down('Space');
+    await page.waitForTimeout(320);
+    await page.keyboard.up('Space');
+    expect(await paused()).toBe(true);
+    expect(await rate()).toBe(1.5);
+    await page.evaluate(() => {
+      const button = document.createElement('button');
+      button.id = 'outside-motion';
+      button.textContent = 'Outside player fixture';
+      document.body.append(button);
+      button.focus();
+    });
+    await page.keyboard.press('f');
+    await page.keyboard.press('m');
+    expect(await video.evaluate((element: HTMLVideoElement) => element.muted)).toBe(false);
+    expect(await page.evaluate(() => Boolean(document.fullscreenElement))).toBe(false);
+    await page.locator('#outside-motion').evaluate((element) => element.remove());
   });
 
   it('decodes real hover thumbnails without seeking the playing video and renders desktop English controls', async () => {
@@ -385,13 +493,12 @@ describe('M5 Motion video viewer', () => {
     await browserExpect.poll(time).toBeGreaterThan(0.1);
     const bounds = await stage.boundingBox();
     if (!bounds) throw new Error('Missing video stage');
-    await page.mouse.move(bounds.x + 100, bounds.y + 100);
+    await page.mouse.move(bounds.x + bounds.width * 0.5, bounds.y + 100);
     await browserExpect(player).toHaveAttribute('data-controls', 'hidden', { timeout: 5000 });
     await page.mouse.down();
     await page.mouse.up();
     await browserExpect(player).toHaveAttribute('data-controls', 'visible');
-    await page.mouse.down();
-    await page.mouse.up();
+    await page.mouse.click(bounds.x + bounds.width * 0.9, bounds.y + 100);
     await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
     await page.keyboard.press('Tab');
     await browserExpect(player).toHaveAttribute('data-controls', 'visible');
@@ -402,7 +509,8 @@ describe('M5 Motion video viewer', () => {
           .evaluate((element) => element.contains(document.activeElement)),
       )
       .toBe(true);
-    await player.getByRole('button', { name: 'Pause', exact: true }).click();
+    // Centre click above paused playback; the right-zone hide did not resume it.
+    expect(await video.evaluate((element: HTMLVideoElement) => element.paused)).toBe(true);
     // Failure injection exercises rejected browser promises without claiming real platform rejection.
     await video.evaluate((element: HTMLVideoElement) => {
       element.play = () =>

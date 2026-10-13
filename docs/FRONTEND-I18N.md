@@ -933,9 +933,10 @@ Left/Right seek five seconds, Shift doubles that, and Space respects pointer
 versus keyboard-navigation context. Timeline scrubbing is direct. Fullscreen and
 Picture-in-Picture are offered only when the browser exposes their APIs.
 
-The control strip stays visible while paused, loading, seeking, using a menu or
-navigating controls with the keyboard, and hides during uninterrupted playback.
-Touch reveals controls without making tiny hover targets mandatory. The seek
+The control strip normally stays visible while paused, loading, seeking, using a
+menu or navigating controls with the keyboard, and hides during uninterrupted
+playback. An explicit right-zone click can hide it while paused; pointer movement
+or keyboard focus reveals it again. The seek
 bar shows actual buffered ranges, elapsed/total time, and a hover timestamp with
 an optional thumbnail. Unsupported thumbnail decoding must never disable native
 playback. Unsupported native video retains Open with/Download; no browser codec
@@ -956,3 +957,15 @@ memory. Leaving the timeline or hiding the tab cancels active preview work;
 previously decoded images remain reusable until eviction or viewer exit. A
 missing index, unsupported WebCodecs decoder or exhausted budget leaves the
 normal timestamp preview and native playback available.
+
+
+Motion stage gestures use invisible 20% / 60% / 20% zones, separate from the
+control strip: hold the left side for temporary 2× playback, click the center to
+play/pause, and click the right side to hide controls. Releasing or cancelling a
+hold restores the prior selected speed. Space tap toggles playback on release;
+a 250 ms hold applies the same temporary 2× action without pausing on release.
+Holding while paused never starts playback. With focus inside Motion, F toggles
+fullscreen and M mute (single-character shortcuts do not act elsewhere). Editable fields and transient menus retain their keys, and Tab-based control navigation
+keeps native activation. Loss of focus/visibility clears holds. Wave's existing
+Space behavior is unchanged. Motion does not currently load external subtitle
+files or expose an embedded subtitle-track selector.

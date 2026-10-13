@@ -38,6 +38,19 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const lifecycle = useRef(0);
   const lastVolume = useRef(1);
   const hideTimer = useRef(0);
+  const gesture = useRef<{
+    id: number;
+    element: HTMLButtonElement;
+    zone: 'left' | 'center' | 'right';
+    x: number;
+    y: number;
+    moved: boolean;
+  } | null>(null);
+  const boost = useRef<{
+    media: HTMLVideoElement | null;
+    rate: number;
+    owners: Set<'pointer' | 'space'>;
+  }>({ media: null, rate: 1, owners: new Set() });
   const [state, setState] = useState(initial);
   const [failed, setFailed] = useState(false);
   const [playError, setPlayError] = useState(false);
@@ -45,6 +58,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const [waiting, setWaiting] = useState(false);
   const [showWaiting, setShowWaiting] = useState(false);
   const [visible, setVisible] = useState(true);
+  const [manuallyHidden, setManuallyHidden] = useState(false);
   const [repeat, setRepeat] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [pip, setPip] = useState(false);
@@ -71,7 +85,54 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
         : next,
     );
   }, []);
+  const startBoost = useCallback(
+    (owner: 'pointer' | 'space') => {
+      const video = media.current;
+      if (!video || video.paused || video.ended || video.error || video.readyState < 1) return;
+      if (!boost.current.owners.size) {
+        boost.current.media = video;
+        boost.current.rate = video.playbackRate;
+      }
+      boost.current.owners.add(owner);
+      video.playbackRate = 2;
+      sync();
+    },
+    [sync],
+  );
+  const endBoost = useCallback(
+    (owner: 'pointer' | 'space') => {
+      if (!boost.current.owners.delete(owner) || boost.current.owners.size) return;
+      if (boost.current.media) boost.current.media.playbackRate = boost.current.rate;
+      boost.current.media = null;
+      sync();
+    },
+    [sync],
+  );
+  const cancelGesture = useCallback(() => {
+    const active = gesture.current;
+    gesture.current = null;
+    if (active?.element.hasPointerCapture(active.id))
+      active.element.releasePointerCapture(active.id);
+    endBoost('pointer');
+  }, [endBoost]);
+  const cancelBoosts = useCallback(() => {
+    cancelGesture();
+    endBoost('space');
+  }, [cancelGesture, endBoost]);
+  useEffect(() => {
+    const visibility = () => {
+      if (document.hidden) cancelBoosts();
+    };
+    window.addEventListener('blur', cancelBoosts);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      cancelBoosts();
+      window.removeEventListener('blur', cancelBoosts);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [cancelBoosts]);
   const reveal = useCallback(() => {
+    setManuallyHidden(false);
     setVisible(true);
     window.clearTimeout(hideTimer.current);
     const hide = () => {
@@ -163,7 +224,15 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     );
     reveal();
   }
-  useMediaShortcuts(() => void toggle(), skip);
+  useMediaShortcuts(() => void toggle(), skip, {
+    isFocused: () => stage.current?.contains(document.activeElement) ?? false,
+    startBoost: () => startBoost('space'),
+    endBoost: () => endBoost('space'),
+    fullscreen: () => {
+      if (document.fullscreenEnabled) void changeDisplay('fullscreen');
+    },
+    mute,
+  });
   function mute() {
     const video = media.current;
     if (!video) return;
@@ -205,7 +274,12 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     }
   }
   const controlsVisible =
-    visible || state.paused || !state.ready || waiting || failed || playError || displayError;
+    (!manuallyHidden && (visible || state.paused)) ||
+    !state.ready ||
+    waiting ||
+    failed ||
+    playError ||
+    displayError;
   return (
     <div
       className="motion-player"
@@ -215,7 +289,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
         if (event.pointerType !== 'touch') reveal();
       }}
       onFocusCapture={(event) => {
-        // Pointer focus on the stage must not reveal before its click toggles.
+        // Pointer focus on the stage must not undo its right-side hide gesture.
         if (!(event.target instanceof Element && event.target.matches('.motion-stage-toggle')))
           reveal();
       }}
@@ -237,10 +311,12 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           sync();
         }}
         onPause={() => {
+          cancelBoosts();
           setWaiting(false);
           sync();
         }}
         onEnded={() => {
+          cancelBoosts();
           setWaiting(false);
           sync();
         }}
@@ -257,6 +333,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           sync();
         }}
         onError={() => {
+          cancelBoosts();
           setFailed(true);
           setWaiting(false);
           sync();
@@ -265,17 +342,54 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       <button
         className="motion-stage-toggle"
         type="button"
-        aria-label={t('viewer.videoControls')}
+        aria-label={t('viewer.videoGestures')}
         aria-expanded={controlsVisible}
         tabIndex={-1}
-        onClick={() => {
-          if (visible && !state.paused) {
+        onPointerDown={(event) => {
+          if (event.button !== 0 || gesture.current) return;
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const fraction = (event.clientX - bounds.left) / bounds.width;
+          const zone = fraction < 0.2 ? 'left' : fraction >= 0.8 ? 'right' : 'center';
+          gesture.current = {
+            id: event.pointerId,
+            element: event.currentTarget,
+            zone,
+            x: event.clientX,
+            y: event.clientY,
+            moved: false,
+          };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          if (zone === 'left') startBoost('pointer');
+        }}
+        onPointerMove={(event) => {
+          const active = gesture.current;
+          if (
+            active?.id === event.pointerId &&
+            Math.hypot(event.clientX - active.x, event.clientY - active.y) > 8
+          )
+            active.moved = true;
+        }}
+        onPointerUp={(event) => {
+          const active = gesture.current;
+          if (active?.id !== event.pointerId) return;
+          cancelGesture();
+          if (active.moved) return;
+          if (active.zone === 'center') void toggle();
+          else if (active.zone === 'right') {
             window.clearTimeout(hideTimer.current);
             setVisible(false);
-          } else reveal();
+            setManuallyHidden(true);
+          }
         }}
-        onDoubleClick={() => {
-          if (document.fullscreenEnabled) void changeDisplay('fullscreen');
+        onPointerCancel={(event) => {
+          if (gesture.current?.id === event.pointerId) cancelGesture();
+        }}
+        onLostPointerCapture={(event) => {
+          if (gesture.current?.id === event.pointerId) cancelGesture();
+        }}
+        onBlur={cancelGesture}
+        onClick={(event) => {
+          if (event.detail === 0) void toggle();
         }}
       />
       <div className="motion-feedback">
@@ -381,7 +495,8 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
                 label: `${format.number(speed, 2)}×`,
               }))}
               onChange={(value) => {
-                if (media.current) media.current.playbackRate = Number(value);
+                if (boost.current.owners.size) boost.current.rate = Number(value);
+                else if (media.current) media.current.playbackRate = Number(value);
                 sync();
               }}
             />

@@ -8097,3 +8097,33 @@ Firefox command: `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-e
 Shared-keyboard regression: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'routes Wave shortcuts|runs Wave' --silent=false`: **2 passed, 28 intentionally skipped**, 24.87 s. Independent review reports no remaining must-fix findings. [Firefox rendered preview](screenshots/m5/file-viewer-motion-preview-desktop-en-firefox.png) also confirms real thumbnail decoding; its “Pop out this video” overlay is browser-owned Firefox UI.
 
 `python3 scripts/check-governance.py`: pass on the final index, including documentation links, TOML, ignore fixtures, tracked-content hygiene and reviewed PNGs (secret detection remains heuristic). Test harnesses closed; no real Pterodactyl test assets were created or changed. PR #21 remains open and unmerged.
+
+### Motion stage zones and temporary speed gestures (2026-10-13)
+
+Owner-requested invisible zones replace the old stage controls toggle: left 20%
+held applies temporary 2×, middle 60% click toggles play/pause, right 20% click
+hides controls even while paused. Controls remain independently clickable. Pointer
+capture restores the chosen speed on release outside the original zone, cancel,
+lost capture, blur, hidden document, pause/end/error or viewer exit. A drag does
+not accidentally activate the center/right action. Holds never autoplay paused
+media. Space tap toggles on keyup; a 250 ms hold applies 2× until release without
+then toggling playback. Wave keeps its prior keydown behavior.
+
+F/M toggle fullscreen/mute only with focus inside Motion. Independent review
+identified this focus restriction as necessary for single-character shortcut
+accessibility; it is implemented and covered alongside input exclusions. No
+remaining must-fix review findings. Prior speed (tested at 1.5×) is restored;
+menus and keyboard-navigation controls retain native behavior. No subtitle loader
+or internal-track selector was added: Motion still does not claim subtitle
+support. No backend/provider changes, infrastructure operations, live test assets
+or container restarts. Existing HMR applies the change; rollback is a source
+revert. Appearance is unchanged, so the prior reviewed Motion screenshots remain
+representative.
+
+Checks:
+
+- Motion browser command from the preceding entry: **9/9 Chromium passed**, 36.96 s, before the final F/M focus restriction.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'three stage zones|plays actual video|hides controls' --silent=false`: **3 passed, 6 skipped**, 25.38 s before that focus refinement.
+- Final focused Chromium command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts apps/web/tests/file-viewers.browser.test.ts -t 'three stage zones|routes Wave shortcuts|runs Wave' --silent=false`: **3 passed, 36 skipped**, 42.57 s. Includes actual pointer cancellation, held/short Space, speed restoration, F/M inside/outside player, input exclusions and Wave regressions.
+- Final web `typecheck`, production `build`, scoped Biome and `git diff --check`: **pass**. Existing large app/editor build warnings remain. `pnpm i18n:compile`: **1403 EN/IT keys** plus pseudolocale.
+- Final Firefox gesture-only command uses `NH_BROWSER=firefox` and `-t 'three stage zones'`: **1 passed, 8 skipped**, 16.28 s, including the focus restriction. Final indexed governance check passes. All browser harnesses closed; historical full suites were not rerun for this UI-only change.
