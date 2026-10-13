@@ -35,6 +35,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
   const generation = useRef(0);
   const lastVolume = useRef(1);
   const [state, setState] = useState(initial);
+  const [decodedDuration, setDecodedDuration] = useState<number>();
   const [buffering, setBuffering] = useState(false);
   const [showBuffering, setShowBuffering] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -105,7 +106,8 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
       sync();
     }
   }
-  const duration = Number.isFinite(state.duration) && state.duration > 0 ? state.duration : 0;
+  const duration =
+    decodedDuration ?? (Number.isFinite(state.duration) && state.duration > 0 ? state.duration : 0);
   const seekable = state.ready && duration > 0 && !failed;
   function seek(value: number) {
     const audio = media.current;
@@ -195,6 +197,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
         </div>
         <AudioTimeline
           media={media}
+          onDuration={setDecodedDuration}
           src={src}
           size={source.size}
           duration={duration}

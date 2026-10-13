@@ -86,15 +86,21 @@ async function analyze(request: WaveformRequest) {
     if (!track || (await track.getNumberOfChannels()) > 8 || !(await track.canDecode())) {
       throw new Error('Unsupported audio track');
     }
+    // Raw ADTS has no declared duration: the media element reports a bitrate
+    // estimate. Count encoded frames using the existing bounded source cache.
+    const rawAac = (await input.getFormat()) === ADTS;
+    const duration = rawAac ? await track.computeDuration() : request.duration;
     await consumeWaveform(
       new AudioSampleSink(track).samples(),
-      // Match the native player's seek timeline. Container metadata can merely
-      // estimate duration (for example, VBR MP3 without Xing metadata).
-      new StreamingWaveform(request.duration),
+      // Other formats retain the existing native timeline; ADTS uses frame timestamps.
+      new StreamingWaveform(duration),
       (message) => {
         if (cancelled) throw new DOMException('Aborted', 'AbortError');
         if (backgroundError) throw backgroundError;
-        worker.postMessage(message, message.type === 'error' ? [] : [message.peaks.buffer]);
+        worker.postMessage(
+          { ...message, ...(rawAac ? { duration } : {}) },
+          message.type === 'error' ? [] : [message.peaks.buffer],
+        );
       },
     );
   } finally {

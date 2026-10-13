@@ -878,6 +878,11 @@ then reduces decoded samples directly into 1024 peaks. Actual partial peaks are
 published while data is still arriving, at most about 20 updates per second.
 The first nonzero result is published promptly; no progress is fabricated.
 Native playback remains independent and never waits for waveform analysis.
+Raw AAC/ADTS duration is calculated from encoded frame timestamps, since native
+players may overestimate it. Waveform, seek range and visible times share that
+duration; an inflated native end position is clamped to the same endpoint. ADTS
+analysis first scans the encoded frames, so its waveform can wait for that scan
+and reread bytes outside the 2 MiB cache. Other formats retain progressive analysis.
 
 The initial trial retains the 32 MiB / ten-minute / eight-channel eligibility
 limits. The source cache is explicitly 2 MiB (upstream 1.61.4 code defaults to

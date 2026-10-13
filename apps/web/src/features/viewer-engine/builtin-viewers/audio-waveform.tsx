@@ -11,16 +11,20 @@ export function AudioWaveform({
   url,
   size,
   duration,
+  onDuration,
   position,
   unavailable = false,
 }: {
   url: string;
   size: number;
   duration: number;
+  onDuration: (duration: number) => void;
   position: number;
   unavailable?: boolean;
 }) {
   const t = useT();
+  const reportDuration = useRef(onDuration);
+  reportDuration.current = onDuration;
   const clip = useId();
   const root = useRef<HTMLDivElement>(null);
   const currentSource = useRef(url);
@@ -30,6 +34,7 @@ export function AudioWaveform({
     url: string;
     state: 'loading' | 'ready' | 'unavailable';
     peaks?: Float32Array;
+    duration?: number;
   }>({ url, state: 'loading' });
   useEffect(() => {
     const element = root.current;
@@ -88,17 +93,24 @@ export function AudioWaveform({
         type: 'module',
       });
       worker.onmessage = (
-        event: MessageEvent<{ type: 'peaks' | 'done' | 'error'; peaks?: Float32Array }>,
+        event: MessageEvent<{
+          type: 'peaks' | 'done' | 'error';
+          peaks?: Float32Array;
+          duration?: number;
+        }>,
       ) => {
         if (!active || currentSource.current !== url) return;
         if (event.data.type === 'error' || !event.data.peaks) {
           fail();
           return;
         }
+        if (event.data.duration && Number.isFinite(event.data.duration))
+          reportDuration.current(event.data.duration);
         setAnalysis({
           url,
           state: event.data.type === 'done' ? 'ready' : 'loading',
           peaks: event.data.peaks,
+          duration: event.data.duration,
         });
         if (event.data.type === 'done') dispose();
       };
@@ -123,8 +135,11 @@ export function AudioWaveform({
   );
   useWaveformReveal(root, url, bars);
   const state = analysis.url === url ? analysis.state : 'loading';
+  const timelineDuration = analysis.url === url ? (analysis.duration ?? duration) : duration;
   const progress =
-    Number.isFinite(position) && duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0;
+    Number.isFinite(position) && timelineDuration > 0
+      ? Math.max(0, Math.min(1, position / timelineDuration))
+      : 0;
   const barWidth = Math.min(6, 500 / Math.max(1, bars.length));
   const barElements = useMemo(
     () =>

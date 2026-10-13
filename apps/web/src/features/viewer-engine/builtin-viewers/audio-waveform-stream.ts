@@ -3,7 +3,7 @@ import { waveformLimits } from './audio-waveform-model.js';
 
 export type WaveformRequest = { url: string; size: number; duration: number };
 export type WaveformMessage =
-  | { type: 'peaks' | 'done'; peaks: Float32Array<ArrayBuffer> }
+  | { type: 'peaks' | 'done'; peaks: Float32Array<ArrayBuffer>; duration?: number }
   | { type: 'error' };
 
 type Sample = Pick<

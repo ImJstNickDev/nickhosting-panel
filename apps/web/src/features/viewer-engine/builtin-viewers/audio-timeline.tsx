@@ -19,6 +19,7 @@ const clock = (seconds: number) => {
 /** The playback clock updates this subtree only, never the transport controls. */
 export function AudioTimeline({
   media,
+  onDuration,
   src,
   size,
   duration,
@@ -27,6 +28,7 @@ export function AudioTimeline({
   failed,
 }: {
   media: RefObject<HTMLAudioElement | null>;
+  onDuration: (duration: number) => void;
   src: string;
   size: number;
   duration: number;
@@ -86,6 +88,7 @@ export function AudioTimeline({
           url={src}
           size={size}
           duration={duration}
+          onDuration={onDuration}
           position={displayedTime}
           unavailable={failed}
         />

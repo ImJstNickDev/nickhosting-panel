@@ -7859,3 +7859,42 @@ Independent review found no must-fix; its suggested non-text viewer callback
 coverage was added and passed. Isolated browser fixtures only; no real provider
 mutation, persistent test assets, dependency changes or container restarts. Vite
 HMR applies the change. Rollback: revert this UI/session change. PR #21 stays open.
+
+### AAC waveform and playback duration (2026-10-13)
+
+Raw ADTS AAC has no declared duration. The old envelope used the media element's
+bitrate estimate and could reject valid decoded samples as incomplete. Wave now
+uses Mediabunny's encoded-frame duration for ADTS, retaining strict envelope
+completeness checks. The same duration reaches the seek slider, time labels and
+waveform progress; a native end position beyond that endpoint is clamped.
+
+The Owner confirmed their Firefox decodes both AAC audio and waveform; the
+remaining issue was the mismatched timeline. No alternate decoder dependency was
+added. Firefox in the isolated Linux probe lacked AAC WebCodecs support, which is
+an environment limitation, not a claim about the Owner's browser. Native Web
+Audio also failed in that probe; evaluated software packages were not retained.
+
+Read-only real dataset check in Chromium through the running dev app:
+`bbb-music.aac` native estimate 18.478376 s; corrected slider 18.0266666667 s,
+visible total 0:18, completed waveform with nonzero amplitudes. No file writes or
+playback/power commands to game servers. ADTS scans encoded frames before decode;
+waveform arrival can wait for this scan and reread bytes outside the existing
+2 MiB cache. Native playback is independent. Other formats retain their previous
+progressive path. No new infrastructure, dependencies, persistent test assets,
+backend APIs or container restarts. Development uses Vite HMR.
+
+Validation: waveform model/stream units 15/15 (435 ms); web typecheck and production
+build pass (existing app/editor chunk-size warnings); scoped Biome passes.
+Independent review found no must-fix in cancellation, source reset or duration
+propagation. Focused browser regression results recorded below. Rollback: revert
+this frontend change; PR #21 remains open and unmerged.
+
+Browser command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'aligns Wave playback|runs Wave' --silent=false`.
+The existing real-WAV controls test passed. The new duration-contract test first
+timed out because its Worker stub expected a nonexistent `type: start` field;
+the stub was corrected to the actual `{url,size,duration}` request. Rerunning only
+`-t 'aligns Wave playback'` passed 1/1 (19.73 s). This test simulates native 20 s
+versus decoded 18 s: slider/labels use 18, position 9 maps to 50%, skips clamp to
+18, native ended at 20 stays at 18/100%, and a new file resets the duration.
+This synthetic UI regression complements the separate real AAC check above.
+Final source/test typecheck, scoped Biome, whitespace and indexed governance pass.

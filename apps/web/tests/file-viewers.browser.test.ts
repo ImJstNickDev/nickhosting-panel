@@ -1600,6 +1600,103 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
+  it('aligns Wave playback and waveform to decoded duration instead of native estimates', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await page.goto(base);
+    await root();
+    // UI contract fixture only: actual ADTS decoding is verified separately by the read-only AAC probe.
+    // Keep real media loading, but hold a simulated decoded duration report.
+    await page.evaluate(() => {
+      const NativeWorker = window.Worker;
+      class DurationWorker {
+        onmessage: ((event: MessageEvent) => void) | null = null;
+        postMessage(message: { type?: string; url?: string }) {
+          if ('url' in message) {
+            Object.assign(window, {
+              reportWaveDuration: () =>
+                this.onmessage?.(
+                  new MessageEvent('message', {
+                    data: { type: 'done', peaks: new Float32Array(1024).fill(0.5), duration: 18 },
+                  }),
+                ),
+            });
+          } else if (message.type === 'cancel') {
+            queueMicrotask(() =>
+              this.onmessage?.(new MessageEvent('message', { data: { type: 'cancelled' } })),
+            );
+          }
+        }
+        terminate() {}
+      }
+      window.Worker = DurationWorker as unknown as typeof Worker;
+      Object.assign(window, {
+        restoreWaveDurationWorker: () => {
+          window.Worker = NativeWorker;
+        },
+      });
+    });
+    try {
+      await page.locator('.fm-filename').getByText('wave-long.wav', { exact: true }).click();
+      const player = page.locator('.ve-audio-player');
+      const audio = player.locator('audio');
+      const position = player.getByRole('slider', { name: 'Playback position', exact: true });
+      await browserExpect
+        .poll(() => audio.evaluate((element: HTMLAudioElement) => element.duration))
+        .toBe(60);
+      await audio.evaluate((element) => {
+        Object.defineProperty(element, 'duration', { configurable: true, value: 20 });
+        element.dispatchEvent(new Event('durationchange'));
+      });
+      await browserExpect(position).toHaveAttribute('max', '20');
+      await browserExpect(player.locator('.wave-times span').last()).toHaveText('0:20');
+      await page.waitForFunction(() => 'reportWaveDuration' in window);
+      await page.evaluate(() =>
+        (window as unknown as { reportWaveDuration: () => void }).reportWaveDuration(),
+      );
+      await browserExpect(position).toHaveAttribute('max', '18');
+      await browserExpect(player.locator('.wave-times span').last()).toHaveText('0:18');
+      await audio.evaluate((element: HTMLAudioElement) => {
+        element.currentTime = 9;
+        element.dispatchEvent(new Event('timeupdate'));
+      });
+      await browserExpect.poll(() => position.inputValue()).toBe('9');
+      await browserExpect(player.locator('.wave-envelope clipPath rect')).toHaveAttribute(
+        'width',
+        '500',
+      );
+      await player.getByRole('button', { name: 'Forward 10 seconds', exact: true }).click();
+      await browserExpect
+        .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+        .toBe(18);
+      await audio.evaluate((element: HTMLAudioElement) => {
+        element.currentTime = 20;
+        element.dispatchEvent(new Event('ended'));
+      });
+      await browserExpect(position).toHaveAttribute('max', '18');
+      await browserExpect.poll(() => position.inputValue()).toBe('18');
+      await browserExpect(player.locator('.wave-times span').first()).toHaveText('0:18');
+      await browserExpect(player.locator('.wave-envelope clipPath rect')).toHaveAttribute(
+        'width',
+        '1000',
+      );
+      await audio.evaluate((element) => Reflect.deleteProperty(element, 'duration'));
+    } finally {
+      await page.evaluate(() => {
+        (
+          window as unknown as { restoreWaveDurationWorker: () => void }
+        ).restoreWaveDurationWorker();
+        Reflect.deleteProperty(window, 'restoreWaveDurationWorker');
+        Reflect.deleteProperty(window, 'reportWaveDuration');
+      });
+    }
+    await root();
+    await page.locator('.fm-filename').getByText('viewer.wav', { exact: true }).click();
+    await browserExpect(
+      page.getByRole('slider', { name: 'Playback position', exact: true }),
+    ).toHaveAttribute('max', '1');
+    expect(errors).toEqual([]);
+  });
+
   it('runs Wave controls through real browser audio playback and releases the stream on exit', async () => {
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
     await page.setViewportSize({ width: 1440, height: 1000 });
