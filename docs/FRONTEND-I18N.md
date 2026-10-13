@@ -665,11 +665,18 @@ nested archive/database readers, unavailable transports and existing editor/pars
 limits remain enforced; decoder failure keeps Open with available for recovery.
 Optional viewer metadata failures do not prevent independent text editing.
 
+ICO frame selection uses a compact custom combobox with local thumbnails,
+dimensions and bit depth. Arrow keys, Home/End and Enter select; Escape cancels,
+Tab or outside interaction closes it. The toolbar stays mounted during a frame
+change, preserving focus. Dimensions and Fit are committed together before paint,
+so a newly selected frame never appears briefly at original size. Changing frames
+reuses already-decoded local images without additional provider requests.
+
 Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard and
 gestures; its percentage is displayed as a rounded integer while calculations
 retain full precision. Confirming an unchanged rounded draft preserves the scale.
 Zoom is bounded to 1–5000% for raster images/ICO and 1–50000% for SVG, including
-Fit, typed values and gestures. Thousands use a high dot (U+02D9: 50˙000%); calculations
+Fit, typed values and gestures. Percentages use no thousands separator (50000%); calculations
 retain full precision. SVG uses a native vector document in a viewport-sized,
 non-interactive iframe, with scripts and external requests denied by sandbox/CSP.
 Source markup is never injected into the application document or trusted srcdoc.

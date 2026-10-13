@@ -81,7 +81,7 @@ describe('M5 builtin file viewers', () => {
     wav.writeUInt32LE(wav.length - 44, 40);
     remote.set('viewer.wav', wav);
     const pngs = await page.evaluate(() =>
-      [16, 32].map((size) => {
+      [16, 32, 128, 256].map((size) => {
         const canvas = document.createElement('canvas');
         canvas.width = size;
         canvas.height = size;
@@ -99,8 +99,8 @@ describe('M5 builtin file viewers', () => {
     let start = ico.length;
     frames.forEach((frame, index) => {
       const pos = 6 + index * 16;
-      ico[pos] = index ? 32 : 16;
-      ico[pos + 1] = index ? 32 : 16;
+      ico[pos] = [16, 32, 128, 0][index] ?? 0;
+      ico[pos + 1] = ico[pos] ?? 0;
       ico.writeUInt16LE(1, pos + 4);
       ico.writeUInt16LE(32, pos + 6);
       ico.writeUInt32LE(frame.length, pos + 8);
@@ -332,12 +332,14 @@ describe('M5 builtin file viewers', () => {
     await harness.screenshot(page, 'file-viewer-image-desktop-en');
     await root();
     await page.locator('.fm-filename').getByText('viewer.ico', { exact: true }).click();
-    await browserExpect(page.getByLabel('Icon image')).toBeVisible();
-    await browserExpect(page.getByLabel('Icon image').locator('option')).toHaveCount(2);
-    await page.getByLabel('Icon image').focus();
+    const picker = page.getByRole('combobox', { name: /Icon image/ });
+    await browserExpect(picker).toBeVisible();
+    await picker.click();
+    await browserExpect(page.getByRole('option')).toHaveCount(4);
     await page.keyboard.press('ArrowDown');
-    await browserExpect(page.getByLabel('Icon image')).toHaveValue('1');
-    await browserExpect(page.getByLabel('Icon image')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await browserExpect(picker).toContainText('32 × 32');
+    await browserExpect(picker).toBeFocused();
     await browserExpect
       .poll(() =>
         page
@@ -352,13 +354,98 @@ describe('M5 builtin file viewers', () => {
     );
     await page.getByRole('button', { name: 'Actual size', exact: true }).click();
     expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
-    await page.getByLabel('Icon image').focus();
+    await picker.focus();
     await page.keyboard.press('ArrowUp');
-    await browserExpect(page.getByLabel('Icon image')).toHaveValue('0');
-    await browserExpect(page.getByLabel('Icon image')).toBeFocused();
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('Enter');
+    await browserExpect(picker).toContainText('16 × 16');
+    await browserExpect(picker).toBeFocused();
     await browserExpect.poll(async () => (await frameGeometry()).scale).toBeGreaterThan(1);
     await page.getByRole('button', { name: 'Actual size', exact: true }).click();
     expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    expect(errors).toEqual([]);
+  });
+
+  it('switches ICO frames already fitted with a compact keyboard and touch picker', async () => {
+    await open('viewer.ico');
+    const picker = page.getByRole('combobox', { name: /Icon image/ });
+    await picker.click();
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await browserExpect(picker).toContainText('256 × 256');
+    await frameGeometry();
+    const contentReads = reads.length;
+    await picker.click();
+    await harness.screenshot(page, 'file-viewer-ico-picker-en');
+    expect(
+      (await new AxeBuilder({ page }).include('.ve-image-viewer').analyze()).violations,
+    ).toEqual([]);
+    // Sample every paint opportunity, not just the settled transform after the load event.
+    await page.evaluate(() => {
+      const state = {
+        running: true,
+        samples: [] as { width: number; expected: number; source: number }[],
+      };
+      Object.assign(window, { icoPaints: state });
+      const sample = () => {
+        const stage = document.querySelector('.ve-image-stage');
+        const image = stage?.querySelector('img');
+        if (stage && image && getComputedStyle(image).visibility === 'visible') {
+          const source = Number.parseFloat(image.style.width);
+          state.samples.push({
+            width: image.getBoundingClientRect().width,
+            expected: Math.min(stage.clientWidth, stage.clientHeight, source * 50),
+            source,
+          });
+        }
+        if (state.running) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    await page.getByRole('option', { name: '128 × 128 32 bit', exact: true }).click();
+    await browserExpect(picker).toBeFocused();
+    await browserExpect(picker).toContainText('128 × 128');
+    await frameGeometry();
+    const samples = await page.evaluate(() => {
+      const state = (
+        window as unknown as {
+          icoPaints: {
+            running: boolean;
+            samples: { width: number; expected: number; source: number }[];
+          };
+        }
+      ).icoPaints;
+      state.running = false;
+      return state.samples;
+    });
+    expect(samples.some((sample) => sample.source === 128)).toBe(true);
+    for (const sample of samples)
+      expect(Math.abs(sample.width - sample.expected)).toBeLessThan(0.1);
+    expect(reads.length).toBe(contentReads);
+    await picker.click();
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Escape');
+    await browserExpect(picker).toContainText('128 × 128');
+    await browserExpect(picker).toBeFocused();
+    await picker.click();
+    await page.keyboard.press('Tab');
+    await browserExpect(page.getByRole('listbox')).toHaveCount(0);
+    await picker.click();
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    await browserExpect(page.getByRole('listbox')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Fit', exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await picker.click();
+    await harness.screenshot(page, 'file-viewer-ico-picker-mobile-en');
+    const bounds = await page.getByRole('listbox').boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390).toBe(true);
+    expect(
+      (await new AxeBuilder({ page }).include('.ve-image-viewer').analyze()).violations,
+    ).toEqual([]);
+    await page.getByRole('option', { name: '16 × 16 32 bit', exact: true }).click();
+    await browserExpect(picker).toContainText('16 × 16');
+    await page.setViewportSize({ width: 1440, height: 1000 });
     expect(errors).toEqual([]);
   });
 
@@ -400,7 +487,7 @@ describe('M5 builtin file viewers', () => {
       await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('50000');
       await page.keyboard.press('Enter');
       expect((await frameGeometry()).scale).toBeCloseTo(500, 4);
-      await browserExpect(page.locator('.ve-zoom-value')).toHaveText('50˙000%');
+      await browserExpect(page.locator('.ve-zoom-value')).toHaveText('50000%');
       const rendering = await page.locator('.ve-svg-surface').evaluate((element) => {
         const frame = element as HTMLIFrameElement;
         const root = frame.contentDocument?.documentElement;

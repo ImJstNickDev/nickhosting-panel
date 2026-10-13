@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useT } from '../../../app/i18n.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { readViewerBytes, viewerPath } from '../core/access.js';
@@ -7,6 +7,7 @@ import type { ViewerProps } from '../core/types.js';
 import { useViewerResource } from '../core/use-resource.js';
 import { ViewerLoading } from '../loading.js';
 import { validateIconset } from './ico-model.js';
+import { IconPicker } from './icon-picker.js';
 import {
   constrainImage,
   fitImage,
@@ -28,7 +29,6 @@ type ImageFrame = {
   svg?: SVGSVGElement;
 };
 export default function ImageViewer({ serverId, source }: ViewerProps) {
-  const t = useT();
   const url = viewerPath(serverId, source);
   const ico = source.name.toLowerCase().endsWith('.ico');
   const vector = source.name.toLowerCase().endsWith('.svg');
@@ -78,42 +78,19 @@ export default function ImageViewer({ serverId, source }: ViewerProps) {
     },
   );
   const [frame, setFrame] = useState(0);
-  const restoreFrameFocus = useRef(false);
-  const frameSelect = useCallback((element: HTMLSelectElement | null) => {
-    if (element && restoreFrameFocus.current) {
-      element.focus({ preventScroll: true });
-      restoreFrameFocus.current = false;
-    }
-  }, []);
   const image = resource.value?.[frame];
   if (resource.error) return <ErrorNotice error={resource.error} />;
   if (!resource.value) return <ViewerLoading />;
   if (!image) return <ErrorNotice error={{ messageKey: 'viewer.imageUnavailable' }} />;
   return (
     <FrameViewport
-      key={image.url}
+      key={url}
       image={image}
       name={source.name}
       vector={vector}
       framePicker={
         resource.value.length > 1 && (
-          <label>
-            {t('viewer.iconImage')}
-            <select
-              ref={frameSelect}
-              value={frame}
-              onChange={(event) => {
-                restoreFrameFocus.current = document.activeElement === event.currentTarget;
-                setFrame(Number(event.target.value));
-              }}
-            >
-              {resource.value.map((item, index) => (
-                <option value={index} key={item.url}>
-                  {item.width} × {item.height} · {item.bpp} bit
-                </option>
-              ))}
-            </select>
-          </label>
+          <IconPicker frames={resource.value} selected={frame} onSelect={setFrame} />
         )
       }
     />
@@ -176,13 +153,28 @@ function FrameViewport({
       fitImage(size, { width: viewport.clientWidth, height: viewport.clientHeight }, maximum),
     );
   }, [maximum, update]);
-  useEffect(() => {
-    if (image.svg && image.width && image.height) {
-      dimensions.current = { width: image.width, height: image.height };
-      setNatural(dimensions.current);
-      fit();
-    }
-  }, [image, fit]);
+  const initialize = useCallback(
+    (size: ImageSize) => {
+      const viewport = stage.current;
+      if (!viewport) return;
+      if (pendingFrame.current !== undefined) cancelAnimationFrame(pendingFrame.current);
+      pendingFrame.current = undefined;
+      dimensions.current = size;
+      const bounds = { width: viewport.clientWidth, height: viewport.clientHeight };
+      current.current = fitImage(size, bounds, maximum);
+      // Reveal the new frame and its fitted geometry in the same commit, before paint.
+      setNatural(size);
+      setViewportSize(bounds);
+      setView(current.current);
+    },
+    [maximum],
+  );
+  useLayoutEffect(() => {
+    setFailed(false);
+    setDraft(null);
+    setInvalid(false);
+    if (image.width && image.height) initialize({ width: image.width, height: image.height });
+  }, [image, initialize]);
   const zoom = useCallback(
     (factor: number, anchor?: { x: number; y: number }) => {
       if (dimensions.current)
@@ -314,7 +306,7 @@ function FrameViewport({
   const exactPercent = view.scale * 100;
   // Compensate multiplication noise at half percentages (e.g. 1.255 × 100).
   const displayedPercent = Math.round(exactPercent + Number.EPSILON * exactPercent);
-  const percent = String(displayedPercent).replace(/\B(?=(\d{3})+(?!\d))/g, '˙');
+  const percent = String(displayedPercent);
   return (
     <div className="ve-image-viewer" ref={root}>
       <div className="ve-controls" role="toolbar" aria-label={t('viewer.imageControls')}>
@@ -467,9 +459,8 @@ function FrameViewport({
                 setFailed(true);
                 return;
               }
-              dimensions.current = { width: element.naturalWidth, height: element.naturalHeight };
-              setNatural(dimensions.current);
-              fit();
+              if (!dimensions.current)
+                initialize({ width: element.naturalWidth, height: element.naturalHeight });
             }}
             onError={() => setFailed(true)}
           />

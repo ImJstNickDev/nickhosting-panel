@@ -52,6 +52,78 @@
   width: auto;
   max-width: 22rem;
 }
+.ve-icon-picker {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
+.ve-controls .ve-icon-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 36px;
+  background: transparent;
+  border: 0;
+}
+.ve-icon-trigger > span {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ve-icon-picker img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+.ve-icon-picker small {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: normal;
+}
+.ve-icon-options {
+  position: absolute;
+  z-index: 5;
+  inset-block-start: calc(100% + 0.3rem);
+  inset-inline-end: 0;
+  min-width: 100%;
+  width: max-content;
+  max-width: min(20rem, 85vw);
+  max-height: min(18rem, 45vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  box-shadow: 0 5px 18px #0002;
+}
+.ve-icon-options button {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  min-height: 40px;
+  padding: 0.4rem 0.6rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+.ve-icon-options button small {
+  margin-inline-start: auto;
+}
+.ve-icon-options button[aria-selected="true"] {
+  background: var(--surface-hover, #f1f2f4);
+  font-weight: 650;
+}
+.ve-icon-options button[data-active="true"] {
+  background: #e2e8ec;
+}
 .ve-zoom-percentage {
   position: relative;
 }

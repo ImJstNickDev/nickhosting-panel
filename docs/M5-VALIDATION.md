@@ -7525,3 +7525,43 @@ command above, filtered to `-t 'renders SVG vectors sharply'`: 1 passed,
 17 skipped, 27.47s. The screenshot was refreshed and visually inspected. Targeted
 Biome and independent scoped review passed. No infrastructure/provider interaction,
 restart or new test resources; previous full rendering evidence remains valid.
+
+## 2026-10-13 — ICO picker and first-paint Fit
+
+Frame replaces the native ICO selector with a compact custom combobox: local
+preview, dimensions, bit depth and a bounded options popup. Arrow keys/Home/End
+navigate, Enter selects, Escape cancels, Tab/outside interaction dismisses it.
+The file-keyed viewport keeps the toolbar mounted so selection retains focus.
+The old onLoad path revealed natural dimensions before the next rAF applied Fit;
+initial dimensions and Fit now commit together before paint. Interactive zoom/pan
+retain their existing rAF coalescing. No provider requests are added when switching.
+The Owner subsequently requested plain integer percentages: 50000%, no separator.
+
+Targeted verification using existing approved isolated services:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts
+  -t 'opens SVG|switches ICO|small transparent|keeps Frame fit'`: Chromium 4/4 passed,
+  15 skipped, 22.13s. Covers SVG/raster Fit regressions and ICO controls.
+- Same command with `NH_BROWSER=firefox`, filter `-t 'opens SVG|switches ICO'`:
+  2/2 passed, 17 skipped, 19.75s. Paint sampling during 256-to-128 selection
+  confirms every visible sample is already fitted; no extra content reads.
+  Keyboard/focus, dismissal, mobile bounds and scoped axe checks pass.
+- Targeted Biome and `git diff --check` pass. The first typecheck caught the
+  React composing-event property (fixed to nativeEvent.isComposing). The final
+  `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` remains blocked by
+  concurrent unrelated work: owner-storage-policy.tsx:75 (useRef missing argument).
+  Earlier errors in that concurrent storage-policy work also appeared on the first
+  run; they were not changed by this task. Do not interpret this as a full typecheck pass.
+
+Independent code/accessibility and [desktop](screenshots/m5/file-viewer-ico-picker-en.png)/
+[mobile](screenshots/m5/file-viewer-ico-picker-mobile-en.png) screenshot review found
+no must-fix findings. Existing localization supplies the picker name; dimensional
+values retain the existing notation. Screenshots are sanitized browser fixtures.
+No infrastructure restart, provider/game-file mutation, new service or test-server
+asset. Existing services only, concurrent edits preserved. Issue #18 remains open.
+
+The final Firefox `-t 'renders SVG vectors sharply'` check passed (1/1,
+18 skipped, 36.09s), including the plain `50000%` label and refreshed SVG screenshot.
+Index governance passed: 742 text files, 228 review PNGs, 627 relative links,
+4 TOML files and 44 ignore cases (heuristic secret scan).
