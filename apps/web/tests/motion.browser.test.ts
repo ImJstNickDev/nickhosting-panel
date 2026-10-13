@@ -389,6 +389,63 @@ describe('M5 Motion video viewer', () => {
     await page.locator('#outside-motion').evaluate((element) => element.remove());
   });
 
+  it('keeps manually hidden controls inside the click circle and clears it on exit or keyboard focus', async () => {
+    await open();
+    await ready();
+    const player = page.locator('.motion-player');
+    const bounds = await player.locator('.motion-stage-toggle').boundingBox();
+    if (!bounds) throw new Error('Missing Motion stage');
+    const x = bounds.x + bounds.width * 0.9;
+    const y = bounds.y + bounds.height * 0.3;
+    await page.mouse.click(x, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    // Distance is measured from the click, not accumulated per mouse event.
+    for (const [dx, dy] of [
+      [3, 4],
+      [-20, 0],
+      [-25, 25],
+    ] as const) {
+      await page.mouse.move(x + dx, y + dy);
+      await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    }
+    if (browser === 'chromium') await screenshot('file-viewer-motion-hidden-en');
+    await page.mouse.move(x - 27, y + 27);
+    await browserExpect(player).toHaveAttribute('data-controls', 'visible');
+
+    // Exiting the player must not reveal controls; reentry discards the old circle.
+    const edge = bounds.x + bounds.width - 4;
+    await page.mouse.click(edge, y);
+    await page.mouse.move(edge + 45, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    await page.mouse.move(edge, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'visible');
+    // The same applies when a click near the edge leaves only a few pixels to travel.
+    await page.mouse.click(edge, y);
+    await page.mouse.move(edge + 8, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    await page.mouse.move(edge, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'visible');
+
+    // Captured drags still dispatch moves to the player after crossing its boundary.
+    await page.mouse.click(edge, y);
+    await page.mouse.down();
+    await page.mouse.move(edge + 45, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    await page.mouse.move(edge + 55, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'hidden');
+    await page.mouse.up();
+    await page.mouse.move(edge, y);
+    await browserExpect(player).toHaveAttribute('data-controls', 'visible');
+
+    await page.mouse.click(x, y);
+    await page.keyboard.press('Tab');
+    await browserExpect(player).toHaveAttribute('data-controls', 'visible');
+    expect(await player.locator('.motion-controls :focus').count()).toBe(1);
+    expect(await player.locator('video').evaluate((video: HTMLVideoElement) => video.paused)).toBe(
+      true,
+    );
+  });
+
   it('decodes real hover thumbnails without seeking the playing video and renders desktop English controls', async () => {
     await open();
     await ready();

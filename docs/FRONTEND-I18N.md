@@ -970,6 +970,11 @@ keeps native activation. Loss of focus/visibility clears holds. Wave's existing
 Space behavior is unchanged. Motion does not currently load external subtitle
 files or expose an embedded subtitle-track selector.
 
+After a right-side mouse/pen click, a 36 px invisible radius around the click
+absorbs small pointer movements. Leaving that circle inside the player reveals
+controls; leaving the player clears the circle without revealing them. Reentry
+and keyboard focus restore normal controls. Touch gestures are unchanged.
+
 #### Motion internal audio tracks
 
 Motion discovers embedded audio tracks through Mediabunny's bounded Range reads.

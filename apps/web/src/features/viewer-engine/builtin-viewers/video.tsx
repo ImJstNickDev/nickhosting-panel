@@ -23,6 +23,7 @@ import './video.css';
 
 const initial = { duration: 0, paused: true, volume: 1, muted: false, rate: 1, ready: false };
 const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const hidePointerRadius = 36;
 const clock = (seconds: number) => {
   const value = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
   const hours = Math.floor(value / 3600);
@@ -43,6 +44,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const lifecycle = useRef(0);
   const lastVolume = useRef(1);
   const hideTimer = useRef(0);
+  const hidePointerOrigin = useRef<{ x: number; y: number } | null>(null);
   const gesture = useRef<{
     id: number;
     element: HTMLButtonElement;
@@ -129,6 +131,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     endBoost('pointer');
   }, [endBoost]);
   const cancelBoosts = useCallback(() => {
+    hidePointerOrigin.current = null;
     cancelGesture();
     endBoost('space');
   }, [cancelGesture, endBoost]);
@@ -145,6 +148,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     };
   }, [cancelBoosts]);
   const reveal = useCallback(() => {
+    hidePointerOrigin.current = null;
     setManuallyHidden(false);
     setVisible(true);
     window.clearTimeout(hideTimer.current);
@@ -303,7 +307,30 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       ref={stage}
       data-controls={controlsVisible ? 'visible' : 'hidden'}
       onPointerMove={(event) => {
-        if (event.pointerType !== 'touch') reveal();
+        if (event.pointerType === 'touch') return;
+        const origin = hidePointerOrigin.current;
+        if (origin || gesture.current) {
+          // Captured drags can keep delivering moves after leaving the player.
+          const bounds = event.currentTarget.getBoundingClientRect();
+          if (
+            event.clientX < bounds.left ||
+            event.clientX >= bounds.right ||
+            event.clientY < bounds.top ||
+            event.clientY >= bounds.bottom
+          ) {
+            hidePointerOrigin.current = null;
+            return;
+          }
+        }
+        if (
+          origin &&
+          Math.hypot(event.clientX - origin.x, event.clientY - origin.y) <= hidePointerRadius
+        )
+          return;
+        reveal();
+      }}
+      onPointerLeave={() => {
+        hidePointerOrigin.current = null;
       }}
       onFocusCapture={(event) => {
         // Pointer focus on the stage must not undo its right-side hide gesture.
@@ -398,6 +425,8 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           if (active.zone === 'center') void toggle();
           else if (active.zone === 'right') {
             window.clearTimeout(hideTimer.current);
+            hidePointerOrigin.current =
+              event.pointerType === 'touch' ? null : { x: event.clientX, y: event.clientY };
             setVisible(false);
             setManuallyHidden(true);
           }

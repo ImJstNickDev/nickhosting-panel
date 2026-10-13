@@ -8243,3 +8243,30 @@ production boundaries remain unchanged; PR #21 stays open and unmerged.
 
 Final indexed `python3 scripts/check-governance.py` and `git diff --cached --check`
 pass, including documentation links, reviewed PNGs and tracked-content hygiene.
+
+### Motion manual-hide pointer tolerance (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. A right-side click now anchors an invisible
+36 px circle: small mouse/pen motion leaves controls hidden, leaving the circle
+inside the player reveals them, and leaving the player only discards the circle.
+Reentry and keyboard focus reveal controls normally. Touch behavior and playback
+are unchanged. No new copy or visible decoration.
+
+Final focused checks:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'click circle|three stage zones|hides controls during playback' --silent=false`: **3 passed, 8 skipped**, 29.91 s.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'click circle' --silent=false`: **1 passed, 10 skipped**, 16.16 s.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass** after declaring the test coordinates as tuples; the initial check caught that test typing issue.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/features/viewer-engine/builtin-viewers/video.tsx apps/web/tests/motion.browser.test.ts`: **pass**.
+
+Independent review caught a captured-pointer edge case: a second move outside the
+player could reveal controls after the circle was cleared. The final guard and
+browser regression cover repeated outside moves while dragging, along with
+circular distance, exit/reentry near the edge, paused state and Tab accessibility.
+No remaining must-fix findings. Reviewed [hidden-controls screenshot](screenshots/m5/file-viewer-motion-hidden-en.png);
+existing visible-player screenshots remain representative.
+
+Only existing isolated browser fixtures were used; harnesses closed. No provider
+operations, infrastructure changes, restarts or live assets. Existing Vite HMR
+applies the change. Rollback is a source revert. Historical full suites were not
+rerun for this pointer-only change; SFTPGo #18 remains unchanged.
