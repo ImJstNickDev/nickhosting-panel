@@ -120,14 +120,34 @@ function ServerCardResource({
     </div>
   );
 }
+function serverListState(server: ServerInfo): { tone: string; label: string } {
+  if (server.installationState === 'pending' || server.installationState === 'installing')
+    return { tone: 'pending', label: statusKey(server.installationState) };
+  if (server.runtimeState === 'starting' || server.runtimeState === 'stopping')
+    return { tone: 'pending', label: statusKey(server.runtimeState) };
+  if (server.activeOperationId) return { tone: 'pending', label: 'platform.activeOperation' };
+  if (server.runtimeState === 'running')
+    return server.readiness === 'loading'
+      ? { tone: 'pending', label: 'platform.loading' }
+      : { tone: 'online', label: 'platform.online' };
+  if (server.wakeEnabled && server.sleepState === 'waking')
+    return { tone: 'pending', label: statusKey(server.sleepState) };
+  if (server.runtimeState === 'offline')
+    return server.wakeEnabled
+      ? { tone: 'sleeping', label: 'platform.offlineWakeEnabled' }
+      : { tone: 'offline', label: 'platform.offlineWakeDisabled' };
+  return { tone: 'unknown', label: 'web.unknown' };
+}
 function ServerCard({
   server,
   headingLevel = 2,
   ownerName,
+  view,
 }: {
   server: ServerInfo;
   headingLevel?: 2 | 3;
   ownerName?: string;
+  view: 'grid' | 'list';
 }) {
   const t = useT(),
     format = useFormat();
@@ -151,10 +171,17 @@ function ServerCard({
       : t(resources.isPending ? 'web.loading' : 'web.unavailable');
   const Heading = headingLevel === 3 ? 'h3' : 'h2';
   const artwork = getGameArtwork(server.gameId);
+  const listState = serverListState(server);
+  const statusLabel = t(listState.label);
   return (
-    <li key={server.id} className="server-card">
+    <li
+      key={server.id}
+      className="server-card"
+      data-list-state={view === 'list' ? listState.tone : undefined}
+    >
       <Tooltip
         content={[
+          ...(view === 'list' ? [statusLabel] : []),
           `${t('platform.memoryLimit')}: ${format.number(server.limits.memory)} MiB`,
           `${t('platform.cpuLimit')}: ${format.number(server.limits.cpu)}%`,
           `${t('web.disk')} · ${t('web.usage')}: ${disk}`,
@@ -164,20 +191,22 @@ function ServerCard({
           className="server-card-link"
           to={`/servers/${server.id}`}
           aria-labelledby={`server-card-name-${server.id}`}
-          aria-describedby={`server-card-resources-${server.id}`}
+          aria-describedby={`server-card-resources-${server.id}${view === 'list' ? ` server-card-status-${server.id}` : ''}`}
         >
           {artwork && <img className="server-artwork" src={artwork} alt="" loading="lazy" />}
           <div className="server-card-body">
             <div className="server-card-heading">
               <Heading id={`server-card-name-${server.id}`}>{server.name}</Heading>
-              <Badge
-                value={server.runtimeState}
-                label={t(
-                  server.runtimeState === 'running'
-                    ? 'platform.online'
-                    : statusKey(server.runtimeState),
-                )}
-              />
+              {view === 'grid' && (
+                <Badge
+                  value={server.runtimeState}
+                  label={t(
+                    server.runtimeState === 'running'
+                      ? 'platform.online'
+                      : statusKey(server.runtimeState),
+                  )}
+                />
+              )}
             </div>
             <p className="muted">
               {server.gameNameKey ? t(server.gameNameKey) : server.gameId} · {server.runtimeId}
@@ -197,6 +226,14 @@ function ServerCard({
           </div>
         </Link>
       </Tooltip>
+      {view === 'list' && (
+        <>
+          <span className="server-list-state" aria-hidden="true" />
+          <span className="visually-hidden" id={`server-card-status-${server.id}`}>
+            {statusLabel}
+          </span>
+        </>
+      )}
       {server.activeOperationId && (
         <div className="server-card-footer">
           <Link to={`/activity/${server.activeOperationId}`}>{t('platform.activeOperation')}</Link>
@@ -223,6 +260,7 @@ export function ServerCards({
           key={server.id}
           server={server}
           headingLevel={headingLevel}
+          view={view}
           ownerName={ownerNames?.get(server.ownerId)}
         />
       ))}

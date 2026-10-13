@@ -53,3 +53,33 @@ Screenshots: [grid](screenshots/m5/server-browser-grid-desktop-en.png),
 [compact Owner](screenshots/m5/server-browser-owner-scope-landscape-en.png),
 [narrow grid](screenshots/m5/server-browser-grid-narrow-en.png),
 [Home infinity](screenshots/m5/home-server-infinity-desktop-en.png).
+
+## List status strip
+
+List rows replace the runtime badge with a 6 px rounded vertical strip, inset
+8 px from the right/top/bottom. Dark red means offline with Gateway wake disabled;
+lighter red means offline with configured Gateway wake enabled. Startup/shutdown,
+installation, active operations and game loading use amber; running uses green.
+Unknown telemetry remains neutral gray. A blocked wake policy alone does not
+claim work is progressing. Grid and Home badges remain unchanged.
+
+The additive list/detail `wakeEnabled` hint combines effective global Gateway
+configuration with saved per-server policy, connection mode, capability and
+manual-stop/maintenance intent. It does not promise available capacity, live
+Gateway health or successful admission. Environment settings apply consistently
+to list, detail and metadata-update responses.
+
+Hovering or focusing a row increases saturation and adds a small local glow.
+Reduced-motion disables the transition. The existing tooltip includes the exact
+status; a screen-reader description preserves status independently of color.
+
+Validation: 31 platform-query integration tests and 6 server-browser tests passed,
+including both offline tones, starting/stopping, online/unknown, keyboard tooltip,
+hover, reduced motion, grid/list separation and desktop/mobile resource bounds.
+Root/web TypeScript and targeted Biome passed; independent review completed.
+No infrastructure/configuration changes, restarts or provider test assets.
+Fixtures were isolated and cleaned. Review the strip colors and hover intensity;
+rollback is a code revert without a data migration.
+
+Screenshots: [desktop status strip](screenshots/m5/server-browser-status-list-desktop-en.png),
+[mobile status strip](screenshots/m5/server-browser-status-list-mobile-en.png).

@@ -21,6 +21,14 @@ export const platformWebMessages: Record<string, readonly [string, string]> = {
     'Another operation holds the server lock. Wait and try again.',
     'Un’altra operazione sta utilizzando il server. Attendi e riprova.',
   ],
+  'platform.offlineWakeEnabled': [
+    'Offline · gateway wake enabled',
+    'Offline · riattivazione gateway abilitata',
+  ],
+  'platform.offlineWakeDisabled': [
+    'Offline · gateway wake disabled',
+    'Offline · riattivazione gateway disabilitata',
+  ],
   'platform.serverFilters': ['Server filters', 'Filtri server'],
   'platform.serverView': ['Server view', 'Vista server'],
   'platform.myServers': ['Mine', 'Miei'],

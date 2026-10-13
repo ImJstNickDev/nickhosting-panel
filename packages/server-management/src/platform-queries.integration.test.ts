@@ -518,6 +518,90 @@ describe('M5 platform browser queries and metadata', () => {
       .execute();
     expect((await listPlatformServers(f.db, other.context)).filterOptions.versions).toEqual([]);
   });
+  it('exposes configured wake without claiming live readiness or ignoring disabled scopes', async () => {
+    const { id } = await installedMinecraft();
+    const env = {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: f.hostId,
+    };
+    await f.db
+      .updateTable('managed_servers')
+      .set({ intent: 'auto_wake_enabled', connection_mode: 'gateway' })
+      .where('id', '=', id)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(false);
+    await sql`insert into gateway_server_states
+      (server_id,generation,enabled,protocol_id,game_version,state,readiness_timeout_seconds,readiness_max_age_seconds,estimate_max_age_seconds,wake_retry_seconds)
+      values (${id},${randomUUID()},true,'minecraft-java','26.1','sleeping',50,10,3600,30)`.execute(
+      f.db,
+    );
+    expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(true);
+    expect(
+      await updatePlatformServer(f.db, f.context, id, { name: 'Wake metadata' }, env),
+    ).toMatchObject({ name: 'Wake metadata', wakeEnabled: true });
+    expect(
+      (await listPlatformServers(f.db, f.context, {}, env)).items.find((server) => server.id === id)
+        ?.wakeEnabled,
+    ).toBe(true);
+    expect(
+      (await getPlatformServer(f.db, f.context, id, { ...env, NH_GATEWAY_ENABLED: 'false' }))
+        .wakeEnabled,
+    ).toBe(false);
+    expect(
+      (await getPlatformServer(f.db, f.context, id, { NH_GATEWAY_ENABLED: 'true' })).wakeEnabled,
+    ).toBe(false);
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ enabled: false })
+      .where('server_id', '=', id)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(false);
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ enabled: true, state: 'blocked', blocked_until: new Date(Date.now() + 60000) })
+      .where('server_id', '=', id)
+      .execute();
+    // A temporary admission block does not disable the configured wake policy.
+    expect(await getPlatformServer(f.db, f.context, id, env)).toMatchObject({
+      wakeEnabled: true,
+      sleepState: 'blocked',
+    });
+    for (const intent of ['manually_stopped', 'maintenance'] as const) {
+      await f.db.updateTable('managed_servers').set({ intent }).where('id', '=', id).execute();
+      expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(false);
+    }
+    await f.db
+      .updateTable('managed_servers')
+      .set({ intent: 'auto_wake_enabled', connection_mode: 'direct' })
+      .where('id', '=', id)
+      .execute();
+    expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(false);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'gateway' })
+      .where('id', '=', id)
+      .execute();
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: {
+          ...minecraftManifest,
+          capabilities: { ...minecraftManifest.capabilities, wake: 'unsupported' },
+        },
+      })
+      .where('id', '=', 'minecraft-java')
+      .execute();
+    try {
+      expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(false);
+    } finally {
+      await f.db
+        .updateTable('game_integrations')
+        .set({ manifest: minecraftManifest })
+        .where('id', '=', 'minecraft-java')
+        .execute();
+    }
+  });
   it('derives viewer/operator/manager actions while keeping first-start denial separate from current state', async () => {
     const other = await peer(),
       project = await createProject(f.db, f.context, { name: 'Shared' }),

@@ -303,6 +303,159 @@ describe('M5 server browser filters, ownership and bounded views', () => {
     expect(pageErrors).toEqual([]);
   });
 
+  it('uses inset status strips only in list view with accessible status and hover feedback', async () => {
+    const db = fixture.database.db;
+    const originals = await db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('owner_id', '=', identities.userId)
+      .where('name', 'in', ['World 00', 'World 01', 'World 02', 'World 03', 'World 04', 'World 05'])
+      .orderBy('name')
+      .execute();
+    const oldEnv = {
+      NH_GATEWAY_ENABLED: fixture.env.NH_GATEWAY_ENABLED,
+      NH_GATEWAY_ID: fixture.env.NH_GATEWAY_ID,
+      NH_GATEWAY_PHYSICAL_HOST_ID: fixture.env.NH_GATEWAY_PHYSICAL_HOST_ID,
+    };
+    Object.assign(fixture.env, {
+      NH_GATEWAY_ENABLED: 'true',
+      NH_GATEWAY_ID: randomUUID(),
+      NH_GATEWAY_PHYSICAL_HOST_ID: provider.ids.hostId,
+    });
+    const statuses = ['offline', 'offline', 'starting', 'stopping', 'running', 'unknown'] as const;
+    try {
+      for (const [index, server] of originals.entries()) {
+        await db
+          .updateTable('managed_servers')
+          .set({
+            name: `Signal ${index}`,
+            runtime_state: statuses[index],
+            intent: index === 1 ? 'sleeping' : 'manually_stopped',
+            connection_mode: 'gateway',
+          })
+          .where('id', '=', server.id)
+          .execute();
+      }
+      const wakeServer = originals[1];
+      if (!wakeServer) throw new Error('Missing isolated wake-enabled server');
+      await db
+        .insertInto('gateway_server_states')
+        .values({
+          server_id: wakeServer.id,
+          generation: randomUUID(),
+          enabled: true,
+          protocol_id: 'minecraft-java',
+          game_version: '26.1',
+          state: 'sleeping',
+          idle_timeout_seconds: null,
+          readiness_timeout_seconds: 60,
+          readiness_max_age_seconds: 30,
+          estimate_max_age_seconds: 3600,
+          wake_retry_seconds: 10,
+          wake_job_id: null,
+          sleep_job_id: null,
+          process_started_at: null,
+          readiness_observed_at: null,
+          startup_deadline_at: null,
+          idle_since: null,
+          last_observed_at: null,
+          last_activity_at: null,
+          blocked_until: null,
+          error_code: null,
+        })
+        .execute();
+      await user.setViewportSize({ width: 1440, height: 1000 });
+      await user.goto(`${fixture.origin}/servers`);
+      await user.getByRole('searchbox', { name: 'Search servers' }).fill('Signal');
+      await user.getByRole('button', { name: 'List', exact: true }).click();
+      await browserExpect(cards(user)).toHaveCount(6);
+      await browserExpect(user.locator('.server-list .badge:visible')).toHaveCount(0);
+      const colors: string[] = [];
+      for (const [index, status] of statuses.entries()) {
+        const link = user.getByRole('link', { name: `Signal ${index}`, exact: true });
+        const expectedStatus =
+          index === 0
+            ? 'Offline · gateway wake disabled'
+            : index === 1
+              ? 'Offline · gateway wake enabled'
+              : status === 'running'
+                ? 'Online'
+                : status.charAt(0).toUpperCase() + status.slice(1);
+        await browserExpect(link).toHaveAccessibleDescription(new RegExp(expectedStatus));
+        const strip = link.locator('..').locator('.server-list-state');
+        await browserExpect(strip).toBeVisible();
+        const geometry = await strip.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const parent = element.closest('.server-card')?.getBoundingClientRect();
+          if (!parent) throw new Error('Missing status strip card');
+          const style = getComputedStyle(element);
+          return {
+            width: rect.width,
+            top: rect.top - parent.top,
+            right: parent.right - rect.right,
+            bottom: parent.bottom - rect.bottom,
+            radius: Number.parseFloat(style.borderRadius),
+            color: style.backgroundColor,
+          };
+        });
+        expect(geometry.width).toBe(6);
+        expect(geometry.top).toBeGreaterThanOrEqual(7);
+        expect(geometry.bottom).toBeGreaterThanOrEqual(7);
+        expect(geometry.right).toBeGreaterThanOrEqual(7);
+        expect(geometry.radius).toBeGreaterThan(0);
+        colors.push(geometry.color);
+        await link.focus();
+        await browserExpect(user.getByRole('tooltip')).toContainText(expectedStatus);
+        await user.keyboard.press('Escape');
+      }
+      expect(colors[0]).not.toBe(colors[1]);
+      expect(colors[2]).toBe(colors[3]);
+      expect(new Set([colors[0], colors[2], colors[4], colors[5]]).size).toBe(4);
+      await user.getByRole('searchbox', { name: 'Search servers' }).focus();
+      const active = user.getByRole('link', { name: 'Signal 4', exact: true });
+      const stripe = active.locator('..').locator('.server-list-state');
+      await active.hover();
+      await browserExpect
+        .poll(() => stripe.evaluate((element) => getComputedStyle(element).boxShadow))
+        .not.toBe('none');
+      await browserExpect(user.getByRole('tooltip')).toContainText('Online');
+      await browserExpect(stripe).toHaveCSS('transition-duration', '0s');
+      await user.mouse.move(0, 0);
+      await screenshot(user, 'server-browser-status-list-desktop-en');
+      await accessible(user);
+      await user.getByRole('button', { name: 'Grid', exact: true }).click();
+      await browserExpect(user.locator('.server-grid .badge:visible')).toHaveCount(6);
+      await browserExpect(user.locator('.server-list-state:visible')).toHaveCount(0);
+      await user.getByRole('button', { name: 'List', exact: true }).click();
+      await user.setViewportSize({ width: 390, height: 844 });
+      await browserExpect.poll(() => cards(user).count()).toBeLessThan(6);
+      await bounded(user);
+      await screenshot(user, 'server-browser-status-list-mobile-en');
+    } finally {
+      await db
+        .deleteFrom('gateway_server_states')
+        .where(
+          'server_id',
+          'in',
+          originals.map((server) => server.id),
+        )
+        .execute();
+      for (const server of originals)
+        await db
+          .updateTable('managed_servers')
+          .set({
+            name: server.name,
+            runtime_state: server.runtime_state,
+            intent: server.intent,
+            connection_mode: server.connection_mode,
+          })
+          .where('id', '=', server.id)
+          .execute();
+      Object.assign(fixture.env, oldEnv);
+      await user.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
+
   it('keeps Italian mobile controls and advanced filters accessible', async () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
     await user.setViewportSize({ width: 390, height: 844 });

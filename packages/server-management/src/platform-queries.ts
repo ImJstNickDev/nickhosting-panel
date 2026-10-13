@@ -115,7 +115,12 @@ const installedServerVersion = sql<string | null>`(
     and version_mapping.game_id = 'minecraft-java'
 )`;
 
-export async function listPlatformServers(db: DB, context: AuthContext, input: unknown = {}) {
+export async function listPlatformServers(
+  db: DB,
+  context: AuthContext,
+  input: unknown = {},
+  env: Environment = {},
+) {
   const value = parse(serverQuerySchema, input),
     after = cursor(value.cursor, true);
   if (value.scope === 'others') ownerOnly(context);
@@ -139,7 +144,7 @@ export async function listPlatformServers(db: DB, context: AuthContext, input: u
     query = query.where('mapping_id', 'in', mappings);
   }
   if (value.version) query = query.where(installedServerVersion, '=', value.version);
-  const [count, facets] = await Promise.all([
+  const [count, facets, gatewayEnabled] = await Promise.all([
     query.clearSelect().select(sql<string>`count(*)`.as('total')).executeTakeFirstOrThrow(),
     db
       .selectFrom(
@@ -165,6 +170,7 @@ export async function listPlatformServers(db: DB, context: AuthContext, input: u
       .select(sql<string | null>`game.manifest->>'nameKey'`.as('game_name_key'))
       .distinct()
       .execute(),
+    configuredGatewayWake(db, env),
   ]);
   const total = Number(count.total);
   const totalPages = Math.max(1, Math.ceil(total / value.limit));
@@ -209,14 +215,22 @@ export async function listPlatformServers(db: DB, context: AuthContext, input: u
       projects: [...projects.values()].sort((a, b) => a.name.localeCompare(b.name)),
       owners: [...owners.values()].sort((a, b) => a.name.localeCompare(b.name)),
     },
-    items: await Promise.all(result.items.map((row) => describeServer(db, context, row))),
+    items: await Promise.all(
+      result.items.map((row) => describeServer(db, context, row, gatewayEnabled)),
+    ),
   };
+}
+
+async function configuredGatewayWake(db: DB, env: Environment) {
+  const { values } = await getSettings(db, env);
+  return Boolean(values.gatewayEnabled && values.gatewayId && values.gatewayPhysicalHostId);
 }
 
 async function describeServer(
   db: DB,
   context: AuthContext,
   row: Awaited<ReturnType<typeof authorizeServer>>,
+  gatewayEnabled = false,
 ) {
   const [mapping, member, policy, initialDenied, upload, reservation, activeStop] =
     await Promise.all([
@@ -296,6 +310,16 @@ async function describeServer(
     connectionMode: row.connection_mode,
     readiness: capabilities?.readiness === false ? ('unknown' as const) : row.readiness,
     sleepState: row.connection_mode === 'direct' ? null : (policy?.state ?? null),
+    // Enabled policies already validate their installed protocol binding on write.
+    // Base manifests may declare manual wake; this is configuration, not live readiness.
+    wakeEnabled: Boolean(
+      gatewayEnabled &&
+        policy?.enabled &&
+        row.connection_mode === 'gateway' &&
+        capabilities !== null &&
+        capabilities.wake !== 'unsupported' &&
+        !['manually_stopped', 'maintenance'].includes(row.intent),
+    ),
     capabilities,
     permissions: {
       read: true,
@@ -339,8 +363,14 @@ async function describeServer(
       : null,
   };
 }
-export async function getPlatformServer(db: DB, context: AuthContext, serverId: string) {
-  return describeServer(db, context, await scopedServer(db, context, serverId));
+export async function getPlatformServer(
+  db: DB,
+  context: AuthContext,
+  serverId: string,
+  env: Environment = {},
+) {
+  const server = await scopedServer(db, context, serverId);
+  return describeServer(db, context, server, await configuredGatewayWake(db, env));
 }
 
 export async function updatePlatformServer(
@@ -398,7 +428,7 @@ export async function updatePlatformServer(
       projectId: value.projectId === undefined ? server.project_id : value.projectId,
     });
   });
-  return getPlatformServer(db, context, serverId);
+  return getPlatformServer(db, context, serverId, env);
 }
 
 async function projectAccess(db: DB, context: AuthContext, projectId: string, manage = false) {

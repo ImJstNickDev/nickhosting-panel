@@ -85,10 +85,10 @@ export function registerPlatformRoutes(
     ),
   );
   app.get('/v1/platform/servers', async (c) =>
-    c.json(await listPlatformServers(db, await principal(c), c.req.query())),
+    c.json(await listPlatformServers(db, await principal(c), c.req.query(), env)),
   );
   app.get('/v1/platform/servers/:id', async (c) =>
-    c.json(await getPlatformServer(db, await principal(c), c.req.param('id'))),
+    c.json(await getPlatformServer(db, await principal(c), c.req.param('id'), env)),
   );
   app.patch('/v1/platform/servers/:id', async (c) =>
     c.json(
