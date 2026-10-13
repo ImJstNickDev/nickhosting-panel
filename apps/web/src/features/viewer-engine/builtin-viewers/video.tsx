@@ -266,6 +266,19 @@ export default function VideoViewer({ serverId, source, identity }: ViewerProps)
       if (document.fullscreenEnabled) void changeDisplay('fullscreen');
     },
     mute,
+    volume: (delta) => {
+      const video = media.current;
+      if (!video || playback.switching) return;
+      const volume = Math.max(
+        0,
+        Math.min(1, Math.round(((video.muted ? 0 : video.volume) + delta) * 100) / 100),
+      );
+      video.volume = volume;
+      video.muted = volume === 0;
+      if (volume > 0) lastVolume.current = volume;
+      sync();
+      reveal();
+    },
   });
   function mute() {
     const video = media.current;

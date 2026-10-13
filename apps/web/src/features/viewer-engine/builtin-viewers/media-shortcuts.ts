@@ -6,6 +6,7 @@ type MotionShortcuts = {
   fullscreen: () => void;
   isFocused: () => boolean;
   mute: () => void;
+  volume: (delta: number) => void;
 };
 
 const menuSelector =
@@ -81,6 +82,11 @@ export function useMediaShortcuts(
           (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 10 : 5),
           !event.repeat,
         );
+      } else if (actions.current.motion && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        if (target?.closest('select') || (keyboardNavigation && interactive)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        actions.current.motion.volume(event.key === 'ArrowUp' ? 0.05 : -0.05);
       } else if (
         actions.current.motion?.isFocused() &&
         ['f', 'm'].includes(event.key.toLowerCase())

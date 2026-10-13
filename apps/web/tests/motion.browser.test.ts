@@ -164,6 +164,29 @@ describe('M5 Motion video viewer', () => {
     await browserExpect.poll(time).toBeCloseTo(30, 1);
     await player.getByRole('button', { name: 'Back 10 seconds', exact: true }).click();
     await browserExpect.poll(time).toBeCloseTo(20, 1);
+    await page.keyboard.press('ArrowDown');
+    expect(await video.evaluate((element: HTMLVideoElement) => element.volume)).toBe(0.95);
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('ArrowUp');
+    expect(await video.evaluate((element: HTMLVideoElement) => element.volume)).toBe(1);
+    await video.evaluate((element: HTMLVideoElement) => {
+      element.muted = true;
+    });
+    await page.keyboard.press('ArrowUp');
+    expect(
+      await video.evaluate((element: HTMLVideoElement) => ({
+        volume: element.volume,
+        muted: element.muted,
+      })),
+    ).toEqual({ volume: 0.05, muted: false });
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    expect(
+      await video.evaluate((element: HTMLVideoElement) => ({
+        volume: element.volume,
+        muted: element.muted,
+      })),
+    ).toEqual({ volume: 0, muted: true });
     await page.keyboard.press('ArrowRight');
     await browserExpect.poll(time).toBeCloseTo(25, 1);
     await page.keyboard.press('Shift+ArrowLeft');

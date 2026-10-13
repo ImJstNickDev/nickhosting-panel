@@ -8661,3 +8661,12 @@ Final focused validation:
 - `scripts/dev.sh pnpm exec biome check` on the nine changed TypeScript source/test files: **passed**.
 - Independent final review: **no remaining must-fix findings**. No full historical M1–M5 suite rerun for this scoped change.
 - `python3 scripts/check-governance.py`: **passed**, 834 indexed text files, 276 review PNGs, 681 relative links, 4 TOML files and 44 ignore cases; secret scanning remains heuristic. `git diff --cached --check`: **passed**.
+
+### Motion volume shortcuts (2026-10-13)
+
+Arrow Up/Down adjust Motion volume by five percentage points, clamped to 0–100%.
+Increasing muted volume starts at 5%; zero mutes. Text fields, open menus/dialogs
+and native controls reached through keyboard navigation keep their own keys.
+Focused real Chromium transport case passed (`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'plays actual video'`): 1 passed, 10 unrelated cases skipped. Covers volume steps, both bounds and muted recovery alongside existing transport behavior. Scoped Biome passed. No layout changes, infrastructure actions or provider mutations.
+Web typecheck passed. Independent review checked exclusions and volume semantics;
+its native-select exception was applied so pointer-focused selects retain arrows.
