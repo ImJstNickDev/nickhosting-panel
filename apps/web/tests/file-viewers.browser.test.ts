@@ -344,10 +344,14 @@ describe('M5 builtin file viewers', () => {
     await input.fill('125,5');
     await page.keyboard.press('Enter');
     await browserExpect(
-      page.getByRole('button', { name: 'Zoom: 125.5%', exact: true }),
+      page.getByRole('button', { name: 'Zoom: 126%', exact: true }),
     ).toBeFocused();
     expect((await frameGeometry()).scale).toBeCloseTo(1.255, 5);
     expect((await frameGeometry()).centerX).toBeCloseTo(before.centerX, 2);
+    await page.locator('.ve-zoom-value').click();
+    await browserExpect(input).toHaveValue('126');
+    await page.keyboard.press('Enter');
+    expect((await frameGeometry()).scale).toBeCloseTo(1.255, 5);
     await page.locator('.ve-zoom-value').click();
     await input.fill('oops');
     await page.keyboard.press('Enter');

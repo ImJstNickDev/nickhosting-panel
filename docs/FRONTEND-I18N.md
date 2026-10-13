@@ -666,7 +666,8 @@ limits remain enforced; decoder failure keeps Open with available for recovery.
 Optional viewer metadata failures do not prevent independent text editing.
 
 Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard and
-gestures; its percentage reflects the rendered image with at most two decimals.
+gestures; its percentage is displayed as a rounded integer while calculations
+retain full precision. Confirming an unchanged rounded draft preserves the scale.
 Zoom is bounded to 1–5000%, including Fit, typed values and gestures. Fit follows
 viewport resizing; manual zoom preserves scale and reclamps position. An image
 that fits stays centered on that axis; a larger image can pan only as far as its

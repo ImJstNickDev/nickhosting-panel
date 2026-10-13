@@ -251,7 +251,10 @@ function FrameViewport({
     requestAnimationFrame(() => percentButton.current?.focus({ preventScroll: true }));
   }
   if (failed) return <ErrorNotice error={{ messageKey: 'viewer.imageUnavailable' }} />;
-  const percent = format.number(view.scale * 100, 2);
+  const exactPercent = view.scale * 100;
+  // Compensate multiplication noise at half percentages (e.g. 1.255 × 100).
+  const displayedPercent = Math.round(exactPercent + Number.EPSILON * exactPercent);
+  const percent = format.number(displayedPercent, 0);
   return (
     <div className="ve-image-viewer" ref={root}>
       <div className="ve-controls" role="toolbar" aria-label={t('viewer.imageControls')}>
@@ -273,7 +276,7 @@ function FrameViewport({
               disabled={!natural}
               aria-label={t('viewer.editZoom', { percent })}
               onClick={() => {
-                setDraft(String(Number((view.scale * 100).toFixed(2))));
+                setDraft(String(displayedPercent));
                 setInvalid(false);
               }}
             >
@@ -305,7 +308,8 @@ function FrameViewport({
                     setInvalid(true);
                     return;
                   }
-                  update((value) => zoomImage(value, scale));
+                  // Confirming the displayed rounded value must not lose internal precision.
+                  if (scale !== displayedPercent / 100) update((value) => zoomImage(value, scale));
                   finishPercent();
                 } else if (event.key === 'Escape') {
                   event.preventDefault();

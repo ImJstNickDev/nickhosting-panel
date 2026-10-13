@@ -7345,3 +7345,19 @@ Read-only HTTPS module inspection returned 200 and confirmed the new bounds and
 shared constraint are served by Vite HMR.
 Index governance passed: 739 text files, 223 review PNGs, 621 relative links,
 4 TOML files and 44 ignore cases (heuristic secret scan).
+
+## 2026-10-13 — Frame integer percentage display
+
+Owner follow-up replaces the two-decimal display with a rounded integer, including
+the initial edit draft. Transform calculations retain full precision; accepting an
+unchanged rounded value does not rescale the image. Decimal input still works.
+An initial targeted browser run exposed multiplication noise at 125.5%; rounding
+now compensates machine epsilon and consistently shows 126% for that value.
+
+Final `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+--config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts
+-t 'keeps Frame fit'`: 1/1 passed, 13 skipped, 13.86s. It checks the integer display,
+rounded draft and preservation of the 1.255 internal scale after confirmation,
+alongside existing fit/zoom/resize behavior. Web typecheck and targeted Biome pass.
+Updated desktop screenshot reviewed. No full-suite rerun, infrastructure restart,
+API change or game-server interaction; prior gesture evidence boundaries remain.
