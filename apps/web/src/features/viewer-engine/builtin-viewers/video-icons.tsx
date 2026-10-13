@@ -9,6 +9,8 @@ export type VideoIconKind =
   | 'fullscreen'
   | 'exitFullscreen'
   | 'pip'
+  | 'subtitles'
+  | 'settings'
   | 'tracks';
 
 export function VideoIcon({ kind }: { kind: VideoIconKind }) {
@@ -53,6 +55,16 @@ export function VideoIcon({ kind }: { kind: VideoIconKind }) {
         <path d="M4 9h5V4m6 0v5h5M9 20v-5H4m11 5v-5h5" />
       ) : kind === 'tracks' ? (
         <path d="M4 14v-3a8 8 0 0 1 16 0v3M4 12H3v7h4v-7H4m16 0h1v7h-4v-7h3" />
+      ) : kind === 'subtitles' ? (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="M7 11h3m4 0h3M7 15h10" />
+        </>
+      ) : kind === 'settings' ? (
+        <>
+          <path d="m10 3-.7 2.1-2 .9-2-.5-2 3.5 1.5 1.7v2.6L3.3 15l2 3.5 2-.5 2 .9L10 21h4l.7-2.1 2-.9 2 .5 2-3.5-1.5-1.7v-2.6L20.7 9l-2-3.5-2 .5-2-.9L14 3z" />
+          <circle cx="12" cy="12" r="3" />
+        </>
       ) : kind === 'pip' ? (
         <>
           <rect x="3" y="5" width="18" height="14" rx="1.5" />

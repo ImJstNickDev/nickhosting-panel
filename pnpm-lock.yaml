@@ -219,6 +219,12 @@ importers:
       icojs:
         specifier: 1.0.1
         version: 1.0.1
+      jassub:
+        specifier: 2.5.20
+        version: 2.5.20
+      media-captions:
+        specifier: 0.0.18
+        version: 0.0.18
       mediabunny:
         specifier: 1.61.4
         version: 1.61.4
@@ -1444,6 +1450,9 @@ packages:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
     engines: {node: '>=6.5'}
 
+  abslink@1.3.1:
+    resolution: {integrity: sha512-ukFoU6q/RBMjoC7fu0Zx2+eVH2QFMfV+aJ2cI3Ypl0Shm0ikGjZ0T2VN0xvLl0a8imhWqvfVrqu2n2Ml3eSMyQ==}
+
   aes-js@3.1.2:
     resolution: {integrity: sha512-e5pEa2kBnBOgR4Y/p20pskXI74UEz7de8ZGVo58asOtvSVG5YAbJeELPZxOmt+Bnz3rX753YKhfIn4X4l1PPRQ==}
 
@@ -1788,6 +1797,9 @@ packages:
     resolution: {integrity: sha512-f+Dtubxfpf6KYFq7WVXJoOLn0bk4TJrMrN9SzeE+jrWrCWj7XX3fA6vkryafhADX+GMymRxgDJDOI33COkJc0w==}
     engines: {node: '>=20.0.0'}
 
+  jassub@2.5.20:
+    resolution: {integrity: sha512-uUE0YoUnw/pdgFVoefRN0leLu5iFS39hfOikouCqHUffLCAU3wqRU5VkpBbY1piV8WWlFcHCz3HEPzvyxbAJTw==}
+
   jest-get-type@29.6.3:
     resolution: {integrity: sha512-zrteXnqYxfQh7l5FHyL38jL39di8H8rHoecLH3JNxH3BwOrBsNeabdap5e0I23lD4HHI8W5VFBZqG4Eaq5LNcw==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
@@ -1829,6 +1841,9 @@ packages:
   leven@3.1.0:
     resolution: {integrity: sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A==}
     engines: {node: '>=6'}
+
+  lfa-ponyfill@1.1.1:
+    resolution: {integrity: sha512-Had4tsGEHtIj58MRtf6SlubNDltxinxMSdxIn1GdwrWbye8TD+pZ+D6qKETnJ9+vQOfG9q/Ds4WUPskhyAMp5Q==}
 
   lightningcss-android-arm64@1.33.0:
     resolution: {integrity: sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==}
@@ -1944,6 +1959,10 @@ packages:
 
   magic-string@1.4.3:
     resolution: {integrity: sha512-z12OxmaPGE0F4xlpGdjuAUckipLpQlTAuAmyGhNoD7ODpYUzvDfvtxUbjM/jwznyP178oju/KDdyi220wNJ0RQ==}
+
+  media-captions@0.0.18:
+    resolution: {integrity: sha512-JW18P6FuHdyLSGwC4TQ0kF3WdNj/+wMw2cKOb8BnmY6vSJGtnwJ+vkYj+IjHOV34j3XMc70HDeB/QYKR7E7fuQ==}
+    engines: {node: '>=16'}
 
   mediabunny@1.61.4:
     resolution: {integrity: sha512-gZPBi40ldiZGeU2DJxT/Q3hlNiaxfpwNYTfmi0Maq3SoBJT64+W+ySc0Z7t+2JUGxNbkXnLFrDkSS2OQuweOhA==}
@@ -2204,6 +2223,9 @@ packages:
   rou3@0.9.2:
     resolution: {integrity: sha512-3SOzvaAg8rkHrXtRjpCvCvbyO5to9oOO27Z/XqHEYXfMRVSw/qMIVdmaOk9W2lcRLtR6dlqTjo9hDeJk70QBYQ==}
 
+  rvfc-polyfill@1.0.8:
+    resolution: {integrity: sha512-uA+0wwTkZ4OT8v45pfDfH+7Yq8mY6MvNngiF5Sq6VBgjJsvsfgt7Q18cyZqZjfAhW9rhkgXPX0cW0R9uw7yElA==}
+
   safe-buffer@5.2.1:
     resolution: {integrity: sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==}
 
@@ -2278,6 +2300,9 @@ packages:
 
   through@2.3.8:
     resolution: {integrity: sha512-w89qg7PI8wAdvX60bMDP+bFoD5Dvhm9oLheFp5O4a2QF0cSBGsBX4qZmadPMvVqlLJBBci+WqGGOAPvcDeNSVg==}
+
+  throughput@1.0.2:
+    resolution: {integrity: sha512-jvK1ZXuhsggjb3qYQjMiU/AVYYiTeqT5thWvYR2yuy2LGM84P5MSSyAinwHahGsdBYKR9m9HncVR/3f3nFKkxg==}
 
   tinybench@6.2.1:
     resolution: {integrity: sha512-IAbQaPJIIdhVxi0mqy9lez1wEwje0UQf9F1vwtbelEG5Nbgn0nPOxCvU+mNeNS9gyJTAhrHp74CbUaSynQpZcQ==}
@@ -3286,6 +3311,8 @@ snapshots:
     dependencies:
       event-target-shim: 5.0.1
 
+  abslink@1.3.1: {}
+
   aes-js@3.1.2: {}
 
   ajv@6.15.0:
@@ -3582,6 +3609,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  jassub@2.5.20:
+    dependencies:
+      abslink: 1.3.1
+      lfa-ponyfill: 1.1.1
+      rvfc-polyfill: 1.0.8
+      throughput: 1.0.2
+
   jest-get-type@29.6.3: {}
 
   jest-validate@29.7.0:
@@ -3630,6 +3664,8 @@ snapshots:
   kysely@0.29.6: {}
 
   leven@3.1.0: {}
+
+  lfa-ponyfill@1.1.1: {}
 
   lightningcss-android-arm64@1.33.0:
     optional: true
@@ -3707,6 +3743,8 @@ snapshots:
   magic-string@1.4.3:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  media-captions@0.0.18: {}
 
   mediabunny@1.61.4:
     dependencies:
@@ -4012,6 +4050,8 @@ snapshots:
 
   rou3@0.9.2: {}
 
+  rvfc-polyfill@1.0.8: {}
+
   safe-buffer@5.2.1: {}
 
   safer-buffer@2.1.2: {}
@@ -4092,6 +4132,8 @@ snapshots:
       - react-native-b4a
 
   through@2.3.8: {}
+
+  throughput@1.0.2: {}
 
   tinybench@6.2.1: {}
 

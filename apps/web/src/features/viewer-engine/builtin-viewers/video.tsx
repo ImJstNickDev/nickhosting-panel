@@ -18,6 +18,7 @@ import { useMediaShortcuts } from './media-shortcuts.js';
 import { VideoIcon, type VideoIconKind } from './video-icons.js';
 import { useVideoLayout } from './video-layout.js';
 import { useVideoSource } from './video-source.js';
+import { useVideoSubtitles } from './video-subtitles.js';
 import { useVideoThumbnail } from './video-thumbnail.js';
 import './video.css';
 
@@ -39,7 +40,15 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const { locale } = useLocale();
   const stage = useRef<HTMLDivElement>(null);
   const controls = useRef<HTMLDivElement>(null);
-  useVideoLayout(stage, media, controls);
+  const subtitleOverlay = useRef<HTMLDivElement>(null);
+  const subtitles = useVideoSubtitles({
+    media,
+    container: subtitleOverlay,
+    url: src,
+    size: source.size,
+    name: source.name,
+  });
+  useVideoLayout(stage, media, controls, subtitles.tracks.length > 0);
   const generation = useRef(0);
   const lifecycle = useRef(0);
   const lastVolume = useRef(1);
@@ -271,6 +280,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     setWaiting(false);
     setState((value) => ({ ...value, duration: 0, ready: false, paused: true }));
     playback.retry();
+    if (subtitles.error) subtitles.retry();
   }
   async function changeDisplay(mode: 'fullscreen' | 'pip') {
     const video = media.current,
@@ -301,6 +311,20 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     failed ||
     playError ||
     displayError;
+  const trackName = (track: { name: string | null; language: string }, index: number) => {
+    let language = '';
+    if (track.language && track.language !== 'und') {
+      try {
+        language =
+          new Intl.DisplayNames([locale === 'it' ? 'it' : 'en'], {
+            type: 'language',
+          }).of(track.language) ?? track.language;
+      } catch {
+        language = track.language;
+      }
+    }
+    return track.name || language || t('viewer.videoTrackNumber', { number: index + 1 });
+  };
   return (
     <div
       className="motion-player"
@@ -338,7 +362,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           reveal();
       }}
     >
-      {/* biome-ignore lint/a11y/useMediaCaption: Arbitrary file preview; no captions are supplied or fabricated. */}
+      {/* biome-ignore lint/a11y/useMediaCaption: Embedded captions use the synchronized subtitle overlay. */}
       <video
         ref={media}
         preload="metadata"
@@ -386,6 +410,12 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           setWaiting(false);
           sync();
         }}
+      />
+      <div
+        className="motion-subtitles"
+        ref={subtitleOverlay}
+        aria-hidden="true"
+        hidden={playback.switching}
       />
       <button
         className="motion-stage-toggle"
@@ -442,6 +472,14 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           if (event.detail === 0) void toggle();
         }}
       />
+      {subtitles.error && state.ready && !failed && !playback.error && (
+        <div className="motion-subtitle-notice" role="status">
+          <span>{t('viewer.videoSubtitleFailed')}</span>
+          <button type="button" className="text-button" onClick={subtitles.retry}>
+            {t('viewer.audioRetry')}
+          </button>
+        </div>
+      )}
       <div className="motion-feedback">
         {(!playback.switching && !playback.discovering && failed) ||
         playback.error ||
@@ -544,19 +582,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
                 className="motion-audio-track"
                 triggerContent={<VideoIcon kind="tracks" />}
                 options={playback.tracks.map((track, index) => {
-                  let language = '';
-                  if (track.language && track.language !== 'und') {
-                    try {
-                      language =
-                        new Intl.DisplayNames([locale === 'it' ? 'it' : 'en'], {
-                          type: 'language',
-                        }).of(track.language) ?? track.language;
-                    } catch {
-                      language = track.language;
-                    }
-                  }
-                  const name =
-                    track.name || language || t('viewer.videoTrackNumber', { number: index + 1 });
+                  const name = trackName(track, index);
                   return {
                     value: track.id,
                     label: track.supported ? name : t('viewer.videoTrackUnavailable', { name }),
@@ -567,6 +593,48 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
                   cancelBoosts();
                   playback.select(id);
                 }}
+              />
+            )}
+            {subtitles.tracks.length > 1 && (
+              <ViewerSelect
+                label={t('viewer.videoSubtitleTrack')}
+                value={subtitles.selectedId ?? ''}
+                className="motion-subtitle-track"
+                triggerContent={<VideoIcon kind="subtitles" />}
+                options={[
+                  { value: '', label: t('viewer.videoSubtitleOff') },
+                  ...subtitles.tracks.map((track, index) => ({
+                    value: track.id,
+                    label: track.supported
+                      ? trackName(track, index)
+                      : t('viewer.videoSubtitleUnsupported', { name: trackName(track, index) }),
+                    disabled: !track.supported,
+                  })),
+                ]}
+                onChange={(id) => subtitles.select(id || null)}
+              />
+            )}
+            {subtitles.tracks.length === 1 && (
+              <ViewerSelect
+                label={t('viewer.videoSettings')}
+                value={subtitles.selectedId ? 'on' : 'off'}
+                className="motion-subtitle-settings"
+                triggerContent={<VideoIcon kind="settings" />}
+                options={[
+                  { value: 'off', label: t('viewer.videoSubtitlesOff') },
+                  {
+                    value: 'on',
+                    label: subtitles.tracks[0]?.supported
+                      ? t('viewer.videoSubtitlesOn')
+                      : t('viewer.videoSubtitleUnsupported', {
+                          name: t('viewer.videoSubtitlesOn'),
+                        }),
+                    disabled: !subtitles.tracks[0]?.supported,
+                  },
+                ]}
+                onChange={(value) =>
+                  subtitles.select(value === 'on' ? (subtitles.tracks[0]?.id ?? null) : null)
+                }
               />
             )}
             <VideoButton

@@ -35,6 +35,16 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
     'La riproduzione non è partita. Premi Riproduci per riprovare.',
   ],
   'viewer.videoAudioTrack': ['Audio track', 'Traccia audio'],
+  'viewer.videoSubtitleTrack': ['Subtitle track', 'Traccia sottotitoli'],
+  'viewer.videoSubtitleOff': ['Off', 'Disattivati'],
+  'viewer.videoSettings': ['Playback settings', 'Impostazioni riproduzione'],
+  'viewer.videoSubtitlesOn': ['Subtitles on', 'Sottotitoli attivati'],
+  'viewer.videoSubtitlesOff': ['Subtitles off', 'Sottotitoli disattivati'],
+  'viewer.videoSubtitleUnsupported': [
+    '{name} · Unsupported format',
+    '{name} · Formato non supportato',
+  ],
+  'viewer.videoSubtitleFailed': ['Subtitles unavailable.', 'Sottotitoli non disponibili.'],
   'viewer.videoTrackNumber': ['Track {number}', 'Traccia {number}'],
   'viewer.videoTrackUnavailable': [
     '{name} · Not supported by this browser',

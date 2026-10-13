@@ -967,8 +967,9 @@ a 250 ms hold applies the same temporary 2× action without pausing on release.
 Holding while paused never starts playback. With focus inside Motion, F toggles
 fullscreen and M mute (single-character shortcuts do not act elsewhere). Editable fields and transient menus retain their keys, and Tab-based control navigation
 keeps native activation. Loss of focus/visibility clears holds. Wave's existing
-Space behavior is unchanged. Motion does not currently load external subtitle
-files or expose an embedded subtitle-track selector.
+Space behavior is unchanged. Motion has an embedded subtitle-track selector for
+supported Matroska/WebM text tracks; external subtitle-file selection is not yet
+implemented. See [subtitle formats and boundaries](M5-VIEWER-FORMATS.md#motion-embedded-subtitles).
 
 After a right-side mouse/pen click, a 36 px invisible radius around the click
 absorbs small pointer movements. Leaving that circle inside the player reveals
@@ -1003,7 +1004,8 @@ required by the remux path. Read caches, prefetch, fragments and retained playba
 windows are bounded and released on close/superseded selection. Safari's
 ManagedMediaSource fallback is capability-detected, but Chromium/Firefox fixture
 evidence must not be presented as Safari/iOS real-device certification. Embedded
-subtitle extraction/rendering remains outside this audio-track change.
+subtitle extraction/rendering is supplied by the separate subtitle module,
+following the same native video clock.
 
 The remux reader uses 64 KiB metadata blocks and 512 KiB playback blocks, a
 2 MiB block cache plus a separately capped 2 MiB demux cache, and 12-second ahead /

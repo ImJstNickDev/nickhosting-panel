@@ -1,9 +1,23 @@
+import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { developmentNetwork } from './vite-network.js';
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: [
+      {
+        find: /^rvfc-polyfill$/,
+        replacement: fileURLToPath(
+          new URL(
+            './src/features/viewer-engine/builtin-viewers/native-video-frames.ts',
+            import.meta.url,
+          ),
+        ),
+      },
+    ],
+  },
   cacheDir: process.env.NH_WEB_CACHE_DIR,
   // Worker-only imports escape the initial app scan. Include the decoder now
   // instead of rebuilding the dependency bundle when Wave first opens.

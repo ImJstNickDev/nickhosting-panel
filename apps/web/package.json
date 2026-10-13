@@ -32,6 +32,8 @@
     "@tanstack/react-query": "5.104.1",
     "better-auth": "1.7.7",
     "icojs": "1.0.1",
+    "jassub": "2.5.20",
+    "media-captions": "0.0.18",
     "mediabunny": "1.61.4",
     "react": "19.3.0",
     "react-dom": "19.3.0",

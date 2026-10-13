@@ -8270,3 +8270,94 @@ Only existing isolated browser fixtures were used; harnesses closed. No provider
 operations, infrastructure changes, restarts or live assets. Existing Vite HMR
 applies the change. Rollback is a source revert. Historical full suites were not
 rerun for this pointer-only change; SFTPGo #18 remains unchanged.
+
+
+### Motion embedded subtitle selection and rendering (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. Embedded MKV/WebM SRT, WebVTT,
+ASS and SSA now have native-clock-synchronized rendering and compact track
+selection. A single audio track has no audio selector; a single subtitle track
+has no track selector and uses On/Off inside Playback settings. Text captions
+use safe DOM nodes; ASS/SSA uses local JASSUB WASM and embedded/default fonts.
+No external font lookup, independent playback clock, transcoding, Panel/Wings
+change or Blueprint update is involved.
+
+Indexed extraction uses subtitle duration/relative-position entries. A synthetic
+2 GiB, densely packetized source verifies that initial playback and a one-hour
+seek together fetch less than 256 KiB while retaining an earlier hour-long cue.
+Incomplete index fields use a bounded fallback. Well-formed-but-incomplete
+indexes, large unindexed files, bitmap subtitle codecs and native PiP captions
+are not certified. Full boundaries and license obligations are in
+[M5-VIEWER-FORMATS](M5-VIEWER-FORMATS.md#motion-embedded-subtitles) and
+[M5-DEPENDENCIES](M5-DEPENDENCIES.md#motion-subtitle-rendering).
+
+Commands/results:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/subtitle-source.test.ts apps/web/src/features/viewer-engine/builtin-viewers/subtitle-renderer.test.ts apps/web/src/features/viewer-engine/builtin-viewers/video-mse.test.ts --silent=false`: **27/27 passed**, 5.07 s. Covers selective reads, long overlaps, malformed/unsupported metadata, cancellation, source identity boundary, bounded fonts, hung ASS operations/cleanup and existing media-source contracts.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-subtitles.browser.test.ts apps/web/tests/motion.browser.test.ts apps/web/tests/motion-audio.browser.test.ts --silent=false`: **18/19 passed**, 81.46 s. All four subtitle and four audio cases passed. The existing Motion source-error case found duplicate Retry buttons when both video and optional subtitle reads failed. The fix shows subtitle recovery only after native playback is available; the general Retry retries both failed reads.
+- Targeted Chromium rerun with `apps/web/tests/motion.browser.test.ts -t 'shows loading and errors'`: **1/1 passed**, 10 intentionally skipped, 13.51 s. This is targeted evidence after the two-line correction, not a claimed second complete suite.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-subtitles.browser.test.ts apps/web/tests/motion.browser.test.ts -t 'subtitle|shows loading and errors' --silent=false`: final **5/5 passed**, 10 intentionally skipped, 56.08 s.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass**; focused Biome on all changed source, tests and Vite configuration: **pass**.
+- `scripts/dev.sh pnpm i18n:check`: **pass**, 1,423 EN/IT/pseudolocale keys.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **pass**; existing main-app/editor large-chunk warnings remain. JASSUB workers, both WASM variants and local font are emitted separately. The unused GPL-3.0 rvfc-polyfill is excluded through an exact Vite alias; neither its package/license entry nor its prototype-patch implementation appears in the compiled browser assets. Required mixed-license notices ship separately.
+
+Browser fixtures are original 12-second VP9/Opus Matroska files containing real
+SRT/ASS/SSA/WebVTT packets and unsupported PGS metadata. Browser tests execute
+actual JASSUB and native playback, with paused seeks, actual 2x-playback cue
+boundaries, switching/Off without audio/video source replacement, safe literal
+markup, unsupported options and viewer cleanup. Desktop English and mobile
+Italian screenshots were inspected; automated Axe found zero violations. At
+320 px, two-line captions clear controls (1 px fractional-layout tolerance).
+An initial strict zero-tolerance assertion failed on fractional rounding; it was
+corrected without relaxing the substantive no-clipping check.
+
+Reviewed screenshots:
+
+- [Chromium desktop](screenshots/m5/file-viewer-motion-subtitles-desktop-en-chromium.png)
+- [Chromium Italian mobile](screenshots/m5/file-viewer-motion-subtitles-mobile-it-chromium.png)
+- [Firefox desktop](screenshots/m5/file-viewer-motion-subtitles-desktop-en-firefox.png)
+- [Firefox Italian mobile](screenshots/m5/file-viewer-motion-subtitles-mobile-it-firefox.png)
+
+Independent source/UX review resolved stalled worker RPC cleanup, sparse-index
+handling, excessive A/V metadata prefetch, caption clearance and the unused
+transitive polyfill licensing concern. It found no remaining must-fix issue;
+current documentation was corrected while historical validation entries remain
+unchanged. ASS coordinates are deliberately preserved; authored graphics may
+intersect temporary controls, but remain readable above their gradient.
+
+Tests used existing isolated M2 services and authored media fixtures, with no
+live game-server writes or new test infrastructure. No historical M1–M5 full
+matrix was repeated. SFTPGo #18 remains unchanged. Production release still
+requires the existing gates and distribution of corresponding LGPL source/build
+materials; this change does not authorize a production deployment.
+
+
+Owner-approved activation updated only `nickhosting-dev-vite-1`:
+
+- Saved the previous image as `nickhosting-dev-app:before-motion-subtitles`.
+- `docker compose --env-file .env.dev.local build vite`: **pass**; frozen lockfile,
+  existing pinned development base, dependency build scripts remain blocked.
+- `docker compose --env-file .env.dev.local up -d --no-deps --wait vite`: **healthy**.
+  Compose reported the separately configured viewer SFTPGo service as an orphan;
+  no orphan removal was requested or performed.
+- Before/after private topology snapshot confirms all ten other dev container
+  identities/images/restart counts unchanged, all network attachments unchanged,
+  and Vite still exclusively on `nickhosting-dev-edge` with no published ports.
+- Internal `/`, `/@vite/client`, subtitle renderer and source modules: **HTTP 200**.
+  Public HTTPS app and Vite client: **HTTP 200**. Logs show Vite ready and normal
+  dependency optimization, without unresolved imports.
+
+No API/worker/Gateway/Panel/Wings restart or game-server operation occurred.
+No persistent data was reset. Scoped approved rollback, if needed: restore the
+saved image to `nickhosting-dev-app:local` and recreate only `vite` with the same
+`up -d --no-deps --wait vite` command, alongside reverting this feature's source.
+Do not recreate other services merely because they share the development image
+name. PR #21 remains open and unmerged.
+
+
+The final public WSS handshake on `/__nickhosting_hmr` returned Vite's
+`connected` message. An initial manual probe used `/` instead of the existing
+configured HMR path and timed out; correcting the probe succeeded without any
+proxy or application configuration change. Staged governance/link/TOML/ignore
+checks pass after normalizing upstream license-notice line endings; no private
+state, credentials or local topology snapshot is staged.

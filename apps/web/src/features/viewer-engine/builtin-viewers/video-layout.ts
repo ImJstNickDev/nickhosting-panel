@@ -5,6 +5,7 @@ export function useVideoLayout(
   stage: RefObject<HTMLDivElement | null>,
   media: RefObject<HTMLVideoElement | null>,
   controls: RefObject<HTMLDivElement | null>,
+  captions = false,
 ) {
   useLayoutEffect(() => {
     const root = stage.current;
@@ -15,6 +16,7 @@ export function useVideoLayout(
     let frame = 0;
     const measure = () => {
       frame = 0;
+      root.style.setProperty('--motion-controls-height', `${toolbar.offsetHeight}px`);
       if (document.fullscreenElement === root) return;
       // Source switches briefly clear metadata: retain the known geometry until it returns.
       if (video.videoWidth > 0 && video.videoHeight > 0)
@@ -24,7 +26,7 @@ export function useVideoLayout(
       const viewport = window.visualViewport?.height ?? document.documentElement.clientHeight;
       const available = viewport - documentTop - 16;
       // Very short windows may scroll rather than crush the timeline and touch targets.
-      const minimum = Math.max(160, toolbar.offsetHeight + 24);
+      const minimum = Math.max(160, toolbar.offsetHeight + (captions ? 80 : 24));
       const height = Math.round(Math.max(minimum, Math.min(bounds.width / ratio, available)));
       const value = `${height}px`;
       if (root.style.getPropertyValue('--motion-height') !== value)
@@ -53,5 +55,5 @@ export function useVideoLayout(
       window.visualViewport?.removeEventListener('resize', schedule);
       document.removeEventListener('fullscreenchange', schedule);
     };
-  }, [stage, media, controls]);
+  }, [stage, media, controls, captions]);
 }

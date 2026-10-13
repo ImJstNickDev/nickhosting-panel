@@ -39,3 +39,37 @@ The unmodified library is MPL-2.0. Distribute
 with the app. No upstream source was patched and this does not license the
 NickHosting repository. Worker notices are separate because the main Vite bundle
 license report does not include modules compiled inside Workers.
+
+## Motion subtitle rendering
+
+Motion pins `jassub` 2.5.20 and `media-captions` 0.0.18. Both load only when a
+subtitle track is selected. Text captions use media-captions' MIT tokenizer and
+timed-node helpers, **not its HTML serializer**: decoded cue text and attributes
+are inserted with DOM text nodes and a small tag allowlist. No subtitle HTML is
+assigned to `innerHTML`.
+
+JASSUB's JS wrapper is MIT; its bundled libass/WASM dependency licenses include
+LGPL-2.1-or-later, FTL, MIT, ISC, NTP, Zlib and BSL-1.0. Liberation Sans is OFL-1.1.
+The IPC helper `abslink` is Apache-2.0; `throughput` and `lfa-ponyfill` declare MIT.
+Distribute [THIRD-PARTY-SUBTITLE-NOTICES.txt](../apps/web/public/THIRD-PARTY-SUBTITLE-NOTICES.txt)
+with the complete build, including the separately emitted WASM, worker and font
+assets. The exact JASSUB source/build revision is
+[`dea3d2d398569a591cf0c767d945d84e9f120484`](https://github.com/ThaUnknown/jassub/tree/dea3d2d398569a591cf0c767d945d84e9f120484);
+the notice records pinned native-library source revisions. Before binary/public
+distribution, release packaging must provide corresponding LGPL source/build
+materials or another compliant source-availability mechanism. An upstream link
+alone is not presented as a blanket compliance guarantee or a new repository
+license decision.
+
+JASSUB's unused `rvfc-polyfill` dependency declares GPL-3.0. An exact Vite alias
+replaces that side-effect import with an original empty adapter in development
+and builds; none of the polyfill implementation is copied or shipped. Motion
+uses canvas/manual rendering and its existing native video frame callback with
+RAF fallback, so it needs no global video prototype patch. Preserve this alias
+and verify the build license inventory on dependency upgrades.
+
+Remote font lookup is disabled. Only bounded embedded font data and the bundled
+default font are used. pnpm's blocked `lfa-ponyfill` postinstall remains blocked;
+no Google font-list download or browser font discovery is enabled. No additional
+COOP/COEP deployment headers, backend transcoder, Blueprint change or native
+dependency is required.

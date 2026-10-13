@@ -183,3 +183,51 @@ connection/channel) measured median OPEN/FSTAT+READ3.32ms after this change,
 versus227.67ms before; cold establishment+read131.40ms. Full measurement scope and
 history are in [M5 validation](M5-VALIDATION.md). No kernel or provider setting was
 changed and these are transport-only timings.
+
+## Motion embedded subtitles
+
+Motion reads embedded Matroska/WebM text tracks: `S_TEXT/UTF8` (SRT-style),
+`S_TEXT/ASS`, `S_TEXT/SSA`, and `S_TEXT/WEBVTT`. ASS/SSA uses JASSUB/libass with
+bounded embedded fonts; plain text captions use safe DOM rendering, basic inline
+styling and timed spans. WebVTT regions, authored positioning and CSS headers are
+not implemented; these text captions use the player's readable bottom layout.
+PGS/VobSub and other bitmap codecs, encrypted/compressed tracks, lacing, missing
+cue durations and dynamic codec-state changes are not claimed as supported.
+MP4 embedded subtitle extraction and external subtitle-file selection remain
+outside this pass. Audio/video codec compatibility is unchanged.
+
+Subtitle tracks use the existing authenticated same-origin viewer Range source.
+For indexed files, Motion uses subtitle CueDuration and CueRelativePosition to
+read only relevant packets, including long captions spanning a seek. This follows
+[Matroska subtitle indexing](https://www.matroska.org/technical/subtitles.html)
+and the [FFmpeg muxer's subtitle cue generation](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/matroskaenc.c).
+An otherwise well-formed but incomplete subtitle index cannot establish complete
+caption coverage and is not supported. Missing/incomplete index fields fall back
+to a bounded metadata scan; large unindexed files may report subtitles unavailable
+rather than download an entire movie. This limitation affects captions only.
+No automatic repair, provider write or transcoding is performed.
+
+The browser keeps a 2 MiB range cache and one 20-second caption window. Each
+operation has an 8 MiB read budget and a 15-second deadline; limits also bound
+index entries, cue text and fonts. Selecting Off, switching tracks, seeking or
+closing the viewer aborts stale reads and destroys unused rendering workers.
+ASS initialization is bounded; runtime operations have a 5-second deadline and
+worker destruction has a 1-second termination fallback.
+
+The native video frame timestamp/currentTime owns synchronization, including
+paused seeks, rate changes and audio selection. No independent audio/subtitle
+clock is created. Rendering follows actual browser frame delivery; this is not
+a guarantee of sub-millisecond display latency under load. Captions work in the
+player and fullscreen, but DOM/canvas overlays do not appear in native video
+Picture-in-Picture. Authored ASS coordinates are preserved; temporary controls
+can overlap authored graphics, which remain above the controls' dark gradient.
+
+Multiple subtitle tracks have a compact Off/track selector. A single track hides
+the track selector and exposes On/Off inside Playback settings. Audio selection
+remains hidden for a single audio track. Forced/default supported subtitles are
+selected initially; all other tracks remain Off until selected. Unsupported
+tracks remain disabled. Selection failure is nonfatal and offers Retry while
+video/audio continue. English and Italian controls use the existing catalog.
+
+See [dependency notices and distribution obligations](M5-DEPENDENCIES.md#motion-subtitle-rendering)
+and the append-only [validation evidence](M5-VALIDATION.md).
