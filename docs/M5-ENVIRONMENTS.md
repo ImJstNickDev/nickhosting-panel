@@ -1004,3 +1004,11 @@ packages require rebuilding/recreating API/Vite, and migration024 must be applie
 explicitly to development before activating personal viewer preferences. No dev
 database reset is needed. All activation steps, source permissions, risks and
 rollback are documented in the linked proposal and require its exact approval.
+
+The Owner approved and activated this proposal on2026-10-13. The dedicated
+`nickhosting-dev-sftpgo-viewer-1` service is healthy, private and read-only; API/Vite
+were rebuilt/recreated and additive migration024 applied without resetting dev
+data. Use both environment files and the complete overlay chain in the
+[activation record](M5-VIEWER-DEPLOYMENT.md#approved-activation-record--2026-10-13)
+for subsequent lifecycle commands. Existing user-facing SFTP and issue18 are
+unchanged; no production deployment is implied.

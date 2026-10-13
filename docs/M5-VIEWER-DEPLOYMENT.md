@@ -1,8 +1,9 @@
 # Private viewer SFTPGo deployment proposal
 
-M5 preparation, **2026-10-13**. This document is an activation proposal, not an
-activation record. The existing isolated `nickhosting-m2-tests` SFTPGo service
-and its fixture directories remain separate and unchanged.
+M5 preparation and approved development activation, **2026-10-13**. The proposal
+below was approved at `c3002697ee0de42d5cac69fa5128738ed646da66`; the activation
+record is appended below. The existing isolated `nickhosting-m2-tests` SFTPGo
+service and its fixture directories remain separate and unchanged.
 
 ## Resources and data boundaries
 
@@ -56,8 +57,8 @@ owner differ on this installation. **Do not derive the reader UID/GID from the
 Wings YAML alone.** Verify the volume root and a managed server's files, then set
 explicit numeric values; exact installation paths and IDs remain private.
 
-Keep new values in ignored `.env.dev.viewer.local` with mode `0600`. This is a
-proposed new file; preparation has not created it. Supply:
+Keep values in ignored `.env.dev.viewer.local` with mode `0600`. Activation created
+this file without overwriting existing state. For a new approved deployment, supply:
 
 ```dotenv
 NH_VIEWER_SFTPGO_UID=VERIFIED_NONROOT_DATA_READER_UID
@@ -192,3 +193,39 @@ The known retained-SSH-transport defect in [issue #18](https://github.com/ImJstN
 remains a production-release gate. Browser access is mediated by NickHosting and
 its own pooled transport is closed on revocation. This does not fix or waive
 upstream revocation for external SFTP clients.
+
+## Approved activation record — 2026-10-13
+
+The Owner approved the exact proposal above. Only the new private viewer service,
+its state, additive migration024 and development API/Vite recreation were applied.
+Previous API/Vite images remain under local `before-viewers-c300269` tags. Accounts,
+existing settings, database, worker, Gateway, ingress and game data were preserved.
+
+Initial startup failed because the image's default host-key list included RSA
+while allowed algorithms contained only Ed25519. Explicitly setting
+`SFTPGO_SFTPD__HOST_KEYS=/var/lib/sftpgo/id_ed25519` fixed startup without changing
+mounts, permissions or other keys. The new service, API and Vite are healthy.
+
+Verified actual data-reader UID/GID is `100:101`; both the existing Wings root
+(`0700`) and sampled managed-server file (`0644`) retain their original ownership
+and permissions. The new state is `0700`. The Wings bind is read-only, the only
+network is existing internal `nickhosting-dev-data`, and no host ports exist.
+There was no Panel/Wings configuration, game-file or game-process mutation.
+
+The private management API key was stored through the encrypted secret service;
+`fileViewers` uses normal audited Owner settings. The first authenticated viewer
+request created one owned, expiring `nhv_` account confined to the selected managed
+server, with only `list`/`download` and filesystem initialization disabled. External
+user-facing SFTP remains independently configured; this service does not enable it.
+
+Actual HTTPS checks passed for authorized ranges/seek, JSON, invalid-range416,
+stream cancellation and subsequent reads; anonymous access returns401. Existing
+Owner/account rows have an identical before/after hash. Login and frontend module
+requests return200 and a real browser reports Vite HMR connected. Detailed results
+are in [M5 validation](M5-VALIDATION.md#2026-10-13--approved-private-viewer-activation).
+
+For daily lifecycle operations use the full `viewer_compose` array above, including
+**both environment files**. Start/stop only this service with
+`"${viewer_compose[@]}" start sftpgo-viewer` or
+`"${viewer_compose[@]}" stop sftpgo-viewer`. Do not rerun the preparation helper on
+existing state. Production remains undeployed; issue18 remains open.

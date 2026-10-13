@@ -7049,3 +7049,75 @@ heuristic; private ledgers, environments, SFTP state and benchmarks stay untrack
 Final `pnpm lint` passed with39 pre-existing/advisory warnings and2 informational
 diagnostics; format check passed. Concurrent account-menu/sidebar edits in the
 shared workspace are not part of this viewer delivery and were preserved unstaged.
+
+## 2026-10-13 — Approved private viewer activation
+
+The Owner approved the proposal at `c3002697ee0de42d5cac69fa5128738ed646da66`.
+Only the new development viewer service/state, explicit additive migration024,
+protected settings/secret and API/Vite image replacement were applied. No Panel,
+Wings, game process/file, NPM, DNS, production network or existing test-stack
+configuration was changed. No Blueprint update was needed.
+
+Commands and actual results:
+
+- Complete six-overlay Compose chain with `.env.dev.local` and private
+  `.env.dev.viewer.local`: `config --quiet` passed; `pull sftpgo-viewer`,
+  `bash deploy/prepare-viewer-state.sh --owner-approved 100 101` and scoped
+  `up -d --no-deps --wait sftpgo-viewer` completed. New state `0700`, secret file
+  `0600`, verified data-reader UID/GID100:101, read-only Wings bind and no host ports.
+- `build api` succeeded; `run --rm --no-deps migrate` applied only
+  `024_file_viewers.sql`; `up -d --no-deps --wait api vite` succeeded. All three
+  affected services healthy with RestartCount0. Previous application images retained.
+- Actual authenticated HTTPS smoke (private script
+  `.codex/local/viewer-live-smoke.mjs`, run through `docker exec -i
+  nickhosting-dev-api-1 node --import tsx --input-type=module`): Owner session and
+  capabilities200, exact byte ranges/seek206, out-of-bounds416, existing JSON200,
+  stream cancellation followed by successful206, anonymous401. No credentials or
+  file contents are included in public evidence.
+- Headers-only elapsed measurements on that smoke: cold range559.61ms (includes
+  first private account/SSH setup), warm range23.88ms, seek36.01ms, JSON38.05ms,
+  read after cancellation71.54ms. These are individual observations through HTTPS,
+  not a load benchmark or claimed universal viewer latency.
+- The one private account is confined to the selected managed server, permits only
+  `list`/`download`, and disables filesystem initialization. It is persistent
+  application state, not a temporary test account to delete. Existing server
+  root/file owners and modes match preflight; no game files were created or changed.
+- Existing Owner/user row count remains1 and the complete row hash is identical
+  before/after migration and configuration. Existing unrelated settings preserved.
+- `scripts/dev.sh pnpm exec tsx .codex/local/files-live-smoke.ts`: HTTPS login200,
+  frontend modules200, anonymous protected API401, Vite HMR connected, no page errors.
+- `scripts/dev.sh pnpm exec tsx .codex/local/viewer-live-browser.ts`: real Chromium,
+  existing Owner session, actual managed file listing, existing JSON opened in the
+  JSON tree through real SFTP-backed HTTP, zero page errors. No response mocks or
+  game-file writes. This is additional live evidence; the broader visual/format
+  matrix above remains isolated fixture evidence.
+- `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts`:
+  **44 passed**,3.13s. No historical full-suite rerun for a deployment-only correction.
+
+Failures/corrections are retained: initial SFTPGo startup loaded default RSA keys
+while allowing only Ed25519 and failed; explicitly limiting `HOST_KEYS` to Ed25519
+resolved it. A private activation helper reported an error from closing its DB pool
+twice after successfully saving configuration; subsequent protected reads verified
+both settings and encrypted secret, without replaying creation. Initial smoke
+scripts used an incorrect DB column, then an absolute instead of required relative
+file path (correctly400); the browser helper initially used the wrong CSS selector.
+These test harness errors were corrected before the successful runs above.
+
+Independent activation/configuration review found no must-fix. All107 pre-existing
+container IDs/images were preserved except the authorized API/Vite replacement;
+only the viewer service was added. Three unrelated services independently changed
+StartedAt in existing crash loops (unchanged IDs/images/networks, more than24,000
+restarts); they were not touched. Existing isolated M2 resources were unchanged.
+Temporary preparation and migration containers removed themselves; private viewer
+state, account, key and bounded cache remain intentionally persistent.
+
+Issue26 continues to track single-stream compressed formats and scoped expired
+account retirement cleanup. Browser-native codec limits, bounded archive/snapshot
+sizes and SQLite consistency caveats remain documented. Issue18 is unchanged and
+production remains undeployed. Concurrent Owner UI work was preserved unstaged.
+
+Final Compose validation and `git diff --check` passed. The repository governance
+check passed (736 indexed text files,215 review PNGs,604 links,4 TOML files and44
+ignore cases before staging this record). Biome does not process Markdown/YAML
+in this repository: its targeted invocation reported no files processed, not a
+formatting pass. No TypeScript application source changed during activation.
