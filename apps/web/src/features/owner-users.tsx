@@ -28,6 +28,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { useStorageUsage } from './use-storage-usage.js';
 import './owner-users.css';
 
 export function OwnerUsersPage() {
@@ -211,9 +212,15 @@ export function OwnerUserPage() {
   const [assisting, setAssisting] = useState(false);
   const user = useQuery({
     queryKey: ['owner-user', userId],
+    refetchInterval: 15000,
     queryFn: () =>
       api<Result<typeof getPlatformUser>>(`/v1/platform/owner/users/${encodeURIComponent(userId)}`),
   });
+  const storageUsage = useStorageUsage(
+    user.data?.quota.storageUsage,
+    user.data?.quota.observedAt,
+    user.dataUpdatedAt,
+  );
   if (user.isPending) return <Loading />;
   if (user.error) return <ErrorNotice error={user.error} />;
   const value = user.data,
@@ -276,7 +283,7 @@ export function OwnerUserPage() {
                   ? `${t('web.disk')} · ${t('web.usage')}`
                   : t('web.disk'),
                 quota.limits.storageMiB === null
-                  ? `${quota.storageUsage.bytes === null ? t('web.unavailable') : format.bytes(quota.storageUsage.bytes)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
+                  ? `${storageUsage === null ? t('web.unavailable') : format.bytes(storageUsage)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
                   : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
               ],
               [

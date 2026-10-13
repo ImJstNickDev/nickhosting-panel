@@ -4,7 +4,7 @@ import { recordAudit } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftManifest } from '@nickhosting/minecraft';
 import { sql } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setUserLimits } from './admission.js';
 import { setGatewayPolicy } from './gateway-orchestration.js';
 import { minecraftMappingDigest } from './minecraft-registry.js';
@@ -259,6 +259,90 @@ describe('M5 platform browser queries and metadata', () => {
       NH_STORAGE_POLICY: 'PER_USER_BUDGET',
     });
     expect(personal.creationStorage).toEqual({ mode: 'limited', defaultDiskMiB: 4096 });
+  });
+  it('keeps Home disk usage across worker polling gaps and expires the oldest contributor at 30 seconds', async () => {
+    const ids = await Promise.all([f.server(), f.server()]);
+    const at = Date.now();
+    for (const [index, id] of ids.entries()) {
+      await f.db.deleteFrom('server_metrics').where('server_id', '=', id).execute();
+      await f.db
+        .insertInto('server_metrics')
+        .values({
+          server_id: id,
+          observed_at: new Date(at + index * 1000),
+          disk_bytes: String((index + 1) * 1048576),
+          memory_bytes: '0',
+          cpu_percent: 0,
+          network_rx_bytes: '0',
+          network_tx_bytes: '0',
+        })
+        .execute();
+    }
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at + 5000);
+    try {
+      const quota = await getPlatformQuota(f.db, f.context, undefined, {
+        NH_OBSERVATION_MAX_AGE_SECONDS: '4',
+      });
+      const expected = { bytes: 3 * 1048576, expiresAt: new Date(at + 30000).toISOString() };
+      expect(quota.storageUsage).toEqual(expected);
+      expect(quota.measured.some((sample) => sample.stale)).toBe(true);
+      clock.mockReturnValue(at + 29999);
+      expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual(expected);
+      clock.mockReturnValue(at + 30000);
+      expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual({
+        bytes: null,
+        expiresAt: null,
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+  it('does not invent Home disk totals for missing, negative, future or unsafe measurements', async () => {
+    expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual({
+      bytes: 0,
+      expiresAt: null,
+    });
+    const id = await f.server();
+    await f.db.deleteFrom('server_metrics').where('server_id', '=', id).execute();
+    const unknown = { bytes: null, expiresAt: null };
+    expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual(unknown);
+    const metric = {
+      server_id: id,
+      observed_at: new Date(),
+      disk_bytes: '-1',
+      memory_bytes: '0',
+      cpu_percent: 0,
+      network_rx_bytes: '0',
+      network_tx_bytes: '0',
+    };
+    // The authoritative store rejects negative measurements before they can be displayed.
+    await expect(f.db.insertInto('server_metrics').values(metric).execute()).rejects.toMatchObject({
+      code: '23514',
+    });
+    expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual(unknown);
+    await f.db
+      .insertInto('server_metrics')
+      .values({ ...metric, observed_at: new Date(Date.now() + 60000), disk_bytes: '1' })
+      .execute();
+    expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual(unknown);
+    await f.db
+      .updateTable('server_metrics')
+      .set({ observed_at: new Date(), disk_bytes: '9007199254740992' })
+      .where('server_id', '=', id)
+      .execute();
+    expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual(unknown);
+    await f.db
+      .updateTable('server_metrics')
+      .set({ disk_bytes: String(Number.MAX_SAFE_INTEGER) })
+      .where('server_id', '=', id)
+      .execute();
+    const second = await f.server();
+    await f.db.deleteFrom('server_metrics').where('server_id', '=', second).execute();
+    await f.db
+      .insertInto('server_metrics')
+      .values({ ...metric, server_id: second, observed_at: new Date(), disk_bytes: '1' })
+      .execute();
+    expect((await getPlatformQuota(f.db, f.context)).storageUsage).toEqual(unknown);
   });
   it('paginates scoped servers without duplicates or timestamp precision omissions, validates filters, treats wildcard search literally', async () => {
     const ids = await Promise.all([

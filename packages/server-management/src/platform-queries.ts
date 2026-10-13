@@ -640,6 +640,41 @@ export async function getPlatformQuota(
     ),
     serverCount: servers.length,
   };
+  // Home telemetry has the same 30-second display lifetime as server cards.
+  // Admission and measured.stale retain their separate, stricter safety lifetime.
+  const displayNow = Date.now();
+  const displayLifetimeMs = 30_000;
+  const samples = new Map(metrics.map((metric) => [metric.server_id, metric]));
+  let usageBytes = 0;
+  let oldestObservation: number | null = null;
+  let completeUsage = true;
+  for (const server of servers) {
+    const metric = samples.get(server.id);
+    const bytes = Number(metric?.disk_bytes);
+    const at = metric?.observed_at.getTime();
+    if (
+      !metric ||
+      !Number.isSafeInteger(bytes) ||
+      bytes < 0 ||
+      at === undefined ||
+      !Number.isFinite(at) ||
+      at > displayNow ||
+      displayNow - at >= displayLifetimeMs ||
+      !Number.isSafeInteger(usageBytes + bytes)
+    ) {
+      completeUsage = false;
+      break;
+    }
+    usageBytes += bytes;
+    oldestObservation = oldestObservation === null ? at : Math.min(oldestObservation, at);
+  }
+  const storageUsage = {
+    bytes: completeUsage ? usageBytes : null,
+    expiresAt:
+      completeUsage && oldestObservation !== null
+        ? new Date(oldestObservation + displayLifetimeMs).toISOString()
+        : null,
+  };
   return {
     userId,
     storageBudgetMiB,
@@ -666,20 +701,7 @@ export async function getPlatformQuota(
       storageOverride?.storage_mib === null || !storageOverride
         ? null
         : Number(storageOverride.storage_mib),
-    storageUsage: {
-      bytes: servers.every((server) =>
-        metrics.some(
-          (metric) =>
-            metric.server_id === server.id &&
-            Number.isSafeInteger(Number(metric.disk_bytes)) &&
-            Number(metric.disk_bytes) >= 0 &&
-            metric.observed_at.getTime() <= Date.now() &&
-            Date.now() - metric.observed_at.getTime() <= values.observationMaxAgeSeconds * 1000,
-        ),
-      )
-        ? metrics.reduce((total, metric) => total + Number(metric.disk_bytes), 0)
-        : null,
-    },
+    storageUsage,
     override: override
       ? {
           memoryMiB: override.memory_mib,

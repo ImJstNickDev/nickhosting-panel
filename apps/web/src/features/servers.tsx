@@ -37,6 +37,7 @@ import {
   serverPath,
   useServer,
 } from './service-contracts.js';
+import { useStorageUsage } from './use-storage-usage.js';
 import './home.css';
 
 export { ServersPage } from './server-browser.js';
@@ -271,6 +272,11 @@ export function QuotaSummary() {
     queryFn: () => api<Quota>('/v1/platform/quotas'),
     refetchInterval: 15000,
   });
+  const storageUsage = useStorageUsage(
+    quota.data?.storageUsage,
+    quota.data?.observedAt,
+    quota.dataUpdatedAt,
+  );
   return (
     <HomeSection title={t('web.quota')}>
       {quota.isPending ? (
@@ -315,9 +321,9 @@ export function QuotaSummary() {
                         </dt>
                         <dd>
                           {key === 'storageMiB' && quota.data.limits.storageMiB === null
-                            ? quota.data.storageUsage.bytes === null
+                            ? storageUsage === null
                               ? t('web.unavailable')
-                              : format.bytes(quota.data.storageUsage.bytes)
+                              : format.bytes(storageUsage)
                             : amount(quota.data.committed[key])}
                         </dd>
                       </div>

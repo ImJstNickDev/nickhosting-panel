@@ -53,7 +53,7 @@ text; server/project/job identities are UUIDs. Invalid cursors are domain errors
 | `PATCH /v1/platform/projects/:id` | `{name}`; project owner or regular platform Owner, under the resource lock. |
 | `DELETE /v1/platform/projects/:id` | `{confirm:true}` with project-owner or regular-Owner authority; returns detached-server count. Deletes grouping/memberships, retains servers and their owner/resource charges. |
 | `POST /v1/platform/projects/:id/collaborator` | Exact verified-email lookup, available only to the project owner or regular platform Owner; `{user: safeProfile|null}`. No ordinary global account directory. |
-| `GET /v1/platform/quotas` | Effective subject's current quota, commitments, measurements and override state. |
+| `GET /v1/platform/quotas` | Effective subject's current quota, commitments, measurements and override state. Home `storageUsage={bytes,expiresAt}` uses a 30-second display lifetime, independently of strict admission freshness. Complete valid totals expire at the oldest contributing sample plus 30 seconds; missing, future, expired or unsafe totals return null fields. Empty inventories return zero with no expiry. Clients honor `expiresAt` without displaying a timestamp. Worker cadence and safety checks are unchanged. |
 | `GET /v1/platform/activity` | Paginated `state`, `action`, `serverId` filters; current server/project scope. |
 | `GET /v1/platform/jobs/:id` | Scoped operation detail, current effect/phase, up to 200 associated events, `retry`, `ownerRecovery`. |
 | `POST /v1/platform/jobs/:id/retry` | `{idempotencyKey}`; returns 202 for an authorized safe new operation intent. Never resets the historical job. |
@@ -507,7 +507,7 @@ New `GLOBAL_POOL` servers use `limits.disk=0`, including when an older client se
 a positive disk value. Existing finite servers are converted only by an explicit
 guided application. Finite/unlimited crossings cannot use ordinary server resize.
 `GET /v1/platform/quotas` returns `creationStorage.defaultDiskMiB=0` for shared
-storage, `storageBudgetOverrideMiB`, and `storageUsage.bytes` (null when any current
+storage, `storageBudgetOverrideMiB`, and `storageUsage.bytes` (30-second display freshness, null when any current
 measurement is missing, invalid or stale). Home cards use the same resources
 endpoint and `resources.disk_bytes` as Console, with a 30-second freshness window;
 they never present an allowance as occupied space or unavailable data as zero.
