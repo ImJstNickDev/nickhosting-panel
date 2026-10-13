@@ -115,6 +115,7 @@ export async function updateSettings(
         active.reduce((s, r) => s + r.memory_mib, 0) > memory ||
         active.reduce((s, r) => s + r.cpu_percent, 0) > cpu ||
         (resolved.values.storagePolicy === 'PER_USER_BUDGET' &&
+          storage > 0 &&
           servers
             .filter((r) => r.owner_id === owner)
             .reduce((s, r) => s + r.limits.disk * (1 + r.feature_limits.backups), 0) > storage)

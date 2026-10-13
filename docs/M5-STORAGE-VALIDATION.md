@@ -128,3 +128,45 @@ deleted. Rollback is a source-only revert, retaining existing storage safety che
 Review the server limit with native arrows and typed decimal values in Owner Settings.
 
 ![Firefox after decrementing the server limit to exactly 3 GiB](screenshots/m5/storage-whole-gib-decrement-firefox-en.png)
+
+## Compact asynchronous reconciliation and personal unlimited storage — 2026-10-13
+
+Replaced manual preview/refresh controls with cached rendering, immediate local
+totals and debounced, serialized background measurements. Newer input survives
+older responses and errors; only the latest verified revision may be confirmed.
+Small circular information buttons replace explanatory paragraphs; errors remain
+visible. Return from cleanup, another tab's active transition, and applying-to-blocked
+recovery retain the existing durable plan and require explicit application.
+
+A user quota of `0` means unlimited, including server creation and later compute
+configuration. Personal disk fields disappear while unlimited; finite drafts remain
+available if the quota is restored. The platform default stays positive. Actual
+occupancy/backup and physical-capacity checks remain mandatory. Compute-only quota
+edits preserve independent storage policy; active temporary legacy storage cannot
+silently become permanent. Provider/SFTP cap changes still require reconciliation.
+
+Validation: backend transitions **27/27**; admission/registry/quota queries **67/67**;
+compact UI **14/14 Chromium**, **12/12 Firefox core cases** before the final two
+recovery additions. Web/root typechecks, compiled catalogs and scoped formatting
+passed. Desktop/mobile screenshots and axe checks cover keyboard, hover/touch help,
+native number arrows, delayed/racing responses, default followers, zero exceptions,
+failed refresh and blocked recovery. Independent review closed the temporary-legacy
+expiry issue; the final admission/actual HTTP rerun passed **26/26**. Repository
+lint passed with 37 existing warnings and 2 informational diagnostics. Full
+historical suites were not repeated for this follow-up.
+
+Migration `028` was applied to the verified development database after comparing
+all prior migration checksums. It changes a constraint only; no existing budget or
+provider cap was changed and no plan was applied by tooling. No container restart,
+real game-server mutation or test-server creation/deletion was performed.
+
+Rollback: retain migration028 and zero-budget data. Reverting to code that treats
+zero as exhausted storage is unsafe while unlimited exceptions exist; first use
+the reviewed reconciliation flow to restore finite allocations. The UI-only layout
+can be reverted independently while retaining zero-aware backend behavior.
+
+![Compact desktop reconciliation](screenshots/m5/storage-compact-desktop-en.png)
+
+![Compact Italian mobile reconciliation](screenshots/m5/storage-compact-mobile-it.png)
+
+![Compact blocked recovery](screenshots/m5/storage-compact-blocked-en.png)

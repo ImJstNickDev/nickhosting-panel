@@ -508,7 +508,8 @@ export async function getPlatformQuota(
   const limits = {
     memoryMiB: effective?.memory_mib ?? values.defaultUserMemoryMiB,
     cpuPercent: effective?.cpu_percent ?? values.defaultUserCpuPercent,
-    storageMiB: values.storagePolicy === 'PER_USER_BUDGET' ? storageBudgetMiB : null,
+    storageMiB:
+      values.storagePolicy === 'PER_USER_BUDGET' && storageBudgetMiB > 0 ? storageBudgetMiB : null,
     serverCount: values.maxServersPerUser,
   };
   const committed = {
@@ -529,8 +530,8 @@ export async function getPlatformQuota(
     storageBudgetMiB,
     storagePolicy: values.storagePolicy,
     creationStorage: {
-      mode: values.storagePolicy === 'GLOBAL_POOL' ? 'shared' : 'limited',
-      defaultDiskMiB: values.storagePolicy === 'GLOBAL_POOL' ? 0 : values.defaultServerStorageMiB,
+      mode: limits.storageMiB === null ? 'shared' : 'limited',
+      defaultDiskMiB: limits.storageMiB === null ? 0 : values.defaultServerStorageMiB,
     },
     limits,
     committed,

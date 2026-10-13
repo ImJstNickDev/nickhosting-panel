@@ -276,7 +276,7 @@ export function OwnerUserPage() {
                   ? `${t('web.disk')} · ${t('web.usage')}`
                   : t('web.disk'),
                 quota.limits.storageMiB === null
-                  ? `${quota.storageUsage.bytes === null ? t('web.unavailable') : format.bytes(quota.storageUsage.bytes)} / ${t('owner.globalPool')}`
+                  ? `${quota.storageUsage.bytes === null ? t('web.unavailable') : format.bytes(quota.storageUsage.bytes)} / ${t(quota.storageBudgetMiB === 0 ? 'platform.unlimited' : 'owner.globalPool')}`
                   : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
               ],
               [
@@ -295,7 +295,9 @@ export function OwnerUserPage() {
                     userId,
                     memoryMiB: number(data, 'memory'),
                     cpuPercent: number(data, 'cpu'),
-                    storageMiB: number(data, 'storage'),
+                    ...(quota.storageBudgetMiB === 0
+                      ? {}
+                      : { storageMiB: number(data, 'storage') }),
                     reason: text(data, 'reason'),
                     ...(text(data, 'expires')
                       ? { expiresAt: new Date(text(data, 'expires')).toISOString() }
@@ -324,14 +326,21 @@ export function OwnerUserPage() {
                 defaultValue={quota.limits.cpuPercent}
                 required
               />
-              <Input
-                label={`${t('web.disk')} (MiB)`}
-                name="storage"
-                type="number"
-                min={1}
-                defaultValue={quota.storageBudgetMiB}
-                required
-              />
+              {quota.storageBudgetMiB === 0 ? (
+                <p>
+                  {t('web.disk')}: {t('platform.unlimited')}{' '}
+                  <Link to="/owner/settings">{t('web.settings')}</Link>
+                </p>
+              ) : (
+                <Input
+                  label={`${t('web.disk')} (MiB)`}
+                  name="storage"
+                  type="number"
+                  min={1}
+                  defaultValue={quota.storageBudgetMiB}
+                  required
+                />
+              )}
               <Input
                 label={t('web.expires')}
                 name="expires"

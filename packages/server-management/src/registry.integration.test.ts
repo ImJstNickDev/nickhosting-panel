@@ -135,6 +135,61 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
       ),
     ).rejects.toThrow('storage_exhausted');
   });
+  it('creates disk zero for an exempt user while personal storage budgets remain enabled', async () => {
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const input = f.input();
+    const { disk: _disk, ...limits } = input.limits;
+    const created = await createManagedServer(
+      f.db,
+      f.adapter,
+      f.context,
+      { ...input, limits },
+      { NH_STORAGE_POLICY: 'PER_USER_BUDGET' },
+    );
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', created.jobId)
+      .executeTakeFirstOrThrow();
+    expect(operation.plan.provision).toMatchObject({ limits: { disk: 0 } });
+  });
+  it('allows compute configuration for an exempt unlimited server but fences finite transitions', async () => {
+    const id = await f.server({ limits: { ...f.limits, disk: 0 } });
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const env = { NH_STORAGE_POLICY: 'PER_USER_BUDGET' };
+    await expect(
+      enqueueServerOperation(
+        f.db,
+        f.context,
+        id,
+        {
+          action: 'configure',
+          idempotencyKey: randomUUID(),
+          limits: { ...f.limits, disk: 64 },
+        },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    await expect(
+      enqueueServerOperation(
+        f.db,
+        f.context,
+        id,
+        {
+          action: 'configure',
+          idempotencyKey: randomUUID(),
+          limits: { ...f.limits, memory: 256, disk: 0 },
+        },
+        env,
+      ),
+    ).resolves.toMatchObject({ serverId: id });
+  });
   it('refuses lifecycle work while a persisted ambiguous upload still owns its server', async () => {
     const serverId = await f.server();
     await pendingUploadFixture(f.db, serverId);

@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { effectiveNodeOverhead, resolveHostOverride } from './configuration.js';
 import { sampleLocalResources } from './host-resources.js';
 import { storageCommitments } from './storage-accounting.js';
+import { getUserStorageBudget } from './storage-user-budget.js';
 
 export type DB = Kysely<Database> | Transaction<Database>;
 export type Environment = Readonly<Record<string, string | undefined>>;
@@ -416,6 +417,10 @@ export async function checkStorage(
   await lockResources(tx);
   await assertStoragePolicyIdle(tx);
   const { host, snapshot, config } = await checkedObservation(tx, hostId, env);
+  const budget =
+    config.storagePolicy === 'PER_USER_BUDGET'
+      ? await getUserStorageBudget(tx, ownerId, config.defaultUserStorageMiB)
+      : 0;
   const rows = await tx
     .selectFrom('managed_servers as s')
     .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
@@ -433,8 +438,7 @@ export async function checkStorage(
   const active = rows.filter(
     (r) =>
       r.id !== excludeServerId &&
-      (r.physical_host_id === hostId ||
-        (config.storagePolicy === 'PER_USER_BUDGET' && r.owner_id === ownerId)),
+      (r.physical_host_id === hostId || (budget > 0 && r.owner_id === ownerId)),
   );
   const commitments = await storageCommitments(tx, active, env);
   const allowance = (row: (typeof rows)[number]) => commitments.get(row.id) ?? 0;
@@ -450,24 +454,9 @@ export async function checkStorage(
   // after a user removes content. Do not credit it against durable disk allowances.
   if (hostReserved + additionalMiB > snapshot.availableDiskMiB - Number(host.disk_headroom_mib))
     throw new DomainError('storage_exhausted');
-  if (config.storagePolicy === 'PER_USER_BUDGET') {
+  if (budget > 0) {
     if (active.some((server) => server.owner_id === ownerId && server.limits.disk === 0))
       throw new DomainError('conflict');
-    const storageOverride = await tx
-      .selectFrom('storage_user_budgets')
-      .select('storage_mib')
-      .where('user_id', '=', ownerId)
-      .executeTakeFirst();
-    const limits = await tx
-      .selectFrom('resource_user_limits')
-      .selectAll()
-      .where('user_id', '=', ownerId)
-      .executeTakeFirst();
-    const budget = storageOverride
-      ? Number(storageOverride.storage_mib ?? config.defaultUserStorageMiB)
-      : limits && (!limits.expires_at || limits.expires_at > new Date())
-        ? Number(limits.storage_mib)
-        : config.defaultUserStorageMiB;
     if (
       active.filter((r) => r.owner_id === ownerId).reduce((sum, r) => sum + allowance(r), 0) +
         additionalMiB >
@@ -490,7 +479,7 @@ export async function setUserLimits(
       userId: z.string().min(1),
       memoryMiB: z.number().int().positive(),
       cpuPercent: z.number().int().positive(),
-      storageMiB: z.number().int().positive(),
+      storageMiB: z.number().int().positive().optional(),
       expiresAt: z.iso.datetime().optional(),
       reason: z.string().trim().min(8).max(300),
     })
@@ -526,22 +515,49 @@ export async function setUserLimits(
       .where('user_id', '=', value.userId)
       .executeTakeFirst();
     const { values: settings } = await getSettings(tx, env);
+    const legacy = await tx
+      .selectFrom('resource_user_limits')
+      .select(['storage_mib', 'expires_at'])
+      .where('user_id', '=', value.userId)
+      .executeTakeFirst();
+    // The legacy row shares compute/storage expiry. Omitting storage cannot
+    // silently turn an active temporary allowance into a permanent exception.
+    if (
+      value.storageMiB === undefined &&
+      !persistent &&
+      legacy?.expires_at &&
+      legacy.expires_at > new Date()
+    )
+      throw new DomainError('conflict');
+    // Unlimited/finite transitions reconcile provider and SFTP caps through the
+    // storage plan. Compute-only edits omit storage and retain its current policy.
+    if (
+      value.storageMiB !== undefined &&
+      (persistent?.storage_mib === '0' ||
+        (settings.storagePolicy === 'PER_USER_BUDGET' &&
+          disks.some((server) => server.limits.disk === 0)))
+    )
+      throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
     if (
       persistent &&
       value.expiresAt &&
+      value.storageMiB !== undefined &&
       Number(persistent.storage_mib ?? settings.defaultUserStorageMiB) !== value.storageMiB
     )
       throw new DomainError('validation_failed');
     if (
+      value.storageMiB !== undefined &&
       disks.reduce((sum, r) => sum + r.limits.disk * (1 + r.feature_limits.backups), 0) >
-      value.storageMiB
+        value.storageMiB
     )
       throw new DomainError('conflict');
     const row = {
       user_id: value.userId,
       memory_mib: value.memoryMiB,
       cpu_percent: value.cpuPercent,
-      storage_mib: String(value.storageMiB),
+      storage_mib: String(
+        value.storageMiB ?? legacy?.storage_mib ?? settings.defaultUserStorageMiB,
+      ),
       expires_at: value.expiresAt ? new Date(value.expiresAt) : null,
       updated_at: new Date(),
     };
@@ -550,7 +566,18 @@ export async function setUserLimits(
       .values(row)
       .onConflict((c) => c.column('user_id').doUpdateSet(row))
       .execute();
-    if (!value.expiresAt)
+    if (value.storageMiB === undefined && !persistent)
+      await tx
+        .insertInto('storage_user_budgets')
+        .values({
+          user_id: value.userId,
+          storage_mib:
+            legacy && (!legacy.expires_at || legacy.expires_at > new Date())
+              ? legacy.storage_mib
+              : null,
+        })
+        .execute();
+    if (!value.expiresAt && value.storageMiB !== undefined)
       await tx
         .insertInto('storage_user_budgets')
         .values({

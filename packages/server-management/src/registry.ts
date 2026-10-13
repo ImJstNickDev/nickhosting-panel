@@ -53,6 +53,8 @@ import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
+import { storageCommitments } from './storage-accounting.js';
+import { getUserStorageBudget } from './storage-user-budget.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 
 export const limitsSchema = z
@@ -319,16 +321,16 @@ export async function createManagedServer(
       providerOwner.provider_url !== config.pterodactylBaseUrl?.replace(/\/$/, '')
     )
       throw new DomainError('integration_unavailable');
-    if (
-      (request.limits.disk === undefined || request.limits.disk === 0) &&
-      config.storagePolicy !== 'GLOBAL_POOL'
-    )
+    const unlimited =
+      config.storagePolicy === 'GLOBAL_POOL' ||
+      (await getUserStorageBudget(tx, context.subjectUserId, config.defaultUserStorageMiB)) === 0;
+    if ((request.limits.disk === undefined || request.limits.disk === 0) && !unlimited)
       throw new DomainError('validation_failed');
     const value = {
       ...request,
       limits: parse(limitsSchema, {
         ...request.limits,
-        disk: config.storagePolicy === 'GLOBAL_POOL' ? 0 : request.limits.disk,
+        disk: unlimited ? 0 : request.limits.disk,
       }),
     };
     const mapping = await tx
@@ -841,8 +843,11 @@ export async function enqueueLockedServerOperation(
   }
   if (value.action === 'configure') {
     const { values: config } = await getSettings(tx, env);
+    const unlimited =
+      config.storagePolicy === 'GLOBAL_POOL' ||
+      (await getUserStorageBudget(tx, server.owner_id, config.defaultUserStorageMiB)) === 0;
     if (
-      (config.storagePolicy === 'PER_USER_BUDGET' && value.limits.disk === 0) ||
+      (!unlimited && value.limits.disk === 0) ||
       (server.limits.disk === 0 && value.limits.disk !== 0) ||
       (server.limits.disk !== 0 && value.limits.disk === 0)
     )
@@ -861,7 +866,15 @@ export async function enqueueLockedServerOperation(
       tx,
       server.owner_id,
       node.physical_host_id,
-      value.limits.disk * (1 + mapping.feature_limits.backups),
+      value.limits.disk === 0
+        ? ((
+            await storageCommitments(
+              tx,
+              [{ ...server, feature_limits: mapping.feature_limits }],
+              env,
+            )
+          ).get(serverId) ?? 0)
+        : value.limits.disk * (1 + mapping.feature_limits.backups),
       env,
       serverId,
     );

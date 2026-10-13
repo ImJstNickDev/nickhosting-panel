@@ -180,14 +180,20 @@ Configured CPU/RAM on cards are labeled as limits. Disk shows occupied space fro
 the same Wings resources field as Console; unavailable or stale readings retain
 an explicit localized fallback instead of displaying the configured allowance.
 
-Owner Settings includes a dedicated storage policy flow: preview before applying,
-per-user budget and per-server allocation editing, separate backup reservation,
-over-budget/unknown-reading states, confirmation and durable per-server progress.
+Owner Settings includes a compact storage policy flow: cached allocations render
+immediately, changes update totals locally, and debounced serialized background
+checks refresh real usage without overwriting newer input. There is no manual
+preview/refresh control; confirmation waits for the latest verified draft.
+Small circular information buttons expose explanatory copy on hover, focus and
+touch. Blocking errors remain visible with retry, alongside per-user budgets,
+server allocations, backup reservation and durable progress. A user budget of
+zero explicitly removes that user's disk caps; the global default stays positive.
 The current policy remains visible until every provider/SFTP change is confirmed.
 A blocked partial application survives reload and offers retry or corrected
 allocations. Files/Backups links preserve the draft in its tab; after deleting
-unneeded data, refresh measurements on the same plan before reducing allocations.
-Refresh preserves unsaved quota/limit edits and never starts application by itself.
+unneeded data, returning to the tab remeasures the same plan before application.
+Background refresh preserves unsaved quota/limit edits and never starts application
+by itself. Cached and applying-to-blocked recovery use the same durable ledger.
 Shared storage creates unlimited servers; existing finite caps remain until the
 Owner explicitly applies the shared-storage plan. Storage settings are excluded
 from generic editors/reset, and environment locks and read-only roles remain

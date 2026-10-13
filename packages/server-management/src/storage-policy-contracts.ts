@@ -16,6 +16,8 @@ export interface StoragePolicyUser {
   userId: string;
   name: string;
   quotaMiB: number;
+  /** Always present in API responses; optional for previously persisted plans. */
+  quotaSource?: 'default' | 'override';
   requiredMiB: number | null;
   servers: StoragePolicyServer[];
 }

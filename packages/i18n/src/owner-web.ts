@@ -1,5 +1,37 @@
 export const ownerWebMessages: Record<string, readonly [string, string]> = {
   'storagePolicy.title': ['Storage', 'Spazio disco'],
+  'storagePolicy.allocations': ['Users and servers', 'Utenti e server'],
+  'storagePolicy.checking': ['Checking usage…', 'Verifica spazio…'],
+  'storagePolicy.policyHelp': ['About storage limits', 'Informazioni sui limiti di spazio'],
+  'storagePolicy.allocationHelp': [
+    'About allocations and backups',
+    'Informazioni su assegnazioni e backup',
+  ],
+  'storagePolicy.userQuotaHelp': [
+    'About the quota for {name}',
+    'Informazioni sulla quota di {name}',
+  ],
+  'storagePolicy.zeroHelp': [
+    'Set 0 to remove this user’s disk limits. A positive quota is shared by their servers and backup reservations.',
+    'Imposta 0 per rimuovere i limiti disco di questo utente. Una quota positiva comprende i suoi server e le riserve per i backup.',
+  ],
+  'storagePolicy.invalidUserSize': [
+    'Enter a valid quota. Use 0 for no limit.',
+    'Inserisci una quota valida. Usa 0 per nessun limite.',
+  ],
+  'storagePolicy.reservedCompact': ['Reserved: {value}', 'Riservato: {value}'],
+  'storagePolicy.resolveCompact': [
+    'Raise the quota or free space in Files or Backups.',
+    'Aumenta la quota o libera spazio in File o Backup.',
+  ],
+  'storagePolicy.progress': [
+    'Verified: {applied} of {total} servers.',
+    'Verificati: {applied} server su {total}.',
+  ],
+  'storagePolicy.blockedCompact': [
+    'Verified: {applied} of {total}. Correct the limits or free space; usage updates when you return. Other writes remain paused.',
+    'Verificati: {applied} su {total}. Correggi i limiti o libera spazio; l’occupazione si aggiorna al ritorno. Le altre scritture restano sospese.',
+  ],
   'storagePolicy.current': ['Current policy', 'Modalità attuale'],
   'storagePolicy.currentQuota': [
     'Default quota per user: {value}',

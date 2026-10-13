@@ -289,13 +289,13 @@ export function QuotaSummary() {
                       <div className="home-quota-committed">
                         <dt>
                           {t(
-                            key === 'storageMiB' && quota.data.storagePolicy === 'GLOBAL_POOL'
+                            key === 'storageMiB' && quota.data.limits.storageMiB === null
                               ? 'web.usage'
                               : 'web.reserved',
                           )}
                         </dt>
                         <dd>
-                          {key === 'storageMiB' && quota.data.storagePolicy === 'GLOBAL_POOL'
+                          {key === 'storageMiB' && quota.data.limits.storageMiB === null
                             ? quota.data.storageUsage.bytes === null
                               ? t('web.unavailable')
                               : format.bytes(quota.data.storageUsage.bytes)
@@ -307,7 +307,8 @@ export function QuotaSummary() {
                         <dd>
                           {quota.data.limits[key] === null
                             ? t(
-                                key === 'serverCount'
+                                key === 'serverCount' ||
+                                  (key === 'storageMiB' && quota.data.storageBudgetMiB === 0)
                                   ? 'platform.unlimited'
                                   : 'platform.globalPool',
                               )

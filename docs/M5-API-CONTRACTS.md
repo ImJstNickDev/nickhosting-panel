@@ -447,9 +447,10 @@ Wings responsibility.
   presentation. Compiled Vanilla installation capability is separate from diagnostic
   evidence; Owner rollout/availability and local provider validation still apply.
 - Quota responses add `creationStorage: {mode: 'shared'|'limited', defaultDiskMiB}`.
-  Create requests may omit `limits.disk` only with `GLOBAL_POOL`. As of the storage
+  Create requests may omit `limits.disk` with `GLOBAL_POOL` or a per-user unlimited
+  exception (`storageBudgetMiB=0`). As of the storage
   reconciliation change below, shared storage always resolves to provider disk `0`
-  (unlimited); personal storage requires an explicit positive allowance. Retrying
+  (unlimited); finite personal storage requires an explicit positive allowance. Retrying
   the same request after a setting change returns the original operation.
   Configure/resize requests still require explicit limits.
 - `defaultServerStorageMiB` defaults to the former wizard value, 4096 MiB; normal
@@ -477,6 +478,30 @@ Migration `027` adds nullable backup occupancy to metrics and permits an explici
 follow-default budget marker. Missing legacy markers still resolve existing user
 overrides; default-following users track later default changes, while positive
 exceptions remain independent of compute override expiry.
+
+Migration `028` permits the persistent personal budget `0` (unlimited), while null
+continues to follow the positive platform default. Public transition users include
+`quotaSource: 'default'|'override'`, including reconstructed legacy plans. Under
+`PER_USER_BUDGET`, applying a zero user quota requires all that user's server disks
+to be zero. Provider/SFTP readback, unknown-measurement blocking and physical
+pool/headroom accounting still apply; a zero quota never means zero occupied space.
+Finite/unlimited changes use the same durable reconciliation in both directions.
+Quota responses expose null effective storage limit/remaining values and
+`creationStorage: {mode:'shared', defaultDiskMiB:0}` for the exempt user, retaining
+`storageBudgetMiB=0` and `storageBudgetOverrideMiB=0` distinctly from inheritance.
+
+`PUT /v1/owner/user-limits` now accepts omitted `storageMiB` for compute-only edits.
+This preserves an existing independent storage policy, including unlimited. An
+active temporary legacy storage exception without an independent marker requires
+explicit storage input; omission cannot silently extend its expiry. Direct quota
+edits cannot convert an unlimited user to finite caps without reconciliation.
+The legacy positive `resource_user_limits.storage_mib` column stays unchanged.
+
+The UI automatically requests previews after edits, serializing and coalescing
+persistent preview requests. Cached totals and default-following quotas update
+immediately; explicit drafts survive fresh measurements and failures. Application
+requires the current verified revision. Blocked refresh retains its original ID
+and effect ledger and is triggered automatically on return from cleanup.
 
 New `GLOBAL_POOL` servers use `limits.disk=0`, including when an older client sends
 a positive disk value. Existing finite servers are converted only by an explicit

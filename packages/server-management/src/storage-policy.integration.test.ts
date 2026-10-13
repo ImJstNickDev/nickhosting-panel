@@ -108,6 +108,7 @@ it('previews fresh usage and backup reservations without provider changes; Owner
     users: [
       {
         quotaMiB: 1024,
+        quotaSource: 'default',
         requiredMiB: 456,
         servers: [
           { usageBytes: 100 * 1048576, minimumDiskMiB: 228, proposedDiskMiB: 228, backupSlots: 1 },
@@ -609,3 +610,222 @@ it('preserves an explicit exception equal to the new default instead of silently
     )?.storage_mib,
   ).toBe('1024');
 });
+
+it('previews an explicit zero quota as unlimited and preserves it through global mode', async () => {
+  await f.db
+    .insertInto('storage_user_budgets')
+    .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+    .execute();
+  const limited = await preview();
+  expect(limited.users[0]).toMatchObject({
+    quotaMiB: 0,
+    quotaSource: 'override',
+    requiredMiB: 0,
+    servers: [{ proposedDiskMiB: 0, minimumDiskMiB: 228 }],
+  });
+  const global = await service.preview(f.owner, {
+    policy: 'GLOBAL_POOL',
+    defaultUserStorageMiB: 1536,
+  });
+  await service.apply(f.owner, global.id, body(global, 0, 0));
+  await service.processPending();
+  expect((await service.get(f.owner, global.id)).status).toBe('completed');
+  expect(
+    await f.db.selectFrom('storage_user_budgets').selectAll().executeTakeFirstOrThrow(),
+  ).toMatchObject({ storage_mib: '0' });
+  expect((await preview()).users[0]).toMatchObject({ quotaMiB: 0, quotaSource: 'override' });
+});
+
+it('recovers an uncertain zero cap by readback and safely restores finite personal limits', async () => {
+  remote.limits.disk = 256;
+  await f.db
+    .updateTable('managed_servers')
+    .set({ limits: JSON.stringify({ ...f.limits, disk: 256 }) })
+    .where('id', '=', serverId)
+    .execute();
+  const value = await preview();
+  await service.apply(f.owner, value.id, body(value, 0, 0));
+  vi.mocked(f.adapter.updateBuild).mockImplementationOnce(async (_id, build) => {
+    remote.limits.disk = build.disk;
+    throw new Error('response lost');
+  });
+  await service.processPending();
+  expect(await service.get(f.owner, value.id)).toMatchObject({
+    status: 'blocked',
+    users: [{ quotaMiB: 0, quotaSource: 'override', servers: [{ proposedDiskMiB: 0 }] }],
+  });
+  expect((await getSettings(f.db)).values.storagePolicy).toBe('GLOBAL_POOL');
+  service = createStoragePolicyService({ db: f.db, adapter: f.adapter, reconcileSftp: sync });
+  await service.refresh(f.owner, value.id);
+  await service.retry(f.owner, value.id);
+  await service.processPending();
+  expect(await service.get(f.owner, value.id)).toMatchObject({
+    status: 'completed',
+    users: [{ quotaMiB: 0, quotaSource: 'override', servers: [{ currentDiskMiB: 0 }] }],
+  });
+  expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+  expect(sync).toHaveBeenCalledWith(expect.anything(), serverId, 0);
+  expect(
+    await f.db.selectFrom('storage_user_budgets').selectAll().executeTakeFirstOrThrow(),
+  ).toMatchObject({ storage_mib: '0' });
+  const finite = await preview();
+  await expect(service.apply(f.owner, finite.id, body(finite, 128, 1024))).rejects.toMatchObject({
+    code: 'validation_failed',
+  });
+  await service.apply(f.owner, finite.id, body(finite, 256, 1024));
+  await service.processPending();
+  expect((await service.get(f.owner, finite.id)).status).toBe('completed');
+  expect(remote.limits.disk).toBe(256);
+  expect(sync).toHaveBeenLastCalledWith(expect.anything(), serverId, 256);
+  expect(
+    await f.db.selectFrom('storage_user_budgets').selectAll().executeTakeFirstOrThrow(),
+  ).toMatchObject({ storage_mib: '1024' });
+});
+
+it('permits zero only for personal unlimited quotas with matching zero server caps', async () => {
+  await expect(
+    service.preview(f.owner, { policy: 'PER_USER_BUDGET', defaultUserStorageMiB: 0 }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+  const value = await preview();
+  for (const [disk, quotaMiB] of [
+    [256, 0],
+    [0, 1024],
+    [0, -1],
+  ]) {
+    await expect(
+      service.apply(f.owner, value.id, body(value, disk, quotaMiB)),
+    ).rejects.toMatchObject({
+      code: 'validation_failed',
+    });
+  }
+  expect(f.adapter.updateBuild).not.toHaveBeenCalled();
+});
+
+it('keeps other users finite while applying an unlimited personal exception', async () => {
+  const other = await managementFixture(f.db, { interactive: true });
+  const otherId = await other.server();
+  const row = await f.db
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', otherId)
+    .executeTakeFirstOrThrow();
+  const allocation = await f.db
+    .selectFrom('server_allocations')
+    .selectAll()
+    .where('server_id', '=', otherId)
+    .executeTakeFirstOrThrow();
+  const otherRemote = {
+    ...structuredClone(remote),
+    id: row.pterodactyl_id,
+    uuid: row.pterodactyl_uuid,
+    identifier: row.pterodactyl_identifier,
+    external_id: row.external_id,
+    user: row.provider_user_id,
+    node: other.providerNodeId,
+    allocation: allocation.pterodactyl_allocation_id,
+    limits: { ...row.limits },
+    relationships: {
+      allocations: {
+        data: [
+          {
+            attributes: {
+              id: allocation.pterodactyl_allocation_id,
+              ip: allocation.address,
+              port: allocation.port,
+              assigned: true,
+            },
+          },
+        ],
+      },
+    },
+  } as ApplicationServer;
+  vi.mocked(f.adapter.getApplicationServer).mockImplementation(async (id) =>
+    structuredClone(id === remote.id ? remote : otherRemote),
+  );
+  vi.mocked(f.adapter.updateBuild).mockImplementation(async (id, build) => {
+    const target = id === remote.id ? remote : otherRemote;
+    target.limits.disk = build.disk;
+    return structuredClone(target);
+  });
+  const value = await preview();
+  const input = {
+    users: value.users.map((user) => ({
+      userId: user.userId,
+      quotaMiB: user.userId === f.context.subjectUserId ? 0 : 1024,
+      servers: user.servers.map((server) => ({
+        serverId: server.serverId,
+        diskMiB: user.userId === f.context.subjectUserId ? 0 : 256,
+      })),
+    })),
+  };
+  await service.apply(f.owner, value.id, input);
+  await service.processPending();
+  expect((await service.get(f.owner, value.id)).status).toBe('completed');
+  expect(remote.limits.disk).toBe(0);
+  expect(otherRemote.limits.disk).toBe(256);
+  expect(await f.db.selectFrom('storage_user_budgets').selectAll().execute()).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ user_id: f.context.subjectUserId, storage_mib: '0' }),
+      expect.objectContaining({ user_id: other.context.subjectUserId, storage_mib: null }),
+    ]),
+  );
+});
+
+it('fails closed on unknown observations and physical exhaustion for unlimited personal quotas', async () => {
+  const value = await preview();
+  await f.db
+    .updateTable('physical_hosts')
+    .set({ storage_pool_mib: '80' })
+    .where('id', '=', f.hostId)
+    .execute();
+  await expect(service.apply(f.owner, value.id, body(value, 0, 0))).rejects.toMatchObject({
+    code: 'storage_exhausted',
+  });
+  await f.db
+    .updateTable('physical_hosts')
+    .set({ storage_pool_mib: '150' })
+    .where('id', '=', f.hostId)
+    .execute();
+  await service.apply(f.owner, value.id, body(value, 0, 0));
+  diskBytes = 200 * 1048576;
+  await service.processPending();
+  expect((await service.get(f.owner, value.id)).errorCode).toBe('storage_exhausted');
+  vi.mocked(f.adapter.getResources).mockRejectedValueOnce(
+    new DomainError('integration_unavailable'),
+  );
+  const unknown = await service.refresh(f.owner, value.id);
+  expect(unknown.users[0]?.servers[0]?.usageBytes).toBeNull();
+  await expect(service.retry(f.owner, value.id)).rejects.toMatchObject({
+    code: 'validation_failed',
+  });
+  expect(f.adapter.updateBuild).not.toHaveBeenCalled();
+  expect(sync).not.toHaveBeenCalled();
+  expect((await getSettings(f.db)).values.storagePolicy).toBe('GLOBAL_POOL');
+});
+
+it.each(['default', 'override'] as const)(
+  'reports %s quota sources accurately for persisted plans without the new field',
+  async (source) => {
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({
+        user_id: f.context.subjectUserId,
+        storage_mib: source === 'default' ? null : '1024',
+      })
+      .execute();
+    const value = await preview();
+    const row = await f.db
+      .selectFrom('storage_policy_transitions')
+      .select('plan')
+      .where('id', '=', value.id)
+      .executeTakeFirstOrThrow();
+    const plan = row.plan as { users: { quotaSource?: string }[] };
+    for (const user of plan.users) delete user.quotaSource;
+    await f.db
+      .updateTable('storage_policy_transitions')
+      .set({ plan: JSON.stringify(plan) })
+      .where('id', '=', value.id)
+      .execute();
+    expect((await service.get(f.owner, value.id)).users[0]?.quotaSource).toBe(source);
+  },
+);

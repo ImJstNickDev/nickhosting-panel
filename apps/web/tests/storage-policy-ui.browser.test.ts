@@ -34,6 +34,7 @@ const fixture = (policy: StorageMode = 'PER_USER_BUDGET'): StorageTransition => 
       userId: 'test-user',
       name: 'Ada Rossi',
       quotaMiB: 4096,
+      quotaSource: 'default',
       requiredMiB: 9216,
       servers: [
         {
@@ -64,7 +65,11 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
   let state: StoragePolicyStatus;
   let draft: StorageTransition;
   let applies: StorageAllocation[][];
-  let previewRequests: unknown[];
+  let previewRequests: Array<{ policy: StorageMode; defaultUserStorageMiB: number }>;
+  let gatePreview: Promise<void> | undefined;
+  let releasePreview: (() => void) | undefined;
+  let activePreviews: number;
+  let peakPreviews: number;
   let previewFails: boolean;
   let applyFails: boolean;
   let retryFails: boolean;
@@ -78,7 +83,7 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
       root: `${process.cwd()}/apps/web`,
       configFile: false,
       cacheDir: `${process.cwd()}/.codex/local/storage-policy-test-vite`,
-      server: { host: '127.0.0.1', port: 0 },
+      server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
     });
     await server.listen();
     origin = server.resolvedUrls?.local[0] ?? '';
@@ -97,6 +102,10 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     role = 'owner';
     applies = [];
     previewRequests = [];
+    gatePreview = undefined;
+    releasePreview = undefined;
+    activePreviews = 0;
+    peakPreviews = 0;
     previewFails = false;
     applyFails = false;
     retryFails = false;
@@ -179,16 +188,28 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
       if (path === '/v1/owner/storage-policy/preview') {
         const body = route.request().postDataJSON();
         previewRequests.push(body);
+        activePreviews += 1;
+        peakPreviews = Math.max(peakPreviews, activePreviews);
+        if (gatePreview) {
+          const gate = gatePreview;
+          gatePreview = undefined;
+          await gate;
+        }
+        activePreviews -= 1;
         if (previewFails)
           return route.fulfill({
             status: 503,
             json: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
           });
-        draft.policy = body.policy;
-        draft.defaultUserStorageMiB = body.defaultUserStorageMiB;
+        const next = structuredClone(draft);
+        next.id = `transition-${previewRequests.length}`;
+        next.policy = body.policy;
+        next.defaultUserStorageMiB = body.defaultUserStorageMiB;
+        for (const user of next.users)
+          if (user.quotaSource === 'default') user.quotaMiB = body.defaultUserStorageMiB;
         if (body.policy === 'GLOBAL_POOL')
-          for (const user of draft.users) for (const item of user.servers) item.proposedDiskMiB = 0;
-        state.transition = structuredClone(draft);
+          for (const user of next.users) for (const item of user.servers) item.proposedDiskMiB = 0;
+        state.transition = next;
         return route.fulfill({ json: state.transition });
       }
       if (path.endsWith('/apply')) {
@@ -204,6 +225,8 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
           const submitted = applies.at(-1)?.find((entry) => entry.userId === user.userId);
           if (!submitted) throw new Error('Missing submitted user');
           user.quotaMiB = submitted.quotaMiB;
+          if (submitted.quotaMiB !== state.transition.defaultUserStorageMiB)
+            user.quotaSource = 'override';
           for (const item of user.servers)
             item.proposedDiskMiB =
               submitted.servers.find((entry) => entry.serverId === item.serverId)?.diskMiB ?? null;
@@ -234,6 +257,7 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     await page.route('**/api/auth/**', (route) => route.fulfill({ json: [] }));
   });
   afterEach(async () => {
+    releasePreview?.();
     await context?.close();
     expect(errors).toEqual([]);
   });
@@ -247,10 +271,16 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     await page.goto(`${origin}owner/settings`);
     await browserExpect(panel()).toBeVisible({ timeout: 30000 });
   }
-  async function preview() {
-    await panel().getByLabel('Storage limits', { exact: true }).selectOption('PER_USER_BUDGET');
-    await panel().getByRole('button', { name: 'Check occupied space', exact: true }).click();
-    await browserExpect(panel().getByRole('heading', { name: 'Review allocations' })).toBeVisible();
+  async function openLimited() {
+    state.transition = structuredClone(draft);
+    await open();
+    await browserExpect(panel().getByRole('heading', { name: 'Users and servers' })).toBeVisible();
+  }
+  const applyButton = () => panel().getByRole('button', { name: 'Apply changes', exact: true });
+  const quotaInput = () => panel().getByLabel('Quota for Ada Rossi (GiB)');
+  const diskInput = () => panel().getByLabel('Limit for Survival world (GiB)');
+  async function returnToSettings() {
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   }
   async function accessible(selector = '.storage-policy') {
     const result = await new AxeBuilder({ page })
@@ -262,38 +292,32 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     ).toEqual([]);
   }
 
-  it('resolves a 4 GiB user over quota, includes backup reservations, confirms and waits for completion', async () => {
-    await open();
-    await preview();
-    await browserExpect(panel().getByText('Server files: 4 GiB', { exact: true })).toBeVisible();
+  it('automatically verifies allocations, computes local changes and applies only verified drafts', async () => {
+    await openLimited();
     await browserExpect(
-      panel().getByText('Reserved, including backups: 9 GiB', { exact: true }),
-    ).toBeVisible();
-    const reviewButton = panel().getByRole('button', { name: 'Review and apply', exact: true });
-    await browserExpect(reviewButton).toBeDisabled();
-    await page.screenshot({
-      path: `${screenshots}/storage-preview-shortfall-desktop-en.png`,
-      fullPage: true,
-    });
+      panel().getByRole('button', { name: /preview|measurements|Check occupied/i }),
+    ).toHaveCount(0);
+    await browserExpect(panel().getByText('Reserved: 9 GiB', { exact: true })).toBeVisible();
+    await browserExpect(applyButton()).toBeDisabled();
+    await quotaInput().fill('12');
+    await diskInput().fill('3');
+    await browserExpect(applyButton()).toBeDisabled();
+    await diskInput().fill('5');
+    await browserExpect(panel().getByText('Reserved: 10 GiB', { exact: true })).toBeVisible();
+    await browserExpect(quotaInput()).toBeEnabled();
+    await browserExpect(applyButton()).toBeEnabled();
+    await panel().screenshot({ path: `${screenshots}/storage-compact-desktop-en.png` });
     await accessible();
-    await panel().getByLabel('Quota for Ada Rossi (GiB)').fill('12');
-    await browserExpect(reviewButton).toBeEnabled();
-    const disk = panel().getByLabel('Limit for Survival world (GiB)');
-    await disk.fill('3');
-    await browserExpect(reviewButton).toBeDisabled();
-    await disk.fill('10');
-    await browserExpect(reviewButton).toBeDisabled();
-    await disk.fill('5');
-    await browserExpect(reviewButton).toBeEnabled();
-    await reviewButton.click();
+    await applyButton().click();
     const dialog = page.getByRole('dialog');
     await browserExpect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
     await accessible('dialog[open]');
     await page.keyboard.press('Escape');
-    await browserExpect(reviewButton).toBeFocused();
-    await reviewButton.click();
+    await browserExpect(applyButton()).toBeFocused();
+    await applyButton().click();
     await dialog.getByRole('button', { name: 'Apply changes', exact: true }).click();
-    await browserExpect(panel().getByText('Applying', { exact: true })).toBeVisible();
+    await browserExpect(panel().getByText('Verified: 0 of 1 servers.')).toBeVisible();
+    await browserExpect(panel().getByRole('heading', { name: 'Users and servers' })).toBeFocused();
     expect(applies).toEqual([
       [
         {
@@ -303,98 +327,244 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
         },
       ],
     ]);
-    await browserExpect(
-      panel().getByText('Storage policy applied and server limits verified.'),
-    ).toHaveCount(0);
-    if (!state.transition) throw new Error('Missing fixture transition');
+    expect(peakPreviews).toBe(1);
+    if (!state.transition) throw new Error('Missing transition');
     state.transition.status = 'completed';
     state.policy = 'PER_USER_BUDGET';
     await browserExpect(
       panel().getByText('Storage policy applied and server limits verified.'),
     ).toBeVisible({ timeout: 10000 });
-    expect(previewRequests).toEqual([{ policy: 'PER_USER_BUDGET', defaultUserStorageMiB: 4096 }]);
   });
 
-  it('steps whole GiB without inheriting the measured minimum and still blocks unsafe limits', async () => {
+  it('renders cached data and coalesces slow responses without overwriting newer inputs', async () => {
+    draft.users.push({
+      userId: 'override-user',
+      name: 'Sam Bianchi',
+      quotaMiB: 32768,
+      quotaSource: 'override',
+      requiredMiB: 0,
+      servers: [],
+    });
+    gatePreview = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    await openLimited();
+    await expect.poll(() => previewRequests.length).toBe(1);
+    await browserExpect(panel().getByText('Server files: 4 GiB', { exact: true })).toBeVisible();
+    const defaultQuota = panel().getByLabel('Default quota per user (GiB)');
+    await defaultQuota.fill('8');
+    await defaultQuota.fill('12');
+    await defaultQuota.fill('16');
+    await diskInput().fill('6');
+    await browserExpect(quotaInput()).toHaveValue('16');
+    await browserExpect(panel().getByLabel('Quota for Sam Bianchi (GiB)')).toHaveValue('32');
+    await browserExpect(applyButton()).toBeDisabled();
+    await page.waitForTimeout(450);
+    expect(previewRequests).toHaveLength(1);
+    releasePreview?.();
+    await expect.poll(() => previewRequests.length).toBe(2);
+    await browserExpect(applyButton()).toBeEnabled();
+    await browserExpect(defaultQuota).toHaveValue('16');
+    await browserExpect(quotaInput()).toHaveValue('16');
+    await browserExpect(diskInput()).toHaveValue('6');
+    expect(previewRequests.map((entry) => entry.defaultUserStorageMiB)).toEqual([4096, 16384]);
+    expect(peakPreviews).toBe(1);
+    expect(applies).toEqual([]);
+  });
+
+  it('retains cached rows and edited values on failed background checks without stealing focus', async () => {
+    previewFails = true;
+    await openLimited();
+    await quotaInput().fill('12');
+    await browserExpect(panel().getByRole('alert')).toContainText(
+      'This integration is unavailable.',
+    );
+    await browserExpect(quotaInput()).toHaveValue('12');
+    await browserExpect(quotaInput()).toBeFocused();
+    await browserExpect(applyButton()).toBeDisabled();
+    previewFails = false;
+    await panel().getByRole('button', { name: 'Try again', exact: true }).click();
+    await browserExpect(applyButton()).toBeEnabled();
+    await browserExpect(quotaInput()).toHaveValue('12');
+  });
+
+  it('recovers from a stale cached draft when another tab has a blocked transition', async () => {
+    gatePreview = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    await openLimited();
+    await expect.poll(() => previewRequests.length).toBe(1);
+    await quotaInput().fill('12');
+    state.transition = {
+      ...structuredClone(draft),
+      id: 'other-transition',
+      status: 'blocked',
+      defaultUserStorageMiB: 8192,
+    };
+    previewFails = true;
+    releasePreview?.();
+    await expect
+      .poll(() => refreshRequests)
+      .toContain('/v1/owner/storage-policy/other-transition/refresh');
+    await browserExpect(panel().getByLabel('Storage limits', { exact: true })).toBeDisabled();
+    await browserExpect(panel().getByLabel('Default quota per user (GiB)')).toHaveValue('8');
+    await browserExpect(quotaInput()).toHaveValue('12');
+    await browserExpect(
+      panel().getByRole('button', { name: 'Apply revised allocations', exact: true }),
+    ).toBeEnabled();
+    expect(applies).toEqual([]);
+  });
+
+  it('allows an individual zero quota, restores finite drafts, and rejects a zero default', async () => {
+    await openLimited();
+    await quotaInput().fill('16');
+    await diskInput().fill('6');
+    await quotaInput().fill('0');
+    await browserExpect(diskInput()).toHaveCount(0);
+    expect(
+      await quotaInput().evaluate((element: HTMLInputElement) => element.checkValidity()),
+    ).toBe(true);
+    await quotaInput().fill('16');
+    await browserExpect(diskInput()).toHaveValue('6');
+    await quotaInput().fill('0');
+    const defaultQuota = panel().getByLabel('Default quota per user (GiB)');
+    await defaultQuota.fill('0');
+    expect(
+      await defaultQuota.evaluate((element: HTMLInputElement) => element.checkValidity()),
+    ).toBe(false);
+    await browserExpect(applyButton()).toBeDisabled();
+    await panel().getByLabel('Storage limits', { exact: true }).selectOption('GLOBAL_POOL');
+    await browserExpect(applyButton()).toBeEnabled();
+    await panel().getByLabel('Storage limits', { exact: true }).selectOption('PER_USER_BUDGET');
+    await browserExpect(defaultQuota).toHaveValue('4');
+    await browserExpect(applyButton()).toBeEnabled();
+    await applyButton().click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .click();
+    await expect
+      .poll(() => applies)
+      .toEqual([
+        [{ userId: 'test-user', quotaMiB: 0, servers: [{ serverId: 'test-server', diskMiB: 0 }] }],
+      ]);
+  });
+
+  it('restores a finite safe proposal for a previously unlimited user and preserves explicit overrides', async () => {
     const user = draft.users[0];
     const server = user?.servers[0];
-    if (!user || !server) throw new Error('Missing storage fixture');
-    server.usageBytes = Math.round(251.8 * 1024 ** 2);
-    server.minimumDiskMiB = 380;
-    server.currentDiskMiB = 4096;
-    server.proposedDiskMiB = 4096;
-    server.backupSlots = 0;
-    user.requiredMiB = 4096;
-    await open();
-    await panel().getByLabel('Storage limits', { exact: true }).selectOption('PER_USER_BUDGET');
+    if (!user || !server) throw new Error('Missing fixture');
+    user.quotaMiB = 0;
+    user.quotaSource = 'override';
+    server.proposedDiskMiB = 0;
+    await openLimited();
+    await browserExpect(quotaInput()).toHaveValue('0');
+    await panel().getByLabel('Default quota per user (GiB)').fill('24');
+    await browserExpect(quotaInput()).toHaveValue('0');
+    await quotaInput().fill('16');
+    await browserExpect(diskInput()).toHaveValue('4.5');
+    await browserExpect(applyButton()).toBeEnabled();
+    await browserExpect(quotaInput()).toHaveValue('16');
+  });
+
+  it('steps whole GiB in native number fields and keeps zero-based Firefox arrows', async () => {
+    await openLimited();
     const defaultQuota = panel().getByLabel('Default quota per user (GiB)');
+    await defaultQuota.fill('4');
     await defaultQuota.press('ArrowDown');
     await browserExpect(defaultQuota).toHaveValue('3');
     await defaultQuota.press('ArrowUp');
     await browserExpect(defaultQuota).toHaveValue('4');
-    await preview();
-    const quota = panel().getByLabel('Quota for Ada Rossi (GiB)');
-    await quota.press('ArrowDown');
-    await browserExpect(quota).toHaveValue('3');
-    await quota.press('ArrowUp');
-    await browserExpect(quota).toHaveValue('4');
-    const disk = panel().getByLabel('Limit for Survival world (GiB)');
-    const review = panel().getByRole('button', { name: 'Review and apply', exact: true });
-    await disk.press('ArrowDown');
-    await browserExpect(disk).toHaveValue('3');
-    await browserExpect(review).toBeEnabled();
-    await page.screenshot({
-      path: `${screenshots}/storage-whole-gib-decrement-${process.env.NH_BROWSER ?? 'chromium'}-en.png`,
-      fullPage: true,
-    });
-    await disk.fill('0.25');
-    await browserExpect(disk).toHaveValue('0.25');
-    await browserExpect(disk).toHaveAttribute('aria-invalid', 'true');
-    await browserExpect(review).toBeDisabled();
-    await disk.fill('3');
-    await browserExpect(review).toBeEnabled();
-    await quota.fill('0');
-    await browserExpect(review).toBeDisabled();
-    expect(applies).toEqual([]);
+    await quotaInput().fill('12');
+    await quotaInput().press('ArrowDown');
+    await browserExpect(quotaInput()).toHaveValue('11');
+    await diskInput().fill('6');
+    await diskInput().press('ArrowDown');
+    await browserExpect(diskInput()).toHaveValue('5');
+    await diskInput().press('ArrowDown');
+    await browserExpect(diskInput()).toHaveValue('4');
+    await browserExpect(applyButton()).toBeDisabled();
+    await browserExpect(diskInput()).toHaveAttribute('aria-invalid', 'true');
+    expect(await diskInput().getAttribute('min')).toBe('0');
   });
 
-  it('never substitutes zero for a missing measurement and refreshes after cleanup', async () => {
-    const item = draft.users[0]?.servers[0];
-    if (!item) throw new Error('Missing fixture');
-    item.usageBytes = null;
-    item.observedAt = null;
-    item.minimumDiskMiB = null;
-    item.proposedDiskMiB = null;
-    await open();
-    await preview();
+  it('keeps missing readings unavailable and refreshes them when returning to the tab', async () => {
+    const server = draft.users[0]?.servers[0];
+    if (!server) throw new Error('Missing fixture');
+    server.usageBytes = null;
+    server.observedAt = null;
+    server.minimumDiskMiB = null;
+    server.proposedDiskMiB = null;
+    await openLimited();
     await browserExpect(
       panel().getByText('Server files: Unavailable', { exact: true }),
     ).toBeVisible();
-    await browserExpect(
-      panel().getByRole('button', { name: 'Review and apply', exact: true }),
-    ).toBeDisabled();
-    await browserExpect(panel().getByLabel('Limit for Survival world (GiB)')).toBeDisabled();
-    await page.screenshot({
-      path: `${screenshots}/storage-preview-unavailable-en.png`,
-      fullPage: true,
-    });
-    item.usageBytes = 0;
-    item.observedAt = date;
-    item.minimumDiskMiB = 128;
-    item.proposedDiskMiB = 128;
-    await panel().getByRole('button', { name: 'Refresh preview', exact: true }).click();
+    await browserExpect(applyButton()).toBeDisabled();
+    await browserExpect(diskInput()).toBeDisabled();
+    server.usageBytes = 0;
+    server.observedAt = date;
+    server.minimumDiskMiB = 128;
+    server.proposedDiskMiB = 128;
+    await returnToSettings();
     await browserExpect(panel().getByText('Server files: 0 B', { exact: true })).toBeVisible();
-    await browserExpect(
-      panel().getByRole('button', { name: 'Review and apply', exact: true }),
-    ).toBeEnabled();
+    await browserExpect(applyButton()).toBeEnabled();
   });
 
-  it('preserves submitted allocations on apply failure and requires a fresh preview after settings change', async () => {
-    await open();
-    await preview();
-    const quota = panel().getByLabel('Quota for Ada Rossi (GiB)');
-    await quota.fill('16');
-    await panel().getByRole('button', { name: 'Review and apply', exact: true }).click();
+  it('refreshes the same blocked plan after cleanup and preserves unsaved inputs', async () => {
+    draft.status = 'blocked';
+    const server = draft.users[0]?.servers[0];
+    if (!server) throw new Error('Missing fixture');
+    server.status = 'blocked';
+    server.errorCode = 'integration_unavailable';
+    await openLimited();
+    await browserExpect(panel().getByLabel('Storage limits', { exact: true })).toBeDisabled();
+    await quotaInput().fill('8');
+    await diskInput().fill('2');
+    const resume = panel().getByRole('button', { name: 'Apply revised allocations', exact: true });
+    await browserExpect(resume).toBeDisabled();
+    await browserExpect(
+      panel().getByRole('link', { name: 'Files for Survival world (opens in a new tab)' }),
+    ).toHaveAttribute('target', '_blank');
+    refreshed = structuredClone(draft);
+    const cleaned = refreshed.users[0]?.servers[0];
+    if (!cleaned) throw new Error('Missing cleaned fixture');
+    cleaned.usageBytes = 1024 ** 3;
+    cleaned.minimumDiskMiB = 1152;
+    cleaned.errorCode = null;
+    await returnToSettings();
+    await browserExpect(panel().getByText('Server files: 1 GiB', { exact: true })).toBeVisible();
+    await browserExpect(quotaInput()).toHaveValue('8');
+    await browserExpect(diskInput()).toHaveValue('2');
+    await browserExpect(resume).toBeEnabled();
+    expect(previewRequests).toEqual([]);
+    expect(applies).toEqual([]);
+    expect(refreshRequests.length).toBeGreaterThan(0);
+    expect(
+      refreshRequests.every((path) => path === '/v1/owner/storage-policy/transition-1/refresh'),
+    ).toBe(true);
+    await panel().screenshot({ path: `${screenshots}/storage-compact-blocked-en.png` });
+    await accessible();
+    await resume.click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .click();
+    await expect
+      .poll(() => applies[0])
+      .toEqual([
+        {
+          userId: 'test-user',
+          quotaMiB: 8192,
+          servers: [{ serverId: 'test-server', diskMiB: 2048 }],
+        },
+      ]);
+  });
+
+  it('retains edited allocations after apply failure and automatically reverifies before retry', async () => {
+    await openLimited();
+    await quotaInput().fill('16');
+    await browserExpect(applyButton()).toBeEnabled();
+    await applyButton().click();
     applyFails = true;
     await page
       .getByRole('dialog')
@@ -403,167 +573,99 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     await browserExpect(page.getByRole('dialog').getByRole('alert')).toContainText(
       'There is not enough available storage.',
     );
-    await browserExpect(quota).toHaveValue('16');
-    await page.keyboard.press('Escape');
-    await panel().getByLabel('Default quota per user (GiB)').fill('8');
+    await browserExpect(quotaInput()).toHaveValue('16');
+    applyFails = false;
     await browserExpect(
-      panel().getByRole('button', { name: 'Review and apply', exact: true }),
-    ).toBeDisabled();
-    previewFails = true;
-    await panel().getByRole('button', { name: 'Refresh preview', exact: true }).click();
-    await browserExpect(panel().getByRole('alert')).toContainText(
-      'This integration is unavailable.',
-    );
-    await browserExpect(panel().getByLabel('Default quota per user (GiB)')).toHaveValue('8');
-    expect(applies).toHaveLength(1);
-  });
-
-  it('restores durable partial updates, offers revised allocations and displays retry failure', async () => {
-    draft.status = 'blocked';
-    const user = draft.users[0];
-    const server = user?.servers[0];
-    if (!user || !server) throw new Error('Missing fixture');
-    user.quotaMiB = 12288;
-    server.status = 'blocked';
-    server.errorCode = 'integration_unavailable';
-    state.transition = draft;
-    retryFails = true;
-    await open();
-    await browserExpect(panel().getByText('Needs attention', { exact: true })).toBeVisible();
-    await browserExpect(panel().getByLabel('Storage limits', { exact: true })).toBeDisabled();
-    await panel().getByRole('button', { name: 'Recheck and retry', exact: true }).click();
-    await browserExpect(panel().getByRole('alert')).toContainText(
-      'This integration is unavailable.',
-    );
-    await panel().getByLabel('Quota for Ada Rossi (GiB)').fill('16');
-    await panel().getByLabel('Limit for Survival world (GiB)').fill('6');
-    await panel().getByRole('button', { name: 'Apply revised allocations', exact: true }).click();
+      page.getByRole('dialog').getByRole('button', { name: 'Apply changes', exact: true }),
+    ).toBeEnabled();
     await page
       .getByRole('dialog')
       .getByRole('button', { name: 'Apply changes', exact: true })
       .click();
-    expect(applies[0]).toEqual([
-      {
-        userId: 'test-user',
-        quotaMiB: 16384,
-        servers: [{ serverId: 'test-server', diskMiB: 6144 }],
-      },
-    ]);
+    await expect.poll(() => applies.length).toBe(2);
+    expect(applies[1]).toEqual(applies[0]);
   });
 
-  it('shows Italian mobile allocations without overflow and verifies keyboard and accessibility', async () => {
+  it('automatically prepares recovery when a running application becomes blocked', async () => {
+    await openLimited();
+    await quotaInput().fill('12');
+    await browserExpect(applyButton()).toBeEnabled();
+    await applyButton().click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .click();
+    await browserExpect(panel().getByText('Verified: 0 of 1 servers.')).toBeVisible();
+    if (!state.transition) throw new Error('Missing transition');
+    state.transition.status = 'blocked';
+    await expect.poll(() => refreshRequests.length, { timeout: 10000 }).toBeGreaterThan(0);
+    await browserExpect(quotaInput()).toHaveValue('12');
+    const resume = panel().getByRole('button', { name: 'Apply revised allocations', exact: true });
+    await browserExpect(resume).toBeEnabled();
+    await resume.click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .click();
+    await expect.poll(() => applies.length).toBe(2);
+  });
+
+  it('keeps explanations in accessible circular help controls and compacts Italian mobile rows', async () => {
     locale = 'it';
     state.transition = draft;
     await context.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
     await page.setViewportSize({ width: 390, height: 844 });
     await open();
-    await browserExpect(panel().getByText('Quota superata di 5 GiB')).toBeVisible();
     await panel().getByLabel('Quota di Ada Rossi (GiB)').fill('12');
-    await page.screenshot({ path: `${screenshots}/storage-preview-mobile-it.png`, fullPage: true });
+    const info = panel().getByRole('button', { name: 'Informazioni sulla quota di Ada Rossi' });
+    await info.focus();
+    await browserExpect(page.getByRole('tooltip')).toContainText('Imposta 0');
+    await page.keyboard.press('Escape');
+    await browserExpect(page.getByRole('tooltip')).toHaveCount(0);
+    await panel().getByLabel('Quota di Ada Rossi (GiB)').focus();
+    await info.hover();
+    await browserExpect(page.getByRole('tooltip')).toContainText('Imposta 0');
+    await page.mouse.move(0, 0);
+    await info.dispatchEvent('pointerdown', { pointerType: 'touch' });
+    await browserExpect(page.getByRole('tooltip')).toContainText('Imposta 0');
+    await info.dispatchEvent('pointerdown', { pointerType: 'touch' });
+    await browserExpect(page.getByRole('tooltip')).toHaveCount(0);
+    expect(
+      await info.evaluate((element) => ({
+        border: getComputedStyle(element).borderTopWidth,
+        radius: getComputedStyle(element).borderRadius,
+      })),
+    ).toEqual({ border: '0px', radius: '50%' });
+    await panel().screenshot({ path: `${screenshots}/storage-compact-mobile-it.png` });
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
     await accessible();
   });
 
-  it('remeasures a blocked plan after cleanup without applying or losing unsaved allocations', async () => {
-    draft.status = 'blocked';
-    const user = draft.users[0];
-    const server = user?.servers[0];
-    if (!user || !server) throw new Error('Missing fixture');
-    server.status = 'blocked';
-    server.errorCode = 'integration_unavailable';
-    state.transition = structuredClone(draft);
-    await open();
-    const quota = panel().getByLabel('Quota for Ada Rossi (GiB)');
-    const disk = panel().getByLabel('Limit for Survival world (GiB)');
-    const apply = panel().getByRole('button', { name: 'Apply revised allocations', exact: true });
-    const refresh = panel().getByRole('button', { name: 'Refresh measurements', exact: true });
-    await browserExpect(panel().getByLabel('Storage limits', { exact: true })).toBeDisabled();
-    await browserExpect(
-      panel().getByRole('button', { name: 'Refresh preview', exact: true }),
-    ).toHaveCount(0);
-    await browserExpect(
-      panel().getByRole('link', { name: 'Files for Survival world (opens in a new tab)' }),
-    ).toHaveAttribute('href', '/servers/test-server/files');
-    await browserExpect(
-      panel().getByRole('link', { name: 'Files for Survival world (opens in a new tab)' }),
-    ).toHaveAttribute('target', '_blank');
-    await browserExpect(
-      panel().getByRole('link', { name: 'Backups for Survival world (opens in a new tab)' }),
-    ).toHaveAttribute('href', '/servers/test-server/backups');
-    await quota.fill('8');
-    await disk.fill('2');
-    await browserExpect(apply).toBeDisabled();
-    await browserExpect(refresh).toBeEnabled();
-    refreshFails = true;
-    await refresh.click();
-    await browserExpect(panel().getByRole('alert')).toContainText(
-      'This integration is unavailable.',
-    );
-    await browserExpect(quota).toHaveValue('8');
-    await browserExpect(disk).toHaveValue('2');
-    refreshFails = false;
-    refreshed = structuredClone(draft);
-    const cleaned = refreshed.users[0]?.servers[0];
-    if (!cleaned) throw new Error('Missing refreshed server');
-    cleaned.usageBytes = 1024 ** 3;
-    cleaned.minimumDiskMiB = 1152;
-    cleaned.observedAt = new Date(Date.now() + 5000).toISOString();
-    cleaned.errorCode = null;
-    await refresh.click();
-    await browserExpect(panel().getByText('Server files: 1 GiB', { exact: true })).toBeVisible();
-    await browserExpect(quota).toHaveValue('8');
-    await browserExpect(disk).toHaveValue('2');
-    await browserExpect(apply).toBeEnabled();
-    await browserExpect(panel().getByText('Needs attention', { exact: true })).toBeVisible();
-    expect(applies).toEqual([]);
-    expect(previewRequests).toEqual([]);
-    expect(refreshRequests).toEqual([
-      '/v1/owner/storage-policy/transition-1/refresh',
-      '/v1/owner/storage-policy/transition-1/refresh',
-    ]);
-    await page.screenshot({
-      path: `${screenshots}/storage-blocked-cleanup-refreshed-en.png`,
-      fullPage: true,
-    });
-    await accessible();
-    await apply.click();
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: 'Apply changes', exact: true })
-      .click();
-    expect(applies).toEqual([
-      [
-        {
-          userId: 'test-user',
-          quotaMiB: 8192,
-          servers: [{ serverId: 'test-server', diskMiB: 2048 }],
-        },
-      ],
-    ]);
-    await browserExpect(panel().getByRole('link', { name: /Files for/ })).toHaveCount(0);
-  });
-
-  it('uses zero for unlimited server allocations and has no generic storage/reset bypass', async () => {
+  it('automatically previews shared storage and has no generic storage/reset bypass', async () => {
+    state.transition = { ...fixture('GLOBAL_POOL'), status: 'completed' };
     await open();
     await browserExpect(page.locator('.settings-list details')).toHaveCount(0);
-    await panel().getByRole('button', { name: 'Check occupied space', exact: true }).click();
-    await browserExpect(panel().getByLabel('Limit for Survival world (GiB)')).toHaveCount(0);
-    await panel().getByRole('button', { name: 'Review and apply', exact: true }).click();
+    await browserExpect(diskInput()).toHaveCount(0);
+    await browserExpect(applyButton()).toBeEnabled();
+    await applyButton().click();
     await page
       .getByRole('dialog')
       .getByRole('button', { name: 'Apply changes', exact: true })
       .click();
-    expect(applies[0]?.[0]?.servers).toEqual([{ serverId: 'test-server', diskMiB: 0 }]);
+    await expect
+      .poll(() => applies[0]?.[0]?.servers)
+      .toEqual([{ serverId: 'test-server', diskMiB: 0 }]);
   });
 
-  it('honors environment locks and operator read-only settings', async () => {
+  it('honors environment locks and operator read-only settings without starting previews', async () => {
     state.lockedKeys = ['storagePolicy'];
     state.transition = draft;
     await open();
-    await browserExpect(panel().getByRole('button')).toHaveCount(0);
-    await browserExpect(panel().getByLabel('Quota for Ada Rossi (GiB)')).toBeDisabled();
+    await browserExpect(applyButton()).toHaveCount(0);
+    await browserExpect(quotaInput()).toBeDisabled();
+    expect(previewRequests).toEqual([]);
     state.lockedKeys = [];
     role = 'operator';
     await page.reload();
@@ -571,5 +673,6 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     await browserExpect(
       panel().getByText('Your role can view these settings. Only the Owner can change them.'),
     ).toBeVisible();
+    expect(previewRequests).toEqual([]);
   });
 });

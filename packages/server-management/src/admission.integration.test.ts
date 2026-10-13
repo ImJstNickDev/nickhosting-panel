@@ -21,6 +21,107 @@ afterAll(async () => {
 });
 
 describe('atomic active compute and persistent resource admission', () => {
+  it('exempts a zero-budget user without bypassing physical storage capacity or unknown usage', async () => {
+    const id = await f.server({ limits: { ...f.limits, disk: 0 } });
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const env = { NH_STORAGE_POLICY: 'PER_USER_BUDGET', NH_DEFAULT_USER_STORAGE_MIB: '1' };
+    const admit = (amount: number) =>
+      f.db
+        .transaction()
+        .execute((tx) => checkStorage(tx, f.context.subjectUserId, f.hostId, amount, env));
+    await expect(admit(1024)).resolves.toBeUndefined();
+    await expect(admit(1000000)).rejects.toThrow('storage_exhausted');
+    await f.db.deleteFrom('server_metrics').where('server_id', '=', id).execute();
+    await expect(admit(16)).rejects.toThrow('integration_unavailable');
+  });
+  it('preserves unlimited storage in compute-only edits and requires reconciliation to restore a cap', async () => {
+    await f.server({ limits: { ...f.limits, disk: 0 } });
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const input = {
+      userId: f.context.subjectUserId,
+      memoryMiB: 512,
+      cpuPercent: 50,
+      reason: 'Compute-only exception for unlimited storage',
+    };
+    await setUserLimits(f.db, f.owner, input);
+    await setUserLimits(f.db, f.owner, {
+      ...input,
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    expect(
+      await f.db
+        .selectFrom('storage_user_budgets')
+        .select('storage_mib')
+        .where('user_id', '=', f.context.subjectUserId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ storage_mib: '0' });
+    await expect(setUserLimits(f.db, f.owner, { ...input, storageMiB: 1024 })).rejects.toThrow(
+      'conflict',
+    );
+    await expect(setUserLimits(f.db, f.owner, { ...input, storageMiB: 0 })).rejects.toThrow(
+      'validation_failed',
+    );
+    expect(
+      Number(
+        (
+          await f.db
+            .selectFrom('resource_user_limits')
+            .select('storage_mib')
+            .where('user_id', '=', f.context.subjectUserId)
+            .executeTakeFirstOrThrow()
+        ).storage_mib,
+      ),
+    ).toBeGreaterThan(0);
+  });
+  it('preserves default-following storage when a compute-only edit replaces an expired legacy override', async () => {
+    await setUserLimits(f.db, f.owner, {
+      userId: f.context.subjectUserId,
+      memoryMiB: 512,
+      cpuPercent: 50,
+      storageMiB: 2048,
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      reason: 'Legacy temporary allowance',
+    });
+    await expect(
+      setUserLimits(f.db, f.owner, {
+        userId: f.context.subjectUserId,
+        memoryMiB: 256,
+        cpuPercent: 25,
+        reason: 'Must not extend a temporary storage allowance',
+      }),
+    ).rejects.toThrow('conflict');
+    expect(
+      await f.db
+        .selectFrom('storage_user_budgets')
+        .select('user_id')
+        .where('user_id', '=', f.context.subjectUserId)
+        .executeTakeFirst(),
+    ).toBeUndefined();
+    await f.db
+      .updateTable('resource_user_limits')
+      .set({ expires_at: new Date(0) })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    await setUserLimits(f.db, f.owner, {
+      userId: f.context.subjectUserId,
+      memoryMiB: 256,
+      cpuPercent: 25,
+      reason: 'Preserve default storage policy',
+    });
+    expect(
+      await f.db
+        .selectFrom('storage_user_budgets')
+        .select('storage_mib')
+        .where('user_id', '=', f.context.subjectUserId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ storage_mib: null });
+  });
   it('preserves an environment-backed storage default during a temporary compute exception', async () => {
     await f.db
       .insertInto('storage_user_budgets')

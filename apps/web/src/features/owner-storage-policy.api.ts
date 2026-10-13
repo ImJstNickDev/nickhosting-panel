@@ -17,6 +17,7 @@ export interface StoragePolicyUser {
   userId: string;
   name: string;
   quotaMiB: number;
+  quotaSource?: 'default' | 'override';
   requiredMiB: number | null;
   servers: StoragePolicyServer[];
 }
@@ -44,14 +45,30 @@ export interface StorageAllocation {
 }
 
 const root = '/v1/owner/storage-policy';
+// Preview writes a durable draft. Aborting a fetch cannot undo that write, so
+// serialize mutations even across a settings-page unmount/remount.
+let mutationQueue: Promise<unknown> = Promise.resolve();
+function serialized<T>(operation: () => Promise<T>): Promise<T> {
+  const result = mutationQueue.then(operation);
+  mutationQueue = result.catch(() => undefined);
+  return result;
+}
 export const storagePolicyApi = {
   status: (signal?: AbortSignal) => api<StoragePolicyStatus>(root, { signal }),
   preview: (policy: StorageMode, defaultUserStorageMiB: number) =>
-    api<StorageTransition>(`${root}/preview`, { body: { policy, defaultUserStorageMiB } }),
+    serialized(() =>
+      api<StorageTransition>(`${root}/preview`, { body: { policy, defaultUserStorageMiB } }),
+    ),
   apply: (id: string, users: StorageAllocation[]) =>
-    api<StorageTransition>(`${root}/${encodeURIComponent(id)}/apply`, { body: { users } }),
+    serialized(() =>
+      api<StorageTransition>(`${root}/${encodeURIComponent(id)}/apply`, { body: { users } }),
+    ),
   retry: (id: string) =>
-    api<StorageTransition>(`${root}/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
+    serialized(() =>
+      api<StorageTransition>(`${root}/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
+    ),
   refresh: (id: string) =>
-    api<StorageTransition>(`${root}/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+    serialized(() =>
+      api<StorageTransition>(`${root}/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+    ),
 };

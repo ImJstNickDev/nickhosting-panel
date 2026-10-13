@@ -23,6 +23,7 @@ export type {
 
 type DB = Kysely<Database>;
 const quota = z.number().int().min(1).max(1073741824);
+const userQuota = z.number().int().min(0).max(1073741824);
 const previewSchema = z
   .object({ policy: z.enum(['GLOBAL_POOL', 'PER_USER_BUDGET']), defaultUserStorageMiB: quota })
   .strict();
@@ -32,7 +33,7 @@ const applySchema = z
       z
         .object({
           userId: z.string().min(1),
-          quotaMiB: quota,
+          quotaMiB: userQuota,
           servers: z.array(
             z
               .object({ serverId: z.uuid(), diskMiB: z.number().int().min(0).max(1073741824) })
@@ -57,6 +58,13 @@ const required = (user: StoragePolicyUser) =>
   user.servers.some((s) => s.proposedDiskMiB === null)
     ? null
     : user.servers.reduce((sum, s) => sum + (s.proposedDiskMiB ?? 0) * (1 + s.backupSlots), 0);
+const quotaSource = (user: StoragePolicyUser, plan: Plan, defaultQuota: number) =>
+  user.quotaMiB === 0 ||
+  user.quotaMiB !== defaultQuota ||
+  user.quotaSource === 'override' ||
+  plan.explicitBudgetUsers?.includes(user.userId)
+    ? 'override'
+    : 'default';
 
 /** Explicit Owner application is the only path that queues remote changes. Preview
  * is read-only towards providers; blocked plans remain fenced until reconciled. */
@@ -129,7 +137,10 @@ export function createStoragePolicyService(options: {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       errorCode: row.error_code,
-      users: plan.users,
+      users: plan.users.map((user) => ({
+        ...user,
+        quotaSource: quotaSource(user, plan, row.default_user_storage_mib),
+      })),
     };
   }
   async function writable(
@@ -305,8 +316,8 @@ export function createStoragePolicyService(options: {
         const legacy = legacyBudgets.find(
           (b) => b.user_id === server.owner_id && (!b.expires_at || b.expires_at > new Date()),
         );
-        if (budget ? budget.storage_mib !== null : legacy !== undefined)
-          explicitBudgetUsers.push(server.owner_id);
+        const explicit = budget ? budget.storage_mib !== null : legacy !== undefined;
+        if (explicit) explicitBudgetUsers.push(server.owner_id);
         user = {
           userId: server.owner_id,
           name: server.owner_name,
@@ -315,6 +326,7 @@ export function createStoragePolicyService(options: {
               ? (budget.storage_mib ?? input.defaultUserStorageMiB)
               : (legacy?.storage_mib ?? input.defaultUserStorageMiB),
           ),
+          quotaSource: explicit ? 'override' : 'default',
           requiredMiB: 0,
           servers: [],
         };
@@ -343,7 +355,7 @@ export function createStoragePolicyService(options: {
           minimumDiskMiB: measured.minimumDiskMiB,
           currentDiskMiB: measured.remote.limits.disk,
           proposedDiskMiB:
-            input.policy === 'GLOBAL_POOL'
+            input.policy === 'GLOBAL_POOL' || user.quotaMiB === 0
               ? 0
               : Math.max(measured.minimumDiskMiB, server.limits.disk),
         });
@@ -431,7 +443,7 @@ export function createStoragePolicyService(options: {
             item.minimumDiskMiB === null ||
             item.usageBytes === null ||
             target === undefined ||
-            (row.policy === 'GLOBAL_POOL'
+            (row.policy === 'GLOBAL_POOL' || edit.quotaMiB === 0
               ? target !== 0
               : target < 16 || item.minimumDiskMiB === null || target < item.minimumDiskMiB)
           )
@@ -446,9 +458,11 @@ export function createStoragePolicyService(options: {
           item.errorCode = null;
         }
         user.quotaMiB = edit.quotaMiB;
+        user.quotaSource = quotaSource(user, plan, row.default_user_storage_mib);
         user.requiredMiB = required(user);
         if (
           row.policy === 'PER_USER_BUDGET' &&
+          user.quotaMiB !== 0 &&
           (user.requiredMiB === null || user.requiredMiB > user.quotaMiB)
         )
           throw new DomainError('storage_exhausted');
@@ -741,8 +755,7 @@ export function createStoragePolicyService(options: {
             if (row.policy === 'PER_USER_BUDGET')
               for (const user of plan.users) {
                 const storageMiB =
-                  user.quotaMiB === row.default_user_storage_mib &&
-                  !plan.explicitBudgetUsers?.includes(user.userId)
+                  quotaSource(user, plan, row.default_user_storage_mib) === 'default'
                     ? null
                     : String(user.quotaMiB);
                 await tx

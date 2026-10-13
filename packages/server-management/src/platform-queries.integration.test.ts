@@ -576,6 +576,28 @@ describe('M5 platform browser queries and metadata', () => {
       'forbidden',
     );
   });
+  it('reports a personal unlimited exception as unbounded and creates without a disk cap', async () => {
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({ user_id: f.context.subjectUserId, storage_mib: '0' })
+      .execute();
+    const env = { NH_STORAGE_POLICY: 'PER_USER_BUDGET' };
+    expect(await getPlatformQuota(f.db, f.context, f.context.subjectUserId, env)).toMatchObject({
+      storageBudgetMiB: 0,
+      storageBudgetOverrideMiB: 0,
+      limits: { storageMiB: null },
+      remaining: { storageMiB: null },
+      creationStorage: { mode: 'shared', defaultDiskMiB: 0 },
+    });
+    await f.db
+      .updateTable('storage_user_budgets')
+      .set({ storage_mib: null })
+      .where('user_id', '=', f.context.subjectUserId)
+      .execute();
+    expect(
+      (await getPlatformQuota(f.db, f.context, f.context.subjectUserId, env)).limits.storageMiB,
+    ).toBeGreaterThan(0);
+  });
   it('provides Owner directory/detail and audit quota history without credentials and refuses ordinary access', async () => {
     await expect(listPlatformUsers(f.db, f.context)).rejects.toThrow('forbidden');
     const users = await listPlatformUsers(f.db, f.owner, { q: f.context.subjectUserId });
