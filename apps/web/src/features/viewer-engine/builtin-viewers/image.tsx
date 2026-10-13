@@ -242,7 +242,7 @@ function FrameViewport({
     requestAnimationFrame(() => percentButton.current?.focus({ preventScroll: true }));
   }
   if (failed) return <ErrorNotice error={{ messageKey: 'viewer.imageUnavailable' }} />;
-  const percent = format.number(view.scale * 100, 4);
+  const percent = format.number(view.scale * 100, 2);
   return (
     <div className="ve-image-viewer" ref={root}>
       <div className="ve-controls" role="toolbar" aria-label={t('viewer.imageControls')}>
@@ -264,7 +264,7 @@ function FrameViewport({
               disabled={!natural}
               aria-label={t('viewer.editZoom', { percent })}
               onClick={() => {
-                setDraft(String(Number((view.scale * 100).toPrecision(10))));
+                setDraft(String(Number((view.scale * 100).toFixed(2))));
                 setInvalid(false);
               }}
             >
