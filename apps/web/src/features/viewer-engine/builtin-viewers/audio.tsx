@@ -13,12 +13,11 @@ import { viewerPath } from '../core/access.js';
 import type { ViewerProps } from '../core/types.js';
 import { ViewerIcon } from '../viewer-icon.js';
 import { ViewerSelect } from '../viewer-select.js';
-import { AudioWaveform } from './audio-waveform.js';
+import { AudioTimeline } from './audio-timeline.js';
 import { waveformLimits } from './audio-waveform-model.js';
 import './audio.css';
 
 const initial = {
-  time: 0,
   duration: 0,
   paused: true,
   volume: 1,
@@ -27,12 +26,6 @@ const initial = {
   ready: false,
 };
 const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
-const clock = (seconds: number) => {
-  if (!Number.isFinite(seconds) || seconds < 0) return '—';
-  const value = Math.floor(seconds),
-    hours = Math.floor(value / 3600);
-  return `${hours ? `${hours}:` : ''}${String(Math.floor(value / 60) % 60).padStart(hours ? 2 : 1, '0')}:${String(value % 60).padStart(2, '0')}`;
-};
 
 export default function AudioViewer({ serverId, source }: ViewerProps) {
   const t = useT(),
@@ -41,8 +34,6 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
   const media = useRef<HTMLAudioElement>(null);
   const generation = useRef(0);
   const lastVolume = useRef(1);
-  const scrubbing = useRef(false);
-  const [seekDraft, setSeekDraft] = useState<number | null>(null);
   const [state, setState] = useState(initial);
   const [buffering, setBuffering] = useState(false);
   const [showBuffering, setShowBuffering] = useState(false);
@@ -62,15 +53,21 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
   const sync = useCallback(() => {
     const audio = media.current;
     if (!audio) return;
-    setState({
-      time: audio.currentTime,
+    const next = {
       duration: audio.duration,
       paused: audio.paused,
       volume: audio.volume,
       muted: audio.muted,
       rate: audio.playbackRate,
       ready: audio.readyState >= 1,
-    });
+    };
+    setState((previous) =>
+      (Object.keys(next) as (keyof typeof next)[]).every((key) =>
+        Object.is(previous[key], next[key]),
+      )
+        ? previous
+        : next,
+    );
   }, []);
   useEffect(() => {
     const audio = media.current;
@@ -84,19 +81,6 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
       audio.load();
     };
   }, [src]);
-  useEffect(() => {
-    if (state.paused || failed) return;
-    let frame = 0;
-    const update = () => {
-      const audio = media.current;
-      if (!audio) return;
-      const time = audio.currentTime;
-      setState((value) => (value.time === time ? value : { ...value, time }));
-      frame = requestAnimationFrame(update);
-    };
-    frame = requestAnimationFrame(update);
-    return () => cancelAnimationFrame(frame);
-  }, [state.paused, failed]);
   async function toggle() {
     const audio = media.current;
     if (!audio) return;
@@ -110,7 +94,10 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
     }
     if (failed || !state.ready) return;
     try {
-      await audio.play();
+      const playing = audio.play();
+      // paused changes synchronously; do not wait for the queued play event.
+      sync();
+      await playing;
     } catch (error) {
       if (generation.current !== attempt || (error as DOMException).name === 'AbortError') return;
       setBuffering(false);
@@ -120,22 +107,11 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
   }
   const duration = Number.isFinite(state.duration) && state.duration > 0 ? state.duration : 0;
   const seekable = state.ready && duration > 0 && !failed;
-  const time = Math.max(0, Math.min(duration || Infinity, state.time));
   function seek(value: number) {
     const audio = media.current;
     if (!audio || !seekable) return;
     audio.currentTime = Math.max(0, Math.min(duration, value));
     sync();
-  }
-  function finishScrub(value: number) {
-    if (!scrubbing.current) return;
-    scrubbing.current = false;
-    seek(value);
-    setSeekDraft(null);
-  }
-  function cancelScrub() {
-    scrubbing.current = false;
-    setSeekDraft(null);
   }
   function mute() {
     const audio = media.current;
@@ -154,10 +130,9 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
     setFailed(false);
     setPlayError(false);
     setBuffering(false);
-    setState((value) => ({ ...value, time: 0, duration: 0, ready: false, paused: true }));
+    setState((value) => ({ ...value, duration: 0, ready: false, paused: true }));
     audio.load();
   }
-  const displayedTime = seekDraft ?? time;
   const silent = state.muted || state.volume === 0;
   const extension = source.name.split('.').at(-1)?.toUpperCase();
   return (
@@ -173,7 +148,6 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
           hidden
           onLoadedMetadata={sync}
           onDurationChange={sync}
-          onTimeUpdate={sync}
           onVolumeChange={sync}
           onRateChange={sync}
           onPlay={sync}
@@ -219,54 +193,15 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
             </span>
           </div>
         </div>
-        <div className="wave-timeline">
-          <div className="wave-seek">
-            <AudioWaveform
-              url={src}
-              size={source.size}
-              duration={duration}
-              position={displayedTime}
-              unavailable={failed}
-            />
-            <input
-              className="wave-range wave-seek-input"
-              type="range"
-              aria-label={t('viewer.audioPosition')}
-              aria-valuetext={t('viewer.audioTime', {
-                current: clock(displayedTime),
-                total: duration ? clock(duration) : '—',
-              })}
-              min={0}
-              max={duration || 1}
-              step={0.001}
-              value={displayedTime}
-              disabled={!seekable}
-              style={
-                {
-                  '--wave-progress': `${duration ? (displayedTime / duration) * 100 : 0}%`,
-                } as CSSProperties
-              }
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                scrubbing.current = true;
-                event.currentTarget.setPointerCapture(event.pointerId);
-              }}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                if (scrubbing.current) setSeekDraft(value);
-                else seek(value);
-              }}
-              onPointerUp={(event) => finishScrub(Number(event.currentTarget.value))}
-              onBlur={(event) => finishScrub(Number(event.currentTarget.value))}
-              onPointerCancel={cancelScrub}
-              onLostPointerCapture={cancelScrub}
-            />
-          </div>
-          <div className="wave-times" aria-hidden="true">
-            <span>{clock(displayedTime)}</span>
-            <span>{duration ? clock(duration) : '—'}</span>
-          </div>
-        </div>
+        <AudioTimeline
+          media={media}
+          src={src}
+          size={source.size}
+          duration={duration}
+          seekable={seekable}
+          paused={state.paused}
+          failed={failed}
+        />
         <div className="wave-controls">
           <div className="wave-repeat">
             <AudioButton
@@ -284,7 +219,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
             <AudioButton
               label={t('viewer.audioBack')}
               disabled={!seekable}
-              onClick={() => seek(time - 10)}
+              onClick={() => seek((media.current?.currentTime ?? 0) - 10)}
             >
               <AudioIcon kind="back" />
             </AudioButton>
@@ -299,7 +234,7 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
             <AudioButton
               label={t('viewer.audioForward')}
               disabled={!seekable}
-              onClick={() => seek(time + 10)}
+              onClick={() => seek((media.current?.currentTime ?? 0) + 10)}
             >
               <AudioIcon kind="forward" />
             </AudioButton>

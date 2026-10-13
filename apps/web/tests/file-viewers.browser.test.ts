@@ -1593,19 +1593,50 @@ describe('M5 builtin file viewers', () => {
     const source = new URL(await audio.evaluate((element: HTMLAudioElement) => element.currentSrc));
     expect(source.origin).toBe(harness.origin);
     expect([...source.searchParams.keys()]).toEqual(['path']);
-    await player.getByRole('button', { name: 'Play', exact: true }).focus();
-    await page.keyboard.press('Space');
-    await browserExpect(player.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
-    await browserExpect
-      .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
-      .toBeGreaterThan(0);
+    // Keep real playback but withhold queued media events: the click must already expose Pause.
+    await audio.evaluate((element) => {
+      const block = (event: Event) => {
+        if (event.target === element) event.stopImmediatePropagation();
+      };
+      for (const name of ['play', 'playing', 'timeupdate'])
+        window.addEventListener(name, block, true);
+      Object.assign(element, { waveTestPlayBlock: block });
+    });
+    try {
+      await player.getByRole('button', { name: 'Play', exact: true }).focus();
+      await page.keyboard.press('Space');
+      await browserExpect(player.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
+      await browserExpect
+        .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
+        .toBeGreaterThan(0);
+    } finally {
+      await audio.evaluate((element) => {
+        const block = (element as HTMLAudioElement & { waveTestPlayBlock: EventListener })
+          .waveTestPlayBlock;
+        for (const name of ['play', 'playing', 'timeupdate'])
+          window.removeEventListener(name, block, true);
+        Reflect.deleteProperty(element, 'waveTestPlayBlock');
+      });
+    }
     // Hold the media clock and suppress timeupdate to prove frame-sampled progress, not its coarse event cadence.
     await audio.evaluate((element) => {
       const block = (event: Event) => {
         if (event.target === element) event.stopImmediatePropagation();
       };
       window.addEventListener('timeupdate', block, true);
-      Object.assign(element, { waveTestTimeUpdateBlock: block });
+      const originalFormat = Intl.NumberFormat;
+      const formats = { speed: 0 };
+      Intl.NumberFormat = new Proxy(originalFormat, {
+        construct(target, args) {
+          if (args[1]?.maximumFractionDigits === 2) formats.speed++;
+          return Reflect.construct(target, args);
+        },
+      });
+      Object.assign(element, {
+        waveTestTimeUpdateBlock: block,
+        waveTestOriginalFormat: originalFormat,
+        waveTestFormats: formats,
+      });
       Object.defineProperty(element, 'currentTime', { configurable: true, value: 12.3 });
     });
     try {
@@ -1618,11 +1649,24 @@ describe('M5 builtin file viewers', () => {
           ),
       );
       expect(Number(await position.inputValue())).toBeCloseTo(12.3, 5);
+      // Clock-only updates must not rebuild the six playback-speed labels.
+      expect(
+        await audio.evaluate(
+          (element) =>
+            (element as HTMLAudioElement & { waveTestFormats: { speed: number } }).waveTestFormats
+              .speed,
+        ),
+      ).toBe(0);
     } finally {
       await audio.evaluate((element) => {
         const block = (element as HTMLAudioElement & { waveTestTimeUpdateBlock: EventListener })
           .waveTestTimeUpdateBlock;
         window.removeEventListener('timeupdate', block, true);
+        Intl.NumberFormat = (
+          element as HTMLAudioElement & { waveTestOriginalFormat: typeof Intl.NumberFormat }
+        ).waveTestOriginalFormat;
+        Reflect.deleteProperty(element, 'waveTestOriginalFormat');
+        Reflect.deleteProperty(element, 'waveTestFormats');
         Reflect.deleteProperty(element, 'waveTestTimeUpdateBlock');
         Reflect.deleteProperty(element, 'currentTime');
       });

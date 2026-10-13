@@ -7809,3 +7809,26 @@ waiting feedback, error/retry and the preload attribute. Injected waiting events
 prove UI behavior, not real-provider timing. Web typecheck and scoped Biome pass;
 independent review found no must-fix. No infrastructure, restart, dependency,
 provider or real file changes. No full suite rerun for this presentation fix.
+
+### Wave playback clock polish (2026-10-13)
+
+Play now synchronizes the actual native paused state immediately after play(),
+without awaiting queued media events. The native currentTime animation loop lives
+in a separate timeline subtree; transport controls and number formatters no longer
+rerender for each clock frame. Unchanged control snapshots retain their state.
+Ten-second skips read the current native position. No speculative clock or
+artificial advancement is introduced; browser media startup still applies.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'runs Wave|shows Wave' --silent=false`: Chromium 2/2 pass (26.49 s). Real WAV playback still exposes Pause with play/playing/timeupdate events withheld by the test. The isolated clock-update regression advances the slider while constructing zero playback-speed formatters. Seek, drag, pause, skips, volume, repeat, rate, ended, stream cleanup, waiting/error/retry and scoped axe checks remain covered.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: pass, source and tests.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: pass; existing app/editor chunk-size warnings remain.
+- Scoped Biome and governance checks: pass.
+
+Independent code review found no must-fix across playback, scrubbing, retry and
+cleanup. This is focused browser-fixture evidence, not a new latency benchmark on
+the Owner's Firefox/audio device. Layout and copy are unchanged; existing Wave
+screenshots remain representative. No production/provider interactions, persistent
+test assets, dependencies or container restarts; development uses Vite HMR.
+Rollback is a revert of this UI/test change. PR #21 remains open and unmerged.
