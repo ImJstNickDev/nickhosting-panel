@@ -9,7 +9,7 @@ export interface ImageTransform {
   fit: boolean;
 }
 
-export const imageZoom = { min: 0.01, max: 50, svgMax: 250 } as const;
+export const imageZoom = { min: 0.01, max: 50, svgMax: 500 } as const;
 export const initialImageTransform: ImageTransform = { scale: 1, x: 0, y: 0, fit: true };
 
 export function fitImage(

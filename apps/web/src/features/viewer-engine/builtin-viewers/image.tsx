@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { useFormat, useT } from '../../../app/i18n.js';
+import { useT } from '../../../app/i18n.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { readViewerBytes, viewerPath } from '../core/access.js';
 import { previewLimits } from '../core/limits.js';
@@ -17,16 +17,49 @@ import {
   parseImagePercent,
   zoomImage,
 } from './image-viewport.js';
+import { parseSvgDocument } from './svg-document.js';
+import { SvgSurface } from './svg-surface.js';
 
-type ImageFrame = { url: string; width?: number; height?: number; bpp?: number };
+type ImageFrame = {
+  url: string;
+  width?: number;
+  height?: number;
+  bpp?: number;
+  svg?: SVGSVGElement;
+};
 export default function ImageViewer({ serverId, source }: ViewerProps) {
   const t = useT();
   const url = viewerPath(serverId, source);
   const ico = source.name.toLowerCase().endsWith('.ico');
+  const vector = source.name.toLowerCase().endsWith('.svg');
   const resource = useViewerResource<ImageFrame[]>(
     url,
     async (signal) => {
       if (source.size > previewLimits.imageBytes) throw { messageKey: 'viewer.tooLarge' };
+      if (vector) {
+        const bytes = await readViewerBytes(url, previewLimits.imageBytes, signal);
+        const svg = parseSvgDocument(bytes);
+        // Decode only for intrinsic sizing. This temporary URL is never attached to the DOM.
+        const sizingURL = URL.createObjectURL(new Blob([bytes], { type: 'image/svg+xml' }));
+        const sizing = new Image();
+        const abort = () => {
+          sizing.src = '';
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        try {
+          signal.throwIfAborted();
+          sizing.src = sizingURL;
+          await sizing.decode();
+          signal.throwIfAborted();
+          if (!sizing.naturalWidth || !sizing.naturalHeight)
+            throw { messageKey: 'viewer.imageUnavailable' };
+          return [{ url, svg, width: sizing.naturalWidth, height: sizing.naturalHeight }];
+        } finally {
+          signal.removeEventListener('abort', abort);
+          sizing.src = '';
+          URL.revokeObjectURL(sizingURL);
+        }
+      }
       if (!ico) return [{ url }];
       const bytes = await readViewerBytes(url, previewLimits.icoBytes, signal);
       validateIconset(bytes);
@@ -61,7 +94,7 @@ export default function ImageViewer({ serverId, source }: ViewerProps) {
       key={image.url}
       image={image}
       name={source.name}
-      vector={source.name.toLowerCase().endsWith('.svg')}
+      vector={vector}
       framePicker={
         resource.value.length > 1 && (
           <label>
@@ -99,7 +132,6 @@ function FrameViewport({
   framePicker: ReactNode;
 }) {
   const t = useT();
-  const format = useFormat();
   const maximum = vector ? imageZoom.svgMax : imageZoom.max;
   const root = useRef<HTMLDivElement>(null);
   const stage = useRef<HTMLElement>(null);
@@ -107,6 +139,15 @@ function FrameViewport({
   const [natural, setNatural] = useState<ImageSize>();
   const [view, setView] = useState(initialImageTransform);
   const current = useRef(view);
+  const pendingFrame = useRef<number | undefined>(undefined);
+  const [viewportSize, setViewportSize] = useState<ImageSize>({ width: 0, height: 0 });
+  useEffect(
+    () => () => {
+      if (pendingFrame.current !== undefined) cancelAnimationFrame(pendingFrame.current);
+      pendingFrame.current = undefined;
+    },
+    [],
+  );
   const [failed, setFailed] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
   const [invalid, setInvalid] = useState(false);
@@ -121,7 +162,11 @@ function FrameViewport({
       viewport && size
         ? constrainImage(next, size, { width: viewport.clientWidth, height: viewport.clientHeight })
         : next;
-    setView(current.current);
+    if (pendingFrame.current === undefined)
+      pendingFrame.current = requestAnimationFrame(() => {
+        pendingFrame.current = undefined;
+        setView(current.current);
+      });
   }, []);
   const fit = useCallback(() => {
     const viewport = stage.current;
@@ -131,6 +176,13 @@ function FrameViewport({
       fitImage(size, { width: viewport.clientWidth, height: viewport.clientHeight }, maximum),
     );
   }, [maximum, update]);
+  useEffect(() => {
+    if (image.svg && image.width && image.height) {
+      dimensions.current = { width: image.width, height: image.height };
+      setNatural(dimensions.current);
+      fit();
+    }
+  }, [image, fit]);
   const zoom = useCallback(
     (factor: number, anchor?: { x: number; y: number }) => {
       if (dimensions.current)
@@ -146,6 +198,7 @@ function FrameViewport({
     if (!stageElement || !keyboardRoot || failed) return;
     const viewport = stageElement;
     const observer = new ResizeObserver(() => {
+      setViewportSize({ width: viewport.clientWidth, height: viewport.clientHeight });
       if (current.current.fit) fit();
       else update((value) => value);
     });
@@ -261,7 +314,7 @@ function FrameViewport({
   const exactPercent = view.scale * 100;
   // Compensate multiplication noise at half percentages (e.g. 1.255 × 100).
   const displayedPercent = Math.round(exactPercent + Number.EPSILON * exactPercent);
-  const percent = format.number(displayedPercent, 0);
+  const percent = String(displayedPercent).replace(/\B(?=(\d{3})+(?!\d))/g, '·');
   return (
     <div className="ve-image-viewer" ref={root}>
       <div className="ve-controls" role="toolbar" aria-label={t('viewer.imageControls')}>
@@ -385,29 +438,42 @@ function FrameViewport({
           if (drag.current?.id === event.pointerId) drag.current = undefined;
         }}
       >
-        <img
-          src={image.url}
-          alt={name}
-          draggable={false}
-          style={{
-            // Size vectors at their displayed resolution; CSS scaling can enlarge a rasterized layer.
-            width: natural ? natural.width * (vector ? view.scale : 1) : undefined,
-            height: natural ? natural.height * (vector ? view.scale : 1) : undefined,
-            visibility: natural ? 'visible' : 'hidden',
-            transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px)${vector ? '' : ` scale(${view.scale})`}`,
-          }}
-          onLoad={(event) => {
-            const element = event.currentTarget;
-            if (!element.naturalWidth || !element.naturalHeight) {
-              setFailed(true);
-              return;
-            }
-            dimensions.current = { width: element.naturalWidth, height: element.naturalHeight };
-            setNatural(dimensions.current);
-            fit();
-          }}
-          onError={() => setFailed(true)}
-        />
+        {image.svg ? (
+          natural && (
+            <div role="img" aria-label={name}>
+              <SvgSurface
+                source={image.svg}
+                size={natural}
+                viewport={viewportSize}
+                view={view}
+                name={name}
+              />
+            </div>
+          )
+        ) : (
+          <img
+            src={image.url}
+            alt={name}
+            draggable={false}
+            style={{
+              width: natural?.width,
+              height: natural?.height,
+              visibility: natural ? 'visible' : 'hidden',
+              transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+            }}
+            onLoad={(event) => {
+              const element = event.currentTarget;
+              if (!element.naturalWidth || !element.naturalHeight) {
+                setFailed(true);
+                return;
+              }
+              dimensions.current = { width: element.naturalWidth, height: element.naturalHeight };
+              setNatural(dimensions.current);
+              fit();
+            }}
+            onError={() => setFailed(true)}
+          />
+        )}
       </section>
     </div>
   );

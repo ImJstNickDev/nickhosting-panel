@@ -11,14 +11,17 @@ import { saveBootstrapConfiguration } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { validateConnection } from '@nickhosting/pterodactyl-adapter';
 import type { ManagementRuntime } from '@nickhosting/server-management';
-import { type Browser, chromium, type Page } from '@playwright/test';
+import { type Browser, chromium, firefox, type Page } from '@playwright/test';
 import { createServer as createViteServer } from 'vite';
 import { createApp } from '../../api/src/app.js';
 import { createApiHttpServer } from '../../api/src/http-server.js';
 
 export const browserPassword = 'Browser-only-password-697!';
 export async function browserHarness(
-  options: { discord?: { clientId: string; clientSecret: string } } = {},
+  options: {
+    discord?: { clientId: string; clientSecret: string };
+    browser?: 'chromium' | 'firefox';
+  } = {},
 ) {
   const database = await createTestDatabase();
   const mails: IdentityMail[] = [];
@@ -108,7 +111,7 @@ export async function browserHarness(
       homedir(),
       '.cache/nickhosting-playwright-libs/root/usr/lib/x86_64-linux-gnu',
     );
-    browser = await chromium.launch({
+    browser = await (options.browser === 'firefox' ? firefox : chromium).launch({
       headless: true,
       ...(existsSync(libs)
         ? {
@@ -140,7 +143,9 @@ export async function browserHarness(
           locale: locale === 'it' ? 'it-IT' : 'en-GB',
           reducedMotion: 'reduce',
         });
-        await context.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+        await context.addInitScript((value) => {
+          if (window === window.top) localStorage.setItem('nh.locale', value);
+        }, locale);
         const page = await context.newPage();
         return page;
       },

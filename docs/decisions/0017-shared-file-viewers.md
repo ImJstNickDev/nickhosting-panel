@@ -60,3 +60,25 @@ See [deployment proposal](../M5-VIEWER-DEPLOYMENT.md),
 [API contracts](../M5-API-CONTRACTS.md) and the validation report. This extends
 [ADR 0007](0007-file-transfer-and-storage.md) without replacing its external SFTP
 or existing file-management decisions.
+
+## Amendment — 2026-10-13: native SVG rendering in Frame
+
+The image-only SVG rule above is superseded for Frame. Firefox's SVG image cache
+made large zoom slow and could degrade detail; CSS dimensions alone did not resolve
+the Owner's report. Frame now mounts a native SVG document in a fixed-viewport
+iframe. The trusted, constant srcdoc installs CSP before source import; iframe
+sandbox permits parent access only, never scripts. CSP denies external resources,
+forms and base changes; only embedded data images/fonts and inline styles remain
+available. Frame is inert and excluded from focus, with image naming and keyboard
+controls in the parent. Raw source nodes never enter the application DOM.
+
+The source root is retained for root CSS, percentages and local paint references;
+an independent clip retains the natural canvas despite root transforms. Input
+bursts are coalesced per animation frame. Raw source Blob URLs are never exposed:
+a temporary detached Image decodes intrinsic dimensions and its URL is immediately
+revoked. Direct API responses keep their existing sandbox CSP. No API, provider,
+Blueprint, infrastructure or file-write permission changes are introduced.
+
+[Validation](../M5-VALIDATION.md) records Chromium/Firefox tests, independent review,
+synthetic performance measurements, and the read-only real dataset check. Raster
+previews and ICO decoding retain their existing path; SFTPGo issue #18 is unchanged.

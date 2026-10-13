@@ -67,7 +67,7 @@ export function viewerHeaders(
     ...(range.partial
       ? { 'Content-Range': `bytes ${range.start}-${range.endExclusive - 1}/${size}` }
       : {}),
-    // SVG is only embedded as an image. Direct navigation is sandboxed as well.
+    // Raw SVG responses stay sandboxed, including direct navigation outside Frame.
     'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'",
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'private, no-store',

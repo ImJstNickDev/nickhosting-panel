@@ -7437,3 +7437,81 @@ issue18 are unchanged.
 Independent final code/security/geometry/screenshot review found no must-fix
 issues. Index governance passed: 739 text files, 225 PNGs, 623 relative links,
 4 TOML files and 44 ignore cases (heuristic secret scan).
+
+## 2026-10-13 — Firefox SVG document rendering, 50000% and raised separator
+
+Owner follow-up confirmed the preceding image-dimension fix did not resolve blur
+or zoom stalls. Frame now uses native SVG document rendering in an isolated,
+viewport-sized frame rather than Firefox's SVG-as-image cache. The file is fetched
+once through the existing authorized byte reader, parsed detached, and imported
+only after the frame's trusted CSP is active. The frame never allows scripts;
+external resources/navigation/forms are restricted, and its content is inert.
+No raw SVG Blob is exposed for navigation. A short-lived, detached image obtains
+intrinsic dimensions only, then its Blob URL is revoked. Root selectors, percentage
+geometry, gradients/use/clip references, and source root transforms are preserved;
+an independent clip retains the logical image canvas. Updates coalesce per rAF.
+
+SVG now allows 1–50000%, displayed with a raised thousands separator (`50·000%`).
+Raster/ICO retain 1–5000%; calculations retain full precision.
+
+A bounded headless Firefox comparison of 40 zoom steps on the same simple
+1000×1000 vector fixture, from 100% to 25000%, measured:
+
+| Rendering path | Mean update including animation-frame wait | Maximum |
+| --- | ---: | ---: |
+| Previous SVG image CSS sizing | 58.0 ms | 935 ms |
+| Native SVG document | 16.3 ms | 18 ms |
+
+These are synthetic local measurements, not a guarantee for every SVG or GPU.
+The initial static Chromium sharpness test had missed this image-cache behavior.
+Related upstream evidence: [Firefox vector image scaling](https://bugzilla.mozilla.org/show_bug.cgi?id=1456558)
+and [large SVG image rasterization](https://bugzilla.mozilla.org/show_bug.cgi?id=1712702).
+A fragment-camera experiment was fast but did not preserve all source semantics;
+nesting another SVG image retained the Firefox stall and was not adopted.
+
+Final checks (targeted only):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/image-viewport.test.ts`:
+  6/6 passed for limits and geometry.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts
+  -t 'renders SVG|isolates native|clips SVG|opens SVG|small transparent|Frame'`:
+  Chromium 8/8 passed, 10 skipped, 54.48s. Includes 50000% pixel sharpness, full
+  keyboard/gesture/bounds/resize/mobile-axe regressions, ICO/raster, and root
+  translation/scale clipping at 100%/200%.
+- Firefox uses the same command with `NH_BROWSER=firefox` and the user-local
+  `LD_LIBRARY_PATH` for browser libraries. Rendering/security final 2/2 passed,
+  29.92s; final Fit/root-transform tests 2/2 passed, 25.00s. The other affected
+  Firefox journeys passed in the earlier scoped run. Seven sharpness variants
+  include viewBox-only, no viewBox, large dimensions, root CSS/percentage lengths
+  and UTF-16 LE/BE. Canvas pixel assertions verify local gradients/use/clip paths;
+  hostile scripts, handlers, external requests, frame navigation/forms and focus
+  theft do not execute. Zoom causes no additional content requests.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, targeted Biome and
+  `git diff --check`: passed. The shared harness retains its pre-existing
+  non-null-assertion warning; unrelated Owner work was not reformatted/reverted.
+- Actual development UI in Firefox: the reported 1000×480 vector dataset file
+  opens at 50000% (500000×240000 native SVG layout), Fit and Actual size pass.
+  Read-only access only; no game files or lifecycle operations changed.
+
+Intermediate tests caught a StrictMode cancellation ref left set after rAF cleanup
+(fixed), layout assertions tighter than Firefox's 1/60-CSS-pixel snapping (now
+asserted within 0.05 displayed pixels), and a test-only locale init script running
+inside nested frames (now top-level only). Browser request notifications include
+CSP-blocked attempts; security assertions count dispatched fixture requests.
+Independent review found source root transforms could paint beyond the canvas;
+the separate iframe clip fixes this and has committed Chromium/Firefox coverage.
+Historical failures and earlier evidence remain recorded above.
+
+Reviewed the [Firefox 50000% fixture](screenshots/m5/file-viewer-frame-svg-50000-en-firefox.png).
+Firefox and required Debian libraries were downloaded/extracted solely to the
+current user's browser cache; no system package installation or upgrade. Tests
+reuse approved isolated services. No deployment, container restart, provider or
+Blueprint change; no game assets created or removed. Safari and physical trackpad
+hardware remain outside this verification. DTD-bearing SVG is rejected; ordinary
+UTF-8 and BOM-marked UTF-16 are covered. See the ADR0017 amendment for the revised
+security boundary. Issue #18 and PR #21's unmerged status remain unchanged.
+
+Independent final code/security/geometry and Firefox screenshot review found no
+remaining must-fix issues. Index governance passed: 741 text files, 226 PNGs,
+625 relative links, 4 TOML files and 44 ignore cases (heuristic secret scan).

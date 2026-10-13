@@ -39,9 +39,9 @@ describe('Frame viewport geometry', () => {
   it('uses the larger SVG limit for both fit and manual zoom without changing raster limits', () => {
     const size = { width: 1, height: 1 },
       viewport = { width: 1000, height: 800 };
-    expect(fitImage(size, viewport, imageZoom.svgMax).scale).toBe(250);
+    expect(fitImage(size, viewport, imageZoom.svgMax).scale).toBe(500);
     expect(fitImage(size, viewport).scale).toBe(50);
-    expect(zoomImage(initialImageTransform, 1000, undefined, imageZoom.svgMax).scale).toBe(250);
+    expect(zoomImage(initialImageTransform, 1000, undefined, imageZoom.svgMax).scale).toBe(500);
     expect(zoomImage(initialImageTransform, 0, undefined, imageZoom.svgMax).scale).toBe(0.01);
   });
   it('keeps the entire smaller image visible and lets larger axes reach either edge', () => {

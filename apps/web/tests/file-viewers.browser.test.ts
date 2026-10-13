@@ -26,7 +26,9 @@ describe('M5 builtin file viewers', () => {
   let holdPreference: Promise<void> | undefined;
 
   beforeAll(async () => {
-    harness = await browserHarness();
+    harness = await browserHarness({
+      browser: process.env.NH_BROWSER === 'firefox' ? 'firefox' : 'chromium',
+    });
     const identities = await prepareJourneyIdentities(harness);
     page = identities.user;
     provider = await installBrowserFixtures(
@@ -108,6 +110,7 @@ describe('M5 builtin file viewers', () => {
     remote.set('viewer.ico', Buffer.concat([ico, ...frames]));
     for (const [name, attributes, width, height] of [
       ['sharp.svg', 'width="32" height="32" viewBox="0 0 32 32"', 32, 32],
+      ['sharp-styled.svg', 'width="32" height="32" viewBox="0 0 32 32"', 32, 32],
       ['sharp-no-viewbox.svg', 'width="32" height="32"', 32, 32],
       ['sharp-viewbox-only.svg', 'viewBox="0 0 32 32"', 32, 32],
       ['sharp-large.svg', 'width="1000" height="480" viewBox="0 0 1000 480"', 1000, 480],
@@ -115,7 +118,41 @@ describe('M5 builtin file viewers', () => {
       remote.set(
         name,
         Buffer.from(
-          `<svg xmlns="http://www.w3.org/2000/svg" ${attributes}><rect width="${width}" height="${height}" fill="white"/><path d="M0 0H${width}L0 ${height}Z" fill="black"/><script>window.viewerScriptRan=true;fetch("/viewer-script-must-not-run")</script><image href="/viewer-script-must-not-run" width="1" height="1"/></svg>`,
+          `<svg xmlns="http://www.w3.org/2000/svg" ${attributes}>${name === 'sharp-styled.svg' ? '<style>:root > rect {fill:white}</style><rect width="100%" height="100%" fill="red"/>' : `<rect width="${width}" height="${height}" fill="white"/>`}<path d="M0 0H${width}L0 ${height}Z" fill="black"/><script>window.viewerScriptRan=true;fetch("/viewer-script-must-not-run")</script><image href="/viewer-script-must-not-run" width="1" height="1"/></svg>`,
+        ),
+      );
+    }
+    remote.set(
+      'hostile.svg',
+      Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" onload="parent.viewerScriptRan=true">
+      <style>@import url('/viewer-script-must-not-run'); :root > rect {fill:#fff}</style>
+      <script>parent.viewerScriptRan=true;window.viewerScriptRan=true</script>
+      <defs><linearGradient id="paint"><stop stop-color="#000"/><stop offset="1" stop-color="#000"/></linearGradient><clipPath id="clip"><rect width="50" height="100"/></clipPath><path id="shape" d="M0 0H100V100H0Z"/></defs>
+      <rect width="100%" height="100%" fill="red"/><use href="#shape" fill="url(#paint)" clip-path="url(#clip)"/>
+      <foreignObject width="1" height="1"><div xmlns="http://www.w3.org/1999/xhtml"><meta http-equiv="refresh" content="0;url=/viewer-script-must-not-run"/><input autofocus="" onfocus="parent.viewerScriptRan=true"/><iframe src="/viewer-script-must-not-run"/><form action="/viewer-script-must-not-run"><input type="submit"/></form><img src="/viewer-script-must-not-run" onerror="parent.viewerScriptRan=true"/></div></foreignObject>
+      <animate attributeName="opacity" from="1" to="1" dur="1s" onbegin="parent.viewerScriptRan=true"/>
+    </svg>`),
+    );
+    const utf16 = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" fill="white"/><path d="M0 0H32L0 32Z" fill="black"/></svg>',
+      'utf16le',
+    );
+    remote.set('sharp-utf16le.svg', Buffer.concat([Buffer.from([0xff, 0xfe]), utf16]));
+    remote.set(
+      'sharp-utf16be.svg',
+      Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(utf16).swap16()]),
+    );
+    for (const [name, transform] of [
+      ['translate', 'transform="translate(20 0)"'],
+      ['scale', 'transform="scale(2)"'],
+      ['css', 'style="transform:translate(20px,0)"'],
+    ]) {
+      remote.set(
+        `root-${name}.svg`,
+        Buffer.from(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100" ' +
+            transform +
+            '><rect width="100" height="100" fill="black"/></svg>',
         ),
       );
     }
@@ -135,8 +172,9 @@ describe('M5 builtin file viewers', () => {
     });
     remote.set('transparent.png', Buffer.from(transparentPng, 'base64'));
     page.on('pageerror', (error) => errors.push(error.message));
-    page.on('request', (request) => {
-      if (new URL(request.url()).pathname === '/viewer-script-must-not-run') scriptRequests++;
+    await page.route('**/viewer-script-must-not-run', async (route) => {
+      scriptRequests++;
+      await route.fulfill({ status: 200, body: 'blocked fixture must not be reached' });
     });
     await page.route(`**${endpoint}/**`, async (route) => {
       const request = route.request();
@@ -279,14 +317,11 @@ describe('M5 builtin file viewers', () => {
     ).toBeVisible();
     expect(reads).toEqual([]);
     await page.locator('.fm-filename').getByText('viewer.svg', { exact: true }).click();
-    await browserExpect(page.locator('.ve-image-stage img')).toBeVisible();
-    await browserExpect
-      .poll(() =>
-        page
-          .locator('.ve-image-stage img')
-          .evaluate((image) => (image as HTMLImageElement).naturalWidth),
-      )
-      .toBe(400);
+    await browserExpect(page.locator('.ve-svg-surface')).toBeVisible();
+    await browserExpect(page.locator('.ve-svg-surface')).toHaveAttribute(
+      'data-natural-width',
+      '400',
+    );
     expect(await page.evaluate(() => 'viewerScriptRan' in window)).toBe(false);
     expect(scriptRequests).toBe(0);
     await page.getByRole('button', { name: 'Actual size', exact: true }).click();
@@ -348,33 +383,41 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
-  it('renders SVG vectors sharply at twenty-five thousand percent without enabling embedded content', async () => {
+  it('renders SVG vectors sharply at fifty thousand percent without enabling embedded content', async () => {
     for (const name of [
       'sharp.svg',
       'sharp-no-viewbox.svg',
       'sharp-viewbox-only.svg',
       'sharp-large.svg',
+      'sharp-styled.svg',
+      'sharp-utf16le.svg',
+      'sharp-utf16be.svg',
     ]) {
       await open(name);
       await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+      const contentReads = reads.length;
       await page.locator('.ve-zoom-value').click();
-      await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('25000');
+      await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('50000');
       await page.keyboard.press('Enter');
-      expect((await frameGeometry()).scale).toBeCloseTo(250, 4);
-      const rendering = await page.locator('.ve-image-stage img').evaluate((element) => {
-        const image = element as HTMLImageElement;
-        const style = getComputedStyle(image);
-        const transform = new DOMMatrixReadOnly(style.transform);
+      expect((await frameGeometry()).scale).toBeCloseTo(500, 4);
+      await browserExpect(page.locator('.ve-zoom-value')).toHaveText('50·000%');
+      const rendering = await page.locator('.ve-svg-surface').evaluate((element) => {
+        const frame = element as HTMLIFrameElement;
+        const root = frame.contentDocument?.documentElement;
+        if (!root || !frame.contentWindow) throw new Error('Missing SVG document');
         return {
-          x: transform.a,
-          y: transform.d,
-          width: Number.parseFloat(style.width),
-          naturalWidth: image.naturalWidth,
+          width: root.getBoundingClientRect().width,
+          naturalWidth: Number(frame.dataset.naturalWidth),
+          frameWidth: frame.clientWidth,
+          viewportWidth: frame.parentElement?.parentElement?.clientWidth,
+          sandbox: frame.getAttribute('sandbox'),
+          scriptRan: 'viewerScriptRan' in frame.contentWindow,
         };
       });
-      expect(rendering.x).toBe(1);
-      expect(rendering.y).toBe(1);
-      expect(rendering.width / rendering.naturalWidth).toBeCloseTo(250, 4);
+      expect(rendering.width / rendering.naturalWidth).toBeCloseTo(500, 4);
+      expect(rendering.frameWidth).toBe(rendering.viewportWidth);
+      expect(rendering.sandbox).toBe('allow-same-origin');
+      expect(rendering.scriptRan).toBe(false);
       const screenshot = await page.locator('.ve-image-stage').screenshot();
       const pixels = await page.evaluate(async (base64) => {
         const blob = await (await fetch(`data:image/png;base64,${base64}`)).blob();
@@ -405,26 +448,128 @@ describe('M5 builtin file viewers', () => {
       expect(pixels.white, name).toBeGreaterThan(pixels.width / 4);
       expect(await page.evaluate(() => 'viewerScriptRan' in window)).toBe(false);
       expect(scriptRequests).toBe(0);
-      if (name === 'sharp.svg') await harness.screenshot(page, 'file-viewer-frame-svg-25000-en');
+      expect(reads.length).toBe(contentReads);
+      if (name === 'sharp.svg')
+        await harness.screenshot(
+          page,
+          `file-viewer-frame-svg-50000-en${process.env.NH_BROWSER === 'firefox' ? '-firefox' : ''}`,
+        );
     }
     expect(errors).toEqual([]);
   });
 
+  it('isolates native SVG scripts, navigation and resources while preserving root styles and local paint references', async () => {
+    await open('hostile.svg');
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    await frameGeometry();
+    const frame = page.locator('.ve-svg-surface');
+    const result = await frame.evaluate((element) => {
+      const frame = element as HTMLIFrameElement,
+        doc = frame.contentDocument;
+      if (!doc || !frame.contentWindow) throw new Error('Missing document');
+      return {
+        root: doc.documentElement.localName,
+        script: 'viewerScriptRan' in frame.contentWindow,
+        focused: doc.activeElement?.localName,
+        fill: frame.contentWindow.getComputedStyle(
+          doc.documentElement.querySelector(':scope > rect') as Element,
+        ).fill,
+      };
+    });
+    expect(result.root).toBe('svg');
+    expect(result.script).toBe(false);
+    expect(result.fill).toBe('rgb(255, 255, 255)');
+    const screenshot = await frame.screenshot();
+    const colors = await page.evaluate(async (base64) => {
+      const bitmap = await createImageBitmap(
+        await (await fetch(`data:image/png;base64,${base64}`)).blob(),
+      );
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('canvas');
+      context.drawImage(bitmap, 0, 0);
+      const y = Math.floor(canvas.height / 2);
+      const left = [...context.getImageData(Math.floor(canvas.width / 2 - 25), y, 1, 1).data];
+      const right = [...context.getImageData(Math.floor(canvas.width / 2 + 25), y, 1, 1).data];
+      bitmap.close();
+      return { left, right };
+    }, screenshot.toString('base64'));
+    expect(colors.left).toEqual([0, 0, 0, 255]);
+    expect(colors.right).toEqual([255, 255, 255, 255]);
+    await browserExpect(
+      page.getByRole('button', { name: 'Actual size', exact: true }),
+    ).toBeFocused();
+    expect(await page.evaluate(() => 'viewerScriptRan' in window)).toBe(false);
+    expect(scriptRequests).toBe(0);
+    await browserExpect(frame).toHaveAttribute('sandbox', 'allow-same-origin');
+    await browserExpect(frame).toHaveAttribute('inert', '');
+    expect(errors).toEqual([]);
+  });
+
+  it('clips SVG root transforms to the natural canvas at actual size and zoom', async () => {
+    for (const name of ['translate', 'scale', 'css']) {
+      await open(`root-${name}.svg`);
+      for (const zoom of [100, 200]) {
+        await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+        if (zoom === 200) {
+          await page.locator('.ve-zoom-value').click();
+          await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('200');
+          await page.keyboard.press('Enter');
+        }
+        await frameGeometry();
+        const screenshot = await page.locator('.ve-image-stage').screenshot();
+        const black = await page.evaluate(async (base64) => {
+          const bitmap = await createImageBitmap(
+            await (await fetch(`data:image/png;base64,${base64}`)).blob(),
+          );
+          const canvas = document.createElement('canvas');
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('canvas');
+          context.drawImage(bitmap, 0, 0);
+          const row = context.getImageData(0, Math.floor(canvas.height / 2), canvas.width, 1).data;
+          let black = 0;
+          for (let i = 0; i < row.length; i += 4) if ((row[i] ?? 255) <= 8) black++;
+          bitmap.close();
+          return black;
+        }, screenshot.toString('base64'));
+        expect(Math.abs(black - (zoom - (name === 'scale' ? 0 : 20)))).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
   async function frameGeometry() {
+    // Input bursts are painted once per animation frame; inspect the committed frame.
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
     return page.locator('.ve-image-stage').evaluate((stage) => {
       const image = stage.querySelector('img');
-      if (!image) throw new Error('Missing frame image');
-      const box = stage.getBoundingClientRect(),
-        picture = image.getBoundingClientRect();
-      const scale = picture.width / image.naturalWidth;
+      const frame = stage.querySelector<HTMLIFrameElement>('iframe');
+      const svg = frame?.contentDocument?.documentElement;
+      const rendered = image ?? svg;
+      if (!rendered) throw new Error('Missing frame image');
+      const box = stage.getBoundingClientRect();
+      const naturalWidth = image ? image.naturalWidth : Number(frame?.dataset.naturalWidth);
+      const picture = rendered.getBoundingClientRect();
+      const offset = frame?.getBoundingClientRect();
+      const x = picture.x + (offset?.x ?? 0),
+        y = picture.y + (offset?.y ?? 0);
+      const scale = picture.width / naturalWidth;
       return {
         scale,
         width: box.width,
         height: box.height,
-        x: picture.x + picture.width / 2 - box.x - box.width / 2,
-        y: picture.y + picture.height / 2 - box.y - box.height / 2,
-        centerX: (box.x + box.width / 2 - picture.x) / scale,
-        centerY: (box.y + box.height / 2 - picture.y) / scale,
+        x: x + picture.width / 2 - box.x - box.width / 2,
+        y: y + picture.height / 2 - box.y - box.height / 2,
+        centerX: (box.x + box.width / 2 - x) / scale,
+        centerY: (box.y + box.height / 2 - y) / scale,
       };
     });
   }
@@ -459,8 +604,9 @@ describe('M5 builtin file viewers', () => {
     await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
     const after = await frameGeometry();
     expect(after.scale).toBeCloseTo(before.scale * 1.25, 5);
-    expect(after.centerX).toBeCloseTo(before.centerX, 2);
-    expect(after.centerY).toBeCloseTo(before.centerY, 2);
+    expect(Math.abs(after.centerX - before.centerX) * before.scale).toBeLessThan(0.05);
+    // Firefox snaps layout to 1/60 CSS pixels; compare within a subpixel display budget.
+    expect(Math.abs(after.centerY - before.centerY) * before.scale).toBeLessThan(0.05);
     await page.locator('.ve-zoom-value').click();
     const input = page.getByRole('textbox', { name: 'Zoom (%)', exact: true });
     await browserExpect(input).toBeFocused();
@@ -470,7 +616,7 @@ describe('M5 builtin file viewers', () => {
       page.getByRole('button', { name: 'Zoom: 126%', exact: true }),
     ).toBeFocused();
     expect((await frameGeometry()).scale).toBeCloseTo(1.255, 5);
-    expect((await frameGeometry()).centerX).toBeCloseTo(before.centerX, 2);
+    expect(Math.abs((await frameGeometry()).centerX - before.centerX) * 1.255).toBeLessThan(0.05);
     await page.locator('.ve-zoom-value').click();
     await browserExpect(input).toHaveValue('126');
     await page.keyboard.press('Enter');
@@ -499,7 +645,7 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
-  it('keeps Frame within image edges and SVG zoom between one and twenty-five thousand percent', async () => {
+  it('keeps Frame within image edges and SVG zoom between one and fifty thousand percent', async () => {
     await open('frame-large.svg');
     const stage = page.locator('.ve-image-stage');
     await page.getByRole('button', { name: 'Actual size', exact: true }).click();
@@ -558,7 +704,7 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(page.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled();
     await stage.focus();
     await page.keyboard.press('Control+Equal');
-    expect((await frameGeometry()).scale).toBe(250);
+    expect((await frameGeometry()).scale).toBe(500);
     const corners = await page.locator('.ve-body').evaluate((element) => {
       const style = getComputedStyle(element);
       return [
