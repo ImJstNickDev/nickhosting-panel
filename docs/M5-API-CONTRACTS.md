@@ -1008,6 +1008,7 @@ returned to the browser.
 | `GET /content?path=...` | Bounded stream with single HTTP Range/HEAD, 206/416 semantics, no-store, nosniff and sandboxed SVG response. `download=true` adds a safe filename. |
 | `GET /archive?path=...&directory=...&offset=0&limit=200` | Retained virtual-folder index, total and next offset. Maximum page size 500. |
 | `GET /archive/content?path=...&entry=...` | Chosen member only, with stream/range/download handling. Compressed-member seeking may decode preceding bytes. |
+| `GET /subtitles?path=...&track=...&time=...` | Ordinary Matroska file caption window `{start,end,cues}` in seconds. Required numeric track ID and finite nonnegative time (default 0); bounded selective metadata reads over the existing SFTP handle, no audio/video payload transfer to the browser. Unsupported/over-budget parsing returns 422. |
 | `GET /sqlite?path=...&table=...&offset=0` | Table names, snapshot consistency and an optional page of 100 rows. No arbitrary SQL. Typed cells preserve integer precision and label truncation/BLOB sizes. |
 
 Migration `024_file_viewers.sql` adds personal preferences and encrypted private
@@ -1016,7 +1017,7 @@ SFTP credential intent/state. Settings `fileViewers` and write-only secret
 existing Owner/environment precedence. Credential retirement retains its identity
 record; changing transport identity never silently reuses an old account.
 
-HTTP cancellation releases a subscriber; parsed archive/SQLite sessions retain
+HTTP cancellation releases a subscriber; parsed archive/SQLite/subtitle sessions retain
 shared source handles for bounded reuse. A shared local authorization watch checks
 active session/server access and credential/configuration revocation each second,
 not each chunk. Loss of authoritative permission checks aborts further reads.

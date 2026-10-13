@@ -202,14 +202,21 @@ read only relevant packets, including long captions spanning a seek. This follow
 [Matroska subtitle indexing](https://www.matroska.org/technical/subtitles.html)
 and the [FFmpeg muxer's subtitle cue generation](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/matroskaenc.c).
 An otherwise well-formed but incomplete subtitle index cannot establish complete
-caption coverage and is not supported. Missing/incomplete index fields fall back
-to a bounded metadata scan; large unindexed files may report subtitles unavailable
-rather than download an entire movie. This limitation affects captions only.
+caption coverage and is not supported. Missing/incomplete index fields on ordinary
+files use the same parser on the backend through the existing authorized SFTP
+handle. Small 1 KiB reads skip audio/video payload lengths; the browser receives
+only a caption window from `GET /files/viewer/subtitles`. Archive members keep the
+bounded browser Range fallback. Large unindexed files/deep seeks may still report
+subtitles unavailable when the scan budget is exhausted, rather than download an
+entire movie. This limitation affects captions only.
 No automatic repair, provider write or transcoding is performed.
 
 The browser keeps a 2 MiB range cache and one 20-second caption window. Each
 operation has an 8 MiB read budget and a 15-second deadline; limits also bound
-index entries, cue text and fonts. Selecting Off, switching tracks, seeking or
+index entries, cue text and fonts. The backend keeps at most eight parsed sessions,
+with a 2 MiB metadata cache per reader and 60-second idle expiry. Retained state is
+bound to the authenticated session, actor/subject and file revision; each request
+reauthorizes access. Selecting Off, switching tracks, seeking or
 closing the viewer aborts stale reads and destroys unused rendering workers.
 ASS initialization is bounded; runtime operations have a 5-second deadline and
 worker destruction has a 1-second termination fallback.

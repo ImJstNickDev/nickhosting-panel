@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MatroskaSubtitles } from '../../../../../../packages/core/src/media-subtitles.js';
 import { openSubtitleSource, subtitleLimits } from './subtitle-source.js';
+import { VideoRangeReader } from './video-mse.js';
 
 const url = 'https://panel.example/v1/servers/example/files/viewer/content?path=/movie.mkv';
 const text = new TextEncoder();
@@ -62,9 +64,12 @@ function serve(bytes: Uint8Array) {
 }
 async function open(bytes: Uint8Array) {
   const mock = serve(bytes);
-  const source = await openSubtitleSource(url, bytes.length, new AbortController().signal);
-  expect(source).not.toBeNull();
-  if (!source) throw new Error('Expected Matroska');
+  const source = new MatroskaSubtitles(
+    bytes.length,
+    (signal) => new VideoRangeReader(url, bytes.length, signal),
+    new AbortController().signal,
+  );
+  expect(await source.open()).toBe(true);
   return { source, ...mock };
 }
 afterEach(() => vi.unstubAllGlobals());
@@ -390,6 +395,104 @@ describe('Motion selective Matroska subtitle source', () => {
     await expect(
       openSubtitleSource(url, bytes.length, new AbortController().signal),
     ).rejects.toThrow('range unavailable');
+  });
+  it('delegates unindexed ordinary files to authorized metadata instead of scanning A/V over HTTP', async () => {
+    const bytes = file(track(), cluster(0, block('visible')));
+    const { fetch: ranges } = serve(bytes);
+    const fetch = vi.fn(async (input: string, options: RequestInit) => {
+      if (new URL(input).pathname.endsWith('/subtitles')) {
+        expect(options.credentials).toBe('same-origin');
+        expect(options.redirect).toBe('error');
+        const query = new URL(input).searchParams;
+        expect(query.get('path')).toBe('/movie.mkv');
+        expect(query.get('track')).toBe('3');
+        expect(query.get('time')).toBe('0');
+        return Response.json({
+          start: 0,
+          end: 20,
+          cues: [{ id: 'cue', start: 1, end: 4, text: 'visible' }],
+        });
+      }
+      return ranges(input, options);
+    });
+    vi.stubGlobal('fetch', fetch);
+    const source = await openSubtitleSource(url, bytes.length, new AbortController().signal);
+    if (!source) throw new Error('Expected source');
+    const discoveryReads = ranges.mock.calls.length;
+    expect((await source.readWindow('3', 0)).cues[0]?.text).toBe('visible');
+    expect(ranges.mock.calls.length).toBe(discoveryReads);
+    source.dispose();
+    await expect(source.readWindow('3', 0)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetch.mock.calls).toHaveLength(discoveryReads + 1);
+  });
+  it('accepts the retained parser window during a backward seek into its lookback', async () => {
+    const bytes = file(track(), cluster(0, block('visible')));
+    serve(bytes);
+    const source = await openSubtitleSource(url, bytes.length, new AbortController().signal);
+    if (!source) throw new Error('Expected source');
+    const window = {
+      start: 8,
+      end: 30,
+      cues: [{ id: 'long', start: 8, end: 29, text: 'still visible' }],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json(window)),
+    );
+    expect(await source.readWindow('3', 10)).toEqual(window);
+    expect(await source.readWindow('3', 8.5)).toEqual(window);
+    source.dispose();
+  });
+  it('keeps the bounded Range fallback for unindexed archive members', async () => {
+    const bytes = file(track(), cluster(0, block('inside archive')));
+    const { fetch } = serve(bytes);
+    const source = await openSubtitleSource(
+      url.replace('/viewer/content', '/viewer/archive/content'),
+      bytes.length,
+      new AbortController().signal,
+    );
+    if (!source) throw new Error('Expected source');
+    expect((await source.readWindow('3', 0)).cues[0]?.text).toBe('inside archive');
+    expect(fetch.mock.calls.every(([input]) => !input.includes('/subtitles'))).toBe(true);
+    source.dispose();
+  });
+  it('cancels delegated requests independently and rejects malformed metadata windows', async () => {
+    const bytes = file(track(), cluster(0, block('visible')));
+    const { fetch: ranges } = serve(bytes);
+    const source = await openSubtitleSource(url, bytes.length, new AbortController().signal);
+    if (!source) throw new Error('Expected source');
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, options: RequestInit) => {
+        if (!new URL(input).pathname.endsWith('/subtitles')) return ranges(input, options);
+        requestSignal = options.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          requestSignal?.addEventListener('abort', () => reject(requestSignal?.reason), {
+            once: true,
+          });
+        });
+      }),
+    );
+    const cancel = new AbortController();
+    const pending = source.readWindow('3', 0, cancel.signal);
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    cancel.abort();
+    await rejected;
+    expect(requestSignal?.aborted).toBe(true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ start: 0, end: 20, cues: [{ id: 'bad', start: 10, end: 2, text: 'bad' }] }),
+      ),
+    );
+    await expect(source.readWindow('3', 0)).rejects.toThrow('Invalid subtitle response');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ start: 0, end: 20, cues: [] })),
+    );
+    expect((await source.readWindow('3', 0)).cues).toEqual([]);
+    source.dispose();
   });
   it('returns null for MP4 rather than claiming embedded subtitle support', async () => {
     const bytes = concat(raw(24, 4), text.encode('ftypisom'), new Uint8Array(12));

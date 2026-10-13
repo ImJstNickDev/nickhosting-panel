@@ -8361,3 +8361,61 @@ configured HMR path and timed out; correcting the probe succeeded without any
 proxy or application configuration change. Staged governance/link/TOML/ignore
 checks pass after normalizing upstream license-notice line endings; no private
 state, credentials or local topology snapshot is staged.
+
+### Motion: unindexed MKV subtitle fallback (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. The Owner's reported 31,762,747-byte
+MKV exposes eight SRT tracks but no subtitle Cue entries. Read-only reproduction
+found discovery in 136.8 ms, followed by `Video read budget exceeded` after
+4,488.4 ms: the browser's 64 KiB Range cache fetched unrelated video payload while
+walking packet headers, exhausting its 8 MiB budget. Successful HTTP 206 responses
+did not mean successful subtitle extraction.
+
+The unchanged parser now lives in a shared pure module. Indexed files retain
+selective browser Range reads. Unindexed ordinary files use a new authorized
+subtitle-window route over the existing retained SFTP source, with 1 KiB metadata
+reads that skip A/V payloads, a 2 MiB cache and the existing bounded scan/deadline.
+No full-movie download, transcoding, new service, dependency or Blueprint update.
+Request cancellation preserves the shared handle; session/permission revocation
+still aborts it. Archive-contained unindexed video retains the bounded Range
+fallback. Large unindexed deep seeks remain subject to limits.
+
+Focused validation (historical full suites were not repeated):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/subtitle-source.test.ts`: **15 passed**; indexed packets, fallback delegation, archive isolation, cancellation, response limits and cached backward seeks.
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-subtitles.test.ts`: **4 passed**, 690 ms; a sparse original 1000 MiB fixture finds its caption after skipping 1,000 video payloads with less than 1,100 KiB transferred; cached repeat performs no reads.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-viewers.integration.test.ts`: **9 passed**, 8.18 s; actual parser fixture, reuse, authorization, revocation and input/unsupported-track errors.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-subtitles.browser.test.ts`: **4 passed**, 24.03 s; indexed text/ASS/SSA/WebVTT rendering, switching, seeking, cleanup and accessibility.
+- Same browser command with `NH_BROWSER=firefox`: **4 passed**, 36.28 s.
+- Root `pnpm exec tsc --noEmit`, WebPanel typecheck, `pnpm --filter @nickhosting/web build` and `pnpm build:runtime`: **pass** via `scripts/dev.sh`. Existing frontend chunk-size warnings remain.
+- Focused Biome: **pass**, with two pre-existing non-null assertion warnings in `file-viewers.ts`.
+
+Private authenticated read-only probes against the reported file now return
+HTTP 200 and correct caption windows. A first backend scan took 1,463 ms;
+subsequent windows/seeks took 72–93 ms. A separate browser-source probe (run
+alongside the UI probe) took 3,871 ms for its initial window and 72–94 ms for
+later windows: five requests total, only two Range requests, none failed. These
+are separate samples, not a guaranteed latency or a benchmark average.
+
+The actual development UI in Chromium rendered both English and Italian captions
+after selection/seeking, with all four subtitle responses HTTP 200, no subtitle
+notice and no page errors. The first UI probe failed its caption assertion before
+the final cache-window correction; the final rerun passed. Independent review
+found and resolved an overly strict browser validator for a reused window after
+a small backward seek; the new regression covers it. No remaining must-fix findings.
+
+The headless Firefox build could not decode this particular real video:
+`NS_ERROR_DOM_MEDIA_METADATA_ERR`, native H.264 capability empty, readyState 0.
+Its subtitle endpoint still returned HTTP 200 without a page error. Real-file
+Firefox playback is therefore not claimed by this automated run; the separate
+Firefox VP9/Opus fixtures verify subtitle rendering. The Owner's browser remains
+the final check for this media/codec combination. Existing reviewed subtitle
+screenshots remain representative; no UI layout or text changed, and no private
+movie frame or subtitle text is published.
+
+Existing dev watchers/HMR loaded the change without a manual container restart.
+Only authorized reads of the supplied game file were performed. No Panel/Wings,
+Blueprint, network, game-server state or persistent media change; no test assets
+created on the provider. Isolated fixture sessions closed normally. SFTPGo #18
+and production-release boundaries remain unchanged. Rollback is a source revert;
+the new route requires no migration. PR #21 remains open and unmerged.

@@ -11,6 +11,7 @@ import { ViewerFormatError, ViewerSessionCache } from './viewer-cache.js';
 import { viewerBody, viewerHeaders, viewerRange } from './viewer-http.js';
 import type { FileViewerService } from './viewer-service.js';
 import { openSqliteViewer, type ViewerSqliteSession } from './viewer-sqlite.js';
+import type { SubtitleViewerSession } from './viewer-subtitles.js';
 
 const preferenceSchema = z.strictObject({
   scope: z.enum(['server', 'game', 'global']),
@@ -31,6 +32,7 @@ const formatMessages: Record<string, string> = {
   viewer_sqlite_wal: 'viewer.sqliteWal',
   viewer_sqlite_changed: 'viewer.sqliteChanged',
   viewer_sqlite_unavailable: 'viewer.sqliteUnavailable',
+  viewer_subtitles_unavailable: 'viewer.videoSubtitleFailed',
 };
 const services = new WeakMap<object, Promise<FileViewerService>>();
 export async function closeFileViewers(db: object) {
@@ -41,12 +43,15 @@ export async function closeFileViewers(db: object) {
 type Retained<T> = { value: T; signal: AbortSignal };
 const archiveCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerArchiveSession>>>();
 const sqliteCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerSqliteSession>>>();
+const subtitleCaches = new WeakMap<object, ViewerSessionCache<Retained<SubtitleViewerSession>>>();
 export async function closeViewerArchives(db: object) {
   const archive = archiveCaches.get(db),
-    sqlite = sqliteCaches.get(db);
+    sqlite = sqliteCaches.get(db),
+    subtitles = subtitleCaches.get(db);
   archiveCaches.delete(db);
   sqliteCaches.delete(db);
-  await Promise.all([archive?.close(), sqlite?.close()]);
+  subtitleCaches.delete(db);
+  await Promise.all([archive?.close(), sqlite?.close(), subtitles?.close()]);
 }
 function disposition(name: string) {
   const filename = posix.basename(name);
@@ -74,8 +79,10 @@ export function registerFileViewerRoutes(
   };
   const archives = new ViewerSessionCache<Retained<ViewerArchiveSession>>();
   const databases = new ViewerSessionCache<Retained<ViewerSqliteSession>>({ maximum: 4 });
+  const subtitles = new ViewerSessionCache<Retained<SubtitleViewerSession>>({ maximum: 8 });
   archiveCaches.set(db, archives);
   sqliteCaches.set(db, databases);
+  subtitleCaches.set(db, subtitles);
   const gameId = async (mappingId: string) =>
     (
       await db
@@ -399,6 +406,29 @@ export function registerFileViewerRoutes(
       } catch (error) {
         lease.release();
         throw error;
+      }
+    }),
+  );
+  app.get(
+    '/v1/servers/:id/files/viewer/subtitles',
+    guarded(async (c) => {
+      const track = parse(z.string().min(1).max(32).regex(/^\d+$/), c.req.query('track'));
+      const time = parse(
+        z.coerce
+          .number()
+          .finite()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER / 1000 - 20),
+        c.req.query('time') ?? '0',
+      );
+      const lease = await retained(c, subtitles, async (opened) => {
+        const { createSubtitleViewer } = await import('./viewer-subtitles.js');
+        return createSubtitleViewer(opened.source, { signal: opened.signal });
+      });
+      try {
+        return c.json(await lease.session.readWindow(track, time, c.req.raw.signal));
+      } finally {
+        lease.release();
       }
     }),
   );

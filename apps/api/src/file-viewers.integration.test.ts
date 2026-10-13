@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type AuthContext, DomainError, SecretCodec } from '@nickhosting/core';
@@ -185,5 +185,56 @@ describe('viewer routes with isolated database and fixture byte source', () => {
   it('does not route a nonexistent managed ID to the byte source', async () => {
     id = randomUUID();
     expect((await request('/content?path=secret')).status).toBe(404);
+  });
+  it('reuses a parsed subtitle window while authorizing each request and respecting revocation', async () => {
+    content = Buffer.from(
+      await readFile(
+        new URL('../../web/tests/fixtures/motion-subtitles.mkv.base64', import.meta.url),
+        'utf8',
+      ),
+      'base64',
+    );
+    const response = await request('/subtitles?path=fixture.mkv&track=3&time=2');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      start: 0,
+      end: 22,
+      cues: expect.arrayContaining([
+        { id: expect.any(String), start: 1, end: 4, text: 'English first caption' },
+      ]),
+    });
+    const parsedReads = reads;
+    const again = await request('/subtitles?path=fixture.mkv&track=3&time=2.5');
+    expect(again.status).toBe(200);
+    expect(reads).toBe(parsedReads);
+    expect(FileViewerService.prototype.open).toHaveBeenCalledTimes(2);
+    actor = { ...fixture.context, actorUserId: randomUUID(), subjectUserId: randomUUID() };
+    expect((await request('/subtitles?path=fixture.mkv&track=3&time=2')).status).toBe(403);
+    expect(reads).toBe(parsedReads);
+    actor = fixture.context;
+    revoked.abort();
+    expect((await request('/subtitles?path=fixture.mkv&track=3&time=2')).status).toBe(403);
+    expect(reads).toBe(parsedReads);
+  });
+  it('rejects invalid subtitle windows before accessing bytes and unsupported tracks honestly', async () => {
+    for (const query of [
+      'track=3&time=NaN',
+      'track=3&time=Infinity',
+      'track=3&time=-1',
+      'track=3&time=1e20',
+      'track=bad&time=0',
+    ])
+      expect((await request(`/subtitles?path=fixture.mkv&${query}`)).status).toBe(400);
+    expect(FileViewerService.prototype.open).not.toHaveBeenCalled();
+    expect(reads).toBe(0);
+    content = Buffer.from(
+      await readFile(
+        new URL('../../web/tests/fixtures/motion-subtitles.mkv.base64', import.meta.url),
+        'utf8',
+      ),
+      'base64',
+    );
+    expect((await request('/subtitles?path=fixture.mkv&track=999&time=0')).status).toBe(422);
+    expect((await request('/subtitles?path=fixture.mkv&track=7&time=0')).status).toBe(422);
   });
 });
