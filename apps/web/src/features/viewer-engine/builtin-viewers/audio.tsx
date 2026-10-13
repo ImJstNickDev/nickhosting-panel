@@ -13,6 +13,7 @@ import { viewerPath } from '../core/access.js';
 import type { ViewerProps } from '../core/types.js';
 import { ViewerIcon } from '../viewer-icon.js';
 import { ViewerSelect } from '../viewer-select.js';
+import { useAudioShortcuts } from './audio-shortcuts.js';
 import { AudioTimeline, type AudioTimelineHandle } from './audio-timeline.js';
 import { waveformLimits } from './audio-waveform-model.js';
 import './audio.css';
@@ -130,6 +131,11 @@ export default function AudioViewer({ serverId, source }: ViewerProps) {
     setState((value) => ({ ...value, duration: 0, ready: false, paused: true }));
     audio.load();
   }
+  useAudioShortcuts(
+    () => void toggle(),
+    (seconds, animated) =>
+      timeline.current?.skipTo((media.current?.currentTime ?? 0) + seconds, animated),
+  );
   const silent = state.muted || state.volume === 0;
   const extension = source.name.split('.').at(-1)?.toUpperCase();
   return (

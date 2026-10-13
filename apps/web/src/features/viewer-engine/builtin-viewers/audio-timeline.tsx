@@ -19,7 +19,7 @@ const clock = (seconds: number) => {
   return `${hours ? `${hours}:` : ''}${String(Math.floor(value / 60) % 60).padStart(hours ? 2 : 1, '0')}:${String(value % 60).padStart(2, '0')}`;
 };
 
-export type AudioTimelineHandle = { skipTo: (seconds: number) => void };
+export type AudioTimelineHandle = { skipTo: (seconds: number, animate?: boolean) => void };
 
 /** The playback clock updates this subtree only, never the transport controls. */
 export function AudioTimeline({
@@ -139,13 +139,18 @@ export function AudioTimeline({
     };
   }, [cancelSkip]);
   useImperativeHandle(ref, () => ({
-    skipTo(value) {
+    skipTo(value, animated = true) {
       const audio = media.current;
       if (!audio || !seekable) return;
       const from = visibleTime.current;
       // Seek the actual audio immediately; only its visual playhead travels.
       seek(value);
-      if (document.hidden || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      if (
+        !animated ||
+        document.hidden ||
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      )
+        return;
       const started = performance.now();
       setSkipPosition(from);
       const animate = () => {

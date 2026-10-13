@@ -1936,6 +1936,150 @@ describe('M5 builtin file viewers', () => {
     }
   });
 
+  it('routes Wave shortcuts by pointer or Tab navigation and excludes editing contexts', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await open('wave-long.wav');
+    const player = page.locator('.ve-audio-player');
+    const audio = player.locator('audio');
+    const position = player.getByRole('slider', { name: 'Playback position', exact: true });
+    const volume = player.getByRole('slider', { name: 'Volume', exact: true });
+    const repeat = player.getByRole('button', { name: 'Repeat', exact: true });
+    await browserExpect
+      .poll(() => audio.evaluate((media: HTMLAudioElement) => media.duration))
+      .toBe(60);
+    await audio.evaluate((media: HTMLAudioElement) => {
+      media.currentTime = 20;
+      media.dispatchEvent(new Event('timeupdate'));
+    });
+    await volume.click();
+    const originalVolume = await volume.inputValue();
+    for (const [key, expected] of [
+      ['ArrowRight', 25],
+      ['ArrowLeft', 20],
+      ['Shift+ArrowRight', 30],
+      ['Shift+ArrowLeft', 20],
+    ] as const) {
+      await page.keyboard.press(key);
+      expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(expected);
+      expect(await volume.inputValue()).toBe(originalVolume);
+    }
+    await page.keyboard.press('Space');
+    await browserExpect
+      .poll(() => audio.evaluate((media: HTMLAudioElement) => media.paused))
+      .toBe(false);
+    await page.keyboard.press('Space');
+    await browserExpect
+      .poll(() => audio.evaluate((media: HTMLAudioElement) => media.paused))
+      .toBe(true);
+    await repeat.click();
+    await page.keyboard.press('Space');
+    await browserExpect
+      .poll(() => audio.evaluate((media: HTMLAudioElement) => media.paused))
+      .toBe(false);
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.loop)).toBe(true);
+    await page.keyboard.press('Space');
+    await browserExpect
+      .poll(() => audio.evaluate((media: HTMLAudioElement) => media.paused))
+      .toBe(true);
+
+    // Enter keyboard navigation using a real Tab; programmatic focus preserves that modality.
+    await position.focus();
+    await page.keyboard.press('Tab');
+    await browserExpect(repeat).toBeFocused();
+    await page.keyboard.press('Space');
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.loop)).toBe(false);
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.paused)).toBe(true);
+    await volume.focus();
+    const keyboardTime = await audio.evaluate((media: HTMLAudioElement) => media.currentTime);
+    await page.keyboard.press('ArrowLeft');
+    expect(Number(await volume.inputValue())).toBeLessThan(Number(originalVolume));
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(keyboardTime);
+    await position.focus();
+    await page.keyboard.press('Home');
+    await page.keyboard.press('ArrowRight');
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(5);
+
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    try {
+      await page.keyboard.down('ArrowRight');
+      expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(10);
+      for (const expected of [15, 20, 25]) {
+        // Repeated keydown without keyup is a held arrow, not separate taps.
+        await page.keyboard.down('ArrowRight');
+        const held = await player.evaluate(async (element) => {
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          );
+          return {
+            native: element.querySelector('audio')?.currentTime,
+            visual: Number(element.querySelector<HTMLInputElement>('.wave-seek-input')?.value),
+          };
+        });
+        expect(held).toEqual({ native: expected, visual: expected });
+      }
+      await page.keyboard.up('ArrowRight');
+      await page.waitForTimeout(350);
+      expect(await position.inputValue()).toBe('25');
+    } finally {
+      await page.keyboard.up('ArrowRight');
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    }
+    await page.keyboard.press('Home');
+    await page.keyboard.press('ArrowRight');
+
+    // The real speed popover keeps its keys and does not start playback.
+    const speed = player.getByRole('combobox', { name: /^Playback speed/ });
+    await speed.click();
+    await browserExpect(page.getByRole('listbox', { name: 'Playback speed' })).toBeVisible();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Space');
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(5);
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.paused)).toBe(true);
+
+    // Inject only exclusion targets; the media and shortcut listener remain real.
+    const excluded = await page.evaluate(() => {
+      const cases = [
+        document.createElement('input'),
+        document.createElement('div'),
+        document.createElement('div'),
+      ];
+      cases[1]?.setAttribute('contenteditable', '');
+      cases[2]?.setAttribute('role', 'dialog');
+      return cases.map((target) => {
+        target.tabIndex = 0;
+        document.body.append(target);
+        target.focus();
+        const keys = ['ArrowRight', ' '].map((key) => {
+          const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+          target.dispatchEvent(event);
+          return event.defaultPrevented;
+        });
+        target.remove();
+        return keys;
+      });
+    });
+    expect(excluded).toEqual([
+      [false, false],
+      [false, false],
+      [false, false],
+    ]);
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.currentTime)).toBe(5);
+    expect(await audio.evaluate((media: HTMLAudioElement) => media.paused)).toBe(true);
+    await root();
+    expect(
+      await page.evaluate(() => {
+        const event = new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          bubbles: true,
+          cancelable: true,
+        });
+        document.body.dispatchEvent(event);
+        return event.defaultPrevented;
+      }),
+    ).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
   it('runs Wave controls through real browser audio playback and releases the stream on exit', async () => {
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -2122,8 +2266,9 @@ describe('M5 builtin file viewers', () => {
     await player.getByRole('button', { name: 'Back 10 seconds', exact: true }).click();
     await browserExpect
       .poll(() => audio.evaluate((element: HTMLAudioElement) => element.currentTime))
-      .toBeLessThan(2);
+      .toBe(5);
     const volume = player.getByRole('slider', { name: 'Volume', exact: true });
+    await page.keyboard.press('Tab');
     await volume.focus();
     await page.keyboard.press('Home');
     await page.keyboard.press('ArrowRight');

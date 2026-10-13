@@ -7959,3 +7959,58 @@ Final web typecheck and scoped Biome passed. Static layout is unchanged; the
 existing player screenshot remains representative, while frame samples prove
 the new motion. No production mutations, restarts or test assets were required.
 Rollback: revert this frontend-only commit.
+
+### Wave keyboard controls and shared viewer Escape (2026-10-13)
+
+Left/Right seek five seconds; Shift doubles this to ten. Space after pointer
+interaction toggles playback even when a control retains focus; actual Tab
+navigation keeps native control semantics. Inputs, editable hosts and open
+menus/dialogs retain their keys. Held arrows cancel visual easing and seek
+immediately on repeat, avoiding the slow repeated ease-in reported by the Owner.
+Single presses retain the previous skip animation. Repeated Space is ignored.
+
+Every viewer/editor now uses Escape to invoke the existing Home action, returning
+to the current folder with normal focus restoration and unsaved-change guard.
+Child handlers and transient overlays retain first Escape; closed native selects
+do not trap it. Independent review identified editable-host/account-menu exclusions
+and a native-select veto; all were corrected before final checks.
+
+Focused browser commands/results:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'routes Wave shortcuts|runs Wave' --silent=false`: **2 passed, 27 skipped**, 35.48 s. Covers ±5/±10, Space, pointer versus Tab, native volume, held arrows/no leftover tween, inputs/contenteditable/dialog/menu exclusions and listener cleanup.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewer-escape.browser.test.ts --silent=false`: **3/3 passed**. All seven builtin viewers/editor, current-folder return, closed SQLite select, overlay precedence and accept/decline of dirty editor changes. These navigation tests intentionally fixture media errors/archive/database metadata, not codec functionality.
+
+Escape test iteration fixed fixture navigation that persisted the prior folder;
+a concurrent Vite optimizer run also produced duplicate React instances. Final
+Escape tests were run serially and passed after the other browser run finished.
+Web typecheck and focused Biome passed. No UI copy/layout changes; existing
+screenshots remain representative. No infrastructure restarts, provider writes,
+or persistent test assets. No must-fix review findings remain. Rollback is a
+frontend source revert. Motion implementation has not started.
+
+### Motion AVI and trickplay investigation only (2026-10-13)
+
+Read-only same-origin authenticated Range inspection of the Owner-provided test
+dataset read 64 KiB from each AVI (206 responses): `bbb-action-75s-480p.avi`
+(13,894,454 bytes, 854×480, 24 fps, 1801 frames) and
+`bbb-short-12s-360p.avi` (1,497,502 bytes, 640×360, 30 fps, 361 frames).
+Both have RIFF/AVI headers, FMP4 video (MPEG-4 Part 2) and MP3 audio
+(format tag 0x55), stereo 48 kHz. These codec/header checks are not full-file
+integrity certification. Native Firefox test of the short AVI failed with media
+error 4, “Failed to init decoder”; AVI and MP4/MPEG-4 Part 2 canPlayType probes
+returned empty. Transport succeeded; no source file was modified or converted.
+[FFmpeg's RIFF codec mapping](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/riff.c)
+identifies the tags. Browser playback needs a supported codec/container; merely
+renaming or remuxing this unsupported video codec is insufficient.
+
+Proposed only: reuse installed Mediabunny for lazy worker-based timeline thumbnails
+on supported formats, one decode in flight, latest requested position prioritized,
+small retained-image cache and bounded Range reads. Preceding-keyframe previews
+reduce decode work at the cost of approximate timing; exact frames may require
+intermediate decoding. A small thumbnail reduces retained image memory, not
+necessarily source-decoding cost. AVI/MPEG-4 Part 2 are not supported by the
+installed library; no fallback decoder/dependency or server transcode was added.
+Sources: [supported formats](https://mediabunny.dev/guide/supported-formats-and-codecs),
+[CanvasSink](https://mediabunny.dev/api/CanvasSink),
+[reading and disposal](https://mediabunny.dev/guide/reading-media-files).
+The Owner will review before Motion development begins.

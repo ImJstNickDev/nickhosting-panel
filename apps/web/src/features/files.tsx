@@ -72,6 +72,7 @@ import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './fold
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
+import { useViewerEscape } from './use-viewer-escape.js';
 import {
   availableViewers,
   preferredViewer,
@@ -1210,6 +1211,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     });
   }
   const unfocusedPaste = useRef<(event: globalThis.KeyboardEvent) => void>(() => {});
+  useViewerEscape(displaying && !pathEditing && !inlineRename && !transferFlow.active, closeEditor);
   unfocusedPaste.current = (event) => {
     // A browser can drop focus to its document when the previous folder's row
     // disappears. Paste still belongs to the mounted Files view in that case.

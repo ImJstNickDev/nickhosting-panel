@@ -712,7 +712,9 @@ One compact row contains the path on the left and Open with, Back to files
 (Home), Download on the right, shared by every viewer. Text editing retains
 Save, Undo, Redo and Find before those common actions. Narrow screens use an
 Open with icon and prioritize the current filename over parent breadcrumb
-segments; Home still returns to the file list. Each action has a localized
+segments; Home still returns to the file list. Escape returns every viewer, including the text editor, to the current folder
+through the existing Home action and unsaved-change guard. Open dialogs, menus,
+search/path controls and fullscreen receive Escape first. Each action has a localized
 accessible name and custom tooltip; unavailable actions are disabled. Find opens
 CodeMirror's search. Archive entries keep their own download/chooser target.
 Open with uses immediate-action cards with distinct first-party marks and stable
@@ -871,6 +873,12 @@ clock, and rate/loop/background changes re-anchor it. Native playback remains
 authoritative. Only the timeline subtree updates on those frames; playback
 controls and their formatters do not. Play synchronizes the native paused state
 immediately after calling play(), without waiting for its queued event.
+Wave shortcuts use Left/Right for five seconds and Shift+Left/Right for ten.
+Single keypresses animate like the skip buttons; held-key repeats seek directly
+and cancel the tween so the playhead never trails accumulated seeks. Space toggles
+play/pause after pointer interaction, including when a control still has focus;
+Tab navigation preserves native button/volume behavior. Text editing and open
+menus/dialogs retain their keys. Repeated Space does not retrigger playback.
 Ten-second skip buttons seek the audio immediately while the playhead and played
 waveform travel together for 280 ms with cubic ease-in-out. Repeated skips retarget
 from the currently displayed position; the endpoint follows ongoing playback.
