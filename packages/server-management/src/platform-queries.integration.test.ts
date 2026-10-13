@@ -316,6 +316,124 @@ describe('M5 platform browser queries and metadata', () => {
       /pterodactyl|external_id|startup|docker_image|environment|10\.0\.0\.2/,
     );
   });
+  it('paginates filtered inventories and returns scoped facets without foreign identities', async () => {
+    const project = await createProject(f.db, f.context, { name: 'Browser group' });
+    const ids = await Promise.all([
+      f.server({ name: 'Browser A', projectId: project.id }),
+      f.server({ name: 'Browser B', projectId: project.id }),
+      f.server({ name: 'Browser C' }),
+    ]);
+    const foreign = await peer();
+    const foreignId = await foreign.server({ name: 'Browser foreign' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running' })
+      .where('id', '=', ids[0] ?? '')
+      .execute();
+    const first = await listPlatformServers(f.db, f.context, { page: 1, limit: 2 });
+    const second = await listPlatformServers(f.db, f.context, { page: 2, limit: 2 });
+    expect(first).toMatchObject({ total: 3, page: 1, totalPages: 2 });
+    expect(second).toMatchObject({ total: 3, page: 2, totalPages: 2 });
+    expect([...first.items, ...second.items].map((row) => row.id).sort()).toEqual(ids.sort());
+    expect(first.filterOptions).toEqual({
+      games: [{ id: f.gameId, nameKey: `games.${f.gameId}.name` }],
+      runtimes: ['fixture'],
+      versions: [],
+      projects: [{ id: project.id, name: 'Browser group' }],
+      owners: [],
+    });
+    const filtered = await listPlatformServers(f.db, f.context, {
+      q: 'Browser',
+      gameId: f.gameId,
+      runtimeId: 'fixture',
+      projectId: project.id,
+      ownerId: f.context.subjectUserId,
+      state: 'running',
+      page: 8,
+      limit: 1,
+    });
+    expect(filtered).toMatchObject({ total: 1, page: 1, totalPages: 1 });
+    expect(filtered.items).toHaveLength(1);
+    expect((await listPlatformServers(f.db, f.context, { runtimeId: 'missing' })).total).toBe(0);
+    expect((await listPlatformServers(f.db, f.context, { projectId: 'none' })).total).toBe(1);
+    expect(
+      (await listPlatformServers(f.db, f.context, { ownerId: foreign.context.subjectUserId }))
+        .total,
+    ).toBe(0);
+    await expect(listPlatformServers(f.db, f.context, { scope: 'others' })).rejects.toThrow(
+      'forbidden',
+    );
+    await expect(
+      listPlatformServers(f.db, f.context, { page: 1, cursor: first.nextCursor }),
+    ).rejects.toThrow('validation_failed');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ owner_id: f.owner.subjectUserId })
+      .where('id', '=', foreignId)
+      .execute();
+    const mine = await listPlatformServers(f.db, f.owner, { scope: 'mine' });
+    expect(mine.items.map((row) => row.id)).toContain(foreignId);
+    expect(mine.filterOptions.owners).toEqual([]);
+    const others = await listPlatformServers(f.db, f.owner, {
+      scope: 'others',
+      ownerId: f.context.subjectUserId,
+    });
+    expect(others.items.map((row) => row.id).sort()).toEqual(ids.sort());
+    expect(others.filterOptions.owners).toContainEqual({
+      id: f.context.subjectUserId,
+      name: 'User',
+    });
+    expect(others.filterOptions.owners.map((row) => row.id)).not.toContain(f.owner.subjectUserId);
+    expect(JSON.stringify(others.filterOptions)).not.toContain('@example.test');
+  });
+  it('keeps collaborator visibility while mine excludes shared servers and uses installed releases only', async () => {
+    const { id, choiceId } = await installedMinecraft();
+    const other = await peer();
+    const project = await createProject(f.db, f.context, { name: 'Shared browser group' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ project_id: project.id })
+      .where('id', '=', id)
+      .execute();
+    await setProjectMember(f.db, f.context, project.id, {
+      userId: other.context.subjectUserId,
+      role: 'viewer',
+    });
+    const visible = await listPlatformServers(f.db, other.context, {
+      gameId: 'minecraft-java',
+      runtimeId: 'vanilla',
+      version: '26.1',
+    });
+    expect(visible.items.map((row) => row.id)).toEqual([id]);
+    expect(visible.filterOptions.versions).toEqual(['26.1']);
+    expect((await listPlatformServers(f.db, other.context, { scope: 'mine' })).items).toEqual([]);
+    expect(
+      (await listPlatformServers(f.db, other.context, { gameId: 'missing' })).filterOptions
+        .versions,
+    ).toEqual([]);
+    expect(
+      (await listPlatformServers(f.db, other.context, { runtimeId: 'missing' })).filterOptions
+        .versions,
+    ).toEqual([]);
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: false })
+      .where('server_id', '=', id)
+      .execute();
+    expect((await listPlatformServers(f.db, other.context, { version: '26.1' })).total).toBe(0);
+    expect((await listPlatformServers(f.db, other.context)).filterOptions.versions).toEqual([]);
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: true })
+      .where('server_id', '=', id)
+      .execute();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({ mapping_id: other.mappingId })
+      .where('id', '=', choiceId)
+      .execute();
+    expect((await listPlatformServers(f.db, other.context)).filterOptions.versions).toEqual([]);
+  });
   it('derives viewer/operator/manager actions while keeping first-start denial separate from current state', async () => {
     const other = await peer(),
       project = await createProject(f.db, f.context, { name: 'Shared' }),
@@ -1085,6 +1203,12 @@ describe('M5 platform browser queries and metadata', () => {
         },
       };
     expect((await listPlatformServers(f.db, support)).items.map((r) => r.id)).toEqual([id]);
+    const scoped = await listPlatformServers(f.db, support);
+    expect(scoped.filterOptions.games.map((game) => game.id)).toEqual([f.gameId]);
+    expect(scoped.filterOptions.owners).toEqual([]);
+    await expect(listPlatformServers(f.db, support, { scope: 'others' })).rejects.toThrow(
+      'forbidden',
+    );
     await expect(listPlatformUsers(f.db, support)).rejects.toThrow('forbidden');
     await recordAudit(f.db, f.owner, 'fixture.record', {});
     await expect(listPlatformAudit(f.db, support)).rejects.toThrow('forbidden');

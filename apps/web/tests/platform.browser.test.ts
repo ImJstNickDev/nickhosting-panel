@@ -148,13 +148,11 @@ describe('M5 real browser platform and Owner journeys', () => {
     );
     await user.goto(`${fixture.origin}/servers`);
     await user.getByLabel('Search servers').fill('does not exist');
-    await user.getByRole('button', { name: 'Filter', exact: true }).click();
     await browserExpect(
       user.getByText('No servers match these filters.', { exact: true }),
     ).toBeVisible();
     await fixture.screenshot(user, 'servers-empty-desktop-en');
     await user.getByLabel('Search servers').fill('');
-    await user.getByRole('button', { name: 'Filter', exact: true }).click();
     await browserExpect(user.getByRole('link', { name: 'Survival', exact: true })).toBeVisible();
     await fixture.screenshot(user, 'servers-desktop-en');
     await peer.goto(`${fixture.origin}/servers`);
@@ -510,7 +508,6 @@ describe('M5 real browser platform and Owner journeys', () => {
 
   it('renders Italian mobile server and Activity journeys with keyboard focus and no page overflow', async () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { name: 'Alex', locale: 'it' });
-    await user.evaluate(() => localStorage.setItem('nh.locale', 'it'));
     await user.setViewportSize({ width: 390, height: 844 });
     await user.goto(fixture.origin);
     await browserExpect(user.getByRole('heading', { name: 'Server recenti' })).toBeVisible();
@@ -521,6 +518,7 @@ describe('M5 real browser platform and Owner journeys', () => {
       await user.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
     await user.goto(`${fixture.origin}/servers`);
+    await user.getByLabel('Cerca server', { exact: true }).fill('Survival');
     await browserExpect(user.getByRole('link', { name: /^(Alex )?Survival$/ })).toBeVisible();
     await fixture.screenshot(user, 'servers-mobile-it');
     await accessible(user);

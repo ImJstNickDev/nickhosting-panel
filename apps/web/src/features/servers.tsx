@@ -29,7 +29,6 @@ import {
   Time,
   text,
 } from '../components/ui.js';
-import { creationGamesQuery } from './creation-catalog.js';
 import { getGameArtwork } from './integrations.js';
 import {
   platformPath,
@@ -39,6 +38,8 @@ import {
   useServer,
 } from './service-contracts.js';
 import './home.css';
+
+export { ServersPage } from './server-browser.js';
 
 type ServerList = Result<typeof listPlatformServers>;
 type Projects = Result<typeof listPlatformProjects>;
@@ -118,7 +119,15 @@ function ServerCardResource({
     </div>
   );
 }
-function ServerCard({ server, headingLevel = 2 }: { server: ServerInfo; headingLevel?: 2 | 3 }) {
+function ServerCard({
+  server,
+  headingLevel = 2,
+  ownerName,
+}: {
+  server: ServerInfo;
+  headingLevel?: 2 | 3;
+  ownerName?: string;
+}) {
   const t = useT(),
     format = useFormat();
   const [now, setNow] = useState(Date.now);
@@ -171,6 +180,7 @@ function ServerCard({ server, headingLevel = 2 }: { server: ServerInfo; headingL
             </div>
             <p className="muted">
               {server.gameNameKey ? t(server.gameNameKey) : server.gameId} · {server.runtimeId}
+              {ownerName && <span className="server-card-owner"> · {ownerName}</span>}
             </p>
             <dl className="server-card-resources" id={`server-card-resources-${server.id}`}>
               <ServerCardResource icon="memoryMiB" label={t('platform.memoryLimit')}>
@@ -197,14 +207,23 @@ function ServerCard({ server, headingLevel = 2 }: { server: ServerInfo; headingL
 export function ServerCards({
   items,
   headingLevel = 2,
+  view = 'grid',
+  ownerNames,
 }: {
   items: ServerInfo[];
   headingLevel?: 2 | 3;
+  view?: 'grid' | 'list';
+  ownerNames?: Map<string, string>;
 }) {
   return (
-    <ul className="server-grid">
+    <ul className={`server-grid ${view === 'list' ? 'server-list' : ''}`}>
       {items.map((server) => (
-        <ServerCard key={server.id} server={server} headingLevel={headingLevel} />
+        <ServerCard
+          key={server.id}
+          server={server}
+          headingLevel={headingLevel}
+          ownerName={ownerNames?.get(server.ownerId)}
+        />
       ))}
     </ul>
   );
@@ -318,13 +337,23 @@ export function QuotaSummary() {
                       <div>
                         <dt>{t('platform.remaining')}</dt>
                         <dd>
-                          {key === 'storageMiB' && quota.data.limits.storageMiB === null
-                            ? quota.data.sharedStorageAvailableBytes == null
-                              ? t('web.unavailable')
-                              : format.bytes(quota.data.sharedStorageAvailableBytes)
-                            : quota.data.remaining[key] === null
-                              ? '—'
-                              : amount(quota.data.remaining[key])}
+                          {key === 'storageMiB' && quota.data.limits.storageMiB === null ? (
+                            quota.data.sharedStorageAvailableBytes == null ? (
+                              t('web.unavailable')
+                            ) : (
+                              format.bytes(quota.data.sharedStorageAvailableBytes)
+                            )
+                          ) : quota.data.remaining[key] === null ? (
+                            key === 'serverCount' ? (
+                              <span role="img" aria-label={t('platform.unlimited')}>
+                                ∞
+                              </span>
+                            ) : (
+                              '—'
+                            )
+                          ) : (
+                            amount(quota.data.remaining[key])
+                          )}
                         </dd>
                       </div>
                     </dl>
@@ -402,96 +431,6 @@ export function HomePage() {
           </ul>
         )}
       </HomeSection>
-    </Page>
-  );
-}
-export function ServersPage() {
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void queryClient.prefetchQuery(creationGamesQuery);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-  const t = useT();
-  const [filters, setFilters] = useState({ q: '', state: '', projectId: '' });
-  const [cursors, setCursors] = useState<string[]>([]);
-  const query = new URLSearchParams({ limit: '12' });
-  for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
-  if (cursors.length) query.set('cursor', cursors.at(-1) ?? '');
-  const servers = useQuery({
-    queryKey: ['servers', query.toString()],
-    queryFn: () => api<ServerList>(`/v1/platform/servers?${query}`),
-    refetchInterval: 15000,
-  });
-  return (
-    <Page
-      title={t('web.servers')}
-      actions={
-        <>
-          <Link className="button secondary" to="/projects">
-            {t('web.projects')}
-          </Link>
-          <Link className="button" to="/servers/new">
-            {t('web.createServer')}
-          </Link>
-        </>
-      }
-    >
-      <form
-        className="toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const data = new FormData(event.currentTarget);
-          setFilters({
-            q: text(data, 'q'),
-            state: text(data, 'state'),
-            projectId: text(data, 'projectId'),
-          });
-          setCursors([]);
-        }}
-      >
-        <Input
-          label={t('platform.searchServers')}
-          name="q"
-          type="search"
-          defaultValue={filters.q}
-          maxLength={100}
-        />
-        <Select label={t('web.status')} name="state" defaultValue={filters.state}>
-          <option value="">{t('web.all')}</option>
-          {['offline', 'starting', 'running', 'stopping', 'unknown'].map((state) => (
-            <option key={state} value={state}>
-              {t(statusKey(state))}
-            </option>
-          ))}
-        </Select>
-        <Select label={t('platform.project')} name="projectId" defaultValue={filters.projectId}>
-          <option value="">{t('web.all')}</option>
-          <option value="none">{t('platform.noProject')}</option>
-        </Select>
-        <button type="submit">{t('web.filter')}</button>
-      </form>
-      {servers.isPending ? (
-        <Loading />
-      ) : servers.error ? (
-        <ErrorNotice error={servers.error} retry={() => void servers.refetch()} />
-      ) : servers.data?.items.length ? (
-        <ServerCards items={servers.data.items} />
-      ) : (
-        <Empty
-          text={
-            Object.values(filters).some(Boolean)
-              ? t('platform.noMatchingServers')
-              : t('web.noServers')
-          }
-        />
-      )}
-      <CursorControls
-        next={servers.data?.nextCursor}
-        previous={cursors.length > 0}
-        onNext={(next) => setCursors([...cursors, next])}
-        onPrevious={() => setCursors(cursors.slice(0, -1))}
-      />
     </Page>
   );
 }

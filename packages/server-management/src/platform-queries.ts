@@ -36,13 +36,18 @@ const pageSchema = z.object({
 });
 const serverQuerySchema = pageSchema
   .extend({
+    page: z.coerce.number().int().min(1).max(1_000_000).optional(),
+    scope: z.enum(['mine', 'others']).optional(),
+    runtimeId: z.string().min(1).max(64).optional(),
+    version: z.string().min(1).max(128).optional(),
     q: z.string().trim().max(100).optional(),
     projectId: z.union([z.uuid(), z.literal('none')]).optional(),
     gameId: z.string().max(64).optional(),
     state: z.enum(['offline', 'starting', 'running', 'stopping', 'unknown']).optional(),
     ownerId: z.string().min(1).max(128).optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => !(value.page !== undefined && value.cursor !== undefined));
 const cursorSchema = z.object({ at: z.iso.datetime(), id: z.string().min(1).max(128) }).strict();
 function cursor(value: string | undefined, uuid = false) {
   if (!value) return null;
@@ -98,10 +103,27 @@ async function scopedServer(db: DB, context: AuthContext, serverId: string) {
   return row;
 }
 
+// Installed release metadata is authoritative; manifest compatibility ranges and
+// integration versions are not the version installed in an individual server.
+const installedServerVersion = sql<string | null>`(
+  select nullif(combination.combination->>'release', '')
+  from minecraft_server_profiles as profile
+  join minecraft_combinations as combination on combination.id = profile.combination_id
+  join runtime_egg_mappings as version_mapping on version_mapping.id = combination.mapping_id
+  where profile.server_id = managed_servers.id and profile.installed = true
+    and combination.mapping_id = managed_servers.mapping_id
+    and version_mapping.game_id = 'minecraft-java'
+)`;
+
 export async function listPlatformServers(db: DB, context: AuthContext, input: unknown = {}) {
   const value = parse(serverQuerySchema, input),
     after = cursor(value.cursor, true);
-  let query = visibleServers(db, context);
+  if (value.scope === 'others') ownerOnly(context);
+  let inventory = visibleServers(db, context);
+  if (value.scope === 'mine') inventory = inventory.where('owner_id', '=', context.subjectUserId);
+  if (value.scope === 'others')
+    inventory = inventory.where('owner_id', '!=', context.subjectUserId);
+  let query = inventory;
   if (value.q) query = query.where(sql<boolean>`strpos(lower(name), lower(${value.q})) > 0`);
   if (value.projectId)
     query =
@@ -110,24 +132,83 @@ export async function listPlatformServers(db: DB, context: AuthContext, input: u
         : query.where('project_id', '=', value.projectId);
   if (value.state) query = query.where('runtime_state', '=', value.state);
   if (value.ownerId) query = query.where('owner_id', '=', value.ownerId);
-  if (value.gameId)
-    query = query.where(
-      'mapping_id',
-      'in',
-      db.selectFrom('runtime_egg_mappings').select('id').where('game_id', '=', value.gameId),
-    );
+  if (value.gameId || value.runtimeId) {
+    let mappings = db.selectFrom('runtime_egg_mappings').select('id');
+    if (value.gameId) mappings = mappings.where('game_id', '=', value.gameId);
+    if (value.runtimeId) mappings = mappings.where('runtime_id', '=', value.runtimeId);
+    query = query.where('mapping_id', 'in', mappings);
+  }
+  if (value.version) query = query.where(installedServerVersion, '=', value.version);
+  const [count, facets] = await Promise.all([
+    query.clearSelect().select(sql<string>`count(*)`.as('total')).executeTakeFirstOrThrow(),
+    db
+      .selectFrom(
+        inventory
+          .clearSelect()
+          .select(['id', 'mapping_id', 'project_id', 'owner_id'])
+          .select(installedServerVersion.as('version'))
+          .as('inventory'),
+      )
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'inventory.mapping_id')
+      .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
+      .leftJoin('projects as project', 'project.id', 'inventory.project_id')
+      .innerJoin('user as account', 'account.id', 'inventory.owner_id')
+      .select([
+        'mapping.game_id',
+        'mapping.runtime_id',
+        'inventory.version',
+        'project.id as project_id',
+        'project.name as project_name',
+        'account.id as owner_id',
+        'account.name as owner_name',
+      ])
+      .select(sql<string | null>`game.manifest->>'nameKey'`.as('game_name_key'))
+      .distinct()
+      .execute(),
+  ]);
+  const total = Number(count.total);
+  const totalPages = Math.max(1, Math.ceil(total / value.limit));
+  const pageNumber = Math.min(value.page ?? 1, totalPages);
   if (after)
     query = query.where(
       sql<boolean>`(date_trunc('milliseconds',created_at),id) < (${new Date(after.at)},${after.id})`,
     );
+  if (value.page !== undefined) query = query.offset((pageNumber - 1) * value.limit);
   const rows = await query
     .orderBy(sql`date_trunc('milliseconds',created_at)`, 'desc')
     .orderBy('id', 'desc')
     .limit(value.limit + 1)
     .execute();
   const result = page(rows, value.limit, (r) => ({ at: r.created_at, id: r.id }));
+  const games = new Map<string, { id: string; nameKey: string | null }>();
+  const runtimes = new Set<string>();
+  const versions = new Set<string>();
+  const projects = new Map<string, { id: string; name: string }>();
+  const owners = new Map<string, { id: string; name: string }>();
+  for (const facet of facets) {
+    games.set(facet.game_id, { id: facet.game_id, nameKey: facet.game_name_key });
+    if (!value.gameId || facet.game_id === value.gameId) {
+      runtimes.add(facet.runtime_id);
+      if ((!value.runtimeId || facet.runtime_id === value.runtimeId) && facet.version)
+        versions.add(facet.version);
+    }
+    if (facet.project_id && facet.project_name !== null)
+      projects.set(facet.project_id, { id: facet.project_id, name: facet.project_name });
+    if (value.scope === 'others' && owner(context))
+      owners.set(facet.owner_id, { id: facet.owner_id, name: facet.owner_name });
+  }
   return {
     ...result,
+    total,
+    page: pageNumber,
+    totalPages,
+    filterOptions: {
+      games: [...games.values()].sort((a, b) => a.id.localeCompare(b.id)),
+      runtimes: [...runtimes].sort(),
+      versions: [...versions].sort((a, b) => b.localeCompare(a, undefined, { numeric: true })),
+      projects: [...projects.values()].sort((a, b) => a.name.localeCompare(b.name)),
+      owners: [...owners.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    },
     items: await Promise.all(result.items.map((row) => describeServer(db, context, row))),
   };
 }
