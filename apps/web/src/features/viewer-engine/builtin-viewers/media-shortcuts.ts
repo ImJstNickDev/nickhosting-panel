@@ -83,7 +83,7 @@ export function useMediaShortcuts(
           !event.repeat,
         );
       } else if (actions.current.motion && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-        if (target?.closest('select') || (keyboardNavigation && interactive)) return;
+        if (target?.closest('select, [role="combobox"]') || (keyboardNavigation && interactive)) return;
         event.preventDefault();
         event.stopPropagation();
         actions.current.motion.volume(event.key === 'ArrowUp' ? 0.05 : -0.05);
