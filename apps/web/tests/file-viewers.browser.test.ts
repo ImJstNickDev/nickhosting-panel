@@ -1316,10 +1316,34 @@ describe('M5 builtin file viewers', () => {
     page = await previousPage.context().newPage();
     streamingUi = true;
     try {
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
       // Observe real worker messages without replacing fetch, decoding, data or timing behavior.
       await page.addInitScript(() => {
         const record = { firstNonzeroAt: undefined as number | undefined, messages: 0 };
         Object.assign(window, { waveStreamMessages: record });
+        const reveals: {
+          index: number;
+          layer: string;
+          delay: number;
+          duration: ReturnType<AnimationEffect['getTiming']>['duration'];
+          animation: Animation;
+        }[] = [];
+        Object.assign(window, { waveReveals: reveals });
+        const animate = Element.prototype.animate;
+        Element.prototype.animate = function (keyframes, options) {
+          const animation = animate.call(this, keyframes, options);
+          if (this.matches('.wave-envelope-bar[data-wave-bar]')) {
+            const timing = animation.effect?.getTiming();
+            reveals.push({
+              index: Number(this.getAttribute('data-wave-bar')),
+              layer: this.closest('.wave-envelope-played') ? 'played' : 'unplayed',
+              delay: timing?.delay ?? 0,
+              duration: timing?.duration ?? 0,
+              animation,
+            });
+          }
+          return animation;
+        };
         const NativeWorker = window.Worker;
         window.Worker = class extends NativeWorker {
           constructor(url: string | URL, options?: WorkerOptions) {
@@ -1380,12 +1404,68 @@ describe('M5 builtin file viewers', () => {
         )
         .toBeGreaterThan(0);
       expect(fixture.complete).toBe(false);
+      const revealTimings = await page.evaluate(() =>
+        (
+          window as unknown as {
+            waveReveals: {
+              index: number;
+              layer: string;
+              delay: number;
+              duration: number;
+              animation: Animation;
+            }[];
+          }
+        ).waveReveals.map(({ animation, ...timing }) => ({
+          ...timing,
+          state: animation.playState,
+        })),
+      );
+      const unplayed = revealTimings.filter((value) => value.layer === 'unplayed');
+      expect(unplayed.length).toBeGreaterThan(10);
+      expect(new Set(unplayed.map((value) => value.index)).size).toBe(unplayed.length);
+      expect(unplayed.map((value) => value.index)).toEqual(
+        unplayed.map((value) => value.index).sort((left, right) => left - right),
+      );
+      for (const item of unplayed) {
+        expect(revealTimings.filter((value) => value.index === item.index)).toHaveLength(2);
+        const played = revealTimings.find(
+          (value) => value.index === item.index && value.layer === 'played',
+        );
+        expect(played?.delay).toBe(item.delay);
+        expect(played?.duration).toBe(180);
+      }
+      const queuedSteps = unplayed
+        .slice(1)
+        .flatMap((value, index) =>
+          value.delay > 0 ? [value.delay - (unplayed[index]?.delay ?? 0)] : [],
+        );
+      expect(queuedSteps.length).toBeGreaterThan(5);
+      for (const step of queuedSteps) expect(step).toBeCloseTo(8, 3);
+      expect(revealTimings.some((value) => value.state === 'running')).toBe(true);
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await browserExpect
+        .poll(() =>
+          page.evaluate(() => {
+            const items = (window as unknown as { waveReveals: { animation: Animation }[] })
+              .waveReveals;
+            return (
+              items.every((value) => value.animation.playState !== 'running') &&
+              items.some((value) => value.animation.playState === 'idle')
+            );
+          }),
+        )
+        .toBe(true);
       await harness.screenshot(page, 'file-viewer-wave-incremental-en');
       fixture.release?.();
       await browserExpect(envelope).toHaveAttribute('data-waveform-state', 'ready');
       expect(fixture.sent).toBe(fixture.body.length);
       expect(fixture.complete).toBe(true);
       expect(fixture.requests).toBe(1);
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { waveReveals: unknown[] }).waveReveals.length,
+        ),
+      ).toBe(revealTimings.length);
       console.info('Wave streaming fixture', {
         browser: process.env.NH_BROWSER ?? 'chromium',
         firstByteToFirstPeakMs: (observed.firstNonzeroAt ?? 0) - (fixture.firstByteAt ?? 0),

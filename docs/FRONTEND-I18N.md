@@ -869,8 +869,11 @@ cleanup path. Duration refinement
 within the eligible range does not restart analysis. Clearly incomplete or
 mismatched timelines are unavailable rather than certified as complete silence.
 
-Wave starts flat without a loading caption; real peak updates expand each band
-from the center with a short transition (disabled for reduced motion). Browser
+Wave starts flat without a loading caption. Newly received bars rise from the
+center in sequence (8 ms between bars, 180 ms per reveal); later batches continue
+the sequence and refinements do not restart it. This presentation-only animation
+does not delay decoding, seeking or playback. File exit cancels it, resizing does
+not replay it, and reduced motion shows the received bars immediately. Browser
 codec support and container metadata determine how early decoding can begin.
 Unsupported decoding or eligibility limits preserve native playback/seek and the
 truthful waveform-unavailable fallback. This introduces no server transcoding,

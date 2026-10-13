@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { safeApiPath } from '../../../api/client.js';
 import { useT } from '../../../app/i18n.js';
 import { waveformBars, waveformEligible, waveformLimits } from './audio-waveform-model.js';
+import { useWaveformReveal } from './audio-waveform-reveal.js';
 import './audio-waveform.css';
 
 const flatPeaks = new Float32Array(waveformLimits.peaks);
@@ -120,6 +121,7 @@ export function AudioWaveform({
     () => waveformBars(peaks ?? flatPeaks, Math.max(1, Math.min(100, Math.floor(width / 7)))),
     [peaks, width],
   );
+  useWaveformReveal(root, url, bars);
   const state = analysis.url === url ? analysis.state : 'loading';
   const progress =
     Number.isFinite(position) && duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0;
@@ -133,6 +135,7 @@ export function AudioWaveform({
           <rect
             key={x}
             className="wave-envelope-bar"
+            data-wave-bar={index}
             data-amplitude={peak}
             data-height={height}
             x={x}

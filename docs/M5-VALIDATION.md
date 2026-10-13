@@ -7767,3 +7767,29 @@ bar 10 grew with only 262,144/960,044 bytes received, cancellation still passed.
 Final combined units: 15/15 pass (629 ms). Screenshot refreshed and independently
 reviewed: received portion has real amplitude, unread remainder stays flat;
 centered controls retain their layout with no additional loading copy.
+
+### Wave per-bar reveal (2026-10-13)
+
+Owner-requested presentation refinement: each newly available bar rises over
+180 ms, with starts spaced 8 ms apart. Incoming batches continue the sequence;
+refined peaks update an active animation's destination without restarting it.
+Both playback-color layers share timing. Decoding/playback/seek are unchanged.
+Reduced motion bypasses/cancels the reveal, file exit cancels pending animations,
+and viewport resizing does not replay already received data. The effect only
+runs when peak geometry changes, not on playback animation frames.
+
+Web typecheck and production build pass (existing large app/editor chunk warnings
+remain). No dependency, API, Worker, infrastructure or live file changes; dev uses
+ordinary Vite HMR. Independent review and focused browser evidence follow.
+
+Focused Chromium real-stream regression passes 1/1 (14.53 s), using the existing
+`-t 'draws real Wave peaks'` browser command. An observer of actual Web Animations
+verifies unique ascending first appearances, equal timing in both color layers,
+8 ms stagger and 180 ms rise. Changing reduced motion cancels pending animations
+and suppresses new reveals. Real partial decode and HTTP cancellation still pass.
+Independent code review found no must-fix. Screenshot refreshed from the actual
+browser; no historical suites or Firefox matrix rerun for this presentation change.
+The final test typecheck initially caught the browser's wider CSSNumericValue
+animation-duration type; the test observer now uses the native getTiming return
+type. Final web source/test typecheck passes. Scoped Biome and indexed governance
+pass (782 text files, 239 PNGs, 638 links, four TOML files, 44 ignore cases).
