@@ -484,6 +484,95 @@ describe('file operation handlers with isolated authoritative database', () => {
     },
   );
 
+  async function archiveBytes(entries: { path: string; content?: Buffer }[]) {
+    const zip = new ZipFile();
+    const chunks: Buffer[] = [];
+    const collected = (async () => {
+      for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+    })();
+    for (const entry of entries) {
+      if (entry.content === undefined) zip.addEmptyDirectory(entry.path);
+      else zip.addBuffer(entry.content, entry.path);
+    }
+    zip.end();
+    await collected;
+    return Buffer.concat(chunks);
+  }
+
+  it('extracts only selected nested members and records the completed selection count', async () => {
+    const nested = await archiveBytes([
+      { path: 'chosen/settings.txt', content: Buffer.from('nested selection') },
+      { path: 'chosen/empty' },
+      { path: 'unselected.txt', content: Buffer.from('skip') },
+    ]);
+    files.set(
+      'source.zip',
+      await archiveBytes([
+        { path: 'nested/inner.zip', content: nested },
+        { path: 'outer.txt', content: Buffer.from('skip') },
+      ]),
+    );
+    const response = await post('extract', {
+      root: '',
+      file: 'source.zip',
+      destination: 'selected',
+      confirm: true,
+      archives: ['nested/inner.zip'],
+      entries: ['chosen'],
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ completed: 2, destination: 'selected' });
+    expect(files.get('selected/chosen/settings.txt')?.toString()).toBe('nested selection');
+    expect(files.has('selected/chosen/empty')).toBe(true);
+    expect(files.has('selected/unselected.txt')).toBe(false);
+    expect(files.has('selected/outer.txt')).toBe(false);
+    expect(service.adapter.uploadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { entries: [] },
+    { entries: ['absent'] },
+    { entries: ['../escape'] },
+    { archives: ['missing.zip'] },
+    { archives: ['safe.txt'] },
+  ])('rejects invalid extraction selection before any provider mutation: %j', async (selection) => {
+    files.set(
+      'source.zip',
+      await archiveBytes([{ path: 'safe.txt', content: Buffer.from('safe') }]),
+    );
+    const response = await post('extract', {
+      root: '',
+      file: 'source.zip',
+      destination: 'selected',
+      confirm: true,
+      ...selection,
+    });
+    expect(response.status).toBe(400);
+    expect(service.adapter.createDirectory).not.toHaveBeenCalled();
+    expect(service.adapter.uploadFile).not.toHaveBeenCalled();
+    expect(service.adapter.deleteFiles).not.toHaveBeenCalled();
+  });
+
+  it('reports uncertainty after a selected extraction upload fails without deleting partial output', async () => {
+    files.set(
+      'source.zip',
+      await archiveBytes([{ path: 'safe.txt', content: Buffer.from('safe') }]),
+    );
+    vi.mocked(service.adapter.uploadFile).mockRejectedValueOnce(new Error('response lost'));
+    const response = await post('extract', {
+      root: '',
+      file: 'source.zip',
+      destination: 'selected',
+      confirm: true,
+      entries: ['safe.txt'],
+    });
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('operation_uncertain');
+    expect(files.has('selected')).toBe(true);
+    expect(service.adapter.deleteFiles).not.toHaveBeenCalled();
+    expect(service.adapter.uploadFile).toHaveBeenCalledTimes(1);
+  });
+
   it('copies nested content using streamed transfers and completes durable upload claims', async () => {
     const result = await post('copy', { root: '', files: ['source'], destination: 'target' });
     expect(await result.clone().text()).toContain('completed');
@@ -492,7 +581,13 @@ describe('file operation handlers with isolated authoritative database', () => {
     expect(files.get('source/a.txt')?.toString()).toBe('hello');
     expect(files.has('source/empty')).toBe(true);
     expect(files.has('target/source/empty')).toBe(true);
-    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toHaveLength(0);
+    expect(
+      await f.db
+        .selectFrom('upload_ingestion_claims')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toHaveLength(0);
     const events = await f.db
       .selectFrom('audit_events')
       .select('action')
@@ -522,7 +617,13 @@ describe('file operation handlers with isolated authoritative database', () => {
       f.db,
       { providerIdentifier: 'fixture', listFiles: expect.any(Function) },
     );
-    expect(await f.db.selectFrom('upload_ingestion_claims').selectAll().execute()).toHaveLength(0);
+    expect(
+      await f.db
+        .selectFrom('upload_ingestion_claims')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toHaveLength(0);
     expect(
       await f.db
         .selectFrom('audit_events')

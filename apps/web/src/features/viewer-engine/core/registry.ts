@@ -16,6 +16,8 @@ export interface ViewerSource {
   size: number;
   /** An entry of the archive at path; never interpreted as a real server path. */
   entry?: string;
+  /** Ordered nested archive members, relative to their containing archive. */
+  archives?: string[];
   gameId?: string;
 }
 export interface ViewerPreference {
@@ -54,7 +56,22 @@ export const builtinViewers: readonly ViewerDefinition[] = [
     id: 'archive',
     label: 'viewer.name.archive',
     description: 'viewer.archive',
-    extensions: ['zip', 'jar', 'tar', 'tgz', 'tar.gz', '7z', 'rar', 'tar.bz2', 'tar.xz', 'tar.zst'],
+    extensions: [
+      'zip',
+      'jar',
+      'tar',
+      'tgz',
+      'tar.gz',
+      '7z',
+      'rar',
+      'tar.bz2',
+      'tar.xz',
+      'tar.zst',
+      'gz',
+      'bz2',
+      'xz',
+      'zst',
+    ],
   },
   {
     id: 'sqlite',
@@ -88,7 +105,7 @@ export function selectableViewers(source: ViewerSource): ViewerDefinition[] {
       extensions: descriptor.extensions,
     }));
   return [...gameViewers, ...builtinViewers].filter(
-    (viewer) => !source.entry || !['archive', 'sqlite'].includes(viewer.id),
+    (viewer) => !(source.entry || source.archives?.length) || viewer.id !== 'sqlite',
   );
 }
 export function availableViewers(source: ViewerSource): ViewerDefinition[] {

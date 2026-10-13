@@ -222,6 +222,78 @@ describe('viewer routes with isolated database and fixture byte source', () => {
     expect(body.status).toBe(206);
     expect(await body.text()).toBe('emb');
   });
+  it('lists nested archives with search/sort and streams a scoped selection ZIP', async () => {
+    const makeZip = async (files: Record<string, Buffer>) => {
+      const zip = new ZipFile();
+      for (const [name, bytes] of Object.entries(files)) zip.addBuffer(bytes, name);
+      zip.end();
+      const chunks: Buffer[] = [];
+      for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+      return Buffer.concat(chunks);
+    };
+    content = await makeZip({
+      'inside.zip': await makeZip({
+        'folder/a.txt': Buffer.from('small'),
+        'folder/b.txt': Buffer.from('larger text'),
+        'other.txt': Buffer.from('exclude'),
+      }),
+    });
+    const params = new URLSearchParams({
+      path: 'outer.zip',
+      archives: JSON.stringify(['inside.zip']),
+    });
+    const listing = await request(`/archive?${params}&directory=folder&sort=size&direction=desc`);
+    expect(listing.status).toBe(200);
+    expect((await listing.json()).entries.map((entry: { name: string }) => entry.name)).toEqual([
+      'b.txt',
+      'a.txt',
+    ]);
+    const searched = await request(`/archive?${params}&directory=folder&query=a.txt`);
+    expect((await searched.json()).entries).toHaveLength(1);
+    const count = reads;
+    const member = await request(`/archive/content?${params}&entry=folder/a.txt`);
+    expect(await member.text()).toBe('small');
+    expect(reads).toBe(count);
+    const downloaded = await request(`/archive/download?${params}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        directory: 'folder/',
+        entries: JSON.stringify(['folder/a.txt']),
+      }),
+    });
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.headers.get('content-type')).toBe('application/zip');
+    const output = Buffer.from(await downloaded.arrayBuffer());
+    const { createArchiveViewer } = await import('./viewer-archive.js');
+    const { Readable } = await import('node:stream');
+    const verify = await createArchiveViewer(
+      {
+        size: output.length,
+        mtimeMs: 1,
+        read: async (offset, length) => output.subarray(offset, offset + length),
+        stream: (start = 0, end = output.length) =>
+          Readable.toWeb(
+            Readable.from([output.subarray(start, end)]),
+          ) as ReadableStream<Uint8Array>,
+      },
+      { name: 'selection.zip', key: 'verify', cache },
+    );
+    try {
+      expect(verify.list().entries.map((entry) => entry.path)).toEqual(['a.txt']);
+      expect(await new Response((await verify.open('a.txt')).stream).text()).toBe('small');
+    } finally {
+      verify.close();
+    }
+    const invalid = await request(
+      `/archive/download?${params}&directory=folder&entries=${encodeURIComponent(JSON.stringify(['other.txt']))}`,
+    );
+    expect(invalid.status).toBe(422);
+    const deep = await request(
+      `/archive?path=outer.zip&archives=${encodeURIComponent(JSON.stringify(['a', 'b', 'c', 'd', 'e']))}`,
+    );
+    expect(deep.status).toBe(400);
+  });
   it('does not hide ZIP CRC failure after streaming the full declared member', async () => {
     const zip = new ZipFile();
     zip.addBuffer(Buffer.from('member'), 'a.txt');

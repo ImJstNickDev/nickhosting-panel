@@ -44,6 +44,10 @@ export const extractFormats = [
   'tar.zst',
   '7z',
   'rar',
+  'gz',
+  'bz2',
+  'xz',
+  'zst',
 ] as const;
 const maxEntries = 20_000;
 const maxDepth = 64;
@@ -350,14 +354,113 @@ export interface StagedFile {
   local: string;
   directory?: boolean;
 }
-/** No archive entry is written remotely until all names, bytes and checksums validate. */
+export interface ArchiveExtractionSelection {
+  /** Paths in the innermost archive. Directories include all descendants. */
+  entries?: string[];
+  /** Archive members to enter, from the outermost archive inward. */
+  archives?: string[];
+  /** Original filename is required to retain a single compressed stream's name. */
+  name?: string;
+}
+
+export function fileArchiveFormat(name: string) {
+  return extractFormats.find((format) => name.toLowerCase().endsWith(`.${format}`));
+}
+
+function extractionPaths(paths: string[] | undefined, limit: number, unique = true) {
+  if (paths === undefined) return undefined;
+  if (paths.length === 0 || paths.length > limit) badArchive('archive_selection');
+  try {
+    const clean = paths.map((path) => safeArchivePath(path).replace(/\/$/, ''));
+    if (unique && new Set(clean.map((path) => path.toLowerCase())).size !== clean.length)
+      badArchive('archive_selection');
+    return clean;
+  } catch {
+    badArchive('archive_selection');
+  }
+}
+
+/** No archive entry is written remotely until every selected member validates locally. */
 export async function stageFileArchive(
   archive: string,
   format: (typeof extractFormats)[number],
   stage: string,
   signal?: AbortSignal,
   diskPolicy: ContentDiskPolicy = {},
+  selection: ArchiveExtractionSelection = {},
 ): Promise<StagedFile[]> {
+  const entries = extractionPaths(selection.entries, maxEntries);
+  const archives =
+    selection.archives?.length === 0 ? [] : (extractionPaths(selection.archives, 4, false) ?? []);
+  // Every layer shares a staging budget, including intermediate archive members.
+  const budget = { remaining: maxExpandedBytes };
+  let source = archive;
+  let sourceFormat = format;
+  let sourceName = selection.name ?? `source.${format}`;
+  const layers: string[] = [];
+  try {
+    for (const member of archives) {
+      const nestedFormat = fileArchiveFormat(member);
+      if (!nestedFormat) badArchive('unsupported_archive');
+      const layer = await mkdtemp(join(dirname(stage), 'archive-layer-'));
+      layers.push(layer);
+      const staged = await stageArchiveEntries(
+        source,
+        sourceFormat,
+        layer,
+        signal,
+        diskPolicy,
+        [member],
+        sourceName,
+        budget,
+      );
+      if (staged.length !== 1 || staged[0]?.directory || staged[0]?.path !== member)
+        badArchive('archive_selection');
+      source = staged[0].local;
+      sourceFormat = nestedFormat;
+      sourceName = member.split('/').at(-1) as string;
+    }
+    return await stageArchiveEntries(
+      source,
+      sourceFormat,
+      stage,
+      signal,
+      diskPolicy,
+      entries,
+      sourceName,
+      budget,
+    );
+  } finally {
+    for (const layer of layers) await rm(layer, { recursive: true, force: true });
+  }
+}
+
+async function stageArchiveEntries(
+  archive: string,
+  format: (typeof extractFormats)[number],
+  stage: string,
+  signal: AbortSignal | undefined,
+  diskPolicy: ContentDiskPolicy,
+  entries: string[] | undefined,
+  name: string,
+  budget: { remaining: number },
+): Promise<StagedFile[]> {
+  const selection = entries ? new Set(entries) : undefined;
+  const matched = new Set<string>();
+  function selected(path: string) {
+    if (!selection) return true;
+    // A descendant proves that an implicit directory exists, even without a header.
+    const parts = path.split('/');
+    let wanted = false;
+    for (let length = 1; length <= parts.length; length++) {
+      const ancestor = parts.slice(0, length).join('/');
+      if (selection.has(ancestor)) {
+        matched.add(ancestor);
+        wanted = true;
+      }
+    }
+    return wanted;
+  }
   const files: StagedFile[] = [];
   const seen = new Map<string, 'file' | 'directory'>();
   let expanded = 0,
@@ -387,27 +490,46 @@ export async function stageFileArchive(
       badArchive('archive_budget');
     return safe;
   }
-  async function stageEntry(path: string, size: number, input: Readable, expectedCrc?: number) {
+  async function stageEntry(
+    path: string,
+    size: number,
+    input: Readable,
+    expectedCrc?: number,
+    unknownSize = false,
+  ) {
     signal?.throwIfAborted();
+    if (!unknownSize && size > budget.remaining) badArchive('archive_budget');
     const local = join(stage, path);
     await mkdir(dirname(local), { recursive: true, mode: 0o700 });
-    await assertContentDiskSpace(stage, size, diskPolicy);
+    await assertContentDiskSpace(stage, unknownSize ? Math.min(size, 1024 ** 2) : size, diskPolicy);
     let length = 0,
-      checksum = 0;
+      checksum = 0,
+      checkedBytes = 0;
     const guard = new Transform({
       transform(chunk: Buffer, _encoding, done) {
         length += chunk.length;
-        if (length > size) return done(new Error('archive_size_mismatch'));
+        if (length > size || length > budget.remaining)
+          return done(new Error('archive_size_mismatch'));
         if (expectedCrc !== undefined) checksum = crc32(chunk, checksum);
-        done(null, chunk);
+        if (unknownSize && length - checkedBytes >= 1024 ** 2) {
+          checkedBytes = length;
+          void assertContentDiskSpace(stage, chunk.length, diskPolicy).then(
+            () => done(null, chunk),
+            (error: Error) => done(error),
+          );
+        } else done(null, chunk);
       },
     });
     await pipeline(input, guard, createWriteStream(local, { flags: 'wx', mode: 0o600 }), {
       signal,
     });
-    if (length !== size || (expectedCrc !== undefined && checksum !== expectedCrc))
+    if (
+      (!unknownSize && length !== size) ||
+      (expectedCrc !== undefined && checksum !== expectedCrc)
+    )
       badArchive('archive_integrity');
-    files.push({ path, size, local });
+    budget.remaining -= length;
+    files.push({ path, size: length, local });
   }
   try {
     if (format === 'zip' || format === 'jar') {
@@ -415,7 +537,8 @@ export async function stageFileArchive(
         archive,
         async (entry) => {
           const path = validate(entry.path, entry.size);
-          await stageEntry(path, entry.size, await entry.open(), entry.entry.crc32);
+          if (selected(path))
+            await stageEntry(path, entry.size, await entry.open(), entry.entry.crc32);
         },
         {
           maxArchiveBytes,
@@ -426,16 +549,37 @@ export async function stageFileArchive(
         },
         async (name) => {
           const path = validate(name, 0, true);
-          files.push({ path, size: 0, local: '', directory: true });
+          if (selected(path)) files.push({ path, size: 0, local: '', directory: true });
         },
       );
+    } else if (format === 'gz' || format === 'bz2' || format === 'xz' || format === 'zst') {
+      const path = validate(name.slice(0, -(format.length + 1)), 0);
+      if (selected(path)) {
+        const [{ createTarDecoder }, { viewerNodeReadable }] = await Promise.all([
+          import('./viewer-archive.js'),
+          import('./viewer-cache.js'),
+        ]);
+        const decode = await createTarDecoder(`tar.${format}`);
+        const input = createReadStream(archive);
+        await stageEntry(
+          path,
+          Math.min(
+            maxArchiveBytes,
+            budget.remaining,
+            Math.max(archiveSize, 1) * maxCompressionRatio,
+          ),
+          viewerNodeReadable(decode(Readable.toWeb(input) as ReadableStream<Uint8Array>, signal)),
+          undefined,
+          true,
+        );
+      }
     } else if (format === '7z' || format === 'rar') {
       // Reuse the bounded isolated decoder. Only temporary local files are touched;
       // the existing caller dispatches provider writes after the entire staging pass.
       const [{ createArchiveViewer }, { ViewerCache, cachedFileSource, viewerNodeReadable }] =
         await Promise.all([import('./viewer-archive.js'), import('./viewer-cache.js')]);
       const cacheRoot = await mkdtemp(join(dirname(stage), 'archive-decoder-'));
-      const decoderBytes = 64 * 1024 ** 2;
+      const decoderBytes = 256 * 1024 ** 2;
       const cache = new ViewerCache({
         root: cacheRoot,
         maxFileBytes: decoderBytes,
@@ -465,8 +609,10 @@ export async function stageFileArchive(
             const page = viewer.list({ directory, offset, limit: 200 });
             for (const entry of page.entries) {
               const path = validate(entry.path, entry.size, entry.directory);
-              if (!entry.directory && entry.size > decoderBytes) badArchive('archive_budget');
-              entries.push({ path, size: entry.size, directory: entry.directory });
+              if (selected(path)) {
+                if (!entry.directory && entry.size > decoderBytes) badArchive('archive_budget');
+                entries.push({ path, size: entry.size, directory: entry.directory });
+              }
               if (entry.directory) directories.push(path);
             }
             if (page.nextOffset === null) break;
@@ -498,9 +644,11 @@ export async function stageFileArchive(
           const path = validate(header.name, header.size ?? 0, header.type === 'directory');
           if (header.type === 'directory') {
             if (header.size) badArchive('archive_directory');
-            files.push({ path, size: 0, local: '', directory: true });
+            if (selected(path)) files.push({ path, size: 0, local: '', directory: true });
             stream.resume();
-          } else await stageEntry(path, header.size ?? 0, Readable.from(stream));
+          } else if (selected(path)) {
+            await stageEntry(path, header.size ?? 0, Readable.from(stream));
+          } else stream.resume();
         })().then(
           () => next(),
           (error: Error) => {
@@ -556,6 +704,7 @@ export async function stageFileArchive(
       throw new DomainError('resources_unavailable');
     badArchive('archive_invalid');
   }
+  if (selection && matched.size !== selection.size) badArchive('archive_selection');
   return files;
 }
 
@@ -799,15 +948,15 @@ export function registerFileOperationRoutes(
         file: z.string(),
         destination: z.string(),
         confirm: z.literal(true),
+        entries: z.array(z.string().min(1).max(1024)).min(1).max(maxEntries).optional(),
+        archives: z.array(z.string().min(1).max(1024)).max(4).optional(),
       }),
       await body(c.req.raw),
     );
     const root = clean(input.root, true),
       name = child(input.file),
       destination = pathJoin(root, child(input.destination));
-    const format = name.toLowerCase().endsWith('.tar.gz')
-      ? 'tar.gz'
-      : extractFormats.find((format) => name.toLowerCase().endsWith(`.${format}`));
+    const format = fileArchiveFormat(name);
     if (!format) badArchive('unsupported_archive');
     const context = await principal(c),
       serverId = c.req.param('id'),
@@ -872,6 +1021,7 @@ export function registerFileOperationRoutes(
             filesRoot,
             c.req.raw.signal,
             diskPolicy,
+            { entries: input.entries, archives: input.archives, name },
           );
           if (files.some((file) => file.size > (transferLimits.upload.providerMaxFileBytes ?? 0)))
             throw new DomainError('validation_failed', 413);

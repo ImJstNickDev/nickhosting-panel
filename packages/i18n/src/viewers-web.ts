@@ -134,6 +134,7 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
   'viewer.tables': ['Tables', 'Tabelle'],
   'viewer.previous': ['Previous', 'Precedente'],
   'viewer.next': ['Next', 'Avanti'],
+  'viewer.archiveSelectPage': ['Select this page', 'Seleziona questa pagina'],
   'viewer.archivePath': ['Archive path', 'Percorso nell’archivio'],
   'viewer.backToArchive': ['Back to archive', 'Torna all’archivio'],
   'viewer.noViewers': [

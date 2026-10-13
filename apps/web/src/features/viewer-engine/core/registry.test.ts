@@ -15,7 +15,7 @@ describe('trusted viewer selection', () => {
     expect(availableViewers(file('icon.ico')).map((item) => item.id)).toEqual(['image']);
     expect(preferredViewer(file('server.jar'))).toBe('archive');
     expect(preferredViewer(file('state.dat'))).toBeUndefined();
-    expect(preferredViewer(file('world.gz'))).toBeUndefined();
+    expect(preferredViewer(file('world.gz'))).toBe('archive');
   });
   it('honors scoped personal choices even when the extension does not suggest that viewer', () => {
     const preferences = [
@@ -41,18 +41,21 @@ describe('trusted viewer selection', () => {
       ]),
     ).toBe('json');
   });
-  it('retains the editor memory bound and excludes unsupported nested archive/database readers', () => {
+  it('retains the editor memory bound and allows nested archives but excludes nested database readers', () => {
     expect(availableViewers(file('huge.json', 2 * 1024 * 1024)).map((item) => item.id)).toEqual([
       'json',
     ]);
-    expect(availableViewers({ ...file('nested.zip'), entry: 'a/nested.zip' })).toEqual([]);
+    expect(preferredViewer({ ...file('nested.zip'), entry: 'a/nested.zip' })).toBe('archive');
     const nested = { ...file('config.json'), entry: 'a/config.json' };
     expect(preferredViewer(nested)).toBe('json');
-    expect(selectableViewers(nested).map((item) => item.id)).not.toContain('archive');
+    expect(selectableViewers(nested).map((item) => item.id)).toContain('archive');
     expect(selectableViewers(nested).map((item) => item.id)).not.toContain('sqlite');
     expect(
       preferredViewer(nested, [{ scope: 'server', extension: 'json', viewerId: 'archive' }]),
-    ).toBe('json');
+    ).toBe('archive');
+    expect(
+      selectableViewers({ ...file('nested.zip'), archives: ['nested.zip'] }).map((item) => item.id),
+    ).not.toContain('sqlite');
     expect(selectableViewers(file('unknown.dat')).map((item) => item.id)).toEqual([
       'image',
       'audio',

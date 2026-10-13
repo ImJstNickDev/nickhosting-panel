@@ -4,6 +4,7 @@ import type { ViewerSource } from './registry.js';
 
 export function viewerPath(serverId: string, source: ViewerSource, operation = 'content') {
   const query = new URLSearchParams({ path: source.path });
+  if (source.archives?.length) query.set('archives', JSON.stringify(source.archives));
   if (source.entry) query.set('entry', source.entry);
   return `${serverPath(serverId)}/files/viewer/${source.entry ? 'archive/' : ''}${operation}?${query}`;
 }

@@ -18,6 +18,10 @@ describe('M5 builtin file viewers', () => {
   let remote: Map<string, Buffer>;
   const preferences: { scope: string; extension: string; viewerId: string }[] = [];
   const reads: string[] = [];
+  const archiveReads: URL[] = [];
+  let holdArchive: Promise<void> | undefined;
+  let atlasLarge = false;
+  let atlasFail = false;
   const waveformReads: string[] = [];
   const errors: string[] = [];
   let scriptRequests = 0;
@@ -332,15 +336,55 @@ describe('M5 builtin file viewers', () => {
           }
         }
         if (action === '/archive') {
+          archiveReads.push(url);
+          if (holdArchive) await holdArchive;
+          if (atlasFail) {
+            await route.fulfill({ status: 503, json: { messageKey: 'viewer.unavailable' } });
+            return;
+          }
           const directory = url.searchParams.get('directory') ?? '';
-          const entries = directory
-            ? [{ name: 'settings.json', path: 'config/settings.json', directory: false, size: 12 }]
-            : [
-                { name: 'config', path: 'config', directory: true, size: 0 },
-                { name: 'README.txt', path: 'README.txt', directory: false, size: 12 },
-              ];
+          const chain = JSON.parse(url.searchParams.get('archives') ?? '[]') as string[];
+          let entries = chain.length
+            ? [{ name: 'inside.txt', path: 'inside.txt', directory: false, size: 9 }]
+            : directory
+              ? [
+                  {
+                    name: 'settings.json',
+                    path: 'config/settings.json',
+                    directory: false,
+                    size: 12,
+                  },
+                ]
+              : [
+                  { name: 'config', path: 'config', directory: true, size: 0 },
+                  { name: 'README.txt', path: 'README.txt', directory: false, size: 12 },
+                  { name: 'nested.zip', path: 'nested.zip', directory: false, size: 100 },
+                ];
+          if (atlasLarge && !directory && !chain.length)
+            entries = Array.from({ length: 450 }, (_, index) => ({
+              name: `record-${String(index).padStart(3, '0')}.txt`,
+              path: `record-${String(index).padStart(3, '0')}.txt`,
+              directory: false,
+              size: index + 1,
+            }));
+          const offset = Number(url.searchParams.get('offset') ?? 0);
+          const query = url.searchParams.get('query') ?? '';
+          entries = entries.filter((entry) =>
+            entry.name.toLowerCase().includes(query.toLowerCase()),
+          );
+          if (url.searchParams.get('sort') === 'size') entries.sort((a, b) => a.size - b.size);
+          if (url.searchParams.get('direction') === 'desc') entries.reverse();
+          entries.sort((left, right) => Number(right.directory) - Number(left.directory));
           await route.fulfill({
-            json: { directory, entries, offset: 0, limit: 200, total: entries.length },
+            json: {
+              directory,
+              entries: entries
+                .slice(offset, offset + 200)
+                .map((entry) => ({ ...entry, modifiedAt: '2026-10-12T14:00:00Z' })),
+              offset,
+              limit: 200,
+              total: entries.length,
+            },
           });
           return;
         }
@@ -1338,9 +1382,9 @@ describe('M5 builtin file viewers', () => {
       'settings.json',
     );
     await page.getByRole('dialog').getByRole('button', { name: 'Show all', exact: true }).click();
-    await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(5);
+    await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(6);
     await browserExpect(
-      page.getByRole('dialog').getByRole('button', { name: /^(Atlas|Data Grid)$/ }),
+      page.getByRole('dialog').getByRole('button', { name: /^Data Grid$/ }),
     ).toHaveCount(0);
     await page.keyboard.press('Escape');
     await browserExpect(openWith).toBeFocused();
@@ -1352,19 +1396,171 @@ describe('M5 builtin file viewers', () => {
     const downloadedUrl = new URL((await downloaded).url());
     expect(downloadedUrl.searchParams.get('path')).toBe('viewer.zip');
     expect(downloadedUrl.searchParams.get('entry')).toBe('config/settings.json');
-    await page.getByRole('button', { name: 'Back to archive', exact: true }).click();
-    await browserExpect(page.locator('.ve-archive-breadcrumb')).toContainText('config');
+    await page
+      .locator('.fm-breadcrumb')
+      .getByRole('button', { name: 'config', exact: true })
+      .click();
+    await browserExpect(page.locator('.fm-breadcrumb')).toContainText('config');
     await browserExpect(
       page.locator('.ve-entry').getByText('settings.json', { exact: true }),
     ).toBeVisible();
     await harness.screenshot(page, 'file-viewer-archive-desktop-en');
     await page
-      .locator('.ve-archive-breadcrumb')
+      .locator('.fm-breadcrumb')
       .getByRole('button', { name: 'viewer.zip', exact: true })
       .click();
     await page.locator('.ve-entry').getByText('README.txt', { exact: true }).click();
     await browserExpect(page.locator('.cm-content')).toContainText('Read-only archive text');
     await browserExpect(page.locator('.cm-content')).toHaveAttribute('contenteditable', 'false');
+    expect(errors).toEqual([]);
+  });
+
+  it('searches and sorts Atlas, selects ranges and opens nested archives with one breadcrumb', async () => {
+    await open('viewer.zip');
+    const archive = page.locator('.ve-archive');
+    await browserExpect(archive.locator('tbody tr')).toHaveCount(3);
+    await browserExpect(page.locator('nav.fm-breadcrumb')).toHaveCount(1);
+    await archive.getByRole('button', { name: 'Size', exact: false }).click();
+    await browserExpect.poll(() => archiveReads.at(-1)?.searchParams.get('sort')).toBe('size');
+    await archive.getByRole('button', { name: 'Size', exact: false }).click();
+    await browserExpect.poll(() => archiveReads.at(-1)?.searchParams.get('direction')).toBe('desc');
+    await archive.getByRole('searchbox').fill('README');
+    await browserExpect(archive.locator('tbody tr')).toHaveCount(1);
+    expect(archiveReads.at(-1)?.searchParams.get('query')).toBe('README');
+    await archive.getByRole('searchbox').fill('');
+    await browserExpect(archive.locator('tbody tr')).toHaveCount(3);
+    await archive
+      .locator('.ve-entry')
+      .first()
+      .click({ modifiers: ['Control'] });
+    await archive
+      .locator('.ve-entry')
+      .last()
+      .click({ modifiers: ['Shift'] });
+    await browserExpect(archive.getByRole('checkbox', { checked: true })).toHaveCount(4);
+    await browserExpect(archive.locator('.ve-archive-selection')).toContainText('3 selected');
+    await archive.getByRole('button', { name: 'Actions for README.txt', exact: true }).click();
+    await browserExpect(page.getByRole('menuitem', { name: 'Download ZIP' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await browserExpect(
+      archive.getByRole('button', { name: 'Actions for README.txt', exact: true }),
+    ).toBeFocused();
+    await browserExpect(archive.locator('.ve-archive-selection')).toContainText('3 selected');
+    await harness.screenshot(page, 'atlas-selection-desktop-en');
+    await archive.locator('.ve-entry').first().focus();
+    await page.keyboard.press('Escape');
+    await browserExpect(archive).toBeVisible();
+    await browserExpect(archive.locator('.ve-archive-selection')).toHaveCount(0);
+    await archive.locator('.ve-entry').getByText('nested.zip', { exact: true }).click();
+    await browserExpect(archive.locator('.ve-entry')).toHaveText('inside.txt');
+    expect(JSON.parse(archiveReads.at(-1)?.searchParams.get('archives') ?? '[]')).toEqual([
+      'nested.zip',
+    ]);
+    await archive.getByRole('checkbox', { name: 'Select inside.txt', exact: true }).check();
+    await archive
+      .locator('.ve-archive-selection')
+      .getByRole('button', { name: 'Extract', exact: true })
+      .click();
+    await browserExpect(page.getByRole('dialog')).toContainText('inside.txt');
+    await page.keyboard.press('Escape');
+    await browserExpect(page.getByRole('dialog')).toHaveCount(0);
+    await browserExpect(archive.locator('.ve-entry')).toHaveText('inside.txt');
+    await browserExpect(
+      archive.getByRole('checkbox', { name: 'Select inside.txt', exact: true }),
+    ).toBeChecked();
+    await archive.getByRole('button', { name: 'Clear selection', exact: true }).click();
+    await archive.locator('.ve-entry').click();
+    await browserExpect(page.locator('.cm-content')).toContainText('Read-only archive text');
+    await page
+      .locator('.fm-breadcrumb')
+      .getByRole('button', { name: 'nested.zip', exact: true })
+      .click();
+    await browserExpect(archive.locator('.ve-entry')).toHaveText('inside.txt');
+    await archive.getByRole('button', { name: 'Parent folder', exact: true }).click();
+    await browserExpect(archive.locator('tbody tr')).toHaveCount(3);
+    await archive.locator('.ve-entry').getByText('config', { exact: true }).click();
+    await browserExpect(archive).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await browserExpect(archive.locator('.ve-entry')).toBeFocused();
+    let releaseArchive = () => {};
+    holdArchive = new Promise<void>((resolve) => {
+      releaseArchive = resolve;
+    });
+    try {
+      await page
+        .locator('.fm-breadcrumb')
+        .getByRole('button', { name: 'viewer.zip', exact: true })
+        .click();
+      await browserExpect(archive.locator('tbody tr')).toHaveCount(3);
+      await browserExpect(archive.locator('.ve-archive-status')).toHaveText('3 items');
+      await archive.locator('.ve-entry').getByText('config', { exact: true }).click();
+      await browserExpect(archive.locator('.ve-entry')).toHaveText('settings.json');
+    } finally {
+      holdArchive = undefined;
+      releaseArchive();
+    }
+    await page
+      .locator('.fm-breadcrumb')
+      .getByRole('button', { name: 'viewer.zip', exact: true })
+      .click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await harness.screenshot(page, 'atlas-mobile-en');
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
+    await open('viewer.zip');
+    await browserExpect(archive.getByRole('searchbox')).toHaveAttribute(
+      'placeholder',
+      'Cerca in questa cartella',
+    );
+    await browserExpect(archive.locator('tbody tr')).toHaveCount(3);
+    await harness.screenshot(page, 'atlas-mobile-it');
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const accessibility = await new AxeBuilder({ page }).include('.file-manager').analyze();
+    expect(accessibility.violations).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it('bounds Atlas rows, searches across pages and distinguishes empty and failed responses', async () => {
+    atlasLarge = true;
+    let releaseLoading = () => {};
+    holdArchive = new Promise<void>((resolve) => {
+      releaseLoading = resolve;
+    });
+    try {
+      await open('viewer.zip');
+      const archive = page.locator('.ve-archive');
+      await browserExpect(archive.locator('.ve-loading')).toBeVisible();
+      await harness.screenshot(page, 'atlas-loading-desktop-en');
+      holdArchive = undefined;
+      releaseLoading();
+      await browserExpect(archive.locator('tbody tr')).toHaveCount(200);
+      await archive.getByRole('button', { name: 'Next', exact: true }).click();
+      await browserExpect(archive.locator('.ve-entry').first()).toHaveText('record-200.txt');
+      await archive.getByRole('button', { name: 'Next', exact: true }).click();
+      await browserExpect(archive.locator('tbody tr')).toHaveCount(50);
+      await archive.getByRole('searchbox').fill('record-010');
+      await browserExpect(archive.locator('.ve-entry')).toHaveText(['record-010.txt']);
+      await archive.getByRole('searchbox').fill('missing');
+      await browserExpect(archive.locator('tbody tr')).toHaveCount(0);
+      await browserExpect(archive.locator('.ve-empty')).toBeVisible();
+      await harness.screenshot(page, 'atlas-empty-desktop-en');
+      atlasFail = true;
+      await archive.getByRole('searchbox').fill('failure');
+      await browserExpect(archive.getByRole('alert')).toBeVisible();
+      await browserExpect(archive.locator('.ve-empty')).toHaveCount(0);
+      await harness.screenshot(page, 'atlas-error-desktop-en');
+      atlasFail = false;
+      await archive.getByRole('button', { name: 'Try again', exact: true }).click();
+      await browserExpect(archive.getByRole('alert')).toHaveCount(0);
+    } finally {
+      atlasLarge = false;
+      atlasFail = false;
+      holdArchive = undefined;
+      releaseLoading();
+    }
     expect(errors).toEqual([]);
   });
 

@@ -5,8 +5,10 @@ import { authorizeServer, parse } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { streamFileZip } from './file-browsing.js';
 import type { ServerRouteOptions } from './servers.js';
-import type { ViewerArchiveSession } from './viewer-archive.js';
+import { viewerArchivePath } from './viewer-archive.js';
+import { archiveChain, selectArchiveEntries, ViewerArchiveTree } from './viewer-archive-tree.js';
 import { ViewerFormatError, ViewerSessionCache } from './viewer-cache.js';
 import { viewerBody, viewerHeaders, viewerRange } from './viewer-http.js';
 import type { FileViewerService } from './viewer-service.js';
@@ -47,7 +49,7 @@ export async function closeFileViewers(db: object) {
   if (pending) await (await pending).close();
 }
 type Retained<T> = { value: T; signal: AbortSignal };
-const archiveCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerArchiveSession>>>();
+const archiveCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerArchiveTree>>>();
 const sqliteCaches = new WeakMap<object, ViewerSessionCache<Retained<ViewerSqliteSession>>>();
 const subtitleCaches = new WeakMap<object, ViewerSessionCache<Retained<SubtitleViewerSession>>>();
 export async function closeViewerArchives(db: object) {
@@ -83,7 +85,7 @@ export function registerFileViewerRoutes(
     }
     return pending;
   };
-  const archives = new ViewerSessionCache<Retained<ViewerArchiveSession>>();
+  const archives = new ViewerSessionCache<Retained<ViewerArchiveTree>>();
   const databases = new ViewerSessionCache<Retained<ViewerSqliteSession>>({ maximum: 4 });
   const subtitles = new ViewerSessionCache<Retained<SubtitleViewerSession>>({ maximum: 8 });
   archiveCaches.set(db, archives);
@@ -202,16 +204,43 @@ export function registerFileViewerRoutes(
       if (!adopted) await opened.close();
     }
   };
-  const archive = (c: C) =>
-    retained(c, archives, async (opened, key) => {
+  const archive = async (c: C) => {
+    let chain: string[];
+    try {
+      chain = archiveChain(JSON.parse(c.req.query('archives') ?? '[]'));
+    } catch {
+      throw new DomainError('validation_failed');
+    }
+    const root = await retained(c, archives, async (opened, key) => {
       const { createArchiveViewer } = await import('./viewer-archive.js');
-      return createArchiveViewer(opened.source, {
+      const session = await createArchiveViewer(opened.source, {
         name: opened.path,
         key,
         cache: opened.cache,
         signal: opened.signal,
       });
+      return new ViewerArchiveTree(session, {
+        key,
+        cache: opened.cache,
+        signal: opened.signal,
+        mtimeMs: opened.source.mtimeMs,
+      });
     });
+    try {
+      const child = await root.session.acquire(chain, c.req.raw.signal);
+      return {
+        session: child.session,
+        signal: root.signal,
+        release() {
+          child.release();
+          root.release();
+        },
+      };
+    } catch (error) {
+      root.release();
+      throw error;
+    }
+  };
   const sqlite = (c: C) =>
     retained(c, databases, (opened, key) =>
       openSqliteViewer(
@@ -376,15 +405,76 @@ export function registerFileViewerRoutes(
       try {
         const directory = c.req.query('directory') ?? '',
           offset = parse(z.coerce.number().int().min(0), c.req.query('offset') ?? '0'),
-          limit = parse(z.coerce.number().int().min(1).max(500), c.req.query('limit') ?? '200');
+          limit = parse(z.coerce.number().int().min(1).max(500), c.req.query('limit') ?? '200'),
+          query = parse(z.string().max(256), c.req.query('query') ?? ''),
+          sort = parse(z.enum(['name', 'size', 'modifiedAt']), c.req.query('sort') ?? 'name'),
+          direction = parse(z.enum(['asc', 'desc']), c.req.query('direction') ?? 'asc');
         return c.json({
-          ...lease.session.list({ directory, offset, limit }),
+          ...lease.session.list({ directory, offset, limit, query, sort, direction }),
           directory,
           offset,
           limit,
         });
       } finally {
         lease.release();
+      }
+    }),
+  );
+  app.on(
+    ['GET', 'POST'],
+    '/v1/servers/:id/files/viewer/archive/download',
+    guarded(async (c) => {
+      let directory = c.req.query('directory') ?? '';
+      let selected = c.req.query('entries') ?? 'null';
+      if (c.req.method === 'POST') {
+        if (
+          c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase() !==
+          'application/x-www-form-urlencoded'
+        )
+          throw new DomainError('validation_failed');
+        const form = await c.req.parseBody();
+        directory = typeof form.directory === 'string' ? form.directory : '';
+        selected = typeof form.entries === 'string' ? form.entries : 'null';
+      }
+      let paths: string[];
+      try {
+        paths = parse(
+          z.array(z.string().min(1).max(1024)).min(1).max(25_000),
+          JSON.parse(selected),
+        );
+      } catch {
+        throw new DomainError('validation_failed');
+      }
+      const lease = await archive(c);
+      try {
+        directory = directory ? viewerArchivePath(directory) : '';
+        const entries = selectArchiveEntries(lease.session, paths, directory).map((entry) => ({
+          ...entry,
+          name: directory ? entry.path.slice(directory.length + 1) : entry.path,
+          file: { is_file: !entry.directory, size: entry.size },
+        }));
+        const signal = AbortSignal.any([c.req.raw.signal, lease.signal]);
+        const stream = streamFileZip(
+          entries,
+          async (entry, transferSignal) =>
+            (await lease.session.open(entry.path, transferSignal)).stream,
+          signal,
+        );
+        const filename = `${posix.basename(c.req.query('path') ?? 'archive')}-selection.zip`;
+        return new Response(
+          viewerBody(stream, signal, async () => lease.release()),
+          {
+            headers: {
+              'Content-Type': 'application/zip',
+              'Content-Disposition': disposition(filename),
+              'Cache-Control': 'no-store',
+              'X-Content-Type-Options': 'nosniff',
+            },
+          },
+        );
+      } catch (error) {
+        lease.release();
+        throw error;
       }
     }),
   );

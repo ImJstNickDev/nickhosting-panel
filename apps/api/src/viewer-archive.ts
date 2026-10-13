@@ -3,7 +3,11 @@ import { pipeline } from 'node:stream/promises';
 import { crc32, createGunzip, createZstdDecompress } from 'node:zlib';
 import { extract } from 'tar-stream';
 import { type Entry, fromRandomAccessReaderPromise, RandomAccessReader } from 'yauzl';
-import { parseSevenZipListing, runSevenZipViewer } from './viewer-archive-sevenzip.js';
+import {
+  parseSevenZipListing,
+  runSevenZipViewer,
+  streamSevenZipViewer,
+} from './viewer-archive-sevenzip.js';
 import {
   cachedFileSource,
   type ViewerCache,
@@ -28,10 +32,22 @@ export type ViewerArchiveFormat =
   | 'tar.bz2'
   | 'tar.xz'
   | '7z'
-  | 'rar';
+  | 'rar'
+  | 'gz'
+  | 'bz2'
+  | 'xz'
+  | 'zst';
+export interface ViewerArchiveListOptions {
+  directory?: string;
+  offset?: number;
+  limit?: number;
+  query?: string;
+  sort?: 'name' | 'size' | 'modifiedAt';
+  direction?: 'asc' | 'desc';
+}
 export interface ViewerArchiveSession {
   format: ViewerArchiveFormat;
-  list(options?: { directory?: string; offset?: number; limit?: number; query?: string }): {
+  list(options?: ViewerArchiveListOptions): {
     entries: ViewerArchiveEntry[];
     total: number;
     nextOffset: number | null;
@@ -57,8 +73,8 @@ const defaultLimits: ViewerArchiveLimits = {
   maxExpandedBytes: 1024 * 1024 * 1024,
   maxCompressionRatio: 1000,
   maxMetadataBytes: 16 * 1024 * 1024,
-  maxWasmInputBytes: 64 * 1024 * 1024,
-  maxWasmEntryBytes: 64 * 1024 * 1024,
+  maxWasmInputBytes: 256 * 1024 * 1024,
+  maxWasmEntryBytes: 256 * 1024 * 1024,
 };
 
 export function viewerArchivePath(input: string): string {
@@ -133,11 +149,13 @@ class ArchiveIndex {
   readonly entries = new Map<string, ViewerArchiveEntry>();
   readonly #explicit = new Set<string>();
   #children?: Map<string, ViewerArchiveEntry[]>;
+  readonly #sorted = new Map<string, ViewerArchiveEntry[]>();
   #expanded = 0;
   #metadata = 0;
   constructor(readonly limits: ViewerArchiveLimits) {}
   add(entry: ViewerArchiveEntry): void {
     this.#children = undefined;
+    this.#sorted.clear();
     if (this.#explicit.has(entry.path)) throw new ViewerFormatError('viewer_archive_duplicate');
     this.#explicit.add(entry.path);
     this.#expanded += entry.size;
@@ -178,12 +196,9 @@ class ArchiveIndex {
     offset = 0,
     limit = 200,
     query = '',
-  }: {
-    directory?: string;
-    offset?: number;
-    limit?: number;
-    query?: string;
-  } = {}) {
+    sort = 'name',
+    direction = 'asc',
+  }: ViewerArchiveListOptions = {}) {
     if (directory) {
       directory = viewerArchivePath(directory);
       if (!this.entries.get(directory)?.directory)
@@ -194,7 +209,9 @@ class ArchiveIndex {
       offset < 0 ||
       !Number.isSafeInteger(limit) ||
       limit < 1 ||
-      limit > 500
+      limit > 500 ||
+      !['name', 'size', 'modifiedAt'].includes(sort) ||
+      !['asc', 'desc'].includes(direction)
     )
       throw new ViewerFormatError('viewer_page_invalid');
     if (!this.#children) {
@@ -205,14 +222,26 @@ class ArchiveIndex {
         siblings.push(entry);
         this.#children.set(parent, siblings);
       }
-      for (const siblings of this.#children.values())
-        siblings.sort(
-          (a, b) =>
-            Number(b.directory) - Number(a.directory) ||
-            a.name.localeCompare(b.name, 'en', { numeric: true }),
-        );
     }
-    const siblings = this.#children.get(directory) ?? [];
+    // Six orderings per directory at most; pagination reuses references, never re-sorts the index.
+    const orderKey = JSON.stringify([directory, sort, direction]);
+    let siblings = this.#sorted.get(orderKey);
+    if (!siblings) {
+      const sign = direction === 'asc' ? 1 : -1;
+      const collator = new Intl.Collator('en', { numeric: true });
+      siblings = [...(this.#children.get(directory) ?? [])].sort((a, b) => {
+        const folders = Number(b.directory) - Number(a.directory);
+        if (folders) return folders;
+        const primary =
+          sort === 'size'
+            ? a.size - b.size
+            : sort === 'modifiedAt'
+              ? (a.modifiedAt ?? '').localeCompare(b.modifiedAt ?? '')
+              : collator.compare(a.name, b.name);
+        return sign * (primary || collator.compare(a.name, b.name) || a.path.localeCompare(b.path));
+      });
+      this.#sorted.set(orderKey, siblings);
+    }
     const search = query.slice(0, 256).toLowerCase();
     const children = search
       ? siblings.filter((entry) => entry.name.toLowerCase().includes(search))
@@ -347,7 +376,19 @@ export async function createArchiveViewer(
           : name.endsWith('.tar.xz')
             ? 'tar.xz'
             : null;
-  if (!format) throw new ViewerFormatError('viewer_archive_unsupported');
+  if (!format) {
+    const streamFormat = (['gz', 'bz2', 'xz', 'zst'] as const).find((suffix) =>
+      name.endsWith(`.${suffix}`),
+    );
+    if (!streamFormat) throw new ViewerFormatError('viewer_archive_unsupported');
+    return createSingleStreamViewer(source, {
+      ...options,
+      limits,
+      format: streamFormat,
+      signal,
+      controller,
+    });
+  }
   return createTarViewer(source, { ...options, limits, format, signal, controller });
 }
 
@@ -378,6 +419,7 @@ async function createSevenZipViewer(
         signal: options.signal,
       }),
     );
+    let expandedBytes = 0;
     for (const record of listing) {
       const path = viewerArchivePath(record.Path as string);
       if (
@@ -389,13 +431,16 @@ async function createSevenZipViewer(
       if (record.Encrypted === '+') throw new ViewerFormatError('viewer_archive_encrypted');
       const directory = record.Folder === '+' || record.Attributes?.startsWith('D') === true;
       const size = Number(record.Size);
+      expandedBytes += size;
+      if (expandedBytes / Math.max(1, source.size) > options.limits.maxCompressionRatio)
+        throw new ViewerFormatError('viewer_archive_budget');
       if (directory && size !== 0) throw new ViewerFormatError('viewer_archive_special_file');
       index.add({
         path,
         name: path.split('/').at(-1) as string,
         size,
         directory,
-        modifiedAt: null,
+        modifiedAt: sevenZipDate(record.Modified),
       });
     }
     return {
@@ -418,21 +463,11 @@ async function createSevenZipViewer(
           {
             maximumBytes: Math.max(1, item.size),
             stream(downloadSignal) {
-              return new ReadableStream({
-                async start(controller) {
-                  try {
-                    const bytes = await runSevenZipViewer(lease.path, {
-                      entry: path,
-                      maximumInputBytes: options.limits.maxWasmInputBytes,
-                      maximumOutputBytes: item.size,
-                      signal: AbortSignal.any([downloadSignal, options.signal]),
-                    });
-                    controller.enqueue(bytes);
-                    controller.close();
-                  } catch (error) {
-                    controller.error(error);
-                  }
-                },
+              return streamSevenZipViewer(lease.path, {
+                entry: path,
+                maximumInputBytes: options.limits.maxWasmInputBytes,
+                maximumOutputBytes: item.size,
+                signal: AbortSignal.any([downloadSignal, options.signal]),
               });
             },
           },
@@ -476,6 +511,84 @@ async function createSevenZipViewer(
   } catch (error) {
     options.controller.abort();
     lease.release();
+    throw error;
+  }
+}
+
+function sevenZipDate(value: string | undefined): string | null {
+  if (!value || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)) return null;
+  const time = Date.parse(value.replace(' ', 'T'));
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
+async function createSingleStreamViewer(
+  source: ViewerReadSource,
+  options: {
+    name: string;
+    key: string;
+    cache: ViewerCache;
+    limits: ViewerArchiveLimits;
+    format: 'gz' | 'bz2' | 'xz' | 'zst';
+    signal: AbortSignal;
+    controller: AbortController;
+  },
+): Promise<ViewerArchiveSession> {
+  // Container headers can supply unsafe/ambiguous filenames; derive only from the visible source name.
+  const path = viewerArchivePath(
+    (options.name.split('/').at(-1) ?? '').slice(0, -(options.format.length + 1)),
+  );
+  const decode = await createTarDecoder(`tar.${options.format}`);
+  let lease: ViewerCacheLease | undefined;
+  try {
+    lease = await options.cache.acquireGenerated(
+      `${options.key}:stream-decoded`,
+      {
+        maximumBytes: Math.min(
+          options.cache.maxFileBytes,
+          options.limits.maxEntryBytes,
+          options.limits.maxExpandedBytes,
+          Math.max(1, source.size) * options.limits.maxCompressionRatio,
+        ),
+        stream(signal) {
+          return decode(source.stream(0, source.size, signal), signal);
+        },
+      },
+      options.signal,
+    );
+    const decoded = cachedFileSource(lease.path, lease.size, source.mtimeMs);
+    const index = new ArchiveIndex(options.limits);
+    index.add({
+      path,
+      name: path.split('/').at(-1) as string,
+      directory: false,
+      size: lease.size,
+      modifiedAt: Number.isFinite(new Date(source.mtimeMs).getTime())
+        ? new Date(source.mtimeMs).toISOString()
+        : null,
+    });
+    return {
+      format: options.format,
+      list(page) {
+        options.signal.throwIfAborted();
+        return index.list(page);
+      },
+      async open(member, requestSignal) {
+        options.signal.throwIfAborted();
+        if (viewerArchivePath(member) !== path)
+          throw new ViewerFormatError('viewer_archive_not_found');
+        const signal = requestSignal
+          ? AbortSignal.any([options.signal, requestSignal])
+          : options.signal;
+        return { size: decoded.size, stream: decoded.stream(0, decoded.size, signal) };
+      },
+      close() {
+        options.controller.abort();
+        lease?.release();
+      },
+    };
+  } catch (error) {
+    options.controller.abort();
+    lease?.release();
     throw error;
   }
 }

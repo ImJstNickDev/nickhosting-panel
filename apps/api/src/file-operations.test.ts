@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -139,6 +139,223 @@ async function tar(
   await output;
   return archive;
 }
+async function zipBytes(entries: { path: string; content?: Buffer }[]) {
+  const zip = new ZipFile();
+  const chunks: Buffer[] = [];
+  const output = (async () => {
+    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+  })();
+  for (const entry of entries) {
+    if (entry.content === undefined) zip.addEmptyDirectory(entry.path);
+    else zip.addBuffer(entry.content, entry.path, { compress: false });
+  }
+  zip.end();
+  await output;
+  return Buffer.concat(chunks);
+}
+
+const noHeadroom = { minimumFreeBytes: 0, minimumFreePercent: 0 };
+describe('selective and nested archive staging', () => {
+  it('stages recursive implicit folders, explicit empty folders and a separate file exactly once', async () => {
+    const f = await fixture();
+    const archive = join(f.root, 'source.zip');
+    await writeFile(
+      archive,
+      await zipBytes([
+        { path: 'folder/child.txt', content: Buffer.from('child') },
+        { path: 'folder/deeper/second.txt', content: Buffer.from('second') },
+        { path: 'empty' },
+        { path: 'readme.txt', content: Buffer.from('readme') },
+        { path: 'ignored/file.txt', content: Buffer.from('ignored') },
+      ]),
+    );
+    const result = await stageFileArchive(archive, 'zip', f.stage, undefined, noHeadroom, {
+      entries: ['folder', 'folder/child.txt', 'empty/', 'readme.txt'],
+    });
+    expect(result.map((entry) => entry.path)).toEqual([
+      'folder/child.txt',
+      'folder/deeper/second.txt',
+      'empty',
+      'readme.txt',
+    ]);
+    expect(await readdir(f.stage)).toEqual(['folder', 'readme.txt']);
+    expect(await readFile(result[0]?.local ?? '', 'utf8')).toBe('child');
+  });
+
+  it('does not open or checksum unrelated ZIP bodies, but verifies every selected body', async () => {
+    const f = await fixture();
+    const archive = join(f.root, 'source.zip');
+    const bytes = await zipBytes([
+      { path: 'safe.txt', content: Buffer.from('wanted') },
+      { path: 'unrelated.txt', content: Buffer.from('unique-unrelated-body') },
+    ]);
+    bytes[bytes.indexOf('unique-unrelated-body')] = 0;
+    await writeFile(archive, bytes);
+    const result = await stageFileArchive(archive, 'zip', f.stage, undefined, noHeadroom, {
+      entries: ['safe.txt'],
+    });
+    expect(result.map((entry) => entry.path)).toEqual(['safe.txt']);
+    const other = join(f.root, 'other');
+    await mkdir(other);
+    await expect(
+      stageFileArchive(archive, 'zip', other, undefined, noHeadroom, {
+        entries: ['unrelated.txt'],
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+
+  it.each([false, true])('drains unselected TAR bodies without staging (gzip %s)', async (gzip) => {
+    const f = await fixture();
+    const archive = await tar(
+      f.root,
+      [
+        { name: 'other/ignored.txt', content: 'ignore this' },
+        { name: 'chosen/first.txt', content: 'first' },
+        { name: 'chosen/empty', type: 'directory' },
+        { name: 'trailing.txt', content: 'skip' },
+      ],
+      gzip,
+    );
+    const result = await stageFileArchive(
+      archive,
+      gzip ? 'tar.gz' : 'tar',
+      f.stage,
+      undefined,
+      noHeadroom,
+      {
+        entries: ['chosen'],
+      },
+    );
+    expect(result.map((entry) => entry.path)).toEqual(['chosen/first.txt', 'chosen/empty']);
+    expect(await readdir(f.stage)).toEqual(['chosen']);
+  });
+
+  it('enters repeated nested member names, stages only the final selection and removes intermediate files', async () => {
+    const f = await fixture();
+    const inner = await zipBytes([
+      { path: 'selected/config.txt', content: Buffer.from('nested value') },
+      { path: 'unrelated.txt', content: Buffer.from('skip') },
+    ]);
+    const middle = await zipBytes([{ path: 'bundle.zip', content: inner }]);
+    const outer = await zipBytes([
+      { path: 'bundle.zip', content: middle },
+      { path: 'unrelated.txt', content: Buffer.from('skip') },
+    ]);
+    const archive = join(f.root, 'source.zip');
+    await writeFile(archive, outer);
+    const result = await stageFileArchive(archive, 'zip', f.stage, undefined, noHeadroom, {
+      archives: ['bundle.zip', 'bundle.zip'],
+      entries: ['selected'],
+    });
+    expect(result.map((entry) => entry.path)).toEqual(['selected/config.txt']);
+    expect(await readFile(result[0]?.local ?? '', 'utf8')).toBe('nested value');
+    expect((await readdir(f.root)).some((name) => name.startsWith('archive-layer-'))).toBe(false);
+  });
+
+  it('extracts a nested compressed TAR selection through the shared streaming decoder', async () => {
+    const f = await fixture();
+    const inner = await tar(
+      f.root,
+      [
+        { name: 'chosen.txt', content: 'nested tar' },
+        { name: 'ignored.txt', content: 'skip' },
+      ],
+      true,
+    );
+    const archive = join(f.root, 'source.zip');
+    await writeFile(
+      archive,
+      await zipBytes([{ path: 'folder/inner.tar.gz', content: await readFile(inner) }]),
+    );
+    const result = await stageFileArchive(archive, 'zip', f.stage, undefined, noHeadroom, {
+      archives: ['folder/inner.tar.gz'],
+      entries: ['chosen.txt'],
+    });
+    expect(result).toHaveLength(1);
+    expect(await readFile(result[0]?.local ?? '', 'utf8')).toBe('nested tar');
+  });
+
+  it('selects the basename of a compressed member inside an archive folder', async () => {
+    const f = await fixture();
+    const archive = join(f.root, 'source.zip');
+    await writeFile(
+      archive,
+      await zipBytes([{ path: 'logs/latest.log.gz', content: gzipSync('nested log') }]),
+    );
+    const result = await stageFileArchive(archive, 'zip', f.stage, undefined, noHeadroom, {
+      archives: ['logs/latest.log.gz'],
+      entries: ['latest.log'],
+    });
+    expect(result.map((file) => file.path)).toEqual(['latest.log']);
+    expect(await readFile(result[0]?.local ?? '', 'utf8')).toBe('nested log');
+  });
+
+  it.each(['gz', 'zst'] as const)(
+    'stages a standalone %s stream with its original uncompressed name',
+    async (format) => {
+      const f = await fixture();
+      const archive = join(f.root, 'source');
+      const content = Buffer.from('standalone text');
+      await writeFile(archive, format === 'gz' ? gzipSync(content) : zstdCompressSync(content));
+      const result = await stageFileArchive(archive, format, f.stage, undefined, noHeadroom, {
+        name: `settings.json.${format}`,
+        entries: ['settings.json'],
+      });
+      expect(result[0]?.path).toBe('settings.json');
+      expect(await readFile(result[0]?.local ?? '')).toEqual(content);
+    },
+  );
+
+  it.each([
+    { entries: [] },
+    { entries: ['missing'] },
+    { entries: ['../escape'] },
+    { entries: ['/absolute'] },
+    { entries: ['folder\\escape'] },
+    { entries: ['safe.txt', 'SAFE.txt'] },
+    { archives: ['../escape.zip'] },
+    { archives: ['missing.zip'] },
+    { archives: Array(5).fill('inner.zip') as string[] },
+  ])(
+    'rejects invalid selection or nested chain %j before returning a staged result',
+    async (selection) => {
+      const f = await fixture();
+      const archive = join(f.root, 'source.zip');
+      await writeFile(
+        archive,
+        await zipBytes([{ path: 'safe.txt', content: Buffer.from('safe') }]),
+      );
+      await expect(
+        stageFileArchive(archive, 'zip', f.stage, undefined, noHeadroom, selection),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+      expect((await readdir(f.root)).some((name) => name.startsWith('archive-layer-'))).toBe(false);
+    },
+  );
+
+  it('rejects malicious unselected TAR metadata and directories presented as nested archives', async () => {
+    const f = await fixture();
+    const archive = await tar(f.root, [
+      { name: 'safe.txt', content: 'safe' },
+      { name: '../escape', content: 'bad' },
+    ]);
+    await expect(
+      stageFileArchive(archive, 'tar', f.stage, undefined, noHeadroom, {
+        entries: ['safe.txt'],
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    const outer = join(f.root, 'source.zip');
+    await writeFile(
+      outer,
+      await zipBytes([{ path: 'directory.zip/child.txt', content: Buffer.from('safe') }]),
+    );
+    await expect(
+      stageFileArchive(outer, 'zip', f.stage, undefined, noHeadroom, {
+        archives: ['directory.zip'],
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+  });
+});
+
 describe('safe file copy planning', () => {
   it('plans more than 100 selected roots with one listing per directory and keeps the tree budget', async () => {
     const names = Array.from({ length: 1001 }, (_, i) => `file-${i}.txt`);

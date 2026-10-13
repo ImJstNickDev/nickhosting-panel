@@ -103,9 +103,9 @@ export async function collectArchiveEntries(
   return entries;
 }
 /** Lazy upstream streams: one file at a time, ZIP64 and backpressure, no whole-body buffer. */
-export function streamFileZip(
-  entries: ArchiveEntry[],
-  open: (entry: ArchiveEntry, signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>,
+export function streamFileZip<T extends { name: string; file: { is_file: boolean; size: number } }>(
+  entries: T[],
+  open: (entry: T, signal: AbortSignal) => Promise<ReadableStream<Uint8Array>>,
   signal?: AbortSignal,
 ): ReadableStream<Uint8Array> {
   const zip = new ZipFile();

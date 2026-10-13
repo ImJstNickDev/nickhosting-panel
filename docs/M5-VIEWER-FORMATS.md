@@ -20,18 +20,20 @@ requests. This is separate from the ordinary directory-list cache.
 | RAR | Same current 7-Zip dependency | Real upstream libarchive RAR5 stored fixture. This does not certify every RAR variant, multipart set, codec or encrypted archive. |
 | SQLite | Node 24 `node:sqlite` | Read-only private snapshot, fixed schema/table pagination queries in a deadline-limited worker; no user SQL or loadable extensions. Integer values preserve 64-bit precision; BLOBs are represented by byte counts; long text cells are explicitly truncated. |
 
-Single compressed streams (`.gz`, `.bz2`, `.xz`, `.zst` without TAR) remain the
-explicit second pass. Encrypted archives, links, devices, ambiguous paths and
+Single compressed streams (`.gz`, `.bz2`, `.xz`, `.zst` without TAR) now expose one
+virtual file, named from the source basename without its compression suffix.
+Decoded content is streamed once into the bounded private cache. Embedded original
+filenames never override that path. Encrypted archives, links, devices, ambiguous paths and
 unsupported compression variants return a format error; a filename extension
 alone never establishes decoder compatibility. Archive browsing is read-only;
 server extraction remains a separately authorized, staged file operation.
 
 The existing extraction operation now accepts ZIP/JAR, TAR/TGZ/TAR.GZ,
-TAR.BZ2/TAR.XZ/TAR.ZST, 7z and RAR. It preserves the existing all-local staging
+TAR.BZ2/TAR.XZ/TAR.ZST, 7z, RAR and standalone GZ/BZ2/XZ/ZST streams. It preserves the existing all-local staging
 pass before provider writes, path/conflict checks, disk safety margins and
 partial-operation reporting. Compressed TAR extraction shares the viewer codec
 but streams directly into staging instead of also writing a complete decoded
-TAR. 7z/RAR extraction uses the same bounded worker and initial 64 MiB
+TAR. 7z/RAR extraction uses the same bounded worker and 256 MiB
 archive/member limits; it does not bypass them by invoking a host executable.
 Larger ZIP/TAR operations retain their pre-existing extraction budgets. Remote
 ownership, destination authorization, upload limits and audit stay in the
@@ -59,10 +61,14 @@ existing generic file operation.
 - Archive defaults bound entry count to 25,000, one expanded member to 256 MiB,
   total declared expanded content to 1 GiB, metadata to 16 MiB, and compression
   ratio to 1,000. These are format-service options, not ordinary UI preferences.
-- 7z/RAR have additional initial limits of 64 MiB compressed input and 64 MiB
-  opened member. Their standalone decoder runs one operation at a time with a
-  ten-second deadline. It uses only Emscripten MEMFS, never NODEFS, a native shell,
-  or a mount of server data. Output is capped independently of archive claims.
+- 7z/RAR have default limits of 256 MiB compressed input and 256 MiB opened
+  member, also subject to the configured private cache budget. Their decoder runs
+  one operation at a time with a 30-second deadline. A read-only descriptor of the
+  already cached input supplies decoder reads; MEMFS holds metadata rather than
+  another full input copy. There is no NODEFS mount, native shell, or game-data
+  mount. Output is capped independently of archive claims and delivered in 64 KiB
+  chunks with consumer backpressure. Large dictionaries/solid archives can still
+  exceed decoder budgets; these defaults do not certify every file of that size.
   The pinned Emscripten loader grows its exported memory through the JS
   `resize_heap`/`Memory.grow` path; the integration caps that growth at 256 MiB.
   Node worker `resourceLimits` limit the JS heap, **not** WASM memory. Dependency
@@ -76,6 +82,53 @@ existing generic file operation.
 - Cache shutdown order is parsed sessions first, then temporary files. An
   interrupted process can leave its private run directory; cleanup of such
   residual directories is a separate scoped operation, not startup deletion.
+
+## Atlas navigation, selection and nested archives
+
+Atlas shares the File toolbar breadcrumb, icon actions and custom tooltips. Its
+folder listing exposes name/size/modified-time sorting, folders first, and search
+within the current directory. Sorting is cached per directory/order in the parsed
+index; filtering happens before pagination. Browser pages are metadata only,
+bounded by the existing 48-page / 8 MiB cache, with 200 visible rows per page.
+Cached rows remain visible during revalidation; next-page and hovered-folder
+prefetch are bounded instead of recursively exploring every folder.
+
+Ctrl/Cmd-click and Shift-click select entries; context menus and selection actions
+provide download and extraction. Downloads of multiple files/folders stream ZIP
+through the same backpressured implementation as the regular file manager. No
+whole ZIP is accumulated in browser memory. Archive content remains read-only:
+selection does not expose rename/delete or imply edits to compressed files.
+
+The archive-list API accepts `query`, `sort=name|size|modifiedAt` and
+`direction=asc|desc`. Viewer requests may include `archives`, a JSON array of up
+to four nested archive-member paths; `path` always identifies the real outer file
+and `entry` identifies a member in the innermost archive. Root authorization and
+revision identity are retained. One root index owns at most eight cached child
+indexes with existing session leases. A nested archive is materialized only on
+opening it, under the same temporary-file budgets. Concurrent callers share that
+work; leaving one view does not cancel another reader. Shutdown aborts creation
+before waiting for index disposal.
+
+`GET|POST /v1/servers/:id/files/viewer/archive/download` accepts a current
+`directory` and JSON `entries` selection (POST form preferred for large lists).
+It resolves folders recursively against retained metadata and streams selected
+members relative to that directory. `POST /files/extract` retains its existing
+`root`, `file`, `destination`, `confirm:true` contract and adds optional `entries`
+and `archives`. Extraction targets a new destination, preserving conflict checks;
+it does not overwrite an existing destination. Selected members are staged and
+validated before provider writes, with cumulative nested staging accounting.
+Unselected ZIP/7z members are not opened; TAR still requires sequential decoding.
+Provider failure after writes remains partial/uncertain, never a claimed rollback.
+Selection manifests use the existing bounded 4 MiB request-body class and normal
+Origin/session enforcement. No new Blueprint endpoint or provider credential.
+
+The sevenzip filesystem adapter was checked against the pinned Emscripten 6.0.1
+[filesystem implementation](https://github.com/emscripten-core/emscripten/blob/6.0.1/src/lib/libfs.js)
+and [MEMFS implementation](https://github.com/emscripten-core/emscripten/blob/6.0.1/src/lib/libmemfs.js).
+Those internal stream contracts must be revalidated when updating the dependency.
+The 65 MiB archive/member regression uses a 32 MiB decoder heap to verify that
+input and output size no longer require equally large WASM allocations. This is
+not a benchmark of production SFTP/network performance.
 
 ## SQLite consistency boundary
 

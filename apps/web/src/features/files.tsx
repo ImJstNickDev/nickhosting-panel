@@ -343,6 +343,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setPathFocusSignal((value) => value + 1);
   }, []);
   const [mode, setMode] = useState<Mode>();
+  const [extractFromViewer, setExtractFromViewer] = useState(false);
+  const [extractSelection, setExtractSelection] = useState<{
+    entries?: string[];
+    archives?: string[];
+  }>();
+  const [viewerBreadcrumb, setViewerBreadcrumb] = useState<HTMLOListElement | null>(null);
   const [viewed, setViewed] = useState<{
     entry: ServerFile;
     source: ViewerSource;
@@ -383,7 +389,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [editorAvailability, setEditorAvailability] =
     useState<ReturnType<typeof fileEditorAvailability>>('text');
   const editing = mode === 'edit' || mode === 'new';
-  const viewing = mode === 'view';
+  const viewing = mode === 'view' || (mode === 'extract' && extractFromViewer);
   const displaying = editing || viewing;
 
   const [error, setError] = useState<unknown>();
@@ -826,6 +832,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   }
   function closeEditor() {
     if (mutationRunning.current) return;
+    if (mode === 'extract' && extractFromViewer) {
+      setMode('view');
+      setExtractFromViewer(false);
+      return;
+    }
     if (!confirmEditorExit()) return;
     discardReloadViewer();
     cancelRead();
@@ -864,6 +875,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setError(undefined);
     setMenu(undefined);
     setTargets(names);
+    setExtractSelection(undefined);
+    setExtractFromViewer(false);
     if (value === 'move' || value === 'copy') {
       transferFlow.begin({ source: directory, destination: folder, names }, value);
       return;
@@ -1076,7 +1089,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         throw failure;
       }
       setDirty(false);
-      setMode(undefined);
+      setMode(mode === 'extract' && extractFromViewer ? 'view' : undefined);
+      setExtractFromViewer(false);
       setSelected(new Set());
       await files.refetch();
     } finally {
@@ -1935,7 +1949,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           />
         ) : (
           <nav aria-label={t('file.breadcrumb')} className="fm-breadcrumb">
-            <ol>
+            <ol ref={setViewerBreadcrumb}>
               {fileBreadcrumbs(directory).map((part, index, all) => (
                 <li key={part.path}>
                   <button
@@ -1951,7 +1965,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   </button>
                 </li>
               ))}
-              {displaying && (
+              {displaying && !viewing && (
                 <li>
                   {inlineRename && mode === 'edit' ? (
                     <InlineFileRename
@@ -2376,12 +2390,22 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 current && current.viewerId !== viewerId ? { ...current, viewerId } : current,
               )
             }
-            actionTargets={{ beforeHome: viewerBeforeHome, afterHome: viewerAfterHome }}
+            actionTargets={{
+              beforeHome: viewerBeforeHome,
+              afterHome: viewerAfterHome,
+              breadcrumb: viewerBreadcrumb,
+            }}
             onText={() => void open(viewed.entry, directory, 'text')}
             onExtract={
               canMutate &&
-              /\.(?:zip|jar|tar|tgz|tar\.(?:gz|bz2|xz|zst)|7z|rar)$/i.test(viewed.entry.name)
-                ? () => chooseMode('extract', [viewed.entry.name])
+              /\.(?:zip|jar|tar|tgz|tar\.(?:gz|bz2|xz|zst)|gz|bz2|xz|zst|7z|rar)$/i.test(
+                viewed.entry.name,
+              )
+                ? (selection) => {
+                    chooseMode('extract', [viewed.entry.name]);
+                    setExtractSelection(selection);
+                    setExtractFromViewer(true);
+                  }
                 : undefined
             }
           />
@@ -2958,7 +2982,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       </Dialog>
       {transferFlow.dialog}
       <Dialog
-        open={Boolean(mode) && !displaying}
+        open={Boolean(mode) && (!displaying || mode === 'extract')}
         className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
         title={t(
           mode === 'mkdir'
@@ -2969,7 +2993,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 ? 'web.delete'
                 : 'file.extract',
         )}
-        onClose={closeEditor}
+        onClose={() => {
+          if (mode && !['view', 'edit', 'new'].includes(mode)) closeEditor();
+        }}
         closeIcon
         closeDisabled={mutating}
         initialFocusSelector={mode === 'delete' ? '[data-form-cancel]' : undefined}
@@ -3000,6 +3026,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 {
                   root: directory,
                   file: targets[0],
+                  ...extractSelection,
                   destination: text(data, 'name'),
                   confirm: true,
                 },
@@ -3028,7 +3055,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
               <p>{t('file.deleteWarning', { count: targets.length })}</p>
             </>
           )}
-          {mode === 'extract' && <p>{t('file.extractWarning')}</p>}
+          {mode === 'extract' && (
+            <>
+              {extractSelection?.entries && (
+                <FileSelectionSummary names={extractSelection.entries} />
+              )}
+              <p>{t('file.extractWarning')}</p>
+            </>
+          )}
         </ActionForm>
       </Dialog>
     </section>

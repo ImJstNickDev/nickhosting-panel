@@ -14,6 +14,25 @@ describe('shared viewer byte access', () => {
       '/v1/servers/server-id/files/viewer/archive/content?path=world%2Fa+b.zip&entry=nested%2Fx.json',
     );
   });
+  it('encodes nested containers independently from their member path', () => {
+    const url = new URL(
+      viewerPath('server-id', {
+        path: 'root.zip',
+        name: 'text.txt',
+        size: 3,
+        archives: ['a/inner.zip', 'deep.jar'],
+        entry: 'text.txt',
+      }),
+      'https://panel.invalid',
+    );
+    expect(url.pathname).toBe('/v1/servers/server-id/files/viewer/archive/content');
+    expect(JSON.parse(url.searchParams.get('archives') ?? 'null')).toEqual([
+      'a/inner.zip',
+      'deep.jar',
+    ]);
+    expect(url.searchParams.get('path')).toBe('root.zip');
+    expect(url.searchParams.get('entry')).toBe('text.txt');
+  });
   it('enforces the byte bound even when Content-Length is absent', async () => {
     const cancel = vi.fn();
     vi.stubGlobal(

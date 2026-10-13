@@ -8670,3 +8670,79 @@ and native controls reached through keyboard navigation keep their own keys.
 Focused real Chromium transport case passed (`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'plays actual video'`): 1 passed, 10 unrelated cases skipped. Covers volume steps, both bounds and muted recovery alongside existing transport behavior. Scoped Biome passed. No layout changes, infrastructure actions or provider mutations.
 Web typecheck passed. Independent review checked exclusions and volume semantics;
 its native-select exception was applied so pointer-focused selects retain arrows.
+
+### Atlas archive navigation and selective extraction (2026-10-13)
+
+Implemented within M5/PR #21 and viewer issue #26. Atlas now shares the File
+breadcrumb, compact icon actions/tooltips, searchable/paginated listings and
+name/size/modified sorting. Ctrl/Cmd-click, Shift-click, page selection, context
+menus and keyboard focus are covered. Cached pages stay visible during a held
+refresh; prefetch is limited to the next page and hovered folders. Only metadata
+enters the browser's bounded 48-page / 8 MiB cache. Background refresh has no
+loading message replacing valid rows. Menus/selection consume Escape before the
+viewer; cancelling extraction preserves the mounted nested archive and selection.
+
+The existing extraction operation accepts selected files/folders and up to four
+nested containers, stages selected bytes before writes, and retains authorization,
+disk/path checks, new-destination conflict policy and uncertainty reporting.
+Multi-selection downloads use the existing backpressured native ZIP stream via a
+bounded POST manifest. Nested archive reads retain a root index plus at most eight
+child indexes; only opened nested containers materialize in private temporary
+storage. Single GZ/BZ2/XZ/ZST streams expose a cached read-only virtual file. No
+archive editing or implicit extraction onto a game server.
+
+7z/RAR now read from a private-cache file descriptor instead of copying all input
+into WASM; output uses acknowledged chunks no larger than 64 KiB. Default input
+and member limits are 256 MiB for viewing and extraction; decoder heap remains
+256 MiB, with one concurrent decoder and a 30-second deadline. Existing expansion,
+ratio and metadata budgets remain. A generated **65 MiB stored 7z input/member**
+was streamed in **1,040 chunks**, initially measured **2,446 ms** with a **32 MiB
+decoder heap cap**. The same fixture passed normal viewer materialization and
+actual local `stageFileArchive` extraction above the old 64 MiB limit. This proves
+the file-backed path on a local fixture, not production throughput or all codecs,
+solid/dictionary sizes, encrypted/multipart RAR variants. No new dependency or
+Blueprint update. Upstream filesystem contract references and limits are in
+[M5-VIEWER-FORMATS.md](M5-VIEWER-FORMATS.md).
+
+Final focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-archive-tree.test.ts apps/api/src/viewer-archive.test.ts apps/api/src/file-operations.test.ts apps/web/src/features/viewer-engine/core/registry.test.ts apps/web/src/features/viewer-engine/core/access.test.ts`: **128 passed**, including real codecs, selective/nested staging, held-read shutdown, shared-caller cancellation, invalid paths, cached indexes, sort/filter and large 7z streaming/staging.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-viewers.integration.test.ts`: **12 passed**; authorization, nested search/sort, selected ZIP bytes, normalized directory names, Range/CRC and revocation using real isolated PostgreSQL plus fixture transports.
+- Same integration command with `apps/api/src/file-operations.integration.test.ts`: **41 passed**, including selective nested extraction, rejected selections with no provider mutations and partial upload uncertainty. External writes are fixture-only.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'navigates archives|Atlas'`: **3 passed**, with 450-item pagination, current-folder search, ordering, nested member preview, native ZIP selection, keyboard/focus, held cache revalidation, cancelled extraction, EN/IT desktop/mobile and Axe. No Axe violations in the checked states; this is not blanket WCAG certification.
+- Same browser command with `-t 'restores the open viewer|preserves JSON|offers all'`: **4 passed**, **28 unrelated cases skipped**, protecting shared viewer refresh, chooser and editor integration.
+- `scripts/dev.sh pnpm typecheck`: **passed**, root/web/browser types.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **passed**; existing large-chunk warnings remain. Atlas lazy chunk approximately 12.9 kB minified / 4.3 kB gzip in this build.
+- `scripts/dev.sh pnpm exec biome check` on all 24 changed source/test/style/catalog files: **passed**, with two existing non-null-assertion warnings in file-viewers.ts. No full historical M1–M5 suite rerun.
+
+Historical attempts/review: the first new nested-route test expected 422 for the
+existing validation error mapped to 400; corrected the assertion. New uncertainty
+coverage legitimately retained a claim and exposed two existing copy tests that
+counted claims across fixture servers; those assertions now scope their own
+server. Review caught and fixed compressed-member basename mismatch, trailing
+slash ZIP projection, pending nested-shutdown lifetime, empty/error conflation,
+menu Escape/focus and extraction-dialog double close. Early UI captures had
+centered filenames and widely spaced actions; final captures correct both.
+Independent backend/security and frontend UX/accessibility reviews report **no
+remaining must-fix findings**.
+
+Reviewed browser captures (fixture data, actual application):
+[desktop selection](screenshots/m5/atlas-selection-desktop-en.png),
+[Italian mobile](screenshots/m5/atlas-mobile-it.png),
+[loading](screenshots/m5/atlas-loading-desktop-en.png),
+[empty search](screenshots/m5/atlas-empty-desktop-en.png),
+[error](screenshots/m5/atlas-error-desktop-en.png).
+
+Safety: no real game-server data read or written for these tests, no Pterodactyl/
+Wings/Blueprint mutation, no new containers/networks, dependencies or migrations.
+Previously approved isolated services were reused; generated archives and staging
+files are removed by test cleanup. Existing dev API/Vite reported healthy and
+load source changes through their established watchers/HMR without manual
+restarts. An unrelated existing dev Gateway unhealthy status was observed only;
+it was not changed as part of Atlas. Production deployment and SFTPGo issue #18
+remain outside scope. Rollback is a source revert; no production data migration.
+
+`python3 scripts/check-governance.py`: **passed**, 836 indexed text files,
+281 review PNGs, 687 relative links, 4 TOML files and 44 ignore cases (secret scan
+is heuristic). `git diff --cached --check`: **passed**. Final read-only container
+status: dev API and Vite both running/healthy.

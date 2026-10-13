@@ -157,7 +157,9 @@ export function createApp(options: Options) {
   app.use('*', async (c, next) => {
     if (
       c.req.method === 'POST' &&
-      /^\/v1\/servers\/[^/]+\/files(?:\/(?:copy|archive))?$/.test(c.req.path)
+      /^\/v1\/servers\/[^/]+\/files(?:\/(?:copy|archive|extract|viewer\/archive\/download))?$/.test(
+        c.req.path,
+      )
     )
       return fileSelectionBodyLimit(c, next);
     if (c.req.method === 'PUT' && /^\/v1\/servers\/[^/]+\/files\/editor$/.test(c.req.path))
