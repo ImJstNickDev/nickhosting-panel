@@ -16,6 +16,8 @@ import './owner-storage-policy.css';
 const queryKey = ['owner-storage-policy'];
 const maximumMiB = 1073741824;
 const bytesPerMiB = 1024 * 1024;
+// GiB inputs use a zero step base: Firefox aligns native arrows to `min` even
+// with step="any". Positive/observed minimums are validated separately below.
 const validMiB = (value: number) => Number.isSafeInteger(value) && value > 0 && value <= maximumMiB;
 
 export function OwnerStoragePolicy({
@@ -218,7 +220,7 @@ function StoragePolicyEditor({
               <Input
                 label={t('storagePolicy.defaultQuota')}
                 type="number"
-                min={1 / 1024}
+                min={0}
                 max={maximumMiB / 1024}
                 step="any"
                 required
@@ -431,7 +433,7 @@ function StorageUser({
           <Input
             label={t('storagePolicy.userQuota', { name: user.name })}
             type="number"
-            min={1 / 1024}
+            min={0}
             max={maximumMiB / 1024}
             step="any"
             value={quota ?? user.quotaMiB / 1024}
@@ -508,7 +510,7 @@ function StorageUser({
                   <Input
                     label={t('storagePolicy.serverQuota', { name: server.name })}
                     type="number"
-                    min={(server.minimumDiskMiB ?? 1) / 1024}
+                    min={0}
                     max={maximumMiB / 1024}
                     step="any"
                     value={

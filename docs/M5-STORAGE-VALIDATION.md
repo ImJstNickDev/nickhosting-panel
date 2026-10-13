@@ -100,3 +100,31 @@ verified reconciliation first. Restoring a previous storage policy requires an
 explicit reviewed plan; changing only the global flag would misrepresent provider
 and SFTP limits. Private notes, credentials and Mailpit messages are not included
 in repository evidence.
+
+## GiB arrow-step correction — 2026-10-13
+
+With 251.8 MiB occupied, the computed minimum is 380 MiB (0.37109375 GiB).
+Firefox aligns native number-input arrows to the HTML minimum even with
+`step="any"`, so decrementing 4 produced 3.37109375. All three storage GiB inputs
+now use a zero step base. Positive-size and measured-minimum validation remain
+separate and still block unsafe application; manually entered fractional GiB
+remain supported at whole-MiB precision. No backend, quota policy or migration changed.
+
+The new browser regression failed before the fix and passed after it in both
+Firefox and Chromium: all three fields step 4 → 3 → 4 as appropriate, a 0.25 GiB
+disk below the 380 MiB minimum blocks application, and a zero user quota also
+blocks application. Each focused run passed 1 case with 8 unrelated cases filtered;
+the complete suite was not repeated. Web and browser-test typechecks, scoped Biome,
+diff checks and independent review passed. Commands:
+
+```sh
+NH_BROWSER=firefox pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/storage-policy-ui.browser.test.ts -t 'steps whole GiB'
+pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/storage-policy-ui.browser.test.ts -t 'steps whole GiB'
+pnpm --filter @nickhosting/web typecheck
+```
+
+No infrastructure, database or real server operations; no test assets created or
+deleted. Rollback is a source-only revert, retaining existing storage safety checks.
+Review the server limit with native arrows and typed decimal values in Owner Settings.
+
+![Firefox after decrementing the server limit to exactly 3 GiB](screenshots/m5/storage-whole-gib-decrement-firefox-en.png)

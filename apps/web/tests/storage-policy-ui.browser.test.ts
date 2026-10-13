@@ -6,6 +6,7 @@ import {
   type BrowserContext,
   expect as browserExpect,
   chromium,
+  firefox,
   type Page,
 } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
@@ -82,7 +83,7 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
     await server.listen();
     origin = server.resolvedUrls?.local[0] ?? '';
     if (!origin) throw new Error('Isolated Vite server has no origin');
-    browser = await chromium.launch({
+    browser = await (process.env.NH_BROWSER === 'firefox' ? firefox : chromium).launch({
       headless: true,
       env: {
         ...process.env,
@@ -312,6 +313,49 @@ describe('Owner storage policy guided UI (isolated API fixtures)', () => {
       panel().getByText('Storage policy applied and server limits verified.'),
     ).toBeVisible({ timeout: 10000 });
     expect(previewRequests).toEqual([{ policy: 'PER_USER_BUDGET', defaultUserStorageMiB: 4096 }]);
+  });
+
+  it('steps whole GiB without inheriting the measured minimum and still blocks unsafe limits', async () => {
+    const user = draft.users[0];
+    const server = user?.servers[0];
+    if (!user || !server) throw new Error('Missing storage fixture');
+    server.usageBytes = Math.round(251.8 * 1024 ** 2);
+    server.minimumDiskMiB = 380;
+    server.currentDiskMiB = 4096;
+    server.proposedDiskMiB = 4096;
+    server.backupSlots = 0;
+    user.requiredMiB = 4096;
+    await open();
+    await panel().getByLabel('Storage limits', { exact: true }).selectOption('PER_USER_BUDGET');
+    const defaultQuota = panel().getByLabel('Default quota per user (GiB)');
+    await defaultQuota.press('ArrowDown');
+    await browserExpect(defaultQuota).toHaveValue('3');
+    await defaultQuota.press('ArrowUp');
+    await browserExpect(defaultQuota).toHaveValue('4');
+    await preview();
+    const quota = panel().getByLabel('Quota for Ada Rossi (GiB)');
+    await quota.press('ArrowDown');
+    await browserExpect(quota).toHaveValue('3');
+    await quota.press('ArrowUp');
+    await browserExpect(quota).toHaveValue('4');
+    const disk = panel().getByLabel('Limit for Survival world (GiB)');
+    const review = panel().getByRole('button', { name: 'Review and apply', exact: true });
+    await disk.press('ArrowDown');
+    await browserExpect(disk).toHaveValue('3');
+    await browserExpect(review).toBeEnabled();
+    await page.screenshot({
+      path: `${screenshots}/storage-whole-gib-decrement-${process.env.NH_BROWSER ?? 'chromium'}-en.png`,
+      fullPage: true,
+    });
+    await disk.fill('0.25');
+    await browserExpect(disk).toHaveValue('0.25');
+    await browserExpect(disk).toHaveAttribute('aria-invalid', 'true');
+    await browserExpect(review).toBeDisabled();
+    await disk.fill('3');
+    await browserExpect(review).toBeEnabled();
+    await quota.fill('0');
+    await browserExpect(review).toBeDisabled();
+    expect(applies).toEqual([]);
   });
 
   it('never substitutes zero for a missing measurement and refreshes after cleanup', async () => {
