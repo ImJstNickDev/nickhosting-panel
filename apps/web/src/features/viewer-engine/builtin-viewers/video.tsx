@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useFormat, useT } from '../../../app/i18n.js';
+import { useFormat, useLocale, useT } from '../../../app/i18n.js';
 import { Tooltip } from '../../../components/tooltip.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { viewerPath } from '../core/access.js';
@@ -16,6 +16,7 @@ import { ViewerSelect } from '../viewer-select.js';
 import { AudioPlaybackClock } from './audio-playback-clock.js';
 import { useMediaShortcuts } from './media-shortcuts.js';
 import { VideoIcon, type VideoIconKind } from './video-icons.js';
+import { useVideoSource } from './video-source.js';
 import { useVideoThumbnail } from './video-thumbnail.js';
 import './video.css';
 
@@ -32,6 +33,8 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     format = useFormat();
   const src = viewerPath(serverId, source);
   const media = useRef<HTMLVideoElement>(null);
+  const playback = useVideoSource({ media, url: src, size: source.size });
+  const { locale } = useLocale();
   const stage = useRef<HTMLDivElement>(null);
   const controls = useRef<HTMLDivElement>(null);
   const generation = useRef(0);
@@ -64,7 +67,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const [pip, setPip] = useState(false);
   const [displayPending, setDisplayPending] = useState(false);
   const duration = Number.isFinite(state.duration) && state.duration > 0 ? state.duration : 0;
-  const seekable = state.ready && duration > 0 && !failed;
+  const seekable = state.ready && duration > 0 && !failed && !playback.switching;
   const silent = state.muted || state.volume === 0;
   const sync = useCallback(() => {
     const video = media.current;
@@ -88,7 +91,15 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const startBoost = useCallback(
     (owner: 'pointer' | 'space') => {
       const video = media.current;
-      if (!video || video.paused || video.ended || video.error || video.readyState < 1) return;
+      if (
+        playback.switching ||
+        !video ||
+        video.paused ||
+        video.ended ||
+        video.error ||
+        video.readyState < 1
+      )
+        return;
       if (!boost.current.owners.size) {
         boost.current.media = video;
         boost.current.rate = video.playbackRate;
@@ -97,7 +108,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       video.playbackRate = 2;
       sync();
     },
-    [sync],
+    [sync, playback.switching],
   );
   const endBoost = useCallback(
     (owner: 'pointer' | 'space') => {
@@ -167,7 +178,6 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     if (!video) return;
     generation.current++;
     lifecycle.current++;
-    if (video.getAttribute('src') !== src) video.setAttribute('src', src);
     const display = () => {
       setFullscreen(document.fullscreenElement === root);
       setPip(document.pictureInPictureElement === video);
@@ -185,14 +195,17 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       if (document.pictureInPictureElement === video)
         void document.exitPictureInPicture().catch(() => {});
       if (document.fullscreenElement === root) void document.exitFullscreen().catch(() => {});
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
     };
-  }, [src, reveal]);
+  }, [reveal]);
+  useEffect(() => {
+    if (playback.switching) {
+      setFailed(false);
+      setPlayError(false);
+    }
+  }, [playback.switching]);
   async function toggle() {
     const video = media.current;
-    if (!video) return;
+    if (!video || playback.switching) return;
     reveal();
     const attempt = ++generation.current;
     setPlayError(false);
@@ -202,7 +215,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       sync();
       return;
     }
-    if (failed || !state.ready) return;
+    if (failed || !state.ready || playback.switching) return;
     try {
       if (video.ended || (duration > 0 && video.currentTime >= duration - 0.001))
         video.currentTime = 0;
@@ -235,7 +248,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   });
   function mute() {
     const video = media.current;
-    if (!video) return;
+    if (!video || playback.switching) return;
     if (silent) {
       video.muted = false;
       if (!video.volume) video.volume = lastVolume.current;
@@ -251,7 +264,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     setPlayError(false);
     setWaiting(false);
     setState((value) => ({ ...value, duration: 0, ready: false, paused: true }));
-    video.load();
+    playback.retry();
   }
   async function changeDisplay(mode: 'fullscreen' | 'pip') {
     const video = media.current,
@@ -277,6 +290,8 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     (!manuallyHidden && (visible || state.paused)) ||
     !state.ready ||
     waiting ||
+    playback.switching ||
+    Boolean(playback.error) ||
     failed ||
     playError ||
     displayError;
@@ -297,11 +312,14 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       {/* biome-ignore lint/a11y/useMediaCaption: Arbitrary file preview; no captions are supplied or fabricated. */}
       <video
         ref={media}
-        src={src}
         preload="metadata"
         playsInline
         aria-label={source.name}
-        onLoadedMetadata={sync}
+        onLoadedMetadata={() => {
+          setFailed(false);
+          setPlayError(false);
+          sync();
+        }}
         onDurationChange={sync}
         onVolumeChange={sync}
         onRateChange={sync}
@@ -322,6 +340,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
         }}
         onWaiting={() => setWaiting(true)}
         onCanPlay={() => {
+          setFailed(false);
           setWaiting(false);
           sync();
         }}
@@ -393,18 +412,24 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
         }}
       />
       <div className="motion-feedback">
-        {failed || playError || displayError ? (
+        {(!playback.switching && !playback.discovering && failed) ||
+        playback.error ||
+        playError ||
+        displayError ? (
           <div className="motion-error">
             <ErrorNotice
               error={{
-                messageKey: failed
-                  ? 'viewer.mediaUnsupported'
-                  : playError
-                    ? 'viewer.audioPlayFailed'
-                    : 'viewer.videoDisplayFailed',
+                messageKey:
+                  playback.error === 'failed'
+                    ? 'viewer.videoTrackFailed'
+                    : failed || playback.error === 'unsupported'
+                      ? 'viewer.mediaUnsupported'
+                      : playError
+                        ? 'viewer.audioPlayFailed'
+                        : 'viewer.videoDisplayFailed',
               }}
             />
-            {failed && (
+            {(failed || playback.error) && (
               <button type="button" className="text-button" onClick={retry}>
                 {t('viewer.audioRetry')}
               </button>
@@ -412,11 +437,13 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           </div>
         ) : (
           <span role="status">
-            {!state.ready
-              ? t('viewer.videoLoading')
-              : showWaiting
-                ? t('viewer.videoBuffering')
-                : ''}
+            {playback.switching
+              ? t('viewer.videoTrackSwitching')
+              : !state.ready
+                ? t('viewer.videoLoading')
+                : showWaiting
+                  ? t('viewer.videoBuffering')
+                  : ''}
           </span>
         )}
       </div>
@@ -432,7 +459,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
           <VideoButton
             label={t(state.paused ? 'viewer.audioPlay' : 'viewer.audioPause')}
             icon={state.paused ? 'play' : 'pause'}
-            disabled={state.paused && (!state.ready || failed)}
+            disabled={playback.switching || (state.paused && (!state.ready || failed))}
             onClick={() => void toggle()}
             className="motion-play"
           />
@@ -453,8 +480,10 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
               label={t(silent ? 'viewer.audioUnmute' : 'viewer.audioMute')}
               icon={silent ? 'mute' : 'volume'}
               onClick={mute}
+              disabled={playback.switching}
             />
             <input
+              disabled={playback.switching}
               className="motion-range motion-volume-input"
               type="range"
               min={0}
@@ -477,6 +506,38 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
             />
           </div>
           <div className="motion-options">
+            {playback.tracks.length > 1 && (
+              <ViewerSelect
+                label={t('viewer.videoAudioTrack')}
+                value={playback.selectedId ?? ''}
+                className="motion-audio-track"
+                triggerContent={<VideoIcon kind="tracks" />}
+                options={playback.tracks.map((track, index) => {
+                  let language = '';
+                  if (track.language && track.language !== 'und') {
+                    try {
+                      language =
+                        new Intl.DisplayNames([locale === 'it' ? 'it' : 'en'], {
+                          type: 'language',
+                        }).of(track.language) ?? track.language;
+                    } catch {
+                      language = track.language;
+                    }
+                  }
+                  const name =
+                    track.name || language || t('viewer.videoTrackNumber', { number: index + 1 });
+                  return {
+                    value: track.id,
+                    label: track.supported ? name : t('viewer.videoTrackUnavailable', { name }),
+                    disabled: !track.supported,
+                  };
+                })}
+                onChange={(id) => {
+                  cancelBoosts();
+                  playback.select(id);
+                }}
+              />
+            )}
             <VideoButton
               label={t('viewer.audioRepeat')}
               icon="repeat"
@@ -490,6 +551,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
               label={t('viewer.audioSpeed')}
               value={String(state.rate)}
               className="motion-speed"
+              disabled={playback.switching}
               options={speeds.map((speed) => ({
                 value: String(speed),
                 label: `${format.number(speed, 2)}×`,

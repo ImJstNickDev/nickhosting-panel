@@ -8,7 +8,8 @@ export type VideoIconKind =
   | 'mute'
   | 'fullscreen'
   | 'exitFullscreen'
-  | 'pip';
+  | 'pip'
+  | 'tracks';
 
 export function VideoIcon({ kind }: { kind: VideoIconKind }) {
   return (
@@ -50,6 +51,8 @@ export function VideoIcon({ kind }: { kind: VideoIconKind }) {
         <path d="M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5" />
       ) : kind === 'exitFullscreen' ? (
         <path d="M4 9h5V4m6 0v5h5M9 20v-5H4m11 5v-5h5" />
+      ) : kind === 'tracks' ? (
+        <path d="M4 14v-3a8 8 0 0 1 16 0v3M4 12H3v7h4v-7H4m16 0h1v7h-4v-7h3" />
       ) : kind === 'pip' ? (
         <>
           <rect x="3" y="5" width="18" height="14" rx="1.5" />

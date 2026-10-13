@@ -8127,3 +8127,83 @@ Checks:
 - Final focused Chromium command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts apps/web/tests/file-viewers.browser.test.ts -t 'three stage zones|routes Wave shortcuts|runs Wave' --silent=false`: **3 passed, 36 skipped**, 42.57 s. Includes actual pointer cancellation, held/short Space, speed restoration, F/M inside/outside player, input exclusions and Wave regressions.
 - Final web `typecheck`, production `build`, scoped Biome and `git diff --check`: **pass**. Existing large app/editor build warnings remain. `pnpm i18n:compile`: **1403 EN/IT keys** plus pseudolocale.
 - Final Firefox gesture-only command uses `NH_BROWSER=firefox` and `-t 'three stage zones'`: **1 passed, 8 skipped**, 16.28 s, including the focus restriction. Final indexed governance check passes. All browser harnesses closed; historical full suites were not rerun for this UI-only change.
+
+### Motion embedded audio selection through one native media clock (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. Motion now discovers internal audio names,
+languages and browser-supported codec pairs and provides a compact headphone
+selector. Supported multitrack MKV/MP4/WebM media uses Mediabunny 1.61.4 to remux
+the original compressed video and selected audio into fragmented MP4 for one
+native video element. There is no server conversion, second audio playback clock,
+new dependency or Blueprint change. Native single-track playback remains the fast
+path; unsupported optional discovery must not invalidate otherwise working native
+playback. Browser capability checks are not a blanket codec certification.
+
+Switches preserve paused/playing intent, time, speed, volume and mute. Superseded
+selections cancel their reads/buffers, unbuffered seeks restart from an indexed
+keyframe, and leaving the viewer releases native media and request resources.
+Transport changes are disabled during switching while the track selector remains
+available. Metadata/packet caches, prefetch, fragments and read budgets are
+bounded; startup/update deadlines prevent indefinite loading. Detailed limits
+are recorded in FRONTEND-I18N.md. Indexed duration and bounded keyframe distances
+are required. Embedded subtitles, transcoding, negative-timestamp certification
+and physical display/speaker synchronization within one millisecond are not
+claimed.
+
+The new fixture is original, generated locally with the project's pinned
+Mediabunny/Chromium: 40 seconds of VP9 video and two Opus tracks, named English tone
+and Tono italiano, with 440/880 Hz tones and shared-timestamp visual/audio markers.
+Its reproducible generator and base64 asset are committed. Tests use the existing
+isolated browser/API harness and Range fixture; no real user media/server writes,
+new Docker resources, container restart, Panel/Wings/network change or production
+access. Development receives source changes through existing HMR. Rollback is a
+frontend/source revert; SFTPGo #18 remains an independent release gate.
+
+Independent read-only review found and resolved potential indefinite no-common-
+range startup, incomplete deadlines, stale playback intent during switching,
+read-budget renewal and misleading optional-discovery errors. Final technical
+and desktop/mobile UX review reports no remaining must-fix findings. Real-file
+coverage is still dependent on the Owner's MKV and its codecs.
+
+Focused checks (no historical milestone-wide rerun):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/app/i18n.test.ts apps/web/src/features/viewer-engine/builtin-viewers/video-mse.test.ts apps/web/src/features/viewer-engine/builtin-viewers/video-thumbnail-model.test.ts apps/web/src/features/viewer-engine/builtin-viewers/audio-playback-clock.test.ts`: **34/34 passed**, including 13 new Range/budget/cancellation/SourceBuffer tests.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass**, application and browser-test TypeScript.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **pass**; existing large app/editor warnings remain. The lazy media bundle now includes remux support: 322.46 kB / 86.14 kB gzip. No dependency was added.
+- Scoped `scripts/dev.sh pnpm exec biome check` over changed source, CSS, translations, tests and fixture generator: **pass**. `scripts/dev.sh pnpm i18n:compile`: **1408 EN/IT keys**, plus pseudolocale.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-audio.browser.test.ts --silent=false`: final **4/4 passed**, 38.22 s. This verifies the real native MSE source, selected track metadata, video progression, settings/position preservation, seeks/buffer windows, repeat/end replay, cancellation, mobile layout and automated axe.
+
+Firefox evidence limitation: two tests explicitly report their frequency-analysis
+substep unavailable. The initial run timed out waiting for Web Audio `resume()`;
+a standalone oscillator triggered by a trusted click also remained suspended
+(`resume` unresolved, no measurable output). The test now bounds that optional
+inspection and does not attach an inactive analyzer to the video. Product code
+was not relaxed to accommodate the headless audio environment. Firefox selection
+and video-playback assertions still run; its physical audio output is **not**
+certified by these tests. Chromium frequency-analysis assertions are mandatory.
+The first Chromium multitrack run passed 3/3 before adding the repeat regression.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-audio.browser.test.ts --silent=false`: final Chromium **4/4 passed**, 27.06 s. Mandatory FFT detects actual 440→880 Hz switching and the final 880 Hz choice after rapid selections. Also verifies pause/time/rate/mute/volume retention, seeks across 28/3/21 seconds, buffer targets, repeat/end replay, held-read cancellation, disposal and mobile axe.
+- Browser fixtures ran on installed Chromium 156 and Firefox 157, not Safari/iOS hardware or every desktop codec stack. Safari's ManagedMediaSource branch is capability-guarded but unverified on real hardware.
+
+Reviewed real rendered screens: [Chromium desktop EN](screenshots/m5/file-viewer-motion-audio-desktop-en-chromium.png), [Chromium mobile IT](screenshots/m5/file-viewer-motion-audio-mobile-it-chromium.png), [Firefox desktop EN](screenshots/m5/file-viewer-motion-audio-desktop-en-firefox.png), [Firefox mobile IT](screenshots/m5/file-viewer-motion-audio-mobile-it-firefox.png). Metadata track names are intentionally preserved rather than translated; all application labels/errors are localized. No clipping or inaccessible native-select substitution was found.
+
+Existing-control regression command:
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts apps/web/tests/file-viewers.browser.test.ts -t 'M5 Motion video viewer|routes Wave shortcuts|runs Wave' --silent=false`
+ran **10 passed, 1 failed, 28 intentionally skipped**. The thumbnail cancellation
+fixture armed its generic non-video Range stall before opening the file, also
+stalling the newly added optional track-discovery reads. It now arms the stall
+after native playback is ready, isolating the hover operation it intends to test.
+No product workaround was added. The affected-only rerun with
+`apps/web/tests/motion.browser.test.ts -t 'cancels an actual pending thumbnail'`
+passed **1/1, 8 skipped**, 12.72 s. Other native Motion and shared Wave regression
+assertions passed in the original run; they were not needlessly rerun wholesale.
+
+Final Firefox native-control regression:
+`NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'plays actual video|three stage zones|cancels an actual pending thumbnail' --silent=false`: **3 passed, 6 skipped**, 23.61 s, including the corrected thumbnail fixture. Browser harnesses closed and all generated test media remains local/original; no live game-server assets were created or cleaned.
+
+`python3 scripts/check-governance.py` and indexed `git diff --check`: **pass**,
+including relative documentation links, tracked-content hygiene, ignore fixtures,
+TOML and reviewed PNGs. Secret scanning remains heuristic. Final independent
+review also checked the disclosed Firefox measurement limit and found no hidden
+pass substitution or remaining must-fix. PR #21 stays open and unmerged.

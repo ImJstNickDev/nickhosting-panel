@@ -12,7 +12,7 @@ export function ViewerSelect({
 }: {
   label: string;
   value: string;
-  options: { value: string; label: string; content?: ReactNode }[];
+  options: { value: string; label: string; content?: ReactNode; disabled?: boolean }[];
   onChange: (value: string) => void;
   disabled?: boolean;
   className?: string;
@@ -101,7 +101,7 @@ export function ViewerSelect({
   }, [disabled]);
   function choose(index: number) {
     const option = options[index];
-    if (!option || disabled) return;
+    if (!option || disabled || option.disabled) return;
     setExpanded(false);
     onChange(option.value);
     trigger.current?.focus({ preventScroll: true });
@@ -191,6 +191,7 @@ export function ViewerSelect({
                 tabIndex={-1}
                 aria-label={option.label}
                 aria-selected={option.value === value}
+                aria-disabled={option.disabled || undefined}
                 data-active={index === activeIndex}
                 onPointerMove={() => setActive(index)}
                 onPointerDown={(event) => event.preventDefault()}

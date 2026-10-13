@@ -969,3 +969,44 @@ fullscreen and M mute (single-character shortcuts do not act elsewhere). Editabl
 keeps native activation. Loss of focus/visibility clears holds. Wave's existing
 Space behavior is unchanged. Motion does not currently load external subtitle
 files or expose an embedded subtitle-track selector.
+
+#### Motion internal audio tracks
+
+Motion discovers embedded audio tracks through Mediabunny's bounded Range reads.
+Its compact headphone menu uses track names/languages from the container, with
+localized numbered fallbacks. Unavailable codec combinations remain visible but
+cannot be selected. No fake subtitle choices are supplied.
+
+For supported multitrack files, compressed video and the selected audio are
+remuxed into fragmented MP4 in the browser and appended to one MediaSource on the
+same native video element. There is no server transcoding and no independent
+Web Audio playback clock. Original packet timestamps are retained; native media
+playback owns A/V synchronization. This is not a guarantee of one-millisecond
+physical display/speaker synchronization across browsers and devices.
+
+Switching retains position, paused/playing intent, speed, volume and mute. It may
+briefly buffer. Transport changes are disabled during that transition while the
+track menu remains usable to replace a pending selection. Seeking beyond the
+buffer reconstructs the stream from a preceding keyframe. Native single-track
+playback remains the fast path; optional metadata discovery does not replace a
+working native source with an error. Unsupported media retains download access.
+
+Container support does not imply codec support: runtime MSE capability checks
+must succeed for the actual video/audio pair, and decoding failures are reported.
+An indexed finite duration, bounded packet sizes and reachable keyframes are
+required by the remux path. Read caches, prefetch, fragments and retained playback
+windows are bounded and released on close/superseded selection. Safari's
+ManagedMediaSource fallback is capability-detected, but Chromium/Firefox fixture
+evidence must not be presented as Safari/iOS real-device certification. Embedded
+subtitle extraction/rendering remains outside this audio-track change.
+
+The remux reader uses 64 KiB metadata blocks and 512 KiB playback blocks, a
+2 MiB block cache plus a separately capped 2 MiB demux cache, and 12-second ahead /
+8-second behind playback targets (keyframes and native buffers add overhead).
+Discovery is capped at 8 MiB, individual packets at 8 MiB and unflushed fragments
+at 32 MiB; a validated append renews the sequential read budget. Startup, fetches
+and buffer updates have 15-second deadlines. A requested point without a common
+A/V range fails instead of waiting indefinitely; an initial gap under one second
+may advance to the actual first common timestamp without shifting packet timing.
+These limits constrain hostile or unusual files and do not certify arbitrary
+high-bitrate, long-GOP, negative-timestamp or damaged media.

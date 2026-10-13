@@ -301,3 +301,13 @@
     outline-color: Highlight;
   }
 }
+
+.motion-player .motion-audio-track .ve-select-trigger {
+  min-width: 0;
+  gap: 0.2rem;
+  padding-inline: 0.4rem;
+}
+.ve-select-options.motion-audio-track [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

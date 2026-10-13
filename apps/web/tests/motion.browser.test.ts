@@ -355,10 +355,11 @@ describe('M5 Motion video viewer', () => {
   });
 
   it('cancels an actual pending thumbnail HTTP request when the pointer leaves', async () => {
+    await open();
+    await ready();
+    // Hold only future hover requests; optional track discovery also uses Range reads.
     holdThumbnail = true;
     try {
-      await open();
-      await ready();
       const bounds = await page.locator('.motion-timeline').boundingBox();
       if (!bounds) throw new Error('Missing Motion timeline');
       await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);

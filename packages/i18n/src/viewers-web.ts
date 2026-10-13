@@ -34,6 +34,17 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
     'Playback could not start. Press Play to try again.',
     'La riproduzione non è partita. Premi Riproduci per riprovare.',
   ],
+  'viewer.videoAudioTrack': ['Audio track', 'Traccia audio'],
+  'viewer.videoTrackNumber': ['Track {number}', 'Traccia {number}'],
+  'viewer.videoTrackUnavailable': [
+    '{name} · Not supported by this browser',
+    '{name} · Non supportata dal browser',
+  ],
+  'viewer.videoTrackSwitching': ['Loading audio track…', 'Caricamento traccia audio…'],
+  'viewer.videoTrackFailed': [
+    'Could not load this audio track. Retry or choose another track.',
+    'Impossibile caricare la traccia audio. Riprova o scegli un’altra traccia.',
+  ],
   'viewer.video': ['Video', 'Video'],
   'viewer.videoLoading': ['Loading video…', 'Caricamento video…'],
   'viewer.videoBuffering': ['Buffering…', 'Caricamento…'],
