@@ -7654,3 +7654,116 @@ partial peaks during analysis, flat initial state, smooth native-clock progress,
 seek, metadata refinement, errors and mobile/axe checks. All linked screenshots
 were refreshed in Chromium for this last amendment (superseding earlier Firefox
 captures); prior Firefox mobile evidence applies to the preceding rendering.
+
+### Wave — browser streaming analysis (2026-10-13)
+
+Supersedes the full-file decode described above; historical results remain intact.
+Mediabunny 1.61.4 now parses the authorized same-origin Range stream and reduces
+real decoded samples into waveform peaks inside a dedicated browser Worker.
+Native playback remains independent. No backend decoder, Blueprint change,
+provider credential or game-file mutation is involved. Limits remain 32 MiB,
+ten minutes and eight channels; larger/unsupported media retains native playback
+with the unavailable-waveform state. Explicit source cache: 2 MiB; 4 KiB peaks
+and 16 KiB scratch, excluding decoder/metadata/network allocations.
+
+Focused commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform-model.test.ts apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform-stream.test.ts
+scripts/dev.sh pnpm --filter @nickhosting/web typecheck
+scripts/dev.sh pnpm --filter @nickhosting/web build
+scripts/dev.sh pnpm exec biome check apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform.tsx apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform-worker.ts apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform-stream.ts apps/web/src/features/viewer-engine/builtin-viewers/audio-waveform-stream.test.ts apps/web/tests/file-viewers.browser.test.ts apps/web/tests/harness.ts apps/web/package.json
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'Wave'
+```
+
+Unit tests: 12/12 pass (752 ms). Typecheck and production build pass; existing
+main/editor >500 kB warnings remain. Scoped Biome passes with the pre-existing
+`browser!` harness warning. Initial Chromium browser run: 5/5 pass (41.35 s),
+including real HTTP partial-body decoding, cancellation, oversized response,
+native playback/seek and mobile/axe. Tests use existing isolated DB services,
+real browser/native decode and a Node HTTP WAV fixture; provider operations are
+mocked. No real game file is written. This does not certify every media codec.
+
+Final review removed a redundant metadata-duration lookup: the native seek
+timeline is authoritative for rendering; significant decode overrun/shortfall
+fails waveform analysis instead of silently clipping or claiming completeness.
+Firefox initially failed the HTTP-cancellation assertion after viewer exit;
+explicit cancellation now aborts fetch and disposes the decoder before worker
+termination. Final browser outcomes and activation evidence follow below.
+
+Firefox investigation retained: termination alone and then explicit abort both
+failed the intercepted HTTP test. A two-second test-only termination delay also
+failed; it was removed. The same real Worker in a fresh page without Playwright
+routing closed the HTTP response correctly. The final UI regression therefore
+uses same-origin Node fixture handlers and an unrouted page, not `route.continue`,
+which still invokes Firefox interception. Assertions still require actual
+partial peaks before EOF and actual HTTP closure on viewer exit.
+
+Final Firefox streaming UI regression: 1/1 pass (21.12 s). The 960,044-byte WAV
+produced nonzero Worker peaks 7 ms after the first response byte, with 262,144
+bytes (27.3%) delivered and the remaining body deliberately held. EOF followed
+278 ms later. This demonstrates incremental behavior; the artificial held tail
+is not a production throughput benchmark. Firefox mobile/axe also passed in the
+earlier two-test run whose separate intercepted cancellation case failed.
+Previous Firefox unmuted audio-sink limitation remains unchanged.
+
+Worker production artifact: 240,942 bytes raw, 62,626 gzip, 53,272 Brotli.
+Only eligible Wave analysis loads it. MPL-2.0 full notice and corresponding
+unmodified upstream source references ship in THIRD-PARTY-WORKER-NOTICES.txt.
+Independent code review found no remaining must-fix after the native-duration
+and explicit cancellation corrections.
+
+Owner explicitly approved updating only the development Vite image. Saved
+`nickhosting-dev-vite-before-mediabunny:5791f01`, then ran:
+
+```sh
+docker compose --env-file .env.dev.local build vite
+docker compose --env-file .env.dev.local up -d --no-deps --wait vite
+```
+
+Initial activation exposed a real Vite optimizer memory failure: discovering the
+Worker-only dependency after the app scan triggered a second dependency bundle,
+exceeding the existing 768 MiB limit and killing Vite. HTTPS briefly returned 502.
+`optimizeDeps.include: ['mediabunny']` now includes it during initial preparation;
+restarted only `nickhosting-dev-vite-1` to finish the approved activation. No memory
+limit was increased. HTTPS subsequently returned 200, Worker module returned 200,
+and the new process cgroup showed no OOM events. No other service was recreated.
+The container retains only `nickhosting-dev-edge`, no published ports; image is
+`sha256:3c202670072279383ebed42d7c09511fb19e9a642a23da1e9aac932f1019d894`.
+Existing SFTPGo orphan warning was not acted upon; no cleanup was authorized or
+performed. Gateway was already unhealthy before activation and is outside this
+Wave task. Production, game servers, database and provider settings were untouched.
+Rollback: revert this Wave change, restore the saved image tag and recreate only
+Vite with the same Compose service scope. Issue #18 remains a release gate.
+
+Final Chromium same-stream regression: 1/1 pass (16.39 s), first peak 9 ms after
+first byte at the same 262,144/960,044-byte boundary, 145 ms before held EOF.
+Both browsers prove HTTP cancellation on exit without weakening the assertion.
+Final rerun command selected `-t 'draws real Wave peaks'`, with
+`NH_BROWSER=firefox` for Firefox and `--silent=false` for test-only metrics.
+The default five-test Wave suite was not repeated after these targeted fixes.
+Final web source/test typecheck and scoped Biome pass; no historical M1–M5 suite
+was rerun. The development prebundle correction also passed independent review.
+Screenshot: [actual partial waveform](screenshots/m5/file-viewer-wave-incremental-en.png).
+
+Live development smoke also fetched `/@vite/client` over HTTPS and established
+`wss://dev.hub.nickhost.ing/__nickhosting_hmr` with Vite's current client token,
+receiving the `connected` event. No token was logged. Repeated HTTPS and container
+health checks stayed successful; cgroup OOM counters remained zero after recovery.
+
+Final visual inspection caught one genuine incremental-rendering issue: leading
+throttling left later decoded peaks unpublished while awaiting another network
+chunk. A single trailing timer now flushes those real peaks within 50 ms and is
+cleared on completion/error. Three new regressions cover held-source progress,
+no late publication after completion/failure and callback errors. Independent
+review found no must-fix. The browser assertion now also requires display bar 10
+(about seven seconds into the file) to grow before the held body is released,
+not merely the first peak. Firefox strengthened test: 1/1 pass (20.88 s), first
+peak 10 ms, the same 27.3% byte boundary and actual HTTP close on exit.
+Final production build/typecheck and eight-file Biome pass. Updated Worker size:
+241,128 bytes raw, 62,712 gzip, 53,295 Brotli.
+Final strengthened Chromium stream test: 1/1 pass (15.41 s), first peak 25 ms;
+bar 10 grew with only 262,144/960,044 bytes received, cancellation still passed.
+Final combined units: 15/15 pass (629 ms). Screenshot refreshed and independently
+reviewed: received portion has real amplitude, unread remainder stays flat;
+centered controls retain their layout with no additional loading copy.

@@ -850,17 +850,28 @@ volume retain native media behavior and keyboard controls with EN/IT labels.
 The playhead follows native currentTime on animation frames while playing.
 Dragging previews the seek position and commits on release. Playback uses the
 existing authenticated, same-origin Range stream; leaving the viewer releases it.
-The waveform is analyzed asynchronously after duration metadata: at most 32 MiB
-and ten minutes, decoded at 8 kHz and reduced to 1024 peaks. Analysis requires one
-additional bounded full-content read because browser `decodeAudioData` requires
-complete data. It does not delay playback. Reads abort on exit; native decoding
-cannot abort, so analysis is serialized and obsolete results discarded. Encoded
-bytes/PCM are not retained as a cache. These limits are not a hard cap on the
-browser decoder's internal memory. Larger/longer or unsupported files keep playback
-and seeking with a neutral rail and truthful waveform-unavailable state.
+Waveform analysis runs in a dedicated browser Worker using Mediabunny 1.61.4.
+It reads the existing authorized same-origin content endpoint with HTTP Range,
+then reduces decoded samples directly into 1024 peaks. Actual partial peaks are
+published while data is still arriving, at most about 20 updates per second.
+The first nonzero result is published promptly; no progress is fabricated.
+Native playback remains independent and never waits for waveform analysis.
 
-Wave starts with flat bars, without a waveform loading caption. After the native
-decoder completes, each batch of 64 actual peak bins is published; bars expand
-from the center with a short transition (disabled for reduced motion). This is
-incremental peak calculation after download/decode, not streaming decoding or
-a simulated download-progress animation.
+The initial trial retains the 32 MiB / ten-minute / eight-channel eligibility
+limits. The source cache is explicitly 2 MiB (upstream 1.61.4 code defaults to
+64 MiB), with one fetch at a time and no automatic retries. The accumulator uses
+4 KiB peaks plus 16 KiB scratch; native decoder, metadata and network buffers are
+additional memory, so these are not a hard total-memory ceiling. Each sample is
+closed after reduction. Leaving the viewer explicitly aborts reads and disposes
+the input inside the Worker before acknowledging termination (with a one-second
+termination fallback for an unresponsive Worker). Completion/error uses the same
+cleanup path. Duration refinement
+within the eligible range does not restart analysis. Clearly incomplete or
+mismatched timelines are unavailable rather than certified as complete silence.
+
+Wave starts flat without a loading caption; real peak updates expand each band
+from the center with a short transition (disabled for reduced motion). Browser
+codec support and container metadata determine how early decoding can begin.
+Unsupported decoding or eligibility limits preserve native playback/seek and the
+truthful waveform-unavailable fallback. This introduces no server transcoding,
+provider credentials, game-file changes or new backend endpoint.

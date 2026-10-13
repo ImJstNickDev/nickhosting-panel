@@ -5,6 +5,9 @@ import { developmentNetwork } from './vite-network.js';
 export default defineConfig({
   plugins: [react()],
   cacheDir: process.env.NH_WEB_CACHE_DIR,
+  // Worker-only imports escape the initial app scan. Include the decoder now
+  // instead of rebuilding the dependency bundle when Wave first opens.
+  optimizeDeps: { include: ['mediabunny'] },
   server: {
     ...developmentNetwork(process.env),
     proxy: process.env.NH_WEB_API_PROXY

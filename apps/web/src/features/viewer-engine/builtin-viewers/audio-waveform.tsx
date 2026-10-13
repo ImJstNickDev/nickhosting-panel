@@ -1,61 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { safeApiPath } from '../../../api/client.js';
 import { useT } from '../../../app/i18n.js';
-import { readViewerBytes } from '../core/access.js';
-import {
-  readWaveformPeak,
-  waveformBars,
-  waveformEligible,
-  waveformLimits,
-} from './audio-waveform-model.js';
+import { waveformBars, waveformEligible, waveformLimits } from './audio-waveform-model.js';
 import './audio-waveform.css';
 
-// Native decodeAudioData cannot be aborted. Keep at most one decode alive across
-// viewer changes; canceled queued tasks skip both download and decode.
-let analysisQueue: Promise<unknown> = Promise.resolve();
 const flatPeaks = new Float32Array(waveformLimits.peaks);
-function analyse(
-  url: string,
-  signal: AbortSignal,
-  onPeaks: (peaks: Float32Array) => void,
-): Promise<Float32Array> {
-  const result = analysisQueue
-    .catch(() => {})
-    .then(async () => {
-      signal.throwIfAborted();
-      const bytes = await readViewerBytes(url, waveformLimits.bytes, signal);
-      signal.throwIfAborted();
-      const context = new OfflineAudioContext(1, 1, 8000);
-      const decoded = await context.decodeAudioData(bytes.buffer);
-      signal.throwIfAborted();
-      if (decoded.duration > waveformLimits.seconds || decoded.numberOfChannels > 8)
-        throw new Error('waveform-limit');
-      const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) =>
-        decoded.getChannelData(index),
-      );
-      const count = Math.min(waveformLimits.peaks, decoded.length);
-      const peaks = new Float32Array(count);
-      for (let index = 0; index < count; index++) {
-        peaks[index] = readWaveformPeak(
-          channels,
-          Math.floor((index * decoded.length) / count),
-          Math.floor(((index + 1) * decoded.length) / count),
-        );
-        if (index % 64 === 63 || index === count - 1) {
-          signal.throwIfAborted();
-          onPeaks(peaks.slice());
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          signal.throwIfAborted();
-        }
-      }
-      return peaks;
-    });
-  // This chain retains neither source bytes nor decoded PCM after completion.
-  analysisQueue = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
 
 export function AudioWaveform({
   url,
@@ -97,24 +46,74 @@ export function AudioWaveform({
       : duration > 0
         ? 'unavailable'
         : 'pending';
+  // Metadata may refine duration during playback; do not restart analysis within
+  // the same eligibility window. The worker receives the latest initial values.
+  const input = useRef({ size, duration });
+  input.current = { size, duration };
   useEffect(() => {
-    const controller = new AbortController();
     if (eligibility !== 'eligible') {
       setAnalysis({ url, state: eligibility === 'unavailable' ? 'unavailable' : 'loading' });
       return;
     }
     setAnalysis({ url, state: 'loading' });
-    const isCurrent = () => !controller.signal.aborted && currentSource.current === url;
-    void analyse(url, controller.signal, (peaks) => {
-      if (isCurrent()) setAnalysis({ url, state: 'loading', peaks });
-    })
-      .then((peaks) => {
-        if (isCurrent()) setAnalysis({ url, state: 'ready', peaks });
-      })
-      .catch(() => {
-        if (isCurrent()) setAnalysis({ url, state: 'unavailable' });
+    let worker: Worker | undefined;
+    let active = true;
+    let disposed = false;
+    const dispose = () => {
+      if (!worker || disposed) return;
+      disposed = true;
+      const closingWorker = worker;
+      // Firefox can retain a worker's fetch after terminate(). Abort in the
+      // worker first, then release it once cancellation is acknowledged.
+      const timeout = window.setTimeout(() => closingWorker.terminate(), 1_000);
+      closingWorker.onmessage = (event: MessageEvent<{ type: string }>) => {
+        if (event.data.type !== 'cancelled') return;
+        window.clearTimeout(timeout);
+        closingWorker.terminate();
+      };
+      closingWorker.onerror = closingWorker.onmessageerror = () => {
+        window.clearTimeout(timeout);
+        closingWorker.terminate();
+      };
+      closingWorker.postMessage({ type: 'cancel' });
+    };
+    const fail = () => {
+      if (active && currentSource.current === url) setAnalysis({ url, state: 'unavailable' });
+      active = false;
+      dispose();
+    };
+    try {
+      worker = new Worker(new URL('./audio-waveform-worker.ts', import.meta.url), {
+        type: 'module',
       });
-    return () => controller.abort();
+      worker.onmessage = (
+        event: MessageEvent<{ type: 'peaks' | 'done' | 'error'; peaks?: Float32Array }>,
+      ) => {
+        if (!active || currentSource.current !== url) return;
+        if (event.data.type === 'error' || !event.data.peaks) {
+          fail();
+          return;
+        }
+        setAnalysis({
+          url,
+          state: event.data.type === 'done' ? 'ready' : 'loading',
+          peaks: event.data.peaks,
+        });
+        if (event.data.type === 'done') dispose();
+      };
+      worker.onerror = fail;
+      worker.onmessageerror = fail;
+      worker.postMessage({
+        url: new URL(safeApiPath(url), window.location.origin).href,
+        ...input.current,
+      });
+    } catch {
+      fail();
+    }
+    return () => {
+      active = false;
+      dispose();
+    };
   }, [url, eligibility]);
   const peaks = analysis.url === url ? analysis.peaks : undefined;
   const bars = useMemo(

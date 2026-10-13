@@ -25,3 +25,17 @@ image, proprietary logo, remote tracking image, marketing template or copied
 Minecraft texture is bundled. Each trusted first-party game module must supply
 its artwork/provenance; the shared card renderer supplies cropping, labels,
 fallbacks and accessibility.
+
+## Wave streaming decoder
+
+`mediabunny` 1.61.4 is pinned for the browser waveform Worker. It supplies parsers
+and native WebCodecs decoding; only WAVE, MP3, Ogg, FLAC, MP4/M4A and ADTS inputs
+are imported, with no encoder/WASM extension. Its two transitive dependencies
+are TypeScript declarations (`@types/dom-webcodecs` and
+`@types/dom-mediacapture-transform`), not runtime decoders.
+The unmodified library is MPL-2.0. Distribute
+`THIRD-PARTY-WORKER-NOTICES.txt`, which contains the full license and exact
+[corresponding source](https://github.com/Vanilagy/mediabunny/tree/v1.61.4),
+with the app. No upstream source was patched and this does not license the
+NickHosting repository. Worker notices are separate because the main Vite bundle
+license report does not include modules compiled inside Workers.

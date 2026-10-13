@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { getRequestListener } from '@hono/node-server';
@@ -21,6 +22,7 @@ export async function browserHarness(
   options: {
     discord?: { clientId: string; clientSecret: string };
     browser?: 'chromium' | 'firefox';
+    handleFixtureRequest?: (request: IncomingMessage, response: ServerResponse) => boolean;
   } = {},
 ) {
   const database = await createTestDatabase();
@@ -36,6 +38,7 @@ export async function browserHarness(
     browser: Browser | undefined;
   let management: ManagementRuntime | undefined;
   const listener = createApiHttpServer((request, response) => {
+    if (options.handleFixtureRequest?.(request, response)) return;
     if (request.url?.startsWith('/v1/') || request.url?.startsWith('/api/auth/'))
       getRequestListener(app.fetch)(request, response);
     else

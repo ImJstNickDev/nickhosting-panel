@@ -1,7 +1,9 @@
 import { Buffer } from 'node:buffer';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { waveformLimits } from '../src/features/viewer-engine/builtin-viewers/audio-waveform-model.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -27,10 +29,86 @@ describe('M5 builtin file viewers', () => {
   let holdPreference: Promise<void> | undefined;
   let holdWaveRequest: Promise<void> | undefined;
   let rejectWave = false;
+  let streamingUi = false;
+  const waveStreams = new Map<
+    string,
+    {
+      body: Buffer;
+      sent: number;
+      requests: number;
+      complete: boolean;
+      cancelled: boolean;
+      declaredAnalysisBytes?: number;
+      firstByteAt?: number;
+      eofAt?: number;
+      release?: () => void;
+      close?: () => void;
+    }
+  >();
+  function streamWaveFixture(request: IncomingMessage, response: ServerResponse) {
+    const url = new URL(request.url ?? '/', 'http://fixture.invalid');
+    // The dedicated unrouted page avoids Firefox interception retaining canceled HTTP streams.
+    if (
+      streamingUi &&
+      request.method === 'GET' &&
+      (url.pathname === `${endpoint}/capabilities` || url.pathname === `${endpoint}/preferences`)
+    ) {
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      response.end(
+        JSON.stringify(
+          url.pathname.endsWith('/capabilities') ? { available: true } : { preferences: [] },
+        ),
+      );
+      return true;
+    }
+    if (!url.pathname.endsWith('/files/viewer/content') || request.method !== 'GET') return false;
+    const fixture = waveStreams.get(url.searchParams.get('path') ?? '');
+    if (!fixture) return false;
+    const body = fixture.body;
+    // Native audio metadata and waveform decode are separate readers. Only analysis is throttled here.
+    const native = request.headers['sec-fetch-dest'] === 'audio';
+    const range = request.headers.range?.match(/^bytes=(\d+)-(\d*)$/);
+    const start = range ? Number(range[1]) : 0;
+    const end = Math.min(range?.[2] ? Number(range[2]) : body.length - 1, body.length - 1);
+    response.writeHead(range ? 206 : 200, {
+      'Content-Type': 'audio/wav',
+      'Content-Length': String(end - start + 1),
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+      ...(range
+        ? {
+            'Content-Range': `bytes ${start}-${end}/${!native && fixture.declaredAnalysisBytes ? fixture.declaredAnalysisBytes : body.length}`,
+          }
+        : {}),
+    });
+    if (native) {
+      response.end(body.subarray(start, end + 1));
+      return true;
+    }
+    fixture.requests++;
+    response.flushHeaders();
+    const firstEnd = Math.min(end + 1, start + 256 * 1024);
+    fixture.firstByteAt ??= Date.now();
+    response.write(body.subarray(start, firstEnd));
+    fixture.sent += firstEnd - start;
+    fixture.close = () => response.destroy();
+    fixture.release = () => {
+      if (response.destroyed || fixture.complete) return;
+      fixture.sent += end + 1 - firstEnd;
+      fixture.complete = true;
+      fixture.eofAt = Date.now();
+      response.end(body.subarray(firstEnd, end + 1));
+    };
+    response.once('close', () => {
+      if (!fixture.complete) fixture.cancelled = true;
+    });
+    return true;
+  }
 
   beforeAll(async () => {
     harness = await browserHarness({
       browser: process.env.NH_BROWSER === 'firefox' ? 'firefox' : 'chromium',
+      handleFixtureRequest: streamWaveFixture,
     });
     const identities = await prepareJourneyIdentities(harness);
     page = identities.user;
@@ -98,6 +176,17 @@ describe('M5 builtin file viewers', () => {
     remote.set('wave-long.wav', longWav);
     remote.set('wave-loading.wav', longWav);
     remote.set('wave-error.wav', longWav);
+    for (const name of ['wave-stream.wav', 'wave-cancel.wav', 'wave-bounded.wav']) {
+      remote.set(name, longWav);
+      waveStreams.set(name, {
+        ...(name === 'wave-bounded.wav' ? { declaredAnalysisBytes: waveformLimits.bytes + 1 } : {}),
+        body: longWav,
+        sent: 0,
+        requests: 0,
+        complete: false,
+        cancelled: false,
+      });
+    }
     const pngs = await page.evaluate(() =>
       [16, 32, 128, 256].map((size) => {
         const canvas = document.createElement('canvas');
@@ -194,129 +283,138 @@ describe('M5 builtin file viewers', () => {
       scriptRequests++;
       await route.fulfill({ status: 200, body: 'blocked fixture must not be reached' });
     });
-    await page.route(`**${endpoint}/**`, async (route) => {
-      const request = route.request();
-      const url = new URL(request.url());
-      const path = url.searchParams.get('path') ?? '';
-      const action = url.pathname.slice(endpoint.length);
-      if (request.method() === 'GET' && action === `/${viewerMetadataFailure}`) {
-        await route.fulfill({ status: 503, json: { code: 'internal_error' } });
-        return;
-      }
-      if (action === '/preferences') {
-        if (request.method() === 'GET') preferenceReads++;
-        if (request.method() === 'PUT') {
-          preferenceWrites++;
-          if (holdPreference) await holdPreference;
-          if (rejectPreference) {
-            await route.fulfill({ status: 503, json: { code: 'internal_error' } });
-            return;
-          }
-          const value = request.postDataJSON();
-          const found = preferences.findIndex(
-            (item) => item.scope === value.scope && item.extension === value.extension,
-          );
-          if (found >= 0) preferences.splice(found, 1);
-          preferences.push(value);
-        }
-        await route.fulfill({ json: { preferences } });
-        return;
-      }
-      if (action === '/capabilities') {
-        await route.fulfill({ json: { available: viewerAvailable } });
-        return;
-      }
-      reads.push(`${action}:${path}:${url.searchParams.get('entry') ?? ''}`);
-      if (path.startsWith('wave-') && path.endsWith('.wav')) {
-        if (action === '/content' && request.resourceType() === 'fetch') waveformReads.push(path);
-        if (holdWaveRequest) await holdWaveRequest;
-        if (rejectWave) {
-          await route.fulfill({ status: 503, body: 'Isolated media fixture unavailable' });
+    await page.route(
+      (url) =>
+        url.pathname.startsWith(`${endpoint}/`) &&
+        !(
+          url.pathname === `${endpoint}/content` &&
+          waveStreams.has(url.searchParams.get('path') ?? '')
+        ),
+      async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        const path = url.searchParams.get('path') ?? '';
+        const action = url.pathname.slice(endpoint.length);
+        if (request.method() === 'GET' && action === `/${viewerMetadataFailure}`) {
+          await route.fulfill({ status: 503, json: { code: 'internal_error' } });
           return;
         }
-      }
-      if (action === '/archive') {
-        const directory = url.searchParams.get('directory') ?? '';
-        const entries = directory
-          ? [{ name: 'settings.json', path: 'config/settings.json', directory: false, size: 12 }]
-          : [
-              { name: 'config', path: 'config', directory: true, size: 0 },
-              { name: 'README.txt', path: 'README.txt', directory: false, size: 12 },
-            ];
-        await route.fulfill({
-          json: { directory, entries, offset: 0, limit: 200, total: entries.length },
-        });
-        return;
-      }
-      if (action === '/sqlite') {
-        await route.fulfill({
-          json: {
-            tables: ['players'],
-            consistency: 'unverified',
-            ...(url.searchParams.get('table')
-              ? {
-                  columns: ['id', 'name', 'data'],
-                  rows: [
-                    [
-                      { type: 'integer', value: '9007199254740993123' },
-                      { type: 'text', value: 'Alex', truncated: false },
-                      { type: 'blob', bytes: 3 },
+        if (action === '/preferences') {
+          if (request.method() === 'GET') preferenceReads++;
+          if (request.method() === 'PUT') {
+            preferenceWrites++;
+            if (holdPreference) await holdPreference;
+            if (rejectPreference) {
+              await route.fulfill({ status: 503, json: { code: 'internal_error' } });
+              return;
+            }
+            const value = request.postDataJSON();
+            const found = preferences.findIndex(
+              (item) => item.scope === value.scope && item.extension === value.extension,
+            );
+            if (found >= 0) preferences.splice(found, 1);
+            preferences.push(value);
+          }
+          await route.fulfill({ json: { preferences } });
+          return;
+        }
+        if (action === '/capabilities') {
+          await route.fulfill({ json: { available: viewerAvailable } });
+          return;
+        }
+        reads.push(`${action}:${path}:${url.searchParams.get('entry') ?? ''}`);
+        if (path.startsWith('wave-') && path.endsWith('.wav')) {
+          if (action === '/content' && request.resourceType() === 'fetch') waveformReads.push(path);
+          if (holdWaveRequest) await holdWaveRequest;
+          if (rejectWave) {
+            await route.fulfill({ status: 503, body: 'Isolated media fixture unavailable' });
+            return;
+          }
+        }
+        if (action === '/archive') {
+          const directory = url.searchParams.get('directory') ?? '';
+          const entries = directory
+            ? [{ name: 'settings.json', path: 'config/settings.json', directory: false, size: 12 }]
+            : [
+                { name: 'config', path: 'config', directory: true, size: 0 },
+                { name: 'README.txt', path: 'README.txt', directory: false, size: 12 },
+              ];
+          await route.fulfill({
+            json: { directory, entries, offset: 0, limit: 200, total: entries.length },
+          });
+          return;
+        }
+        if (action === '/sqlite') {
+          await route.fulfill({
+            json: {
+              tables: ['players'],
+              consistency: 'unverified',
+              ...(url.searchParams.get('table')
+                ? {
+                    columns: ['id', 'name', 'data'],
+                    rows: [
+                      [
+                        { type: 'integer', value: '9007199254740993123' },
+                        { type: 'text', value: 'Alex', truncated: false },
+                        { type: 'blob', bytes: 3 },
+                      ],
                     ],
-                  ],
-                  offset: 0,
-                  hasMore: false,
-                }
-              : {}),
-          },
-        });
-        return;
-      }
-      const body =
-        action === '/archive/content'
-          ? Buffer.from(
-              url.searchParams.get('entry')?.endsWith('.json')
-                ? '{"ok":true}'
-                : 'Read-only archive text',
-            )
-          : remote.get(path);
-      if (!body) {
-        await route.fulfill({ status: 404, json: { code: 'not_found' } });
-        return;
-      }
-      const contentType = path.endsWith('.svg')
-        ? 'image/svg+xml'
-        : path.endsWith('.ico')
-          ? 'image/x-icon'
-          : path.endsWith('.wav')
-            ? 'audio/wav'
-            : path.endsWith('.avi')
-              ? 'video/x-msvideo'
-              : 'application/octet-stream';
-      const range = request.headers().range?.match(/^bytes=(\d+)-(\d*)$/);
-      if (path.endsWith('.wav') && range) {
-        const start = Number(range[1]);
-        const end = Math.min(range[2] ? Number(range[2]) : body.length - 1, body.length - 1);
+                    offset: 0,
+                    hasMore: false,
+                  }
+                : {}),
+            },
+          });
+          return;
+        }
+        const body =
+          action === '/archive/content'
+            ? Buffer.from(
+                url.searchParams.get('entry')?.endsWith('.json')
+                  ? '{"ok":true}'
+                  : 'Read-only archive text',
+              )
+            : remote.get(path);
+        if (!body) {
+          await route.fulfill({ status: 404, json: { code: 'not_found' } });
+          return;
+        }
+        const contentType = path.endsWith('.svg')
+          ? 'image/svg+xml'
+          : path.endsWith('.ico')
+            ? 'image/x-icon'
+            : path.endsWith('.wav')
+              ? 'audio/wav'
+              : path.endsWith('.avi')
+                ? 'video/x-msvideo'
+                : 'application/octet-stream';
+        const range = request.headers().range?.match(/^bytes=(\d+)-(\d*)$/);
+        if (path.endsWith('.wav') && range) {
+          const start = Number(range[1]);
+          const end = Math.min(range[2] ? Number(range[2]) : body.length - 1, body.length - 1);
+          await route.fulfill({
+            status: 206,
+            body: body.subarray(start, end + 1),
+            contentType,
+            headers: {
+              'Accept-Ranges': 'bytes',
+              'Content-Range': `bytes ${start}-${end}/${body.length}`,
+              'Content-Length': String(end - start + 1),
+              'Cache-Control': 'no-store',
+            },
+          });
+          return;
+        }
         await route.fulfill({
-          status: 206,
-          body: body.subarray(start, end + 1),
+          body,
           contentType,
-          headers: {
-            'Accept-Ranges': 'bytes',
-            'Content-Range': `bytes ${start}-${end}/${body.length}`,
-            'Content-Length': String(end - start + 1),
-            'Cache-Control': 'no-store',
-          },
+          headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
         });
-        return;
-      }
-      await route.fulfill({
-        body,
-        contentType,
-        headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
-      });
-    });
+      },
+    );
   });
   afterAll(async () => {
+    for (const fixture of waveStreams.values()) fixture.close?.();
     provider?.dispose();
     await harness?.close();
   });
@@ -1210,6 +1308,138 @@ describe('M5 builtin file viewers', () => {
         'The browser cannot play this file, or the file is unavailable. Download it to open it locally.',
       ),
     ).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  it('draws real Wave peaks before the streamed response ends and cancels analysis on exit', async () => {
+    const previousPage = page;
+    page = await previousPage.context().newPage();
+    streamingUi = true;
+    try {
+      // Observe real worker messages without replacing fetch, decoding, data or timing behavior.
+      await page.addInitScript(() => {
+        const record = { firstNonzeroAt: undefined as number | undefined, messages: 0 };
+        Object.assign(window, { waveStreamMessages: record });
+        const NativeWorker = window.Worker;
+        window.Worker = class extends NativeWorker {
+          constructor(url: string | URL, options?: WorkerOptions) {
+            super(url, options);
+            this.addEventListener('message', (event) => {
+              if (
+                event.data?.type === 'peaks' &&
+                event.data.peaks instanceof Float32Array &&
+                event.data.peaks.some((value: number) => value > 0)
+              ) {
+                record.firstNonzeroAt ??= Date.now();
+                record.messages++;
+              }
+            });
+          }
+        };
+      });
+      await page.goto(harness.origin);
+      await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      const fixture = waveStreams.get('wave-stream.wav');
+      if (!fixture) throw new Error('Missing streaming WAV fixture');
+      await open('wave-stream.wav');
+      const envelope = page.locator('.wave-envelope');
+      await browserExpect.poll(() => fixture.requests).toBe(1);
+      await browserExpect
+        .poll(() =>
+          envelope
+            .locator('.wave-envelope-unplayed .wave-envelope-bar')
+            .evaluateAll((bars) =>
+              bars.some((bar) => Number(bar.getAttribute('data-amplitude')) > 0),
+            ),
+        )
+        .toBe(true);
+      expect(fixture.sent).toBeLessThan(fixture.body.length);
+      expect(fixture.complete).toBe(false);
+      const observed = await page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              waveStreamMessages: { firstNonzeroAt?: number; messages: number };
+            }
+          ).waveStreamMessages,
+      );
+      expect(observed.messages).toBeGreaterThan(0);
+      expect(observed.firstNonzeroAt).toBeGreaterThanOrEqual(fixture.firstByteAt ?? 0);
+      const earlyBytes = fixture.sent;
+      await browserExpect(envelope).toHaveAttribute('data-waveform-state', 'loading');
+      // The first 256 KiB contains over 16 seconds. Already-decoded later peaks must flush even while EOF is held.
+      await browserExpect
+        .poll(async () =>
+          Number(
+            await envelope
+              .locator('.wave-envelope-unplayed .wave-envelope-bar')
+              .nth(10)
+              .getAttribute('data-amplitude'),
+          ),
+        )
+        .toBeGreaterThan(0);
+      expect(fixture.complete).toBe(false);
+      await harness.screenshot(page, 'file-viewer-wave-incremental-en');
+      fixture.release?.();
+      await browserExpect(envelope).toHaveAttribute('data-waveform-state', 'ready');
+      expect(fixture.sent).toBe(fixture.body.length);
+      expect(fixture.complete).toBe(true);
+      expect(fixture.requests).toBe(1);
+      console.info('Wave streaming fixture', {
+        browser: process.env.NH_BROWSER ?? 'chromium',
+        firstByteToFirstPeakMs: (observed.firstNonzeroAt ?? 0) - (fixture.firstByteAt ?? 0),
+        firstPeakBeforeEofMs: (fixture.eofAt ?? 0) - (observed.firstNonzeroAt ?? 0),
+        bytesAtFirstPeak: earlyBytes,
+        totalBytes: fixture.body.length,
+        note: 'Tail intentionally held; functional incremental proof, not a production throughput benchmark.',
+      });
+      const cancelled = waveStreams.get('wave-cancel.wav');
+      if (!cancelled) throw new Error('Missing cancellation WAV fixture');
+      await open('wave-cancel.wav');
+      await browserExpect.poll(() => cancelled.requests).toBe(1);
+      await browserExpect
+        .poll(() =>
+          envelope
+            .locator('.wave-envelope-unplayed .wave-envelope-bar')
+            .evaluateAll((bars) =>
+              bars.some((bar) => Number(bar.getAttribute('data-amplitude')) > 0),
+            ),
+        )
+        .toBe(true);
+      await root();
+      await browserExpect(page.locator('.wave-envelope')).toHaveCount(0);
+      await browserExpect.poll(() => cancelled.cancelled).toBe(true);
+      expect(cancelled.complete).toBe(false);
+      expect(cancelled.sent).toBeLessThan(cancelled.body.length);
+      expect(errors).toEqual([]);
+    } finally {
+      streamingUi = false;
+      await page.close();
+      page = previousPage;
+    }
+  });
+
+  it('rejects oversized Wave analysis responses without breaking native media controls', async () => {
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    const fixture = waveStreams.get('wave-bounded.wav');
+    if (!fixture) throw new Error('Missing bounded WAV fixture');
+    await open('wave-bounded.wav');
+    const player = page.locator('.ve-audio-player');
+    await browserExpect
+      .poll(() => player.locator('audio').evaluate((element: HTMLAudioElement) => element.duration))
+      .toBe(60);
+    // Fault injection: provider analysis response advertises more bytes than the selected file's metadata.
+    await browserExpect(player.locator('.wave-envelope')).toHaveAttribute(
+      'data-waveform-state',
+      'unavailable',
+    );
+    await browserExpect.poll(() => fixture.cancelled).toBe(true);
+    expect(fixture.requests).toBe(1);
+    expect(fixture.sent).toBeLessThan(fixture.body.length);
+    expect(fixture.complete).toBe(false);
+    await browserExpect(player.getByRole('button', { name: 'Play', exact: true })).toBeEnabled();
+    await browserExpect(player.locator('.wave-error')).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 
