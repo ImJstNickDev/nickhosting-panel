@@ -12,6 +12,10 @@ import {
   StreamTarget,
   WEBM,
 } from 'mediabunny';
+import type {
+  MotionTimingValues,
+  MotionTrace,
+} from '../../../../../../packages/core/src/motion-timing.js';
 
 export const videoSourceLimits = {
   blockBytes: 64 * 1024,
@@ -80,6 +84,7 @@ export class VideoRangeReader {
     readonly url: string,
     readonly size: number,
     readonly signal: AbortSignal,
+    private readonly trace?: MotionTrace,
   ) {}
   resetBudget(bytes: number) {
     this.remaining = bytes;
@@ -98,57 +103,90 @@ export class VideoRangeReader {
     }
     const pending = this.pending.get(start);
     if (pending) return pending;
+    const queued = this.trace?.span('video.range_queue');
     const request = this.queue
       .catch(() => {})
       .then(async () => {
+        queued?.({ outcome: this.signal.aborted ? 'cancelled' : 'succeeded' });
         this.signal.throwIfAborted();
         const end = Math.min(this.size, start + this.blockBytes);
         this.remaining -= end - start;
         if (this.remaining < 0) throw new Error('Video read budget exceeded');
-        const response = await fetch(this.url, {
-          headers: { Range: `bytes=${start}-${end - 1}` },
-          credentials: 'same-origin',
-          redirect: 'error',
-          signal: AbortSignal.any([
-            this.signal,
-            AbortSignal.timeout(videoSourceLimits.operationMs),
-          ]),
-        });
-        if (
-          response.status !== 206 ||
-          response.headers.get('content-range') !== `bytes ${start}-${end - 1}/${this.size}`
-        ) {
-          await response.body?.cancel();
-          throw new Error('Video range unavailable or file changed');
-        }
-        // Do not trust a provider to honor its advertised Content-Range length.
-        if (!response.body) throw new Error('Missing video body');
-        const bytes = new Uint8Array(end - start);
-        const reader = response.body.getReader();
-        let offset = 0;
+        const finish = this.trace?.span('video.range');
+        let headersReady = this.trace?.span('video.range_headers');
+        const values: MotionTimingValues | undefined = this.trace ? {} : undefined;
         try {
-          while (true) {
-            this.signal.throwIfAborted();
-            const next = await reader.read();
-            if (next.done) break;
-            if (offset + next.value.byteLength > bytes.length)
-              throw new Error('Excess video range bytes');
-            bytes.set(next.value, offset);
-            offset += next.value.byteLength;
+          const response = await fetch(this.url, {
+            headers: { Range: `bytes=${start}-${end - 1}` },
+            credentials: 'same-origin',
+            redirect: 'error',
+            signal: AbortSignal.any([
+              this.signal,
+              AbortSignal.timeout(videoSourceLimits.operationMs),
+            ]),
+          });
+          headersReady?.({ outcome: 'succeeded', status: response.status });
+          headersReady = undefined;
+          if (values) {
+            values.status = response.status;
+            const requestId = response.headers.get('x-request-id');
+            if (
+              requestId &&
+              /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)
+            )
+              values.requestId = requestId;
+            const timing = response.headers
+              .get('server-timing')
+              ?.match(/(?:^|,)\s*nh-motion;dur=([\d.]+)/);
+            if (timing && Number.isFinite(Number(timing[1]))) values.serverMs = Number(timing[1]);
           }
-          if (offset !== bytes.length) throw new Error('Incomplete video range');
-        } finally {
-          await reader.cancel().catch(() => {});
-          reader.releaseLock();
+          if (
+            response.status !== 206 ||
+            response.headers.get('content-range') !== `bytes ${start}-${end - 1}/${this.size}`
+          ) {
+            await response.body?.cancel();
+            throw new Error('Video range unavailable or file changed');
+          }
+          // Do not trust a provider to honor its advertised Content-Range length.
+          if (!response.body) throw new Error('Missing video body');
+          const bytes = new Uint8Array(end - start);
+          const reader = response.body.getReader();
+          let offset = 0;
+          try {
+            while (true) {
+              this.signal.throwIfAborted();
+              const next = await reader.read();
+              if (next.done) break;
+              if (offset + next.value.byteLength > bytes.length)
+                throw new Error('Excess video range bytes');
+              bytes.set(next.value, offset);
+              offset += next.value.byteLength;
+            }
+            if (offset !== bytes.length) throw new Error('Incomplete video range');
+          } finally {
+            await reader.cancel().catch(() => {});
+            reader.releaseLock();
+          }
+          this.signal.throwIfAborted();
+          this.cache.set(start, bytes);
+          while (this.cache.size * this.blockBytes > videoSourceLimits.cacheBytes) {
+            const oldest = this.cache.keys().next().value;
+            if (oldest === undefined) break;
+            this.cache.delete(oldest);
+          }
+          finish?.({ ...values, bytes: bytes.length, outcome: 'succeeded' });
+          return bytes;
+        } catch (error) {
+          headersReady?.({ outcome: this.signal.aborted ? 'cancelled' : 'failed' });
+          finish?.({
+            ...values,
+            outcome:
+              this.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')
+                ? 'cancelled'
+                : 'failed',
+          });
+          throw error;
         }
-        this.signal.throwIfAborted();
-        this.cache.set(start, bytes);
-        while (this.cache.size * this.blockBytes > videoSourceLimits.cacheBytes) {
-          const oldest = this.cache.keys().next().value;
-          if (oldest === undefined) break;
-          this.cache.delete(oldest);
-        }
-        return bytes;
       });
     this.queue = request;
     this.pending.set(start, request);
@@ -183,7 +221,12 @@ export class VideoRangeReader {
     return result;
   }
 }
-export function openVideoInput(url: string, size: number, signal: AbortSignal) {
+export function openVideoInput(
+  url: string,
+  size: number,
+  signal: AbortSignal,
+  trace?: MotionTrace,
+) {
   const parsed = new URL(url, location.href);
   if (
     parsed.origin !== location.origin ||
@@ -194,7 +237,7 @@ export function openVideoInput(url: string, size: number, signal: AbortSignal) {
     size <= 0
   )
     throw new Error('Invalid video source');
-  const reader = new VideoRangeReader(parsed.href, size, signal);
+  const reader = new VideoRangeReader(parsed.href, size, signal, trace);
   const input = new Input({
     formats: [MP4, QTFF, WEBM, MATROSKA],
     source: new CustomSource({
@@ -340,6 +383,7 @@ export class VideoMseSession {
       size: number;
       trackId: string;
       snapshot: PlaybackSnapshot;
+      trace?: MotionTrace;
       onReady: () => void;
       onError: () => void;
     },
@@ -354,7 +398,9 @@ export class VideoMseSession {
     this.objectUrl = undefined;
   }
   async start() {
-    const { media, url, size, trackId, snapshot } = this.options;
+    const { media, url, size, trackId, snapshot, trace } = this.options;
+    let finish = trace?.span('mse.start');
+    let phase = trace?.span('mse.metadata');
     const signal = this.cancellation.signal;
     let startupTimedOut = false;
     const startupTimer = setTimeout(() => {
@@ -362,7 +408,7 @@ export class VideoMseSession {
       this.cancellation.abort();
     }, videoSourceLimits.operationMs);
     try {
-      const { input, reader } = openVideoInput(url, size, signal);
+      const { input, reader } = openVideoInput(trace?.url(url, 'mse') ?? url, size, signal, trace);
       this.input = input;
       const video = await input.getPrimaryVideoTrack();
       const audio = (await input.getAudioTracks()).find((track) => String(track.id) === trackId);
@@ -378,6 +424,8 @@ export class VideoMseSession {
         throw new Error('Unsupported video configuration');
       const mime = `video/mp4; codecs="${videoConfig.codec},${audioConfig.codec}"`;
       if (!factory.isTypeSupported(mime)) throw new Error('Unsupported video codecs');
+      phase?.({ outcome: 'succeeded' });
+      phase = trace?.span('mse.first_packets');
       reader.resetBudget(videoSourceLimits.windowBytes);
       reader.streaming();
       const videoSink = new EncodedPacketSink(video),
@@ -392,6 +440,8 @@ export class VideoMseSession {
         (await audioSink.getPacket(Math.max(0, nextVideo.timestamp))) ??
         (await audioSink.getFirstPacket());
       if (!nextAudio) throw new Error('Empty audio track');
+      phase?.({ outcome: 'succeeded' });
+      phase = trace?.span('mse.source_open');
       signal.throwIfAborted();
       const source = new factory();
       const opened = waitFor(source, 'sourceopen', signal);
@@ -406,6 +456,8 @@ export class VideoMseSession {
       media.muted = currentOptions.muted;
       media.playbackRate = currentOptions.rate;
       await opened;
+      phase?.({ outcome: 'succeeded' });
+      phase = trace?.span('mse.first_buffer');
       signal.throwIfAborted();
       const buffer = source.addSourceBuffer(mime);
       source.duration = duration;
@@ -463,6 +515,10 @@ export class VideoMseSession {
         if (!this.ready && (bufferedContains(buffer.buffered, target, 0.05) || initialGap)) {
           media.currentTime = initialGap ? firstCommon : target;
           this.ready = true;
+          phase?.({ outcome: 'succeeded' });
+          phase = undefined;
+          finish?.({ outcome: 'succeeded', mediaSeconds: media.currentTime });
+          finish = undefined;
           clearTimeout(startupTimer);
           this.options.onReady();
           if (snapshot.playing) await media.play();
@@ -510,8 +566,17 @@ export class VideoMseSession {
         await this.trim(buffer, signal, position);
       }
     } catch {
+      const outcome = signal.aborted && !startupTimedOut ? 'cancelled' : 'failed';
+      phase?.({ outcome });
+      phase = undefined;
+      if (!this.ready) finish?.({ outcome });
+      finish = undefined;
       if (!signal.aborted || startupTimedOut) this.options.onError();
     } finally {
+      if (!this.ready) {
+        phase?.({ outcome: 'cancelled' });
+        finish?.({ outcome: 'cancelled' });
+      }
       clearTimeout(startupTimer);
       this.dispose();
     }

@@ -80,21 +80,29 @@ export function viewerBody(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal,
   close: () => Promise<void>,
+  timing?: {
+    chunk(bytes: number): void;
+    finish(outcome: 'succeeded' | 'failed' | 'cancelled'): void;
+  },
 ) {
   const reader = body.getReader();
   let finished = false;
   let controller: ReadableStreamDefaultController<Uint8Array>;
-  const finish = async () => {
+  const finish = async (outcome: 'succeeded' | 'failed' | 'cancelled') => {
     if (finished) return;
     finished = true;
     signal.removeEventListener('abort', abort);
     await reader.cancel().catch(() => {});
-    await close();
+    try {
+      await close();
+    } finally {
+      timing?.finish(outcome);
+    }
   };
   const abort = () => {
     if (finished) return;
     controller.error(new DomainError('forbidden'));
-    void finish();
+    void finish('cancelled');
   };
   return new ReadableStream<Uint8Array>({
     start(c) {
@@ -109,13 +117,16 @@ export function viewerBody(
         if (finished) return;
         if (item.done) {
           c.close();
-          await finish();
-        } else c.enqueue(item.value);
+          await finish('succeeded');
+        } else {
+          timing?.chunk(item.value.byteLength);
+          c.enqueue(item.value);
+        }
       } catch (error) {
         if (!finished) c.error(error);
-        await finish();
+        await finish('failed');
       }
     },
-    cancel: finish,
+    cancel: () => finish('cancelled'),
   });
 }

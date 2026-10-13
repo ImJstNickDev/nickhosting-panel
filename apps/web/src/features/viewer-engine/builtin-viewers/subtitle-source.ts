@@ -4,6 +4,7 @@ import {
   type SubtitleWindow,
   subtitleLimits,
 } from '../../../../../../packages/core/src/media-subtitles.js';
+import type { MotionTrace } from '../../../../../../packages/core/src/motion-timing.js';
 import { VideoRangeReader } from './video-mse.js';
 
 export {
@@ -78,6 +79,7 @@ export async function openSubtitleSource(
   url: string,
   size: number,
   signal: AbortSignal,
+  trace?: MotionTrace,
 ): Promise<SubtitleSource | null> {
   const parsed = new URL(url, location.href);
   if (
@@ -93,7 +95,13 @@ export async function openSubtitleSource(
   const lifetime = AbortSignal.any([signal, controller.signal]);
   const source = new MatroskaSubtitles(
     size,
-    (readSignal) => new VideoRangeReader(parsed.href, size, readSignal),
+    (readSignal) =>
+      new VideoRangeReader(
+        trace?.url(parsed.href, 'subtitles') ?? parsed.href,
+        size,
+        readSignal,
+        trace,
+      ),
     lifetime,
   );
   try {
@@ -117,7 +125,7 @@ export async function openSubtitleSource(
         endpoint.pathname = endpoint.pathname.replace(/\/content$/, '/subtitles');
         endpoint.searchParams.set('track', trackId);
         endpoint.searchParams.set('time', String(time));
-        const response = await fetch(endpoint.href, {
+        const response = await fetch(trace?.url(endpoint.href, 'subtitles') ?? endpoint.href, {
           credentials: 'same-origin',
           redirect: 'error',
           signal: AbortSignal.any([

@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  MotionTimingPhase,
+  MotionTimingValues,
+  MotionTrace,
+} from '../../../../../../packages/core/src/motion-timing.js';
 import {
   bufferedContains,
   capturePlayback,
@@ -38,6 +43,71 @@ function rangeFetch(size: number) {
 }
 
 describe('Motion bounded video Range reader', () => {
+  it('records queue, headers and complete body once per remote block, without tracing cache hits', async () => {
+    const events: { phase: MotionTimingPhase; values?: MotionTimingValues }[] = [];
+    const trace: MotionTrace = {
+      mark: vi.fn(),
+      url: (url) => url,
+      span: (phase) => (values) => {
+        events.push({ phase, values });
+      },
+    };
+    const request = vi.fn(
+      async () =>
+        new Response(new Uint8Array(100), {
+          status: 206,
+          headers: {
+            'content-range': 'bytes 0-99/100',
+            'x-request-id': 'ec6109de-e4e1-467b-967f-7a38cf97c37a',
+            'server-timing': 'nh-motion;dur=12.5',
+          },
+        }),
+    );
+    vi.stubGlobal('fetch', request);
+    const reader = new VideoRangeReader(source, 100, new AbortController().signal, trace);
+    await reader.read(1, 2);
+    await reader.read(3, 4);
+    expect(request).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      { phase: 'video.range_queue', values: { outcome: 'succeeded' } },
+      { phase: 'video.range_headers', values: { outcome: 'succeeded', status: 206 } },
+      {
+        phase: 'video.range',
+        values: {
+          outcome: 'succeeded',
+          bytes: 100,
+          status: 206,
+          serverMs: 12.5,
+          requestId: 'ec6109de-e4e1-467b-967f-7a38cf97c37a',
+        },
+      },
+    ]);
+  });
+  it('records body failures without exposing error text or file paths', async () => {
+    const finishes: MotionTimingValues[] = [];
+    const trace: MotionTrace = {
+      mark: vi.fn(),
+      url: (url) => url,
+      span: () => (values) => {
+        if (values) finishes.push(values);
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(new Uint8Array(99), {
+            status: 206,
+            headers: { 'content-range': 'bytes 0-99/100' },
+          }),
+      ),
+    );
+    const reader = new VideoRangeReader(source, 100, new AbortController().signal, trace);
+    await expect(reader.read(0, 1)).rejects.toThrow('Incomplete video range');
+    expect(finishes.at(-1)).toEqual({ outcome: 'failed', status: 206 });
+    expect(JSON.stringify(finishes)).not.toContain('video.mkv');
+  });
+
   it('coalesces tiny metadata reads and concurrent overlapping packets into authenticated bounded ranges', async () => {
     const size = 1024 * 1024;
     const request = rangeFetch(size);

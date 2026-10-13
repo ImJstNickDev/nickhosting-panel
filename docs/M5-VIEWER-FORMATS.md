@@ -184,6 +184,45 @@ versus227.67ms before; cold establishment+read131.40ms. Full measurement scope a
 history are in [M5 validation](M5-VALIDATION.md). No kernel or provider setting was
 changed and these are transport-only timings.
 
+## Motion debug timing
+
+With API logging at `debug`, the existing viewer-capabilities response enables a
+Motion timeline on the next viewer mount. Refresh the page after changing the log
+level so cached capabilities do not retain the old setting. No timing UI is added.
+The browser emits `viewer.motion_timing` in its debug console and batches fixed
+numeric milestones into API `viewer.motion_browser` records. An opaque trace UUID
+correlates them with API `viewer.motion_request` records and request UUIDs. Browser
+diagnostics are untrusted measurements, not authoritative operational events.
+
+The timeline starts when Motion mounts, after its lazy-loaded bundle is available;
+it does not measure the preceding Files navigation/module-download interval.
+It records native metadata, first decoded/displayed frame callback, play/pause,
+buffering and seek intervals; track discovery; Range queue/header/body durations;
+MSE metadata, first packets, source-open and first buffer; subtitle discovery,
+renderer import, fonts, initialization, extraction and window application. Hover
+thumbnail reads have a distinct request purpose. Waiting ends on readiness or is
+cancelled by pause/error/source reset, excluding intentional paused time.
+
+API phases distinguish principal resolution, management configuration, viewer
+access/open, retained-session acquisition, parser creation on cache miss and
+subtitle extraction. Stream summaries include first byte, bytes, completion or
+cancellation. `Server-Timing: nh-motion;dur=...` measures response-header readiness,
+not body completion; stream totals include backpressure and cleanup. HTTP browser
+durations also include transfer and scheduling. These cannot independently isolate
+network latency or GPU decoding. Nested/parallel phases must not be summed as
+serial time; compare the browser's relative timestamps and request correlations.
+Development StrictMode can create cancelled discovery attempts, identified as such.
+
+Browser collection is bounded to 512 milestones/five minutes per mount, batches
+of at most 48, normally flushed after one second, and no per-frame/packet logging.
+Delivery is best-effort with a five-second timeout and no retry; closing flushes
+remaining records. Intake is limited to 30 batches per authenticated session per
+minute, with bounded in-memory bookkeeping. No file reads are added for tracing;
+only small diagnostic POSTs are added. No filenames, caption content, credentials,
+provider URLs or error strings enter these records. Debug-off uses no timing
+clocks or diagnostic delivery. Timing is diagnostic instrumentation with bounded
+overhead, not a claim of a zero-overhead benchmark.
+
 ## Motion embedded subtitles
 
 Motion reads embedded Matroska/WebM text tracks: `S_TEXT/UTF8` (SRT-style),

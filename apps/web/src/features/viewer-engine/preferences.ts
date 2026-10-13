@@ -7,7 +7,10 @@ export function viewerCapabilitiesQuery(serverId: string, identity: string) {
   return {
     queryKey: ['viewer-capabilities', identity, serverId] as const,
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      api<{ available: boolean }>(`${serverPath(serverId)}/files/viewer/capabilities`, { signal }),
+      api<{ available: boolean; debugTiming?: boolean }>(
+        `${serverPath(serverId)}/files/viewer/capabilities`,
+        { signal },
+      ),
     staleTime: 30_000,
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: false,

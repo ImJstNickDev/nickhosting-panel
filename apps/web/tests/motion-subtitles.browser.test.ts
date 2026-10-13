@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { motionTimingInput } from '../../api/src/viewer-timing.js';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
@@ -21,15 +22,31 @@ describe('M5 Motion embedded subtitles', () => {
   const media = new Map<string, Buffer>();
   const errors: string[] = [];
   const requests: { path: string; range: string | undefined }[] = [];
+  let debugTiming = false;
+  const timingBatches: unknown[] = [];
 
   function serve(request: IncomingMessage, response: ServerResponse) {
     const url = new URL(request.url ?? '/', 'http://fixture.invalid');
     if (!endpoint || !url.pathname.startsWith(`${endpoint}/`)) return false;
+    if (url.pathname.endsWith('/motion-timing') && request.method === 'POST') {
+      let body = '';
+      request.on('data', (chunk) => {
+        body += String(chunk);
+      });
+      request.on('end', () => {
+        timingBatches.push(JSON.parse(body));
+        response.writeHead(204);
+        response.end();
+      });
+      return true;
+    }
     if (url.pathname.endsWith('/capabilities') || url.pathname.endsWith('/preferences')) {
       response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       response.end(
         JSON.stringify(
-          url.pathname.endsWith('/capabilities') ? { available: true } : { preferences: [] },
+          url.pathname.endsWith('/capabilities')
+            ? { available: true, ...(debugTiming ? { debugTiming: true } : {}) }
+            : { preferences: [] },
         ),
       );
       return true;
@@ -322,5 +339,52 @@ describe('M5 Motion embedded subtitles', () => {
     ).toEqual({ connected: false, paused: true, source: null });
     await browserExpect(page.locator('.motion-subtitles')).toHaveCount(0);
     expect(errors).toEqual([]);
+  });
+  it('records bounded debug milestones without resetting playback and is silent when disabled', async () => {
+    expect(timingBatches).toEqual([]);
+    debugTiming = true;
+    await open();
+    const video = page.locator('.motion-player video');
+    await browserExpect.poll(() => timingBatches.length).toBeGreaterThan(0);
+    await browserExpect
+      .poll(() =>
+        timingBatches
+          .flatMap((batch) => motionTimingInput.parse(batch).events)
+          .some((event) => event.phase === 'video.discovery' && event.outcome === 'succeeded'),
+      )
+      .toBe(true);
+    const src = await video.getAttribute('src');
+    expect(src).toContain('motionTrace=');
+    // A paused buffering interval must not count time spent deliberately paused.
+    await video.evaluate((element) => {
+      element.dispatchEvent(new Event('waiting'));
+      element.dispatchEvent(new Event('pause'));
+    });
+    await browserExpect
+      .poll(() =>
+        timingBatches
+          .flatMap((batch) => motionTimingInput.parse(batch).events)
+          .some((event) => event.phase === 'native.waiting' && event.outcome === 'cancelled'),
+      )
+      .toBe(true);
+    await seek(2);
+    await browserExpect(page.locator('.motion-subtitles')).toContainText('English first caption');
+    expect(await video.getAttribute('src')).toBe(src);
+    await browserExpect
+      .poll(() =>
+        timingBatches
+          .flatMap((batch) => motionTimingInput.parse(batch).events)
+          .some((event) => event.phase === 'native.seek' && event.outcome === 'succeeded'),
+      )
+      .toBe(true);
+    const batches = timingBatches.map((batch) => motionTimingInput.parse(batch));
+    expect(new Set(batches.map((batch) => batch.traceId)).size).toBe(1);
+    expect(
+      batches.flatMap((batch) => batch.events).filter((event) => event.phase === 'viewer.mounted'),
+    ).toHaveLength(1);
+    expect(JSON.stringify(batches)).not.toContain('motion-subtitles.mkv');
+    expect(errors).toEqual([]);
+    await page.getByRole('button', { name: /^(Back to files|Torna ai file)$/ }).click();
+    debugTiming = false;
   });
 });

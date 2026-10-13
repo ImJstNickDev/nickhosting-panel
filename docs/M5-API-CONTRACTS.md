@@ -1000,7 +1000,7 @@ returned to the browser.
 
 | Route under `/v1/servers/:id/files/viewer` | Contract |
 | --- | --- |
-| `GET /capabilities` | `available` and small image/ICO/JSON preview budgets. Optional transport can remain unconfigured without preventing ordinary text editing or downloads. |
+| `GET /capabilities` | `available` and small image/ICO/JSON preview budgets. Optional transport can remain unconfigured without preventing ordinary text editing or downloads. `debugTiming: true` is included only when the API logger enables debug. |
 | `GET /preferences` | Current actor's server/game/global extension preferences. Assisted access does not read or rewrite the subject's preferences. |
 | `PUT /preferences` | `{scope, extension, viewerId}`; builtin or namespaced compiled first-party identifier. One preference per actor/scope/extension. |
 | `DELETE /preferences` | `{scope, extension}` removes only that actor's preference. |
@@ -1009,6 +1009,7 @@ returned to the browser.
 | `GET /archive?path=...&directory=...&offset=0&limit=200` | Retained virtual-folder index, total and next offset. Maximum page size 500. |
 | `GET /archive/content?path=...&entry=...` | Chosen member only, with stream/range/download handling. Compressed-member seeking may decode preceding bytes. |
 | `GET /subtitles?path=...&track=...&time=...` | Ordinary Matroska file caption window `{start,end,cues}` in seconds. Required numeric track ID and finite nonnegative time (default 0); bounded selective metadata reads over the existing SFTP handle, no audio/video payload transfer to the browser. Unsupported/over-budget parsing returns 422. |
+| `POST /motion-timing` | Debug-only diagnostic intake: opaque UUID `traceId`, 1–48 fixed-vocabulary numeric milestone records; requires normal authentication, server read permission and Origin. Returns 204, or 404 with debug off. Browser records are untrusted diagnostics and cannot affect operations. No paths, URLs, captions or arbitrary messages. |
 | `GET /sqlite?path=...&table=...&offset=0` | Table names, snapshot consistency and an optional page of 100 rows. No arbitrary SQL. Typed cells preserve integer precision and label truncation/BLOB sizes. |
 
 Migration `024_file_viewers.sql` adds personal preferences and encrypted private

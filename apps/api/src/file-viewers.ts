@@ -12,6 +12,12 @@ import { viewerBody, viewerHeaders, viewerRange } from './viewer-http.js';
 import type { FileViewerService } from './viewer-service.js';
 import { openSqliteViewer, type ViewerSqliteSession } from './viewer-sqlite.js';
 import type { SubtitleViewerSession } from './viewer-subtitles.js';
+import {
+  createViewerTiming,
+  motionTimingInput,
+  motionTimingLimiter,
+  type ViewerTiming,
+} from './viewer-timing.js';
 
 const preferenceSchema = z.strictObject({
   scope: z.enum(['server', 'game', 'global']),
@@ -91,10 +97,22 @@ export function registerFileViewerRoutes(
         .where('id', '=', mappingId)
         .executeTakeFirstOrThrow()
     ).game_id;
+  const timings = new WeakMap<C, ViewerTiming>();
   const guarded = (work: (c: C) => Promise<Response>) => async (c: C) => {
+    const timing = createViewerTiming(options.logger, {
+      traceId: c.req.query('motionTrace'),
+      purpose: c.req.query('motionPurpose'),
+      requestId: c.get('requestId'),
+      serverId: c.req.param('id'),
+    });
+    if (timing) timings.set(c, timing);
     try {
-      return await work(c);
+      const response = await work(c);
+      timing?.headers(response);
+      if (!timing?.streaming) timing?.finish(response.ok ? 'succeeded' : 'failed');
+      return response;
     } catch (error) {
+      timing?.finish(c.req.raw.signal.aborted ? 'cancelled' : 'failed');
       if (error instanceof ViewerFormatError)
         return c.json(
           {
@@ -109,15 +127,20 @@ export function registerFileViewerRoutes(
     }
   };
   const open = async (c: C, persistent = false) => {
-    const context = await principal(c),
-      service = await management();
-    const opened = await (await viewer()).open(
-      context,
-      service,
-      c.req.param('id')!,
-      c.req.query('path') ?? '',
-      persistent ? new AbortController().signal : c.req.raw.signal,
-    );
+    const timing = timings.get(c);
+    const context = timing
+        ? await timing.measure('principal', () => principal(c))
+        : await principal(c),
+      service = timing ? await timing.measure('management', management) : await management();
+    const work = async () =>
+      (await viewer()).open(
+        context,
+        service,
+        c.req.param('id')!,
+        c.req.query('path') ?? '',
+        persistent ? new AbortController().signal : c.req.raw.signal,
+      );
+    const opened = timing ? await timing.measure('viewerOpen', work) : await work();
     return { opened, context };
   };
   // Parsed sessions outlive a single HTTP request. An abandoned tab cannot
@@ -137,37 +160,43 @@ export function registerFileViewerRoutes(
       opened.key,
     ]);
     try {
-      const lease = await cache.acquire(
-        key,
-        async () => {
-          adopted = true;
-          try {
-            const session = await create(opened, key);
-            const invalidate = () => {
-              void cache.invalidate(key);
-            };
-            opened.signal.addEventListener('abort', invalidate, { once: true });
-            session.closedSignal?.addEventListener('abort', invalidate, { once: true });
-            if (opened.signal.aborted || session.closedSignal?.aborted) {
-              await session.close();
-              throw new DomainError('forbidden');
-            }
-            return {
-              session: { value: session, signal: opened.signal },
-              dispose: async () => {
-                opened.signal.removeEventListener('abort', invalidate);
-                session.closedSignal?.removeEventListener('abort', invalidate);
+      const timing = timings.get(c);
+      const acquire = () =>
+        cache.acquire(
+          key,
+          async () => {
+            adopted = true;
+            try {
+              const session = timing
+                ? await timing.measure('parserOpen', () => create(opened, key))
+                : await create(opened, key);
+              const invalidate = () => {
+                void cache.invalidate(key);
+              };
+              opened.signal.addEventListener('abort', invalidate, { once: true });
+              session.closedSignal?.addEventListener('abort', invalidate, { once: true });
+              if (opened.signal.aborted || session.closedSignal?.aborted) {
                 await session.close();
-                await opened.close();
-              },
-            };
-          } catch (error) {
-            await opened.close();
-            throw error;
-          }
-        },
-        c.req.raw.signal,
-      );
+                throw new DomainError('forbidden');
+              }
+              return {
+                session: { value: session, signal: opened.signal },
+                dispose: async () => {
+                  opened.signal.removeEventListener('abort', invalidate);
+                  session.closedSignal?.removeEventListener('abort', invalidate);
+                  await session.close();
+                  await opened.close();
+                },
+              };
+            } catch (error) {
+              await opened.close();
+              throw error;
+            }
+          },
+          c.req.raw.signal,
+        );
+      const lease = timing ? await timing.measure('retainedAcquire', acquire) : await acquire();
+      timing?.cache(!adopted);
       return { session: lease.session.value, release: lease.release, signal: lease.session.signal };
     } finally {
       if (!adopted) await opened.close();
@@ -198,8 +227,31 @@ export function registerFileViewerRoutes(
     ]);
     return c.json({
       available: !!(values.fileViewers && key),
+      ...(options.logger?.isEnabled('debug') ? { debugTiming: true } : {}),
       previewLimits: { imageBytes: 67108864, icoBytes: 16777216, jsonBytes: 8388608 },
     });
+  });
+  const acceptTiming = motionTimingLimiter();
+  app.post('/v1/servers/:id/files/viewer/motion-timing', async (c) => {
+    if (!options.logger?.isEnabled('debug')) return c.body(null, 404);
+    const context = await principal(c);
+    await authorizeServer(db, context, c.req.param('id'), 'server:read');
+    if (!acceptTiming(context[authSessionId] ?? context.actorUserId))
+      throw new DomainError('rate_limited');
+    if (!c.req.header('content-type')?.startsWith('application/json'))
+      throw new DomainError('validation_failed');
+    const input = parse(motionTimingInput, await c.req.json().catch(() => null));
+    try {
+      options.logger.log('debug', 'viewer.motion_browser', {
+        source: 'browser',
+        requestId: c.get('requestId'),
+        serverId: c.req.param('id'),
+        ...input,
+      });
+    } catch {
+      /* Diagnostics must not change playback. */
+    }
+    return c.body(null, 204);
   });
   app.get('/v1/servers/:id/files/viewer/preferences', async (c) => {
     const context = await principal(c),
@@ -300,11 +352,14 @@ export function registerFileViewerRoutes(
           await opened.close();
           return new Response(null, { status: range.partial ? 206 : 200, headers });
         }
+        const timing = timings.get(c);
+        if (timing) timing.streaming = true;
         return new Response(
           viewerBody(
             opened.source.stream(range.start, range.endExclusive),
             opened.signal,
             opened.close,
+            timing,
           ),
           { status: range.partial ? 206 : 200, headers },
         );
@@ -389,10 +444,17 @@ export function registerFileViewerRoutes(
             await reader.cancel();
           },
         });
+        const timing = timings.get(c);
+        if (timing) timing.streaming = true;
         return new Response(
-          viewerBody(body, AbortSignal.any([c.req.raw.signal, lease.signal]), async () => {
-            lease.release();
-          }),
+          viewerBody(
+            body,
+            AbortSignal.any([c.req.raw.signal, lease.signal]),
+            async () => {
+              lease.release();
+            },
+            timing,
+          ),
           {
             status: range.partial ? 206 : 200,
             headers: {
@@ -426,7 +488,9 @@ export function registerFileViewerRoutes(
         return createSubtitleViewer(opened.source, { signal: opened.signal });
       });
       try {
-        return c.json(await lease.session.readWindow(track, time, c.req.raw.signal));
+        const timing = timings.get(c);
+        const work = () => lease.session.readWindow(track, time, c.req.raw.signal);
+        return c.json(timing ? await timing.measure('subtitleWindow', work) : await work());
       } finally {
         lease.release();
       }

@@ -12,9 +12,11 @@ import { Tooltip } from '../../../components/tooltip.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { viewerPath } from '../core/access.js';
 import type { ViewerProps } from '../core/types.js';
+import { useViewerCapabilities } from '../preferences.js';
 import { ViewerSelect } from '../viewer-select.js';
 import { AudioPlaybackClock } from './audio-playback-clock.js';
 import { useMediaShortcuts } from './media-shortcuts.js';
+import { useMotionTiming } from './motion-timing.js';
 import { VideoIcon, type VideoIconKind } from './video-icons.js';
 import { useVideoLayout } from './video-layout.js';
 import { useVideoSource } from './video-source.js';
@@ -31,12 +33,15 @@ const clock = (seconds: number) => {
   return `${hours ? `${hours}:` : ''}${String(Math.floor(value / 60) % 60).padStart(hours ? 2 : 1, '0')}:${String(value % 60).padStart(2, '0')}`;
 };
 
-export default function VideoViewer({ serverId, source }: ViewerProps) {
+export default function VideoViewer({ serverId, source, identity }: ViewerProps) {
   const t = useT(),
     format = useFormat();
-  const src = viewerPath(serverId, source);
   const media = useRef<HTMLVideoElement>(null);
-  const playback = useVideoSource({ media, url: src, size: source.size });
+  const capabilities = useViewerCapabilities(serverId, identity);
+  const trace = useMotionTiming(media, serverId, capabilities.data?.debugTiming === true);
+  const path = viewerPath(serverId, source);
+  const src = trace?.url(path) ?? path;
+  const playback = useVideoSource({ media, url: src, size: source.size, trace });
   const { locale } = useLocale();
   const stage = useRef<HTMLDivElement>(null);
   const controls = useRef<HTMLDivElement>(null);
@@ -47,6 +52,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
     url: src,
     size: source.size,
     name: source.name,
+    trace,
   });
   useVideoLayout(stage, media, controls, subtitles.tracks.length > 0);
   const generation = useRef(0);
@@ -519,7 +525,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
       <div className="motion-controls" ref={controls}>
         <VideoTimeline
           media={media}
-          src={src}
+          src={trace?.url(path, 'thumbnail') ?? path}
           size={source.size}
           duration={duration}
           seekable={seekable}

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type AuthContext, DomainError, SecretCodec } from '@nickhosting/core';
+import { type AuthContext, createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { authorizeServer, type ManagementRuntime } from '@nickhosting/server-management';
 import { Hono } from 'hono';
@@ -24,6 +24,8 @@ let cache: ViewerCache;
 let content: Buffer;
 let reads: number;
 let revoked: AbortController;
+let debugTiming = false;
+const timingLogs = vi.fn();
 const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: Buffer.alloc(32, 17) } });
 beforeAll(async () => {
   db = await createTestDatabase();
@@ -76,7 +78,12 @@ beforeEach(async () => {
       error instanceof DomainError ? (error.status as 400) : 500,
     ),
   );
+  debugTiming = false;
+  timingLogs.mockClear();
+  const logger = createLogger(timingLogs, { level: 'debug' });
+  vi.spyOn(logger, 'isEnabled').mockImplementation((level) => level !== 'debug' || debugTiming);
   registerFileViewerRoutes(app, {
+    logger,
     db: db.db,
     codec,
     env: {},
@@ -102,6 +109,52 @@ const put = (value: unknown) =>
   });
 
 describe('viewer routes with isolated database and fixture byte source', () => {
+  it('collects bounded debug browser timings only after server authorization without opening files', async () => {
+    const traceId = randomUUID();
+    const post = (body: unknown) =>
+      request('/motion-timing', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const valid = { traceId, events: [{ phase: 'native.play', atMs: 10 }] };
+    expect((await post(valid)).status).toBe(404);
+    expect(await (await request('/capabilities')).json()).not.toHaveProperty('debugTiming');
+    debugTiming = true;
+    expect(await (await request('/capabilities')).json()).toHaveProperty('debugTiming', true);
+    expect((await post(valid)).status).toBe(204);
+    expect(timingLogs.mock.calls.at(-1)?.[0]).toMatchObject({
+      event: 'viewer.motion_browser',
+      data: { source: 'browser', traceId, events: valid.events },
+    });
+    expect(
+      (await post({ traceId, events: [{ phase: 'native.play', atMs: 10, path: '/private' }] }))
+        .status,
+    ).toBe(400);
+    actor = { ...fixture.context, actorUserId: randomUUID(), subjectUserId: randomUUID() };
+    expect((await post(valid)).status).toBe(403);
+    expect(FileViewerService.prototype.open).not.toHaveBeenCalled();
+  });
+  it('correlates debug Range timings and leaves disabled responses and bytes unchanged', async () => {
+    const traceId = randomUUID();
+    const suffix = `/content?path=/private.mkv&motionTrace=${traceId}&motionPurpose=native`;
+    const disabled = await request(suffix, { headers: { Range: 'bytes=2-4' } });
+    expect(await disabled.text()).toBe('234');
+    expect(disabled.headers.has('server-timing')).toBe(false);
+    expect(timingLogs).not.toHaveBeenCalled();
+    debugTiming = true;
+    const enabled = await request(suffix, { headers: { Range: 'bytes=2-4' } });
+    expect(enabled.status).toBe(206);
+    expect(await enabled.text()).toBe('234');
+    expect(enabled.headers.get('server-timing')).toMatch(/^nh-motion;dur=/);
+    await vi.waitFor(() => expect(timingLogs).toHaveBeenCalledTimes(1));
+    expect(timingLogs.mock.calls[0]?.[0]).toMatchObject({
+      event: 'viewer.motion_request',
+      data: { traceId, purpose: 'native', bytes: 3, outcome: 'succeeded' },
+    });
+    expect(JSON.stringify(timingLogs.mock.calls)).not.toContain('/private.mkv');
+  });
+
   it('reports unconfigured optional transport without constructing it or accessing provider state', async () => {
     const response = await request('/capabilities');
     expect(response.status).toBe(200);

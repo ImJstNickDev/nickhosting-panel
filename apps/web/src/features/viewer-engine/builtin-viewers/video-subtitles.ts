@@ -1,4 +1,5 @@
 import { type RefObject, useEffect, useRef, useState } from 'react';
+import type { MotionTrace } from '../../../../../../packages/core/src/motion-timing.js';
 import type { SubtitleRenderer } from './subtitle-renderer.js';
 import type { SubtitleSource, SubtitleTrack, SubtitleWindow } from './subtitle-source.js';
 
@@ -16,12 +17,14 @@ export function useVideoSubtitles({
   url,
   size,
   name,
+  trace,
 }: {
   media: RefObject<HTMLVideoElement | null>;
   container: RefObject<HTMLDivElement | null>;
   url: string;
   size: number;
   name: string;
+  trace?: MotionTrace;
 }) {
   const [state, setState] = useState<SubtitleState>(initial);
   const commands = useRef({ select: (_id: string | null) => {}, retry: () => {} });
@@ -62,13 +65,31 @@ export function useVideoSubtitles({
       const attempt = generation;
       const cancellation = new AbortController();
       read = cancellation;
+      let finish = trace?.span('subtitles.window');
+      let apply: ReturnType<MotionTrace['span']> | undefined;
       try {
         const next = await source.readWindow(selected, time, cancellation.signal);
+        finish?.({
+          outcome: cancellation.signal.aborted ? 'cancelled' : 'succeeded',
+          count: next.cues.length,
+          mediaSeconds: time,
+        });
+        finish = undefined;
         if (attempt !== generation || cancellation.signal.aborted || lifetime.signal.aborted)
           return;
+        apply = trace?.span('subtitles.apply');
         await renderer?.setWindow(next);
+        apply?.({
+          outcome: cancellation.signal.aborted ? 'cancelled' : 'succeeded',
+          count: next.cues.length,
+        });
+        apply = undefined;
         if (attempt === generation && !cancellation.signal.aborted) window = next;
       } catch {
+        const outcome =
+          cancellation.signal.aborted || lifetime.signal.aborted ? 'cancelled' : 'failed';
+        finish?.({ outcome });
+        apply?.({ outcome });
         if (!cancellation.signal.aborted) fail(attempt);
       } finally {
         if (read === cancellation) read = null;
@@ -93,12 +114,43 @@ export function useVideoSubtitles({
         fail(attempt);
         return;
       }
+      const finish = trace?.span('subtitles.renderer');
+      let rendererReady: ReturnType<MotionTrace['span']> | undefined;
+      const imported = trace?.span('subtitles.renderer_import');
+      const fontsReady = trace?.span('subtitles.fonts');
       try {
         const [{ createSubtitleRenderer }, fonts] = await Promise.all([
-          import('./subtitle-renderer.js'),
-          track.format === 'ass' || track.format === 'ssa' ? source.fonts(signal) : [],
+          import('./subtitle-renderer.js').then(
+            (module) => {
+              imported?.({ outcome: signal.aborted ? 'cancelled' : 'succeeded' });
+              return module;
+            },
+            (error: unknown) => {
+              imported?.({ outcome: signal.aborted ? 'cancelled' : 'failed' });
+              throw error;
+            },
+          ),
+          Promise.resolve(
+            track.format === 'ass' || track.format === 'ssa' ? source.fonts(signal) : [],
+          ).then(
+            (fonts) => {
+              fontsReady?.({
+                outcome: signal.aborted ? 'cancelled' : 'succeeded',
+                count: fonts.length,
+              });
+              return fonts;
+            },
+            (error: unknown) => {
+              fontsReady?.({ outcome: signal.aborted ? 'cancelled' : 'failed' });
+              throw error;
+            },
+          ),
         ]);
-        if (attempt !== generation || lifetime.signal.aborted) return;
+        if (attempt !== generation || lifetime.signal.aborted) {
+          finish?.({ outcome: 'cancelled' });
+          return;
+        }
+        rendererReady = trace?.span('subtitles.renderer_setup');
         const next = await createSubtitleRenderer({
           media: video,
           container: overlay,
@@ -107,21 +159,33 @@ export function useVideoSubtitles({
           signal,
           onError: () => fail(attempt),
         });
+        rendererReady?.({ outcome: signal.aborted ? 'cancelled' : 'succeeded' });
+        rendererReady = undefined;
         if (attempt !== generation || lifetime.signal.aborted) {
+          finish?.({ outcome: 'cancelled' });
           next.destroy();
           return;
         }
         renderer = next;
+        finish?.({ outcome: 'succeeded' });
         await load();
       } catch {
+        const outcome = signal.aborted ? 'cancelled' : 'failed';
+        rendererReady?.({ outcome });
+        finish?.({ outcome });
         fail(attempt);
       }
     };
     const discover = async () => {
       publish({ error: false });
+      const finish = trace?.span('subtitles.discovery');
       try {
         const { openSubtitleSource } = await import('./subtitle-source.js');
-        const next = await openSubtitleSource(url, size, lifetime.signal);
+        const next = await openSubtitleSource(url, size, lifetime.signal, trace);
+        finish?.({
+          outcome: lifetime.signal.aborted ? 'cancelled' : 'succeeded',
+          count: next?.tracks.length ?? 0,
+        });
         if (lifetime.signal.aborted) {
           next?.dispose();
           return;
@@ -134,6 +198,7 @@ export function useVideoSubtitles({
           tracks.find((track) => track.supported && track.default);
         await select(preferred?.id ?? null);
       } catch {
+        finish?.({ outcome: lifetime.signal.aborted ? 'cancelled' : 'failed' });
         publish({ error: true });
       }
     };
@@ -167,7 +232,7 @@ export function useVideoSubtitles({
       video.removeEventListener('seeking', seek);
       video.removeEventListener('loadedmetadata', seek);
     };
-  }, [media, container, url, size, name]);
+  }, [media, container, url, size, name, trace]);
   return {
     ...state,
     select: (id: string | null) => commands.current.select(id),

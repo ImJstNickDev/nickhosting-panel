@@ -1,4 +1,5 @@
 import { type RefObject, useEffect, useRef, useState } from 'react';
+import type { MotionTrace } from '../../../../../../packages/core/src/motion-timing.js';
 import {
   bufferedContains,
   capturePlayback,
@@ -30,10 +31,12 @@ export function useVideoSource({
   media,
   url,
   size,
+  trace,
 }: {
   media: RefObject<HTMLVideoElement | null>;
   url: string;
   size: number;
+  trace?: MotionTrace;
 }) {
   const [state, setState] = useState<VideoSourceState>(initial);
   const commands = useRef({ select: (_id: string) => {}, retry: () => {} });
@@ -71,6 +74,7 @@ export function useVideoSource({
         url,
         size,
         trackId: id,
+        trace,
         snapshot,
         onReady: () => {
           if (disposed || version !== attempt) return;
@@ -112,9 +116,19 @@ export function useVideoSource({
       publish({ discovering: true });
       const timer = window.setTimeout(() => cancellation.abort(), videoSourceLimits.operationMs);
       let opened: ReturnType<typeof openVideoInput> | undefined;
+      const finish = trace?.span('video.discovery');
       try {
-        opened = openVideoInput(url, size, cancellation.signal);
+        opened = openVideoInput(
+          trace?.url(url, 'discovery') ?? url,
+          size,
+          cancellation.signal,
+          trace,
+        );
         const info = await inspectVideo(opened.input);
+        finish?.({
+          outcome: cancellation.signal.aborted ? 'cancelled' : 'succeeded',
+          count: info.tracks.length,
+        });
         if (disposed || discovery !== cancellation || cancellation.signal.aborted) return;
         tracks = info.tracks;
         desired = info.primaryId;
@@ -131,6 +145,7 @@ export function useVideoSource({
           publish({ selectedId: selected });
         }
       } catch {
+        finish?.({ outcome: cancellation.signal.aborted ? 'cancelled' : 'failed' });
         if (!disposed && discovery === cancellation && video.error) publish({ error: 'failed' });
         // Optional discovery failures must not replace working native playback.
       } finally {
@@ -183,7 +198,7 @@ export function useVideoSource({
       video.load();
       video.disableRemotePlayback = remotePlayback;
     };
-  }, [media, url, size]);
+  }, [media, url, size, trace]);
   return {
     ...state,
     select: (id: string) => commands.current.select(id),

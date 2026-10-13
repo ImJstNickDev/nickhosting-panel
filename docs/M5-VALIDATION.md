@@ -8419,3 +8419,54 @@ Blueprint, network, game-server state or persistent media change; no test assets
 created on the provider. Isolated fixture sessions closed normally. SFTPGo #18
 and production-release boundaries remain unchanged. Rollback is a source revert;
 the new route requires no migration. PR #21 remains open and unmerged.
+
+### Motion debug timetrace (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. Added optional Motion instrumentation;
+no playback, caching or buffering optimization is included in this pass.
+API debug level enables collection through existing viewer capabilities. Opaque
+trace/request IDs correlate browser milestones with backend access, extraction
+and streaming summaries. The next Owner test can be analyzed from API logs
+without asking the Owner to export the browser console. No media paths, caption
+text, provider URLs or credentials are collected.
+
+The browser batches milestones (maximum 512 in five minutes, at most 48 per POST).
+Native first-frame callbacks are one-shot; there is no per-frame/packet logging.
+Streaming observes existing chunks without buffering/copying them. Disabled
+diagnostics do not run timing clocks or deliver telemetry. Intake retains normal
+session/server permission/Origin checks, strict fixed fields and bounded rate
+bookkeeping. Timelines begin at Motion mount, excluding earlier lazy-module loads;
+nested/parallel durations are explicitly not additive. See
+[timing interpretation](M5-VIEWER-FORMATS.md#motion-debug-timing).
+
+Focused commands/results:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-timing.test.ts apps/api/src/viewer-http.test.ts`: **26 passed**; debug-off, strict payloads, rate bounds, stream/cancellation and existing HTTP behavior.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/video-mse.test.ts apps/web/src/features/viewer-engine/builtin-viewers/subtitle-source.test.ts`: **30 passed**, 4.70 s; existing reader/parser regressions plus timing/cache and safe failure metadata.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/motion-timing.test.ts`: **5 passed**, 572 ms; batching, fixed fields, idempotent spans, bounds and diagnostic failures not surfacing to playback.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-viewers.integration.test.ts`: **11 passed**, including authenticated debug intake and unchanged reader authorization.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-subtitles.browser.test.ts`: **5 passed**, 31.39 s. Covers existing subtitle rendering plus schema-valid diagnostic batches, stable playback URL, one timeline across StrictMode replay, seeks, and cancellation of buffering time on intentional pause. Debug-off cases send no batches.
+- Same browser command with `NH_BROWSER=firefox` and `-t 'bounded debug milestones'`: **1 passed, 4 deliberately skipped**, 21.93 s. Targeted tracing evidence, not a repeated full Firefox suite.
+- `scripts/dev.sh pnpm typecheck`, WebPanel production build and runtime build: **pass**. Existing frontend large-chunk warnings remain.
+- Focused Biome on all 16 changed source/test files: **pass**, two pre-existing non-null assertions in `file-viewers.ts`; whitespace check passes.
+
+Read-only development smoke: viewer capabilities returned HTTP 200 with
+`debugTiming: true`. The actual reported MKV retained visible English/Italian
+captions after seeks, all subtitle responses HTTP 200, no page errors, and six
+diagnostic batches accepted with HTTP 204. API logs contain matching browser and
+request records covering discovery, native playback, MSE and subtitles, including
+explicit cancellation outcomes. This checks collection, not an Owner latency
+benchmark. Private probes and the movie content are not tracked or published.
+
+Independent review resolved an over-broad request-ID filter, waiting intervals
+that could include intentional paused time, and hover-preview reads initially
+labeled as native playback. The final implementation uses UUIDs, ends/cancels
+waiting correctly, and labels thumbnails separately. No remaining must-fix
+findings. No UI layout changed; prior screenshots remain representative.
+
+Existing watchers/HMR loaded the source; no manual container restart, dependency
+installation, configuration change, provider write, new infrastructure or test
+media asset. Existing isolated fixtures closed normally. SFTPGo #18 remains a
+production-release gate. No historical full milestone matrix was repeated.
+Rollback: revert this source-only change; there is no migration. PR #21 stays
+open and unmerged.
