@@ -512,6 +512,16 @@ measurement is missing, invalid or stale). Home cards use the same resources
 endpoint and `resources.disk_bytes` as Console, with a 30-second freshness window;
 they never present an allowance as occupied space or unavailable data as zero.
 
+For unbounded storage, quotas also return `sharedStorageAvailableBytes`: actual
+filesystem free space from the worker's cached host observations. Enabled managed
+hosts with enabled nodes contribute once each, honoring environment host overrides.
+Missing, invalid or stale observations make the whole total null; no filesystem
+scan or provider request occurs on the quota read. Home formats this quantity in
+the disk card's Available row, including for accounts without servers. The total
+is platform-wide physical free space, not a personal allowance or a guarantee that
+one server can use capacity on another host. Limited users retain their remaining
+quota calculation. Host paths, identities and fingerprints are not exposed.
+
 Preview reads the managed provider identity, live resources and backup inventory.
 Personal caps cover observed usage plus the greater of 128 MiB or 10% growth
 headroom, as well as existing backup capacity; a user's reservations include each

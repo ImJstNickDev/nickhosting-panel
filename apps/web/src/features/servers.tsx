@@ -318,9 +318,13 @@ export function QuotaSummary() {
                       <div>
                         <dt>{t('platform.remaining')}</dt>
                         <dd>
-                          {quota.data.remaining[key] === null
-                            ? '—'
-                            : amount(quota.data.remaining[key])}
+                          {key === 'storageMiB' && quota.data.limits.storageMiB === null
+                            ? quota.data.sharedStorageAvailableBytes == null
+                              ? t('web.unavailable')
+                              : format.bytes(quota.data.sharedStorageAvailableBytes)
+                            : quota.data.remaining[key] === null
+                              ? '—'
+                              : amount(quota.data.remaining[key])}
                         </dd>
                       </div>
                     </dl>

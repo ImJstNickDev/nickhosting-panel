@@ -66,6 +66,52 @@ describe('M5 real browser platform and Owner journeys', () => {
     ).toBeVisible();
   }
 
+  it('shows measured shared disk space on Home and marks stale samples unavailable', async () => {
+    const db = fixture.database.db;
+    const observation = await db
+      .selectFrom('host_observations')
+      .selectAll()
+      .where('host_id', '=', provider.ids.hostId)
+      .executeTakeFirstOrThrow();
+    const sample = async (at = new Date()) => {
+      await db
+        .updateTable('host_observations')
+        .set({
+          snapshot: JSON.stringify({
+            ...observation.snapshot,
+            availableDiskMiB: 8192,
+            observedAt: at.toISOString(),
+          }),
+          observed_at: at,
+        })
+        .where('host_id', '=', provider.ids.hostId)
+        .execute();
+    };
+    for (const locale of ['en', 'it'] as const) {
+      await journeyRequest(fixture, user, '/api/auth/update-user', { locale });
+      await user.setViewportSize(
+        locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+      );
+      await sample();
+      await user.goto(fixture.origin);
+      const disk = user.locator('.home-quota-card').filter({
+        has: user.getByRole('heading', {
+          name: locale === 'en' ? 'Storage' : 'Spazio su disco',
+          exact: true,
+        }),
+      });
+      await browserExpect(disk.locator('dd').last()).toHaveText('8 GiB');
+      await fixture.screenshot(user, `home-shared-disk-${locale}`);
+      await sample(new Date(Date.now() - 10000));
+      await user.reload();
+      await browserExpect(disk.locator('dd').last()).toHaveText(
+        locale === 'en' ? 'Unavailable' : 'Non disponibile',
+      );
+    }
+    await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'en' });
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await provider.management.refreshObservations();
+  });
   it('shows scoped server artwork, resource units, useful empty filters and accessible Home', async () => {
     const files = await provider.files();
     files.set('home-usage.bin', Buffer.alloc(4 * 1024 * 1024));

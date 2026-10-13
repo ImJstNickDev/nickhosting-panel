@@ -9,7 +9,8 @@ import { type Database, getSettings, recordAudit, secretStatus } from '@nickhost
 import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
-import { type DB, type Environment, lockResources } from './admission.js';
+import { checkedObservation, type DB, type Environment, lockResources } from './admission.js';
+import { resolveHostOverride } from './configuration.js';
 import { trustedGameModules } from './game-modules.js';
 import {
   type GatewayPolicy,
@@ -458,6 +459,39 @@ export async function deletePlatformProject(
   });
 }
 
+/** Reuse the worker's filesystem samples; nodes on one host share one disk reading. */
+async function sharedStorageAvailableBytes(db: DB, env: Environment): Promise<number | null> {
+  const hosts = await db
+    .selectFrom('physical_hosts as h')
+    .selectAll('h')
+    .where((eb) =>
+      eb.exists(
+        eb
+          .selectFrom('managed_nodes as n')
+          .select('n.id')
+          .whereRef('n.physical_host_id', '=', 'h.id')
+          .where('n.enabled', '=', true),
+      ),
+    )
+    .execute();
+  const activeHosts = hosts.filter((host) => resolveHostOverride(host, env).enabled);
+  if (!activeHosts.length) return null;
+  const samples = await Promise.all(
+    activeHosts.map(async ({ id }) => {
+      try {
+        const { snapshot } = await checkedObservation(db, id, env);
+        return Math.floor(snapshot.availableDiskMiB * 1048576);
+      } catch (error) {
+        if (error instanceof DomainError && error.code === 'resources_unavailable') return null;
+        throw error;
+      }
+    }),
+  );
+  if (samples.some((bytes) => bytes === null)) return null;
+  const total = samples.reduce<number>((sum, bytes) => sum + (bytes ?? 0), 0);
+  return Number.isSafeInteger(total) ? total : null;
+}
+
 export async function getPlatformQuota(
   db: DB,
   context: AuthContext,
@@ -529,6 +563,8 @@ export async function getPlatformQuota(
     userId,
     storageBudgetMiB,
     storagePolicy: values.storagePolicy,
+    sharedStorageAvailableBytes:
+      limits.storageMiB === null ? await sharedStorageAvailableBytes(db, env) : null,
     creationStorage: {
       mode: limits.storageMiB === null ? 'shared' : 'limited',
       defaultDiskMiB: limits.storageMiB === null ? 0 : values.defaultServerStorageMiB,

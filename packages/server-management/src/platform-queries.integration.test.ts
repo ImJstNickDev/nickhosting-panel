@@ -598,6 +598,87 @@ describe('M5 platform browser queries and metadata', () => {
       (await getPlatformQuota(f.db, f.context, f.context.subjectUserId, env)).limits.storageMiB,
     ).toBeGreaterThan(0);
   });
+  it('reports actual shared filesystem space once per active host even before the first server', async () => {
+    await f.db
+      .updateTable('physical_hosts')
+      .set({ enabled: false })
+      .where('id', '!=', f.hostId)
+      .execute();
+    const node = await f.db
+      .selectFrom('managed_nodes')
+      .selectAll()
+      .where('id', '=', f.nodeId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('managed_nodes')
+      .values({
+        id: randomUUID(),
+        physical_host_id: node.physical_host_id,
+        provision_user_id: node.provision_user_id,
+        pterodactyl_node_id: node.pterodactyl_node_id + 1000000,
+      })
+      .execute();
+    await f.observe({ availableDiskMiB: 2048.5 });
+    expect(await getPlatformQuota(f.db, f.context)).toMatchObject({
+      sharedStorageAvailableBytes: 2048.5 * 1048576,
+      remaining: { storageMiB: null },
+      committed: { serverCount: 0 },
+    });
+    expect(
+      await getPlatformQuota(f.db, f.context, f.context.subjectUserId, {
+        NH_STORAGE_POLICY: 'PER_USER_BUDGET',
+      }),
+    ).toMatchObject({ sharedStorageAvailableBytes: null });
+  });
+  it('does not show stale or partial shared disk totals and excludes disabled hosts', async () => {
+    await f.db
+      .updateTable('physical_hosts')
+      .set({ enabled: false })
+      .where('id', '!=', f.hostId)
+      .execute();
+    const second = await peer();
+    await f.observe({ availableDiskMiB: 2048 });
+    await second.observe({ availableDiskMiB: 1024 });
+    expect((await getPlatformQuota(f.db, f.context)).sharedStorageAvailableBytes).toBe(
+      3072 * 1048576,
+    );
+    await second.observe({ availableDiskMiB: 1024 }, new Date(Date.now() - 10000));
+    expect((await getPlatformQuota(f.db, f.context)).sharedStorageAvailableBytes).toBeNull();
+    const hostOverride = {
+      id: second.hostId,
+      name: 'Overridden shared host',
+      memoryLimitMiB: 8192,
+      cpuLimitPercent: 800,
+      storagePoolMiB: 1000000,
+      memoryHeadroomMiB: 256,
+      cpuHeadroomPercent: 20,
+      diskHeadroomMiB: 256,
+      localDiskPath: '/isolated-fixture',
+      observerId: 'isolated-observer',
+    };
+    const overrideEnv = (enabled: boolean) => ({
+      NH_HOST_POLICIES: JSON.stringify({ [second.hostId]: { ...hostOverride, enabled } }),
+    });
+    expect(
+      (await getPlatformQuota(f.db, f.context, f.context.subjectUserId, overrideEnv(false)))
+        .sharedStorageAvailableBytes,
+    ).toBe(2048 * 1048576);
+    await f.db
+      .updateTable('physical_hosts')
+      .set({ enabled: false })
+      .where('id', '=', second.hostId)
+      .execute();
+    expect((await getPlatformQuota(f.db, f.context)).sharedStorageAvailableBytes).toBe(
+      2048 * 1048576,
+    );
+    await second.observe({ availableDiskMiB: 1024 });
+    expect(
+      (await getPlatformQuota(f.db, f.context, f.context.subjectUserId, overrideEnv(true)))
+        .sharedStorageAvailableBytes,
+    ).toBe(3072 * 1048576);
+    await f.observe({ availableDiskMiB: 0 });
+    expect((await getPlatformQuota(f.db, f.context)).sharedStorageAvailableBytes).toBe(0);
+  });
   it('provides Owner directory/detail and audit quota history without credentials and refuses ordinary access', async () => {
     await expect(listPlatformUsers(f.db, f.context)).rejects.toThrow('forbidden');
     const users = await listPlatformUsers(f.db, f.owner, { q: f.context.subjectUserId });
