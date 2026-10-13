@@ -48,11 +48,36 @@
   width: auto;
   max-width: 22rem;
 }
-.ve-controls output {
+.ve-zoom-percentage {
+  position: relative;
+}
+.ve-controls .ve-zoom-value,
+.ve-controls .ve-zoom-percentage input {
   font-variant-numeric: tabular-nums;
   min-width: 3.5rem;
   text-align: center;
   font-size: 0.875rem;
+}
+.ve-controls .ve-zoom-percentage input {
+  width: 6rem;
+  min-height: 32px;
+  padding: 0.3rem;
+  border-color: transparent;
+  background: #f1f2f4;
+  border-radius: 0.35rem;
+}
+.ve-zoom-error {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  width: 14rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #c44;
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: #982020;
+  font-size: 0.8rem;
 }
 .ve-controls .text-button {
   color: inherit;
@@ -65,9 +90,8 @@
   background: var(--surface-hover, #f1f2f4);
 }
 .ve-image-stage {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
+  overscroll-behavior: contain;
   height: min(65vh, 42rem);
   overflow: hidden;
   touch-action: none;
@@ -77,17 +101,18 @@
 .ve-image-stage:active {
   cursor: grabbing;
 }
-.ve-image-stage img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  transform-origin: center;
-  user-select: none;
-  flex-shrink: 0;
+.ve-image-stage:focus-visible {
+  outline-offset: -3px;
 }
-.ve-image-stage .ve-natural-size {
+.ve-image-stage img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
   max-width: none;
   max-height: none;
+  transform-origin: center;
+  user-select: none;
+  pointer-events: none;
 }
 .ve-media {
   display: flex;

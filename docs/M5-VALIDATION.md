@@ -7256,3 +7256,55 @@ rerun. Production release restrictions and issue18 are unchanged.
 Index governance passed: 737 text files, 221 review PNGs, 617 links, 4 TOML files
 and 44 ignore cases (heuristic secret scan). Read-only HTTPS smoke returned 200
 and confirmed the new toggle and expanded list are served by Vite in dev.
+
+## 2026-10-13 — Frame zoom and viewport interaction
+
+Replaced the competing CSS-fit/state-scale calculations with one transform in
+natural image pixels. Fit reports its real percentage and follows viewport
+resizing; Actual size is centered 100%. Buttons, CTRL/CMD +/− and a typed percentage
+zoom around the viewport center even after panning. Trackpad deltas pan, pinch
+anchors at the pointer, and separate WebKit gestures suppress duplicate wheel
+updates. Percentage input accepts dot/comma decimals, validates without changing
+the image on failure, applies on Enter and cancels on Escape/blur. All controls
+remain scoped to Frame; inputs/dialogs retain their normal shortcuts.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/image-viewport.test.ts`:
+  3/3 passed; fit/sub-1% scale, center/pointer invariance, inverse zoom, finite
+  bounds and decimal validation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'opens SVG|Frame'`:
+  3/3 targeted journeys passed, 10 intentionally skipped, 21.26s. Covers actual
+  image dimensions, Fit/Actual size, resized viewport, keyboard/buttons after
+  panning, percentage success/error/cancel, wheel bursts, pinch anchoring, gesture
+  duplication prevention, dialog isolation and ICO keyboard frame changes.
+  Italian 390px layout has zero axe violations within Frame and no page overflow.
+- Initial run had two passing journeys and one failing anchor assertion; an
+  isolated rerun reproduced it. The test assumed fractional coordinates survived
+  construction of a WheelEvent. Corrected it to use the actual event coordinates
+  delivered by the browser, retaining the same strict geometric tolerance.
+- Independent review found ICO frame switching unmounted the focused picker;
+  fixed conditional focus restoration and added consecutive ArrowDown/ArrowUp
+  assertions. An inset viewport focus outline avoids clipping. Final independent
+  technical/accessibility/visual review reports no remaining must-fix findings.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm
+  i18n:compile`, `scripts/dev.sh pnpm i18n:check`, targeted Biome on the six changed
+  TS/TSX/CSS files and `git diff --check`: passed.
+
+Reviewed [desktop Fit](screenshots/m5/file-viewer-frame-fit-desktop-en.png) and
+[Italian mobile zoom](screenshots/m5/file-viewer-frame-mobile-it.png) screenshots.
+Tests use the actual application in Chromium with isolated provider fixtures and
+disposable schemas on existing approved services. Wheel/pinch/WebKit gesture
+events are synthetic: physical trackpads and native Safari/Firefox behavior were
+not manually certified. Event handling follows the documented
+[wheel cancellation](https://developer.mozilla.org/en-US/docs/Web/API/Element/wheel_event),
+[trackpad CTRL wheel behavior](https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/ctrlKey)
+and nonstandard [WebKit gesture API](https://developer.mozilla.org/en-US/docs/Web/API/Element/gesturechange_event).
+No content/proxy/API contract, real server, Blueprint extension, network or
+container change; no restart or new test asset on a game server. Concurrent Owner
+UI work was preserved. No full historical suite rerun; issue18 is unchanged.
+
+Index governance passed: 739 text files, 223 review PNGs, 619 relative links,
+4 TOML files and 44 ignore cases (heuristic secret scan). Read-only dev HTTPS
+module check returned 200 and confirmed the new Frame controls are served through
+Vite HMR, including percentage parsing, gestures and ICO focus restoration.

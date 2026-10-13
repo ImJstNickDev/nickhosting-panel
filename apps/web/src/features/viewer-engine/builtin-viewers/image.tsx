@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import { useT } from '../../../app/i18n.js';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { useFormat, useT } from '../../../app/i18n.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { readViewerBytes, viewerPath } from '../core/access.js';
 import { previewLimits } from '../core/limits.js';
@@ -7,6 +7,14 @@ import type { ViewerProps } from '../core/types.js';
 import { useViewerResource } from '../core/use-resource.js';
 import { ViewerLoading } from '../loading.js';
 import { validateIconset } from './ico-model.js';
+import {
+  fitImage,
+  type ImageSize,
+  type ImageTransform,
+  initialImageTransform,
+  parseImagePercent,
+  zoomImage,
+} from './image-viewport.js';
 
 type ImageFrame = { url: string; width?: number; height?: number; bpp?: number };
 export default function ImageViewer({ serverId, source }: ViewerProps) {
@@ -35,96 +43,32 @@ export default function ImageViewer({ serverId, source }: ViewerProps) {
     },
   );
   const [frame, setFrame] = useState(0);
-  const [scale, setScale] = useState(1);
-  const [natural, setNatural] = useState(false);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [failed, setFailed] = useState(false);
-  const drag = useRef<{ x: number; y: number; left: number; top: number } | undefined>(undefined);
+  const restoreFrameFocus = useRef(false);
+  const frameSelect = useCallback((element: HTMLSelectElement | null) => {
+    if (element && restoreFrameFocus.current) {
+      element.focus({ preventScroll: true });
+      restoreFrameFocus.current = false;
+    }
+  }, []);
   const image = resource.value?.[frame];
   if (resource.error) return <ErrorNotice error={resource.error} />;
   if (!resource.value) return <ViewerLoading />;
-  if (!image || failed) return <ErrorNotice error={{ messageKey: 'viewer.imageUnavailable' }} />;
-  const reset = () => {
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-  };
-  const zoom = (factor: number) =>
-    setScale((value) => Math.max(0.01, Math.min(1_000_000, value * factor)));
+  if (!image) return <ErrorNotice error={{ messageKey: 'viewer.imageUnavailable' }} />;
   return (
-    <div className="ve-image-viewer">
-      <div
-        className="ve-controls"
-        role="toolbar"
-        aria-label={t('viewer.imageControls')}
-        onKeyDown={(event) => {
-          if (
-            (event.target as HTMLElement).closest('select,input') ||
-            event.altKey ||
-            event.ctrlKey ||
-            event.metaKey
-          )
-            return;
-          const directions: Record<string, readonly [number, number]> = {
-            ArrowLeft: [40, 0],
-            ArrowRight: [-40, 0],
-            ArrowUp: [0, 40],
-            ArrowDown: [0, -40],
-          };
-          const delta = directions[event.key];
-          if (delta) {
-            event.preventDefault();
-            setOffset((current) => ({
-              x: current.x + (delta[0] ?? 0),
-              y: current.y + (delta[1] ?? 0),
-            }));
-          }
-        }}
-      >
-        <button
-          type="button"
-          className="fm-tool"
-          aria-label={t('viewer.zoomOut')}
-          onClick={() => zoom(1 / 1.25)}
-        >
-          −
-        </button>
-        <output>{Math.round(scale * 100)}%</output>
-        <button
-          type="button"
-          className="fm-tool"
-          aria-label={t('viewer.zoomIn')}
-          onClick={() => zoom(1.25)}
-        >
-          +
-        </button>
-        <button
-          type="button"
-          className="text-button"
-          onClick={() => {
-            reset();
-            setNatural(false);
-          }}
-        >
-          {t('viewer.fit')}
-        </button>
-        <button
-          type="button"
-          className="text-button"
-          onClick={() => {
-            reset();
-            setNatural(true);
-          }}
-        >
-          {t('viewer.actualSize')}
-        </button>
-        {resource.value.length > 1 && (
+    <FrameViewport
+      key={image.url}
+      image={image}
+      name={source.name}
+      framePicker={
+        resource.value.length > 1 && (
           <label>
             {t('viewer.iconImage')}
             <select
+              ref={frameSelect}
               value={frame}
               onChange={(event) => {
+                restoreFrameFocus.current = document.activeElement === event.currentTarget;
                 setFrame(Number(event.target.value));
-                reset();
               }}
             >
               {resource.value.map((item, index) => (
@@ -134,39 +78,315 @@ export default function ImageViewer({ serverId, source }: ViewerProps) {
               ))}
             </select>
           </label>
-        )}
+        )
+      }
+    />
+  );
+}
+
+function FrameViewport({
+  image,
+  name,
+  framePicker,
+}: {
+  image: ImageFrame;
+  name: string;
+  framePicker: ReactNode;
+}) {
+  const t = useT();
+  const format = useFormat();
+  const root = useRef<HTMLDivElement>(null);
+  const stage = useRef<HTMLElement>(null);
+  const dimensions = useRef<ImageSize | undefined>(undefined);
+  const [natural, setNatural] = useState<ImageSize>();
+  const [view, setView] = useState(initialImageTransform);
+  const current = useRef(view);
+  const [failed, setFailed] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  const percentInput = useRef<HTMLInputElement>(null);
+  const percentButton = useRef<HTMLButtonElement>(null);
+  const drag = useRef<{ id: number; x: number; y: number } | undefined>(undefined);
+  const update = useCallback((change: (value: ImageTransform) => ImageTransform) => {
+    current.current = change(current.current);
+    setView(current.current);
+  }, []);
+  const fit = useCallback(() => {
+    const viewport = stage.current;
+    const size = dimensions.current;
+    if (!viewport || !size || !viewport.clientWidth || !viewport.clientHeight) return;
+    update(() => fitImage(size, { width: viewport.clientWidth, height: viewport.clientHeight }));
+  }, [update]);
+  const zoom = useCallback(
+    (factor: number, anchor?: { x: number; y: number }) => {
+      if (dimensions.current) update((value) => zoomImage(value, value.scale * factor, anchor));
+    },
+    [update],
+  );
+  // Native listeners permit cancelling browser/page zoom only over this viewport.
+  // Refs carry the latest transform across batched wheel events without stale deltas.
+  useEffect(() => {
+    const stageElement = stage.current;
+    const keyboardRoot = root.current?.closest('.ve-engine') ?? root.current;
+    if (!stageElement || !keyboardRoot || failed) return;
+    const viewport = stageElement;
+    const observer = new ResizeObserver(() => {
+      if (current.current.fit) fit();
+    });
+    observer.observe(viewport);
+    let gestureScale: number | undefined;
+    const anchorAt = (x: number, y: number) => {
+      const rect = viewport.getBoundingClientRect();
+      return { x: x - rect.left - rect.width / 2, y: y - rect.top - rect.height / 2 };
+    };
+    function wheel(event: WheelEvent) {
+      if (!dimensions.current || !event.cancelable) return;
+      event.preventDefault();
+      if (gestureScale !== undefined) return;
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
+      if (event.ctrlKey) {
+        zoom(
+          Math.exp(-Math.max(-100, Math.min(100, event.deltaY * unit)) * 0.01),
+          anchorAt(event.clientX, event.clientY),
+        );
+      } else {
+        update((value) => ({
+          ...value,
+          fit: false,
+          x: value.x - event.deltaX * (event.deltaMode === 2 ? viewport.clientWidth : unit),
+          y: value.y - event.deltaY * unit,
+        }));
+      }
+    }
+    // Safari exposes a separate pinch event; wheel zoom is suppressed during that gesture.
+    function gesture(event: Event) {
+      const input = event as Event & { scale: number; clientX?: number; clientY?: number };
+      if (event.type === 'gestureend') {
+        gestureScale = undefined;
+        return;
+      }
+      if (!dimensions.current || !Number.isFinite(input.scale) || input.scale <= 0) return;
+      event.preventDefault();
+      drag.current = undefined;
+      if (event.type === 'gesturestart') gestureScale = input.scale;
+      else if (gestureScale !== undefined) {
+        const anchor =
+          typeof input.clientX === 'number' && typeof input.clientY === 'number'
+            ? anchorAt(input.clientX, input.clientY)
+            : undefined;
+        zoom(input.scale / gestureScale, anchor);
+        gestureScale = input.scale;
+      }
+    }
+    function key(event: Event) {
+      const input = event as KeyboardEvent;
+      if (
+        !dimensions.current ||
+        input.defaultPrevented ||
+        input.isComposing ||
+        input.altKey ||
+        (input.target as HTMLElement).closest(
+          'input,textarea,select,[contenteditable="true"],dialog',
+        )
+      )
+        return;
+      if (input.ctrlKey || input.metaKey) {
+        const direction =
+          ['+', '='].includes(input.key) || input.code === 'NumpadAdd'
+            ? 1
+            : input.key === '-' || input.code === 'NumpadSubtract'
+              ? -1
+              : 0;
+        if (!direction) return;
+        input.preventDefault();
+        zoom(direction > 0 ? 1.25 : 1 / 1.25);
+        return;
+      }
+      const delta = {
+        ArrowLeft: [40, 0],
+        ArrowRight: [-40, 0],
+        ArrowUp: [0, 40],
+        ArrowDown: [0, -40],
+      }[input.key];
+      if (!delta) return;
+      input.preventDefault();
+      update((value) => ({
+        ...value,
+        fit: false,
+        x: value.x + (delta[0] ?? 0),
+        y: value.y + (delta[1] ?? 0),
+      }));
+    }
+    viewport.addEventListener('wheel', wheel, { passive: false });
+    for (const type of ['gesturestart', 'gesturechange', 'gestureend'])
+      viewport.addEventListener(type, gesture, { passive: false });
+    keyboardRoot.addEventListener('keydown', key);
+    return () => {
+      observer.disconnect();
+      viewport.removeEventListener('wheel', wheel);
+      for (const type of ['gesturestart', 'gesturechange', 'gestureend'])
+        viewport.removeEventListener(type, gesture);
+      keyboardRoot.removeEventListener('keydown', key);
+    };
+  }, [failed, fit, update, zoom]);
+  const editingPercent = draft !== null;
+  useEffect(() => {
+    if (editingPercent) {
+      percentInput.current?.focus();
+      percentInput.current?.select();
+    }
+  }, [editingPercent]);
+  function finishPercent() {
+    setDraft(null);
+    setInvalid(false);
+    requestAnimationFrame(() => percentButton.current?.focus({ preventScroll: true }));
+  }
+  if (failed) return <ErrorNotice error={{ messageKey: 'viewer.imageUnavailable' }} />;
+  const percent = format.number(view.scale * 100, 4);
+  return (
+    <div className="ve-image-viewer" ref={root}>
+      <div className="ve-controls" role="toolbar" aria-label={t('viewer.imageControls')}>
+        <button
+          type="button"
+          className="fm-tool"
+          aria-label={t('viewer.zoomOut')}
+          disabled={!natural}
+          onClick={() => zoom(1 / 1.25)}
+        >
+          −
+        </button>
+        <div className="ve-zoom-percentage">
+          {draft === null ? (
+            <button
+              type="button"
+              className="text-button ve-zoom-value"
+              ref={percentButton}
+              disabled={!natural}
+              aria-label={t('viewer.editZoom', { percent })}
+              onClick={() => {
+                setDraft(String(Number((view.scale * 100).toPrecision(10))));
+                setInvalid(false);
+              }}
+            >
+              {percent}%
+            </button>
+          ) : (
+            <input
+              ref={percentInput}
+              type="text"
+              inputMode="decimal"
+              aria-label={t('viewer.zoomPercent')}
+              aria-invalid={invalid || undefined}
+              aria-describedby={invalid ? 've-zoom-error' : undefined}
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setInvalid(false);
+              }}
+              onBlur={() => {
+                setDraft(null);
+                setInvalid(false);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const scale = parseImagePercent(draft);
+                  if (scale === undefined) {
+                    setInvalid(true);
+                    return;
+                  }
+                  update((value) => zoomImage(value, scale));
+                  finishPercent();
+                } else if (event.key === 'Escape') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  finishPercent();
+                }
+              }}
+            />
+          )}
+          {invalid && (
+            <span className="ve-zoom-error" id="ve-zoom-error" role="alert">
+              {t('viewer.invalidZoom')}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="fm-tool"
+          aria-label={t('viewer.zoomIn')}
+          disabled={!natural}
+          onClick={() => zoom(1.25)}
+        >
+          +
+        </button>
+        <button type="button" className="text-button" disabled={!natural} onClick={fit}>
+          {t('viewer.fit')}
+        </button>
+        <button
+          type="button"
+          className="text-button"
+          disabled={!natural}
+          onClick={() => update(() => ({ scale: 1, x: 0, y: 0, fit: false }))}
+        >
+          {t('viewer.actualSize')}
+        </button>
+        {framePicker}
       </div>
-      <div
+      <section
         className="ve-image-stage"
+        ref={stage}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard pan/zoom viewport; Tab remains available to leave it.
+        tabIndex={0}
+        aria-label={t('viewer.imageControls')}
         onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          drag.current = { x: event.clientX, y: event.clientY, left: offset.x, top: offset.y };
+          if (event.button !== 0 || !event.isPrimary) return;
+          event.currentTarget.focus({ preventScroll: true });
+          drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
           const start = drag.current;
-          if (start)
-            setOffset({
-              x: start.left + event.clientX - start.x,
-              y: start.top + event.clientY - start.y,
-            });
+          if (!start || start.id !== event.pointerId) return;
+          const dx = event.clientX - start.x,
+            dy = event.clientY - start.y;
+          drag.current = { id: start.id, x: event.clientX, y: event.clientY };
+          update((value) => ({ ...value, fit: false, x: value.x + dx, y: value.y + dy }));
         }}
-        onPointerUp={() => {
-          drag.current = undefined;
+        onPointerUp={(event) => {
+          if (drag.current?.id === event.pointerId) drag.current = undefined;
         }}
-        onPointerCancel={() => {
-          drag.current = undefined;
+        onPointerCancel={(event) => {
+          if (drag.current?.id === event.pointerId) drag.current = undefined;
+        }}
+        onLostPointerCapture={(event) => {
+          if (drag.current?.id === event.pointerId) drag.current = undefined;
         }}
       >
         <img
           src={image.url}
-          alt={source.name}
+          alt={name}
           draggable={false}
-          className={natural ? 've-natural-size' : ''}
-          style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
+          style={{
+            width: natural?.width,
+            height: natural?.height,
+            visibility: natural ? 'visible' : 'hidden',
+            transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+          }}
+          onLoad={(event) => {
+            const element = event.currentTarget;
+            if (!element.naturalWidth || !element.naturalHeight) {
+              setFailed(true);
+              return;
+            }
+            dimensions.current = { width: element.naturalWidth, height: element.naturalHeight };
+            setNatural(dimensions.current);
+            fit();
+          }}
           onError={() => setFailed(true)}
         />
-      </div>
+      </section>
     </div>
   );
 }

@@ -55,6 +55,12 @@ describe('M5 builtin file viewers', () => {
         '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200"><rect width="400" height="200" fill="#315a48"/><circle cx="200" cy="100" r="50" fill="#f0cf88"/><script>window.viewerScriptRan=true;fetch("/viewer-script-must-not-run")</script></svg>',
       ),
     );
+    remote.set(
+      'frame-large.svg',
+      Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2400" viewBox="0 0 4000 2400"><rect width="4000" height="2400" fill="#315a48"/><path d="M0 1200H4000M2000 0V2400" stroke="#74998a" stroke-width="20"/><circle cx="2000" cy="1200" r="500" fill="#f0cf88"/></svg>',
+      ),
+    );
     remote.set('viewer.zip', Buffer.from('archive metadata fixture'));
     remote.set('viewer.sqlite', Buffer.from('sqlite API fixture'));
     remote.set('unsupported.avi', Buffer.from('not a playable video'));
@@ -256,13 +262,18 @@ describe('M5 builtin file viewers', () => {
     expect(await page.evaluate(() => 'viewerScriptRan' in window)).toBe(false);
     expect(scriptRequests).toBe(0);
     await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
-    await browserExpect(page.locator('.ve-controls output')).toHaveText('125%');
+    await browserExpect(
+      page.getByRole('button', { name: 'Zoom: 125%', exact: true }),
+    ).toBeVisible();
     await harness.screenshot(page, 'file-viewer-image-desktop-en');
     await root();
     await page.locator('.fm-filename').getByText('viewer.ico', { exact: true }).click();
     await browserExpect(page.getByLabel('Icon image')).toBeVisible();
     await browserExpect(page.getByLabel('Icon image').locator('option')).toHaveCount(2);
-    await page.getByLabel('Icon image').selectOption('1');
+    await page.getByLabel('Icon image').focus();
+    await page.keyboard.press('ArrowDown');
+    await browserExpect(page.getByLabel('Icon image')).toHaveValue('1');
+    await browserExpect(page.getByLabel('Icon image')).toBeFocused();
     await browserExpect
       .poll(() =>
         page
@@ -270,6 +281,213 @@ describe('M5 builtin file viewers', () => {
           .evaluate((image) => (image as HTMLImageElement).naturalWidth),
       )
       .toBe(32);
+    await page.keyboard.press('ArrowUp');
+    await browserExpect(page.getByLabel('Icon image')).toHaveValue('0');
+    await browserExpect(page.getByLabel('Icon image')).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  async function frameGeometry() {
+    return page.locator('.ve-image-stage').evaluate((stage) => {
+      const image = stage.querySelector('img');
+      if (!image) throw new Error('Missing frame image');
+      const box = stage.getBoundingClientRect(),
+        picture = image.getBoundingClientRect();
+      const scale = picture.width / image.naturalWidth;
+      return {
+        scale,
+        width: box.width,
+        height: box.height,
+        x: picture.x + picture.width / 2 - box.x - box.width / 2,
+        y: picture.y + picture.height / 2 - box.y - box.height / 2,
+        centerX: (box.x + box.width / 2 - picture.x) / scale,
+        centerY: (box.y + box.height / 2 - picture.y) / scale,
+      };
+    });
+  }
+
+  it('keeps Frame fit, actual pixels, edited percentages and center-based keyboard zoom consistent', async () => {
+    await open('frame-large.svg');
+    await browserExpect(
+      page.getByRole('button', { name: 'Actual size', exact: true }),
+    ).toBeEnabled();
+    const fit = await frameGeometry();
+    expect(fit.scale).toBeCloseTo(Math.min(1, fit.width / 4000, fit.height / 2400), 5);
+    expect(fit.x).toBeCloseTo(0, 3);
+    expect(fit.y).toBeCloseTo(0, 3);
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    await browserExpect(
+      page.getByRole('button', { name: 'Zoom: 100%', exact: true }),
+    ).toBeVisible();
+    expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    await page.getByRole('button', { name: 'Fit', exact: true }).click();
+    expect((await frameGeometry()).scale).toBeCloseTo(fit.scale, 5);
+    await page.locator('.ve-engine').focus();
+    await page.keyboard.press('Control+Equal');
+    expect((await frameGeometry()).scale).toBeCloseTo(fit.scale * 1.25, 5);
+    await page.keyboard.press('Control+Minus');
+    await page.keyboard.press('Meta+Equal');
+    expect((await frameGeometry()).scale).toBeCloseTo(fit.scale * 1.25, 5);
+    const stage = page.locator('.ve-image-stage');
+    await stage.focus();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowDown');
+    const before = await frameGeometry();
+    await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+    const after = await frameGeometry();
+    expect(after.scale).toBeCloseTo(before.scale * 1.25, 5);
+    expect(after.centerX).toBeCloseTo(before.centerX, 2);
+    expect(after.centerY).toBeCloseTo(before.centerY, 2);
+    await page.locator('.ve-zoom-value').click();
+    const input = page.getByRole('textbox', { name: 'Zoom (%)', exact: true });
+    await browserExpect(input).toBeFocused();
+    await input.fill('125,5');
+    await page.keyboard.press('Enter');
+    await browserExpect(
+      page.getByRole('button', { name: 'Zoom: 125.5%', exact: true }),
+    ).toBeFocused();
+    expect((await frameGeometry()).scale).toBeCloseTo(1.255, 5);
+    expect((await frameGeometry()).centerX).toBeCloseTo(before.centerX, 2);
+    await page.locator('.ve-zoom-value').click();
+    await input.fill('oops');
+    await page.keyboard.press('Enter');
+    await browserExpect(input).toHaveAttribute('aria-invalid', 'true');
+    await browserExpect(page.getByRole('alert')).toContainText('Enter a valid zoom');
+    expect((await frameGeometry()).scale).toBeCloseTo(1.255, 5);
+    await page.keyboard.press('Escape');
+    await browserExpect(page.locator('.ve-zoom-value')).toBeFocused();
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    await page.setViewportSize({ width: 900, height: 740 });
+    expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    await page.getByRole('button', { name: 'Fit', exact: true }).click();
+    await page.setViewportSize({ width: 780, height: 700 });
+    await browserExpect
+      .poll(async () => {
+        const view = await frameGeometry();
+        return Math.abs(view.scale - Math.min(1, view.width / 4000, view.height / 2400));
+      })
+      .toBeLessThan(0.00001);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await harness.screenshot(page, 'file-viewer-frame-fit-desktop-en');
+    expect(errors).toEqual([]);
+  });
+
+  it('pans Frame with trackpad deltas and anchors pinch zoom without browser zoom or duplicate gesture updates', async () => {
+    await open('frame-large.svg');
+    const stage = page.locator('.ve-image-stage');
+    await browserExpect(
+      page.getByRole('button', { name: 'Actual size', exact: true }),
+    ).toBeEnabled();
+    const start = await frameGeometry();
+    const pageScroll = await page.evaluate(() => window.scrollY);
+    const cancelled = await stage.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return !element.dispatchEvent(
+        new WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          deltaX: 75,
+          deltaY: 40,
+          clientX: rect.x + rect.width / 2,
+          clientY: rect.y + rect.height / 2,
+        }),
+      );
+    });
+    expect(cancelled).toBe(true);
+    const panned = await frameGeometry();
+    expect(panned.x).toBeCloseTo(start.x - 75, 3);
+    expect(panned.y).toBeCloseTo(start.y - 40, 3);
+    const pinchAnchor = await stage.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const event = new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: true,
+        deltaY: -Math.log(2) / 0.01,
+        clientX: rect.x + rect.width / 2 + 60,
+        clientY: rect.y + rect.height / 2 - 40,
+      });
+      element.dispatchEvent(event);
+      return {
+        x: event.clientX - rect.x - rect.width / 2,
+        y: event.clientY - rect.y - rect.height / 2,
+      };
+    });
+    const pinched = await frameGeometry();
+    expect(pinched.scale).toBeCloseTo(panned.scale * 2, 5);
+    expect((pinchAnchor.x - pinched.x) / pinched.scale).toBeCloseTo(
+      (pinchAnchor.x - panned.x) / panned.scale,
+      2,
+    );
+    expect((pinchAnchor.y - pinched.y) / pinched.scale).toBeCloseTo(
+      (pinchAnchor.y - panned.y) / panned.scale,
+      2,
+    );
+    await stage.evaluate((element) => {
+      for (let index = 0; index < 10; index++)
+        element.dispatchEvent(
+          new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 5, deltaY: 3 }),
+        );
+    });
+    expect((await frameGeometry()).x).toBeCloseTo(pinched.x - 50, 3);
+    expect((await frameGeometry()).y).toBeCloseTo(pinched.y - 30, 3);
+    await stage.evaluate((element) => {
+      for (const [type, scale] of [
+        ['gesturestart', 1],
+        ['gesturechange', 1.5],
+        ['gestureend', 1.5],
+      ] as const) {
+        element.dispatchEvent(
+          Object.assign(new Event(type, { bubbles: true, cancelable: true }), { scale }),
+        );
+        if (type === 'gesturestart')
+          element.dispatchEvent(
+            new WheelEvent('wheel', {
+              bubbles: true,
+              cancelable: true,
+              ctrlKey: true,
+              deltaY: -25,
+            }),
+          );
+      }
+    });
+    expect((await frameGeometry()).scale).toBeCloseTo(pinched.scale * 1.5, 5);
+    expect(await page.evaluate(() => window.scrollY)).toBe(pageScroll);
+    const stable = await frameGeometry();
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    const allowed = await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Frame', exact: true })
+      .evaluate((element) =>
+        element.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: '+',
+            ctrlKey: true,
+          }),
+        ),
+      );
+    expect(allowed).toBe(true);
+    expect((await frameGeometry()).scale).toBeCloseTo(stable.scale, 5);
+    await page.keyboard.press('Escape');
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open('frame-large.svg');
+    await browserExpect(page.getByRole('button', { name: 'Adatta', exact: true })).toBeEnabled();
+    await page.locator('.ve-zoom-value').click();
+    await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('50');
+    await page.keyboard.press('Enter');
+    await browserExpect(page.getByRole('button', { name: 'Zoom: 50%', exact: true })).toBeVisible();
+    await harness.screenshot(page, 'file-viewer-frame-mobile-it');
+    expect(
+      (await new AxeBuilder({ page }).include('.ve-image-viewer').analyze()).violations,
+    ).toEqual([]);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     expect(errors).toEqual([]);
   });
 

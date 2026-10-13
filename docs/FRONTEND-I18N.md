@@ -664,6 +664,17 @@ Only compiled viewers for this game and builtins are selectable. Unsupported
 nested archive/database readers, unavailable transports and existing editor/parser
 limits remain enforced; decoder failure keeps Open with available for recovery.
 Optional viewer metadata failures do not prevent independent text editing.
+
+Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard and
+gestures; its percentage reflects the rendered image, including fits below 1%.
+Fit follows viewport resizing; manual zoom preserves scale. Toolbar and CTRL/CMD
++/− zoom around the viewport center, preserving the image point under that center
+after panning. Trackpad scrolling pans; pinch zoom follows the gesture position.
+The percentage is editable: Enter applies a positive decimal (dot or comma),
+Escape/blur discard the draft, and invalid input retains focus with a localized
+error. Shortcuts stay within the active viewer and yield to fields/dialogs.
+ICO frame changes reset geometry while preserving an active frame picker's focus.
+
 Search uses a compact input, current/total match count, previous/next actions and
 case/whole-word/regular-expression toggles. Options expose their pressed state and
 localized tooltips; replacement fields appear only when requested. Search and
