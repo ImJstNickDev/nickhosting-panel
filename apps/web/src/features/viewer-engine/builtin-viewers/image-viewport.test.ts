@@ -8,9 +8,10 @@ import {
 } from './image-viewport.js';
 
 describe('Frame viewport geometry', () => {
-  it('fits natural pixels, preserves small images and respects the one-percent minimum', () => {
+  it('fits large and small images while respecting both zoom limits', () => {
     expect(fitImage({ width: 4000, height: 2000 }, { width: 1000, height: 800 }).scale).toBe(0.25);
-    expect(fitImage({ width: 400, height: 200 }, { width: 1000, height: 800 }).scale).toBe(1);
+    expect(fitImage({ width: 400, height: 200 }, { width: 1000, height: 800 }).scale).toBe(2.5);
+    expect(fitImage({ width: 1, height: 1 }, { width: 1000, height: 800 }).scale).toBe(50);
     expect(fitImage({ width: 100_000, height: 10 }, { width: 300, height: 500 }).scale).toBe(0.01);
   });
   it('keeps the same image point at the center or pointer after zooming a panned image', () => {

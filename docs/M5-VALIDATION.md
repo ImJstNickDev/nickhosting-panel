@@ -7361,3 +7361,34 @@ rounded draft and preservation of the 1.255 internal scale after confirmation,
 alongside existing fit/zoom/resize behavior. Web typecheck and targeted Biome pass.
 Updated desktop screenshot reviewed. No full-suite rerun, infrastructure restart,
 API change or game-server interaction; prior gesture evidence boundaries remain.
+
+## 2026-10-13 — Frame Fit for small images and ICO
+
+Fit previously capped scale at 100%, so small images appeared unchanged when
+switching between Fit and Actual size. It now enlarges small images as well as
+shrinking large images within the existing 1–5000% limits. Actual size remains 100%.
+Transparent canvas pixels remain part of the dimensions; no alpha-cropping,
+parser, file or provider behavior changed.
+
+Validation:
+
+- Image-viewport unit suite: 5/5 passed, including 400×200 upscaling to 250%, tiny
+  images bounded at 5000%, large images and the 1% floor.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts
+  -t 'opens SVG|small transparent|Frame'`: 5/5 passed, 10 skipped, 24.69s. New transparent
+  PNG Fit/Actual/Fit assertions, both ICO frames with keyboard-focus preservation,
+  plus existing geometry/gesture/bounds/mobile regressions.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, targeted Biome and
+  `git diff --check`: passed. Full historical suites were not rerun.
+- Owner-authorized read-only live check: inspected the reported dataset through
+  normal authenticated NickHosting reads (directory metadata and bounded image
+  header ranges). PNG 256×256; ICO 6 frames from 16×16 through 256×256. Actual Chromium
+  dev WebPanel at 1440×1000: PNG Fit 246% / Actual 100% / restored Fit 246%; first
+  ICO frame Fit 3938% / Actual 100% / restored Fit 3938%. No writes to game files,
+  lifecycle operations, new assets or infrastructure/container changes.
+
+Reviewed [transparent PNG fixture](screenshots/m5/file-viewer-frame-transparent-fit-en.png).
+Only sanitized fixtures are published; private helpers/credentials remain ignored.
+Concurrent Owner changes and issue18 are preserved.
+Independent final code/test/screenshot review found no must-fix issues.

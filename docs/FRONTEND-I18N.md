@@ -668,7 +668,9 @@ Optional viewer metadata failures do not prevent independent text editing.
 Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard and
 gestures; its percentage is displayed as a rounded integer while calculations
 retain full precision. Confirming an unchanged rounded draft preserves the scale.
-Zoom is bounded to 1–5000%, including Fit, typed values and gestures. Fit follows
+Zoom is bounded to 1–5000%, including Fit, typed values and gestures. Fit enlarges
+small images and ICO frames or shrinks large ones to the viewport, using the full
+canvas including transparent padding. Actual size always restores 100%. Fit follows
 viewport resizing; manual zoom preserves scale and reclamps position. An image
 that fits stays centered on that axis; a larger image can pan only as far as its
 edges. Toolbar and CTRL/CMD +/− zoom around the viewport center; pinch follows the

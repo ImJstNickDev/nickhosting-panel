@@ -106,6 +106,21 @@ describe('M5 builtin file viewers', () => {
       start += frame.length;
     });
     remote.set('viewer.ico', Buffer.concat([ico, ...frames]));
+    const transparentPng = await page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 256;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('canvas');
+      context.fillStyle = '#315a48';
+      context.beginPath();
+      context.moveTo(70, 40);
+      context.lineTo(210, 128);
+      context.lineTo(70, 216);
+      context.closePath();
+      context.fill();
+      return canvas.toDataURL('image/png').split(',')[1] ?? '';
+    });
+    remote.set('transparent.png', Buffer.from(transparentPng, 'base64'));
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('request', (request) => {
       if (new URL(request.url()).pathname === '/viewer-script-must-not-run') scriptRequests++;
@@ -261,6 +276,7 @@ describe('M5 builtin file viewers', () => {
       .toBe(400);
     expect(await page.evaluate(() => 'viewerScriptRan' in window)).toBe(false);
     expect(scriptRequests).toBe(0);
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
     await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
     await browserExpect(
       page.getByRole('button', { name: 'Zoom: 125%', exact: true }),
@@ -281,9 +297,36 @@ describe('M5 builtin file viewers', () => {
           .evaluate((image) => (image as HTMLImageElement).naturalWidth),
       )
       .toBe(32);
+    const fittedIcon = await frameGeometry();
+    expect(fittedIcon.scale).toBeCloseTo(
+      Math.min(50, fittedIcon.width / 32, fittedIcon.height / 32),
+      5,
+    );
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    await page.getByLabel('Icon image').focus();
     await page.keyboard.press('ArrowUp');
     await browserExpect(page.getByLabel('Icon image')).toHaveValue('0');
     await browserExpect(page.getByLabel('Icon image')).toBeFocused();
+    await browserExpect.poll(async () => (await frameGeometry()).scale).toBeGreaterThan(1);
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    expect(errors).toEqual([]);
+  });
+
+  it('fits a small transparent PNG up to the viewport and restores natural pixels', async () => {
+    await open('transparent.png');
+    await browserExpect(
+      page.getByRole('button', { name: 'Actual size', exact: true }),
+    ).toBeEnabled();
+    const fitted = await frameGeometry();
+    expect(fitted.scale).toBeCloseTo(Math.min(50, fitted.width / 256, fitted.height / 256), 5);
+    expect(fitted.scale).toBeGreaterThan(1);
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    expect((await frameGeometry()).scale).toBeCloseTo(1, 5);
+    await page.getByRole('button', { name: 'Fit', exact: true }).click();
+    expect((await frameGeometry()).scale).toBeCloseTo(fitted.scale, 5);
+    await harness.screenshot(page, 'file-viewer-frame-transparent-fit-en');
     expect(errors).toEqual([]);
   });
 

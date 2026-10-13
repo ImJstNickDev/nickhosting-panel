@@ -16,7 +16,7 @@ export function fitImage(image: ImageSize, viewport: ImageSize): ImageTransform 
   return {
     scale: Math.max(
       imageZoom.min,
-      Math.min(1, viewport.width / image.width, viewport.height / image.height),
+      Math.min(imageZoom.max, viewport.width / image.width, viewport.height / image.height),
     ),
     x: 0,
     y: 0,
