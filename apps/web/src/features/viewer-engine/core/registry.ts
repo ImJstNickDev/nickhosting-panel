@@ -26,6 +26,7 @@ export interface ViewerPreference {
 export interface ViewerDefinition {
   id: ViewerId;
   label: string;
+  description?: string;
   extensions: readonly string[];
 }
 
@@ -33,27 +34,41 @@ export interface ViewerDefinition {
 export const builtinViewers: readonly ViewerDefinition[] = [
   {
     id: 'image',
-    label: 'viewer.image',
+    label: 'viewer.name.image',
+    description: 'viewer.image',
     extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'apng', 'avif', 'svg', 'bmp', 'ico'],
   },
   {
     id: 'audio',
-    label: 'viewer.audio',
+    label: 'viewer.name.audio',
+    description: 'viewer.audio',
     extensions: ['ogg', 'oga', 'mp3', 'wav', 'flac', 'opus', 'm4a', 'aac'],
   },
   {
     id: 'video',
-    label: 'viewer.video',
+    label: 'viewer.name.video',
+    description: 'viewer.video',
     extensions: ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', 'ogv'],
   },
   {
     id: 'archive',
-    label: 'viewer.archive',
+    label: 'viewer.name.archive',
+    description: 'viewer.archive',
     extensions: ['zip', 'jar', 'tar', 'tgz', 'tar.gz', '7z', 'rar', 'tar.bz2', 'tar.xz', 'tar.zst'],
   },
-  { id: 'sqlite', label: 'viewer.sqlite', extensions: ['db', 'sqlite', 'sqlite3'] },
-  { id: 'json', label: 'viewer.json', extensions: ['json', 'jsonc', 'json5'] },
-  { id: 'text', label: 'file.editor', extensions: [] },
+  {
+    id: 'sqlite',
+    label: 'viewer.name.sqlite',
+    description: 'viewer.sqlite',
+    extensions: ['db', 'sqlite', 'sqlite3'],
+  },
+  {
+    id: 'json',
+    label: 'viewer.name.json',
+    description: 'viewer.readOnly',
+    extensions: ['json', 'jsonc', 'json5'],
+  },
+  { id: 'text', label: 'viewer.name.text', description: 'file.editor', extensions: [] },
 ];
 
 export function viewerExtension(name: string) {

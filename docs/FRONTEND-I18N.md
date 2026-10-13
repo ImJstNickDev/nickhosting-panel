@@ -648,6 +648,15 @@ Open with icon and prioritize the current filename over parent breadcrumb
 segments; Home still returns to the file list. Each action has a localized
 accessible name and custom tooltip; unavailable actions are disabled. Find opens
 CodeMirror's search. Archive entries keep their own download/chooser target.
+Open with uses immediate-action cards with distinct first-party marks and stable
+EN/IT names: Scribe (text), Frame (images), Wave (audio), Motion (video), Atlas
+(archives), Data Grid (SQLite) and JSON Tree. A compact personal-choice control
+above the cards defaults to one-time opening; server, game and global defaults
+retain their existing precedence and apply to the file extension. Choosing a card
+saves an explicitly requested preference before opening, retaining the dialog on
+failure. Only X/Escape closes the chooser; no radio selectors or confirmation footer.
+Keyboard activation, functional screen-reader descriptions and pending-save guards
+are shared across builtins and trusted integration viewers.
 Search uses a compact input, current/total match count, previous/next actions and
 case/whole-word/regular-expression toggles. Options expose their pressed state and
 localized tooltips; replacement fields appear only when requested. Search and

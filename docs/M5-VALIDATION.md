@@ -7162,3 +7162,54 @@ existing isolated services and temporary test schemas; no live provider mutation
 new Docker resource, restart or game-file write. Vite applies the UI through HMR.
 Concurrent Owner UI changes remain unstaged; only the shared-header documentation
 paragraph from FRONTEND-I18N.md belongs to this change.
+
+## 2026-10-13 — Open with cards and personal defaults
+
+Open with now uses immediate-action cards, distinct first-party SVG marks and
+stable EN/IT names: Scribe, Frame, Wave, Motion, Atlas, Data Grid and JSON Tree.
+Functional descriptions remain localized and connected to each accessible name.
+One scope selector precedes the cards: one-time opening (no write), or a personal
+extension default for this server, game or all servers. The existing server > game
+> global resolution is unchanged; broader choices never silently delete narrower
+preferences. X/Escape replaces the Cancel/Open footer. Failed preference writes
+retain the chooser; pending writes disable controls and reject duplicate clicks.
+No API, authorization, provider, dependency or persistence contract changes.
+
+Targeted validation:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed, including
+  application and browser-test TypeScript.
+- `scripts/dev.sh pnpm i18n:compile` and `scripts/dev.sh pnpm i18n:check`: passed
+  for EN/IT/pseudolocale. Concurrent Owner translations remain in the working tree;
+  only viewer catalog changes are included in this commit.
+- `scripts/dev.sh pnpm exec biome check` on open-with.tsx, viewer-icon.tsx,
+  core/registry.ts, viewer.css, viewers-web.ts and file-viewers.browser.test.ts:
+  passed; `git diff --check` passed.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/core/registry.test.ts`:
+  3/3 passed, including availability and personal-preference resolution.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts`:
+  8/8 passed in 35.99s. Coverage includes click/Enter/Space opening, all three
+  scopes, one-time choices without writes, failed-write retry, duplicate activation,
+  pending Escape/close guards, editor focus, archive entry targeting and unavailable
+  preview fallback.
+- Independent review found missing accessible functional descriptions behind brand
+  labels, and a single-card CSS selector that also counted the legend. Both fixed;
+  the same browser command with `-t 'preserves JSON|retains the chooser|keeps Italian mobile|keeps the existing editor'`
+  passed all 4 affected journeys in 26.53s (4 others intentionally skipped), with
+  EN/IT accessible-description assertions, single-card centering, 390px/320px
+  layouts, keyboard focus and zero axe violations in the mobile chooser.
+- `python3 scripts/check-governance.py`: passed (737 indexed text files, 219
+  review PNGs, 615 links, 4 TOML files and 44 ignore cases; heuristic secret scan).
+
+Reviewed screenshots: [desktop](screenshots/m5/file-viewer-open-with-desktop-en.png),
+[Italian mobile](screenshots/m5/file-viewer-open-with-mobile-it.png),
+[320px](screenshots/m5/file-viewer-open-with-320-it.png), and
+[failed preference save](screenshots/m5/file-viewer-open-with-error-en.png).
+Independent code/accessibility/UX review reports no remaining must-fix; no manual
+screen-reader session was performed. Browser tests use the actual application with
+isolated provider/viewer API fixtures and temporary schemas on existing approved
+services. No real game-file operation, new container, restart or infrastructure
+change was needed. An HTTPS GET of the dev Vite module returned 200 and confirmed
+the new cards, scope control and accessible descriptions are served through HMR.
+Issue18 and existing production-release boundaries remain unchanged. Concurrent
+Owner UI changes were preserved; no broad historical suite was rerun.

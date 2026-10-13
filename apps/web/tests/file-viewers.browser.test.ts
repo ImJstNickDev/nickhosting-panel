@@ -20,6 +20,9 @@ describe('M5 builtin file viewers', () => {
   let scriptRequests = 0;
   let viewerAvailable = true;
   let preferenceReads = 0;
+  let preferenceWrites = 0;
+  let rejectPreference = false;
+  let holdPreference: Promise<void> | undefined;
 
   beforeAll(async () => {
     harness = await browserHarness();
@@ -106,6 +109,12 @@ describe('M5 builtin file viewers', () => {
       if (action === '/preferences') {
         if (request.method() === 'GET') preferenceReads++;
         if (request.method() === 'PUT') {
+          preferenceWrites++;
+          if (holdPreference) await holdPreference;
+          if (rejectPreference) {
+            await route.fulfill({ status: 503, json: { code: 'internal_error' } });
+            return;
+          }
           const value = request.postDataJSON();
           const found = preferences.findIndex(
             (item) => item.scope === value.scope && item.extension === value.extension,
@@ -265,15 +274,94 @@ describe('M5 builtin file viewers', () => {
     await harness.screenshot(page, 'file-viewer-json-desktop-en');
     await page.getByRole('button', { name: 'Open with', exact: true }).click();
     const dialog = page.getByRole('dialog');
-    await dialog.getByRole('radio', { name: 'Text editor', exact: true }).check();
-    await dialog.getByRole('checkbox', { name: 'Use by default for this file type' }).check();
-    await dialog.getByRole('button', { name: 'Open', exact: true }).click();
+    await browserExpect(dialog.getByRole('radio')).toHaveCount(0);
+    await browserExpect(dialog.getByRole('checkbox')).toHaveCount(0);
+    await browserExpect(dialog.getByRole('button', { name: /^(Open|Cancel)$/ })).toHaveCount(0);
+    await browserExpect(
+      dialog.getByRole('button', { name: 'Scribe', exact: true }),
+    ).toHaveAccessibleDescription('Text editor');
+    await dialog.getByRole('combobox', { name: 'My choice for .json' }).selectOption('server');
+    await harness.screenshot(page, 'file-viewer-open-with-desktop-en');
+    await dialog.getByRole('button', { name: 'Scribe', exact: true }).click();
     await browserExpect(page.locator('.cm-content')).toContainText('9007199254740993123456789');
     expect(preferences).toContainEqual({ scope: 'server', extension: 'json', viewerId: 'text' });
     await root();
     await page.locator('.fm-filename').getByText('viewer.json', { exact: true }).click();
     await browserExpect(page.locator('.cm-content')).toBeVisible();
     expect(await page.getByRole('dialog').isVisible()).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
+  it('opens cards immediately, preserves one-time choices and saves each personal scope', async () => {
+    preferences.length = 0;
+    await open('viewer.json');
+    const writesBefore = preferenceWrites;
+    const trigger = page.getByRole('button', { name: 'Open with', exact: true });
+    await trigger.click();
+    const dialog = page.getByRole('dialog');
+    await browserExpect(
+      dialog.getByRole('button', { name: 'JSON Tree', exact: true }),
+    ).toBeFocused();
+    await page.keyboard.press('Tab');
+    await browserExpect(dialog.getByRole('button', { name: 'Scribe', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await browserExpect(page.locator('.cm-content')).toBeFocused();
+    expect(preferenceWrites).toBe(writesBefore);
+    for (const scope of ['global', 'game', 'server']) {
+      await trigger.click();
+      await dialog.getByRole('combobox').selectOption(scope);
+      await dialog.getByRole('button', { name: 'JSON Tree', exact: true }).focus();
+      await page.keyboard.press('Space');
+      await browserExpect(dialog).not.toBeVisible();
+      expect(preferences).toContainEqual({ scope, extension: 'json', viewerId: 'json' });
+    }
+    await trigger.click();
+    await browserExpect(dialog.getByRole('combobox')).toHaveValue('once');
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await browserExpect(trigger).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  it('retains the chooser on failed preference saves and prevents duplicate activation', async () => {
+    await open('viewer.json5');
+    await page.getByRole('button', { name: 'Open with', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('combobox').selectOption('server');
+    rejectPreference = true;
+    let release!: () => void;
+    holdPreference = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writesBefore = preferenceWrites;
+    const scribe = dialog.getByRole('button', { name: 'Scribe', exact: true });
+    try {
+      await scribe.evaluate((element) => {
+        (element as HTMLButtonElement).click();
+        (element as HTMLButtonElement).click();
+      });
+      await browserExpect.poll(() => preferenceWrites).toBe(writesBefore + 1);
+      await browserExpect(scribe).toBeDisabled();
+      await browserExpect(dialog.getByRole('combobox')).toBeDisabled();
+      await browserExpect(
+        dialog.getByRole('button', { name: 'Close', exact: true }),
+      ).toBeDisabled();
+      await browserExpect(dialog.getByRole('status')).not.toBeEmpty();
+      await page.keyboard.press('Escape');
+      await browserExpect(dialog).toBeVisible();
+    } finally {
+      release();
+      holdPreference = undefined;
+    }
+    await browserExpect(dialog.getByRole('alert')).toBeVisible();
+    await browserExpect(scribe).toBeEnabled();
+    expect(preferences.some((value) => value.extension === 'json5')).toBe(false);
+    await harness.screenshot(page, 'file-viewer-open-with-error-en');
+    rejectPreference = false;
+    await scribe.click();
+    await browserExpect(dialog).not.toBeVisible();
+    await browserExpect(page.locator('.cm-content')).toBeFocused();
+    expect(preferences).toContainEqual({ scope: 'server', extension: 'json5', viewerId: 'text' });
+    preferences.length = 0;
     expect(errors).toEqual([]);
   });
 
@@ -343,10 +431,20 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(page.locator('.ve-json')).toContainText('0x10');
     await harness.screenshot(page, 'file-viewer-json-mobile-it');
     await page.getByRole('button', { name: 'Apri con', exact: true }).click();
-    await browserExpect(page.getByRole('dialog')).toContainText('Albero JSON');
+    await browserExpect(page.getByRole('dialog')).toContainText('JSON Tree');
+    await browserExpect(
+      page.getByRole('dialog').getByRole('button', { name: 'Scribe', exact: true }),
+    ).toHaveAccessibleDescription('Editor di testo');
     await harness.screenshot(page, 'file-viewer-open-with-mobile-it');
     const accessibility = await new AxeBuilder({ page }).include('.ve-chooser').analyze();
     expect(accessibility.violations).toEqual([]);
+    await page.setViewportSize({ width: 320, height: 740 });
+    await browserExpect(page.getByRole('dialog')).toBeVisible();
+    const bounds = await page
+      .getByRole('dialog')
+      .evaluate((element) => ({ width: element.clientWidth, content: element.scrollWidth }));
+    expect(bounds.content).toBeLessThanOrEqual(bounds.width);
+    await harness.screenshot(page, 'file-viewer-open-with-320-it');
     await page.keyboard.press('Escape');
     await browserExpect(page.getByRole('dialog')).not.toBeVisible();
     expect(
@@ -363,8 +461,13 @@ describe('M5 builtin file viewers', () => {
     await page.getByRole('button', { name: 'Open with', exact: true }).click();
     const chooser = page.getByRole('dialog');
     await browserExpect(chooser).toContainText('File previews are not configured.');
-    await browserExpect(chooser.getByRole('radio')).toHaveCount(1);
-    await browserExpect(chooser.getByRole('checkbox')).toHaveCount(0);
+    await browserExpect(chooser.locator('.ve-viewer-card')).toHaveCount(1);
+    await browserExpect(chooser.getByRole('button', { name: 'Scribe', exact: true })).toBeEnabled();
+    await browserExpect(chooser.getByRole('combobox')).toHaveCount(0);
+    const card = await chooser.locator('.ve-viewer-card').boundingBox();
+    const grid = await chooser.locator('.ve-viewer-options').boundingBox();
+    if (!card || !grid) throw new Error('Missing single viewer card');
+    expect(Math.abs(card.x + card.width / 2 - grid.x - grid.width / 2)).toBeLessThan(2);
     await page.keyboard.press('Escape');
     await open('viewer.zip');
     await browserExpect(page.locator('.fm-editor-view')).toContainText('binary file');
