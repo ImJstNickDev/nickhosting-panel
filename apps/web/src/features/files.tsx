@@ -1,3 +1,4 @@
+import type { FilemanContext } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
   type DragEvent,
@@ -19,7 +20,7 @@ import { ApiError, api, apiError, download, queryClient, upload } from '../api/c
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
-import { ActionForm, Dialog, Empty, ErrorNotice, Input, Time, text } from '../components/ui.js';
+import { ActionForm, Dialog, Empty, ErrorNotice, Input, text } from '../components/ui.js';
 import {
   type FileClipboard,
   type FileOrder,
@@ -68,14 +69,30 @@ import { clearFileListing, readFileListing, writeFileListing } from './file-list
 import { FilePathPicker } from './file-path-picker.js';
 import { FileSelectionSummary, useFileTransfer } from './file-transfer-flow.js';
 import { nextUpload, planUploadBatch, runUploadPool } from './file-upload-queue.js';
+import { gameFilemanExtensions } from './fileman/extensions.js';
+import { FilemanHost, FilemanSlot } from './fileman/host.js';
+import {
+  FilemanBreadcrumbs,
+  FilemanContextMenu,
+  FilemanListing,
+  FilemanListSkeleton,
+  FilemanParent,
+  FilemanSearch,
+  FilemanSelectionBar,
+  FilemanToolbar,
+  FilemanViewToggle,
+  FilemanToolbarIcon as ToolbarIcon,
+} from './fileman/presentation.js';
 import { FolderUploadError, planFolderUpload, prepareFolderUpload } from './folder-upload.js';
 import { InlineFileRename } from './inline-file-rename.js';
 import { validFilename } from './inline-file-rename-model.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
+import { isSingleCompressed } from './viewer-engine/core/compressed.js';
 import {
   availableViewers,
   preferredViewer,
+  savedViewer,
   selectableViewers,
   type ViewerId,
   type ViewerSource,
@@ -126,45 +143,6 @@ const filePlaceholders = Array.from({ length: 12 }, (_, index) => ({
   width: `${40 + (index % 4) * 12}%`,
 }));
 
-function FileListSkeleton({ view }: { view: 'list' | 'grid' }) {
-  const t = useT();
-  return (
-    <>
-      <div className={`fm-list fm-${view} fm-loading`} aria-busy="true">
-        <div className="fm-columns" aria-hidden="true">
-          <span className="fm-skeleton fm-skeleton-check" />
-          <span className="fm-skeleton fm-skeleton-heading" />
-          <span className="fm-skeleton fm-skeleton-heading" />
-          <span className="fm-skeleton fm-skeleton-heading" />
-        </div>
-        <ul aria-hidden="true">
-          {filePlaceholders.map(({ id, width }) => (
-            <li className="fm-entry" key={id}>
-              <span className="fm-skeleton fm-skeleton-check" />
-              <span className="fm-filename">
-                <span className="fm-skeleton fm-skeleton-icon" />
-                <span className="fm-skeleton fm-skeleton-name" style={{ width }} />
-              </span>
-              <span className="fm-size">
-                <span className="fm-skeleton" />
-              </span>
-              <span className="fm-date">
-                <span className="fm-skeleton" />
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
-      <div className="fm-count" aria-hidden="true">
-        <span className="fm-skeleton fm-skeleton-heading" />
-      </div>
-      <span className="sr-only" role="status">
-        {t('web.loading')}
-      </span>
-    </>
-  );
-}
-
 function FileEditorSkeleton() {
   const t = useT();
   return (
@@ -181,83 +159,6 @@ function FileEditorSkeleton() {
         {t('file.editorLoading')}
       </span>
     </div>
-  );
-}
-function ToolbarIcon({
-  kind,
-}: {
-  kind:
-    | 'folder'
-    | 'file'
-    | 'upload'
-    | 'uploadFolder'
-    | 'refresh'
-    | 'path'
-    | 'rename'
-    | 'home'
-    | 'save'
-    | 'undo'
-    | 'redo'
-    | 'find'
-    | 'download'
-    | 'move'
-    | 'copy'
-    | 'delete'
-    | 'clear';
-}) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      {kind === 'download' ? (
-        <path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" />
-      ) : kind === 'move' ? (
-        <path d="M3 7V5h7l2 3h9v12H3V7Zm4 7h10m-3-3 3 3-3 3" />
-      ) : kind === 'copy' ? (
-        <path d="M9 8h12v13H9ZM5 16H3V3h12v2" />
-      ) : kind === 'delete' ? (
-        <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />
-      ) : kind === 'clear' ? (
-        <path d="m6 6 12 12M6 18 18 6" />
-      ) : kind === 'home' ? (
-        <path d="m3 11 9-8 9 8M5 10v11h5v-7h4v7h5V10" />
-      ) : kind === 'save' ? (
-        <path d="M4 3h13l3 3v15H4ZM8 3v6h8V3M8 21v-8h8v8" />
-      ) : kind === 'undo' ? (
-        <path d="m8 4-5 5 5 5M3 9h11a6 6 0 0 1 0 12" />
-      ) : kind === 'redo' ? (
-        <path d="m16 4 5 5-5 5M21 9H10a6 6 0 0 0 0 12" />
-      ) : kind === 'find' ? (
-        <>
-          <circle cx="10" cy="10" r="6" />
-          <path d="m15 15 6 6" />
-        </>
-      ) : kind === 'path' ? (
-        <path d="M3 6h7l2 3h9v11H3V6Zm5 9h8m-3-3 3 3-3 3" />
-      ) : kind === 'rename' ? (
-        <path d="m15 5 4 4M4 20l5-1L20 8a2.8 2.8 0 0 0-4-4L5 15l-1 5Z" />
-      ) : kind === 'refresh' ? (
-        <path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
-      ) : kind === 'upload' ? (
-        <path d="M12 16V3m-4 4 4-4 4 4M4 15v5h16v-5" />
-      ) : kind === 'file' ? (
-        <>
-          <path d="M14 3H5v18h14V8l-5-5v5h5" />
-          <path d="M12 12v6m-3-3h6" />
-        </>
-      ) : (
-        <>
-          <path d="M3 7V5h7l2 3h9v12H3V7Z" />
-          {kind === 'folder' ? <path d="M12 11v6m-3-3h6" /> : <path d="M12 18v-7m-3 3 3-3 3 3" />}
-        </>
-      )}
-    </svg>
   );
 }
 export function FilesPage({ serverId }: { serverId: string }) {
@@ -349,13 +250,18 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     archives?: string[];
   }>();
   const [viewerBreadcrumb, setViewerBreadcrumb] = useState<HTMLOListElement | null>(null);
+  const [viewerContext, setViewerContext] = useState<Partial<FilemanContext>>({});
   const [viewed, setViewed] = useState<{
     entry: ServerFile;
     source: ViewerSource;
     viewerId?: ViewerId;
+    autoDecodeCompressed?: boolean;
   }>();
   const [viewerBeforeHome, setViewerBeforeHome] = useState<HTMLSpanElement | null>(null);
   const [viewerAfterHome, setViewerAfterHome] = useState<HTMLSpanElement | null>(null);
+  const [viewerSearch, setViewerSearch] = useState<HTMLSpanElement | null>(null);
+  const [viewerView, setViewerView] = useState<HTMLSpanElement | null>(null);
+  const [viewerTools, setViewerTools] = useState<HTMLSpanElement | null>(null);
   const [openWith, setOpenWith] = useState<{ entry: ServerFile; source: ViewerSource }>();
   const [targets, setTargets] = useState<string[]>([]);
   const [content, setContent] = useState('');
@@ -908,7 +814,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       (viewerCapabilities.data?.available === true
         ? Boolean(preferredViewer(viewerSource(menu.entry), viewerPreferences.data?.preferences))
         : availableViewers(viewerSource(menu.entry)).some((choice) => choice.id === 'text')));
-  async function open(entry: ServerFile, folder = directory, forcedViewer?: ViewerId) {
+  async function open(
+    entry: ServerFile,
+    folder = directory,
+    forcedViewer?: ViewerId,
+    autoDecodeCompressed = forcedViewer !== 'archive',
+  ) {
     if (mutationRunning.current || transferFlow.active) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
     if (entry.is_symlink) return;
@@ -938,6 +849,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             (await queryClient.ensureQueryData(viewerPreferencesQuery(serverId, viewerIdentity)))
               .preferences;
           viewerId = preferredViewer(source, preferences);
+          if (isSingleCompressed(source) && savedViewer(source, preferences) === 'archive')
+            autoDecodeCompressed = false;
         }
       } catch (failure) {
         setError(failure);
@@ -952,13 +865,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       )
         return;
     }
-    if (viewerId && viewerId !== 'text') {
+    if (viewerId && (viewerId !== 'text' || (autoDecodeCompressed && isSingleCompressed(source)))) {
       cancelRead();
       setPathEditing(false);
       setDirectory(folder);
       setTargets([entry.name]);
       setDirty(false);
-      setViewed({ entry, source, viewerId });
+      setViewed({ entry, source, viewerId, autoDecodeCompressed });
       setMode('view');
       setMenu(undefined);
       return;
@@ -1006,8 +919,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       if (sequence === readSequence.current) setReading(false);
     }
   }
-  const reopenViewer = useEffectEvent((entry: ServerFile, folder: string, choice?: ViewerId) =>
-    open(entry, folder, choice),
+  const reopenViewer = useEffectEvent(
+    (entry: ServerFile, folder: string, choice?: ViewerId, autoDecodeCompressed?: boolean) =>
+      open(entry, folder, choice, autoDecodeCompressed),
   );
   useEffect(() => {
     if (!viewerKey || restoreAttempt.current === viewerKey) return;
@@ -1043,7 +957,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const choice = selectableViewers(source).some((item) => item.id === reloadViewer.viewerId)
       ? reloadViewer.viewerId
       : undefined;
-    void reopenViewer(entry, directory, choice).finally(() => {
+    void reopenViewer(entry, directory, choice, reloadViewer.autoDecodeCompressed).finally(() => {
       if (mounted.current) setRestoredViewerKey(viewerKey);
     });
   }, [
@@ -1062,7 +976,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     writeViewerBookmark(
       viewerKey,
       viewing && viewed
-        ? { path: viewed.source.path, viewerId: viewed.viewerId ?? 'text' }
+        ? {
+            path: viewed.source.path,
+            viewerId: viewed.viewerId ?? 'text',
+            autoDecodeCompressed: viewed.autoDecodeCompressed,
+          }
         : mode === 'edit' && activeFile
           ? { path: join(directory, activeFile), viewerId: 'text' }
           : undefined,
@@ -1888,417 +1806,414 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     ['queued', 'waiting', 'uploading', 'confirming'].includes(item.status),
   );
   return (
-    <section
-      className="file-manager"
-      ref={managerRef}
-      aria-label={t('web.files')}
-      tabIndex={-1}
-      onKeyDown={keyboard}
-      onDragEnter={(event) => {
-        if (!displaying && !fileActionsBusy && event.dataTransfer.types.includes('Files')) {
-          event.preventDefault();
-          setDropActive(true);
-        }
+    <FilemanHost
+      context={{
+        serverId,
+        gameId: server.data?.gameId,
+        path: editing ? join(directory, mode === 'new' ? newName : (targets[0] ?? '')) : directory,
+        surface: displaying ? 'viewer' : 'directory',
+        viewerId: displaying ? (viewing ? viewed?.viewerId : 'text') : undefined,
+        readOnly: viewing || !canMutate,
+        ...(viewing ? viewerContext : {}),
       }}
-      onDragOver={(event) => {
-        if (
-          !displaying &&
-          event.dataTransfer.types.includes(dragType) &&
-          (event.target as Element).closest('.fm-list')
-        )
-          dragOverFolder(event, directory);
-        if (!displaying && event.dataTransfer.types.includes('Files')) {
-          event.preventDefault();
-          event.dataTransfer.dropEffect = uploadAvailable && !fileActionsBusy ? 'copy' : 'none';
-        }
-      }}
-      onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropActive(false);
-      }}
-      onDrop={(event) => {
-        if (
-          !displaying &&
-          event.dataTransfer.types.includes(dragType) &&
-          (event.target as Element).closest('.fm-list')
-        ) {
-          dropFolder(event, directory);
-          return;
-        }
-        if (!displaying && event.dataTransfer.types.includes('Files')) {
-          event.preventDefault();
-          setDropActive(false);
+      extensions={gameFilemanExtensions}
+    >
+      <section
+        className="file-manager"
+        ref={managerRef}
+        aria-label={t('web.files')}
+        tabIndex={-1}
+        onKeyDown={keyboard}
+        onDragEnter={(event) => {
+          if (!displaying && !fileActionsBusy && event.dataTransfer.types.includes('Files')) {
+            event.preventDefault();
+            setDropActive(true);
+          }
+        }}
+        onDragOver={(event) => {
           if (
-            [...event.dataTransfer.items].some((item) => item.webkitGetAsEntry?.()?.isDirectory)
+            !displaying &&
+            event.dataTransfer.types.includes(dragType) &&
+            (event.target as Element).closest('.fm-list')
+          )
+            dragOverFolder(event, directory);
+          if (!displaying && event.dataTransfer.types.includes('Files')) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = uploadAvailable && !fileActionsBusy ? 'copy' : 'none';
+          }
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropActive(false);
+        }}
+        onDrop={(event) => {
+          if (
+            !displaying &&
+            event.dataTransfer.types.includes(dragType) &&
+            (event.target as Element).closest('.fm-list')
           ) {
-            setError({ messageKey: 'file.useFolderUpload' });
+            dropFolder(event, directory);
             return;
           }
-          acceptUploads([...event.dataTransfer.files]);
-        }
-      }}
-    >
-      <div className={`fm-toolbar ${displaying ? 'fm-toolbar-editing' : ''}`}>
-        {pathEditing ? (
-          <FilePathPicker
-            serverId={serverId}
-            directory={directory}
-            focusSignal={pathFocusSignal}
-            onNavigate={(path) => navigate(path, true)}
-            onOpenFile={(entry, folder) => void open(entry, folder)}
-            onClose={() => setPathEditing(false)}
-          />
-        ) : (
-          <nav aria-label={t('file.breadcrumb')} className="fm-breadcrumb">
-            <ol ref={setViewerBreadcrumb}>
-              {fileBreadcrumbs(directory).map((part, index, all) => (
-                <li key={part.path}>
+          if (!displaying && event.dataTransfer.types.includes('Files')) {
+            event.preventDefault();
+            setDropActive(false);
+            if (
+              [...event.dataTransfer.items].some((item) => item.webkitGetAsEntry?.()?.isDirectory)
+            ) {
+              setError({ messageKey: 'file.useFolderUpload' });
+              return;
+            }
+            acceptUploads([...event.dataTransfer.files]);
+          }
+        }}
+      >
+        <FilemanToolbar editing={displaying}>
+          {pathEditing ? (
+            <FilePathPicker
+              serverId={serverId}
+              directory={directory}
+              focusSignal={pathFocusSignal}
+              onNavigate={(path) => navigate(path, true)}
+              onOpenFile={(entry, folder) => void open(entry, folder)}
+              onClose={() => setPathEditing(false)}
+            />
+          ) : (
+            <FilemanBreadcrumbs
+              parts={fileBreadcrumbs(directory)}
+              listRef={setViewerBreadcrumb}
+              current={!displaying}
+              onNavigate={navigate}
+              buttonProps={(part) => ({
+                className: hoverDestination === part.path ? 'fm-drop-hover' : '',
+                onDragOver: (event) => dragOverFolder(event, part.path),
+                onDragLeave: (event) => dragLeaveFolder(event, part.path),
+                onDrop: (event) => dropFolder(event, part.path),
+              })}
+              trailing={
+                displaying &&
+                !viewing && (
+                  <li>
+                    {inlineRename && mode === 'edit' ? (
+                      <InlineFileRename
+                        name={targets[0] ?? ''}
+                        onCommit={renameEditor}
+                        onCancel={() => {
+                          const focused = document.activeElement?.closest('.fm-inline-rename');
+                          setInlineRename(false);
+                          if (focused) requestAnimationFrame(() => editorControls?.focus());
+                        }}
+                        onComplete={() => {
+                          setInlineRename(false);
+                        }}
+                      />
+                    ) : (
+                      <span aria-current="page" className="fm-current-file">
+                        {mode === 'new' ? newName || t('service.newFile') : targets[0]}
+                        {dirty && <span aria-hidden="true"> *</span>}
+                      </span>
+                    )}
+                  </li>
+                )
+              }
+              actions={
+                !displaying ? (
+                  <Tooltip
+                    placement="cursor"
+                    content={t('file.editPath', { shortcut: pathShortcut })}
+                  >
+                    <button
+                      type="button"
+                      className="fm-tool fm-path-edit"
+                      aria-keyshortcuts="Alt+G"
+                      aria-label={t('file.editPath', { shortcut: pathShortcut })}
+                      onClick={editPath}
+                    >
+                      <ToolbarIcon kind="path" />
+                    </button>
+                  </Tooltip>
+                ) : (
+                  mode === 'edit' &&
+                  canManage && (
+                    <Tooltip
+                      placement="cursor"
+                      content={t(dirty ? 'file.saveBeforeRename' : 'service.rename')}
+                    >
+                      <button
+                        type="button"
+                        className="fm-tool fm-path-edit"
+                        aria-label={t('service.rename')}
+                        disabled={
+                          !canMutate || dirty || reading || mutating || saving || inlineRename
+                        }
+                        onClick={() => setInlineRename(true)}
+                      >
+                        <ToolbarIcon kind="rename" />
+                      </button>
+                    </Tooltip>
+                  )
+                )
+              }
+            />
+          )}
+          {!displaying && (
+            <>
+              <FilemanSearch
+                inputRef={searchInput}
+                value={search}
+                onChange={setSearch}
+                onFocus={() => setPathEditing(false)}
+                shortcut={macKeyboard ? '⌥ + K' : 'ALT + K'}
+              />
+              <div className="fm-tools">
+                <Tooltip placement="cursor" content={t('file.refresh')}>
                   <button
                     type="button"
-                    className={`text-button ${hoverDestination === part.path ? 'fm-drop-hover' : ''}`}
-                    aria-current={!displaying && index === all.length - 1 ? 'page' : undefined}
-                    onClick={() => navigate(part.path)}
-                    onDragOver={(event) => dragOverFolder(event, part.path)}
-                    onDragLeave={(event) => dragLeaveFolder(event, part.path)}
-                    onDrop={(event) => dropFolder(event, part.path)}
+                    className="fm-tool"
+                    aria-label={t('file.refresh')}
+                    disabled={files.isFetching}
+                    onClick={() => void files.refetch()}
                   >
-                    {index === 0 ? t('file.root') : part.name}
-                  </button>
-                </li>
-              ))}
-              {displaying && !viewing && (
-                <li>
-                  {inlineRename && mode === 'edit' ? (
-                    <InlineFileRename
-                      name={targets[0] ?? ''}
-                      onCommit={renameEditor}
-                      onCancel={() => {
-                        const focused = document.activeElement?.closest('.fm-inline-rename');
-                        setInlineRename(false);
-                        if (focused) requestAnimationFrame(() => editorControls?.focus());
-                      }}
-                      onComplete={() => {
-                        setInlineRename(false);
-                      }}
-                    />
-                  ) : (
-                    <span aria-current="page" className="fm-current-file">
-                      {mode === 'new' ? newName || t('service.newFile') : targets[0]}
-                      {dirty && <span aria-hidden="true"> *</span>}
-                    </span>
-                  )}
-                </li>
-              )}
-            </ol>
-            {!displaying ? (
-              <Tooltip placement="cursor" content={t('file.editPath', { shortcut: pathShortcut })}>
-                <button
-                  type="button"
-                  className="fm-tool fm-path-edit"
-                  aria-keyshortcuts="Alt+G"
-                  aria-label={t('file.editPath', { shortcut: pathShortcut })}
-                  onClick={editPath}
-                >
-                  <ToolbarIcon kind="path" />
-                </button>
-              </Tooltip>
-            ) : (
-              mode === 'edit' &&
-              canManage && (
-                <Tooltip
-                  placement="cursor"
-                  content={t(dirty ? 'file.saveBeforeRename' : 'service.rename')}
-                >
-                  <button
-                    type="button"
-                    className="fm-tool fm-path-edit"
-                    aria-label={t('service.rename')}
-                    disabled={!canMutate || dirty || reading || mutating || saving || inlineRename}
-                    onClick={() => setInlineRename(true)}
-                  >
-                    <ToolbarIcon kind="rename" />
+                    <ToolbarIcon kind="refresh" />
                   </button>
                 </Tooltip>
-              )
-            )}
-          </nav>
-        )}
-        {!displaying && (
-          <>
-            <div className="fm-search">
-              <input
-                ref={searchInput}
-                type="search"
-                aria-label={t('file.search')}
-                aria-keyshortcuts="Alt+K"
-                placeholder={t('file.searchLabel')}
-                value={search}
-                onFocus={() => setPathEditing(false)}
-                onChange={(event) => setSearch(event.target.value)}
-              />
-              <span aria-hidden="true">
-                <kbd>{macKeyboard ? '⌥ + K' : 'ALT + K'}</kbd>
-              </span>
-            </div>
-            <div className="fm-tools">
-              <Tooltip placement="cursor" content={t('file.refresh')}>
+                {canManage && (
+                  <>
+                    <Tooltip placement="cursor" content={t('service.newFolder')}>
+                      <button
+                        type="button"
+                        className="fm-tool"
+                        aria-label={t('service.newFolder')}
+                        disabled={!canMutate || preparingFolder || fileActionsBusy}
+                        onClick={() => chooseMode('mkdir', [])}
+                      >
+                        <ToolbarIcon kind="folder" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip placement="cursor" content={t('service.newFile')}>
+                      <button
+                        type="button"
+                        className="fm-tool"
+                        aria-label={t('service.newFile')}
+                        disabled={!canMutate || preparingFolder || fileActionsBusy}
+                        onClick={() => chooseMode('new', [])}
+                      >
+                        <ToolbarIcon kind="file" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip
+                      placement="cursor"
+                      content={
+                        !uploadAvailable
+                          ? t(uploadReason)
+                          : preparingFolder
+                            ? t('file.folderPreparing')
+                            : t('web.upload')
+                      }
+                    >
+                      <button
+                        type="button"
+                        className="fm-tool"
+                        aria-label={t('web.upload')}
+                        disabled={fileActionsBusy}
+                        aria-disabled={!uploadAvailable || preparingFolder}
+                        onClick={() => {
+                          if (uploadAvailable && !preparingFolder) fileInput.current?.click();
+                          else
+                            setError({
+                              messageKey: preparingFolder ? 'file.folderPreparing' : uploadReason,
+                            });
+                        }}
+                      >
+                        <ToolbarIcon kind="upload" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip
+                      placement="cursor"
+                      content={
+                        !uploadAvailable
+                          ? t(uploadReason)
+                          : preparingFolder || uploadsBusy
+                            ? t('file.waitUploads')
+                            : t('file.uploadFolder')
+                      }
+                    >
+                      <button
+                        type="button"
+                        className="fm-tool"
+                        aria-label={t('file.uploadFolder')}
+                        disabled={fileActionsBusy}
+                        aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
+                        onClick={() => {
+                          if (uploadAvailable && !preparingFolder && !uploadsBusy)
+                            folderInput.current?.click();
+                          else
+                            setError({
+                              messageKey: !uploadAvailable ? uploadReason : 'file.waitUploads',
+                            });
+                        }}
+                      >
+                        <ToolbarIcon kind="uploadFolder" />
+                      </button>
+                    </Tooltip>
+                    <input
+                      ref={fileInput}
+                      type="file"
+                      multiple
+                      className="fm-file-input"
+                      aria-label={t('service.selectFile')}
+                      onChange={(event) => {
+                        acceptUploads([...(event.target.files ?? [])]);
+                        event.target.value = '';
+                      }}
+                    />
+                    <input
+                      ref={folderInput}
+                      type="file"
+                      multiple
+                      {...{ webkitdirectory: '' }}
+                      className="fm-file-input"
+                      aria-label={t('file.uploadFolder')}
+                      onChange={(event) => {
+                        void acceptFolder([...(event.target.files ?? [])]);
+                        event.target.value = '';
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+              <FilemanViewToggle view={view} onChange={setView} />
+            </>
+          )}
+          {viewing && <span className="fm-viewer-chrome-slot" ref={setViewerSearch} />}
+          {viewing && (
+            <div className="fm-editor-toolbar">
+              <span className="fm-viewer-chrome-slot" ref={setViewerTools} />
+              <span className="fm-viewer-action-slot" ref={setViewerBeforeHome} />
+              <Tooltip placement="cursor" content={t('file.backToFiles')}>
                 <button
                   type="button"
                   className="fm-tool"
-                  aria-label={t('file.refresh')}
-                  disabled={files.isFetching}
-                  onClick={() => void files.refetch()}
+                  aria-label={t('file.backToFiles')}
+                  onClick={closeEditor}
                 >
-                  <ToolbarIcon kind="refresh" />
+                  <ToolbarIcon kind="home" />
                 </button>
               </Tooltip>
-              {canManage && (
-                <>
-                  <Tooltip placement="cursor" content={t('service.newFolder')}>
-                    <button
-                      type="button"
-                      className="fm-tool"
-                      aria-label={t('service.newFolder')}
-                      disabled={!canMutate || preparingFolder || fileActionsBusy}
-                      onClick={() => chooseMode('mkdir', [])}
-                    >
-                      <ToolbarIcon kind="folder" />
-                    </button>
-                  </Tooltip>
-                  <Tooltip placement="cursor" content={t('service.newFile')}>
-                    <button
-                      type="button"
-                      className="fm-tool"
-                      aria-label={t('service.newFile')}
-                      disabled={!canMutate || preparingFolder || fileActionsBusy}
-                      onClick={() => chooseMode('new', [])}
-                    >
-                      <ToolbarIcon kind="file" />
-                    </button>
-                  </Tooltip>
-                  <Tooltip
-                    placement="cursor"
-                    content={
-                      !uploadAvailable
-                        ? t(uploadReason)
-                        : preparingFolder
-                          ? t('file.folderPreparing')
-                          : t('web.upload')
+              <span className="fm-viewer-action-slot" ref={setViewerAfterHome} />
+            </div>
+          )}
+          {viewing && <span className="fm-viewer-chrome-slot" ref={setViewerView} />}
+          {editing && (
+            <div className="fm-editor-toolbar" role="toolbar" aria-label={t('file.editor')}>
+              {(
+                [
+                  {
+                    kind: 'save',
+                    label: 'web.save',
+                    disabled:
+                      !canMutate ||
+                      reading ||
+                      mutating ||
+                      saving ||
+                      !!readError ||
+                      editorAvailability !== 'text' ||
+                      (!dirty && mode !== 'new'),
+                    run: saveShortcut,
+                  },
+                  {
+                    kind: 'undo',
+                    label: 'editor.undo',
+                    disabled: (mutating && !renaming) || !editorControls?.canUndo,
+                    run: () => editorControls?.undo(),
+                  },
+                  {
+                    kind: 'redo',
+                    label: 'editor.redo',
+                    disabled: (mutating && !renaming) || !editorControls?.canRedo,
+                    run: () => editorControls?.redo(),
+                  },
+                  {
+                    kind: 'find',
+                    label: 'editor.search',
+                    disabled: reading || !editorControls,
+                    run: () => editorControls?.find(),
+                  },
+                ] as const
+              ).map((action) => (
+                <Tooltip key={action.kind} placement="cursor" content={t(action.label)}>
+                  <button
+                    type="button"
+                    className="fm-tool"
+                    disabled={action.disabled}
+                    aria-label={t(action.label)}
+                    onClick={action.run}
+                  >
+                    <ToolbarIcon kind={action.kind} />
+                  </button>
+                </Tooltip>
+              ))}
+              {mode === 'edit' && (
+                <Tooltip placement="cursor" content={t('viewer.openWith')}>
+                  <button
+                    type="button"
+                    className="fm-viewer-action fm-viewer-open-with"
+                    aria-label={t('viewer.openWith')}
+                    disabled={dirty || saving || reading || mutating}
+                    onClick={() => {
+                      const entry = files.data?.find((item) => item.name === targets[0]);
+                      if (entry)
+                        setOpenWith({
+                          entry,
+                          source: viewerSource(entry),
+                        });
+                    }}
+                  >
+                    <OpenWithIcon />
+                    <span className="fm-viewer-action-label">{t('viewer.openWith')}</span>
+                  </button>
+                </Tooltip>
+              )}
+              <Tooltip placement="cursor" content={t('file.backToFiles')}>
+                <button
+                  type="button"
+                  className="fm-tool"
+                  aria-label={t('file.backToFiles')}
+                  disabled={mutating}
+                  onClick={closeEditor}
+                >
+                  <ToolbarIcon kind="home" />
+                </button>
+              </Tooltip>
+              {mode === 'edit' && (
+                <Tooltip placement="cursor" content={t('web.download')}>
+                  <button
+                    type="button"
+                    className="fm-tool"
+                    aria-label={t('web.download')}
+                    disabled={!transfers.data?.download.available}
+                    onClick={() =>
+                      download(
+                        `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, targets[0] ?? ''))}`,
+                      )
                     }
                   >
-                    <button
-                      type="button"
-                      className="fm-tool"
-                      aria-label={t('web.upload')}
-                      disabled={fileActionsBusy}
-                      aria-disabled={!uploadAvailable || preparingFolder}
-                      onClick={() => {
-                        if (uploadAvailable && !preparingFolder) fileInput.current?.click();
-                        else
-                          setError({
-                            messageKey: preparingFolder ? 'file.folderPreparing' : uploadReason,
-                          });
-                      }}
-                    >
-                      <ToolbarIcon kind="upload" />
-                    </button>
-                  </Tooltip>
-                  <Tooltip
-                    placement="cursor"
-                    content={
-                      !uploadAvailable
-                        ? t(uploadReason)
-                        : preparingFolder || uploadsBusy
-                          ? t('file.waitUploads')
-                          : t('file.uploadFolder')
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="fm-tool"
-                      aria-label={t('file.uploadFolder')}
-                      disabled={fileActionsBusy}
-                      aria-disabled={!uploadAvailable || preparingFolder || uploadsBusy}
-                      onClick={() => {
-                        if (uploadAvailable && !preparingFolder && !uploadsBusy)
-                          folderInput.current?.click();
-                        else
-                          setError({
-                            messageKey: !uploadAvailable ? uploadReason : 'file.waitUploads',
-                          });
-                      }}
-                    >
-                      <ToolbarIcon kind="uploadFolder" />
-                    </button>
-                  </Tooltip>
-                  <input
-                    ref={fileInput}
-                    type="file"
-                    multiple
-                    className="fm-file-input"
-                    aria-label={t('service.selectFile')}
-                    onChange={(event) => {
-                      acceptUploads([...(event.target.files ?? [])]);
-                      event.target.value = '';
-                    }}
-                  />
-                  <input
-                    ref={folderInput}
-                    type="file"
-                    multiple
-                    {...{ webkitdirectory: '' }}
-                    className="fm-file-input"
-                    aria-label={t('file.uploadFolder')}
-                    onChange={(event) => {
-                      void acceptFolder([...(event.target.files ?? [])]);
-                      event.target.value = '';
-                    }}
-                  />
-                </>
+                    <ToolbarIcon kind="download" />
+                  </button>
+                </Tooltip>
               )}
             </div>
-            <fieldset className="fm-view" aria-label={t('file.view')}>
-              <button
-                type="button"
-                className="secondary fm-icon-button"
-                aria-label={t('file.list')}
-                aria-pressed={view === 'list'}
-                onClick={() => setView('list')}
-              >
-                ☰
-              </button>
-              <button
-                type="button"
-                className="secondary fm-icon-button"
-                aria-label={t('file.grid')}
-                aria-pressed={view === 'grid'}
-                onClick={() => setView('grid')}
-              >
-                ▦
-              </button>
-            </fieldset>
-          </>
-        )}
-        {viewing && (
-          <div className="fm-editor-toolbar">
-            <span className="fm-viewer-action-slot" ref={setViewerBeforeHome} />
-            <Tooltip placement="cursor" content={t('file.backToFiles')}>
-              <button
-                type="button"
-                className="fm-tool"
-                aria-label={t('file.backToFiles')}
-                onClick={closeEditor}
-              >
-                <ToolbarIcon kind="home" />
-              </button>
-            </Tooltip>
-            <span className="fm-viewer-action-slot" ref={setViewerAfterHome} />
-          </div>
-        )}
-        {editing && (
-          <div className="fm-editor-toolbar" role="toolbar" aria-label={t('file.editor')}>
-            {(
-              [
-                {
-                  kind: 'save',
-                  label: 'web.save',
-                  disabled:
-                    !canMutate ||
-                    reading ||
-                    mutating ||
-                    saving ||
-                    !!readError ||
-                    editorAvailability !== 'text' ||
-                    (!dirty && mode !== 'new'),
-                  run: saveShortcut,
-                },
-                {
-                  kind: 'undo',
-                  label: 'editor.undo',
-                  disabled: (mutating && !renaming) || !editorControls?.canUndo,
-                  run: () => editorControls?.undo(),
-                },
-                {
-                  kind: 'redo',
-                  label: 'editor.redo',
-                  disabled: (mutating && !renaming) || !editorControls?.canRedo,
-                  run: () => editorControls?.redo(),
-                },
-                {
-                  kind: 'find',
-                  label: 'editor.search',
-                  disabled: reading || !editorControls,
-                  run: () => editorControls?.find(),
-                },
-              ] as const
-            ).map((action) => (
-              <Tooltip key={action.kind} placement="cursor" content={t(action.label)}>
-                <button
-                  type="button"
-                  className="fm-tool"
-                  disabled={action.disabled}
-                  aria-label={t(action.label)}
-                  onClick={action.run}
-                >
-                  <ToolbarIcon kind={action.kind} />
-                </button>
-              </Tooltip>
-            ))}
-            {mode === 'edit' && (
-              <Tooltip placement="cursor" content={t('viewer.openWith')}>
-                <button
-                  type="button"
-                  className="fm-viewer-action fm-viewer-open-with"
-                  aria-label={t('viewer.openWith')}
-                  disabled={dirty || saving || reading || mutating}
-                  onClick={() => {
-                    const entry = files.data?.find((item) => item.name === targets[0]);
-                    if (entry)
-                      setOpenWith({
-                        entry,
-                        source: viewerSource(entry),
-                      });
-                  }}
-                >
-                  <OpenWithIcon />
-                  <span className="fm-viewer-action-label">{t('viewer.openWith')}</span>
-                </button>
-              </Tooltip>
-            )}
-            <Tooltip placement="cursor" content={t('file.backToFiles')}>
-              <button
-                type="button"
-                className="fm-tool"
-                aria-label={t('file.backToFiles')}
-                disabled={mutating}
-                onClick={closeEditor}
-              >
-                <ToolbarIcon kind="home" />
-              </button>
-            </Tooltip>
-            {mode === 'edit' && (
-              <Tooltip placement="cursor" content={t('web.download')}>
-                <button
-                  type="button"
-                  className="fm-tool"
-                  aria-label={t('web.download')}
-                  disabled={!transfers.data?.download.available}
-                  onClick={() =>
-                    download(
-                      `${serverPath(serverId)}/files/content?path=${encodeURIComponent(join(directory, targets[0] ?? ''))}`,
-                    )
-                  }
-                >
-                  <ToolbarIcon kind="download" />
-                </button>
-              </Tooltip>
-            )}
-          </div>
-        )}
-      </div>
-      {!displaying && totalSelected > 0 && (
-        <section className="fm-selection" aria-label={t('file.selection')}>
-          <span className="fm-selection-count">{t('file.selected', { count: totalSelected })}</span>
-          <div className="fm-selection-actions">
+          )}
+        </FilemanToolbar>
+        {!displaying && totalSelected > 0 && (
+          <FilemanSelectionBar
+            count={totalSelected}
+            onClear={() => {
+              managerRef.current
+                ?.querySelector<HTMLInputElement>('.fm-entry input[type="checkbox"]:checked')
+                ?.focus({ preventScroll: true });
+              setSelected(new Set());
+            }}
+          >
             <Tooltip placement="cursor" content={t('file.downloadZip')}>
               <button
                 type="button"
@@ -2350,721 +2265,589 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 </Tooltip>
               </>
             )}
-          </div>
-          <Tooltip placement="cursor" content={t('file.clearSelection')}>
-            <button
-              type="button"
-              className="fm-tool fm-selection-clear"
-              aria-label={t('file.clearSelection')}
-              onClick={() => {
-                managerRef.current
-                  ?.querySelector<HTMLInputElement>('.fm-entry input[type="checkbox"]:checked')
-                  ?.focus({ preventScroll: true });
-                setSelected(new Set());
+          </FilemanSelectionBar>
+        )}
+        {Boolean(error) && <ErrorNotice error={error} />}
+        {capabilities.error && (
+          <ErrorNotice error={capabilities.error} retry={() => void capabilities.refetch()} />
+        )}
+        {copied && (
+          <span className="fm-copy-status" role="status">
+            {t('file.pathCopied')}
+          </span>
+        )}
+        {viewing && viewed ? (
+          <Suspense fallback={<FileEditorSkeleton />}>
+            <FileViewer
+              key={`${viewerIdentity}:${viewed.source.path}`}
+              source={viewed.source}
+              viewerId={viewed.viewerId}
+              onContextChange={setViewerContext}
+              serverId={serverId}
+              identity={viewerIdentity}
+              autoDecodeCompressed={viewed.autoDecodeCompressed}
+              onViewerChange={(viewerId, options) =>
+                setViewed((current) =>
+                  current &&
+                  (current.viewerId !== viewerId ||
+                    current.autoDecodeCompressed !== options?.autoDecodeCompressed)
+                    ? { ...current, viewerId, autoDecodeCompressed: options?.autoDecodeCompressed }
+                    : current,
+                )
+              }
+              actionTargets={{
+                beforeHome: viewerBeforeHome,
+                afterHome: viewerAfterHome,
+                breadcrumb: viewerBreadcrumb,
+                search: viewerSearch,
+                view: viewerView,
+                tools: viewerTools,
               }}
-            >
-              <ToolbarIcon kind="clear" />
-            </button>
-          </Tooltip>
-        </section>
-      )}
-      {Boolean(error) && <ErrorNotice error={error} />}
-      {capabilities.error && (
-        <ErrorNotice error={capabilities.error} retry={() => void capabilities.refetch()} />
-      )}
-      {copied && (
-        <span className="fm-copy-status" role="status">
-          {t('file.pathCopied')}
-        </span>
-      )}
-      {viewing && viewed ? (
-        <Suspense fallback={<FileEditorSkeleton />}>
-          <FileViewer
-            key={`${viewerIdentity}:${viewed.source.path}`}
-            source={viewed.source}
-            viewerId={viewed.viewerId}
-            serverId={serverId}
-            identity={viewerIdentity}
-            onViewerChange={(viewerId) =>
-              setViewed((current) =>
-                current && current.viewerId !== viewerId ? { ...current, viewerId } : current,
-              )
-            }
-            actionTargets={{
-              beforeHome: viewerBeforeHome,
-              afterHome: viewerAfterHome,
-              breadcrumb: viewerBreadcrumb,
-            }}
-            onText={() => void open(viewed.entry, directory, 'text')}
-            onExtract={
-              canMutate &&
-              /\.(?:zip|jar|tar|tgz|tar\.(?:gz|bz2|xz|zst)|gz|bz2|xz|zst|7z|rar)$/i.test(
-                viewed.entry.name,
-              )
-                ? (selection) => {
-                    chooseMode('extract', [viewed.entry.name]);
-                    setExtractSelection(selection);
-                    setExtractFromViewer(true);
-                  }
-                : undefined
-            }
-          />
-        </Suspense>
-      ) : editing ? (
-        <section
-          className="fm-editor-view"
-          ref={editorForm}
-          aria-label={t('file.editor')}
-          tabIndex={-1}
-        >
-          {!reading && editorAvailability === 'text' && !readError && (
-            <span className="fm-editor-state sr-only" role="status">
-              {t(mutating || saving ? 'web.pending' : dirty ? 'file.unsaved' : 'file.saved')}
-            </span>
-          )}
-          {reading ? (
-            <FileEditorSkeleton />
-          ) : editorAvailability !== 'text' || readError ? (
-            <div className="fm-editor-unavailable">
-              {readError ? (
-                <ErrorNotice error={readError} />
-              ) : (
-                <p>{t(`file.editorUnavailable.${editorAvailability}`)}</p>
-              )}
-            </div>
-          ) : (
-            <form
-              id="file-editor-form"
-              className="fm-inline-editor"
-              aria-busy={mutating || saving}
-              onSubmit={(event) => {
-                event.preventDefault();
-                void saveEditor();
-              }}
-            >
-              {mode === 'new' && (
-                <Input
-                  label={t('web.name')}
-                  name="name"
-                  value={newName}
-                  onKeyDown={(event) => {
-                    if (
-                      (event.ctrlKey || event.metaKey) &&
-                      !event.altKey &&
-                      event.key.toLowerCase() === 's'
-                    ) {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      if (!event.nativeEvent.isComposing) event.currentTarget.form?.requestSubmit();
+              onText={() => void open(viewed.entry, directory, 'text')}
+              onExtract={
+                canMutate &&
+                /\.(?:zip|jar|tar|tgz|tar\.(?:gz|bz2|xz|zst)|gz|bz2|xz|zst|7z|rar)$/i.test(
+                  viewed.entry.name,
+                )
+                  ? (selection) => {
+                      chooseMode('extract', [viewed.entry.name]);
+                      setExtractSelection(selection);
+                      setExtractFromViewer(true);
                     }
-                  }}
-                  onChange={(event) => {
-                    setNewName(event.target.value);
-                    setDirty(true);
-                  }}
-                  required
-                  pattern="[^/\\\\]+"
-                  disabled={mutating || saving}
-                />
+                  : undefined
+              }
+            />
+          </Suspense>
+        ) : editing ? (
+          <FilemanSlot name="viewer.content">
+            <section
+              className="fm-editor-view"
+              ref={editorForm}
+              aria-label={t('file.editor')}
+              tabIndex={-1}
+            >
+              {!reading && editorAvailability === 'text' && !readError && (
+                <span className="fm-editor-state sr-only" role="status">
+                  {t(mutating || saving ? 'web.pending' : dirty ? 'file.unsaved' : 'file.saved')}
+                </span>
               )}
-              {Boolean(saveError) && <ErrorNotice error={saveError} />}
-              <Suspense fallback={<FileEditorSkeleton />}>
-                <FileTextEditor
-                  key={readSequence.current}
-                  path={join(
-                    directory,
-                    mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
+              {reading ? (
+                <FileEditorSkeleton />
+              ) : editorAvailability !== 'text' || readError ? (
+                <div className="fm-editor-unavailable">
+                  {readError ? (
+                    <ErrorNotice error={readError} />
+                  ) : (
+                    <p>{t(`file.editorUnavailable.${editorAvailability}`)}</p>
                   )}
-                  value={content}
-                  onChange={(value) => {
-                    contentRef.current = value;
-                    setContent(value);
-                    setDirty(value !== baseline.current || (mode === 'new' && newName.length > 0));
-                    updateFileSaveDraft(
-                      saveScope,
-                      serverId,
-                      join(directory, mode === 'new' ? newName : (targets[0] ?? '')),
-                      value,
-                    );
+                </div>
+              ) : (
+                <form
+                  id="file-editor-form"
+                  className="fm-inline-editor"
+                  aria-busy={mutating || saving}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void saveEditor();
                   }}
-                  onSave={saveShortcut}
-                  onControls={setEditorControls}
-                  readOnly={!canMutate || (mutating && !renaming)}
-                  shouldAutoFocus={() =>
-                    mode === 'edit' && document.activeElement === editorForm.current
-                  }
-                  label={t('service.content')}
-                />
-              </Suspense>
-            </form>
-          )}
-        </section>
-      ) : files.isPending ? (
-        <FileListSkeleton view={view} />
-      ) : files.error ? (
-        <>
-          <div className="fm-list fm-list-error">
-            <ErrorNotice error={files.error} retry={() => void files.refetch()} />
-          </div>
-          <div className="fm-count" />
-        </>
-      ) : (
-        <>
-          <div className={`fm-list fm-${view}`}>
-            <div className="fm-columns">
-              <input
-                type="checkbox"
-                aria-label={t('file.selectAll')}
-                checked={
-                  rows.filter((entry) => !entry.is_symlink).length > 0 &&
-                  rows
-                    .filter((entry) => !entry.is_symlink)
-                    .every((entry) => selected.has(entry.name))
-                }
-                onChange={(event) =>
-                  setSelected(
-                    event.target.checked
-                      ? new Set(
-                          rows.filter((entry) => !entry.is_symlink).map((entry) => entry.name),
-                        )
-                      : new Set(),
-                  )
-                }
-              />
-              {(['name', 'size', 'date'] as const).map((field) => {
-                const key = field === 'date' ? 'file.modified' : `web.${field}`;
-                const active = order === field;
-                const arrow = active && (order !== 'name' || descending);
-                return (
-                  <Tooltip
-                    placement="cursor"
-                    key={field}
-                    content={
-                      active
-                        ? t(descending ? 'file.descending' : 'file.ascending')
-                        : t('file.sortColumn', { name: t(key) })
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="fm-column-button"
-                      aria-label={t(key)}
-                      aria-pressed={active}
-                      onClick={() => {
-                        if (active) setDescending((value) => !value);
-                        else {
-                          setOrder(field);
-                          setDescending(false);
+                >
+                  {mode === 'new' && (
+                    <Input
+                      label={t('web.name')}
+                      name="name"
+                      value={newName}
+                      onKeyDown={(event) => {
+                        if (
+                          (event.ctrlKey || event.metaKey) &&
+                          !event.altKey &&
+                          event.key.toLowerCase() === 's'
+                        ) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (!event.nativeEvent.isComposing)
+                            event.currentTarget.form?.requestSubmit();
                         }
                       }}
-                    >
-                      {t(key)}
-                      {arrow && (
-                        <svg
-                          className="fm-sort-arrow"
-                          data-order={descending ? 'descending' : 'ascending'}
-                          viewBox="0 0 16 16"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.6"
-                          aria-hidden="true"
-                        >
-                          <path d={descending ? 'M8 2v12m-4-4 4 4 4-4' : 'M8 14V2m-4 4 4-4 4 4'} />
-                        </svg>
+                      onChange={(event) => {
+                        setNewName(event.target.value);
+                        setDirty(true);
+                      }}
+                      required
+                      pattern="[^/\\\\]+"
+                      disabled={mutating || saving}
+                    />
+                  )}
+                  {Boolean(saveError) && <ErrorNotice error={saveError} />}
+                  <Suspense fallback={<FileEditorSkeleton />}>
+                    <FileTextEditor
+                      key={readSequence.current}
+                      path={join(
+                        directory,
+                        mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
                       )}
-                    </button>
-                  </Tooltip>
-                );
-              })}
-              <span className="sr-only">{t('web.actions')}</span>
+                      value={content}
+                      onChange={(value) => {
+                        contentRef.current = value;
+                        setContent(value);
+                        setDirty(
+                          value !== baseline.current || (mode === 'new' && newName.length > 0),
+                        );
+                        updateFileSaveDraft(
+                          saveScope,
+                          serverId,
+                          join(directory, mode === 'new' ? newName : (targets[0] ?? '')),
+                          value,
+                        );
+                      }}
+                      onSave={saveShortcut}
+                      onControls={setEditorControls}
+                      readOnly={!canMutate || (mutating && !renaming)}
+                      shouldAutoFocus={() =>
+                        mode === 'edit' && document.activeElement === editorForm.current
+                      }
+                      label={t('service.content')}
+                    />
+                  </Suspense>
+                </form>
+              )}
+            </section>
+          </FilemanSlot>
+        ) : files.isPending ? (
+          <FilemanListSkeleton view={view} />
+        ) : files.error ? (
+          <>
+            <div className="fm-list fm-list-error">
+              <ErrorNotice error={files.error} retry={() => void files.refetch()} />
             </div>
-            {directory && (
-              <div className="fm-parent">
-                <button
-                  type="button"
-                  className="text-button"
+            <div className="fm-count" />
+          </>
+        ) : (
+          <FilemanListing
+            entries={rows}
+            view={view}
+            selected={selected}
+            order={order}
+            descending={descending}
+            onSort={(field) => {
+              if (order === field) setDescending((value) => !value);
+              else {
+                setOrder(field);
+                setDescending(false);
+              }
+            }}
+            onSelectAll={(checked) =>
+              setSelected(
+                checked
+                  ? new Set(rows.filter((entry) => !entry.is_symlink).map((entry) => entry.name))
+                  : new Set(),
+              )
+            }
+            onSelect={(entry, event) => {
+              const checked = event.currentTarget.checked;
+              setSelected((current) =>
+                selectFileRange(rows, current, anchor, entry.name, event.shiftKey, checked),
+              );
+              if (!event.shiftKey) setAnchor(entry.name);
+            }}
+            onOpen={(entry, event) => {
+              if (event.ctrlKey || event.metaKey || event.shiftKey) selectEntry(entry, event);
+              else {
+                setAnchor(entry.name);
+                void open(entry);
+              }
+            }}
+            onMenu={showMenu}
+            menuEntry={menu?.entry.name}
+            busy={fileActionsBusy}
+            gameId={server.data?.gameId}
+            isArchive={isArchive}
+            parent={
+              directory ? (
+                <FilemanParent
                   data-drag-hover={hoverDestination === parent || undefined}
                   onClick={() => navigate(parent)}
-                  aria-label={t('service.parentFolder')}
                   onDragOver={(event) => dragOverFolder(event, parent)}
                   onDragLeave={(event) => dragLeaveFolder(event, parent)}
                   onDrop={(event) => dropFolder(event, parent)}
-                >
-                  <FileIcon folder />
-                  ..
-                </button>
-              </div>
-            )}
-            <ul aria-label={t('file.entries')}>
-              {rows.map((entry) => (
-                <li
-                  key={entry.name}
-                  data-directory-path={
-                    !entry.is_file && !entry.is_symlink ? join(directory, entry.name) : undefined
-                  }
-                  className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''} ${hoverDestination === join(directory, entry.name) && !entry.is_file && !entry.is_symlink ? 'fm-drop-hover' : ''} ${scopedClipboard?.action === 'move' && scopedClipboard.source === directory && scopedClipboard.names.includes(entry.name) ? 'fm-cut' : ''}`}
-                  onMouseDown={(event) => {
-                    // Modifier selection must not also create a browser text range.
-                    if (
-                      event.button === 0 &&
-                      (event.ctrlKey || event.metaKey || event.shiftKey) &&
-                      !(event.target as HTMLElement).closest('input,.fm-menu-trigger')
-                    )
-                      event.preventDefault();
-                  }}
-                  onClickCapture={(event) => {
-                    if ((event.target as HTMLElement).closest('button,input')) return;
-                    selectEntry(entry, event);
-                    event.currentTarget.querySelector<HTMLButtonElement>('.fm-filename')?.focus();
-                  }}
-                  draggable={canMutate && !entry.is_symlink && !fileActionsBusy}
-                  onDragStart={(event) => {
-                    const names = selected.has(entry.name) ? selectedNames : [entry.name];
-                    dragSession.current = {
-                      identity: saveIdentity.current,
-                      serverId,
-                      source: directory,
-                      names,
-                    };
-                    event.dataTransfer.setData(
-                      dragType,
-                      JSON.stringify({ serverId, directory, names }),
-                    );
-                    event.dataTransfer.effectAllowed = 'move';
-                  }}
-                  onDragOver={
-                    !entry.is_file && !entry.is_symlink
-                      ? (event) => dragOverFolder(event, join(directory, entry.name))
-                      : undefined
-                  }
-                  onDragLeave={
-                    !entry.is_file && !entry.is_symlink
-                      ? (event) => dragLeaveFolder(event, join(directory, entry.name))
-                      : undefined
-                  }
-                  onDrop={
-                    !entry.is_file && !entry.is_symlink
-                      ? (event) => dropFolder(event, join(directory, entry.name))
-                      : undefined
-                  }
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    showMenu(
-                      entry,
-                      event.currentTarget.querySelector<HTMLButtonElement>('.fm-menu-trigger') ??
-                        event.currentTarget,
-                      event.clientX,
-                      event.clientY,
-                    );
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    aria-label={t('file.select', { name: entry.name })}
-                    disabled={entry.is_symlink || fileActionsBusy}
-                    checked={selected.has(entry.name)}
-                    onChange={() => {}}
-                    onClick={(event) => {
-                      const checked = event.currentTarget.checked;
-                      setSelected((current) =>
-                        selectFileRange(rows, current, anchor, entry.name, event.shiftKey, checked),
-                      );
-                      if (!event.shiftKey) setAnchor(entry.name);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="fm-filename"
-                    data-file-name={entry.name}
-                    disabled={entry.is_symlink || fileActionsBusy}
-                    onClick={(event) => {
-                      if (event.ctrlKey || event.metaKey || event.shiftKey)
-                        selectEntry(entry, event);
-                      else {
-                        setAnchor(entry.name);
-                        void open(entry);
-                      }
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-                        event.preventDefault();
-                        showMenu(entry, event.currentTarget);
-                      }
-                    }}
-                  >
-                    <FileIcon
-                      folder={!entry.is_file}
-                      name={entry.name}
-                      gameId={server.data?.gameId}
-                      archive={isArchive(entry.name)}
-                    />
-                    <span>
-                      {entry.name}
-                      {entry.is_symlink && <small> · {t('service.symlink')}</small>}
-                    </span>
-                  </button>
-                  <span className="fm-size">{entry.is_file ? format.bytes(entry.size) : '—'}</span>
-                  <span className="fm-date">
-                    <Time value={entry.modified_at} />
-                  </span>
-                  <button
-                    type="button"
-                    className="secondary fm-icon-button fm-menu-trigger"
-                    aria-haspopup="menu"
-                    aria-expanded={menu?.entry.name === entry.name}
-                    aria-label={t('file.actionsFor', { name: entry.name })}
-                    onClick={(event) => showMenu(entry, event.currentTarget)}
-                  >
-                    ⋯
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {!rows.length && <Empty text={t(search ? 'file.noMatches' : 'service.folderEmpty')} />}
-          </div>
-          <div className="fm-count">{t('file.items', { count: rows.length })}</div>
-        </>
-      )}
-      {dropActive && (
-        <div className="fm-drop-overlay" aria-live="polite">
-          <FileIcon folder />
-          <strong>{t(uploadAvailable ? 'file.dropHere' : uploadReason)}</strong>
-        </div>
-      )}
-      {menu && (
-        <div
-          ref={menuRef}
-          role="menu"
-          aria-label={t('file.actionsFor', { name: menu.entry.name })}
-          className="fm-menu"
-          style={{ left: menu.left, top: menu.top }}
-          onKeyDown={(event) => {
-            const buttons = [
-              ...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'),
-            ];
-            const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-            if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-              event.preventDefault();
-              buttons[
-                event.key === 'Home'
-                  ? 0
-                  : event.key === 'End'
-                    ? buttons.length - 1
-                    : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length
-              ]?.focus();
+                />
+              ) : undefined
             }
-            if (event.key === 'Escape' || event.key === 'Tab') {
-              event.preventDefault();
+            empty={<Empty text={t(search ? 'file.noMatches' : 'service.folderEmpty')} />}
+            rowProps={(entry) => ({
+              'data-directory-path':
+                !entry.is_file && !entry.is_symlink ? join(directory, entry.name) : undefined,
+              className: `${hoverDestination === join(directory, entry.name) && !entry.is_file && !entry.is_symlink ? 'fm-drop-hover' : ''} ${scopedClipboard?.action === 'move' && scopedClipboard.source === directory && scopedClipboard.names.includes(entry.name) ? 'fm-cut' : ''}`,
+              onMouseDown: (event) => {
+                if (
+                  event.button === 0 &&
+                  (event.ctrlKey || event.metaKey || event.shiftKey) &&
+                  !(event.target as HTMLElement).closest('input,.fm-menu-trigger')
+                )
+                  event.preventDefault();
+              },
+              onClickCapture: (event) => {
+                if ((event.target as HTMLElement).closest('button,input')) return;
+                selectEntry(entry, event);
+                event.currentTarget.querySelector<HTMLButtonElement>('.fm-filename')?.focus();
+              },
+              draggable: canMutate && !entry.is_symlink && !fileActionsBusy,
+              onDragStart: (event) => {
+                const names = selected.has(entry.name) ? selectedNames : [entry.name];
+                dragSession.current = {
+                  identity: saveIdentity.current,
+                  serverId,
+                  source: directory,
+                  names,
+                };
+                event.dataTransfer.setData(
+                  dragType,
+                  JSON.stringify({ serverId, directory, names }),
+                );
+                event.dataTransfer.effectAllowed = 'move';
+              },
+              onDragOver:
+                !entry.is_file && !entry.is_symlink
+                  ? (event) => dragOverFolder(event, join(directory, entry.name))
+                  : undefined,
+              onDragLeave:
+                !entry.is_file && !entry.is_symlink
+                  ? (event) => dragLeaveFolder(event, join(directory, entry.name))
+                  : undefined,
+              onDrop:
+                !entry.is_file && !entry.is_symlink
+                  ? (event) => dropFolder(event, join(directory, entry.name))
+                  : undefined,
+            })}
+          />
+        )}
+        {dropActive && (
+          <div className="fm-drop-overlay" aria-live="polite">
+            <FileIcon folder />
+            <strong>{t(uploadAvailable ? 'file.dropHere' : uploadReason)}</strong>
+          </div>
+        )}
+        {menu && (
+          <FilemanContextMenu
+            ref={menuRef}
+            label={t('file.actionsFor', { name: menu.entry.name })}
+            left={menu.left}
+            top={menu.top}
+            onClose={() => {
               setMenu(undefined);
               menuTrigger.current?.focus();
-            }
-          }}
-        >
-          {!menu.entry.is_symlink && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!menuCanOpen}
-                aria-describedby={!menuCanOpen ? 'file-edit-unavailable' : undefined}
-                onClick={() => {
-                  void open(menu.entry);
-                  setMenu(undefined);
-                }}
-              >
-                {t(menu.entry.is_file ? 'viewer.open' : 'service.openFolder')}
-              </button>
-              {!menuCanOpen && (
-                <small id="file-edit-unavailable" className="fm-menu-reason">
-                  {t(`file.editorUnavailable.${fileEditorAvailability(menu.entry)}`)}
-                </small>
-              )}
-              {menu.entry.is_file && (
+            }}
+          >
+            {!menu.entry.is_symlink && (
+              <>
                 <button
                   type="button"
                   role="menuitem"
+                  disabled={!menuCanOpen}
+                  aria-describedby={!menuCanOpen ? 'file-edit-unavailable' : undefined}
                   onClick={() => {
-                    setOpenWith({
-                      entry: menu.entry,
-                      source: viewerSource(menu.entry),
-                    });
+                    void open(menu.entry);
                     setMenu(undefined);
                   }}
                 >
-                  {t('viewer.openWith')}
+                  {t(menu.entry.is_file ? 'viewer.open' : 'service.openFolder')}
                 </button>
-              )}
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!transfers.data?.download.available}
-                onClick={() => {
-                  downloadNames([menu.entry.name]);
-                  setMenu(undefined);
-                }}
-              >
-                {t(menu.entry.is_file ? 'web.download' : 'file.downloadZip')}
-              </button>
-            </>
-          )}
-          {canManage && !menu.entry.is_symlink && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!canMutate}
-                onClick={() => chooseMode('rename', [menu.entry.name])}
-              >
-                {t('service.rename')}
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!canMutate}
-                onClick={() => chooseMode('move', [menu.entry.name])}
-              >
-                {t('file.move')}
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!canMutate || capabilities.data?.copy !== true}
-                onClick={() => chooseMode('copy', [menu.entry.name])}
-              >
-                {t('file.copy')}
-              </button>
-              {menu.entry.is_file && isArchive(menu.entry.name) && (
+                {!menuCanOpen && (
+                  <small id="file-edit-unavailable" className="fm-menu-reason">
+                    {t(`file.editorUnavailable.${fileEditorAvailability(menu.entry)}`)}
+                  </small>
+                )}
+                {menu.entry.is_file && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setOpenWith({
+                        entry: menu.entry,
+                        source: viewerSource(menu.entry),
+                      });
+                      setMenu(undefined);
+                    }}
+                  >
+                    {t('viewer.openWith')}
+                  </button>
+                )}
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!canMutate || capabilities.data?.extract !== true}
-                  onClick={() => chooseMode('extract', [menu.entry.name])}
+                  disabled={!transfers.data?.download.available}
+                  onClick={() => {
+                    downloadNames([menu.entry.name]);
+                    setMenu(undefined);
+                  }}
                 >
-                  {t('file.extract')}
+                  {t(menu.entry.is_file ? 'web.download' : 'file.downloadZip')}
                 </button>
-              )}
-            </>
-          )}
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              const path = join(directory, menu.entry.name);
-              setMenu(undefined);
-              navigator.clipboard
-                .writeText(`/${path}`)
-                .then(() => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
-                })
-                .catch((failure) => setError(failure));
-            }}
-          >
-            {t('file.copyPath')}
-          </button>
-          {canManage && !menu.entry.is_symlink && (
+              </>
+            )}
+            {canManage && !menu.entry.is_symlink && (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!canMutate}
+                  onClick={() => chooseMode('rename', [menu.entry.name])}
+                >
+                  {t('service.rename')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!canMutate}
+                  onClick={() => chooseMode('move', [menu.entry.name])}
+                >
+                  {t('file.move')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!canMutate || capabilities.data?.copy !== true}
+                  onClick={() => chooseMode('copy', [menu.entry.name])}
+                >
+                  {t('file.copy')}
+                </button>
+                {menu.entry.is_file && isArchive(menu.entry.name) && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!canMutate || capabilities.data?.extract !== true}
+                    onClick={() => chooseMode('extract', [menu.entry.name])}
+                  >
+                    {t('file.extract')}
+                  </button>
+                )}
+              </>
+            )}
             <button
               type="button"
               role="menuitem"
-              className="danger"
-              disabled={!canMutate}
-              onClick={() => chooseMode('delete', [menu.entry.name])}
+              onClick={() => {
+                const path = join(directory, menu.entry.name);
+                setMenu(undefined);
+                navigator.clipboard
+                  .writeText(`/${path}`)
+                  .then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                  })
+                  .catch((failure) => setError(failure));
+              }}
             >
-              {t('web.delete')}
+              {t('file.copyPath')}
             </button>
-          )}
-        </div>
-      )}
-      {openWith && (
-        <OpenWith
-          serverId={serverId}
-          source={openWith.source}
-          available={viewerCapabilities.data?.available === true}
-          onClose={() => setOpenWith(undefined)}
-          onChoose={(id) => {
-            const chosen = openWith;
-            setOpenWith(undefined);
-            void open(chosen.entry, directory, id);
-          }}
-        />
-      )}
-      {preparingFolder && (
-        <div className="fm-folder-progress" role="status">
-          <span>{t('file.folderPreparing')}</span>
-          <button
-            type="button"
-            className="text-button"
-            onClick={() => folderPreparation.current?.abort()}
-          >
-            {t('web.cancel')}
-          </button>
-        </div>
-      )}
-      {visibleUploads.length > 0 && (
-        <section className="fm-uploads" aria-label={t('web.upload')}>
-          <header>
-            <strong>{t('web.upload')}</strong>
-          </header>
-          {uploadPause && (
-            <div className="notice">
-              <p role="status">
-                {t(
-                  uploadPause === 'checking'
-                    ? 'file.uploadQueueChecking'
-                    : uploadPause === 'busy'
-                      ? 'file.uploadQueueBusy'
-                      : 'file.uploadQueuePaused',
-                )}
-              </p>
+            {canManage && !menu.entry.is_symlink && (
               <button
                 type="button"
-                className="text-button"
-                disabled={uploadPause === 'checking'}
-                onClick={() => void runUploads()}
+                role="menuitem"
+                className="danger"
+                disabled={!canMutate}
+                onClick={() => chooseMode('delete', [menu.entry.name])}
               >
-                {t('file.resumeUploads')}
+                {t('web.delete')}
               </button>
-            </div>
-          )}
-          <ul>
-            {visibleUploads.map((item) => (
-              <li key={item.id}>
-                <div className="fm-upload-name">
-                  <span>{item.path.slice(item.directory ? item.directory.length + 1 : 0)}</span>
-                  <span>{t(`file.upload.${item.status}`)}</span>
-                  {['queued', 'waiting', 'uploading', 'confirming'].includes(item.status) && (
-                    <button
-                      type="button"
-                      className="text-button"
-                      aria-label={t('file.cancelUpload', { name: item.file.name })}
-                      onClick={() => cancelUpload(item.id)}
-                    >
-                      {t('web.cancel')}
-                    </button>
-                  )}
-                </div>
-                {['uploading', 'confirming'].includes(item.status) && (
-                  <>
-                    <progress
-                      value={item.sent}
-                      max={Math.max(1, item.file.size)}
-                      aria-label={item.file.name}
-                    />
-                    <small>
-                      {format.bytes(item.sent)} / {format.bytes(item.file.size)} ·{' '}
-                      {format.bytes(item.speed)}/s
-                    </small>
-                  </>
-                )}
-                {Boolean(item.error) && <ErrorNotice error={item.error} />}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      <Dialog
-        open={pendingUploads.length > 0}
-        title={t('file.replaceTitle')}
-        closeIcon
-        onClose={() => setPendingUploads([])}
-      >
-        <p>{t('file.replaceWarning')}</p>
-        <ul>
-          {pendingUploads
-            .filter((file) => files.data?.some((entry) => entry.name === file.name))
-            .map((file) => (
-              <li key={file.name}>{file.name}</li>
-            ))}
-        </ul>
-        <button type="button" onClick={() => queueUploads(pendingUploads)}>
-          {t('file.replaceUpload')}
-        </button>
-      </Dialog>
-      {transferFlow.dialog}
-      <Dialog
-        open={Boolean(mode) && (!displaying || mode === 'extract')}
-        className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
-        title={t(
-          mode === 'mkdir'
-            ? 'service.newFolder'
-            : mode === 'rename'
-              ? 'service.rename'
-              : mode === 'delete'
-                ? 'web.delete'
-                : 'file.extract',
+            )}
+          </FilemanContextMenu>
         )}
-        onClose={() => {
-          if (mode && !['view', 'edit', 'new'].includes(mode)) closeEditor();
-        }}
-        closeIcon
-        closeDisabled={mutating}
-        initialFocusSelector={mode === 'delete' ? '[data-form-cancel]' : undefined}
-      >
-        <ActionForm
-          key={`${mode}:${targets.join(',')}`}
-          success={false}
-          destructive={mode === 'delete'}
-          arrowActionNavigation={mode === 'delete'}
-          onCancel={mode === 'delete' ? closeEditor : undefined}
-          submitLabel={t(
-            mode === 'delete' ? 'web.delete' : mode === 'extract' ? 'file.extract' : 'web.save',
-          )}
-          onSubmit={async (data) => {
-            if (!canMutate) throw { messageKey: 'error.forbidden' };
-            if (mode === 'mkdir')
-              await mutation({ action: 'mkdir', root: directory, name: text(data, 'name') });
-            else if (mode === 'delete')
-              await mutation({ action: 'delete', root: directory, files: targets, confirm: true });
-            else if (mode === 'rename')
-              await mutation({
-                action: 'rename',
-                root: directory,
-                files: [{ from: targets[0], to: text(data, 'name') }],
-              });
-            else if (mode === 'extract')
-              await mutation(
-                {
-                  root: directory,
-                  file: targets[0],
-                  ...extractSelection,
-                  destination: text(data, 'name'),
-                  confirm: true,
-                },
-                '/files/extract',
-              );
-          }}
+        {openWith && (
+          <OpenWith
+            serverId={serverId}
+            source={openWith.source}
+            available={viewerCapabilities.data?.available === true}
+            onClose={() => setOpenWith(undefined)}
+            onChoose={(id) => {
+              const chosen = openWith;
+              setOpenWith(undefined);
+              void open(chosen.entry, directory, id);
+            }}
+          />
+        )}
+        {preparingFolder && (
+          <div className="fm-folder-progress" role="status">
+            <span>{t('file.folderPreparing')}</span>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => folderPreparation.current?.abort()}
+            >
+              {t('web.cancel')}
+            </button>
+          </div>
+        )}
+        {visibleUploads.length > 0 && (
+          <section className="fm-uploads" aria-label={t('web.upload')}>
+            <header>
+              <strong>{t('web.upload')}</strong>
+            </header>
+            {uploadPause && (
+              <div className="notice">
+                <p role="status">
+                  {t(
+                    uploadPause === 'checking'
+                      ? 'file.uploadQueueChecking'
+                      : uploadPause === 'busy'
+                        ? 'file.uploadQueueBusy'
+                        : 'file.uploadQueuePaused',
+                  )}
+                </p>
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={uploadPause === 'checking'}
+                  onClick={() => void runUploads()}
+                >
+                  {t('file.resumeUploads')}
+                </button>
+              </div>
+            )}
+            <ul>
+              {visibleUploads.map((item) => (
+                <li key={item.id}>
+                  <div className="fm-upload-name">
+                    <span>{item.path.slice(item.directory ? item.directory.length + 1 : 0)}</span>
+                    <span>{t(`file.upload.${item.status}`)}</span>
+                    {['queued', 'waiting', 'uploading', 'confirming'].includes(item.status) && (
+                      <button
+                        type="button"
+                        className="text-button"
+                        aria-label={t('file.cancelUpload', { name: item.file.name })}
+                        onClick={() => cancelUpload(item.id)}
+                      >
+                        {t('web.cancel')}
+                      </button>
+                    )}
+                  </div>
+                  {['uploading', 'confirming'].includes(item.status) && (
+                    <>
+                      <progress
+                        value={item.sent}
+                        max={Math.max(1, item.file.size)}
+                        aria-label={item.file.name}
+                      />
+                      <small>
+                        {format.bytes(item.sent)} / {format.bytes(item.file.size)} ·{' '}
+                        {format.bytes(item.speed)}/s
+                      </small>
+                    </>
+                  )}
+                  {Boolean(item.error) && <ErrorNotice error={item.error} />}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <Dialog
+          open={pendingUploads.length > 0}
+          title={t('file.replaceTitle')}
+          closeIcon
+          onClose={() => setPendingUploads([])}
         >
-          {(mode === 'mkdir' || mode === 'rename' || mode === 'extract') && (
-            <Input
-              label={t(mode === 'extract' ? 'file.extractFolder' : 'web.name')}
-              name="name"
-              required
-              pattern="[^/\\\\]+"
-              defaultValue={
-                mode === 'rename'
-                  ? targets[0]
-                  : mode === 'extract'
-                    ? `${targets[0]?.replace(/\.(tar\.)?(gz|bz2|xz|zst|zip|jar|tar|tgz|tbz2|txz|7z|rar)$/i, '')}-extracted`
-                    : ''
-              }
-            />
+          <p>{t('file.replaceWarning')}</p>
+          <ul>
+            {pendingUploads
+              .filter((file) => files.data?.some((entry) => entry.name === file.name))
+              .map((file) => (
+                <li key={file.name}>{file.name}</li>
+              ))}
+          </ul>
+          <button type="button" onClick={() => queueUploads(pendingUploads)}>
+            {t('file.replaceUpload')}
+          </button>
+        </Dialog>
+        {transferFlow.dialog}
+        <Dialog
+          open={Boolean(mode) && (!displaying || mode === 'extract')}
+          className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
+          title={t(
+            mode === 'mkdir'
+              ? 'service.newFolder'
+              : mode === 'rename'
+                ? 'service.rename'
+                : mode === 'delete'
+                  ? 'web.delete'
+                  : 'file.extract',
           )}
-          {mode === 'delete' && (
-            <>
-              <FileSelectionSummary names={targets} />
-              <p>{t('file.deleteWarning', { count: targets.length })}</p>
-            </>
-          )}
-          {mode === 'extract' && (
-            <>
-              {extractSelection?.entries && (
-                <FileSelectionSummary names={extractSelection.entries} />
-              )}
-              <p>{t('file.extractWarning')}</p>
-            </>
-          )}
-        </ActionForm>
-      </Dialog>
-    </section>
+          onClose={() => {
+            if (mode && !['view', 'edit', 'new'].includes(mode)) closeEditor();
+          }}
+          closeIcon
+          closeDisabled={mutating}
+          initialFocusSelector={mode === 'delete' ? '[data-form-cancel]' : undefined}
+        >
+          <ActionForm
+            key={`${mode}:${targets.join(',')}`}
+            success={false}
+            destructive={mode === 'delete'}
+            arrowActionNavigation={mode === 'delete'}
+            onCancel={mode === 'delete' ? closeEditor : undefined}
+            submitLabel={t(
+              mode === 'delete' ? 'web.delete' : mode === 'extract' ? 'file.extract' : 'web.save',
+            )}
+            onSubmit={async (data) => {
+              if (!canMutate) throw { messageKey: 'error.forbidden' };
+              if (mode === 'mkdir')
+                await mutation({ action: 'mkdir', root: directory, name: text(data, 'name') });
+              else if (mode === 'delete')
+                await mutation({
+                  action: 'delete',
+                  root: directory,
+                  files: targets,
+                  confirm: true,
+                });
+              else if (mode === 'rename')
+                await mutation({
+                  action: 'rename',
+                  root: directory,
+                  files: [{ from: targets[0], to: text(data, 'name') }],
+                });
+              else if (mode === 'extract')
+                await mutation(
+                  {
+                    root: directory,
+                    file: targets[0],
+                    ...extractSelection,
+                    destination: text(data, 'name'),
+                    confirm: true,
+                  },
+                  '/files/extract',
+                );
+            }}
+          >
+            {(mode === 'mkdir' || mode === 'rename' || mode === 'extract') && (
+              <Input
+                label={t(mode === 'extract' ? 'file.extractFolder' : 'web.name')}
+                name="name"
+                required
+                pattern="[^/\\\\]+"
+                defaultValue={
+                  mode === 'rename'
+                    ? targets[0]
+                    : mode === 'extract'
+                      ? `${targets[0]?.replace(/\.(tar\.)?(gz|bz2|xz|zst|zip|jar|tar|tgz|tbz2|txz|7z|rar)$/i, '')}-extracted`
+                      : ''
+                }
+              />
+            )}
+            {mode === 'delete' && (
+              <>
+                <FileSelectionSummary names={targets} />
+                <p>{t('file.deleteWarning', { count: targets.length })}</p>
+              </>
+            )}
+            {mode === 'extract' && (
+              <>
+                {extractSelection?.entries && (
+                  <FileSelectionSummary names={extractSelection.entries} />
+                )}
+                <p>{t('file.extractWarning')}</p>
+              </>
+            )}
+          </ActionForm>
+        </Dialog>
+      </section>
+    </FilemanHost>
   );
 }

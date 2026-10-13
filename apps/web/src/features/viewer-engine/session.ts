@@ -4,6 +4,7 @@ import type { ViewerId } from './core/registry.js';
 export interface ViewerBookmark {
   path: string;
   viewerId: ViewerId;
+  autoDecodeCompressed?: boolean;
 }
 
 /** Tab-local navigation metadata only: never content, credentials or signed URLs. */
@@ -18,10 +19,17 @@ export function readViewerBookmark(key: string | undefined): ViewerBookmark | un
       !value.path ||
       normalizeFilePath(value.path) === undefined ||
       typeof value.viewerId !== 'string' ||
-      value.viewerId.length > 128
+      value.viewerId.length > 128 ||
+      (value.autoDecodeCompressed !== undefined && typeof value.autoDecodeCompressed !== 'boolean')
     )
       return;
-    return { path: value.path, viewerId: value.viewerId as ViewerId };
+    return {
+      path: value.path,
+      viewerId: value.viewerId as ViewerId,
+      ...(value.autoDecodeCompressed !== undefined
+        ? { autoDecodeCompressed: value.autoDecodeCompressed }
+        : {}),
+    };
   } catch {
     // Optional browser storage must not prevent opening files.
   }

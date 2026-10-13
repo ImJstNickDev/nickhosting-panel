@@ -828,23 +828,23 @@
   }
 }
 
-.fm-toolbar-editing {
+.fm-toolbar-editing:not(:has(.fm-search)) {
   flex-wrap: nowrap;
   gap: 8px;
 }
-.fm-toolbar-editing .fm-breadcrumb {
+.fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb {
   flex: 1 1 0;
   min-width: 0;
 }
-.fm-toolbar-editing .fm-breadcrumb ol {
+.fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb ol {
   flex-wrap: nowrap;
   overflow: auto;
   scrollbar-width: none;
 }
-.fm-toolbar-editing .fm-breadcrumb li {
+.fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li {
   flex-shrink: 0;
 }
-.fm-toolbar-editing .fm-current-file {
+.fm-toolbar-editing:not(:has(.fm-search)) .fm-current-file {
   max-width: 200px;
 }
 .fm-editor-toolbar {
@@ -873,7 +873,7 @@
   white-space: nowrap;
 }
 @media (max-width: 760px) {
-  .fm-toolbar-editing {
+  .fm-toolbar-editing:not(:has(.fm-search)) {
     padding-inline: 10px;
     gap: 5px;
   }
@@ -885,11 +885,11 @@
     min-width: 29px;
     height: 32px;
   }
-  .fm-toolbar-editing .fm-current-file {
+  .fm-toolbar-editing:not(:has(.fm-search)) .fm-current-file {
     max-width: 140px;
   }
 }
-.fm-toolbar-editing .fm-path-form {
+.fm-toolbar-editing:not(:has(.fm-search)) .fm-path-form {
   flex: 1 1 0;
   min-width: 0;
 }
@@ -1008,7 +1008,7 @@
   }
 }
 
-.fm-toolbar-editing .fm-path-form input {
+.fm-toolbar-editing:not(:has(.fm-search)) .fm-path-form input {
   min-width: 0;
 }
 
@@ -1109,16 +1109,16 @@ dialog.fm-delete-confirm {
   .fm-viewer-open-with .fm-viewer-action-icon {
     display: block;
   }
-  .fm-toolbar-editing .fm-breadcrumb ol {
+  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb ol {
     flex: 1;
   }
-  .fm-toolbar-editing .fm-breadcrumb li:not(:last-child) {
+  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li:not(:last-child) {
     display: none;
   }
-  .fm-toolbar-editing .fm-breadcrumb li:last-child {
+  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li:last-child {
     flex: 1 1 0;
   }
-  .fm-toolbar-editing .fm-breadcrumb li:last-child::before {
+  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li:last-child::before {
     display: none;
   }
 }
@@ -1128,4 +1128,14 @@ dialog.fm-delete-confirm {
     width: 24px;
     min-width: 24px;
   }
+}
+
+/* Portal slots preserve the canonical toolbar flex item positions. */
+.fm-viewer-chrome-slot {
+  display: contents;
+}
+
+.fm-toolbar:has(.fm-search) .fm-editor-toolbar {
+  gap: 6px;
+  flex-wrap: wrap;
 }

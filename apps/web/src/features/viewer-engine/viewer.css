@@ -267,65 +267,32 @@
   color: #265f50;
   background: none;
 }
-.ve-archive-breadcrumb {
-  padding: 0.65rem 0.75rem;
-  border-bottom: 1px solid var(--border, #dddfe4);
-}
 .ve-kind,
 .ve-snapshot {
   font-size: 0.8rem;
   color: var(--muted, #636977);
   margin-left: auto;
 }
-.ve-archive-list,
 .ve-table-scroll {
   max-height: min(60vh, 38rem);
   overflow: auto;
 }
-.ve-archive table,
 .ve-database table {
   width: 100%;
   border-collapse: collapse;
 }
-.ve-archive th,
-.ve-archive td,
 .ve-database th,
 .ve-database td {
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--border, #dddfe4);
   text-align: left;
 }
-.ve-archive th:last-child,
-.ve-archive td:last-child:not([colspan]) {
-  text-align: right;
-}
-.ve-archive th,
 .ve-database th {
   position: sticky;
   top: 0;
   background: var(--surface, #fff);
   font-size: 0.8rem;
   font-weight: 500;
-}
-.ve-entry {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  padding: 0.25rem;
-  font-size: 0.875rem;
-  text-align: left;
-  overflow-wrap: anywhere;
-}
-.ve-entry:hover {
-  background: var(--surface-hover, #f1f2f4);
-}
-.ve-entry svg {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
 }
 .ve-empty {
   text-align: center;
@@ -523,161 +490,11 @@
   }
 }
 
-/* Atlas shares the Files controls and row density. Archive contents are read-only. */
+/* Layout only: archive presentation and interactions use the shared Fileman surface. */
 .ve-body:has(> .ve-archive) {
   border: 0;
   border-radius: 0;
 }
-.ve-archive-tools,
-.ve-archive-selection {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.65rem 1rem;
-  border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
-}
-.ve-archive-tools {
-  justify-content: space-between;
-}
-.ve-archive-status {
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-.ve-archive-search {
-  width: min(100%, 19rem);
-}
-.ve-archive .ve-archive-search input {
-  padding-right: 82px;
-}
-.ve-archive-selection {
-  background: #edf3f8;
-  font-size: 0.85rem;
-}
-.ve-archive-selection > .fm-tool:last-child {
-  margin-left: auto;
-}
-.ve-archive-list {
-  min-height: min(45vh, 26rem);
-  overscroll-behavior: contain;
-}
-.ve-archive table {
-  table-layout: fixed;
-}
-.ve-archive th {
-  z-index: 1;
-  height: 42px;
-}
-.ve-archive th .text-button {
-  color: inherit;
-  text-decoration: none;
-  font-size: 0.8rem;
-}
-.ve-archive th,
-.ve-archive td {
-  padding: 0.3rem 0.6rem;
-}
-.ve-archive .ve-archive-check {
-  width: 44px;
-  text-align: center;
-}
-.ve-archive .ve-archive-check input {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--blue);
-  cursor: pointer;
-}
-.ve-archive th:nth-child(3) {
-  width: 100px;
-}
-.ve-archive .ve-archive-size {
-  color: var(--muted);
-  font-size: 0.8rem;
-  white-space: nowrap;
-}
-.ve-archive .ve-archive-date {
-  width: 185px;
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-.ve-archive .ve-archive-action {
-  width: 48px;
-  text-align: center;
-}
-.ve-archive .ve-entry {
-  justify-content: flex-start;
-  text-align: left;
-  width: 100%;
-  min-height: 36px;
-  text-decoration: none;
-  white-space: nowrap;
-}
-.ve-archive .ve-entry > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ve-archive tbody tr:hover {
-  background: #f6f8fa;
-}
-.ve-archive tbody tr.fm-selected {
-  background: #e8f0f8;
-}
-.ve-archive-menu {
-  position: fixed;
-  z-index: 1000;
-}
-@media (max-width: 640px) {
-  .ve-archive .ve-archive-date {
-    display: none;
-  }
-  .ve-archive-tools {
-    gap: 0.4rem;
-    padding-inline: 0.65rem;
-  }
-  .ve-archive-search {
-    width: min(100%, 13rem);
-    flex: 1;
-    min-width: 10rem;
-  }
-  .ve-archive-status {
-    max-width: 6rem;
-  }
-  .ve-archive th:nth-child(3) {
-    width: 75px;
-  }
-  .ve-archive .ve-archive-check {
-    width: 36px;
-  }
-  .ve-archive .ve-archive-action {
-    width: 42px;
-  }
-  .ve-archive th,
-  .ve-archive td {
-    padding-inline: 0.3rem;
-  }
-}
-
 .ve-archive:focus {
   outline: none;
-}
-
-.ve-archive-mobile-sort {
-  display: none;
-}
-@media (max-width: 640px) {
-  .ve-archive-mobile-sort {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-    margin-left: auto;
-  }
-  .ve-archive-mobile-sort select {
-    width: auto;
-    font-size: 0.8rem;
-    padding: 0.3rem 1.5rem 0.3rem 0.4rem;
-  }
-  .ve-archive-search {
-    flex-basis: 100%;
-    max-width: none;
-  }
 }

@@ -37,6 +37,8 @@ export function OpenWith({
   source,
   selected,
   available = true,
+  displayName = source.name,
+  archivePreferenceExtension,
   onChoose,
   onClose,
 }: {
@@ -44,6 +46,8 @@ export function OpenWith({
   source: ViewerSource;
   selected?: ViewerId;
   available?: boolean;
+  displayName?: string;
+  archivePreferenceExtension?: string;
   onChoose: (id: ViewerId) => void;
   onClose: () => void;
 }) {
@@ -67,7 +71,11 @@ export function OpenWith({
     setError(undefined);
     try {
       if (scope !== 'once' && available && extension)
-        await setViewerPreference(serverId, { scope, extension, viewerId: viewer });
+        await setViewerPreference(serverId, {
+          scope,
+          extension: viewer === 'archive' ? (archivePreferenceExtension ?? extension) : extension,
+          viewerId: viewer,
+        });
       onChoose(viewer);
     } catch (failure) {
       setError(failure);
@@ -88,7 +96,7 @@ export function OpenWith({
       initialFocusSelector=".ve-viewer-card"
       className="ve-chooser"
     >
-      <p className="ve-chooser-filename">{source.name}</p>
+      <p className="ve-chooser-filename">{displayName}</p>
       {error ? <ErrorNotice error={error} /> : null}
       {!available && <p>{t('viewer.notConfigured')}</p>}
       {choices.length > 0 && available && extension && (
@@ -148,6 +156,13 @@ export function OpenWith({
                 {t(item.description)}
               </span>
             )}
+            {item.id === 'archive' &&
+              archivePreferenceExtension &&
+              archivePreferenceExtension !== extension && (
+                <span className="ve-viewer-kind">
+                  {t('viewer.scope', { extension: archivePreferenceExtension })}
+                </span>
+              )}
           </button>
         ))}
       </fieldset>

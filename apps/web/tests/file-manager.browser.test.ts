@@ -52,8 +52,42 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await harness?.close();
     await rm(stage, { recursive: true, force: true });
   });
+  async function openRoot(page: Page) {
+    // goto preserves tab navigation by design. These scenario setups request root;
+    // reload assertions below still exercise the real persisted navigation state.
+    if (new URL(page.url()).origin === harness.origin)
+      await page.evaluate((serverId) => {
+        for (const key of Object.keys(sessionStorage)) {
+          const directoryKey = key.startsWith('viewer:') ? key.slice('viewer:'.length) : key;
+          try {
+            const identity: unknown = JSON.parse(directoryKey);
+            if (
+              Array.isArray(identity) &&
+              identity[0] === 'file-directory' &&
+              identity.at(-1) === serverId
+            )
+              sessionStorage.removeItem(key);
+          } catch {
+            // Other preferences and cache entries are outside this fixture's scope.
+          }
+        }
+      }, provider.ids.serverId);
+    await page.goto(base);
+  }
   const row = (name: string) =>
     user.locator('.fm-entry').filter({ has: user.getByRole('button', { name, exact: true }) });
+  async function visibleDragBox(locator: Locator) {
+    await locator.scrollIntoViewIfNeeded();
+    await browserExpect(locator).toBeInViewport({ ratio: 1 });
+    const box = await locator.boundingBox();
+    const viewport = user.viewportSize();
+    if (!box || !viewport) throw new Error('Drag target has no visible geometry');
+    expect(box.x + box.width / 2).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width / 2).toBeLessThan(viewport.width);
+    expect(box.y + box.height / 2).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height / 2).toBeLessThan(viewport.height);
+    return box;
+  }
   const dialog = () => user.getByRole('dialog');
   const editorView = () => user.getByRole('region', { name: 'Text editor', exact: true });
   async function menu(name: string) {
@@ -62,7 +96,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       .click();
   }
   it('navigates breadcrumbs and direct paths, searches/sorts folders first, and switches grid without changing inventory', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await browserExpect.poll(() => editorRequests).toBe(1);
     await browserExpect(user.locator('.fm-sort-arrow')).toHaveCount(0);
     await browserExpect(
@@ -101,10 +135,23 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.getByRole('button', { name: 'Name', exact: true }).click();
   });
   it('reserves the Files viewport with accessible skeletons for initial and folder loads without hiding cached files', async () => {
+    const authenticatedState = await user.context().storageState();
     for (const locale of ['en', 'it'] as const) {
+      // Each cold-load scenario starts without tab snapshots or a live query cache.
+      const context = await harness.browser.newContext({
+        storageState: authenticatedState,
+        viewport: locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+        reducedMotion: 'reduce',
+      });
+      await context.addInitScript((value) => localStorage.setItem('nh.locale', value), locale);
+      const user = await context.newPage();
+      user.on('pageerror', (error) => errors.push(error.message));
+      const row = (name: string) =>
+        user.locator('.fm-entry').filter({ has: user.getByRole('button', { name, exact: true }) });
       await journeyRequest(harness, user, '/api/auth/update-user', { locale });
-      await user.setViewportSize(
-        locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
+      // Warming world would correctly prevent a skeleton; keep this fixture cold.
+      await user.route(`**/v1/servers/${provider.ids.serverId}/files/directories`, (route) =>
+        route.fulfill({ json: { results: [] } }),
       );
       let release = () => {};
       let pending = new Promise<void>((resolve) => {
@@ -117,7 +164,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await route.continue();
       });
       try {
-        await user.goto(base);
+        await openRoot(user);
         const list = user.locator('.fm-list');
         const manager = user.locator('.file-manager');
         await browserExpect(list).toHaveAttribute('aria-busy', 'true');
@@ -178,7 +225,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         expect((await manager.boundingBox())?.height).toBe(gridHeight);
       } finally {
         release();
-        await user.unroute(url);
+        // Drain held callbacks before disposing routes or their browser context.
+        await user.unrouteAll({ behavior: 'wait' });
+        await context.close();
       }
     }
     await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
@@ -186,7 +235,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect(errors).toEqual([]);
   });
   it('does not force tab focus after click or reload, while keeping keyboard navigation visible', async () => {
-    await user.goto(base);
+    await openRoot(user);
     const tabs = user.locator('.tabs');
     const filesTab = tabs.getByRole('link', { name: 'Files', exact: true });
     await tabs.getByRole('link', { name: 'Connection', exact: true }).click();
@@ -207,7 +256,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     expect(await filesTab.evaluate((link) => getComputedStyle(link).outlineStyle)).toBe('solid');
   });
   it('supports keyboard context menus, range selection, batch copy/move and streamed ZIP download', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).focus();
     await user.keyboard.press('Shift+F10');
     await browserExpect(user.getByRole('menu')).toBeVisible();
@@ -294,7 +343,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       return originalRename(...args);
     };
     try {
-      await user.goto(base);
+      await openRoot(user);
       await row(source).getByRole('button', { name: source, exact: true }).click();
       await user.getByRole('checkbox', { name: 'Select all files', exact: true }).check();
       const selection = user.getByRole('region', { name: 'Selected files' });
@@ -360,7 +409,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     const bytes = Buffer.from([0, 1, 2, 127, 128, 255]);
     for (const name of names) files.set(`world/${name}`, bytes);
     try {
-      await user.goto(base);
+      await openRoot(user);
       await row('world').getByRole('button', { name: 'world', exact: true }).click();
       for (const name of names) {
         await menu(name);
@@ -390,7 +439,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       ] as const) {
         await journeyRequest(harness, user, '/api/auth/update-user', { locale });
         await user.setViewportSize({ width, height: width > 760 ? 1000 : 844 });
-        await user.goto(base);
+        await openRoot(user);
         for (const name of ['alpha.txt', 'beta.json'])
           await user
             .getByRole('checkbox', {
@@ -531,7 +580,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await user.setViewportSize(
           italian ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
         );
-        await user.goto(base);
+        await openRoot(user);
         for (const name of names)
           await user
             .getByRole('checkbox', {
@@ -645,7 +694,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await journeyRequest(harness, user, endpoint, { action: 'mkdir', root: '', name });
     const remote = await provider.files();
     remote.set('drag-file.txt', Buffer.from('Dragged file'));
-    await user.goto(base);
+    await openRoot(user);
 
     await user.getByRole('checkbox', { name: 'Select drag-source', exact: true }).check();
     await row('drag-source').dragTo(user.getByRole('button', { name: 'root', exact: true }));
@@ -671,10 +720,11 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await journeyRequest(harness, user, endpoint, { action: 'mkdir', root, name });
     const remote = await provider.files();
     remote.set('spring-file.txt', Buffer.from('Spring drag'));
-    await user.goto(base);
+    await openRoot(user);
+    // Keep the source and first target on screen before the native drag begins.
+    await user.getByRole('searchbox', { name: 'Search this folder' }).fill('spring-');
     const center = async (locator: Locator) => {
-      const box = await locator.boundingBox();
-      if (!box) throw new Error('Drag target is not visible');
+      const box = await visibleDragBox(locator);
       return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     };
     const moveTo = async (locator: Locator, steps = 1) => {
@@ -712,12 +762,12 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     });
     const remote = await provider.files();
     remote.set('crumb-parent/crumb-child/crumb-file.txt', Buffer.from('Breadcrumb drag'));
-    await user.goto(base);
+    await openRoot(user);
     await user.getByRole('button', { name: 'root', exact: true }).click();
     await row('crumb-parent').getByRole('button', { name: 'crumb-parent', exact: true }).click();
     await row('crumb-child').getByRole('button', { name: 'crumb-child', exact: true }).click();
-    const source = await row('crumb-file.txt').boundingBox();
-    const target = await user.getByRole('button', { name: 'root', exact: true }).boundingBox();
+    const source = await visibleDragBox(row('crumb-file.txt'));
+    const target = await visibleDragBox(user.getByRole('button', { name: 'root', exact: true }));
     if (!source || !target) throw new Error('Drag source or breadcrumb is not visible');
     await user.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
     await user.mouse.down();
@@ -762,11 +812,11 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     });
     const remote = await provider.files();
     remote.set('spring-cancel/cancel-source.txt', Buffer.from('Keep until release'));
-    await user.goto(base);
+    await openRoot(user);
     await user.getByRole('button', { name: 'root', exact: true }).click();
     await row('spring-cancel').getByRole('button', { name: 'spring-cancel', exact: true }).click();
-    const source = await row('cancel-source.txt').boundingBox();
-    const target = await row('target').boundingBox();
+    const source = await visibleDragBox(row('cancel-source.txt'));
+    const target = await visibleDragBox(row('target'));
     if (!source || !target) throw new Error('Drag source or folder is not visible');
     await user.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
     await user.mouse.down();
@@ -821,7 +871,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await user.setViewportSize(
         locale === 'it' ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
       );
-      await user.goto(base);
+      await openRoot(user);
       await selectAndDrop(locale === 'it');
       await browserExpect(dialog()).toHaveAccessibleName(
         locale === 'it'
@@ -872,7 +922,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     }
     await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'en' });
     await user.setViewportSize({ width: 1440, height: 1000 });
-    await user.goto(base);
+    await openRoot(user);
     await selectAndDrop();
     await browserExpect(dialog()).toBeVisible();
     // A new conflict after the first prompt requires another explicit confirmation.
@@ -954,7 +1004,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await route.continue();
     });
     try {
-      await user.goto(base);
+      await openRoot(user);
       await row('late-drop.txt').dragTo(row('late-target'));
       await browserExpect(dialog()).toHaveAccessibleName(
         'A file with the same name exists in late-target',
@@ -1046,7 +1096,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await user.route('**/files?*', intercept);
       await user.route('**/files', intercept);
       try {
-        await user.goto(base);
+        await openRoot(user);
         await menu(name);
         await user.getByRole('menuitem', { name: 'Move', exact: true }).click();
         await dialog().getByRole('treeitem', { name: 'identity-target', exact: true }).click();
@@ -1099,7 +1149,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await user.setViewportSize(
         locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
       );
-      await user.goto(base);
+      await openRoot(user);
       const manager = user.locator('.file-manager');
       await browserExpect(row('beta.json')).toBeVisible();
       let release = () => {};
@@ -1335,7 +1385,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.setViewportSize({ width: 1440, height: 1000 });
   });
   it('renames the open file without leaving the editor and protects unsaved content', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
     const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
     await browserExpect(editor).toBeFocused();
@@ -1402,7 +1452,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       '\n',
     );
     (await provider.files()).set('rename-position.txt', Buffer.from(original));
-    await user.goto(base);
+    await openRoot(user);
     await row('rename-position.txt')
       .getByRole('button', { name: 'rename-position.txt', exact: true })
       .click();
@@ -1487,7 +1537,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   });
   it('does not steal focus on blur rename completion or lose text on rename failure', async () => {
     (await provider.files()).set('rename-focus.txt', Buffer.from('Keep this text'));
-    await user.goto(base);
+    await openRoot(user);
     await row('rename-focus.txt')
       .getByRole('button', { name: 'rename-focus.txt', exact: true })
       .click();
@@ -1551,7 +1601,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'it' });
     await user.setViewportSize({ width: 390, height: 844 });
     try {
-      await user.goto(base);
+      await openRoot(user);
       await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
       await user.getByRole('button', { name: 'Rinomina', exact: true }).click();
       const name = user.locator('.fm-inline-rename input');
@@ -1590,6 +1640,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     }
   });
   it('keeps edits when browser Back is cancelled and leaves only after confirmation', async () => {
+    await openRoot(user);
     await user.goto(base.replace(/files$/, 'console'));
     await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
@@ -1605,7 +1656,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.locator('.tabs').getByRole('link', { name: 'Files', exact: true }).click();
   });
   it('keeps known binary jars and world data out of the text endpoint and mounted editor', async () => {
-    await user.goto(base);
+    await openRoot(user);
     let reads = 0;
     const track = (request: import('@playwright/test').Request) => {
       if (new URL(request.url()).pathname.endsWith('/files/editor') && request.method() === 'GET')
@@ -1638,7 +1689,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   });
   it('edits JSON with keyboard save and refuses concurrent overwrite while retaining the draft', async () => {
     const beforeNavigation = editorRequests;
-    await user.goto(base);
+    await openRoot(user);
     await browserExpect.poll(() => editorRequests).toBe(beforeNavigation + 1);
     const beforeEditor = editorRequests;
     await row('beta.json').getByRole('button', { name: 'beta.json', exact: true }).click();
@@ -1662,7 +1713,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     ).toBeFocused();
   });
   it('indents with Tab and outdents with Shift+Tab without trapping keyboard focus', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
     const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
     await browserExpect(editor).toHaveAttribute('aria-description', /Escape.*Tab/);
@@ -1715,7 +1766,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await user.getByRole('button', { name: 'Back to files', exact: true }).click();
   });
   it('saves in the background while preserving new edits, navigation and recoverable failures', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await row('alpha.txt').getByRole('button', { name: 'alpha.txt', exact: true }).click();
     const editor = editorView().getByRole('textbox', { name: 'Contents', exact: true });
     await editor.fill('Submitted snapshot');
@@ -1824,7 +1875,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.locator('.file-save-notices')).toHaveCount(0);
   });
   it('uploads multiple files sequentially and confirms replacement instead of silently overwriting', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await browserExpect(user.getByRole('button', { name: 'Upload', exact: true })).toHaveAttribute(
       'aria-disabled',
       'false',
@@ -1853,7 +1904,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(user.locator('.fm-uploads')).toHaveCount(0);
   });
   it('uploads a whole folder with nested paths and rejects an existing folder without overwriting', async () => {
-    await user.goto(base);
+    await openRoot(user);
     const local = resolve(stage, 'client-pack');
     await mkdir(`${local}/nested/地図`, { recursive: true });
     await writeFile(`${local}/notes.txt`, 'folder notes');
@@ -1885,7 +1936,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     const remote = await provider.files();
     remote.set('world/path notes.txt', Buffer.from('Nested original'));
     remote.set('path notes.txt', Buffer.from('Root untouched'));
-    await user.goto(base);
+    await openRoot(user);
     await browserExpect(row('world')).toBeVisible();
     const path = user.getByRole('combobox', { name: 'Path', exact: true });
     const listings: string[] = [];
@@ -1955,7 +2006,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     remote.set(paths[0], Buffer.from('{"nested":true}'));
     remote.set(paths[1], Buffer.from('Another file'));
     try {
-      await user.goto(base);
+      await openRoot(user);
       await browserExpect(row('libraries')).toBeVisible();
       await user.keyboard.press('Alt+g');
       const path = user.getByRole('combobox', { name: 'Path', exact: true });
@@ -1995,7 +2046,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     }
   });
   it('keeps path errors visible and never commits a stale candidate after editing the prefix', async () => {
-    await user.goto(base);
+    await openRoot(user);
     await browserExpect(user.locator('.fm-tools')).toBeVisible();
     await user.keyboard.press('Alt+g');
     const path = user.getByRole('combobox', { name: 'Path', exact: true });
@@ -2021,7 +2072,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await user.setViewportSize(
         locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
       );
-      await user.goto(base);
+      await openRoot(user);
       await browserExpect(user.locator('.fm-tools')).toBeVisible();
       await user.keyboard.press('Alt+g');
       const path = user.getByRole('combobox', {
@@ -2073,7 +2124,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
         await page.addInitScript((value) => {
           Object.defineProperty(navigator, 'platform', { get: () => value });
         }, platform);
-        await page.goto(base);
+        await openRoot(page);
         const search = page.getByRole('searchbox', { name: 'Search this folder' });
         const mac = platform === 'MacIntel';
         const keys = 'Alt+k';
@@ -2149,7 +2200,7 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       await user.setViewportSize(
         locale === 'en' ? { width: 1440, height: 1000 } : { width: 390, height: 844 },
       );
-      await user.goto(base);
+      await openRoot(user);
       await browserExpect(user.locator('.fm-entry').first()).toBeVisible();
       expect(await user.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,

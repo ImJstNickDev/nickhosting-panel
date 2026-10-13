@@ -83,10 +83,58 @@ existing generic file operation.
   interrupted process can leave its private run directory; cleanup of such
   residual directories is a separate scoped operation, not startup deletion.
 
+## Fileman extension host
+
+Fileman owns filesystem controllers, browser navigation and authorized operations.
+ViewerEngine is its extension layer, not another file manager. Shared presentation
+lives in `apps/web/src/features/fileman/presentation.tsx`: real directories and
+Atlas adapt their own metadata to that same UI. Atlas supplies a virtual directory
+source with archive-specific cache/pagination; it does not duplicate ordinary
+uploads, mutations or provider authorization. Unsupported mutation actions are
+absent rather than decorative disabled controls.
+
+Two compiled extension contracts serve different needs:
+
+- `defineTrustedGameViewer` adds a lazily loaded complete content view.
+- `defineTrustedFilemanExtension` modifies existing named presentation slots.
+  `FilemanHost` applies `FilemanSlot` contributions; `FilemanScope` narrows context
+  for the current viewer without creating another registry or transport.
+
+Slots cover toolbar, breadcrumb, search, view toggle, selection, listing, entry
+icon/name/metadata/actions, context menu, viewer content/actions/download. A patch
+can prepend, append, decorate, replace or hide. Decorators receive the existing
+presentation, preserving its controllers. Conditions use server/game, path, view,
+read-only state and entry metadata. Game contributions apply only to their game;
+builtin contributions are explicitly namespaced. Ordering is priority then ID;
+multiple active replacements/hides of one slot are rejected instead of silently
+winning. Unmounting a viewer removes its scoped UI and portals; nothing patches
+the DOM globally. Render functions must remain pure and do not fetch provider data.
+
+Only reviewed, statically imported first-party modules enter
+`fileman/extensions.ts` and `viewer-engine/trusted-viewers.ts`. JSON from settings,
+provider metadata or saved preferences cannot install executable code. Presentation
+capabilities do not confer authorization; existing shared API/controllers enforce
+all writes. Deep alterations require a new explicit contract, not arbitrary
+prototype/DOM patching. Shared renderers remain a future extension point; this pass
+does not add 3D, Minecraft NBT/DAT or another game integration.
+
+Viewer chrome uses positioned search/view/tools outlets in the Fileman toolbar;
+React portals retain scoped context and event ownership. Atlas uses those outlets
+instead of an extra toolbar row. Extraction is an icon with an accessible label
+and tooltip. Navigation keeps the existing cache and backend revision boundaries.
+
+Standalone GZ/BZ2/XZ/ZST opens its single decoded member directly, read-only. The
+visible filename and breadcrumb retain the original suffix; only internal viewer
+selection/highlighting use the decoded member name. Compound TAR variants still
+open Atlas. The download action offers archive versus decoded file. Explicit
+Open With Atlas remains available, and refresh retains that choice. Unsupported
+decoded formats use the existing chooser instead of pretending to support them.
+
 ## Atlas navigation, selection and nested archives
 
-Atlas shares the File toolbar breadcrumb, icon actions and custom tooltips. Its
-folder listing exposes name/size/modified-time sorting, folders first, and search
+Atlas uses the same Fileman presentation components as real directories: toolbar,
+breadcrumb, list/grid, rows, sort headings, selection bar, contextual menus and
+custom tooltips. Its folder listing exposes name/size/modified-time sorting, folders first, and search
 within the current directory. Sorting is cached per directory/order in the parsed
 index; filtering happens before pagination. Browser pages are metadata only,
 bounded by the existing 48-page / 8 MiB cache, with 200 visible rows per page.

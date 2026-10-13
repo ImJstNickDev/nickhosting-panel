@@ -118,7 +118,7 @@ export function availableViewers(source: ViewerSource): ViewerDefinition[] {
     return viewer.extensions.includes(extension);
   });
 }
-export function preferredViewer(
+export function savedViewer(
   source: ViewerSource,
   preferences: readonly ViewerPreference[] = [],
 ): ViewerId | undefined {
@@ -130,5 +130,11 @@ export function preferredViewer(
     if (preference && selectable.some((item) => item.id === preference.viewerId))
       return preference.viewerId;
   }
-  return availableViewers(source)[0]?.id;
+  return undefined;
+}
+export function preferredViewer(
+  source: ViewerSource,
+  preferences: readonly ViewerPreference[] = [],
+): ViewerId | undefined {
+  return savedViewer(source, preferences) ?? availableViewers(source)[0]?.id;
 }

@@ -4,13 +4,22 @@ import { createPortal } from 'react-dom';
 import { ApiError, api, download } from '../../../api/client.js';
 import { useFormat, useT } from '../../../app/i18n.js';
 import { Tooltip } from '../../../components/tooltip.js';
-import { ErrorNotice } from '../../../components/ui.js';
-import { FileIcon } from '../../file-icon.js';
+import { Empty, ErrorNotice } from '../../../components/ui.js';
+import {
+  FilemanContextMenu,
+  FilemanListing,
+  FilemanListSkeleton,
+  FilemanParent,
+  FilemanSearch,
+  FilemanSelectionBar,
+  FilemanToolbar,
+  FilemanToolbarIcon,
+  FilemanViewToggle,
+} from '../../fileman/presentation.js';
 import { serverPath } from '../../service-contracts.js';
 import { viewerPath } from '../core/access.js';
 import { trimArchivePages } from '../core/archive-memory.js';
 import type { ViewerProps } from '../core/types.js';
-import { ViewerLoading } from '../loading.js';
 
 interface ArchiveEntry {
   name: string;
@@ -33,6 +42,10 @@ export default function ArchiveViewer({
   source,
   identity,
   onOpen,
+  onOpenWith,
+  chrome,
+  listingView,
+  onListingView,
   archiveDirectory = '',
   onArchiveDirectory,
   onArchiveBack,
@@ -51,12 +64,14 @@ export default function ArchiveViewer({
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<Sort>('name');
-  const [sortTouched, setSortTouched] = useState(false);
+  const [localView, setLocalView] = useState<'list' | 'grid'>('list');
+  const view = listingView ?? localView;
+  const setView = onListingView ?? setLocalView;
   const [direction, setDirection] = useState<'asc' | 'desc'>('asc');
   const [selected, setSelected] = useState<Map<string, ArchiveEntry>>(new Map());
   const anchor = useRef<string | undefined>(undefined);
   const searchInput = useRef<HTMLInputElement>(null);
-  const scroll = useRef<HTMLElement>(null);
+  const scroll = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTrigger = useRef<HTMLElement | null>(null);
   const [menu, setMenu] = useState<{ entry: ArchiveEntry; x: number; y: number }>();
@@ -216,6 +231,35 @@ export default function ArchiveViewer({
   const menuItems =
     menu && selected.has(menu.entry.path) ? [...selected.values()] : menu ? [menu.entry] : [];
   const busy = page.isFetching || query !== search.trim();
+  const rows = entries.map((entry) => ({
+    ...entry,
+    is_file: !entry.directory,
+    is_symlink: false,
+    modified_at: entry.modifiedAt ?? null,
+  }));
+  const selectedNames = new Set([...selected.values()].map((entry) => entry.name));
+  const searchControl = (
+    <FilemanSearch
+      value={search}
+      onChange={setSearch}
+      inputRef={searchInput}
+      shortcut={macKeyboard ? '⌥ + K' : 'ALT + K'}
+    />
+  );
+  const toolsControl = (
+    <Tooltip placement="cursor" content={t('file.refresh')}>
+      <button
+        type="button"
+        className="fm-tool"
+        aria-label={t('file.refresh')}
+        disabled={page.isFetching}
+        onClick={() => void page.refetch()}
+      >
+        <FilemanToolbarIcon kind="refresh" />
+      </button>
+    </Tooltip>
+  );
+  const viewControl = <FilemanViewToggle view={view} onChange={setView} />;
   return (
     <section
       className="ve-archive"
@@ -238,115 +282,25 @@ export default function ArchiveViewer({
         }
         if (event.target === event.currentTarget && event.key === 'ArrowDown') {
           event.preventDefault();
-          scroll.current?.querySelector<HTMLButtonElement>('.ve-entry')?.focus();
+          scroll.current?.querySelector<HTMLButtonElement>('.fm-filename')?.focus();
         }
       }}
     >
-      <div className="ve-archive-tools">
-        <div className="fm-tools">
-          <Tooltip placement="cursor" content={t('service.parentFolder')}>
-            <button
-              type="button"
-              className="fm-tool"
-              aria-label={t('service.parentFolder')}
-              disabled={!directory && !onArchiveBack}
-              onClick={() =>
-                directory
-                  ? navigate(directory.split('/').slice(0, -1).join('/'))
-                  : onArchiveBack?.()
-              }
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="20"
-                height="20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                aria-hidden="true"
-              >
-                <path d="m7 10 5-5 5 5M12 5v14" />
-              </svg>
-            </button>
-          </Tooltip>
-          <Tooltip placement="cursor" content={t('file.refresh')}>
-            <button
-              type="button"
-              className="fm-tool"
-              aria-label={t('file.refresh')}
-              disabled={page.isFetching}
-              onClick={() => void page.refetch()}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="20"
-                height="20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                aria-hidden="true"
-              >
-                <path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" />
-              </svg>
-            </button>
-          </Tooltip>
-          <span className="ve-archive-status" role="status">
-            {page.data
-              ? t('file.items', { count: page.data.total })
-              : page.isPending
-                ? t('web.loading')
-                : ''}
-          </span>
-        </div>
-        <div className="ve-archive-mobile-sort">
-          <select
-            aria-label={t('file.sort')}
-            value={sort}
-            onChange={(event) => {
-              setSort(event.target.value as Sort);
-              setSortTouched(true);
-              setOffset(0);
-            }}
-          >
-            <option value="name">{t('web.name')}</option>
-            <option value="size">{t('web.size')}</option>
-            <option value="modifiedAt">{t('file.modified')}</option>
-          </select>
-          <Tooltip
-            placement="cursor"
-            content={t(direction === 'asc' ? 'file.ascending' : 'file.descending')}
-          >
-            <button
-              type="button"
-              className="fm-tool"
-              aria-label={t(direction === 'asc' ? 'file.ascending' : 'file.descending')}
-              onClick={() => {
-                setDirection(direction === 'asc' ? 'desc' : 'asc');
-                setOffset(0);
-              }}
-            >
-              {direction === 'asc' ? '↑' : '↓'}
-            </button>
-          </Tooltip>
-        </div>
-        <div className="fm-search ve-archive-search">
-          <input
-            ref={searchInput}
-            type="search"
-            value={search}
-            aria-label={t('file.search')}
-            aria-keyshortcuts="Alt+K"
-            placeholder={t('file.search')}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <span aria-hidden="true">
-            <kbd>{macKeyboard ? '⌥ + K' : 'ALT + K'}</kbd>
-          </span>
-        </div>
-      </div>
+      {chrome?.search && chrome?.view && chrome?.tools ? (
+        <>
+          {createPortal(searchControl, chrome.search)}
+          {createPortal(toolsControl, chrome.tools)}
+          {createPortal(viewControl, chrome.view)}
+        </>
+      ) : (
+        <FilemanToolbar>
+          {searchControl}
+          <div className="fm-tools">{toolsControl}</div>
+          {viewControl}
+        </FilemanToolbar>
+      )}
       {!!selected.size && !accessLost && (
-        <section className="ve-archive-selection" aria-label={t('file.selection')}>
-          <span role="status">{t('file.selected', { count: selected.size })}</span>
+        <FilemanSelectionBar count={selected.size} onClear={() => setSelected(new Map())}>
           <Tooltip
             placement="cursor"
             content={t(
@@ -365,17 +319,7 @@ export default function ArchiveViewer({
               )}
               onClick={() => downloadEntries([...selected.values()])}
             >
-              <svg
-                viewBox="0 0 24 24"
-                width="20"
-                height="20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                aria-hidden="true"
-              >
-                <path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" />
-              </svg>
+              <FilemanToolbarIcon kind="download" />
             </button>
           </Tooltip>
           {onExtract && (
@@ -386,248 +330,131 @@ export default function ArchiveViewer({
                 aria-label={t('file.extract')}
                 onClick={() => extract([...selected.values()])}
               >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="20"
-                  height="20"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.7"
-                  aria-hidden="true"
-                >
-                  <path d="M3 7V5h7l2 3h9v13H3V7ZM12 17v-7m-3 3 3-3 3 3" />
-                </svg>
+                <FilemanToolbarIcon kind="extract" />
               </button>
             </Tooltip>
           )}
-          <button
-            type="button"
-            className="fm-tool"
-            aria-label={t('file.clearSelection')}
-            onClick={() => setSelected(new Map())}
-          >
-            ×
-          </button>
-        </section>
+        </FilemanSelectionBar>
       )}
       {page.error && <ErrorNotice error={page.error} retry={() => void page.refetch()} />}
       {page.isPending ? (
-        <ViewerLoading />
+        <FilemanListSkeleton view={view} />
       ) : (
         !accessLost &&
         page.data && (
           <>
-            <section
-              aria-label={t('file.entries')}
-              className="ve-archive-list"
-              ref={scroll}
-              aria-busy={busy}
-              onKeyDown={(event) => {
-                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
-                  event.preventDefault();
-                  setSelected(new Map(entries.map((item) => [item.path, item])));
-                }
-                if (event.key === 'Escape' && selected.size && !event.defaultPrevented) {
-                  event.preventDefault();
-                  setSelected(new Map());
-                }
+            <FilemanListing
+              entries={rows}
+              view={view}
+              selected={selectedNames}
+              order={sort === 'modifiedAt' ? 'date' : sort}
+              descending={direction === 'desc'}
+              fetching={busy}
+              totalCount={page.data.total}
+              listRef={scroll}
+              gameId={source.gameId}
+              isArchive={(name) => /\.(?:zip|tar|tgz|gz|bz2|xz|7z|rar|jar)$/i.test(name)}
+              menuEntry={menu?.entry.name}
+              onSort={(field) => {
+                const next = field === 'date' ? 'modifiedAt' : field;
+                setDirection(sort === next && direction === 'asc' ? 'desc' : 'asc');
+                setSort(next);
+                setOffset(0);
               }}
-            >
-              <table aria-label={t('file.entries')}>
-                <thead>
-                  <tr>
-                    <th className="ve-archive-check" scope="col">
-                      <input
-                        type="checkbox"
-                        aria-label={t('viewer.archiveSelectPage')}
-                        checked={
-                          entries.length > 0 && entries.every((entry) => selected.has(entry.path))
-                        }
-                        ref={(element) => {
-                          if (element)
-                            element.indeterminate =
-                              entries.some((entry) => selected.has(entry.path)) &&
-                              !entries.every((entry) => selected.has(entry.path));
-                        }}
-                        onChange={(event) =>
-                          setSelected((previous) => {
-                            const next = new Map(previous);
-                            for (const entry of entries) {
-                              if (event.target.checked) next.set(entry.path, entry);
-                              else next.delete(entry.path);
-                            }
-                            return next;
-                          })
-                        }
-                      />
-                    </th>
-                    {(
-                      [
-                        ['name', 'web.name'],
-                        ['size', 'web.size'],
-                        ['modifiedAt', 'file.modified'],
-                      ] as const
-                    ).map(([field, label]) => (
-                      <th
-                        key={field}
-                        scope="col"
-                        aria-sort={
-                          sort === field
-                            ? direction === 'asc'
-                              ? 'ascending'
-                              : 'descending'
-                            : 'none'
-                        }
-                        className={field === 'modifiedAt' ? 've-archive-date' : undefined}
-                      >
-                        <button
-                          type="button"
-                          className="text-button"
-                          onClick={() => {
-                            setSort(field);
-                            setSortTouched(true);
-                            setDirection(sort === field && direction === 'asc' ? 'desc' : 'asc');
-                            setOffset(0);
-                          }}
-                        >
-                          {t(label)}
-                          {sort === field && sortTouched && (
-                            <span aria-hidden="true">{direction === 'asc' ? ' ↑' : ' ↓'}</span>
-                          )}
-                        </button>
-                      </th>
-                    ))}
-                    <th scope="col" className="ve-archive-action">
-                      <span className="sr-only">{t('web.actions')}</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.map((entry, index) => (
-                    <tr
-                      key={entry.path}
-                      className={selected.has(entry.path) ? 'fm-selected' : undefined}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        showMenu(
-                          entry,
-                          event.currentTarget.querySelector<HTMLButtonElement>('.ve-entry') ??
-                            event.currentTarget,
-                          { x: event.clientX, y: event.clientY },
-                        );
-                      }}
-                      onClick={(event) => {
-                        if (!(event.target as HTMLElement).closest('button,input'))
-                          select(entry, event);
-                      }}
-                    >
-                      <td className="ve-archive-check">
-                        <input
-                          type="checkbox"
-                          aria-label={t('file.select', { name: entry.name })}
-                          checked={selected.has(entry.path)}
-                          onClick={(event) => select(entry, event, true)}
-                          onChange={() => {}}
-                        />
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="ve-entry"
-                          onMouseEnter={() => {
-                            if (entry.directory && !prefetchingFolder.current) {
-                              prefetchingFolder.current = true;
-                              void cache
-                                .prefetchQuery({ ...options(entry.path, 0, ''), staleTime: 30_000 })
-                                .finally(() => {
-                                  prefetchingFolder.current = false;
-                                  trimArchivePages(options(directory, offset).queryKey);
-                                });
-                            }
-                          }}
-                          onClick={(event) =>
-                            event.ctrlKey || event.metaKey || event.shiftKey
-                              ? select(entry, event)
-                              : open(entry)
-                          }
-                          onKeyDown={(event) => {
-                            if (event.key === ' ') {
-                              event.preventDefault();
-                              select(entry, event, true);
-                            }
-                            if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
-                              event.preventDefault();
-                              const next =
-                                event.key === 'Home'
-                                  ? 0
-                                  : event.key === 'End'
-                                    ? entries.length - 1
-                                    : Math.max(
-                                        0,
-                                        Math.min(
-                                          entries.length - 1,
-                                          index + (event.key === 'ArrowUp' ? -1 : 1),
-                                        ),
-                                      );
-                              if (event.shiftKey && entries[next]) {
-                                anchor.current ??= entry.path;
-                                select(entries[next], event);
-                              }
-                              scroll.current
-                                ?.querySelectorAll<HTMLButtonElement>('.ve-entry')
-                                [next]?.focus();
-                            }
-                            if (
-                              event.key === 'ContextMenu' ||
-                              (event.shiftKey && event.key === 'F10')
-                            ) {
-                              event.preventDefault();
-                              showMenu(entry, event.currentTarget);
-                            }
-                          }}
-                        >
-                          <FileIcon
-                            name={entry.name}
-                            folder={entry.directory}
-                            archive={/\.(?:zip|jar|tar|tgz|gz|bz2|xz|zst|7z|rar)$/i.test(
-                              entry.name,
-                            )}
-                          />
-                          <span>{entry.name}</span>
-                        </button>
-                      </td>
-                      <td className="ve-archive-size">
-                        {entry.directory ? '—' : format.bytes(entry.size)}
-                      </td>
-                      <td className="ve-archive-date">
-                        {entry.modifiedAt ? format.date(entry.modifiedAt) : '—'}
-                      </td>
-                      <td className="ve-archive-action">
-                        <button
-                          type="button"
-                          className="secondary fm-icon-button fm-menu-trigger"
-                          aria-label={t('file.actionsFor', { name: entry.name })}
-                          aria-haspopup="menu"
-                          aria-expanded={menu?.entry.path === entry.path}
-                          onClick={(event) => showMenu(entry, event.currentTarget)}
-                        >
-                          ⋯
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!entries.length && (
-                <p className="ve-empty">{t(query ? 'file.noMatches' : 'service.folderEmpty')}</p>
-              )}
-            </section>
-            {page.data && page.data.total > pageSize && (
+              onSelectAll={(checked) =>
+                setSelected((previous) => {
+                  const next = new Map(previous);
+                  for (const entry of entries) {
+                    if (checked) next.set(entry.path, entry);
+                    else next.delete(entry.path);
+                  }
+                  return next;
+                })
+              }
+              onSelect={(entry, event) => select(entry, event, true)}
+              onOpen={(entry, event) =>
+                event.ctrlKey || event.metaKey || event.shiftKey
+                  ? select(entry, event)
+                  : open(entry)
+              }
+              onMenu={(entry, trigger, x, y) =>
+                showMenu(entry, trigger, x !== undefined && y !== undefined ? { x, y } : undefined)
+              }
+              parent={
+                directory || onArchiveBack ? (
+                  <FilemanParent
+                    onClick={() =>
+                      directory
+                        ? navigate(directory.split('/').slice(0, -1).join('/'))
+                        : onArchiveBack?.()
+                    }
+                  />
+                ) : undefined
+              }
+              empty={<Empty text={t(query ? 'file.noMatches' : 'service.folderEmpty')} />}
+              rowProps={(entry) => ({
+                onMouseDown: (event) => {
+                  if (
+                    event.button === 0 &&
+                    (event.ctrlKey || event.metaKey || event.shiftKey) &&
+                    !(event.target as HTMLElement).closest('input,.fm-menu-trigger')
+                  )
+                    event.preventDefault();
+                },
+                onClickCapture: (event) => {
+                  if ((event.target as HTMLElement).closest('button,input')) return;
+                  select(entry, event);
+                  event.currentTarget.querySelector<HTMLButtonElement>('.fm-filename')?.focus();
+                },
+                onMouseEnter: () => {
+                  if (entry.directory && !prefetchingFolder.current) {
+                    prefetchingFolder.current = true;
+                    void cache
+                      .prefetchQuery({ ...options(entry.path, 0, ''), staleTime: 30_000 })
+                      .finally(() => {
+                        prefetchingFolder.current = false;
+                        trimArchivePages(options(directory, offset).queryKey);
+                      });
+                  }
+                },
+                onKeyDown: (event) => {
+                  if (!(event.target as HTMLElement).matches('.fm-filename')) return;
+                  if (event.key === ' ') {
+                    event.preventDefault();
+                    select(entry, event, true);
+                  }
+                  if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+                    event.preventDefault();
+                    const index = entries.findIndex((item) => item.path === entry.path);
+                    const next =
+                      event.key === 'Home'
+                        ? 0
+                        : event.key === 'End'
+                          ? entries.length - 1
+                          : Math.max(
+                              0,
+                              Math.min(
+                                entries.length - 1,
+                                index + (event.key === 'ArrowUp' ? -1 : 1),
+                              ),
+                            );
+                    if (event.shiftKey && entries[next]) {
+                      anchor.current ??= entry.path;
+                      select(entries[next], event);
+                    }
+                    scroll.current
+                      ?.querySelectorAll<HTMLButtonElement>('.fm-filename')
+                      [next]?.focus();
+                  }
+                },
+              })}
+            />
+            {page.data.total > pageSize && (
               <div className="ve-pagination">
                 <button
                   type="button"
                   className="secondary"
-                  disabled={offset === 0}
+                  disabled={offset === 0 || busy}
                   onClick={() => setOffset((value) => Math.max(0, value - pageSize))}
                 >
                   {t('viewer.previous')}
@@ -640,7 +467,7 @@ export default function ArchiveViewer({
                 <button
                   type="button"
                   className="secondary"
-                  disabled={offset + pageSize >= page.data.total}
+                  disabled={offset + pageSize >= page.data.total || busy}
                   onClick={() => setOffset((value) => value + pageSize)}
                 >
                   {t('viewer.next')}
@@ -652,38 +479,36 @@ export default function ArchiveViewer({
       )}
       {menu &&
         createPortal(
-          <div
+          <FilemanContextMenu
             ref={menuRef}
-            role="menu"
-            aria-label={t('file.actionsFor', { name: menu.entry.name })}
-            className="fm-menu ve-archive-menu"
-            style={{ left: menu.x, top: menu.y }}
-            onKeyDown={(event) => {
-              const buttons = [
-                ...event.currentTarget.querySelectorAll<HTMLButtonElement>('button'),
-              ];
-              const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-              if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
-                event.preventDefault();
-                buttons[
-                  event.key === 'Home'
-                    ? 0
-                    : event.key === 'End'
-                      ? buttons.length - 1
-                      : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) %
-                        buttons.length
-                ]?.focus();
-              }
-              if (event.key === 'Escape' || event.key === 'Tab') {
-                event.preventDefault();
-                setMenu(undefined);
-                menuTrigger.current?.focus();
-              }
+            label={t('file.actionsFor', { name: menu.entry.name })}
+            left={menu.x}
+            top={menu.y}
+            onClose={() => {
+              setMenu(undefined);
+              menuTrigger.current?.focus();
             }}
           >
             <button type="button" role="menuitem" onClick={() => open(menu.entry)}>
               {t(menu.entry.directory ? 'service.openFolder' : 'viewer.open')}
             </button>
+            {!menu.entry.directory && onOpenWith && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  onOpenWith({
+                    ...source,
+                    name: menu.entry.name,
+                    size: menu.entry.size,
+                    entry: menu.entry.path,
+                  });
+                  setMenu(undefined);
+                }}
+              >
+                {t('viewer.openWith')}
+              </button>
+            )}
             <button type="button" role="menuitem" onClick={() => downloadEntries(menuItems)}>
               {t(
                 menuItems.length === 1 && !menu.entry.directory
@@ -696,7 +521,7 @@ export default function ArchiveViewer({
                 {t('file.extract')}
               </button>
             )}
-          </div>,
+          </FilemanContextMenu>,
           document.body,
         )}
     </section>

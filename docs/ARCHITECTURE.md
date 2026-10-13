@@ -257,8 +257,13 @@ bound to its current provider identity.
 
 ### Shared file viewers (M5)
 
-The file manager's lazy viewer engine owns selection, personal defaults and shared
-read access. Builtin views cover text, images, browser-playable media, archive
+Fileman owns filesystem controllers and one shared presentation layer for real
+and virtual directories. Its lazy ViewerEngine owns viewer selection, personal
+defaults and shared read access. Atlas renders the actual Fileman components with
+an archive-backed data source. The trusted Game SDK supports complete lazy views
+and scoped, typed presentation contributions (hide/replace/decorate/add to named
+surfaces); no DOM monkey-patching or remote executable modules. Shared controllers
+remain authoritative for I/O and permissions. Builtin views cover text, images, browser-playable media, archive
 virtual folders and read-only JSON/SQLite. Trusted game modules use validated SDK
 viewer descriptors; they do not replace common file authorization or transports.
 A server-side SFTP broker reuses the managed-server access proof, pinned pooled

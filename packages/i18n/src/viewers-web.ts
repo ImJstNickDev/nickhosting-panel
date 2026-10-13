@@ -72,6 +72,8 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
     'Non è stato possibile cambiare la modalità di visualizzazione. Riprova.',
   ],
   'viewer.archive': ['Archive', 'Archivio'],
+  'viewer.downloadArchive': ['Download archive', 'Scarica archivio'],
+  'viewer.downloadFile': ['Download file', 'Scarica file'],
   'viewer.sqlite': ['SQLite database', 'Database SQLite'],
   'viewer.json': ['JSON tree', 'Albero JSON'],
   'viewer.name.text': ['Scribe', 'Scribe'],

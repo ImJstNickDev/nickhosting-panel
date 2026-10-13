@@ -8746,3 +8746,110 @@ remain outside scope. Rollback is a source revert; no production data migration.
 281 review PNGs, 687 relative links, 4 TOML files and 44 ignore cases (secret scan
 is heuristic). `git diff --cached --check`: **passed**. Final read-only container
 status: dev API and Vite both running/healthy.
+
+### Fileman host, shared Atlas UI and single compressed views — 2026-10-13
+
+Owner-requested architecture follow-up to the Atlas pass above. Fileman now owns
+one actual presentation for real directories and virtual archive folders. Shared
+components cover toolbar, breadcrumb, search, list/grid, sorting, entry icons,
+selection, contextual menus and skeletons. Atlas retains its existing bounded
+metadata cache and archive source adapter. It no longer carries separate row/table/
+hover CSS. Its search, layout toggle and actions mount at the corresponding Fileman
+toolbar positions; unsupported writes/uploads are absent.
+
+The trusted Game SDK adds named presentation patches (prepend/append/decorate/
+replace/hide) alongside complete lazy viewer modules. The host indexes patches by
+slot, validates namespaces and deterministic conflicts, and scopes them to the
+current game/viewer/entry. No installed game extension is added by this change.
+Backend operations, authorization, SFTP sessions, signed URLs and filesystem
+controllers remain unchanged; extension rendering adds no provider requests.
+Native text editing also uses the common content slot. Active nested viewer context
+propagates to the outer toolbar, avoiding stale or falsely writable context.
+
+Standalone GZ/BZ2/XZ/ZST opens the decoded read-only member while preserving the
+compressed visible identity. Download distinguishes original and decoded bytes;
+explicit Atlas choices and compound TAR remain browsable. See the format contract
+and ADR 0017 amendment for extension APIs and boundaries.
+
+Review/attempt record: the first native Files browser suite ran during concurrent
+source/HMR edits and was interrupted with exit 130 after it stopped yielding
+progress; it produced no test summary and is **not** counted as passing. Focused
+Atlas tests exposed mobile toolbar breadcrumb/search clipping; shared CSS now
+uses normal folder layout when directory search is present. Independent review
+also found stale outer host context, a decoded-ZIP source-chain mismatch, and
+wrapper-vs-member preference ambiguity; fixes and final verification are recorded
+below. Historical Atlas/backend codec validation above remains unchanged.
+
+Additional test-attempt detail: the stable native run first stopped on a stale
+cold-skeleton assertion (persisted metadata was correctly displayed), then passed
+five cases before an old `goto(files)` assumption restored the previous folder
+instead of root. Tests now explicitly establish cold contexts or root navigation;
+reload/retained-cache assertions remain. One agent test process exited 143 before
+results; no pass was counted. A new compressed Retry case initially used the wrong
+existing English label, `Retry` instead of `Try again`; corrected the test selector.
+No production behavior was weakened to satisfy those assertions.
+
+Final focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/fileman.test.ts packages/game-sdk/src/viewers.test.ts apps/web/src/features/fileman/host.test.ts apps/web/src/features/file-manager-model.test.ts apps/web/src/features/viewer-engine/core/registry.test.ts apps/web/src/features/viewer-engine/core/access.test.ts apps/web/src/features/viewer-engine/core/compressed.test.ts`: **27 passed** across seven files.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts apps/web/tests/fileman-extension.browser.test.ts apps/web/tests/file-viewer-escape.browser.test.ts -t 'navigates archives|Atlas|restores the open viewer|preserves JSON|offers all|compiled Fileman|Escape' --bail=1 --reporter=verbose`: **12 passed, 25 unrelated cases skipped**. Includes shared native/Atlas computed-style parity, EN/IT desktop/mobile, real host context across Atlas→JSON→Files and native editor, personal defaults, refresh and Escape/dirty editor handling.
+- Same isolated browser command with `apps/web/tests/compressed-viewers.browser.test.ts --bail=1 --reporter=verbose`: **7 passed**. Covers all four single-stream types, root/nested decoded ZIPs, readonly text, original/decoded download targets, directory return, saved wrapper Atlas preference without changing ordinary JSON, refresh, failure/retry and Italian mobile keyboard menu.
+- `scripts/dev.sh pnpm typecheck`: **passed** (root, web and browser tests).
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **passed**. Existing large-chunk warnings remain; no new package or decoder dependency.
+- `scripts/dev.sh pnpm exec biome check` over the changed SDK, host, viewer, native Files, tests and catalog files: **passed**.
+
+Independent technical and UX/accessibility reviews found and resolved the issues
+listed above, including shared Extract/Download icon reuse and suppressing the
+Download tooltip while its menu is open. Final technical review reports no
+remaining must-fix. Screenshots are actual browser fixtures, reviewed by the
+coordinator and separately by the UX reviewer:
+[list/hover desktop EN](screenshots/m5/atlas-fileman-list-hover-desktop-en.png),
+[grid desktop IT](screenshots/m5/atlas-fileman-grid-desktop-it.png),
+[list mobile EN](screenshots/m5/atlas-fileman-list-mobile-en.png),
+[grid mobile IT](screenshots/m5/atlas-fileman-grid-mobile-it.png),
+[nested compressed](screenshots/m5/file-viewer-single-compressed-nested.png),
+[download mobile IT](screenshots/m5/file-viewer-single-compressed-download-mobile-it.png),
+[lookup error](screenshots/m5/file-viewer-single-compressed-error.png).
+
+Safety: this is frontend/SDK composition over unchanged backend controllers and
+transports. Browser tests use isolated PostgreSQL/API handlers and fixture provider
+responses, not real server mutations. Existing approved test services were reused;
+no Docker resource creation/restart, Blueprint update, provider/network mutation,
+new dependencies or database migration. Historical codec/SFTP/backend integration
+evidence remains valid for unchanged code; no full M1–M5 matrix was repeated.
+Dev API/Vite remain healthy and use their existing source watchers/HMR. Issue #18
+and production release boundaries remain unchanged. Rollback is a source revert;
+there are no provider writes or schema changes to reverse.
+
+The native continuation exposed two further fixture assumptions: raw drag mouse
+coordinates could point outside the clipped listing, and a Back-navigation setup
+inherited an editor bookmark from the preceding test. Drag fixtures now require
+visible in-viewport geometry (the spring case filters its own sibling names), and
+root-intended setup clears only this isolated server's navigation bookmarks.
+Actual move/drop, Back/dirty-content and reload assertions were retained. These
+were test setup changes only; no backend or product workaround was introduced.
+
+Native Fileman verification completed: **all 34 distinct scenarios passed across
+partitioned runs**, not a single clean full-suite run. The command prefix was
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts --bail=1 --reporter=verbose`:
+
+- No filter: first **10 passed**, then the off-screen held-drag fixture failed.
+- `-t 'opens nested folders|opens a hovered breadcrumb|cancels a held drag'`:
+  **3 passed, 31 skipped** after fixture correction.
+- `-t 'asks only|requests consent|clears move|opens text inline|renames the open|returns to the same|does not steal|keeps inline rename|keeps edits when|keeps known|edits JSON|indents with|saves in|uploads|completes|keeps path|renders bounded|shows platform|renders compact desktop'`:
+  first **8 passed**, then the inherited editor bookmark in Back setup failed.
+- `-t 'keeps edits when|keeps known|edits JSON|indents with|saves in|uploads|completes|keeps path|renders bounded|shows platform|renders compact desktop'`:
+  **13 passed, 21 skipped** after correcting that setup. No unhandled errors.
+
+Coverage includes >100-file bulk operations, downloads/filenames, selection,
+collision handling, held drag and breadcrumb drops, authorization changes, editor
+concurrent writes/dirty guards, undo/cursor retention, uploads, path completion,
+keyboard shortcuts and desktop/mobile Axe checks. Zero Axe violations in tested
+states is not blanket WCAG certification. The corrected test file passed Biome,
+browser test TypeScript and whitespace checks. Expensive already-passing scenarios
+were not repeated merely to obtain one monolithic summary.
+
+`python3 scripts/check-governance.py`: **passed**, 847 indexed text files,
+288 review PNGs, 696 relative links, 4 TOML files and 44 ignore cases (heuristic
+secret scan). `git diff --cached --check`: **passed**. Read-only final dev status:
+API and Vite running/healthy; no manual restart or real game asset creation.

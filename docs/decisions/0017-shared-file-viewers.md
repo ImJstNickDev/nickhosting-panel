@@ -82,3 +82,25 @@ Blueprint, infrastructure or file-write permission changes are introduced.
 [Validation](../M5-VALIDATION.md) records Chromium/Firefox tests, independent review,
 synthetic performance measurements, and the read-only real dataset check. Raster
 previews and ICO decoding retain their existing path; SFTPGo issue #18 is unchanged.
+
+## Amendment — 2026-10-13: Fileman as the viewer extension host
+
+The initial engine registered complete viewers but left Atlas with an independent
+folder presentation. The Owner requested one extensible Fileman rather than a
+similar-looking archive browser. Real folders and Atlas now use shared toolbar,
+list/grid, entry, selection and menu components. Each retains its own data source
+and cache; existing filesystem operations are not duplicated.
+
+The SDK adds validated compiled presentation patches for named slots, alongside
+complete viewer loaders. Add/decorate/hide/replace behavior has deterministic
+ordering and explicit replacement-conflict rejection. Game context scopes patches;
+viewer context and portal lifetime follow React, without global DOM modifications.
+This is an explicit extension API, not an arbitrary runtime mixin mechanism.
+Capabilities remain separate from authorization and source access.
+
+Single compressed streams now open their decoded member automatically while
+retaining the compressed filename. Download distinguishes original versus decoded
+bytes; compound archives and explicit Atlas choices retain virtual-folder browsing.
+No Blueprint, provider, infrastructure, credential or backend permission changes.
+See [extension contract and formats](../M5-VIEWER-FORMATS.md) and
+[validation](../M5-VALIDATION.md).

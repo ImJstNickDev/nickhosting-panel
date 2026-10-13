@@ -9,6 +9,18 @@ export function viewerPath(serverId: string, source: ViewerSource, operation = '
   return `${serverPath(serverId)}/files/viewer/${source.entry ? 'archive/' : ''}${operation}?${query}`;
 }
 
+/** Download exactly the selected file, or the current container's original bytes. */
+export function viewerDownloadPath(serverId: string, source: ViewerSource) {
+  if (source.entry) return `${viewerPath(serverId, source)}&download=true`;
+  if (source.archives?.length)
+    return `${viewerPath(serverId, {
+      ...source,
+      entry: source.archives.at(-1),
+      archives: source.archives.slice(0, -1),
+    })}&download=true`;
+  return `${serverPath(serverId)}/files/content?path=${encodeURIComponent(source.path)}`;
+}
+
 /** One bounded transport for parsers. Media use the same-origin URL with native Range requests. */
 export async function readViewerBytes(
   url: string,
