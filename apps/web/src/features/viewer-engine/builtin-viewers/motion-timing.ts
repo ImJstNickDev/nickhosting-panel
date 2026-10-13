@@ -8,6 +8,7 @@ import type {
 import { serverPath } from '../../service-contracts.js';
 
 const maximumEvents = 512;
+const maximumRangeEvents = 192;
 const maximumBatch = 48;
 const maximumMs = 300_000;
 const noop = () => {};
@@ -20,6 +21,7 @@ export class MotionTimeline implements MotionTrace {
   private pending: MotionTimingEvent[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private count = 0;
+  private rangeCount = 0;
   private closed = false;
   private mounted = false;
   constructor(private readonly endpoint: string) {}
@@ -33,6 +35,15 @@ export class MotionTimeline implements MotionTrace {
       if (this.closed || this.count >= maximumEvents) return;
       const elapsed = performance.now() - this.started;
       if (elapsed < 0 || elapsed > maximumMs) return;
+      // Reserve the remaining budget for seeks, failures and subtitle recovery.
+      if (
+        phase === 'video.range' ||
+        phase === 'video.range_queue' ||
+        phase === 'video.range_headers'
+      ) {
+        if (this.rangeCount >= maximumRangeEvents) return;
+        this.rangeCount++;
+      }
       // Deliberately copy only the diagnostic contract, never arbitrary objects.
       const event: MotionTimingEvent = { phase, atMs: round(elapsed) };
       for (const key of [
@@ -60,6 +71,13 @@ export class MotionTimeline implements MotionTrace {
       this.count++;
       if (this.pending.length >= maximumBatch) this.flush();
       else if (!this.timer) this.timer = setTimeout(() => this.flush(), 1000);
+      if (
+        this.rangeCount === maximumRangeEvents &&
+        (phase === 'video.range' ||
+          phase === 'video.range_queue' ||
+          phase === 'video.range_headers')
+      )
+        this.mark('trace.range_limit', { count: maximumRangeEvents });
     } catch {
       // Observability is never a media failure.
     }

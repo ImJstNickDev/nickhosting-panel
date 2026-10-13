@@ -8470,3 +8470,70 @@ media asset. Existing isolated fixtures closed normally. SFTPGo #18 remains a
 production-release gate. No historical full milestone matrix was repeated.
 Rollback: revert this source-only change; there is no migration. PR #21 stays
 open and unmerged.
+
+### Motion Owner trace and fractional subtitle windows (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. Analyzed the completed Owner run without
+changing provider or media state. Times below are relative to Motion timeline
+creation, excluding the earlier lazy-module download. Nested and parallel phases
+must not be added together.
+
+| Milestone | Duration | Completion from trace origin |
+| --- | --- | --- |
+| Video track discovery | 541 ms | 728 ms |
+| Subtitle track discovery (parallel) | 558 ms | 745 ms |
+| Subtitle renderer import/setup | 27 ms | 773 ms |
+| MSE metadata | 248 ms | 976 ms |
+| MSE first packets | 506 ms | 1,482 ms |
+| First displayed-frame callback | — | 1,560 ms |
+| MSE first buffer | 336 ms | 1,819 ms |
+| Complete MSE initialization (includes preceding MSE stages) | 1,091 ms | 1,819 ms |
+| First completed subtitle window | 1,889 ms | 3,715 ms |
+
+Two earlier subtitle reads were cancelled after 756 ms and 297 ms as native
+metadata and the restored MSE position triggered replacement reads. Code review
+confirms the transient zero-position read during source replacement is redundant;
+it is a measured optimization candidate, not changed by this correctness pass.
+The final window's backend extraction occupied 1,728 ms of a 1,756 ms request.
+Later cached browser windows completed in approximately 31–141 ms. The first
+user Play and native playing event had the same recorded millisecond.
+
+The captured run contains 384 backend requests: 357 succeeded, 27 cancelled,
+zero failed. Cancellations include source replacement and hover-preview changes;
+they do not establish playback failures. The browser reached its 512-event limit
+after about 18 seconds, before the reported later subtitle error/retries. Thus
+the exact user exception was not captured and is not claimed as proven.
+
+A concrete matching defect was independently reproduced: a valid 22-second
+window at 12.072 seconds has the floating-point span `22.000000000000004`. The
+frontend rejected it despite a successful backend response; retries could receive
+the same cached window. Two new regression cases failed before the fix. The
+comparison now permits only a few floating-point units, capped at 0.1 microsecond;
+genuinely oversized responses still fail. No parser, provider or media mutation.
+
+The trace now samples at most 192 Range milestones within the existing 512-event
+cap, reserving space for subsequent subtitle errors/recovery. A fixed marker
+reports this sub-limit. Independent review caught and resolved a marker-ordering
+edge case that could otherwise emit event 513; a mixed-budget regression covers it.
+
+Read-only Chromium probe of the Owner-supplied MKV succeeded at 12.072, 11.072,
+12.072 and 35.075 seconds, with no failed HTTP response or source-reader error.
+The first cold window took 2,808 ms; subsequent windows 54/33/64 ms. This verifies
+the actual source reader against the real file; it does not claim that all of the
+Owner's later interactive failures were reproduced. Private media and probe
+outputs remain untracked.
+
+No visual layout change, new dependency, migration, manual container restart,
+Blueprint update, provider write, game-server command or new infrastructure.
+Existing HMR loads the fix. Existing screenshots remain representative.
+No historical full milestone suite repeated; SFTPGo #18 remains unchanged.
+Rollback: revert the source-only changes. PR #21 remains open and unmerged.
+
+Focused validation for this correction:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/subtitle-source.test.ts apps/web/src/features/viewer-engine/builtin-viewers/motion-timing.test.ts apps/api/src/viewer-timing.test.ts`: **31 passed** before the final marker-ordering regression.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/motion-timing.test.ts`: **7 passed** after that final fix; 32 distinct unit cases across these files.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-subtitles.browser.test.ts`: **5 passed**, 31.65 s, existing isolated services. No new containers started.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass**.
+- Focused Biome on all five changed source/test files: **pass**.
+- Independent read-only review: **no remaining must-fix findings**, with the evidence boundary above explicitly retained.

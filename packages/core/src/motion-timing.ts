@@ -2,6 +2,7 @@
 export const motionTimingPhases = [
   'viewer.mounted',
   'viewer.closed',
+  'trace.range_limit',
   'native.loadstart',
   'native.metadata',
   'native.loadeddata',

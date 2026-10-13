@@ -20,6 +20,32 @@ const batches = () =>
   vi.mocked(fetch).mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
 
 describe('bounded Motion debug timeline', () => {
+  it('keeps the total cap when range sampling reaches its limit on the final event', () => {
+    const trace = timeline();
+    for (let index = 0; index < 191; index++) trace.mark('video.range');
+    for (let index = 0; index < 320; index++) trace.mark('native.play');
+    trace.mark('video.range');
+    trace.close();
+    expect(batches().flatMap((batch) => batch.events)).toHaveLength(512);
+  });
+  it('reserves room for failures and recovery after frequent Range milestones', () => {
+    const trace = timeline();
+    for (let index = 0; index < 1000; index++) {
+      trace.mark('video.range_queue');
+      trace.mark('video.range_headers');
+      trace.mark('video.range');
+    }
+    trace.mark('subtitles.window', { outcome: 'failed' });
+    trace.mark('subtitles.window', { outcome: 'succeeded' });
+    trace.close();
+    const events = batches().flatMap((batch) => batch.events);
+    expect(events.filter((event) => event.phase.startsWith('video.range'))).toHaveLength(192);
+    expect(events.filter((event) => event.phase === 'trace.range_limit')).toHaveLength(1);
+    expect(
+      events.filter((event) => event.phase === 'subtitles.window').map((event) => event.outcome),
+    ).toEqual(['failed', 'succeeded']);
+    expect(events.at(-1).phase).toBe('viewer.closed');
+  });
   it('batches fixed milestones without transferring file paths or arbitrary error content', async () => {
     const trace = timeline();
     trace.activate();

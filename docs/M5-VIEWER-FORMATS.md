@@ -215,6 +215,10 @@ Development StrictMode can create cancelled discovery attempts, identified as su
 
 Browser collection is bounded to 512 milestones/five minutes per mount, batches
 of at most 48, normally flushed after one second, and no per-frame/packet logging.
+Range queue/header/body milestones share a 192-event sub-limit; a fixed
+`trace.range_limit` marker identifies truncation. Remaining capacity preserves
+subtitle failures, recovery and playback milestones rather than recording every
+Range read. The overall 512-event limit is unchanged.
 Delivery is best-effort with a five-second timeout and no retry; closing flushes
 remaining records. Intake is limited to 30 batches per authenticated session per
 minute, with bounded in-memory bookkeeping. No file reads are added for tracing;

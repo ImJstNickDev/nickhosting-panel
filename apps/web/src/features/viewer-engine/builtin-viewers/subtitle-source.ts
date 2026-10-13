@@ -41,13 +41,16 @@ async function remoteWindow(response: Response, time: number): Promise<SubtitleW
   const value: unknown = JSON.parse(json);
   if (!value || typeof value !== 'object') throw new Error('Invalid subtitle response');
   const window = value as SubtitleWindow;
+  // Subtracting fractional timestamps can round a valid 22-second span upward.
+  // Allow a few floating-point units, capped far below a single media timestamp.
+  const spanRounding = Math.min(1e-7, Number.EPSILON * Math.max(1, window.start, window.end) * 4);
   if (
     !Number.isFinite(window.start) ||
     !Number.isFinite(window.end) ||
     window.start < 0 ||
     window.start > time ||
     window.end <= time ||
-    window.end - window.start > subtitleLimits.windowSeconds + 2 ||
+    window.end - window.start > subtitleLimits.windowSeconds + 2 + spanRounding ||
     !Array.isArray(window.cues) ||
     window.cues.length > subtitleLimits.windowCues ||
     window.cues.some(

@@ -443,6 +443,37 @@ describe('Motion selective Matroska subtitle source', () => {
     expect(await source.readWindow('3', 8.5)).toEqual(window);
     source.dispose();
   });
+  it.each([12.072, 12.075, 17.631, 59.111])(
+    'accepts fractional cached windows at %s without rounding failures',
+    async (time) => {
+      const bytes = file(track(), cluster(0, block('visible')));
+      serve(bytes);
+      const source = await openSubtitleSource(url, bytes.length, new AbortController().signal);
+      if (!source) throw new Error('Expected source');
+      const window = { start: time - 2, end: time + 20, cues: [] };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json(window)),
+      );
+      expect(await source.readWindow('3', time)).toEqual(window);
+      expect(await source.readWindow('3', time - 1)).toEqual(window);
+      expect(await source.readWindow('3', time)).toEqual(window);
+      source.dispose();
+    },
+  );
+  it('still rejects windows exceeding the duration cap by a meaningful amount', async () => {
+    const bytes = file(track(), cluster(0, block('visible')));
+    serve(bytes);
+    const source = await openSubtitleSource(url, bytes.length, new AbortController().signal);
+    if (!source) throw new Error('Expected source');
+    const time = 12.072;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ start: time - 2, end: time + 20.000001, cues: [] })),
+    );
+    await expect(source.readWindow('3', time)).rejects.toThrow('Invalid subtitle response');
+    source.dispose();
+  });
   it('keeps the bounded Range fallback for unindexed archive members', async () => {
     const bytes = file(track(), cluster(0, block('inside archive')));
     const { fetch } = serve(bytes);
