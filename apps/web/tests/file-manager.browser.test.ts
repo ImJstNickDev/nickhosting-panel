@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
-import { expect as browserExpect, type Page } from '@playwright/test';
+import { expect as browserExpect, type Locator, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
@@ -660,6 +660,136 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     await browserExpect(row('drag-file.txt')).toHaveCount(0);
     await browserExpect(user.getByRole('alert')).toHaveCount(0);
     expect(remote.has('drag-destination/drag-file.txt')).toBe(true);
+  });
+  it('opens nested folders on a held drag and moves the original file on release', async () => {
+    const endpoint = `/v1/servers/${provider.ids.serverId}/files`;
+    for (const [root, name] of [
+      ['', 'spring-a'],
+      ['spring-a', 'spring-b'],
+      ['spring-a/spring-b', 'spring-c'],
+    ])
+      await journeyRequest(harness, user, endpoint, { action: 'mkdir', root, name });
+    const remote = await provider.files();
+    remote.set('spring-file.txt', Buffer.from('Spring drag'));
+    await user.goto(base);
+    const center = async (locator: Locator) => {
+      const box = await locator.boundingBox();
+      if (!box) throw new Error('Drag target is not visible');
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    };
+    const moveTo = async (locator: Locator, steps = 1) => {
+      const { x, y } = await center(locator);
+      await user.mouse.move(x, y, { steps });
+    };
+    await moveTo(row('spring-file.txt'));
+    await user.mouse.down();
+    await moveTo(row('spring-a'), 10);
+    const first = await center(row('spring-a'));
+    await user.mouse.move(first.x + 1, first.y + 1, { steps: 3 });
+    await browserExpect(row('spring-a')).toHaveClass(/fm-drop-hover/);
+    await harness.screenshot(user, 'file-spring-hover-desktop-en');
+    await browserExpect(row('spring-b')).toBeVisible({ timeout: 5000 });
+    await moveTo(row('spring-b'), 10);
+    await browserExpect(row('spring-c')).toBeVisible({ timeout: 5000 });
+    await moveTo(row('spring-c'), 10);
+    await user.mouse.up();
+    await browserExpect
+      .poll(() => remote.has('spring-a/spring-b/spring-c/spring-file.txt'))
+      .toBe(true);
+    await browserExpect(user.getByRole('alert')).toHaveCount(0);
+  });
+  it('opens a hovered breadcrumb while keeping the dragged file and accepts a drop in that directory', async () => {
+    const endpoint = `/v1/servers/${provider.ids.serverId}/files`;
+    await journeyRequest(harness, user, endpoint, {
+      action: 'mkdir',
+      root: '',
+      name: 'crumb-parent',
+    });
+    await journeyRequest(harness, user, endpoint, {
+      action: 'mkdir',
+      root: 'crumb-parent',
+      name: 'crumb-child',
+    });
+    const remote = await provider.files();
+    remote.set('crumb-parent/crumb-child/crumb-file.txt', Buffer.from('Breadcrumb drag'));
+    await user.goto(base);
+    await user.getByRole('button', { name: 'root', exact: true }).click();
+    await row('crumb-parent').getByRole('button', { name: 'crumb-parent', exact: true }).click();
+    await row('crumb-child').getByRole('button', { name: 'crumb-child', exact: true }).click();
+    const source = await row('crumb-file.txt').boundingBox();
+    const target = await user.getByRole('button', { name: 'root', exact: true }).boundingBox();
+    if (!source || !target) throw new Error('Drag source or breadcrumb is not visible');
+    await user.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+    await user.mouse.down();
+    await user.mouse.move(target.x + target.width / 2, target.y + target.height / 2, {
+      steps: 10,
+    });
+    await user.mouse.move(target.x + target.width / 2 + 1, target.y + target.height / 2 + 1, {
+      steps: 3,
+    });
+    await browserExpect(user.getByRole('button', { name: 'root', exact: true })).toHaveClass(
+      /fm-drop-hover/,
+    );
+    await browserExpect(row('crumb-parent')).toBeVisible({ timeout: 5000 });
+    await browserExpect(user.getByRole('button', { name: 'root', exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    const listHeader = await user.locator('.fm-columns').boundingBox();
+    if (!listHeader) throw new Error('File list is not visible');
+    await user.mouse.move(
+      listHeader.x + listHeader.width / 2,
+      listHeader.y + listHeader.height / 2,
+      {
+        steps: 10,
+      },
+    );
+    await user.mouse.up();
+    await browserExpect.poll(() => remote.has('crumb-file.txt')).toBe(true);
+    await browserExpect(user.getByRole('alert')).toHaveCount(0);
+  });
+  it('cancels a held drag after leaving the window without moving the source', async () => {
+    const endpoint = `/v1/servers/${provider.ids.serverId}/files`;
+    await journeyRequest(harness, user, endpoint, {
+      action: 'mkdir',
+      root: '',
+      name: 'spring-cancel',
+    });
+    await journeyRequest(harness, user, endpoint, {
+      action: 'mkdir',
+      root: 'spring-cancel',
+      name: 'target',
+    });
+    const remote = await provider.files();
+    remote.set('spring-cancel/cancel-source.txt', Buffer.from('Keep until release'));
+    await user.goto(base);
+    await user.getByRole('button', { name: 'root', exact: true }).click();
+    await row('spring-cancel').getByRole('button', { name: 'spring-cancel', exact: true }).click();
+    const source = await row('cancel-source.txt').boundingBox();
+    const target = await row('target').boundingBox();
+    if (!source || !target) throw new Error('Drag source or folder is not visible');
+    await user.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+    await user.mouse.down();
+    await user.mouse.move(target.x + target.width / 2, target.y + target.height / 2, {
+      steps: 10,
+    });
+    await user.mouse.move(target.x + target.width / 2 + 1, target.y + target.height / 2 + 1, {
+      steps: 3,
+    });
+    await browserExpect(row('target')).toHaveClass(/fm-drop-hover/);
+    await browserExpect(user.getByRole('button', { name: 'target', exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+      { timeout: 5000 },
+    );
+    await user.mouse.move(0, 0, { steps: 10 });
+    await user.mouse.up();
+    expect(remote.has('spring-cancel/cancel-source.txt')).toBe(true);
+    expect(remote.has('spring-cancel/target/cancel-source.txt')).toBe(false);
+    await browserExpect(user.locator('.fm-drop-hover')).toHaveCount(0);
+    await user.getByRole('button', { name: 'spring-cancel', exact: true }).click();
+    await row('cancel-source.txt').dragTo(row('target'));
+    await browserExpect.poll(() => remote.has('spring-cancel/target/cancel-source.txt')).toBe(true);
   });
   it('asks only for file collisions on drop, supports cancellation and scopes overwrite to freshly confirmed names', async () => {
     await journeyRequest(harness, user, `/v1/servers/${provider.ids.serverId}/files`, {

@@ -120,6 +120,7 @@ function waitForUploadRetry(delay: number, signal: AbortSignal) {
   });
 }
 const dragType = 'application/x-nickhosting-files';
+const springOpenDelay = 1050;
 const filePlaceholders = Array.from({ length: 12 }, (_, index) => ({
   id: `file-placeholder-${index}`,
   width: `${40 + (index % 4) * 12}%`,
@@ -389,6 +390,41 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const [copied, setCopied] = useState(false);
   const [menu, setMenu] = useState<{ entry: ServerFile; left: number; top: number }>();
   const [dropActive, setDropActive] = useState(false);
+  const [hoverDestination, setHoverDestination] = useState<string>();
+  const dragSession = useRef<
+    { identity: string | undefined; serverId: string; source: string; names: string[] } | undefined
+  >(undefined);
+  const hoverTarget = useRef<string | undefined>(undefined);
+  const springTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const finish = () => {
+      window.clearTimeout(springTimer.current);
+      springTimer.current = undefined;
+      hoverTarget.current = undefined;
+      dragSession.current = undefined;
+      setHoverDestination(undefined);
+    };
+    window.addEventListener('dragend', finish, true);
+    window.addEventListener('drop', finish);
+    window.addEventListener('blur', finish);
+    const leaveWindow = (event: globalThis.DragEvent) => {
+      if (
+        event.clientX <= 0 ||
+        event.clientY <= 0 ||
+        event.clientX >= window.innerWidth ||
+        event.clientY >= window.innerHeight
+      )
+        finish();
+    };
+    window.addEventListener('dragleave', leaveWindow);
+    return () => {
+      window.removeEventListener('dragend', finish, true);
+      window.removeEventListener('drop', finish);
+      window.removeEventListener('blur', finish);
+      window.removeEventListener('dragleave', leaveWindow);
+      finish();
+    };
+  }, []);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [uploadPause, setUploadPause] = useState<'checking' | 'blocked' | 'busy'>();
   const [preparingFolder, setPreparingFolder] = useState(false);
@@ -588,6 +624,8 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   });
   const canManage = server.data?.permissions.manage === true;
   const canMutate = canManage && server.data?.availableActions.files === true;
+  const canMutateRef = useRef(canMutate);
+  canMutateRef.current = canMutate;
   const uploadAvailable = transfers.data?.upload.available === true;
   const selectedNames = [...selected];
   const selectedEntries = files.data?.filter((entry) => selected.has(entry.name)) ?? [];
@@ -763,7 +801,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     restoreAttempt.current = viewerKey;
     setRestoredViewerKey(viewerKey);
   }
-  function navigate(path: string, preserveName = false) {
+  function navigate(path: string, preserveName = false, duringDrag = false) {
     if (mutationRunning.current || transferFlow.active) return;
     const normalized = normalizeFilePath(path);
     if (normalized === undefined) {
@@ -772,7 +810,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
     if (!confirmEditorExit()) return;
     discardReloadViewer();
-    focusDirectory.current = true;
+    focusDirectory.current = !duringDrag;
     cancelRead();
     setSaving(false);
     setInlineRename(false);
@@ -1326,42 +1364,78 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       return;
     event.preventDefault();
     event.stopPropagation();
-    try {
-      const payload = JSON.parse(event.dataTransfer.getData(dragType)) as {
-        serverId: string;
-        directory: string;
-        names: string[];
-      };
-      if (
-        payload.serverId !== serverId ||
-        payload.directory !== directory ||
-        !Array.isArray(payload.names) ||
-        !payload.names.length ||
-        !payload.names.every((name) =>
-          files.data?.some((entry) => entry.name === name && !entry.is_symlink),
+    const payload = dragSession.current;
+    clearDragSession();
+    if (!payload || payload.identity !== saveIdentity.current || payload.serverId !== serverId)
+      return;
+    // A drop onto the source or a selected folder cannot move anything.
+    // Ignore it like a cancelled drag instead of showing a page-wide error.
+    if (!validMoveTarget(payload.source, payload.names, folder)) return;
+    setMenu(undefined);
+    setError(undefined);
+    menuTrigger.current = document.activeElement as HTMLElement;
+    transferFlow.begin(
+      { source: payload.source, destination: folder, names: payload.names },
+      'move',
+      false,
+    );
+  }
+  function clearHover() {
+    window.clearTimeout(springTimer.current);
+    springTimer.current = undefined;
+    hoverTarget.current = undefined;
+    setHoverDestination(undefined);
+  }
+  function clearDragSession() {
+    clearHover();
+    dragSession.current = undefined;
+  }
+  function dragOverFolder(event: DragEvent, path: string) {
+    const payload = dragSession.current;
+    if (event.dataTransfer.types.includes(dragType)) event.stopPropagation();
+    if (
+      !canMutate ||
+      mutationRunning.current ||
+      !event.dataTransfer.types.includes(dragType) ||
+      !payload ||
+      payload.identity !== saveIdentity.current ||
+      payload.serverId !== serverId ||
+      !validMoveTarget(payload.source, payload.names, path)
+    ) {
+      if (hoverTarget.current === path) clearHover();
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    if (hoverTarget.current === path) return;
+    clearHover();
+    hoverTarget.current = path;
+    setHoverDestination(path);
+    if (path !== directory) {
+      springTimer.current = window.setTimeout(() => {
+        if (
+          hoverTarget.current !== path ||
+          !dragSession.current ||
+          dragSession.current.identity !== saveIdentity.current ||
+          !canMutateRef.current ||
+          mutationRunning.current
         )
-      )
-        return;
-      // A drop onto the source or a selected folder cannot move anything.
-      // Ignore it like a cancelled drag instead of showing a page-wide error.
-      if (!validMoveTarget(directory, payload.names, folder)) return;
-      setMenu(undefined);
-      setError(undefined);
-      menuTrigger.current = document.activeElement as HTMLElement;
-      transferFlow.begin(
-        { source: directory, destination: folder, names: payload.names },
-        'move',
-        false,
-      );
-    } catch {
-      // Ignore missing or malformed drag data; no file operation was started.
+          return;
+        clearHover();
+        navigate(path, false, true);
+      }, springOpenDelay);
     }
   }
-  function dragOverFolder(event: DragEvent) {
-    if (canMutate && event.dataTransfer.types.includes(dragType)) {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'move';
-    }
+  function dragLeaveFolder(event: DragEvent, path: string) {
+    const target = event.currentTarget;
+    const { clientX, clientY } = event;
+    window.setTimeout(() => {
+      if (
+        hoverTarget.current === path &&
+        !target.contains(document.elementFromPoint(clientX, clientY))
+      )
+        clearHover();
+    }, 0);
   }
   function updateUpload(id: number, patch: Partial<UploadItem>) {
     if (mounted.current)
@@ -1813,6 +1887,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         }
       }}
       onDragOver={(event) => {
+        if (
+          !displaying &&
+          event.dataTransfer.types.includes(dragType) &&
+          (event.target as Element).closest('.fm-list')
+        )
+          dragOverFolder(event, directory);
         if (!displaying && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           event.dataTransfer.dropEffect = uploadAvailable && !fileActionsBusy ? 'copy' : 'none';
@@ -1822,6 +1902,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropActive(false);
       }}
       onDrop={(event) => {
+        if (
+          !displaying &&
+          event.dataTransfer.types.includes(dragType) &&
+          (event.target as Element).closest('.fm-list')
+        ) {
+          dropFolder(event, directory);
+          return;
+        }
         if (!displaying && event.dataTransfer.types.includes('Files')) {
           event.preventDefault();
           setDropActive(false);
@@ -1852,10 +1940,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 <li key={part.path}>
                   <button
                     type="button"
-                    className="text-button"
+                    className={`text-button ${hoverDestination === part.path ? 'fm-drop-hover' : ''}`}
                     aria-current={!displaying && index === all.length - 1 ? 'page' : undefined}
                     onClick={() => navigate(part.path)}
-                    onDragOver={dragOverFolder}
+                    onDragOver={(event) => dragOverFolder(event, part.path)}
+                    onDragLeave={(event) => dragLeaveFolder(event, part.path)}
                     onDrop={(event) => dropFolder(event, part.path)}
                   >
                     {index === 0 ? t('file.root') : part.name}
@@ -2470,9 +2559,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 <button
                   type="button"
                   className="text-button"
+                  data-drag-hover={hoverDestination === parent || undefined}
                   onClick={() => navigate(parent)}
                   aria-label={t('service.parentFolder')}
-                  onDragOver={dragOverFolder}
+                  onDragOver={(event) => dragOverFolder(event, parent)}
+                  onDragLeave={(event) => dragLeaveFolder(event, parent)}
                   onDrop={(event) => dropFolder(event, parent)}
                 >
                   <FileIcon folder />
@@ -2487,7 +2578,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   data-directory-path={
                     !entry.is_file && !entry.is_symlink ? join(directory, entry.name) : undefined
                   }
-                  className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''} ${scopedClipboard?.action === 'move' && scopedClipboard.source === directory && scopedClipboard.names.includes(entry.name) ? 'fm-cut' : ''}`}
+                  className={`fm-entry ${selected.has(entry.name) ? 'fm-selected' : ''} ${hoverDestination === join(directory, entry.name) && !entry.is_file && !entry.is_symlink ? 'fm-drop-hover' : ''} ${scopedClipboard?.action === 'move' && scopedClipboard.source === directory && scopedClipboard.names.includes(entry.name) ? 'fm-cut' : ''}`}
                   onMouseDown={(event) => {
                     // Modifier selection must not also create a browser text range.
                     if (
@@ -2505,13 +2596,28 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   draggable={canMutate && !entry.is_symlink && !fileActionsBusy}
                   onDragStart={(event) => {
                     const names = selected.has(entry.name) ? selectedNames : [entry.name];
+                    dragSession.current = {
+                      identity: saveIdentity.current,
+                      serverId,
+                      source: directory,
+                      names,
+                    };
                     event.dataTransfer.setData(
                       dragType,
                       JSON.stringify({ serverId, directory, names }),
                     );
                     event.dataTransfer.effectAllowed = 'move';
                   }}
-                  onDragOver={!entry.is_file && !entry.is_symlink ? dragOverFolder : undefined}
+                  onDragOver={
+                    !entry.is_file && !entry.is_symlink
+                      ? (event) => dragOverFolder(event, join(directory, entry.name))
+                      : undefined
+                  }
+                  onDragLeave={
+                    !entry.is_file && !entry.is_symlink
+                      ? (event) => dragLeaveFolder(event, join(directory, entry.name))
+                      : undefined
+                  }
                   onDrop={
                     !entry.is_file && !entry.is_symlink
                       ? (event) => dropFolder(event, join(directory, entry.name))
