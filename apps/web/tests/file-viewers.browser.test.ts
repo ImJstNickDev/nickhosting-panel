@@ -372,12 +372,88 @@ describe('M5 builtin file viewers', () => {
     expect(errors).toEqual([]);
   });
 
+  it('keeps Frame within image edges and zoom between one and five thousand percent', async () => {
+    await open('frame-large.svg');
+    const stage = page.locator('.ve-image-stage');
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
+    for (const direction of [-1, 1]) {
+      await stage.evaluate((element, sign) => {
+        element.dispatchEvent(
+          new WheelEvent('wheel', {
+            bubbles: true,
+            cancelable: true,
+            deltaX: sign * 1e6,
+            deltaY: sign * 1e6,
+          }),
+        );
+      }, direction);
+      const view = await frameGeometry();
+      expect(view.x).toBeCloseTo((-direction * (4000 - view.width)) / 2, 3);
+      expect(view.y).toBeCloseTo((-direction * (2400 - view.height)) / 2, 3);
+    }
+    await stage.focus();
+    await page.keyboard.press('ArrowRight');
+    const edge = await frameGeometry();
+    expect(edge.x).toBeCloseTo(-(4000 - edge.width) / 2, 3);
+    const box = await stage.boundingBox();
+    if (!box) throw new Error('Missing image viewport');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 - 100, box.y + box.height / 2 - 100);
+    await page.mouse.up();
+    expect((await frameGeometry()).x).toBeCloseTo(edge.x, 3);
+    expect((await frameGeometry()).y).toBeCloseTo(edge.y, 3);
+    await page.setViewportSize({ width: 1900, height: 1100 });
+    await browserExpect
+      .poll(async () => {
+        const view = await frameGeometry();
+        return Math.abs(view.x + (4000 - view.width) / 2);
+      })
+      .toBeLessThan(0.001);
+    await page.locator('.ve-zoom-value').click();
+    await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('0.01');
+    await page.keyboard.press('Enter');
+    await browserExpect(page.getByRole('button', { name: 'Zoom out', exact: true })).toBeDisabled();
+    await stage.focus();
+    await page.keyboard.press('Control+Minus');
+    await stage.evaluate((element) => {
+      element.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: 100 }),
+      );
+      element.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 10000, deltaY: 10000 }),
+      );
+    });
+    expect(await frameGeometry()).toMatchObject({ scale: 0.01, x: 0, y: 0 });
+    await page.locator('.ve-zoom-value').click();
+    await page.getByRole('textbox', { name: 'Zoom (%)', exact: true }).fill('99999');
+    await page.keyboard.press('Enter');
+    await browserExpect(page.getByRole('button', { name: 'Zoom in', exact: true })).toBeDisabled();
+    await stage.focus();
+    await page.keyboard.press('Control+Equal');
+    expect((await frameGeometry()).scale).toBe(50);
+    const corners = await page.locator('.ve-body').evaluate((element) => {
+      const style = getComputedStyle(element);
+      return [
+        style.borderTopLeftRadius,
+        style.borderTopRightRadius,
+        style.borderBottomLeftRadius,
+        style.borderBottomRightRadius,
+      ];
+    });
+    expect(corners.slice(0, 2)).toEqual(['0px', '0px']);
+    expect(corners.slice(2).every((radius) => Number.parseFloat(radius) > 0)).toBe(true);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    expect(errors).toEqual([]);
+  });
+
   it('pans Frame with trackpad deltas and anchors pinch zoom without browser zoom or duplicate gesture updates', async () => {
     await open('frame-large.svg');
     const stage = page.locator('.ve-image-stage');
     await browserExpect(
       page.getByRole('button', { name: 'Actual size', exact: true }),
     ).toBeEnabled();
+    await page.getByRole('button', { name: 'Actual size', exact: true }).click();
     const start = await frameGeometry();
     const pageScroll = await page.evaluate(() => window.scrollY);
     const cancelled = await stage.evaluate((element) => {

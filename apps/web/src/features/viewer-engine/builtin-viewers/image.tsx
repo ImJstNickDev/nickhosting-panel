@@ -8,9 +8,11 @@ import { useViewerResource } from '../core/use-resource.js';
 import { ViewerLoading } from '../loading.js';
 import { validateIconset } from './ico-model.js';
 import {
+  constrainImage,
   fitImage,
   type ImageSize,
   type ImageTransform,
+  imageZoom,
   initialImageTransform,
   parseImagePercent,
   zoomImage,
@@ -108,7 +110,13 @@ function FrameViewport({
   const percentButton = useRef<HTMLButtonElement>(null);
   const drag = useRef<{ id: number; x: number; y: number } | undefined>(undefined);
   const update = useCallback((change: (value: ImageTransform) => ImageTransform) => {
-    current.current = change(current.current);
+    const next = change(current.current);
+    const viewport = stage.current;
+    const size = dimensions.current;
+    current.current =
+      viewport && size
+        ? constrainImage(next, size, { width: viewport.clientWidth, height: viewport.clientHeight })
+        : next;
     setView(current.current);
   }, []);
   const fit = useCallback(() => {
@@ -132,6 +140,7 @@ function FrameViewport({
     const viewport = stageElement;
     const observer = new ResizeObserver(() => {
       if (current.current.fit) fit();
+      else update((value) => value);
     });
     observer.observe(viewport);
     let gestureScale: number | undefined;
@@ -250,7 +259,7 @@ function FrameViewport({
           type="button"
           className="fm-tool"
           aria-label={t('viewer.zoomOut')}
-          disabled={!natural}
+          disabled={!natural || view.scale <= imageZoom.min}
           onClick={() => zoom(1 / 1.25)}
         >
           −
@@ -316,7 +325,7 @@ function FrameViewport({
           type="button"
           className="fm-tool"
           aria-label={t('viewer.zoomIn')}
-          disabled={!natural}
+          disabled={!natural || view.scale >= imageZoom.max}
           onClick={() => zoom(1.25)}
         >
           +

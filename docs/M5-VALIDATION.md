@@ -7308,3 +7308,40 @@ Index governance passed: 739 text files, 223 review PNGs, 619 relative links,
 4 TOML files and 44 ignore cases (heuristic secret scan). Read-only dev HTTPS
 module check returned 200 and confirmed the new Frame controls are served through
 Vite HMR, including percentage parsing, gestures and ICO focus restoration.
+
+## 2026-10-13 — Frame movement bounds and zoom limits
+
+Owner follow-up supersedes the earlier sub-1%/large zoom behavior: Frame now
+allows 1–5000%, with the existing two-decimal display/draft. Fit also respects the
+minimum; unusually wide images that cannot fit at 1% remain pannable to their
+edges. A shared transform constraint centers axes that fit and bounds oversized
+axes at either edge. Wheel/trackpad, drag, keys, buttons, percentage entry and
+viewport resizing all use it. Edge limits take priority over zoom anchoring.
+Zoom buttons disable at the relevant bound. Frame's top corners are square at
+the file-toolbar seam; the bottom corners retain their rounding.
+
+Validation on final code:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/image-viewport.test.ts`:
+  5/5 passed, covering limits, both signed edges, mixed-size axes, zoom-out
+  recentering, minimum Fit and manual resize.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'Frame'`:
+  3/3 passed, 11 intentionally skipped, 23.88s. Includes extreme wheel deltas,
+  arrow/pointer constraints, resize reclamping, typed minimum/maximum, disabled
+  buttons, shortcut/pinch limits, centered small images and computed corner radii.
+  Existing anchoring, percentage, gesture and mobile axe checks still pass.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, targeted Biome on the
+  five changed TS/TSX/CSS files, and `git diff --check`: passed.
+
+Updated and reviewed [desktop](screenshots/m5/file-viewer-frame-fit-desktop-en.png)
+and [Italian mobile](screenshots/m5/file-viewer-frame-mobile-it.png) screenshots.
+Actual browser/application with isolated provider fixtures and temporary test
+schemas; no new containers, game assets, server operations or restarts. No full
+historical suite rerun; previous hardware/browser evidence limits remain.
+Concurrent Owner work and issue18 were preserved.
+
+Independent final code/accessibility/visual review found no must-fix issues.
+Read-only HTTPS module inspection returned 200 and confirmed the new bounds and
+shared constraint are served by Vite HMR.
+Index governance passed: 739 text files, 223 review PNGs, 621 relative links,
+4 TOML files and 44 ignore cases (heuristic secret scan).

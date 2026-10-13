@@ -666,10 +666,13 @@ limits remain enforced; decoder failure keeps Open with available for recovery.
 Optional viewer metadata failures do not prevent independent text editing.
 
 Frame uses a single natural-pixel scale for Fit, Actual size, buttons, keyboard and
-gestures; its percentage reflects the rendered image, including fits below 1%.
-Fit follows viewport resizing; manual zoom preserves scale. Toolbar and CTRL/CMD
-+/− zoom around the viewport center, preserving the image point under that center
-after panning. Trackpad scrolling pans; pinch zoom follows the gesture position.
+gestures; its percentage reflects the rendered image with at most two decimals.
+Zoom is bounded to 1–5000%, including Fit, typed values and gestures. Fit follows
+viewport resizing; manual zoom preserves scale and reclamps position. An image
+that fits stays centered on that axis; a larger image can pan only as far as its
+edges. Toolbar and CTRL/CMD +/− zoom around the viewport center; pinch follows the
+gesture position, with edge constraints taking priority over anchoring. Trackpad
+scrolling pans. Frame has square top corners and rounded bottom corners.
 The percentage is editable: Enter applies a positive decimal (dot or comma),
 Escape/blur discard the draft, and invalid input retains focus with a localized
 error. Shortcuts stay within the active viewer and yield to fields/dialogs.

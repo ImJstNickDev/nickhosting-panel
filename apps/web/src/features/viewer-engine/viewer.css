@@ -33,6 +33,10 @@
 .ve-body > .notice {
   margin: 1rem;
 }
+.ve-body:has(> .ve-image-viewer) {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
 .ve-controls {
   padding: 0.6rem 0.75rem;
   border-bottom: 1px solid var(--border, #dddfe4);

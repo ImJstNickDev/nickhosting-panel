@@ -9,15 +9,33 @@ export interface ImageTransform {
   fit: boolean;
 }
 
-export const imageZoom = { min: 0.000001, max: 1_000_000 } as const;
+export const imageZoom = { min: 0.01, max: 50 } as const;
 export const initialImageTransform: ImageTransform = { scale: 1, x: 0, y: 0, fit: true };
 
 export function fitImage(image: ImageSize, viewport: ImageSize): ImageTransform {
   return {
-    scale: Math.min(1, viewport.width / image.width, viewport.height / image.height),
+    scale: Math.max(
+      imageZoom.min,
+      Math.min(1, viewport.width / image.width, viewport.height / image.height),
+    ),
     x: 0,
     y: 0,
     fit: true,
+  };
+}
+
+/** Keep smaller axes centered and let larger axes pan only as far as their edges. */
+export function constrainImage(
+  view: ImageTransform,
+  image: ImageSize,
+  viewport: ImageSize,
+): ImageTransform {
+  const limitX = Math.max(0, (image.width * view.scale - viewport.width) / 2);
+  const limitY = Math.max(0, (image.height * view.scale - viewport.height) / 2);
+  return {
+    ...view,
+    x: limitX ? Math.max(-limitX, Math.min(limitX, view.x)) : 0,
+    y: limitY ? Math.max(-limitY, Math.min(limitY, view.y)) : 0,
   };
 }
 
