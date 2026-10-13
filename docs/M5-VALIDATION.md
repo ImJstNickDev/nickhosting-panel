@@ -6921,3 +6921,17 @@ An Owner live copy/cut comparison is still needed for actual post-change latency
 provider call counts alone do not establish a millisecond result. Rollback is a
 source revert through the existing dev watcher; no schema/configuration migration
 is involved. PR #21 remains open and unmerged.
+
+### 2026-10-13 — Save shortcut from a new file's name
+
+The new-file name input now intercepts Ctrl/Cmd+S and submits the existing editor
+form, with native name validation, instead of opening the browser's Save Page
+dialog. Enter and CodeMirror shortcuts are unchanged; composition cannot submit.
+No visual, API or infrastructure change is involved.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-shortcuts.browser.test.ts -t 'pastes a newly created'`:
+  **1 passed / 11 filtered**, 15.74 seconds. The existing new-file/cut/paste journey
+  now saves its document with Ctrl+S while focus is in the name input.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck` and focused Biome:
+  passed. Only existing isolated browser fixtures were used; no live file writes,
+  manual restart, provider or infrastructure changes.

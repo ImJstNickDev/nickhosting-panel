@@ -187,7 +187,8 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     await user.getByRole('textbox', { name: 'Name', exact: true }).fill('test');
     const editor = user.locator('.cm-content');
     await editor.fill('Created in the editor');
-    await editor.press('Control+s');
+    // Saving must also work while focus is on the new file's name, not CodeMirror.
+    await user.getByRole('textbox', { name: 'Name', exact: true }).press('Control+s');
     await browserExpect(
       user.getByRole('button', { name: 'Save changes', exact: true }),
     ).toBeDisabled();

@@ -2093,6 +2093,17 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   label={t('web.name')}
                   name="name"
                   value={newName}
+                  onKeyDown={(event) => {
+                    if (
+                      (event.ctrlKey || event.metaKey) &&
+                      !event.altKey &&
+                      event.key.toLowerCase() === 's'
+                    ) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (!event.nativeEvent.isComposing) event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
                   onChange={(event) => {
                     setNewName(event.target.value);
                     setDirty(true);
