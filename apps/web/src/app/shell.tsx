@@ -1,7 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
-import { api, queryClient } from '../api/client.js';
+import { api } from '../api/client.js';
+import { AccountMenu } from '../components/account-menu.js';
+import { Tooltip } from '../components/tooltip.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
 import { fileSaveScope } from '../features/file-background-save.js';
 import { FileSaveNotices } from '../features/file-save-notices.js';
@@ -123,11 +125,7 @@ export function Shell() {
             ))}
           </nav>
           <div className="sidebar-bottom">
-            {(ordinaryOwner || readOnlyAdmin) && (
-              <Link to={ownerArea ? '/' : ordinaryOwner ? '/owner' : '/owner/audit'}>
-                {t(ownerArea ? 'web.home' : ordinaryOwner ? 'web.owner' : 'web.administration')}
-              </Link>
-            )}
+            {ownerArea && (ordinaryOwner || readOnlyAdmin) && <Link to="/">{t('web.home')}</Link>}
             <small>{current.subject.name}</small>
           </div>
         </aside>
@@ -147,7 +145,39 @@ export function Shell() {
                 ? t(ordinaryOwner ? 'web.owner' : 'web.administration')
                 : (config.data?.instanceName ?? 'NickHosting')}
             </span>
-            <Link to="/settings">{current.subject.name}</Link>
+            <div className="topbar-account-actions">
+              {(ordinaryOwner || readOnlyAdmin) && (
+                <Tooltip key={location.pathname} content={t('web.admin')}>
+                  <Link
+                    className="topbar-admin"
+                    to={ordinaryOwner ? '/owner' : '/owner/audit'}
+                    aria-label={t('web.admin')}
+                    data-active={ownerArea || undefined}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M5 3v4m0 4v10M12 3v10m0 4v4M19 3v4m0 4v10" />
+                      <rect x="3" y="7" width="4" height="4" rx="1" />
+                      <rect x="10" y="13" width="4" height="4" rx="1" />
+                      <rect x="17" y="7" width="4" height="4" rx="1" />
+                    </svg>
+                  </Link>
+                </Tooltip>
+              )}
+              <AccountMenu
+                key={`${location.pathname}:${current.subject.id}:${current.context.sessionType}`}
+                name={current.subject.name}
+                support={support}
+                onExitSupport={exit}
+              />
+            </div>
           </header>
           <main id="content">
             <Outlet />

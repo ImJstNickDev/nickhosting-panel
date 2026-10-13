@@ -72,7 +72,7 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
     );
   });
 
-  it('assigns the Owner disk default in shared storage and freezes idempotent retries', async () => {
+  it('creates an unlimited disk in shared storage and freezes idempotent retries', async () => {
     const input = f.input();
     const { disk: _disk, ...limits } = input.limits;
     const request = { ...input, limits };
@@ -84,7 +84,13 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
       .select('limits')
       .where('id', '=', result.serverId)
       .executeTakeFirstOrThrow();
-    expect(stored.limits.disk).toBe(512);
+    expect(stored.limits.disk).toBe(0);
+    const plan = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', result.jobId)
+      .executeTakeFirstOrThrow();
+    expect(plan.plan.provision).toMatchObject({ limits: { disk: 0 } });
     expect(
       await createManagedServer(f.db, f.adapter, f.context, request, {
         NH_DEFAULT_SERVER_STORAGE_MIB: '1024',
@@ -103,6 +109,18 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
         {
           NH_STORAGE_POLICY: 'PER_USER_BUDGET',
         },
+      ),
+    ).rejects.toThrow('validation_failed');
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        {
+          ...input,
+          limits: { ...limits, disk: 0 },
+        },
+        { NH_STORAGE_POLICY: 'PER_USER_BUDGET' },
       ),
     ).rejects.toThrow('validation_failed');
     await expect(

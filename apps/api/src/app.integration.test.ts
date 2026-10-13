@@ -45,6 +45,7 @@ describe('Hono public backend contracts', () => {
   beforeAll(async () => {
     database = await createTestDatabase();
     const identity = createIdentity({
+      secretCodec: codec,
       pool: database.pool,
       baseURL: 'http://localhost:3999',
       authSecret: randomBytes(32).toString('base64url'),

@@ -14,6 +14,7 @@ import type { ProviderAccountTables } from './provider-account-types.js';
 import type { ProviderFeedTables } from './provider-feed-types.js';
 import type { ScheduleTables } from './schedule-types.js';
 import type { ServerTables } from './server-types.js';
+import type { StoragePolicyTables } from './storage-policy-types.js';
 
 export interface Database
   extends AuthTables,
@@ -27,7 +28,8 @@ export interface Database
     ScheduleTables,
     HealthTables,
     ProviderFeedTables,
-    ProviderAccountTables {
+    ProviderAccountTables,
+    StoragePolicyTables {
   viewer_sftp_credentials: {
     id: string;
     server_id: string;
@@ -95,3 +97,5 @@ export { migrate } from './migrate.js';
 export type { ScheduleAction, ScheduleTiming } from './schedule-types.js';
 export type { HostSnapshot, ServerLimits } from './server-types.js';
 export * from './settings.js';
+export * from './storage-policy.js';
+export type { StoragePolicy, StoragePolicyTables } from './storage-policy-types.js';

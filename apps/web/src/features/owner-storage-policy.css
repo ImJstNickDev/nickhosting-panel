@@ -1,0 +1,128 @@
+.storage-policy {
+  display: grid;
+  gap: 1rem;
+}
+.storage-policy p {
+  margin: 0;
+}
+.storage-current {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.storage-current > span {
+  color: var(--muted);
+}
+.storage-target {
+  display: grid;
+  gap: 0.65rem;
+}
+.storage-target > fieldset {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.storage-target .field {
+  flex: 1 1 14rem;
+  max-width: 24rem;
+  margin: 0;
+}
+.storage-target > p {
+  max-width: 70ch;
+}
+.storage-review {
+  display: grid;
+  gap: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.storage-review-heading,
+.storage-user-heading,
+.storage-budget {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.storage-review-heading h3,
+.storage-user h4 {
+  margin: 0;
+}
+.storage-user {
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  overflow: hidden;
+}
+.storage-user-heading {
+  padding: 1rem;
+}
+.storage-user-heading > div:first-child {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.storage-user-heading > .field {
+  width: 15rem;
+  max-width: 100%;
+  margin: 0;
+}
+.storage-budget {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--line);
+  background: #f8f9f8;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.storage-resolution {
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+}
+.storage-server {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(15rem, 1fr);
+  gap: 0.7rem 1.25rem;
+  padding: 1rem;
+  border-top: 1px solid var(--line);
+}
+.storage-server-name,
+.storage-server-allocation {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  overflow-wrap: anywhere;
+}
+.storage-server-allocation .field {
+  margin: 0;
+}
+.storage-server > p {
+  grid-column: 1 / -1;
+  font-size: 0.9rem;
+}
+.storage-blocker {
+  color: var(--danger, #9f2424);
+}
+.storage-review-actions {
+  justify-content: flex-end;
+}
+.storage-cleanup-actions {
+  margin-top: 0.35rem;
+  font-size: 0.9rem;
+}
+@media (max-width: 620px) {
+  .storage-server {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .storage-user-heading > .field {
+    width: 100%;
+  }
+  .storage-target .field {
+    max-width: none;
+  }
+  .storage-review-actions > button {
+    flex: 1 1 auto;
+  }
+}

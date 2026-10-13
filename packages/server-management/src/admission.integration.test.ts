@@ -21,6 +21,35 @@ afterAll(async () => {
 });
 
 describe('atomic active compute and persistent resource admission', () => {
+  it('preserves an environment-backed storage default during a temporary compute exception', async () => {
+    await f.db
+      .insertInto('storage_user_budgets')
+      .values({
+        user_id: f.context.subjectUserId,
+        storage_mib: null,
+      })
+      .execute();
+    await setUserLimits(
+      f.db,
+      f.owner,
+      {
+        userId: f.context.subjectUserId,
+        memoryMiB: 512,
+        cpuPercent: 50,
+        storageMiB: 1536,
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+        reason: 'Temporary compute exception',
+      },
+      { NH_DEFAULT_USER_STORAGE_MIB: '1536' },
+    );
+    expect(
+      await f.db
+        .selectFrom('storage_user_budgets')
+        .select('storage_mib')
+        .where('user_id', '=', f.context.subjectUserId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ storage_mib: null });
+  });
   it('permits many stopped high-RAM servers without consuming active compute', async () => {
     const results = [];
     // Complete each fixture provision before the next: this tests retaining many

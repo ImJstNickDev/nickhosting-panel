@@ -202,6 +202,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
     identity = createIdentity({
+      secretCodec: codec,
       pool: database.pool,
       baseURL: origin,
       authSecret: randomBytes(32).toString('base64url'),
@@ -377,6 +378,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       }),
       inspectCredential: async () => null,
       rotateCredential: async (ref, input) => ({ ...ref, expiresAt: input.expiresAt }),
+      updateQuota: async (ref, quotaBytes) => ({ ...ref, quotaBytes }),
       revokeCredential: async () => {},
     });
     app = createApp({
@@ -397,16 +399,13 @@ describe('M2 Hono API with real invitation, password and session authentication'
       management: async () => runtime,
       log: (entry) => logs.push(entry),
     });
-    expect(
-      (
-        await request(owner, '/v1/setup/owner', {
-          token: bootstrapToken,
-          name: 'Owner',
-          email: 'servers-owner@example.test',
-          password,
-        })
-      ).status,
-    ).toBe(201);
+    const claimed = await request(owner, '/v1/setup/owner', {
+      token: bootstrapToken,
+      name: 'Owner',
+      email: 'servers-owner@example.test',
+      password,
+    });
+    expect(claimed.status, await claimed.text()).toBe(201);
     await verify(owner, 'servers-owner@example.test');
     userId = await invited(user, 'servers-user@example.test');
     peerId = await invited(peer, 'servers-peer@example.test');
@@ -2619,6 +2618,124 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect((await upload(peer, server, new Uint8Array(1), 1)).status).toBe(204);
   });
 
+  it.each(['blocked', 'applying'] as const)(
+    'permits only blocked cleanup during a %s storage transition and keeps ordinary writes fenced',
+    async (status) => {
+      const server = await f.server();
+      const transitionId = randomUUID();
+      const originalDelete = f.adapter.deleteFiles;
+      const deleteFiles = vi.fn<PterodactylAdapter['deleteFiles']>().mockResolvedValue(undefined);
+      f.adapter.deleteFiles = deleteFiles;
+      const beforeBackups = deleteBackup.mock.calls.length;
+      const beforeWrites = writeFile.mock.calls.length;
+      const beforeUploads = uploadFile.mock.calls.length;
+      const actor = await identity.authenticate(owner.headers());
+      await f.db
+        .insertInto('storage_policy_transitions')
+        .values({
+          id: transitionId,
+          actor_user_id: actor.context.actorUserId,
+          status,
+          policy: 'PER_USER_BUDGET',
+          previous_policy: 'GLOBAL_POOL',
+          default_user_storage_mib: 1024,
+          plan: '{}',
+        })
+        .execute();
+      try {
+        const deletion = { action: 'delete', root: '', files: ['old.log'], confirm: true };
+        const file = await request(user, `/v1/servers/${server}/files`, deletion);
+        expect(file.status, await file.clone().text()).toBe(status === 'blocked' ? 204 : 409);
+        const backup = await request(
+          user,
+          `/v1/servers/${server}/backups/${backupId}`,
+          { confirm: true },
+          { method: 'DELETE' },
+        );
+        expect(backup.status, await backup.clone().text()).toBe(status === 'blocked' ? 204 : 409);
+        expect(deleteFiles).toHaveBeenCalledTimes(status === 'blocked' ? 1 : 0);
+        expect(deleteBackup.mock.calls.length - beforeBackups).toBe(status === 'blocked' ? 1 : 0);
+
+        expect(
+          (
+            await request(user, `/v1/servers/${server}/files`, {
+              action: 'write',
+              path: 'old.log',
+              content: 'blocked write',
+            })
+          ).status,
+        ).toBe(409);
+        expect(
+          (
+            await request(user, `/v1/servers/${server}/files/copy`, {
+              root: '',
+              files: ['old.log'],
+              destination: 'copied',
+            })
+          ).status,
+        ).toBe(409);
+        expect((await upload(user, server, new Uint8Array(1), 1)).status).toBe(409);
+        expect(writeFile.mock.calls).toHaveLength(beforeWrites);
+        expect(uploadFile.mock.calls).toHaveLength(beforeUploads);
+
+        // The cleanup exception never confers access to another user's server.
+        const unauthorized = await request(outsider, `/v1/servers/${server}/files`, deletion);
+        expect([403, 404]).toContain(unauthorized.status);
+        expect(deleteFiles).toHaveBeenCalledTimes(status === 'blocked' ? 1 : 0);
+      } finally {
+        f.adapter.deleteFiles = originalDelete;
+        await f.db
+          .deleteFrom('storage_policy_transitions')
+          .where('id', '=', transitionId)
+          .execute();
+      }
+    },
+  );
+
+  it('uploads singly and in batches with disk=0 while retaining finite declared and provider limits', async () => {
+    const server = await f.server({ limits: { ...f.limits, disk: 0 } });
+    try {
+      expect((await upload(user, server, new Uint8Array(3), 3)).status).toBe(204);
+      expect(uploadFile.mock.calls.at(-1)?.[2].maxBytes).toBe(3);
+      const batchId = randomUUID();
+      const path = 'unlimited-batch.bin';
+      const prepared = await request(user, `/v1/servers/${server}/files/upload-batches`, {
+        id: batchId,
+        files: [{ id: 'file', path, bytes: 2, overwrite: false }],
+      });
+      expect(prepared.status).toBe(200);
+      expect(
+        (
+          await upload(user, server, new Uint8Array(2), 2, {}, undefined, {
+            path,
+            batchId,
+            entryId: 'file',
+            overwrite: 'false',
+          })
+        ).status,
+      ).toBe(204);
+      expect(uploadFile.mock.calls.at(-1)?.[2].maxBytes).toBe(2);
+      const before = uploadFile.mock.calls.length;
+      const host = await f.db
+        .selectFrom('physical_hosts')
+        .select('upload_policy')
+        .where('id', '=', f.hostId)
+        .executeTakeFirstOrThrow();
+      if (!host.upload_policy) throw new Error('Missing fixture upload policy');
+      expect(
+        (await upload(user, server, new Uint8Array(1), host.upload_policy.providerMaxFileBytes + 1))
+          .status,
+      ).toBe(413);
+      expect(uploadFile.mock.calls).toHaveLength(before);
+    } finally {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ limits: JSON.stringify(f.limits) })
+        .where('id', '=', server)
+        .execute();
+    }
+  });
+
   it('rejects invalid upload declarations, quota violations and lifecycle conflicts before provider writes', async () => {
     const server = await f.server();
     const before = uploadFile.mock.calls.length;
@@ -2949,6 +3066,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
       options: `-c search_path=${database.schema}`,
     });
     const identity = createIdentity({
+      secretCodec: codec,
       pool: small.pool,
       baseURL: origin,
       authSecret: randomBytes(32).toString('base64url'),

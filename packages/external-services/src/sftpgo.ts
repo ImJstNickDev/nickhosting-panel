@@ -22,7 +22,7 @@ const requestSchema = z
     credentialId: uuid,
     password: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/),
     expiresAt: z.number().int().positive(),
-    quotaBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    quotaBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
 export type SftpCredentialRequest = z.infer<typeof requestSchema>;
@@ -36,23 +36,28 @@ export interface SftpCredentialRef {
   expiresAt: number;
   quotaBytes: number;
 }
-const userSchema = z.object({
-  id: z.number().int().positive(),
-  username: z.string(),
-  status: z.number(),
-  home_dir: z.string(),
-  additional_info: z.string(),
-  expiration_date: z.number(),
-  quota_size: z.number(),
-  filesystem: z.object({ provider: z.number() }),
-  virtual_folders: z.array(z.unknown()).nullish(),
-  groups: z.array(z.unknown()).nullish(),
-  permissions: z.record(z.string(), z.array(z.string())),
-  filters: z.object({
-    denied_protocols: z.array(z.string()).nullish(),
-    allow_api_key_auth: z.boolean().optional(),
-  }),
-});
+const userSchema = z
+  .object({
+    id: z.number().int().positive(),
+    username: z.string(),
+    status: z.number(),
+    home_dir: z.string(),
+    additional_info: z.string(),
+    expiration_date: z.number(),
+    quota_size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    used_quota_size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    filesystem: z.object({ provider: z.number() }).passthrough(),
+    virtual_folders: z.array(z.unknown()).nullish(),
+    groups: z.array(z.unknown()).nullish(),
+    permissions: z.record(z.string(), z.array(z.string())),
+    filters: z
+      .object({
+        denied_protocols: z.array(z.string()).nullish(),
+        allow_api_key_auth: z.boolean().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 type RemoteUser = z.infer<typeof userSchema>;
 
 function validate<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -203,7 +208,7 @@ export class SftpGoAdapter {
       !Number.isSafeInteger(ref.externalUserId) ||
       ref.externalUserId < 1 ||
       !Number.isSafeInteger(ref.quotaBytes) ||
-      ref.quotaBytes < 1
+      ref.quotaBytes < 0
     )
       throw new DomainError('validation_failed');
   }
@@ -264,6 +269,59 @@ export class SftpGoAdapter {
       expiresAt: user.expiration_date,
       quotaBytes: user.quota_size,
     };
+  }
+
+  /** Reconcile quota without resetting passwords, expiry, status or other account limits. */
+  async updateQuota(
+    ref: SftpCredentialRef,
+    quotaBytes: number,
+    observedUsedBytes?: number,
+  ): Promise<SftpCredentialRef> {
+    this.#checkRef(ref);
+    validate(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), quotaBytes);
+    if (observedUsedBytes !== undefined)
+      validate(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), observedUsedBytes);
+    const user = await this.#read(ref.username);
+    if (!user) throw new DomainError('not_found');
+    this.#assertOwned(user, ref);
+    this.#assertIsolation(user);
+    const assertUsage = (observed: RemoteUser) => {
+      // SFTPGo tracking mode 2 does not count unlimited uploads. Game writes
+      // also bypass its counters: any finite target requires fresh Wings usage.
+      if (quotaBytes > 0 && observedUsedBytes === undefined)
+        throw new DomainError('integration_unavailable');
+      if (
+        quotaBytes > 0 &&
+        Math.max(observedUsedBytes ?? 0, observed.used_quota_size ?? 0) > quotaBytes
+      )
+        throw new DomainError('resources_unavailable');
+    };
+    assertUsage(user);
+    if (user.quota_size !== quotaBytes) {
+      const payload: Record<string, unknown> = { ...user, quota_size: quotaBytes };
+      // SFTPGo retains the current password when omitted on PUT. Never replay a
+      // redacted/hash field from GET or retrieve the encrypted delivery password.
+      delete payload.password;
+      const response = await this.#http.request(
+        `api/v2/users/${ref.username}?disconnect=1`,
+        'PUT',
+        payload,
+      );
+      if (response.status === 404) throw new DomainError('not_found');
+      if (response.status === 409) throw new DomainError('conflict');
+    }
+    const confirmed = await this.#read(ref.username);
+    if (!confirmed) throw new DomainError('not_found');
+    this.#assertOwned(confirmed, ref);
+    this.#assertIsolation(confirmed);
+    assertUsage(confirmed);
+    if (
+      confirmed.quota_size !== quotaBytes ||
+      confirmed.status !== user.status ||
+      confirmed.expiration_date !== user.expiration_date
+    )
+      throw new DomainError('conflict');
+    return { ...ref, quotaBytes, expiresAt: confirmed.expiration_date };
   }
 
   async rotateCredential(

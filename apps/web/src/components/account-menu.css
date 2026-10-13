@@ -1,0 +1,117 @@
+.topbar-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.topbar-admin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  color: #36556a;
+  text-decoration: none;
+}
+.topbar-admin:hover,
+.topbar-admin[data-active] {
+  background: #e9eff3;
+}
+.topbar-admin svg {
+  width: 22px;
+  height: 22px;
+}
+.account-menu {
+  position: relative;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.account-avatar {
+  width: 40px;
+  height: 40px;
+  padding: 7px;
+  border: 1px solid #bbc8d0;
+  border-radius: 50%;
+  background: #e9eff3;
+  color: #36556a;
+  overflow: hidden;
+}
+.account-avatar[aria-expanded="true"] {
+  background: #dbe4eb;
+  border-color: #36556a;
+}
+.account-avatar svg {
+  width: 24px;
+  height: 24px;
+}
+.account-dropdown {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 10px);
+  right: 0;
+  width: min(240px, calc(100vw - 32px));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px #202b371a;
+}
+.account-dropdown-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 10px;
+  margin-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  text-align: center;
+}
+.account-profile-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border: 1px solid #bbc8d0;
+  border-radius: 50%;
+  background: #e9eff3;
+  color: #36556a;
+}
+.account-profile-avatar svg {
+  width: 42px;
+  height: 42px;
+}
+.account-dropdown-name {
+  max-width: 100%;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.account-dropdown-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-weight: 400;
+  text-decoration: none;
+}
+.account-dropdown-action:hover {
+  background: #eef2f4;
+  filter: none;
+}
+.account-dropdown-action svg {
+  width: 19px;
+  height: 19px;
+  flex-shrink: 0;
+}
+.account-sign-out {
+  color: #a32121;
+}

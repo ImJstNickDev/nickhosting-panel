@@ -6,7 +6,12 @@ import {
   DomainError,
   type SecretCodec,
 } from '@nickhosting/core';
-import { type Database, getSecret, getSettings } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSecret,
+  getSettings,
+} from '@nickhosting/database';
 import { evaluateGameAccess } from '@nickhosting/game-sdk';
 import {
   type ApplicationServer,
@@ -28,6 +33,7 @@ import {
   cleanupServerExternalServices,
   type ExternalServiceOptions,
   reconcileExternalServices,
+  reconcileServerStorageQuota,
 } from './external.js';
 import { createFileDiskUsageCache, trackFileDiskMutations } from './file-disk-usage.js';
 import {
@@ -51,6 +57,11 @@ import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { authorizeScheduledEffect } from './schedules.js';
 import { createScopedProviderAdapter } from './scoped-provider-adapter.js';
 import { assertIdleSleepAllowed } from './sleep-policy.js';
+import {
+  refreshStorageObservations,
+  type StorageObservationScope,
+} from './storage-observations.js';
+import { createStoragePolicyService } from './storage-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 import type { UploadTiming } from './upload-timing.js';
 
@@ -409,6 +420,30 @@ export async function createManagementRuntime(options: ManagementOptions) {
   const externalOptions: ExternalServiceOptions = {
     codec: options.codec,
     env,
+    readServerDiskUsage: async (connection, serverId) => {
+      const server = await connection
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .where('deleted_at', 'is', null)
+        .executeTakeFirst();
+      if (!server?.pterodactyl_id || !server.pterodactyl_identifier)
+        throw new DomainError('not_found');
+      await verifyManagedIdentity(
+        connection,
+        server,
+        await adapter.getApplicationServer(server.pterodactyl_id),
+      );
+      const started = Date.now();
+      const { resources } = await adapter.getResources(server.pterodactyl_identifier);
+      if (
+        Date.now() - started > 30_000 ||
+        !Number.isSafeInteger(resources.disk_bytes) ||
+        resources.disk_bytes < 0
+      )
+        throw new DomainError('resources_unavailable');
+      return resources.disk_bytes;
+    },
     verifyServer: async (connection, serverId) => {
       const server = await connection
         .selectFrom('managed_servers')
@@ -877,6 +912,17 @@ export async function createManagementRuntime(options: ManagementOptions) {
   }
   /** Streaming transfers must not retain a session/role snapshot. Uploads use
    * their already-pinned lock connection; downloads borrow only for each check. */
+  async function assertStorageMutationAllowed(connection: Kysely<Database>, cleanup: boolean) {
+    if (!cleanup) return assertStoragePolicyIdle(connection);
+    // Only explicit file/backup deletion uses this path. A blocked plan needs a
+    // way to reclaim space; active application still excludes cleanup effects.
+    const applying = await connection
+      .selectFrom('storage_policy_transitions')
+      .select('id')
+      .where('status', '=', 'applying')
+      .executeTakeFirst();
+    if (applying) throw new DomainError('conflict');
+  }
   async function authorizeTransfer(
     context: AuthContext,
     serverId: string,
@@ -884,6 +930,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     connection: Kysely<Database> = db,
     timing?: UploadTiming,
     expectedServer?: Awaited<ReturnType<typeof authorizeServer>>,
+    storageCleanup = false,
   ): Promise<void> {
     const timed = <T>(name: string, work: () => Promise<T>) =>
       timing ? timing.measure(name, work) : work();
@@ -893,6 +940,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     const server = await timed('transfer.serverPermission', () =>
       authorizeServer(connection, current, serverId, write ? 'server:manage' : 'server:read'),
     );
+    if (write) await assertStorageMutationAllowed(connection, storageCleanup);
     if (
       !server.pterodactyl_id ||
       !server.pterodactyl_identifier ||
@@ -922,6 +970,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       | 'upload-prepare'
       | 'upload-transfer' = 'fresh',
     timing?: UploadTiming,
+    storageCleanup = false,
   ) {
     const timed = <T>(name: string, work: () => Promise<T>) =>
       timing ? timing.measure(name, work) : work();
@@ -953,6 +1002,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         if (!server.pterodactyl_id || !server.pterodactyl_identifier)
           throw new DomainError('conflict');
         if (write && server.active_operation_id) throw new DomainError('conflict');
+        if (write) await assertStorageMutationAllowed(connection, storageCleanup);
         if (write && !sharedUpload && identityMode !== 'upload-prepare')
           await assertNoPendingUpload(connection, serverId);
         identityAttempted = true;
@@ -989,6 +1039,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
         );
         if (reuseIdentity && directoryServerIdentity(latest) !== directoryServerIdentity(server))
           throw new DomainError('conflict');
+        if (write) await assertStorageMutationAllowed(connection, storageCleanup);
         return await work(server.pterodactyl_identifier, connection, refreshed, server);
       } catch (error) {
         if (identityAttempted) directoryIdentityCache.invalidate(serverId);
@@ -1033,6 +1084,24 @@ export async function createManagementRuntime(options: ManagementOptions) {
     timing?: UploadTiming,
   ) {
     return withAccess(context, serverId, write, work, 'fresh', timing);
+  }
+  /** Callbacks are restricted to explicit deletion, preserving all normal
+   * session, ownership, provider-identity and exclusive server-lock checks. */
+  function cleanupAccess<T>(
+    context: AuthContext,
+    serverId: string,
+    work: Parameters<typeof withAccess<T>>[3],
+    timing?: UploadTiming,
+  ) {
+    return withAccess(context, serverId, true, work, 'fresh', timing, true);
+  }
+  function authorizeCleanupTransfer(
+    context: AuthContext,
+    serverId: string,
+    connection: Kysely<Database>,
+    timing?: UploadTiming,
+  ) {
+    return authorizeTransfer(context, serverId, true, connection, timing, undefined, true);
   }
   async function listFiles(
     context: AuthContext,
@@ -1236,9 +1305,22 @@ export async function createManagementRuntime(options: ManagementOptions) {
     fileDiskUsage,
     containerObserver,
     refreshObservations,
+    refreshStorage: (connection: Kysely<Database> = db, scope?: StorageObservationScope) =>
+      refreshStorageObservations(connection, adapter, env, scope),
+    storagePolicy: createStoragePolicyService({
+      db,
+      adapter,
+      env,
+      reconcileSftp: async (connection, serverId, diskMiB) => {
+        await reconcileServerStorageQuota(connection, serverId, diskMiB, externalOptions, {
+          assumeServerLock: true,
+        });
+      },
+    }),
     process,
     reconcile,
     access,
+    cleanupAccess,
     uploadAccess,
     uploadBatchAccess,
     uploadBatchBinding,
@@ -1248,6 +1330,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
     fileMutationAccess,
     fileDirectoryBatch,
     authorizeTransfer,
+    authorizeCleanupTransfer,
     lifecycle,
     externalOptions,
     minecraftOptions,

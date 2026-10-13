@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { statfs } from 'node:fs/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, recordAudit } from '@nickhosting/database';
+import { assertStoragePolicyIdle, type Database, recordAudit } from '@nickhosting/database';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
@@ -88,6 +88,7 @@ export async function reserveUploadIngestion(
   try {
     await connection.transaction().execute(async (tx) => {
       await lockResources(tx);
+      await assertStoragePolicyIdle(tx);
       const server = await tx
         .selectFrom('managed_servers')
         .selectAll()

@@ -23,6 +23,13 @@ let debugTrace = false;
 let operationLogs: LogRecord[];
 afterEach(async () => {
   if (stage) await rm(stage, { recursive: true, force: true });
+  // Unlimited-cap cases mutate only their own fixture server. Restore its finite
+  // reservation before the next test reuses this schema, rather than leaving an
+  // unobserved provider disk in another test's admission calculation.
+  if (f && serverId)
+    await sql`update managed_servers set limits=jsonb_set(limits,'{disk}','64'::jsonb) where id=${serverId} and (limits->>'disk')::numeric=0`.execute(
+      f.db,
+    );
 });
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -127,6 +134,10 @@ beforeEach(async () => {
   } as unknown as ManagementRuntime;
   service.fileMutationAccess = (context, id, work, timing) =>
     service.access(context, id, true, work, timing);
+  service.cleanupAccess = (context, id, work, timing) =>
+    service.access(context, id, true, work, timing);
+  service.authorizeCleanupTransfer = (context, id, connection, timing) =>
+    service.authorizeTransfer(context, id, true, connection, timing);
   service.fileDiskUsage = async (_server, identifier) =>
     (await service.adapter.getResources(identifier)).resources.disk_bytes;
   service.fileDirectoryBatch = vi.fn(
@@ -433,36 +444,45 @@ describe('file operation handlers with isolated authoritative database', () => {
     expect(service.adapter.renameFiles).not.toHaveBeenCalled();
   });
 
-  it('extracts a validated ZIP into a new directory and preserves empty folders', async () => {
-    const zip = new ZipFile();
-    const chunks: Buffer[] = [];
-    const collected = (async () => {
-      for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
-    })();
-    zip.addEmptyDirectory('empty');
-    zip.addBuffer(Buffer.from('verified'), 'nested/settings.txt');
-    zip.end();
-    await collected;
-    files.set('source.zip', Buffer.concat(chunks));
-    const response = await post('extract', {
-      root: '',
-      file: 'source.zip',
-      destination: 'extracted',
-      confirm: true,
-    });
-    expect(await response.clone().text()).toContain('completed');
-    expect(response.status).toBe(200);
-    expect(files.get('extracted/nested/settings.txt')?.toString()).toBe('verified');
-    expect(files.has('extracted/empty')).toBe(true);
-    expect(
+  it.each([64, 0])(
+    'extracts a validated ZIP with disk=%s and preserves empty folders',
+    async (disk) => {
+      const server = await authorizeServer(f.db, f.context, serverId, 'server:manage');
       await f.db
-        .selectFrom('upload_ingestion_claims')
-        .selectAll()
-        .where('server_id', '=', serverId)
-        .execute(),
-    ).toHaveLength(0);
-    await rm(stage, { recursive: true, force: true });
-  });
+        .updateTable('managed_servers')
+        .set({ limits: JSON.stringify({ ...server.limits, disk }) })
+        .where('id', '=', serverId)
+        .execute();
+      const zip = new ZipFile();
+      const chunks: Buffer[] = [];
+      const collected = (async () => {
+        for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+      })();
+      zip.addEmptyDirectory('empty');
+      zip.addBuffer(Buffer.from('verified'), 'nested/settings.txt');
+      zip.end();
+      await collected;
+      files.set('source.zip', Buffer.concat(chunks));
+      const response = await post('extract', {
+        root: '',
+        file: 'source.zip',
+        destination: 'extracted',
+        confirm: true,
+      });
+      expect(await response.clone().text()).toContain('completed');
+      expect(response.status).toBe(200);
+      expect(files.get('extracted/nested/settings.txt')?.toString()).toBe('verified');
+      expect(files.has('extracted/empty')).toBe(true);
+      expect(
+        await f.db
+          .selectFrom('upload_ingestion_claims')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toHaveLength(0);
+      await rm(stage, { recursive: true, force: true });
+    },
+  );
 
   it('copies nested content using streamed transfers and completes durable upload claims', async () => {
     const result = await post('copy', { root: '', files: ['source'], destination: 'target' });
@@ -584,6 +604,28 @@ describe('file operation handlers with isolated authoritative database', () => {
       expect(files.get('source/a.txt')?.toString()).toBe('hello');
     },
   );
+  it('copies with an unlimited server quota but keeps exact stream limits and host reservations', async () => {
+    const server = await authorizeServer(f.db, f.context, serverId, 'server:manage');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ limits: JSON.stringify({ ...server.limits, disk: 0 }) })
+      .where('id', '=', serverId)
+      .execute();
+    vi.mocked(service.adapter.getResources).mockResolvedValueOnce({
+      resources: { disk_bytes: 8 * 1024 ** 3 },
+    } as Awaited<ReturnType<typeof service.adapter.getResources>>);
+    const result = await post('copy', { root: '', files: ['source'], destination: 'target' });
+    expect(result.status).toBe(200);
+    expect(files.get('target/source/a.txt')?.toString()).toBe('hello');
+    expect(vi.mocked(service.adapter.uploadFile).mock.calls.at(-1)?.[2].maxBytes).toBe(5);
+    expect(
+      await f.db
+        .selectFrom('upload_ingestion_claims')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .execute(),
+    ).toHaveLength(0);
+  });
   it('keeps full copy capacity accounting when replacing files', async () => {
     files.set('target/a.txt', Buffer.from('hello'));
     const server = await authorizeServer(f.db, f.context, serverId, 'server:manage');

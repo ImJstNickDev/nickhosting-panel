@@ -7,7 +7,13 @@ import {
   DomainError,
   type Permission,
 } from '@nickhosting/core';
-import { type Database, getSettings, notifyJobOutbox, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  notifyJobOutbox,
+  recordAudit,
+} from '@nickhosting/database';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import {
   minecraftRuntimeMappingSchema,
@@ -53,7 +59,7 @@ export const limitsSchema = z
   .object({
     memory: z.number().int().min(32).max(1048576),
     cpu: z.number().int().min(1).max(100000),
-    disk: z.number().int().min(16).max(1073741824),
+    disk: z.union([z.literal(0), z.number().int().min(16).max(1073741824)]),
     swap: z.literal(0).default(0),
     io: z.number().int().min(10).max(1000).default(500),
   })
@@ -297,6 +303,7 @@ export async function createManagedServer(
     const previous = await previousRequest(tx, context, request.idempotencyKey, hash);
     if (previous) return previous;
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
     const { values: config } = await getSettings(tx, env);
     const providerOwner = await tx
       .selectFrom('provider_accounts as account')
@@ -312,13 +319,16 @@ export async function createManagedServer(
       providerOwner.provider_url !== config.pterodactylBaseUrl?.replace(/\/$/, '')
     )
       throw new DomainError('integration_unavailable');
-    if (request.limits.disk === undefined && config.storagePolicy !== 'GLOBAL_POOL')
+    if (
+      (request.limits.disk === undefined || request.limits.disk === 0) &&
+      config.storagePolicy !== 'GLOBAL_POOL'
+    )
       throw new DomainError('validation_failed');
     const value = {
       ...request,
       limits: parse(limitsSchema, {
         ...request.limits,
-        disk: request.limits.disk ?? config.defaultServerStorageMiB,
+        disk: config.storagePolicy === 'GLOBAL_POOL' ? 0 : request.limits.disk,
       }),
     };
     const mapping = await tx
@@ -426,7 +436,7 @@ export async function createManagedServer(
       tx,
       context.subjectUserId,
       node.physical_host_id,
-      value.limits.disk * (1 + mapping.feature_limits.backups),
+      (value.limits.disk || config.defaultServerStorageMiB) * (1 + mapping.feature_limits.backups),
       env,
     );
     const { pool, allocations: inventory } = await validatedBackendInventory(adapter, node, env);
@@ -696,6 +706,7 @@ export async function enqueueLockedServerOperation(
 ) {
   const value = parse(operationSchema, input);
   if (value.action === 'kill') throw new DomainError('conflict');
+  if (value.action !== 'stop') await assertStoragePolicyIdle(tx);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   const server = await authorizeServer(
     tx,
@@ -829,6 +840,13 @@ export async function enqueueLockedServerOperation(
     plan.truncate = value.truncate;
   }
   if (value.action === 'configure') {
+    const { values: config } = await getSettings(tx, env);
+    if (
+      (config.storagePolicy === 'PER_USER_BUDGET' && value.limits.disk === 0) ||
+      (server.limits.disk === 0 && value.limits.disk !== 0) ||
+      (server.limits.disk !== 0 && value.limits.disk === 0)
+    )
+      throw new DomainError('conflict');
     const node = await tx
       .selectFrom('managed_nodes')
       .selectAll()
@@ -956,6 +974,7 @@ export async function enqueueServerOperation(
     const previous = await previousRequest(tx, context, value.idempotencyKey, hash);
     if (previous) return previous;
     await lockResources(tx);
+    if (value.action !== 'stop') await assertStoragePolicyIdle(tx);
     const policy = await tx
       .selectFrom('gateway_server_states')
       .selectAll()

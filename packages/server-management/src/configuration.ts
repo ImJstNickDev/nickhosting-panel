@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, getSettings, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
@@ -16,6 +21,7 @@ import {
   validatedBackendInventory,
 } from './allocation-pool.js';
 import { ownerOnly, parse } from './registry.js';
+import { storageCommitments } from './storage-accounting.js';
 import { uploadPolicyOverrides, uploadPolicySchema } from './upload-policy.js';
 
 /** Explicit environment override wins over the Owner's per-node verified bound. */
@@ -120,6 +126,7 @@ export async function setPhysicalHost(
   }
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
     const hostId = value.id ?? randomUUID();
     const previous = await tx
       .selectFrom('physical_hosts')
@@ -174,16 +181,12 @@ export async function setPhysicalHost(
       .selectFrom('managed_servers as server')
       .innerJoin('managed_nodes as node', 'node.id', 'server.node_id')
       .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
-      .select(['server.limits', 'mapping.feature_limits'])
+      .select(['server.id', 'server.limits', 'server.pterodactyl_id', 'mapping.feature_limits'])
       .where('node.physical_host_id', '=', hostId)
       .where('server.deleted_at', 'is', null)
       .execute();
-    if (
-      occupied.reduce(
-        (sum, server) => sum + server.limits.disk * (1 + server.feature_limits.backups),
-        0,
-      ) > value.storagePoolMiB
-    )
+    const storage = await storageCommitments(tx, occupied, env);
+    if ([...storage.values()].reduce((sum, value) => sum + value, 0) > value.storagePoolMiB)
       throw new DomainError('conflict');
     await tx
       .insertInto('physical_hosts')

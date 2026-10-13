@@ -1,3 +1,4 @@
+import type { SecretCodec } from '@nickhosting/core';
 import type { DiscordOptions } from 'better-auth/social-providers';
 import type { Pool, PoolClient } from 'pg';
 
@@ -23,6 +24,7 @@ export interface IdentityOptions {
   supportIdleTtlSeconds?: number;
   supportAbsoluteTtlSeconds?: number;
   authSecret: string;
+  secretCodec: SecretCodec;
   bootstrapToken?: string;
   mail: (message: IdentityMail) => Promise<void>;
   discord?: Pick<DiscordOptions, 'clientId' | 'clientSecret' | 'getUserInfo'>;

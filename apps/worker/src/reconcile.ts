@@ -10,6 +10,19 @@ export async function reconcileServers(
   logger: ReturnType<typeof createLogger>,
   env: Readonly<Record<string, string | undefined>>,
 ) {
+  const transition = await db
+    .selectFrom('storage_policy_transitions')
+    .select('id')
+    .where('status', '=', 'applying')
+    .limit(1)
+    .executeTakeFirst();
+  if (transition) {
+    try {
+      await (await management()).storagePolicy.processPending();
+    } catch {
+      logger.log('warn', 'storage.policy_reconciliation_unavailable', {});
+    }
+  }
   const states = await db
     .selectFrom('gateway_server_states as state')
     .innerJoin('managed_servers as server', 'server.id', 'state.server_id')

@@ -273,7 +273,12 @@ export async function managementFixture(
     ...patch,
   });
   async function server(patch: Record<string, unknown> = {}) {
-    const created = await createManagedServer(db, adapter, context, input(patch));
+    // Legacy fixtures describe pre-existing finite disks. Opt into the new
+    // unlimited creation path explicitly; the stored platform policy is unchanged.
+    const unlimited = (patch.limits as { disk?: number } | undefined)?.disk === 0;
+    const created = await createManagedServer(db, adapter, context, input(patch), {
+      NH_STORAGE_POLICY: unlimited ? 'GLOBAL_POOL' : 'PER_USER_BUDGET',
+    });
     // A completed fixture provision: external behavior is exercised in lifecycle tests.
     const providerId = ++sequence;
     await db
@@ -299,6 +304,20 @@ export async function managementFixture(
       .where('job_id', '=', created.jobId)
       .execute();
     await db.deleteFrom('job_outbox').where('job_id', '=', created.jobId).execute();
+    if (unlimited)
+      await db
+        .insertInto('server_metrics')
+        .values({
+          server_id: created.serverId,
+          observed_at: new Date(),
+          disk_bytes: '0',
+          backup_bytes: '0',
+          memory_bytes: '0',
+          cpu_percent: 0,
+          network_rx_bytes: '0',
+          network_tx_bytes: '0',
+        })
+        .execute();
     return created.serverId;
   }
   return {

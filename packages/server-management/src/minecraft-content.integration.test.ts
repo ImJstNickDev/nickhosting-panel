@@ -831,9 +831,13 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     expect(await f.f.db.selectFrom('minecraft_staging_claims').selectAll().execute()).toEqual([]);
   });
 
-  it.each([true, false])(
-    'consented replacement (old files: %s) verifies removals and selection and safely retries the same job',
-    async (oldContent) => {
+  it.each([
+    { oldContent: true, disk: 64 },
+    { oldContent: false, disk: 64 },
+    { oldContent: true, disk: 0 },
+  ])(
+    'consented replacement $oldContent with disk=$disk verifies removals and retries safely',
+    async ({ oldContent, disk }) => {
       // Tiny isolated fixtures need the absolute safety margin, not 10% of
       // a shared multi-terabyte host. Production's 10% default is unchanged.
       const checkDisk = contentDisk.assertContentDiskSpace;
@@ -844,6 +848,12 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
 
       const selected = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };
       const f = await installedPackFixture(selected);
+      f.context.server.limits = { ...f.context.server.limits, disk };
+      await f.f.db
+        .updateTable('managed_servers')
+        .set({ limits: JSON.stringify(f.context.server.limits) })
+        .where('id', '=', f.serverId)
+        .execute();
       const root = `./mountdata/test-assets/m4-replacement-${randomUUID()}`;
       const target = { provider: 'modrinth' as const, projectId: 'packB', versionId: 'versionB' };
       const env = {
@@ -953,7 +963,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           resources: {
             memory_bytes: 0,
             cpu_absolute: 0,
-            disk_bytes: 100,
+            disk_bytes: disk === 0 ? 8 * 1024 ** 3 : 100,
             network_rx_bytes: 0,
             network_tx_bytes: 0,
             uptime: 0,

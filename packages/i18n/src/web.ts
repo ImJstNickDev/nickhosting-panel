@@ -13,6 +13,7 @@ export const webMessages: Record<string, readonly [string, string]> = {
   'web.integrations': ['Integrations', 'Integrazioni'],
   'web.operations': ['Operations', 'Operazioni'],
   'web.administration': ['Administration', 'Amministrazione'],
+  'web.admin': ['Admin', 'Admin'],
   'web.audit': ['Audit log', 'Registro di controllo'],
   'web.projects': ['Projects', 'Progetti'],
   'web.createServer': ['Create server', 'Crea server'],

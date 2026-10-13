@@ -372,6 +372,7 @@ export function registerMinecraftRoutes(
     );
     // Content preparation can involve remote work; sample immediately before admission.
     // The first server cannot depend on worker reconciliation having sampled this host.
+    await service.refreshStorage(db, { mappingId: choice.row.mapping_id });
     await service.refreshObservations();
     return c.json(
       await createManagedServer(

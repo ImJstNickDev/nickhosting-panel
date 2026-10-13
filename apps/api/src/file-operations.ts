@@ -19,6 +19,7 @@ import {
   type ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
 import {
+  assertServerStorageCapacity,
   getPlatformTransfers,
   parse,
   reserveUploadIngestion,
@@ -659,16 +660,14 @@ export function registerFileOperationRoutes(
                   { providerIdentifier: id, listFiles: directories.list },
                 ),
               );
-              const maxBytes = server.limits.disk * 1048576;
               const diskBytes = await timing.measure('copy.diskResources', () =>
                 service.fileDiskUsage(server, id, trace.enabled ? timing : undefined),
               );
-              if (
+              assertServerStorageCapacity(
+                server.limits.disk,
                 diskBytes +
-                  entries.reduce((sum, entry) => sum + (entry.directory ? 0 : entry.size), 0) >
-                maxBytes
-              )
-                throw new DomainError('resources_unavailable');
+                  entries.reduce((sum, entry) => sum + (entry.directory ? 0 : entry.size), 0),
+              );
               let completed = 0;
               await timing.measure('copy.auditRequested', () =>
                 recordAudit(connection, current, 'server.files.requested', {
@@ -731,7 +730,7 @@ export function registerFileOperationRoutes(
                           service.adapter.uploadFile(id, entry.path, {
                             body: download.body,
                             contentLength: entry.size,
-                            maxBytes,
+                            maxBytes: entry.size,
                             signal: c.req.raw.signal,
                             authorize: () =>
                               timing.measure('copy.authorizeUpload', () =>
@@ -881,13 +880,11 @@ export function registerFileOperationRoutes(
             files.map((file) => pathJoin(destination, file.path)),
             connection,
           );
-          const maxBytes = server.limits.disk * 1048576;
           const resources = await service.adapter.getResources(id);
-          if (
-            resources.resources.disk_bytes + files.reduce((sum, file) => sum + file.size, 0) >
-            maxBytes
-          )
-            throw new DomainError('resources_unavailable');
+          assertServerStorageCapacity(
+            server.limits.disk,
+            resources.resources.disk_bytes + files.reduce((sum, file) => sum + file.size, 0),
+          );
           await service.authorizeTransfer(current, serverId, true, connection);
           if (
             (await service.adapter.listFiles(id, root)).some(
@@ -954,7 +951,7 @@ export function registerFileOperationRoutes(
                 await service.adapter.uploadFile(id, target, {
                   body: Readable.toWeb(createReadStream(file.local)) as ReadableStream<Uint8Array>,
                   contentLength: file.size,
-                  maxBytes,
+                  maxBytes: file.size,
                   signal: c.req.raw.signal,
                   authorize: () => service.authorizeTransfer(current, serverId, true, connection),
                 });

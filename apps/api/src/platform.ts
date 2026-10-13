@@ -43,6 +43,33 @@ export function registerPlatformRoutes(
   options: Omit<ServerRouteOptions, 'acquireUploadSlot'>,
 ) {
   const { db, env, principal, management } = options;
+  app.get('/v1/owner/storage-policy', async (c) => {
+    const context = await principal(c, true);
+    return c.json(await (await management()).storagePolicy.status(context));
+  });
+  app.post('/v1/owner/storage-policy/preview', async (c) => {
+    const context = await principal(c, true);
+    return c.json(await (await management()).storagePolicy.preview(context, await body(c)), 201);
+  });
+  app.get('/v1/owner/storage-policy/:id', async (c) => {
+    const context = await principal(c, true);
+    return c.json(await (await management()).storagePolicy.get(context, c.req.param('id')));
+  });
+  app.post('/v1/owner/storage-policy/:id/apply', async (c) => {
+    const context = await principal(c, true);
+    return c.json(
+      await (await management()).storagePolicy.apply(context, c.req.param('id'), await body(c)),
+      202,
+    );
+  });
+  app.post('/v1/owner/storage-policy/:id/retry', async (c) => {
+    const context = await principal(c, true);
+    return c.json(await (await management()).storagePolicy.retry(context, c.req.param('id')), 202);
+  });
+  app.post('/v1/owner/storage-policy/:id/refresh', async (c) => {
+    const context = await principal(c, true);
+    return c.json(await (await management()).storagePolicy.refresh(context, c.req.param('id')));
+  });
   app.get('/v1/owner/integrations/:gameId/sleep-policy', async (c) =>
     c.json(await getGameSleepPolicy(db, await principal(c, true), c.req.param('gameId'), env)),
   );

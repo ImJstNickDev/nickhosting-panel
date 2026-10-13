@@ -63,6 +63,8 @@ export const en = {
   'errors.invitation_expired': 'This invitation has expired.',
   'errors.invitation_revoked': 'This invitation has been revoked.',
   'errors.invitation_exhausted': 'This invitation has already been used.',
+  'errors.invitation_link_unavailable':
+    'This invitation link cannot be retrieved. Create a new invitation.',
   'errors.setup_completed': 'Setup has already been completed.',
   'errors.setup_token_invalid': 'The setup code is invalid.',
   'errors.support_invalid': 'This support session is invalid.',
@@ -183,6 +185,8 @@ export const it: Record<MessageKey, string> = {
   'errors.invitation_expired': 'Questo invito è scaduto.',
   'errors.invitation_revoked': 'Questo invito è stato revocato.',
   'errors.invitation_exhausted': 'Questo invito è già stato utilizzato.',
+  'errors.invitation_link_unavailable':
+    'Il link di questo invito non è recuperabile. Crea un nuovo invito.',
   'errors.setup_completed': 'La configurazione iniziale è già stata completata.',
   'errors.setup_token_invalid': 'Il codice di configurazione non è valido.',
   'errors.support_invalid': 'Questa sessione di assistenza non è valida.',

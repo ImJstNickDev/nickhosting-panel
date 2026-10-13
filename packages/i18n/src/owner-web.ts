@@ -1,4 +1,130 @@
 export const ownerWebMessages: Record<string, readonly [string, string]> = {
+  'storagePolicy.title': ['Storage', 'Spazio disco'],
+  'storagePolicy.current': ['Current policy', 'Modalità attuale'],
+  'storagePolicy.currentQuota': [
+    'Default quota per user: {value}',
+    'Quota predefinita per utente: {value}',
+  ],
+  'storagePolicy.mode': ['Storage limits', 'Limiti di spazio'],
+  'storagePolicy.mode.GLOBAL_POOL': ['Shared storage', 'Spazio condiviso'],
+  'storagePolicy.mode.PER_USER_BUDGET': ['Storage budget per user', 'Quota di spazio per utente'],
+  'storagePolicy.defaultQuota': [
+    'Default quota per user (GiB)',
+    'Quota predefinita per utente (GiB)',
+  ],
+  'storagePolicy.globalHelp': [
+    'Apply this policy to remove existing server disk caps. New servers use the host’s available space without a disk cap.',
+    'Applica questa modalità per rimuovere i limiti disco dai server esistenti. I nuovi server usano lo spazio disponibile sull’host senza un limite disco.',
+  ],
+  'storagePolicy.limitedHelp': [
+    'Review occupied space and allocate each user’s quota across their servers before applying limits.',
+    'Verifica lo spazio occupato e ripartisci la quota di ogni utente tra i suoi server prima di applicare i limiti.',
+  ],
+  'storagePolicy.preview': ['Check occupied space', 'Verifica spazio occupato'],
+  'storagePolicy.refresh': ['Refresh preview', 'Aggiorna anteprima'],
+  'storagePolicy.refreshMeasurements': ['Refresh measurements', 'Aggiorna misurazioni'],
+  'storagePolicy.openFiles': ['Files', 'File'],
+  'storagePolicy.openBackups': ['Backups', 'Backup'],
+  'storagePolicy.openFilesLabel': [
+    'Files for {name} (opens in a new tab)',
+    'File di {name} (apre una nuova scheda)',
+  ],
+  'storagePolicy.openBackupsLabel': [
+    'Backups for {name} (opens in a new tab)',
+    'Backup di {name} (apre una nuova scheda)',
+  ],
+  'storagePolicy.review': ['Review allocations', 'Verifica assegnazioni'],
+  'storagePolicy.status.draft': ['Preview', 'Anteprima'],
+  'storagePolicy.status.applying': ['Applying', 'Applicazione in corso'],
+  'storagePolicy.status.blocked': ['Needs attention', 'Da sistemare'],
+  'storagePolicy.reviewLimited': [
+    'Adjust individual quotas or server limits below. Each server needs room for its current files and a safety margin.',
+    'Modifica le quote individuali o i limiti dei server qui sotto. Ogni server richiede spazio per i file attuali e un margine operativo.',
+  ],
+  'storagePolicy.reviewUnlimited': [
+    'The following servers will have their disk limits removed.',
+    'Il limite disco verrà rimosso dai seguenti server.',
+  ],
+  'storagePolicy.backupHelp': [
+    'Reserved space includes each server’s limit plus the same amount for every allowed backup. Backup reservations are separate from measured server files.',
+    'Lo spazio riservato comprende il limite di ogni server e altrettanto spazio per ogni backup consentito. Le riserve per i backup sono separate dai file misurati sui server.',
+  ],
+  'storagePolicy.changed': [
+    'The settings have changed. Refresh the preview before applying them.',
+    'Le impostazioni sono cambiate. Aggiorna l’anteprima prima di applicarle.',
+  ],
+  'storagePolicy.filesUsed': ['Server files: {value}', 'File dei server: {value}'],
+  'storagePolicy.userQuota': ['Quota for {name} (GiB)', 'Quota di {name} (GiB)'],
+  'storagePolicy.reserved': [
+    'Reserved, including backups: {value}',
+    'Riservato, inclusi i backup: {value}',
+  ],
+  'storagePolicy.remaining': ['Still available: {value}', 'Ancora disponibile: {value}'],
+  'storagePolicy.shortfall': ['Over quota by {value}', 'Quota superata di {value}'],
+  'storagePolicy.resolveUser': [
+    'Raise this user’s quota, or free space on their servers and refresh measurements. Individual quotas remain in effect until changed.',
+    'Aumenta la quota di questo utente, oppure libera spazio sui suoi server e aggiorna le misurazioni. Le quote individuali restano attive finché non vengono modificate.',
+  ],
+  'storagePolicy.used': ['Files: {value}', 'File: {value}'],
+  'storagePolicy.measured': ['Measured:', 'Misurato:'],
+  'storagePolicy.serverQuota': ['Limit for {name} (GiB)', 'Limite di {name} (GiB)'],
+  'storagePolicy.currentLimit': ['Current limit: {value}', 'Limite attuale: {value}'],
+  'storagePolicy.minimum': [
+    'Minimum with safety margin: {value}',
+    'Minimo con margine operativo: {value}',
+  ],
+  'storagePolicy.backupReservation': [
+    'Backup reservation ({count, plural, one {# slot} other {# slots}}): {value}',
+    'Riserva backup ({count, plural, one {# posto} other {# posti}}): {value}',
+  ],
+  'storagePolicy.unlimited': ['No limit', 'Senza limite'],
+  'storagePolicy.unavailable': ['Unavailable', 'Non disponibile'],
+  'storagePolicy.missingMeasurement': [
+    'Could not measure this server. Restore the connection and check again.',
+    'Impossibile misurare questo server. Ripristina la connessione e ripeti la verifica.',
+  ],
+  'storagePolicy.invalidSize': [
+    'Enter a positive size in GiB, in whole MiB increments.',
+    'Inserisci una dimensione positiva in GiB, con incrementi di MiB interi.',
+  ],
+  'storagePolicy.resolveFirst': [
+    'Resolve missing readings and quota shortfalls before applying.',
+    'Risolvi le letture mancanti e le quote superate prima di applicare.',
+  ],
+  'storagePolicy.noServers': [
+    'There are no existing servers to adjust.',
+    'Non ci sono server esistenti da adeguare.',
+  ],
+  'storagePolicy.apply': ['Review and apply', 'Rivedi e applica'],
+  'storagePolicy.resume': ['Apply revised allocations', 'Applica assegnazioni aggiornate'],
+  'storagePolicy.recheck': ['Recheck and retry', 'Ricontrolla e riprova'],
+  'storagePolicy.confirmTitle': ['Apply storage policy', 'Applica politica di spazio'],
+  'storagePolicy.confirmLimited': [
+    'Set a default quota of {quota} per user and apply the reviewed allocations to {count} servers. Individual quotas shown in the preview take precedence.',
+    'Imposta una quota predefinita di {quota} per utente e applica le assegnazioni verificate a {count} server. Le quote individuali mostrate nell’anteprima hanno la precedenza.',
+  ],
+  'storagePolicy.confirmUnlimited': [
+    'Remove disk limits from {count} servers and create new servers without a disk cap.',
+    'Rimuovi il limite disco da {count} server e crea i nuovi server senza limite disco.',
+  ],
+  'storagePolicy.confirmCheck': [
+    'Occupied space is checked again before each update. If a server has grown or cannot be verified, the update pauses for review.',
+    'Lo spazio occupato viene ricontrollato prima di ogni aggiornamento. Se un server è cresciuto o non è verificabile, l’aggiornamento si interrompe per una nuova verifica.',
+  ],
+  'storagePolicy.confirmApply': ['Apply changes', 'Applica modifiche'],
+  'storagePolicy.applying': [
+    'Confirmed updates: {applied} of {total}. The policy is complete only after every server has been verified.',
+    'Aggiornamenti confermati: {applied} di {total}. La modifica è completata solo dopo la verifica di tutti i server.',
+  ],
+  'storagePolicy.blocked': [
+    'Confirmed updates: {applied} of {total}. Raise affected quotas, or delete unneeded files or backups and refresh measurements before reducing allocations. Other writes remain paused. Retry after restoring an unavailable connection.',
+    'Aggiornamenti confermati: {applied} di {total}. Aumenta le quote interessate, oppure elimina file o backup non necessari e aggiorna le misurazioni prima di ridurre le assegnazioni. Le altre scritture restano sospese. Se la connessione non è disponibile, ripristinala e riprova.',
+  ],
+  'storagePolicy.serverApplied': ['Limit verified', 'Limite verificato'],
+  'storagePolicy.completed': [
+    'Storage policy applied and server limits verified.',
+    'Politica di spazio applicata e limiti dei server verificati.',
+  ],
   'owner.config.fileViewers': ['Private file viewers', 'Visualizzatori file privati'],
   'owner.readOnlySettings': [
     'Your role can view these settings. Only the Owner can change them.',
@@ -61,6 +187,32 @@ export const ownerWebMessages: Record<string, readonly [string, string]> = {
   ],
   'owner.createInvite': ['Create invitation', 'Crea invito'],
   'owner.inviteLink': ['Invitation link', 'Link di invito'],
+  'owner.inviteShowLink': ['Show link', 'Mostra link'],
+  'owner.inviteEdit': ['Edit invitation', 'Modifica invito'],
+  'owner.inviteRevoke': ['Revoke invitation', 'Revoca invito'],
+  'owner.inviteUsed': ['Uses', 'Utilizzi'],
+  'owner.inviteExhausted': ['Used up', 'Esaurito'],
+  'owner.inviteLegacy': [
+    'This invitation’s link cannot be retrieved. Create a new invitation if you no longer have it.',
+    'Il link di questo invito non è recuperabile. Crea un nuovo invito se non lo hai più.',
+  ],
+  'owner.inviteCopyFailed': [
+    'Could not copy the link. Select it and copy it manually.',
+    'Impossibile copiare il link. Selezionalo e copialo manualmente.',
+  ],
+  'owner.inviteImmutable': [
+    'The recipient and role cannot be changed.',
+    'Il destinatario e il ruolo non possono essere modificati.',
+  ],
+  'owner.inviteUsedCount': ['Already used: {count}', 'Già utilizzato: {count}'],
+  'owner.inviteRevokeWarning': [
+    'This link will no longer allow registration. Existing accounts are unaffected.',
+    'Questo link non consentirà più nuove registrazioni. Gli account esistenti non cambieranno.',
+  ],
+  'owner.inviteRestoreWarning': [
+    'Extending the expiration or increasing uses can make this invitation usable again.',
+    'Estendere la scadenza o aumentare gli utilizzi può rendere nuovamente utilizzabile questo invito.',
+  ],
   'owner.inviteOnce': [
     'Copy this link now. It cannot be retrieved again.',
     'Copia ora questo link. Non potrai recuperarlo in seguito.',

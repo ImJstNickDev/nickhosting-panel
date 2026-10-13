@@ -49,6 +49,7 @@ describe('Owner health HTTP evidence boundaries', () => {
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
     const identity = createIdentity({
+      secretCodec: new SecretCodec({ activeKeyId: 'fixture', keys: { fixture: randomBytes(32) } }),
       pool: database.pool,
       baseURL: origin,
       authSecret: randomBytes(32).toString('base64url'),

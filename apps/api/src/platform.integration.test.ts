@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { createManagementRuntime } from '@nickhosting/server-management';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
@@ -11,6 +12,7 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
   let database: Awaited<ReturnType<typeof createTestDatabase>>;
   let f: Awaited<ReturnType<typeof managementFixture>>;
   let app: ReturnType<typeof createApp>;
+  let management: Awaited<ReturnType<typeof createManagementRuntime>>;
   let owner: AuthClient, user: AuthClient, peer: AuthClient;
   let peerId: string;
   const origin = 'http://localhost:3999',
@@ -78,6 +80,7 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
     const identity = createIdentity({
+      secretCodec: new SecretCodec({ activeKeyId: 'fixture', keys: { fixture: randomBytes(32) } }),
       pool: database.pool,
       baseURL: origin,
       authSecret: randomBytes(32).toString('base64url'),
@@ -90,10 +93,13 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     owner = new AuthClient(identity);
     user = new AuthClient(identity);
     peer = new AuthClient(identity);
+    const codec = new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } });
+    management = await createManagementRuntime({ db: database.db, codec, adapter: f.adapter });
     app = createApp({
       database,
       identity: async () => identity,
-      codec: new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } }),
+      codec,
+      management: async () => management,
       origins: [origin],
       log: () => {},
     });
@@ -122,6 +128,38 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
   });
   afterAll(async () => {
     await database?.destroy();
+  });
+  it('protects storage-policy plans and completes explicit changes through durable reconciliation', async () => {
+    const path = '/v1/owner/storage-policy';
+    expect((await request(null, path)).status).toBe(401);
+    expect((await request(user, path)).status).toBe(403);
+    const current = await request(owner, path);
+    expect(current.headers.get('cache-control')).toBe('no-store');
+    expect(await current.json()).toMatchObject({ policy: 'GLOBAL_POOL', transition: null });
+    for (const policy of ['PER_USER_BUDGET', 'GLOBAL_POOL']) {
+      const input = { policy, defaultUserStorageMiB: 1024 };
+      expect((await request(user, `${path}/preview`, input)).status).toBe(403);
+      expect(
+        (
+          await request(owner, `${path}/preview`, input, 'POST', {
+            origin: 'https://attacker.example.test',
+          })
+        ).status,
+      ).toBe(403);
+      const preview = await request(owner, `${path}/preview`, input);
+      expect(preview.status).toBe(201);
+      const plan = await preview.json();
+      expect(plan).toMatchObject({ status: 'draft', policy, users: [] });
+      expect((await request(user, `${path}/${plan.id}`)).status).toBe(403);
+      const apply = await request(owner, `${path}/${plan.id}/apply`, { users: [] });
+      expect(apply.status).toBe(202);
+      expect(await apply.json()).toMatchObject({ status: 'applying' });
+      await management.storagePolicy.processPending();
+      expect(await (await request(owner, path)).json()).toMatchObject({
+        policy,
+        transition: { id: plan.id, status: 'completed' },
+      });
+    }
   });
   it('requires verified session and Owner role, rejects forged origin, preserves existing list shape', async () => {
     for (const path of [

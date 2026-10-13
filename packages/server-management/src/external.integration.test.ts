@@ -15,6 +15,7 @@ import {
   listSftpCredentials,
   previewServerDns,
   reconcileExternalServices,
+  reconcileServerStorageQuota,
   revokeSftpCredential,
   rotateSftpCredential,
   updateServerDns,
@@ -178,6 +179,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
     recordSequence = 0;
   let loseSftpWrite = false,
     failSftpReadAfterWrite = false,
+    failSftpWrites = false,
     loseDnsWrite = false,
     failDns = false;
   const sftpCalls: string[] = [],
@@ -195,7 +197,9 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       return Response.json(users.get(username) ?? {}, { status: users.has(username) ? 200 : 404 });
     }
     const body = init?.body ? JSON.parse(String(init.body)) : {};
-    if (method === 'POST') users.set(body.username, { ...body, id: ++userSequence });
+    if (failSftpWrites) throw new Error('isolated provider unavailable before write');
+    if (method === 'POST')
+      users.set(body.username, { ...body, id: ++userSequence, used_quota_size: 0 });
     if (method === 'PUT') users.set(username, { ...users.get(username), ...body });
     if (method === 'DELETE') users.delete(username);
     if (loseSftpWrite) {
@@ -257,6 +261,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       NH_STATIC_GAME_HOSTNAME: 'static.example.test',
     },
     verifyServer: vi.fn(async () => {}),
+    readServerDiskUsage: vi.fn(async () => 0),
     sftpFactory: (config, apiKey) =>
       new SftpGoAdapter({
         baseURL: config.sftpgoBaseUrl ?? '',
@@ -287,6 +292,9 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
     loseSftp: () => {
       loseSftpWrite = true;
     },
+    failSftpWrites: (value: boolean) => {
+      failSftpWrites = value;
+    },
     loseDns: () => {
       loseDnsWrite = true;
     },
@@ -301,6 +309,177 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
 }
 
 describe('durable server external services', () => {
+  it.each(['applying', 'blocked'] as const)(
+    'fences new and rotated credentials while storage policy is %s but permits reconciliation',
+    async (status) => {
+      const f = await fixture();
+      const credentialId = randomUUID();
+      await createSftpCredential(f.db, f.context, f.serverId, { credentialId }, f.options);
+      await f.db
+        .insertInto('storage_policy_transitions')
+        .values({
+          id: randomUUID(),
+          actor_user_id: f.context.actorUserId,
+          status,
+          policy: 'GLOBAL_POOL',
+          previous_policy: 'PER_USER_BUDGET',
+          default_user_storage_mib: 1024,
+          plan: '{}',
+        })
+        .execute();
+      const before = f.sftpCalls.length;
+      await expect(
+        createSftpCredential(
+          f.db,
+          f.context,
+          f.serverId,
+          { credentialId: randomUUID() },
+          f.options,
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      await expect(
+        rotateSftpCredential(
+          f.db,
+          f.context,
+          f.serverId,
+          credentialId,
+          { rotationId: randomUUID() },
+          f.options,
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      expect(f.sftpCalls).toHaveLength(before);
+      expect(await reconcileServerStorageQuota(f.db, f.serverId, 0, f.options)).toEqual({
+        reconciled: 1,
+      });
+    },
+  );
+  it('updates an absent pending credential intent without issuing access until ordinary recovery', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    f.failSftpWrites(true);
+    await expect(
+      createSftpCredential(f.db, f.context, f.serverId, { credentialId }, f.options),
+    ).rejects.toThrow();
+    f.failSftpWrites(false);
+    const before = await f.db
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .executeTakeFirstOrThrow();
+    const oldIntent = JSON.parse(f.codec.decrypt(before.envelope, `external-sftp:${credentialId}`));
+    expect(await reconcileServerStorageQuota(f.db, f.serverId, 0, f.options)).toEqual({
+      reconciled: 1,
+    });
+    expect(f.users.size).toBe(0);
+    const after = await f.db
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .executeTakeFirstOrThrow();
+    const updated = JSON.parse(f.codec.decrypt(after.envelope, `external-sftp:${credentialId}`));
+    expect(updated).toMatchObject({
+      delivered: false,
+      request: { quotaBytes: 0, password: oldIntent.request.password },
+    });
+    expect(after.state).toBe(before.state);
+    // The storage transition commits the provider-confirmed cap before the
+    // ordinary credential recovery worker is allowed to resume.
+    await sql`update managed_servers set limits=jsonb_set(limits,'{disk}','0'::jsonb) where id=${f.serverId}`.execute(
+      f.db,
+    );
+    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 0 });
+    expect([...f.users.values()][0]).toMatchObject({
+      quota_size: 0,
+      password: oldIntent.request.password,
+    });
+  });
+  it('issues unlimited SFTP credentials and reconciles active quotas without redelivery or rotation', async () => {
+    const f = await fixture();
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ limits: JSON.stringify({ ...server.limits, disk: 0 }) })
+      .where('id', '=', f.serverId)
+      .execute();
+    const credentialId = randomUUID();
+    const issued = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId },
+      f.options,
+    );
+    const username = issued.username;
+    if (!username) throw new Error('Missing fixture credential');
+    expect(f.users.get(username)?.quota_size).toBe(0);
+    const password = f.users.get(username)?.password;
+    const expires = f.users.get(username)?.expiration_date;
+    expect(await reconcileServerStorageQuota(f.db, f.serverId, 64, f.options)).toEqual({
+      reconciled: 1,
+    });
+    expect(f.users.get(username)).toMatchObject({
+      quota_size: 64 * 1_048_576,
+      password,
+      expiration_date: expires,
+    });
+    expect(await reconcileServerStorageQuota(f.db, f.serverId, 0, f.options)).toEqual({
+      reconciled: 1,
+    });
+    expect(f.users.get(username)).toMatchObject({
+      quota_size: 0,
+      password,
+      expiration_date: expires,
+    });
+    const puts = f.sftpCalls.filter((method) => method === 'PUT').length;
+    await reconcileServerStorageQuota(f.db, f.serverId, 0, f.options);
+    expect(f.sftpCalls.filter((method) => method === 'PUT')).toHaveLength(puts);
+    const row = await f.db
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .executeTakeFirstOrThrow();
+    expect(row.provider_ref).toMatchObject({ quotaBytes: 0 });
+    const intent = JSON.parse(f.codec.decrypt(row.envelope, `external-sftp:${credentialId}`));
+    expect(intent).toMatchObject({ delivered: true, request: { quotaBytes: 0, password } });
+    expect(
+      (await createSftpCredential(f.db, f.context, f.serverId, { credentialId }, f.options))
+        .password,
+    ).toBeUndefined();
+    expect(f.sftpCalls.filter((method) => method === 'POST')).toHaveLength(1);
+  });
+  it('fails quota reconciliation before mutation when ownership or finite usage cannot be proven', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    const issued = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId },
+      f.options,
+    );
+    if (!issued.username) throw new Error('Missing fixture credential');
+    const remote = f.users.get(issued.username);
+    if (!remote) throw new Error('Missing fixture account');
+    remote.used_quota_size = 2 * 1_048_576;
+    await expect(reconcileServerStorageQuota(f.db, f.serverId, 1, f.options)).rejects.toMatchObject(
+      { code: 'resources_unavailable' },
+    );
+    remote.additional_info = '{}';
+    await expect(reconcileServerStorageQuota(f.db, f.serverId, 0, f.options)).rejects.toMatchObject(
+      { code: 'conflict' },
+    );
+    expect(f.sftpCalls.filter((method) => method === 'PUT')).toHaveLength(0);
+    const row = await f.db
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .executeTakeFirstOrThrow();
+    expect(row.provider_ref).toMatchObject({ quotaBytes: 64 * 1_048_576 });
+  });
   it.each(['support-revoked', 'parent-revoked'] as const)(
     'rejects external cleanup through %s interactive support',
     async (reason) => {

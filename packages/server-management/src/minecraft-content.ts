@@ -58,6 +58,7 @@ import {
   requireMinecraftRuntimeImageEvidence,
 } from './minecraft-runtime-evidence.js';
 import { createMinecraftSourceStore, reserveMinecraftStaging } from './minecraft-sources.js';
+import { assertServerStorageCapacity } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
 
 export type {
@@ -1685,11 +1686,7 @@ async function applyPreparedContent(
   for (const file of staged.manifest)
     if (!(await completed(context, stepId('install', file.path)))) stagedBytes += file.size;
   const usage = await context.adapter.getResources(context.server.pterodactyl_identifier ?? '');
-  if (
-    !Number.isSafeInteger(stagedBytes) ||
-    stagedBytes + usage.resources.disk_bytes > Number(context.server.limits.disk) * 1024 ** 2
-  )
-    throw new DomainError('resources_unavailable');
+  assertServerStorageCapacity(context.server.limits.disk, stagedBytes + usage.resources.disk_bytes);
   if (
     prepared.backupBefore &&
     context.operation().plan.backupComplete !== true &&
@@ -2066,11 +2063,7 @@ async function applyWorldContent(
   for (const file of staged.manifest)
     if (!(await completed(context, stepId('install', file.path)))) bytes += file.size;
   const usage = await context.adapter.getResources(context.server.pterodactyl_identifier ?? '');
-  if (
-    !Number.isSafeInteger(bytes) ||
-    usage.resources.disk_bytes + bytes > Number(context.server.limits.disk) * 1024 ** 2
-  )
-    throw new DomainError('resources_unavailable');
+  assertServerStorageCapacity(context.server.limits.disk, usage.resources.disk_bytes + bytes);
   if (context.operation().plan.minecraftWorldPrepared !== true) {
     const actual = await remoteEntry(context, target);
     if (Boolean(actual) !== prepared.world.existing || actual?.is_file)

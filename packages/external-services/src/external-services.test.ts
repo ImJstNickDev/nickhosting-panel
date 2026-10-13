@@ -23,6 +23,8 @@ function sftpFixture() {
   let id = 0;
   const calls: { method: string; path: string; body?: Record<string, unknown> }[] = [];
   let loseNextCreateResponse = false;
+  let ignoreNextQuotaUpdate = false;
+  let loseNextUpdateResponse = false;
   const fetcher: typeof fetch = vi.fn(async (input, init) => {
     const url = new URL(String(input));
     expect(init?.redirect).toBe('error');
@@ -35,7 +37,7 @@ function sftpFixture() {
       return Response.json(users.get(username) ?? {}, { status: users.has(username) ? 200 : 404 });
     if (method === 'POST') {
       if (users.has(body.username)) return Response.json({}, { status: 409 });
-      users.set(body.username, { ...body, id: ++id });
+      users.set(body.username, { ...body, id: ++id, used_quota_size: 0 });
       if (loseNextCreateResponse) {
         loseNextCreateResponse = false;
         throw new Error('timeout secret-key fixture-private-key');
@@ -43,7 +45,15 @@ function sftpFixture() {
       return Response.json(users.get(body.username), { status: 201 });
     }
     if (method === 'PUT') {
+      if (ignoreNextQuotaUpdate) {
+        ignoreNextQuotaUpdate = false;
+        return Response.json({ message: 'not applied' });
+      }
       users.set(username, { ...users.get(username), ...body });
+      if (loseNextUpdateResponse) {
+        loseNextUpdateResponse = false;
+        throw new Error('isolated response lost after update');
+      }
       return Response.json({ message: 'updated' });
     }
     if (method === 'DELETE') {
@@ -77,10 +87,92 @@ function sftpFixture() {
     loseNextCreate: () => {
       loseNextCreateResponse = true;
     },
+    ignoreNextQuotaUpdate: () => {
+      ignoreNextQuotaUpdate = true;
+    },
+    loseNextUpdate: () => {
+      loseNextUpdateResponse = true;
+    },
   };
 }
 
 describe('SFTPGo credentials', () => {
+  it('accepts zero as an unlimited server quota while retaining session and protocol limits', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential({ ...fixture.request(), quotaBytes: 0 });
+    expect(ref.quotaBytes).toBe(0);
+    expect(fixture.users.get(ref.username)).toMatchObject({ quota_size: 0, max_sessions: 2 });
+    expect(
+      await fixture.adapter.ensureCredential({
+        ...fixture.request(),
+        credentialId: ref.credentialId,
+        quotaBytes: 0,
+      }),
+    ).toEqual(ref);
+  });
+  it('changes active account quotas with readback and no credential, lifetime or policy reset', async () => {
+    const fixture = sftpFixture();
+    const request = fixture.request();
+    const ref = await fixture.adapter.ensureCredential(request);
+    const user = fixture.users.get(ref.username);
+    if (!user) throw new Error('Missing fixture account');
+    user.used_quota_size = 4096;
+    user.upload_bandwidth = 512;
+    (user.filters as Record<string, unknown>).max_upload_file_size = 65536;
+    const unlimited = await fixture.adapter.updateQuota(ref, 0);
+    expect(unlimited).toMatchObject({ quotaBytes: 0, expiresAt: ref.expiresAt });
+    const update = fixture.calls.findLast((call) => call.method === 'PUT');
+    expect(update?.path).toContain('disconnect=1');
+    expect(update?.body).not.toHaveProperty('password');
+    expect(fixture.users.get(ref.username)).toMatchObject({
+      password: request.password,
+      status: 1,
+      expiration_date: ref.expiresAt,
+      quota_size: 0,
+      max_sessions: 2,
+      upload_bandwidth: 512,
+      filters: { max_upload_file_size: 65536 },
+    });
+    expect(await fixture.adapter.updateQuota(unlimited, 4096, 4096)).toMatchObject({
+      quotaBytes: 4096,
+    });
+    expect(fixture.calls.at(-1)?.method).toBe('GET');
+  });
+  it('refuses a finite quota below observed usage or with unavailable usage before any mutation', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential({ ...fixture.request(), quotaBytes: 0 });
+    const user = fixture.users.get(ref.username);
+    if (!user) throw new Error('Missing fixture account');
+    user.used_quota_size = 8192;
+    await expect(fixture.adapter.updateQuota(ref, 4096, 8192)).rejects.toMatchObject({
+      code: 'resources_unavailable',
+    });
+    delete user.used_quota_size;
+    await expect(fixture.adapter.updateQuota(ref, 4096)).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+    expect(fixture.calls.filter((call) => call.method === 'PUT')).toHaveLength(0);
+  });
+  it('requires ownership and isolation proof for quota changes', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential(fixture.request());
+    const user = fixture.users.get(ref.username);
+    if (!user) throw new Error('Missing fixture account');
+    user.additional_info = '{}';
+    await expect(fixture.adapter.updateQuota(ref, 0)).rejects.toMatchObject({ code: 'conflict' });
+    expect(fixture.calls.filter((call) => call.method === 'PUT')).toHaveLength(0);
+  });
+  it('rejects an unconfirmed provider quota and recovers a lost response idempotently', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential(fixture.request());
+    fixture.ignoreNextQuotaUpdate();
+    await expect(fixture.adapter.updateQuota(ref, 0)).rejects.toMatchObject({ code: 'conflict' });
+    fixture.loseNextUpdate();
+    await expect(fixture.adapter.updateQuota(ref, 0)).rejects.toThrow();
+    const puts = fixture.calls.filter((call) => call.method === 'PUT').length;
+    expect(await fixture.adapter.updateQuota(ref, 0)).toMatchObject({ quotaBytes: 0 });
+    expect(fixture.calls.filter((call) => call.method === 'PUT')).toHaveLength(puts);
+  });
   it('provisions independent users with one mapped UUID directory and no broad permissions', async () => {
     const fixture = sftpFixture();
     const first = await fixture.adapter.ensureCredential(fixture.request());

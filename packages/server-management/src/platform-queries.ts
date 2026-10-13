@@ -26,6 +26,7 @@ import {
 } from './registry.js';
 import { publicIdleTimeout, resolveIdleTimeout } from './sleep-policy.js';
 import { hasStopProcessBaseline, stopEscalation } from './stop-escalation.js';
+import { serverStorageLimitBytes } from './storage-capacity.js';
 import { effectiveUploadPolicy } from './upload-policy.js';
 
 const pageSchema = z.object({
@@ -465,7 +466,7 @@ export async function getPlatformQuota(
 ) {
   assertAuthContext(context);
   if (userId !== context.subjectUserId) ownerOnly(context);
-  const [settings, override, reservations, servers, metrics] = await Promise.all([
+  const [settings, override, reservations, servers, metrics, storageOverride] = await Promise.all([
     getSettings(db, env),
     db
       .selectFrom('resource_user_limits')
@@ -490,31 +491,46 @@ export async function getPlatformQuota(
       .orderBy('m.server_id')
       .orderBy('m.observed_at', 'desc')
       .execute(),
+    db
+      .selectFrom('storage_user_budgets')
+      .select('storage_mib')
+      .where('user_id', '=', userId)
+      .executeTakeFirst(),
   ]);
   const { values } = settings,
     effective =
       override && (!override.expires_at || override.expires_at > new Date()) ? override : null;
+  const storageBudgetMiB = Number(
+    storageOverride
+      ? (storageOverride.storage_mib ?? values.defaultUserStorageMiB)
+      : (effective?.storage_mib ?? values.defaultUserStorageMiB),
+  );
   const limits = {
     memoryMiB: effective?.memory_mib ?? values.defaultUserMemoryMiB,
     cpuPercent: effective?.cpu_percent ?? values.defaultUserCpuPercent,
-    storageMiB:
-      values.storagePolicy === 'PER_USER_BUDGET'
-        ? Number(effective?.storage_mib ?? values.defaultUserStorageMiB)
-        : null,
+    storageMiB: values.storagePolicy === 'PER_USER_BUDGET' ? storageBudgetMiB : null,
     serverCount: values.maxServersPerUser,
   };
   const committed = {
     memoryMiB: reservations.reduce((n, r) => n + r.memory_mib, 0),
     cpuPercent: reservations.reduce((n, r) => n + r.cpu_percent, 0),
-    storageMiB: servers.reduce((n, r) => n + r.limits.disk * (1 + r.feature_limits.backups), 0),
+    storageMiB: servers.reduce(
+      (n, r) =>
+        n +
+        (r.limits.disk ||
+          Math.ceil(Number(metrics.find((m) => m.server_id === r.id)?.disk_bytes ?? 0) / 1048576)) *
+          (1 + r.feature_limits.backups),
+      0,
+    ),
     serverCount: servers.length,
   };
   return {
     userId,
+    storageBudgetMiB,
     storagePolicy: values.storagePolicy,
     creationStorage: {
       mode: values.storagePolicy === 'GLOBAL_POOL' ? 'shared' : 'limited',
-      defaultDiskMiB: values.defaultServerStorageMiB,
+      defaultDiskMiB: values.storagePolicy === 'GLOBAL_POOL' ? 0 : values.defaultServerStorageMiB,
     },
     limits,
     committed,
@@ -527,6 +543,24 @@ export async function getPlatformQuota(
         limits.serverCount === null
           ? null
           : Math.max(0, limits.serverCount - committed.serverCount),
+    },
+    storageBudgetOverrideMiB:
+      storageOverride?.storage_mib === null || !storageOverride
+        ? null
+        : Number(storageOverride.storage_mib),
+    storageUsage: {
+      bytes: servers.every((server) =>
+        metrics.some(
+          (metric) =>
+            metric.server_id === server.id &&
+            Number.isSafeInteger(Number(metric.disk_bytes)) &&
+            Number(metric.disk_bytes) >= 0 &&
+            metric.observed_at.getTime() <= Date.now() &&
+            Date.now() - metric.observed_at.getTime() <= values.observationMaxAgeSeconds * 1000,
+        ),
+      )
+        ? metrics.reduce((total, metric) => total + Number(metric.disk_bytes), 0)
+        : null,
     },
     override: override
       ? {
@@ -988,14 +1022,14 @@ export async function getPlatformTransfers(
       available: reason === null,
       reason,
       providerMaxFileBytes: policy?.providerMaxFileBytes ?? null,
-      serverDiskBytes: server.limits.disk * 1048576,
+      serverDiskBytes: serverStorageLimitBytes(server.limits.disk),
       concurrency: settings.values.uploadConcurrency,
       batchMaxFiles: 500,
       batchMaxBytes: policy
         ? Math.max(
             0,
             Math.min(
-              server.limits.disk * 1048576,
+              serverStorageLimitBytes(server.limits.disk) ?? Number.MAX_SAFE_INTEGER,
               Math.floor(
                 (policy.temporaryDiskBudgetBytes - 65536 * settings.values.uploadConcurrency) / 2,
               ),

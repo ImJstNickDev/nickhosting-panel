@@ -63,6 +63,7 @@ export async function browserHarness(
   };
   try {
     const identity = createIdentity({
+      secretCodec: codec,
       pool: database.pool,
       baseURL: origin,
       publicURL: origin,

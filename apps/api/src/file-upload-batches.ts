@@ -17,6 +17,7 @@ import {
   parse,
   readUploadBatch,
   reserveUploadIngestion,
+  serverStorageLimitBytes,
   type UploadTiming,
   uploadBatchMaxFiles,
   uploadBatchStatus,
@@ -200,13 +201,13 @@ export function registerUploadBatchRoutes(
               return { id: null, concurrency, rejected, files: [] };
             }
             const bytes = accepted.reduce((sum, file) => sum + file.bytes, 0);
-            const maxBytes = server.limits.disk * 1024 * 1024;
+            const maxBytes = serverStorageLimitBytes(server.limits.disk);
             if (
               !Number.isSafeInteger(bytes) ||
               !Number.isSafeInteger(growth) ||
-              !Number.isSafeInteger(maxBytes) ||
-              observed.value.resources.disk_bytes + growth > maxBytes ||
-              accepted.some((file) => file.bytes > maxBytes)
+              (maxBytes !== null &&
+                (observed.value.resources.disk_bytes + growth > maxBytes ||
+                  accepted.some((file) => file.bytes > maxBytes)))
             )
               throw new DomainError('validation_failed', 413);
             c.req.raw.signal.throwIfAborted();
@@ -435,7 +436,7 @@ async function runBatchUpload(
                     },
                   }),
                 contentLength: input.contentLength,
-                maxBytes: server.limits.disk * 1024 * 1024,
+                maxBytes: serverStorageLimitBytes(server.limits.disk) ?? input.contentLength,
                 signal: c.req.raw.signal,
                 authorize: () =>
                   service.authorizeTransfer(current, serverId, true, connection, timing, server),

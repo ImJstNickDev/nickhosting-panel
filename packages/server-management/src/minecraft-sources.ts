@@ -11,7 +11,12 @@ import {
   SafeContentHttp,
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, getSettings, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
@@ -254,6 +259,7 @@ export async function reserveMinecraftStaging(
     throw new DomainError('validation_failed');
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
     const job = await tx
       .selectFrom('operation_jobs as job')
       .innerJoin('server_operations as operation', 'operation.job_id', 'job.id')

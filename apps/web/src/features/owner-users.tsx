@@ -1,5 +1,5 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type {
   getPlatformUser,
@@ -12,7 +12,6 @@ import { useFormat, useT } from '../app/i18n.js';
 import { identityChanged, useSession } from '../app/session.js';
 import {
   ActionForm,
-  Badge,
   Check,
   Details,
   Dialog,
@@ -29,46 +28,87 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import './owner-users.css';
 
 export function OwnerUsersPage() {
   const t = useT();
-  const [q, setQ] = useState(''),
-    [role, setRole] = useState(''),
-    [cursor, setCursor] = useState<string>();
+  const searchInput = useRef<HTMLInputElement>(null);
+  const [search, setSearch] = useState('');
+  const [{ q, role, cursor }, setFilters] = useState<{
+    q: string;
+    role: string;
+    cursor?: string;
+  }>({ q: '', role: '' });
+  const macKeyboard = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setFilters((current) =>
+        current.q === search.trim() ? current : { ...current, q: search.trim(), cursor: undefined },
+      );
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    function focusSearch(event: KeyboardEvent) {
+      if (
+        event.defaultPrevented ||
+        event.isComposing ||
+        !event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        event.code !== 'KeyK' ||
+        document.querySelector('dialog[open]')
+      )
+        return;
+      event.preventDefault();
+      searchInput.current?.focus();
+      searchInput.current?.select();
+    }
+    document.addEventListener('keydown', focusSearch);
+    return () => document.removeEventListener('keydown', focusSearch);
+  }, []);
   const users = useQuery({
     queryKey: ['owner-users', q, role, cursor],
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const params = new URLSearchParams({ q });
       if (role) params.set('role', role);
       if (cursor) params.set('cursor', cursor);
-      return api<Result<typeof listPlatformUsers>>(`/v1/platform/owner/users?${params}`);
+      return api<Result<typeof listPlatformUsers>>(`/v1/platform/owner/users?${params}`, {
+        signal,
+      });
     },
+    placeholderData: keepPreviousData,
   });
+  const updating = users.isFetching || search.trim() !== q;
   return (
-    <Page
-      title={t('web.users')}
-      actions={
-        <Link className="button secondary" to="/owner/invitations">
-          {t('web.invites')}
-        </Link>
-      }
-    >
+    <Page title={t('web.users')}>
       <Section>
-        <form
-          className="toolbar"
-          onSubmit={(event) => {
-            event.preventDefault();
-            setQ(text(new FormData(event.currentTarget), 'q'));
-            setCursor(undefined);
-          }}
-        >
-          <Input label={t('web.search')} name="q" defaultValue={q} maxLength={100} />
+        <div className="owner-users-toolbar">
+          <div className="owner-users-search">
+            <Input
+              ref={searchInput}
+              type="search"
+              label={t('web.search')}
+              name="q"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              maxLength={100}
+              aria-keyshortcuts="Alt+K"
+              autoComplete="off"
+            />
+            {updating && (
+              <span className="owner-users-refresh" role="status" aria-label={t('web.loading')} />
+            )}
+            <span aria-hidden="true">
+              <kbd>{macKeyboard ? '⌥ + K' : 'ALT + K'}</kbd>
+            </span>
+          </div>
           <Select
             label={t('web.role')}
             value={role}
             onChange={(event) => {
-              setRole(event.target.value);
-              setCursor(undefined);
+              setFilters({ q: search.trim(), role: event.target.value });
             }}
           >
             <option value="">{t('web.all')}</option>
@@ -78,47 +118,66 @@ export function OwnerUsersPage() {
               </option>
             ))}
           </Select>
-          <button type="submit" className="secondary">
-            {t('web.search')}
-          </button>
-        </form>
-        {users.isPending ? (
-          <Loading />
-        ) : users.error ? (
-          <ErrorNotice error={users.error} />
-        ) : !users.data.items.length ? (
-          <Empty />
-        ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t('web.name')}</th>
-                  <th>{t('web.email')}</th>
-                  <th>{t('web.role')}</th>
-                  <th>{t('web.created')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.data.items.map((user) => (
-                  <tr key={user.id}>
-                    <td>
-                      <Link to={`/owner/users/${user.id}`}>{user.name}</Link>
-                    </td>
-                    <td>{user.email}</td>
-                    <td>{t(`owner.role.${user.role}`)}</td>
-                    <td>
-                      <Time value={user.createdAt} />
-                    </td>
+          <Link className="button secondary owner-users-invites" to="/owner/invitations">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <path d="m3 7 9 6 9-6" />
+            </svg>
+            {t('web.invites')}
+          </Link>
+        </div>
+        <div className="owner-users-results" aria-busy={updating} aria-live="polite">
+          {users.isPending ? (
+            <Loading />
+          ) : users.error ? (
+            <ErrorNotice error={users.error} retry={() => void users.refetch()} />
+          ) : !users.data.items.length ? (
+            <Empty />
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t('web.name')}</th>
+                    <th>{t('web.email')}</th>
+                    <th>{t('web.role')}</th>
+                    <th>{t('web.created')}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                </thead>
+                <tbody>
+                  {users.data.items.map((user) => (
+                    <tr key={user.id}>
+                      <td>
+                        <Link to={`/owner/users/${user.id}`}>{user.name}</Link>
+                      </td>
+                      <td>{user.email}</td>
+                      <td>{t(`owner.role.${user.role}`)}</td>
+                      <td>
+                        <Time value={user.createdAt} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
         <div className="actions">
           {cursor && (
-            <button className="secondary" type="button" onClick={() => setCursor(undefined)}>
+            <button
+              className="secondary"
+              type="button"
+              disabled={updating}
+              onClick={() => setFilters((current) => ({ ...current, cursor: undefined }))}
+            >
               {t('owner.firstPage')}
             </button>
           )}
@@ -126,7 +185,13 @@ export function OwnerUsersPage() {
             <button
               className="secondary"
               type="button"
-              onClick={() => setCursor(users.data.nextCursor!)}
+              disabled={updating || users.isPlaceholderData}
+              onClick={() =>
+                setFilters((current) => ({
+                  ...current,
+                  cursor: users.data?.nextCursor ?? undefined,
+                }))
+              }
             >
               {t('web.next')}
             </button>
@@ -207,8 +272,12 @@ export function OwnerUserPage() {
                 `${format.number(quota.committed.cpuPercent)} / ${format.number(quota.limits.cpuPercent)}%`,
               ],
               [
-                t('web.disk'),
-                `${format.number(quota.committed.storageMiB)} MiB / ${quota.limits.storageMiB === null ? t('owner.globalPool') : `${format.number(quota.limits.storageMiB)} MiB`}`,
+                quota.limits.storageMiB === null
+                  ? `${t('web.disk')} · ${t('web.usage')}`
+                  : t('web.disk'),
+                quota.limits.storageMiB === null
+                  ? `${quota.storageUsage.bytes === null ? t('web.unavailable') : format.bytes(quota.storageUsage.bytes)} / ${t('owner.globalPool')}`
+                  : `${format.number(quota.committed.storageMiB)} MiB / ${format.number(quota.limits.storageMiB)} MiB`,
               ],
               [
                 t('web.servers'),
@@ -260,11 +329,7 @@ export function OwnerUserPage() {
                 name="storage"
                 type="number"
                 min={1}
-                defaultValue={
-                  quota.override?.storageMiB ??
-                  quota.limits.storageMiB ??
-                  Math.max(1024, quota.committed.storageMiB)
-                }
+                defaultValue={quota.storageBudgetMiB}
                 required
               />
               <Input
@@ -358,149 +423,8 @@ export function OwnerUserPage() {
     </Page>
   );
 }
-type Invitation = {
-  id: string;
-  email: string | null;
-  role: string;
-  remainingUses: number;
-  maxUses: number;
-  expiresAt: string;
-  revokedAt: string | null;
-  createdAt: string;
-};
-export function InvitationsPage() {
-  const t = useT();
-  const [link, setLink] = useState<string>(),
-    [create, setCreate] = useState(false);
-  const invitations = useQuery({
-    queryKey: ['invitations'],
-    queryFn: () => api<Invitation[]>('/v1/owner/invitations'),
-  });
-  return (
-    <Page
-      title={t('web.invites')}
-      actions={
-        <button type="button" onClick={() => setCreate(true)}>
-          {t('owner.createInvite')}
-        </button>
-      }
-    >
-      {link && (
-        <Notice>
-          <Input label={t('owner.inviteLink')} value={link} readOnly autoComplete="off" />
-          <p>{t('owner.inviteOnce')}</p>
-          <button type="button" className="secondary" onClick={() => setLink(undefined)}>
-            {t('web.close')}
-          </button>
-        </Notice>
-      )}
-      <Section>
-        {invitations.isPending ? (
-          <Loading />
-        ) : invitations.error ? (
-          <ErrorNotice error={invitations.error} />
-        ) : !invitations.data.length ? (
-          <Empty />
-        ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t('web.email')}</th>
-                  <th>{t('web.role')}</th>
-                  <th>{t('owner.uses')}</th>
-                  <th>{t('web.expires')}</th>
-                  <th>{t('web.status')}</th>
-                  <th>{t('web.actions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invitations.data.map((invite) => (
-                  <tr key={invite.id}>
-                    <td>{invite.email ?? t('owner.anyEmail')}</td>
-                    <td>{t(`owner.role.${invite.role}`)}</td>
-                    <td>
-                      {invite.remainingUses} / {invite.maxUses}
-                    </td>
-                    <td>
-                      <Time value={invite.expiresAt} />
-                    </td>
-                    <td>
-                      <Badge
-                        value={
-                          invite.revokedAt
-                            ? 'revoked'
-                            : Date.parse(invite.expiresAt) <= Date.now()
-                              ? 'expired'
-                              : invite.remainingUses === 0
-                                ? 'succeeded'
-                                : 'active'
-                        }
-                      />
-                    </td>
-                    <td>
-                      {!invite.revokedAt &&
-                        invite.remainingUses > 0 &&
-                        Date.parse(invite.expiresAt) > Date.now() && (
-                          <ActionForm
-                            submitLabel={t('web.revoke')}
-                            success={false}
-                            onSubmit={async () => {
-                              await api(`/v1/owner/invitations/${invite.id}`, { method: 'DELETE' });
-                              await invitations.refetch();
-                            }}
-                          >
-                            <Check required label={t('web.confirm')} />
-                          </ActionForm>
-                        )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
-      <Dialog open={create} title={t('owner.createInvite')} onClose={() => setCreate(false)}>
-        <ActionForm
-          submitLabel={t('owner.createInvite')}
-          success={false}
-          onSubmit={async (data) => {
-            const email = text(data, 'email'),
-              expires = text(data, 'expires');
-            const response = await api<{ url: string }>('/v1/owner/invitations', {
-              body: {
-                ...(email ? { email } : {}),
-                role: text(data, 'role'),
-                maxUses: number(data, 'uses'),
-                ...(expires ? { expiresAt: new Date(expires).toISOString() } : {}),
-              },
-            });
-            setLink(response.url);
-            setCreate(false);
-            await invitations.refetch();
-          }}
-        >
-          <Input label={`${t('web.email')} (${t('web.optional')})`} type="email" name="email" />
-          <Select label={t('web.role')} name="role">
-            <option value="user">{t('owner.role.user')}</option>
-            <option value="operator">{t('owner.role.operator')}</option>
-          </Select>
-          <Input
-            label={t('owner.maxUses')}
-            type="number"
-            name="uses"
-            min={1}
-            max={100}
-            defaultValue={1}
-            required
-          />
-          <Input label={t('web.expires')} type="datetime-local" name="expires" />
-        </ActionForm>
-      </Dialog>
-    </Page>
-  );
-}
+export { InvitationsPage } from './owner-invitations.js';
+
 export function OwnerAuditPage() {
   const t = useT();
   return (

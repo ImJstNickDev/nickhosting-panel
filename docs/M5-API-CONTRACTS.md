@@ -447,13 +447,74 @@ Wings responsibility.
   presentation. Compiled Vanilla installation capability is separate from diagnostic
   evidence; Owner rollout/availability and local provider validation still apply.
 - Quota responses add `creationStorage: {mode: 'shared'|'limited', defaultDiskMiB}`.
-  Create requests may omit `limits.disk` only with `GLOBAL_POOL`. Core resolves
-  the Owner default under the existing resource transaction and freezes it with
-  the request. Retrying the same omitted-disk request after a setting change returns
-  the original operation. Configure/resize requests still require explicit limits.
+  Create requests may omit `limits.disk` only with `GLOBAL_POOL`. As of the storage
+  reconciliation change below, shared storage always resolves to provider disk `0`
+  (unlimited); personal storage requires an explicit positive allowance. Retrying
+  the same request after a setting change returns the original operation.
+  Configure/resize requests still require explicit limits.
 - `defaultServerStorageMiB` defaults to the former wizard value, 4096 MiB; normal
-  defaults < Owner DB < environment precedence applies. This is a finite allowance,
-  not unlimited disk. No actual Owner settings are seeded or changed by the update.
+  defaults < Owner DB < environment precedence applies. It is the initial proposal
+  for personal storage and the physical working-space reservation for new shared
+  servers, not a shared server's provider cap.
+
+## 2026-10-13 — Unlimited shared storage and guided limit reconciliation
+
+| Owner route | Contract |
+| --- | --- |
+| `GET /v1/owner/storage-policy` | Effective policy, default personal budget, environment locks and latest durable transition. |
+| `POST /v1/owner/storage-policy/preview` | `{policy, defaultUserStorageMiB}`; persists a draft with users, measured occupied bytes, current/proposed server caps, minimum safe caps and backup reservations. No provider writes. |
+| `GET /v1/owner/storage-policy/:id` | Durable per-server progress and errors, including incomplete changes. |
+| `POST /v1/owner/storage-policy/:id/apply` | `{users:[{userId,quotaMiB,servers:[{serverId,diskMiB}]}]}`; validates the complete inventory and queues the explicitly confirmed plan. Returns 202. |
+| `POST /v1/owner/storage-policy/:id/retry` | Requeues a blocked plan with the same allocations. A corrected allocation uses `apply` on the existing blocked plan. |
+| `POST /v1/owner/storage-policy/:id/refresh` | Remeasures a blocked plan without effects; retains the transition ID, targets and uncertain-effect ledger so cleanup can be followed by an explicit corrected application. |
+
+All routes require a verified regular Owner; writes retain origin/CSRF checks and
+environment precedence. Generic settings cannot change policy or default user
+storage while servers exist: the guided flow is mandatory. Migration `026` adds
+storage-only permanent user exceptions and durable transition records without
+changing any existing server limits or initiating provider effects.
+Migration `027` adds nullable backup occupancy to metrics and permits an explicit
+follow-default budget marker. Missing legacy markers still resolve existing user
+overrides; default-following users track later default changes, while positive
+exceptions remain independent of compute override expiry.
+
+New `GLOBAL_POOL` servers use `limits.disk=0`, including when an older client sends
+a positive disk value. Existing finite servers are converted only by an explicit
+guided application. Finite/unlimited crossings cannot use ordinary server resize.
+`GET /v1/platform/quotas` returns `creationStorage.defaultDiskMiB=0` for shared
+storage, `storageBudgetOverrideMiB`, and `storageUsage.bytes` (null when any current
+measurement is missing, invalid or stale). Home cards use the same resources
+endpoint and `resources.disk_bytes` as Console, with a 30-second freshness window;
+they never present an allowance as occupied space or unavailable data as zero.
+
+Preview reads the managed provider identity, live resources and backup inventory.
+Personal caps cover observed usage plus the greater of 128 MiB or 10% growth
+headroom, as well as existing backup capacity; a user's reservations include each
+server cap multiplied by one plus its backup slots. Missing measurements prevent
+application. The Owner can clean up data and refresh the draft, or edit the user
+budget and server allocations. No file deletion, automatic shutdown or cap below
+the verified minimum is part of this flow.
+
+The worker rechecks identity, usage, host pool/headroom and unfinished operations
+before applying absolute provider caps and scoped SFTP quotas. Writes that could
+invalidate the plan are fenced during application or an unresolved partial change.
+Provider and SFTP readback must confirm before local caps are saved; the global
+policy changes only after all servers confirm. Uncertain responses remain durable
+and require explicit retry/correction, which checks what already took effect.
+SFTP finite reductions also use corroborated Wings occupancy because unlimited
+SFTP quota counters may be absent. Existing SFTP credentials retain identity,
+password and expiry; the separate issue #18 release gate remains applicable.
+
+Disk `0` means no per-server disk ceiling throughout uploads, copy/extraction,
+Minecraft content and SFTP. Transfer descriptors express this as
+`upload.serverDiskBytes=null`; declared-byte, temporary staging, host free-space,
+maximum-file and queue limits still apply. Physical admission charges unlimited
+servers against fresh occupied-space observations, never against a zero allowance.
+Retained backups are counted at their observed size even after live files shrink.
+Creation and resize refresh unlimited-server measurements before the physical-host
+sample and admission transaction; missing/incomplete backup inventories prevent
+new commitments. Blocked transitions permit only authorized file/backup deletion,
+followed by the same plan's refresh and explicit resume. Other writes remain fenced.
 
 ## 2026-10-10 — Declared capabilities and optional Gateway
 
@@ -931,3 +992,40 @@ crawl or preview download for unopened files.
 See [format limits and evidence](M5-VIEWER-FORMATS.md) and
 [deployment approval/rollback](M5-VIEWER-DEPLOYMENT.md). Browser fixtures and isolated
 SFTP transport tests do not establish a live Wings mount or production readiness.
+
+### Invitation management UI (2026-10-13)
+
+The invitation UI is connected to the implemented Owner-only recovery/update
+routes. Migration `025_invitation_token_ciphertext.sql` adds a nullable encrypted
+token envelope alongside the existing hash. Creation encrypts tokens with the
+protected `SecretCodec` master key and AAD bound to the invitation ID. Redemption
+continues to use the hash; recovery verifies the decrypted token against that
+hash. Lists and audit events never include the token, URL, hash or ciphertext.
+
+| Route | Contract |
+| --- | --- |
+| `GET /v1/owner/invitations/:id/link` | Owner-only recovery of `{url:string}`; sensitive response with `Cache-Control: no-store`. Recovery requires an active invitation. Legacy tokens return `invitation_link_unavailable`; absent, expired, exhausted and revoked invitations return their specific errors. |
+| `PATCH /v1/owner/invitations/:id` | Accepts `{expiresAt:ISO,maxUses:integer}` with `maxUses` from 1 to 100; returns the complete authoritative `Invitation`. Recipient email and role remain immutable. |
+
+List and create responses may include an optional `linkAvailable:boolean`:
+`true` means durable token recovery is supported for that invitation; `false`
+identifies a legacy, non-recoverable link. Omission means the older API has not
+declared recoverability, not that durable recovery is available. An original
+create response can still expose its one-time URL for the current UI session.
+
+Used invitations retain their consumed count, `maxUses - remainingUses`. A new
+maximum cannot be lower than that count. The backend locks the invitation row and recomputes usage before updating it,
+serializing with registration and revocation; client validation is only a
+convenience. Expiration must be in the future and at most 365 days away. Revoked invitations cannot be edited. Expired or exhausted
+invitations can be edited, and extending expiration or increasing uses may make
+them usable again. Revocation discards the encrypted token; expiration/exhaustion retain it so
+renewal preserves the original URL. Create, recovery and updates use the existing
+Origin/support-session checks; all responses, including errors, are `no-store`.
+Recovery and edits record only safe metadata in the audit log.
+
+The migration does not delete or rewrite existing invitations. Legacy hash-only
+invitations remain redeemable and report `linkAvailable:false`. Any Owner-requested
+test-data reset is a separate, explicitly scoped operation. Retain encryption keys
+for stored key IDs; losing a key makes its links unrecoverable, while their hashes
+still support redemption. Code rollback can leave the nullable column in place;
+do not drop ciphertext during rollback if links must remain recoverable.

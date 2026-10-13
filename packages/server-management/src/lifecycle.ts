@@ -299,7 +299,13 @@ async function ownedRemote(db: Kysely<Database>, server: Server, options: Lifecy
   return remote;
 }
 
-async function observation(db: Kysely<Database>, server: Server, resources: Resources, now: Date) {
+async function observation(
+  db: Kysely<Database>,
+  server: Server,
+  resources: Resources,
+  now: Date,
+  backupBytes: number | null = null,
+) {
   const apply = async (tx: Kysely<Database>) => {
     await tx
       .updateTable('managed_servers')
@@ -325,6 +331,7 @@ async function observation(db: Kysely<Database>, server: Server, resources: Reso
         memory_bytes: String(Math.floor(value.memory_bytes)),
         cpu_percent: value.cpu_absolute,
         disk_bytes: String(Math.floor(value.disk_bytes)),
+        backup_bytes: backupBytes === null ? null : String(backupBytes),
         network_rx_bytes: String(Math.floor(value.network_rx_bytes)),
         network_tx_bytes: String(Math.floor(value.network_tx_bytes)),
       })
@@ -2142,6 +2149,28 @@ export async function reconcileManagedServer(
   let suppressCachedRunning = false;
   let current = await options.adapter.getResources(server.pterodactyl_identifier ?? '');
   const now = nowOf(options);
+  let backupBytes: number | null = null;
+  if (server.limits.disk === 0) {
+    // Retained backups may be much larger than the remaining live files.
+    // Missing/incomplete inventory does not prevent runtime-state observation,
+    // but cannot authorize additional physical storage commitments.
+    try {
+      const started = Date.now();
+      const backups = await options.adapter.listBackups(server.pterodactyl_identifier ?? '');
+      const total = backups.reduce((sum, backup) => sum + backup.bytes, 0);
+      if (
+        Date.now() - started <= 30_000 &&
+        Number.isSafeInteger(total) &&
+        backups.every(
+          (backup) =>
+            backup.completed_at && Number.isSafeInteger(backup.bytes) && backup.bytes >= 0,
+        )
+      )
+        backupBytes = total;
+    } catch {
+      // Unknown stays null; no zero fallback for storage admission.
+    }
+  }
   let externalStop: ExternalStopReceipt | null = null;
   if (!server.active_operation_id && options.observeExternalStop) {
     const reserved = await db
@@ -2343,7 +2372,7 @@ export async function reconcileManagedServer(
       .where('id', '=', server.id)
       .execute();
     if (suppressCachedRunning) return 'observed' as const;
-    await observation(tx, server, current, now);
+    await observation(tx, server, current, now, backupBytes);
     const reservation = await tx
       .selectFrom('resource_reservations')
       .selectAll()

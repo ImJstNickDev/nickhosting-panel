@@ -7,6 +7,8 @@ import {
   inspectMinecraftCombination,
   type ManagementRuntime,
   minecraftMappingDigest,
+  refreshStorageObservations,
+  type StorageObservationScope,
   signMinecraftEvidence,
 } from '@nickhosting/server-management';
 import { Hono } from 'hono';
@@ -188,6 +190,8 @@ async function eligibleChoice(attest = true) {
     );
   management.mockResolvedValue({
     adapter: fixture.adapter,
+    refreshStorage: (connection = fixture.db, scope?: StorageObservationScope) =>
+      refreshStorageObservations(connection, fixture.adapter, env, scope),
     refreshObservations: fixture.observe,
     minecraftOptions: async () => ({
       http: { json: vi.fn(), download: vi.fn() },

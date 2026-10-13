@@ -254,6 +254,7 @@ export interface ServerTables {
     memory_bytes: string;
     cpu_percent: number;
     disk_bytes: string;
+    backup_bytes: Generated<string | null>;
     network_rx_bytes: string;
     network_tx_bytes: string;
   };

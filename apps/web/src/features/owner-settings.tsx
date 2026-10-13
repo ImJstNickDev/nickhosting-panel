@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { ApiError, api } from '../api/client.js';
-import { useT } from '../app/i18n.js';
+import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import {
   ActionForm,
@@ -16,6 +16,7 @@ import {
   Select,
   Textarea,
 } from '../components/ui.js';
+import { OwnerStoragePolicy } from './owner-storage-policy.js';
 import { GlobalSleepSettings } from './sleep-timeout.js';
 
 type Schema = {
@@ -68,6 +69,7 @@ const groups = [
 export function OwnerSettingsPage() {
   const t = useT(),
     session = useSession();
+  const format = useFormat();
   const editable =
     session.data?.context.role === 'owner' && session.data?.context.sessionType === 'regular';
   const settings = useQuery({
@@ -95,6 +97,34 @@ export function OwnerSettingsPage() {
           }}
         />
       </Section>
+      <Section title={t('storagePolicy.title')}>
+        {editable ? (
+          <OwnerStoragePolicy
+            editable={editable}
+            lockedKeys={value.config.lockedKeys}
+            onSaved={async () => {
+              await settings.refetch();
+            }}
+          />
+        ) : (
+          <div className="storage-policy">
+            <p className="storage-current">
+              <span>{t('storagePolicy.current')}</span>
+              <strong>{t(`storagePolicy.mode.${value.config.values.storagePolicy}`)}</strong>
+            </p>
+            {value.config.values.storagePolicy === 'PER_USER_BUDGET' && (
+              <p>
+                {t('storagePolicy.currentQuota', {
+                  value: format.bytes(
+                    Number(value.config.values.defaultUserStorageMiB) * 1024 * 1024,
+                  ),
+                })}
+              </p>
+            )}
+            <Notice>{t('owner.readOnlySettings')}</Notice>
+          </div>
+        )}
+      </Section>
       {groups.map((group) => (
         <Section title={t(`owner.group.${group}`)} key={group}>
           <div className="settings-list">
@@ -106,6 +136,9 @@ export function OwnerSettingsPage() {
                     'defaultIdleTimeoutSeconds',
                     'idleTimeoutUserAccess',
                     'gameIdleTimeouts',
+                    'storagePolicy',
+                    'defaultUserStorageMiB',
+                    'defaultServerStorageMiB',
                   ].includes(key),
               )
               .map(([key, definition]) => (

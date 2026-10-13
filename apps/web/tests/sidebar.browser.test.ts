@@ -68,7 +68,7 @@ describe('M5 sidebar viewport and navigation regression', () => {
     return bounds;
   }
 
-  it('keeps desktop navigation and Administration in the viewport after scrolling a tall page', async () => {
+  it('keeps desktop navigation in the viewport and exposes Administration in the topbar', async () => {
     await owner.setViewportSize({ width: 1440, height: 900 });
     await owner.goto(`${fixture.origin}/settings`);
     await browserExpect(
@@ -76,14 +76,18 @@ describe('M5 sidebar viewport and navigation regression', () => {
     ).toBeVisible();
     expect(await owner.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(900);
     const top = await sidebarFitsViewport();
-    const administration = owner.getByRole('link', { name: 'Administration', exact: true });
+    const administration = owner
+      .locator('.topbar')
+      .getByRole('link', { name: 'Admin', exact: true });
     await browserExpect(administration).toBeInViewport({ ratio: 1 });
     await owner.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
     await browserExpect.poll(() => owner.evaluate(() => scrollY)).toBeGreaterThan(100);
     expect((await sidebarFitsViewport()).y).toBeCloseTo(top.y, 0);
-    await browserExpect(administration).toBeInViewport({ ratio: 1 });
     await screenshot('sidebar-scrolled-desktop-en');
     await accessible();
+    await owner.evaluate(() => window.scrollTo(0, 0));
+    await administration.hover();
+    await browserExpect(owner.getByRole('tooltip')).toHaveText('Admin');
     await administration.click();
     await browserExpect(owner).toHaveURL(`${fixture.origin}/owner`);
     await browserExpect(
@@ -152,7 +156,9 @@ describe('M5 sidebar viewport and navigation regression', () => {
     await browserExpect(menu).toHaveAttribute('aria-expanded', 'true');
     await browserExpect(sidebar).toBeVisible();
     expect(await sidebar.evaluate((element) => getComputedStyle(element).position)).toBe('static');
-    const administration = sidebar.getByRole('link', { name: 'Amministrazione', exact: true });
+    const administration = owner
+      .locator('.topbar')
+      .getByRole('link', { name: 'Admin', exact: true });
     await browserExpect(administration).toBeInViewport({ ratio: 1 });
     await screenshot('sidebar-open-mobile-it');
     await accessible();

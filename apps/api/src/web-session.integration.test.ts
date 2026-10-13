@@ -37,6 +37,7 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     database = await createTestDatabase();
     const bootstrapToken = randomBytes(32).toString('base64url');
     identity = createIdentity({
+      secretCodec: new SecretCodec({ activeKeyId: 'fixture', keys: { fixture: randomBytes(32) } }),
       pool: database.pool,
       baseURL: origin,
       authSecret: randomBytes(32).toString('base64url'),

@@ -7,7 +7,13 @@ import {
   type PlatformConfig,
   type SecretCodec,
 } from '@nickhosting/core';
-import { type Database, getSecret, getSettings, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSecret,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
 import {
   CloudflareDnsProvider,
   type ConnectionPlan,
@@ -22,15 +28,16 @@ import {
 import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
-import type { Environment } from './admission.js';
+import { type Environment, lockResources } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, parse } from './registry.js';
+import { serverStorageLimitBytes } from './storage-capacity.js';
 
 type SftpRow = Selectable<Database['external_sftp_credentials']>;
 type DnsRow = Selectable<Database['dns_assignments']>;
 type SftpProvider = Pick<
   SftpGoAdapter,
-  'ensureCredential' | 'inspectCredential' | 'rotateCredential' | 'revokeCredential'
+  'ensureCredential' | 'inspectCredential' | 'rotateCredential' | 'revokeCredential' | 'updateQuota'
 >;
 type DnsProvider = Pick<CloudflareDnsProvider, 'plan' | 'apply' | 'inspectOwned'>;
 export interface ExternalServiceOptions {
@@ -38,6 +45,8 @@ export interface ExternalServiceOptions {
   env?: Environment;
   /** The runtime corroborates the registered server against the Pterodactyl adapter before new access. */
   verifyServer: (db: Kysely<Database>, serverId: string) => Promise<void>;
+  /** Fresh corroborated Wings usage; SFTPGo counters omit game/unlimited writes. */
+  readServerDiskUsage?: (db: Kysely<Database>, serverId: string) => Promise<number>;
   sftpFactory?: (config: PlatformConfig, apiKey: string) => SftpProvider;
   dnsFactory?: (config: PlatformConfig, apiToken: string) => DnsProvider;
   now?: () => Date;
@@ -205,6 +214,10 @@ async function runCredential(
     await saveIntent(db, row, intent, options, 'revoking');
   }
   if (intent.action !== 'revoke') {
+    await db.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      await assertStoragePolicyIdle(tx);
+    });
     try {
       await authorizeServer(
         db,
@@ -315,6 +328,10 @@ export async function createSftpCredential(
     const server = await authorizeServer(connection, verified, serverId, 'server:manage');
     if (!server.pterodactyl_uuid || server.deleted_at || server.active_operation_id)
       throw new DomainError('conflict');
+    await connection.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      await assertStoragePolicyIdle(tx);
+    });
     let row = await connection
       .selectFrom('external_sftp_credentials')
       .selectAll()
@@ -350,10 +367,12 @@ export async function createSftpCredential(
           credentialId,
           password: generateSftpPassword(),
           expiresAt,
-          quotaBytes: server.limits.disk * 1_048_576,
+          quotaBytes: serverStorageLimitBytes(server.limits.disk) ?? 0,
         },
       };
       row = await connection.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await assertStoragePolicyIdle(tx);
         const inserted = await tx
           .insertInto('external_sftp_credentials')
           .values({
@@ -408,6 +427,10 @@ export async function rotateSftpCredential(
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
     const server = await authorizeServer(connection, verified, serverId, 'server:manage');
     if (server.active_operation_id) throw new DomainError('conflict');
+    await connection.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      await assertStoragePolicyIdle(tx);
+    });
     let row = await connection
       .selectFrom('external_sftp_credentials')
       .selectAll()
@@ -428,6 +451,8 @@ export async function rotateSftpCredential(
       intent.request.expiresAt = now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
       const previous = row;
       await connection.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await assertStoragePolicyIdle(tx);
         await saveIntent(tx, previous, intent, options, 'pending');
         await recordAudit(tx, verified, 'server.sftp.rotated', {
           serverId,
@@ -445,6 +470,75 @@ export async function rotateSftpCredential(
     return deliverCredential(connection, row, verified, options);
   });
 }
+/** Called after authoritative Wings readback by the storage-policy transition.
+ * Keeps credential identity and one-time delivery state; never creates or rotates users.
+ */
+export async function reconcileServerStorageQuota(
+  db: Kysely<Database>,
+  serverId: string,
+  diskMiB: number,
+  options: ExternalServiceOptions,
+  locks: { assumeServerLock?: boolean } = {},
+): Promise<{ reconciled: number }> {
+  const quotaBytes = serverStorageLimitBytes(diskMiB) ?? 0;
+  parse(z.uuid(), serverId);
+  const reconcile = async (connection: Kysely<Database>) => {
+    const rows = await connection
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .where('state', '!=', 'revoked')
+      .execute();
+    if (!rows.length) return { reconciled: 0 };
+    const server = await connection
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    if (!server?.pterodactyl_uuid) throw new DomainError('not_found');
+    await options.verifyServer(connection, serverId);
+    const { provider, scope } = await sftpProvider(connection, options);
+    let reconciled = 0;
+    for (const row of rows) {
+      const intent = credentialIntent(row, options);
+      if (intent.scope !== scope || intent.request.externalServerUuid !== server.pterodactyl_uuid)
+        throw new DomainError('configuration_invalid');
+      let ref = row.provider_ref as SftpCredentialRef | null;
+      if (!ref) ref = await provider.inspectCredential(intent.request);
+      if (ref) {
+        if (
+          ref.serverId !== serverId ||
+          ref.externalServerUuid !== server.pterodactyl_uuid ||
+          ref.credentialId !== row.id
+        )
+          throw new DomainError('conflict');
+        if (quotaBytes > 0 && !options.readServerDiskUsage)
+          throw new DomainError('configuration_invalid');
+        const usedBytes =
+          quotaBytes > 0 ? await options.readServerDiskUsage?.(connection, serverId) : undefined;
+        ref = await provider.updateQuota(ref, quotaBytes, usedBytes);
+      } else if (row.state === 'active') {
+        throw new DomainError('conflict');
+      }
+      // A pending creation with no provider user receives the new quota in its
+      // existing encrypted intent. Its worker may create it after the policy commits.
+      intent.request.quotaBytes = quotaBytes;
+      await connection.transaction().execute(async (tx) => {
+        await saveIntent(tx, row, intent, options, row.state);
+        await tx
+          .updateTable('external_sftp_credentials')
+          .set({ provider_ref: ref ? JSON.stringify(ref) : null })
+          .where('id', '=', row.id)
+          .execute();
+      });
+      reconciled++;
+    }
+    return { reconciled };
+  };
+  return locks.assumeServerLock ? reconcile(db) : locked(db, serverId, reconcile);
+}
+
 async function revokeRow(db: Kysely<Database>, row: SftpRow, options: ExternalServiceOptions) {
   if (row.state === 'revoked') return row;
   const intent = credentialIntent(row, options);

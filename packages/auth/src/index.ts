@@ -17,6 +17,19 @@ const email = z
   .refine((value) => !value.endsWith('.invalid'));
 const password = z.string().min(12).max(128);
 const token = z.string().min(20).max(256);
+interface InvitationSummary {
+  id: string;
+  email: string | null;
+  role: 'user' | 'operator';
+  remainingUses: number;
+  maxUses: number;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  createdAt: Date;
+  linkAvailable: boolean;
+}
+const invitationSummaryColumns = `id,email,role,"remainingUses","maxUses","expiresAt","revokedAt","createdAt",
+  ("tokenCiphertext" IS NOT NULL) AS "linkAvailable"`;
 const setupSchema = z
   .object({
     instanceName: z.string().trim().min(1).max(100),
@@ -235,7 +248,7 @@ export function createIdentity(options: IdentityOptions) {
     const id = randomUUID();
     await transaction(pool, async (tx) => {
       await tx.query(
-        'INSERT INTO invitation(id,"tokenHash","remainingUses","maxUses","expiresAt",email,role,"createdBy") VALUES($1,$2,$3,$3,$4,$5,$6,$7)',
+        'INSERT INTO invitation(id,"tokenHash","remainingUses","maxUses","expiresAt",email,role,"createdBy","tokenCiphertext") VALUES($1,$2,$3,$3,$4,$5,$6,$7,$8)',
         [
           id,
           tokenHash(value),
@@ -244,6 +257,7 @@ export function createIdentity(options: IdentityOptions) {
           input.email ?? null,
           input.role,
           actor.context.actorUserId,
+          options.secretCodec.encrypt(value, `invitation:${id}`),
         ],
       );
       await writeAudit(tx, {
@@ -258,6 +272,7 @@ export function createIdentity(options: IdentityOptions) {
       token: value,
       url: new URL(`/invite/${value}`, publicURL).href,
       expiresAt,
+      linkAvailable: true,
     };
   }
   async function inspectInvitation(value: string) {
@@ -279,16 +294,98 @@ export function createIdentity(options: IdentityOptions) {
   async function listInvitations(headers: Headers) {
     await owner(headers);
     return (
-      await pool.query(
-        'SELECT id,email,role,"remainingUses","maxUses","expiresAt","revokedAt","createdAt" FROM invitation ORDER BY "createdAt" DESC LIMIT 200',
+      await pool.query<InvitationSummary>(
+        `SELECT ${invitationSummaryColumns} FROM invitation ORDER BY "createdAt" DESC LIMIT 200`,
       )
     ).rows;
+  }
+  async function getInvitationLink(headers: Headers, id: string) {
+    const actor = await owner(headers);
+    return transaction(pool, async (tx) => {
+      const result = await tx.query<{
+        tokenHash: string;
+        tokenCiphertext: unknown;
+        expiresAt: Date;
+        revokedAt: Date | null;
+        remainingUses: number;
+      }>(
+        'SELECT "tokenHash","tokenCiphertext","expiresAt","revokedAt","remainingUses" FROM invitation WHERE id=$1 FOR UPDATE',
+        [id],
+      );
+      const invite = result.rows[0];
+      if (!invite) throw new DomainError('not_found');
+      if (invite.revokedAt) throw new DomainError('invitation_revoked');
+      if (invite.expiresAt <= new Date()) throw new DomainError('invitation_expired');
+      if (invite.remainingUses < 1) throw new DomainError('invitation_exhausted');
+      if (!invite.tokenCiphertext) throw new DomainError('invitation_link_unavailable');
+      const value = options.secretCodec.decrypt(invite.tokenCiphertext, `invitation:${id}`);
+      if (!equalToken(tokenHash(value), invite.tokenHash)) throw new DomainError('secret_invalid');
+      await writeAudit(tx, {
+        actorUserId: actor.context.actorUserId,
+        subjectUserId: actor.context.subjectUserId,
+        action: 'invitation.link_revealed',
+        metadata: { invitationId: id },
+      });
+      return { url: new URL(`/invite/${value}`, publicURL).href };
+    });
+  }
+  async function updateInvitation(headers: Headers, id: string, raw: unknown) {
+    const actor = await owner(headers);
+    const input = parse(
+      z
+        .object({
+          expiresAt: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
+          maxUses: z.number().int().min(1).max(100),
+        })
+        .strict(),
+      raw,
+    );
+    return transaction(pool, async (tx) => {
+      const result = await tx.query<{
+        revokedAt: Date | null;
+        remainingUses: number;
+        maxUses: number;
+      }>('SELECT "revokedAt","remainingUses","maxUses" FROM invitation WHERE id=$1 FOR UPDATE', [
+        id,
+      ]);
+      const invite = result.rows[0];
+      if (!invite) throw new DomainError('not_found');
+      if (invite.revokedAt) throw new DomainError('invitation_revoked');
+      // Redemption and revocation acquire the same row lock. Recompute usage
+      // after acquiring it, so editing cannot restore already-consumed uses.
+      const consumed = invite.maxUses - invite.remainingUses;
+      const now = Date.now();
+      if (
+        input.maxUses < consumed ||
+        input.expiresAt.getTime() <= now ||
+        input.expiresAt.getTime() > now + 31_536_000_000
+      )
+        throw new DomainError('validation_failed');
+      const updated = await tx.query<InvitationSummary>(
+        `UPDATE invitation SET "expiresAt"=$2,"maxUses"=$3,"remainingUses"=$4 WHERE id=$1 RETURNING ${invitationSummaryColumns}`,
+        [id, input.expiresAt, input.maxUses, input.maxUses - consumed],
+      );
+      const summary = updated.rows[0];
+      if (!summary) throw new DomainError('not_found');
+      await writeAudit(tx, {
+        actorUserId: actor.context.actorUserId,
+        subjectUserId: actor.context.subjectUserId,
+        action: 'invitation.updated',
+        metadata: {
+          invitationId: id,
+          expiresAt: input.expiresAt.toISOString(),
+          maxUses: input.maxUses,
+          consumedUses: consumed,
+        },
+      });
+      return summary;
+    });
   }
   async function revokeInvitation(headers: Headers, id: string) {
     const actor = await owner(headers);
     await transaction(pool, async (tx) => {
       const result = await tx.query(
-        'UPDATE invitation SET "revokedAt"=coalesce("revokedAt",now()) WHERE id=$1 RETURNING id',
+        'UPDATE invitation SET "revokedAt"=coalesce("revokedAt",now()),"tokenCiphertext"=NULL WHERE id=$1 RETURNING id',
         [id],
       );
       if (!result.rowCount) throw new DomainError('not_found');
@@ -511,6 +608,8 @@ export function createIdentity(options: IdentityOptions) {
     createInvitation,
     inspectInvitation,
     listInvitations,
+    getInvitationLink,
+    updateInvitation,
     revokeInvitation,
     stepUp,
     startSupport,

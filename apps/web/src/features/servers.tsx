@@ -10,6 +10,7 @@ import type {
 import { api, idempotencyKey, queryClient } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
+import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
   Badge,
@@ -30,7 +31,14 @@ import {
 } from '../components/ui.js';
 import { creationGamesQuery } from './creation-catalog.js';
 import { getGameArtwork } from './integrations.js';
-import { platformPath, type ServerInfo, serverPath, useServer } from './service-contracts.js';
+import {
+  platformPath,
+  type Resources,
+  type ServerInfo,
+  serverPath,
+  useServer,
+} from './service-contracts.js';
+import './home.css';
 
 type ServerList = Result<typeof listPlatformServers>;
 type Projects = Result<typeof listPlatformProjects>;
@@ -89,55 +97,153 @@ export function TableRegion({ label, children }: { label: string; children: Reac
     </section>
   );
 }
-export function ServerCards({ items }: { items: ServerInfo[] }) {
+function ServerCardResource({
+  icon,
+  label,
+  children,
+}: {
+  icon: keyof typeof quotaIcons;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="server-card-resource">
+      <dt>
+        <span className="visually-hidden">{label}</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d={quotaIcons[icon]} />
+        </svg>
+      </dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+function ServerCard({ server, headingLevel = 2 }: { server: ServerInfo; headingLevel?: 2 | 3 }) {
   const t = useT(),
     format = useFormat();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const resources = useQuery({
+    queryKey: ['resources', server.id],
+    queryFn: ({ signal }) => api<Resources>(`${serverPath(server.id)}/resources`, { signal }),
+    refetchInterval: 10000,
+  });
+  const bytes =
+    !resources.error && now - resources.dataUpdatedAt < 30000
+      ? resources.data?.resources.disk_bytes
+      : undefined;
+  const disk =
+    bytes !== undefined && Number.isFinite(bytes) && bytes >= 0
+      ? format.bytes(bytes)
+      : t(resources.isPending ? 'web.loading' : 'web.unavailable');
+  const Heading = headingLevel === 3 ? 'h3' : 'h2';
+  const artwork = getGameArtwork(server.gameId);
+  return (
+    <li key={server.id} className="server-card">
+      <Tooltip
+        content={[
+          `${t('platform.memoryLimit')}: ${format.number(server.limits.memory)} MiB`,
+          `${t('platform.cpuLimit')}: ${format.number(server.limits.cpu)}%`,
+          `${t('web.disk')} · ${t('web.usage')}: ${disk}`,
+        ].join('\n')}
+      >
+        <Link
+          className="server-card-link"
+          to={`/servers/${server.id}`}
+          aria-labelledby={`server-card-name-${server.id}`}
+          aria-describedby={`server-card-resources-${server.id}`}
+        >
+          {artwork && <img className="server-artwork" src={artwork} alt="" loading="lazy" />}
+          <div className="server-card-body">
+            <div className="server-card-heading">
+              <Heading id={`server-card-name-${server.id}`}>{server.name}</Heading>
+              <Badge
+                value={server.runtimeState}
+                label={t(
+                  server.runtimeState === 'running'
+                    ? 'platform.online'
+                    : statusKey(server.runtimeState),
+                )}
+              />
+            </div>
+            <p className="muted">
+              {server.gameNameKey ? t(server.gameNameKey) : server.gameId} · {server.runtimeId}
+            </p>
+            <dl className="server-card-resources" id={`server-card-resources-${server.id}`}>
+              <ServerCardResource icon="memoryMiB" label={t('platform.memoryLimit')}>
+                {format.number(server.limits.memory)} MiB
+              </ServerCardResource>
+              <ServerCardResource icon="cpuPercent" label={t('platform.cpuLimit')}>
+                {format.number(server.limits.cpu)}%
+              </ServerCardResource>
+              <ServerCardResource icon="storageMiB" label={`${t('web.disk')} · ${t('web.usage')}`}>
+                {disk}
+              </ServerCardResource>
+            </dl>
+          </div>
+        </Link>
+      </Tooltip>
+      {server.activeOperationId && (
+        <div className="server-card-footer">
+          <Link to={`/activity/${server.activeOperationId}`}>{t('platform.activeOperation')}</Link>
+        </div>
+      )}
+    </li>
+  );
+}
+export function ServerCards({
+  items,
+  headingLevel = 2,
+}: {
+  items: ServerInfo[];
+  headingLevel?: 2 | 3;
+}) {
   return (
     <ul className="server-grid">
-      {items.map((server) => {
-        const artwork = getGameArtwork(server.gameId);
-        return (
-          <li key={server.id} className="server-card">
-            {artwork && <img className="server-artwork" src={artwork} alt="" loading="lazy" />}
-            <div className="server-card-body">
-              <div className="section-heading">
-                <h2>
-                  <Link to={`/servers/${server.id}`}>{server.name}</Link>
-                </h2>
-                <Badge value={server.runtimeState} label={t(statusKey(server.runtimeState))} />
-              </div>
-              <p className="muted">
-                {server.gameNameKey ? t(server.gameNameKey) : server.gameId} · {server.runtimeId}
-              </p>
-              <dl className="server-card-resources">
-                <div>
-                  <dt>{t('platform.memoryLimit')}</dt>
-                  <dd>{format.number(server.limits.memory)} MiB</dd>
-                </div>
-                <div>
-                  <dt>{t('platform.cpuLimit')}</dt>
-                  <dd>{format.number(server.limits.cpu)}%</dd>
-                </div>
-                <div>
-                  <dt>{t('platform.diskLimit')}</dt>
-                  <dd>{format.number(server.limits.disk)} MiB</dd>
-                </div>
-              </dl>
-              {server.activeOperationId && (
-                <Link to={`/activity/${server.activeOperationId}`}>
-                  {t('platform.activeOperation')}
-                </Link>
-              )}
-              {server.sleepState && (
-                <span className="muted">{t(statusKey(server.sleepState))}</span>
-              )}
-            </div>
-          </li>
-        );
-      })}
+      {items.map((server) => (
+        <ServerCard key={server.id} server={server} headingLevel={headingLevel} />
+      ))}
     </ul>
   );
 }
+function HomeSection({
+  title,
+  children,
+  action,
+}: {
+  title: string;
+  children: ReactNode;
+  action?: { to: string; label: string };
+}) {
+  return (
+    <section className="home-section">
+      <header className="section-heading">
+        <h2>{title}</h2>
+        {action && (
+          <Link className="home-section-link" to={action.to}>
+            {action.label}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 5 7 7-7 7" />
+            </svg>
+          </Link>
+        )}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+const quotaIcons = {
+  memoryMiB: 'M3 7h18v10H3ZM7 10v4m5-4v4m5-4v4M7 17v3m5-3v3m5-3v3',
+  cpuPercent:
+    'M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM9 9h6v6H9ZM9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3',
+  storageMiB: 'M5 4h14l2 10v6H3v-6L5 4ZM3 14h18M7 17h1m3 0h1',
+  serverCount: 'M4 3h16v7H4ZM4 14h16v7H4ZM7 6h1m-1 11h1',
+};
+
 export function QuotaSummary() {
   const t = useT(),
     format = useFormat();
@@ -147,7 +253,7 @@ export function QuotaSummary() {
     refetchInterval: 15000,
   });
   return (
-    <Section title={t('web.quota')}>
+    <HomeSection title={t('web.quota')}>
       {quota.isPending ? (
         <Loading />
       ) : quota.error ? (
@@ -155,60 +261,77 @@ export function QuotaSummary() {
       ) : (
         quota.data && (
           <>
-            <TableRegion label={t('web.quota')}>
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">{t('platform.resources')}</th>
-                    <th scope="col">{t('web.reserved')}</th>
-                    <th scope="col">{t('web.quota')}</th>
-                    <th scope="col">{t('platform.remaining')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(['memoryMiB', 'cpuPercent', 'storageMiB', 'serverCount'] as const).map(
-                    (key) => (
-                      <tr key={key}>
-                        <th scope="row">
+            <div className="home-quota-grid">
+              {(['memoryMiB', 'cpuPercent', 'storageMiB', 'serverCount'] as const).map((key) => {
+                const unit = key.endsWith('MiB') ? ' MiB' : key === 'cpuPercent' ? '%' : '';
+                const amount = (value: number) => `${format.number(value)}${unit}`;
+                return (
+                  <article className="home-quota-card" key={key}>
+                    <header>
+                      <span className="home-quota-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d={quotaIcons[key]} />
+                        </svg>
+                      </span>
+                      <h3>
+                        {t(
+                          key === 'memoryMiB'
+                            ? 'web.memory'
+                            : key === 'cpuPercent'
+                              ? 'web.cpu'
+                              : key === 'storageMiB'
+                                ? 'web.disk'
+                                : 'web.servers',
+                        )}
+                      </h3>
+                    </header>
+                    <dl>
+                      <div className="home-quota-committed">
+                        <dt>
                           {t(
-                            key === 'memoryMiB'
-                              ? 'web.memory'
-                              : key === 'cpuPercent'
-                                ? 'web.cpu'
-                                : key === 'storageMiB'
-                                  ? 'web.disk'
-                                  : 'web.servers',
+                            key === 'storageMiB' && quota.data.storagePolicy === 'GLOBAL_POOL'
+                              ? 'web.usage'
+                              : 'web.reserved',
                           )}
-                        </th>
-                        <td>
-                          {format.number(quota.data.committed[key])}
-                          {key.endsWith('MiB') ? ' MiB' : key === 'cpuPercent' ? '%' : ''}
-                        </td>
-                        <td>
+                        </dt>
+                        <dd>
+                          {key === 'storageMiB' && quota.data.storagePolicy === 'GLOBAL_POOL'
+                            ? quota.data.storageUsage.bytes === null
+                              ? t('web.unavailable')
+                              : format.bytes(quota.data.storageUsage.bytes)
+                            : amount(quota.data.committed[key])}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t('web.quota')}</dt>
+                        <dd>
                           {quota.data.limits[key] === null
                             ? t(
                                 key === 'serverCount'
                                   ? 'platform.unlimited'
                                   : 'platform.globalPool',
                               )
-                            : format.number(quota.data.limits[key])}
-                        </td>
-                        <td>
+                            : amount(quota.data.limits[key])}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t('platform.remaining')}</dt>
+                        <dd>
                           {quota.data.remaining[key] === null
                             ? '—'
-                            : format.number(quota.data.remaining[key])}
-                        </td>
-                      </tr>
-                    ),
-                  )}
-                </tbody>
-              </table>
-            </TableRegion>
-            <p className="muted">{t('platform.allowanceHint')}</p>
+                            : amount(quota.data.remaining[key])}
+                        </dd>
+                      </div>
+                    </dl>
+                  </article>
+                );
+              })}
+            </div>
+            <p className="home-quota-hint muted">{t('platform.allowanceHint')}</p>
           </>
         )
       )}
-    </Section>
+    </HomeSection>
   );
 }
 export function HomePage() {
@@ -232,38 +355,40 @@ export function HomePage() {
         </Link>
       }
     >
-      <Section
+      <HomeSection
         title={t('platform.recentServers')}
-        actions={<Link to="/servers">{t('platform.allServers')}</Link>}
+        action={{ to: '/servers', label: t('platform.allServers') }}
       >
         {servers.isPending ? (
           <Loading />
         ) : servers.error ? (
           <ErrorNotice error={servers.error} retry={() => void servers.refetch()} />
         ) : servers.data?.items.length ? (
-          <ServerCards items={servers.data.items} />
+          <ServerCards items={servers.data.items} headingLevel={3} />
         ) : (
           <Empty text={t('web.noServers')} />
         )}
-      </Section>
+      </HomeSection>
       <QuotaSummary />
-      <Section
+      <HomeSection
         title={t('platform.recentActivity')}
-        actions={<Link to="/activity">{t('platform.allActivity')}</Link>}
+        action={{ to: '/activity', label: t('platform.allActivity') }}
       >
         {activity.isPending ? (
           <Loading />
         ) : activity.error ? (
-          <ErrorNotice error={activity.error} />
+          <ErrorNotice error={activity.error} retry={() => void activity.refetch()} />
         ) : !activity.data?.items.length ? (
           <Empty text={t('platform.noActivity')} />
         ) : (
-          <ul className="activity-list">
+          <ul className="home-activity-list">
             {activity.data.items.map((job) => (
               <li key={job.id}>
                 <Link to={`/activity/${job.id}`}>
-                  {job.serverName ?? t('platform.operation')} ·{' '}
-                  {t(job.action ? `platform.${job.action}` : 'platform.operation')}
+                  <span>{job.serverName ?? t('platform.operation')}</span>
+                  <span className="muted">
+                    {t(job.action ? `platform.${job.action}` : 'platform.operation')}
+                  </span>
                 </Link>
                 <Badge value={job.effectState === 'uncertain' ? 'uncertain' : job.state} />
                 <Time value={job.updatedAt} />
@@ -271,7 +396,7 @@ export function HomePage() {
             ))}
           </ul>
         )}
-      </Section>
+      </HomeSection>
     </Page>
   );
 }
@@ -571,7 +696,7 @@ export function ServerSettings({ serverId }: { serverId: string }) {
                   ...data.limits,
                   memory: number(form, 'memory'),
                   cpu: number(form, 'cpu'),
-                  disk: number(form, 'disk'),
+                  disk: data.limits.disk === 0 ? 0 : number(form, 'disk'),
                 },
               });
             }}
@@ -597,17 +722,21 @@ export function ServerSettings({ serverId }: { serverId: string }) {
               defaultValue={data.limits.cpu}
               required
             />
-            <Input
-              name="disk"
-              label={`${t('web.disk')} (MiB)`}
-              hint={t('platform.diskGrowOnly')}
-              type="number"
-              min={data.limits.disk}
-              max={1073741824}
-              step={1}
-              defaultValue={data.limits.disk}
-              required
-            />
+            {data.limits.disk === 0 ? (
+              <p className="muted">{t('gameUi.sharedStorage')}</p>
+            ) : (
+              <Input
+                name="disk"
+                label={`${t('web.disk')} (MiB)`}
+                hint={t('platform.diskGrowOnly')}
+                type="number"
+                min={data.limits.disk}
+                max={1073741824}
+                step={1}
+                defaultValue={data.limits.disk}
+                required
+              />
+            )}
           </ActionForm>
         )}
       </Section>

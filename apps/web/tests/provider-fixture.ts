@@ -833,6 +833,15 @@ export async function installBrowserFixtures(
       check();
       credentials.delete(ref.credentialId);
     },
+    updateQuota: async (ref, quotaBytes) => {
+      check();
+      const current = credentials.get(ref.credentialId);
+      if (!current || current.serverId !== ref.serverId || current.instanceId !== instanceId)
+        throw new DomainError('not_found');
+      const next = { ...current, quotaBytes };
+      credentials.set(ref.credentialId, next);
+      return next;
+    },
   });
   async function processPending() {
     const results: Array<{ jobId: string; state: string; result: string }> = [];

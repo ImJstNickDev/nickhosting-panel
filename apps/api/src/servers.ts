@@ -13,6 +13,7 @@ import {
   backendAllocationPoolOverrides,
   createManagedServer,
   createProject,
+  createServerSchema,
   createSftpCredential,
   createUploadTiming,
   deleteServerDns,
@@ -35,6 +36,7 @@ import {
   resolveUncertainOperation,
   revokeSftpCredential,
   rotateSftpCredential,
+  serverStorageLimitBytes,
   setManagedNode,
   setPhysicalHost,
   setProjectMember,
@@ -147,9 +149,13 @@ export function registerServerRoutes(
     await recoverUploadIngestion(db, await owner(c), c.req.param('claimId'), await body(c), env);
     return c.body(null, 204);
   });
-  app.put('/v1/owner/resource-hosts', async (c) =>
-    c.json(await setPhysicalHost(db, await owner(c), await body(c), env)),
-  );
+  app.put('/v1/owner/resource-hosts', async (c) => {
+    const context = await owner(c);
+    const input = await body(c);
+    const { id } = parse(z.object({ id: z.uuid().optional() }).passthrough(), input);
+    if (id) await (await management()).refreshStorage(db, { hostId: id });
+    return c.json(await setPhysicalHost(db, context, input, env));
+  });
   app.get('/v1/owner/nodes', async (c) => {
     await owner(c);
     const nodes = await db.selectFrom('managed_nodes').selectAll().execute();
@@ -180,7 +186,7 @@ export function registerServerRoutes(
     );
   });
   app.put('/v1/owner/user-limits', async (c) => {
-    await setUserLimits(db, await owner(c), await body(c));
+    await setUserLimits(db, await owner(c), await body(c), env);
     return c.body(null, 204);
   });
   app.post('/v1/owner/reconcile', async (c) => {
@@ -216,8 +222,10 @@ export function registerServerRoutes(
   app.post('/v1/servers', async (c) => {
     const context = await principal(c),
       service = await management();
+    const input = parse(createServerSchema, await body(c));
+    await service.refreshStorage(db, { mappingId: input.mappingId });
     await service.refreshObservations();
-    return c.json(await createManagedServer(db, service.adapter, context, await body(c), env), 202);
+    return c.json(await createManagedServer(db, service.adapter, context, input, env), 202);
   });
   app.get('/v1/servers/:id', async (c) => {
     const server = await authorizeServer(db, await principal(c), c.req.param('id'));
@@ -250,9 +258,11 @@ export function registerServerRoutes(
         authorizeServer(db, context, c.req.param('id'), 'server:operate'),
       );
       if (input.action !== 'kill' && input.action !== 'stop')
-        await stage('hostSamplingMs', async () =>
-          (await management()).refreshObservations(db, c.req.param('id')),
-        );
+        await stage('hostSamplingMs', async () => {
+          const service = await management();
+          if (input.action === 'configure') await service.refreshStorage(db, c.req.param('id'));
+          await service.refreshObservations(db, c.req.param('id'));
+        });
       const result = await stage('enqueueMs', () =>
         enqueueServerOperation(db, context, c.req.param('id'), input, env),
       );
@@ -515,8 +525,8 @@ export function registerServerRoutes(
               listFiles,
             });
             const server = await authorizeServer(connection, current, serverId, 'server:manage');
-            const maxBytes = server.limits.disk * 1024 * 1024;
-            if (!Number.isSafeInteger(maxBytes) || contentLength > maxBytes)
+            const maxBytes = serverStorageLimitBytes(server.limits.disk);
+            if (maxBytes !== null && contentLength > maxBytes)
               throw new DomainError('validation_failed', 413);
             return { maxBytes, files: await listFiles(directory) };
           }),
@@ -533,7 +543,10 @@ export function registerServerRoutes(
           throw new DomainError('conflict');
         // Native Wings filesystem quotas remain authoritative against concurrent
         // game/provider writes. This conservative preflight never invents storage.
-        if (resources.resources.disk_bytes - (existing?.size ?? 0) + contentLength > maxBytes)
+        if (
+          maxBytes !== null &&
+          resources.resources.disk_bytes - (existing?.size ?? 0) + contentLength > maxBytes
+        )
           throw new DomainError('validation_failed', 413);
         await service.authorizeTransfer(current, serverId, true, connection);
         await recordAudit(connection, current, 'server.files.requested', {
@@ -555,7 +568,7 @@ export function registerServerRoutes(
                   },
                 }),
               contentLength,
-              maxBytes,
+              maxBytes: maxBytes ?? contentLength,
               signal: c.req.raw.signal,
               authorize: () => service.authorizeTransfer(current, serverId, true, connection),
             }),
@@ -632,7 +645,7 @@ export function registerServerRoutes(
       );
       release = options.acquireUploadSlot();
       await timing.measure('files.access', () =>
-        service.fileMutationAccess(
+        (input.action === 'delete' ? service.cleanupAccess : service.fileMutationAccess)(
           context,
           c.req.param('id'),
           async (id, connection, current, server) => {
@@ -699,10 +712,9 @@ export function registerServerRoutes(
                 input.files,
                 () =>
                   timing.measure('files.authorize', () =>
-                    service.authorizeTransfer(
+                    service.authorizeCleanupTransfer(
                       current,
                       c.req.param('id'),
-                      true,
                       connection,
                       trace.enabled ? timing : undefined,
                     ),
@@ -766,7 +778,7 @@ export function registerServerRoutes(
     const context = await principal(c),
       service = await management();
     parse(z.object({ confirm: z.literal(true) }).strict(), await body(c));
-    await service.access(context, c.req.param('id'), true, async (id, connection, current) => {
+    await service.cleanupAccess(context, c.req.param('id'), async (id, connection, current) => {
       await recordAudit(connection, current, 'server.backup.delete_requested', {
         serverId: c.req.param('id'),
         backupId: c.req.param('backupId'),

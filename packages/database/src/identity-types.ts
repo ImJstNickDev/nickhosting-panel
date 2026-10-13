@@ -1,3 +1,4 @@
+import type { EncryptedSecret } from '@nickhosting/core';
 import type { Generated } from 'kysely';
 
 export interface AuthUser {
@@ -75,6 +76,7 @@ export interface AuthTables {
   invitation: {
     id: string;
     tokenHash: string;
+    tokenCiphertext: EncryptedSecret | null;
     remainingUses: number;
     maxUses: number;
     expiresAt: Date;

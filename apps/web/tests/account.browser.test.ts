@@ -69,7 +69,9 @@ describe('M5 real browser identity and Owner setup', () => {
     const dialog = owner.getByRole('dialog');
     await dialog.getByLabel('Email (Optional)').fill('member@browser.example.test');
     await dialog.getByRole('button', { name: 'Create invitation', exact: true }).click();
-    const invitation = await owner.getByLabel('Invitation link').inputValue();
+    const invitation = await owner
+      .getByRole('textbox', { name: 'Invitation link', exact: true })
+      .inputValue();
     user = await fixture.page();
     user.on('pageerror', (error) => pageErrors.push(error.message));
     await user.goto(invitation);
@@ -93,6 +95,48 @@ describe('M5 real browser identity and Owner setup', () => {
     expect((await user.request.get(`${fixture.origin}/v1/owner/settings`)).status()).toBe(403);
     await user.goto(`${fixture.origin}/owner`);
     await browserExpect(user).toHaveURL(`${fixture.origin}/`);
+  });
+  it('recovers the same invitation after reload, persists edits and revokes it through real APIs', async () => {
+    await owner.goto(`${fixture.origin}/owner/invitations`);
+    await owner.getByRole('button', { name: 'Create invitation', exact: true }).click();
+    const dialog = owner.getByRole('dialog');
+    await dialog.getByLabel('Email (Optional)').fill('managed-invite@browser.example.test');
+    await dialog.getByLabel('Maximum uses').fill('3');
+    await dialog.getByRole('button', { name: 'Create invitation', exact: true }).click();
+    const original = await dialog.getByLabel('Invitation link').inputValue();
+    await browserExpect(
+      dialog.getByText('Copy this link now. It cannot be retrieved again.'),
+    ).toHaveCount(0);
+    await owner.reload();
+    const row = owner.getByRole('row').filter({ hasText: 'managed-invite@browser.example.test' });
+    await row
+      .getByRole('button', { name: 'Show link: managed-invite@browser.example.test' })
+      .click();
+    await browserExpect(dialog.getByLabel('Invitation link')).toHaveValue(original);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await row
+      .getByRole('button', { name: 'Edit invitation: managed-invite@browser.example.test' })
+      .click();
+    await dialog.getByLabel('Maximum uses').fill('5');
+    await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(dialog).not.toBeVisible();
+    await owner.reload();
+    await browserExpect(row).toContainText('0 / 5');
+    await row
+      .getByRole('button', { name: 'Show link: managed-invite@browser.example.test' })
+      .click();
+    await browserExpect(dialog.getByLabel('Invitation link')).toHaveValue(original);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await row
+      .getByRole('button', { name: 'Revoke invitation: managed-invite@browser.example.test' })
+      .click();
+    await dialog.getByRole('button', { name: 'Revoke', exact: true }).click();
+    await browserExpect(dialog).not.toBeVisible();
+    await browserExpect(row).toContainText('Revoked');
+    const token = new URL(original).pathname.split('/').at(-1);
+    expect((await owner.request.get(`${fixture.origin}/v1/invitations/${token}`)).status()).toBe(
+      410,
+    );
   });
   it('enrolls TOTP and a real WebAuthn virtual authenticator, then signs in using recovery', async () => {
     await user.goto(`${fixture.origin}/settings`);

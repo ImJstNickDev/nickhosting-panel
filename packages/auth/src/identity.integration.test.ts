@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { assertAuthContext } from '@nickhosting/core';
+import { assertAuthContext, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { IdentityMail, IdentityOptions } from './contracts.js';
@@ -109,6 +109,7 @@ describe('real PostgreSQL identity boundaries', () => {
       pool: database.pool,
       baseURL: 'http://localhost:3999',
       authSecret: randomBytes(32).toString('base64url'),
+      secretCodec: new SecretCodec({ activeKeyId: 'test', keys: { test: randomBytes(32) } }),
       bootstrapToken,
       mail: async (message) => {
         mails.push(message);

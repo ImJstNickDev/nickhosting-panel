@@ -12,6 +12,7 @@ import { evaluateGameAccess, gameManifestSchema, gameRolloutSchema } from '@nick
 import { type Kysely, sql, type Transaction } from 'kysely';
 import type { PoolClient } from 'pg';
 import type { Database } from './index.js';
+import { assertStoragePolicyIdle } from './storage-policy.js';
 
 type DB = Kysely<Database> | Transaction<Database>;
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -75,6 +76,7 @@ export async function updateSettings(
     for (const key of Object.keys(value) as Array<keyof PlatformConfig>)
       if (value[key] === undefined) delete value[key];
     const resolved = resolveConfig(value, env);
+    await assertStoragePolicyIdle(tx);
     // Policy changes must validate already committed reservations under the same
     // lock as admission; switching storage modes cannot hide existing use.
     const reservations = await tx.selectFrom('resource_reservations').selectAll().execute();
@@ -85,6 +87,13 @@ export async function updateSettings(
       .where('s.deleted_at', 'is', null)
       .execute();
     const exceptions = await tx.selectFrom('resource_user_limits').selectAll().execute();
+    const storageBudgets = await tx.selectFrom('storage_user_budgets').selectAll().execute();
+    if (
+      servers.length > 0 &&
+      resolved.values.storagePolicy !==
+        resolveConfig(previous?.value ?? {}, env).values.storagePolicy
+    )
+      throw new DomainError('conflict', 409, { reason: 'storage_policy_transition_required' });
     const owners = new Set([
       ...reservations.map((r) => r.owner_id),
       ...servers.map((s) => s.owner_id),
@@ -95,9 +104,12 @@ export async function updateSettings(
       );
       const memory = exception?.memory_mib ?? resolved.values.defaultUserMemoryMiB;
       const cpu = exception?.cpu_percent ?? resolved.values.defaultUserCpuPercent;
-      const storage = exception
-        ? Number(exception.storage_mib)
-        : resolved.values.defaultUserStorageMiB;
+      const storageBudget = storageBudgets.find((budget) => budget.user_id === owner);
+      const storage = Number(
+        storageBudget
+          ? (storageBudget.storage_mib ?? resolved.values.defaultUserStorageMiB)
+          : (exception?.storage_mib ?? resolved.values.defaultUserStorageMiB),
+      );
       const active = reservations.filter((r) => r.owner_id === owner);
       if (
         active.reduce((s, r) => s + r.memory_mib, 0) > memory ||

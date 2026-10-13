@@ -1,10 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
-import { type Database, getSettings, type HostSnapshot, recordAudit } from '@nickhosting/database';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  type HostSnapshot,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { effectiveNodeOverhead, resolveHostOverride } from './configuration.js';
 import { sampleLocalResources } from './host-resources.js';
+import { storageCommitments } from './storage-accounting.js';
 
 export type DB = Kysely<Database> | Transaction<Database>;
 export type Environment = Readonly<Record<string, string | undefined>>;
@@ -407,17 +414,30 @@ export async function checkStorage(
   excludeServerId?: string,
 ) {
   await lockResources(tx);
+  await assertStoragePolicyIdle(tx);
   const { host, snapshot, config } = await checkedObservation(tx, hostId, env);
   const rows = await tx
     .selectFrom('managed_servers as s')
     .innerJoin('managed_nodes as n', 'n.id', 's.node_id')
     .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-    .select(['s.id', 's.owner_id', 's.limits', 'm.feature_limits', 'n.physical_host_id'])
+    .select([
+      's.id',
+      's.owner_id',
+      's.limits',
+      's.pterodactyl_id',
+      'm.feature_limits',
+      'n.physical_host_id',
+    ])
     .where('s.deleted_at', 'is', null)
     .execute();
-  const active = rows.filter((r) => r.id !== excludeServerId);
-  const allowance = (row: (typeof rows)[number]) =>
-    row.limits.disk * (1 + row.feature_limits.backups);
+  const active = rows.filter(
+    (r) =>
+      r.id !== excludeServerId &&
+      (r.physical_host_id === hostId ||
+        (config.storagePolicy === 'PER_USER_BUDGET' && r.owner_id === ownerId)),
+  );
+  const commitments = await storageCommitments(tx, active, env);
+  const allowance = (row: (typeof rows)[number]) => commitments.get(row.id) ?? 0;
   const hostReserved = active
     .filter((r) => r.physical_host_id === hostId)
     .reduce((sum, r) => sum + allowance(r), 0);
@@ -431,13 +451,21 @@ export async function checkStorage(
   if (hostReserved + additionalMiB > snapshot.availableDiskMiB - Number(host.disk_headroom_mib))
     throw new DomainError('storage_exhausted');
   if (config.storagePolicy === 'PER_USER_BUDGET') {
+    if (active.some((server) => server.owner_id === ownerId && server.limits.disk === 0))
+      throw new DomainError('conflict');
+    const storageOverride = await tx
+      .selectFrom('storage_user_budgets')
+      .select('storage_mib')
+      .where('user_id', '=', ownerId)
+      .executeTakeFirst();
     const limits = await tx
       .selectFrom('resource_user_limits')
       .selectAll()
       .where('user_id', '=', ownerId)
       .executeTakeFirst();
-    const budget =
-      limits && (!limits.expires_at || limits.expires_at > new Date())
+    const budget = storageOverride
+      ? Number(storageOverride.storage_mib ?? config.defaultUserStorageMiB)
+      : limits && (!limits.expires_at || limits.expires_at > new Date())
         ? Number(limits.storage_mib)
         : config.defaultUserStorageMiB;
     if (
@@ -449,7 +477,12 @@ export async function checkStorage(
   }
 }
 
-export async function setUserLimits(db: Kysely<Database>, context: AuthContext, input: unknown) {
+export async function setUserLimits(
+  db: Kysely<Database>,
+  context: AuthContext,
+  input: unknown,
+  env: Environment = {},
+) {
   assertPermission(context, 'platform:manage');
   if (context.sessionType !== 'regular') throw new DomainError('forbidden');
   const parsed = z
@@ -469,6 +502,7 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
     throw new DomainError('validation_failed');
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
     const active = await tx
       .selectFrom('resource_reservations')
       .selectAll()
@@ -486,6 +520,18 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
       .where('s.owner_id', '=', value.userId)
       .where('s.deleted_at', 'is', null)
       .execute();
+    const persistent = await tx
+      .selectFrom('storage_user_budgets')
+      .select('storage_mib')
+      .where('user_id', '=', value.userId)
+      .executeTakeFirst();
+    const { values: settings } = await getSettings(tx, env);
+    if (
+      persistent &&
+      value.expiresAt &&
+      Number(persistent.storage_mib ?? settings.defaultUserStorageMiB) !== value.storageMiB
+    )
+      throw new DomainError('validation_failed');
     if (
       disks.reduce((sum, r) => sum + r.limits.disk * (1 + r.feature_limits.backups), 0) >
       value.storageMiB
@@ -504,6 +550,20 @@ export async function setUserLimits(db: Kysely<Database>, context: AuthContext, 
       .values(row)
       .onConflict((c) => c.column('user_id').doUpdateSet(row))
       .execute();
+    if (!value.expiresAt)
+      await tx
+        .insertInto('storage_user_budgets')
+        .values({
+          user_id: value.userId,
+          storage_mib: String(value.storageMiB),
+          updated_at: new Date(),
+        })
+        .onConflict((conflict) =>
+          conflict
+            .column('user_id')
+            .doUpdateSet({ storage_mib: String(value.storageMiB), updated_at: new Date() }),
+        )
+        .execute();
     await recordAudit(tx, context, 'resource.user_limits.updated', { ...value });
   });
 }

@@ -45,6 +45,51 @@ restricted Administration area for audit and read-only settings; Owner mutation
 controls are absent and backend checks remain authoritative. It moves focus to the page heading
 on navigation and supplies a skip link and a mobile navigation disclosure. Desktop navigation stays within the viewport while the page scrolls; short windows scroll the sidebar internally so administration and account links remain reachable. Mobile retains its existing disclosure layout.
 
+The topbar uses a circular profile silhouette to open an account disclosure with
+an avatar centered above the centered current name, Settings and Sign out.
+Authorized users have an administration sliders icon beside the topbar avatar,
+with an Admin tooltip on hover or keyboard focus; operators retain their audit
+destination. The administration sidebar keeps its Home return link.
+The account disclosure closes on outside click, Escape,
+focus leaving the disclosure or navigation. Escape restores avatar focus;
+activating Settings while already there also preserves focus. Logout uses the
+existing identity/cache reset and exposes request errors with repeat submissions
+disabled while pending. Assisted sessions show Exit assistance instead of personal
+account actions. The avatar is local artwork and requires no stored profile photo.
+
+Owner Users groups search, role filtering and Invitations in one toolbar. Search
+applies after a 200 ms typing pause; role changes apply immediately with the
+current search text. Filter changes reset pagination, superseded requests cancel,
+and pagination is disabled while filters/results are updating. Existing results
+remain visible during refetch, with a compact search loading indicator, busy
+semantics and visible retryable errors.
+Alt+K focuses and selects the search text, with the same modifier, composition and
+open-dialog guards as Files; the hint displays Option+K on Apple keyboards.
+
+Invitations use row actions to reveal/copy a link, edit expiration and maximum
+uses, or confirm revocation. Role and recipient remain read-only; used/maximum
+counts distinguish exhausted invitations, and revoked rows remain in the list.
+Mobile rows stack their labeled fields so status and actions remain visible
+without horizontal scrolling. After revocation removes its action button, dialog
+focus returns to Create invitation.
+Dialogs retain drafts and display failures; clipboard failure leaves the URL
+selectable. Revealed URLs exist only in component memory, never browser storage.
+The UI uses the invitation GET-link/PATCH contracts in `M5-API-CONTRACTS.md`.
+Encrypted tokens allow recovery after navigation or reload; editing retains the
+same URL and already-consumed uses. Legacy hash-only links are explicitly
+unrecoverable. Creation and revocation retain their existing API contracts,
+with real error handling throughout.
+
+Home uses compact standalone server cards, resource allowance cards and aligned
+recent activity rows. Server cards open through their full surface, with a native
+link, whole-card keyboard focus and a separate active-operation link when present.
+Cards show only process state (Offline, Starting, Online, Stopping, or Unknown
+when unconfirmed); the automatic sleep/wake state is retained on the Status page.
+CPU/memory limits and measured disk use have icons beside the values, with localized
+tooltips and accessible labels; the entire card remains a native navigation link.
+Allowance cards preserve committed, limit and remaining values with explicit units;
+they describe resource reservations, not live process measurements.
+
 Server entry opens Console by default, with Start/Restart/Stop and their durable
 operation feedback and restart confirmation. Stop is disabled when offline.
 During a provider-confirmed stopping state it becomes Kill, enabled only for an
@@ -131,7 +176,23 @@ rows retain their decorative check in a compact scrollable list.
 Decorative art/checks do not duplicate accessible labels. Keyboard focus uses a
 restrained high-contrast outline, always available without an opt-in; programmatic
 heading focus has no decorative ring. Forced-colors mode retains selection cues.
-Configured CPU/RAM/disk on cards are labeled as limits, not current usage.
+Configured CPU/RAM on cards are labeled as limits. Disk shows occupied space from
+the same Wings resources field as Console; unavailable or stale readings retain
+an explicit localized fallback instead of displaying the configured allowance.
+
+Owner Settings includes a dedicated storage policy flow: preview before applying,
+per-user budget and per-server allocation editing, separate backup reservation,
+over-budget/unknown-reading states, confirmation and durable per-server progress.
+The current policy remains visible until every provider/SFTP change is confirmed.
+A blocked partial application survives reload and offers retry or corrected
+allocations. Files/Backups links preserve the draft in its tab; after deleting
+unneeded data, refresh measurements on the same plan before reducing allocations.
+Refresh preserves unsaved quota/limit edits and never starts application by itself.
+Shared storage creates unlimited servers; existing finite caps remain until the
+Owner explicitly applies the shared-storage plan. Storage settings are excluded
+from generic editors/reset, and environment locks and read-only roles remain
+visible. English/Italian copy, desktop/mobile layout, focus/error recovery and
+WCAG 2.2 AA checks are covered by the storage-policy browser suite.
 
 ### Visual and behavior conventions
 

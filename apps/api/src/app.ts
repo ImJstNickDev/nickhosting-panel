@@ -399,6 +399,20 @@ export function createApp(options: Options) {
       201,
     );
   });
+  app.get('/v1/owner/invitations/:id/link', async (c) => {
+    noSupport(c);
+    return c.json(
+      await c.get('identity').getInvitationLink(c.get('authHeaders'), c.req.param('id')),
+    );
+  });
+  app.patch('/v1/owner/invitations/:id', async (c) => {
+    noSupport(c);
+    return c.json(
+      await c
+        .get('identity')
+        .updateInvitation(c.get('authHeaders'), c.req.param('id'), await body(c)),
+    );
+  });
   app.delete('/v1/owner/invitations/:id', async (c) => {
     noSupport(c);
     await c.get('identity').revokeInvitation(c.get('authHeaders'), c.req.param('id'));

@@ -91,6 +91,7 @@ export async function createRuntime(env: Readonly<Record<string, string | undefi
       if (cached?.signature === signature) return cached.identity;
       const value = createIdentity({
         pool: database.pool,
+        secretCodec: codec,
         baseURL: values.apiUrl,
         publicURL: values.publicUrl,
         authSecret: secrets.authSecret,

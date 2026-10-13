@@ -61,10 +61,14 @@ describe('M5 real browser platform and Owner journeys', () => {
   }
   async function consolePage() {
     await user.goto(`${fixture.origin}/servers/${provider.ids.serverId}/console`);
-    await browserExpect(user.getByRole('heading', { name: 'Console', exact: true })).toBeVisible();
+    await browserExpect(
+      user.getByRole('heading', { name: /^(Alex )?Survival$/, exact: true }),
+    ).toBeVisible();
   }
 
   it('shows scoped server artwork, resource units, useful empty filters and accessible Home', async () => {
+    const files = await provider.files();
+    files.set('home-usage.bin', Buffer.alloc(4 * 1024 * 1024));
     await user.goto(fixture.origin);
     await browserExpect(user.getByRole('heading', { name: 'Home', exact: true })).toBeVisible();
     await browserExpect(
@@ -80,6 +84,22 @@ describe('M5 real browser platform and Owner journeys', () => {
     ).toBe(true);
     await fixture.screenshot(user, 'home-desktop-en');
     await accessible(user);
+    await user.locator('.server-card').click({ position: { x: 20, y: 20 } });
+    await browserExpect(user).toHaveURL(
+      new RegExp(`/servers/${provider.ids.serverId}/(console|status)$`),
+    );
+    await user.goto(fixture.origin);
+    const serverLink = user.locator('.server-card-link');
+    await serverLink.focus();
+    await browserExpect(user.getByRole('tooltip')).toContainText('Memory limit: 128 MiB');
+    await browserExpect(user.getByRole('tooltip')).toContainText('CPU limit: 10%');
+    await browserExpect(user.getByRole('tooltip')).toContainText('Storage · Usage: 4 MiB');
+    await user.keyboard.press('Escape');
+    await browserExpect(user.getByRole('tooltip')).toHaveCount(0);
+    await user.keyboard.press('Enter');
+    await browserExpect(user).toHaveURL(
+      new RegExp(`/servers/${provider.ids.serverId}/(console|status)$`),
+    );
     await user.goto(`${fixture.origin}/servers`);
     await user.getByLabel('Search servers').fill('does not exist');
     await user.getByRole('button', { name: 'Filter', exact: true }).click();
@@ -93,6 +113,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     await fixture.screenshot(user, 'servers-desktop-en');
     await peer.goto(`${fixture.origin}/servers`);
     await browserExpect(peer.getByRole('link', { name: 'Survival', exact: true })).toHaveCount(0);
+    files.delete('home-usage.bin');
   });
 
   it('creates a verified-choice Vanilla server through the installer pages and reports admission-denied first start', async () => {
@@ -300,6 +321,9 @@ describe('M5 real browser platform and Owner journeys', () => {
   });
 
   it('organizes and shares a server, discovers real members and revokes project access', async () => {
+    await journeyRequest(fixture, peer, '/api/auth/update-user', { name: 'Taylor', locale: 'en' });
+    await peer.evaluate(() => localStorage.setItem('nh.locale', 'en'));
+    await peer.setViewportSize({ width: 1440, height: 1000 });
     await user.goto(`${fixture.origin}/projects`);
     await user.getByRole('button', { name: 'Create project', exact: true }).click();
     const dialog = user.getByRole('dialog');
@@ -313,10 +337,13 @@ describe('M5 real browser platform and Owner journeys', () => {
       .filter({ has: user.getByRole('heading', { name: 'Name and project', exact: true }) });
     await metadata.getByLabel('Name', { exact: true }).fill('Alex Survival');
     await metadata.getByLabel('Project', { exact: true }).selectOption(projectId);
+    const saved = user.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' &&
+        response.url().endsWith(`/v1/platform/servers/${provider.ids.serverId}`),
+    );
     await metadata.getByRole('button', { name: 'Save changes', exact: true }).click();
-    await browserExpect(
-      user.getByRole('heading', { name: 'Alex Survival', exact: true }),
-    ).toBeVisible();
+    expect((await saved).status()).toBe(200);
     await user.goto(`${fixture.origin}/projects/${projectId}`);
     const add = user
       .locator('section')
@@ -363,7 +390,7 @@ describe('M5 real browser platform and Owner journeys', () => {
   it('operates Owner quotas and renders health, infrastructure, mappings and protected settings honestly', async () => {
     await owner.goto(`${fixture.origin}/owner/users`);
     await owner.getByLabel('Search', { exact: true }).fill('Alex');
-    await owner.getByRole('button', { name: 'Search', exact: true }).click();
+    await browserExpect(owner.getByRole('link', { name: 'Alex', exact: true })).toBeVisible();
     const historyResponse = owner.waitForResponse((response) => {
       const url = new URL(response.url());
       return (
@@ -439,6 +466,14 @@ describe('M5 real browser platform and Owner journeys', () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { name: 'Alex', locale: 'it' });
     await user.evaluate(() => localStorage.setItem('nh.locale', 'it'));
     await user.setViewportSize({ width: 390, height: 844 });
+    await user.goto(fixture.origin);
+    await browserExpect(user.getByRole('heading', { name: 'Server recenti' })).toBeVisible();
+    await browserExpect(user.locator('.home-quota-card')).toHaveCount(4);
+    await fixture.screenshot(user, 'home-mobile-it');
+    await accessible(user);
+    expect(
+      await user.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
     await user.goto(`${fixture.origin}/servers`);
     await browserExpect(user.getByRole('link', { name: /^(Alex )?Survival$/ })).toBeVisible();
     await fixture.screenshot(user, 'servers-mobile-it');
@@ -674,6 +709,10 @@ describe('M5 real browser platform and Owner journeys', () => {
   });
 
   it('gives platform operators read-only audit and settings access without Owner mutations', async () => {
+    await peer.setViewportSize({ width: 1440, height: 1000 });
+    await journeyRequest(fixture, peer, '/api/auth/update-user', { name: 'Taylor', locale: 'en' });
+    await peer.goto(fixture.origin);
+    await peer.evaluate(() => localStorage.setItem('nh.locale', 'en'));
     await journeyRequest(
       fixture,
       owner,
@@ -682,7 +721,7 @@ describe('M5 real browser platform and Owner journeys', () => {
       'PATCH',
     );
     await peer.goto(fixture.origin);
-    await peer.getByRole('link', { name: 'Administration', exact: true }).click();
+    await peer.getByRole('link', { name: 'Admin', exact: true }).click();
     await browserExpect(peer).toHaveURL(`${fixture.origin}/owner/audit`);
     await browserExpect(
       peer.getByRole('heading', { name: 'Audit log', exact: true }),
@@ -719,7 +758,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     await credential.locator('summary').click();
     await browserExpect(credential.getByText('Configured', { exact: true })).toBeVisible();
     await browserExpect(
-      peer.getByRole('button', { name: 'Save changes', exact: true }),
+      peer.getByRole('button', { name: 'Save changes', exact: true, disabled: false }),
     ).toHaveCount(0);
     await browserExpect(peer.getByLabel('New credential', { exact: true })).toHaveCount(0);
     expect(JSON.stringify(await journeyRequest(fixture, peer, '/v1/owner/settings'))).not.toContain(
@@ -766,9 +805,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     );
     await peer.goto(`${fixture.origin}/owner/settings`);
     await browserExpect(peer).toHaveURL(`${fixture.origin}/`);
-    await browserExpect(
-      peer.getByRole('link', { name: 'Administration', exact: true }),
-    ).toHaveCount(0);
+    await browserExpect(peer.getByRole('link', { name: 'Admin', exact: true })).toHaveCount(0);
     expect((await peer.request.get(`${fixture.origin}/v1/owner/settings`)).status()).toBe(403);
     expect(pageErrors).toEqual([]);
   });

@@ -254,7 +254,7 @@ describe('M5 platform browser queries and metadata', () => {
     const shared = await getPlatformQuota(f.db, f.context, f.context.subjectUserId, {
       NH_DEFAULT_SERVER_STORAGE_MIB: '8192',
     });
-    expect(shared.creationStorage).toEqual({ mode: 'shared', defaultDiskMiB: 8192 });
+    expect(shared.creationStorage).toEqual({ mode: 'shared', defaultDiskMiB: 0 });
     const personal = await getPlatformQuota(f.db, f.context, f.context.subjectUserId, {
       NH_STORAGE_POLICY: 'PER_USER_BUDGET',
     });
@@ -853,7 +853,7 @@ describe('M5 platform browser queries and metadata', () => {
       concurrency: 2,
       batchMaxFiles: 500,
       batchMaxBytes: Math.min(
-        result.upload.serverDiskBytes,
+        result.upload.serverDiskBytes ?? Number.MAX_SAFE_INTEGER,
         Math.floor((20_000_000_000 - 65536 * 2) / 2),
       ),
     });
