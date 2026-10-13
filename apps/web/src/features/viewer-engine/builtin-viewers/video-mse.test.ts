@@ -8,7 +8,9 @@ import {
   bufferedContains,
   capturePlayback,
   updateSourceBuffer,
+  VideoBufferBudget,
   VideoRangeReader,
+  videoBufferEviction,
   videoSourceLimits,
 } from './video-mse.js';
 
@@ -131,6 +133,39 @@ describe('Motion bounded video Range reader', () => {
     expect(request).toHaveBeenCalledOnce();
     expect(request.mock.calls[0]?.[1].headers).toEqual({ Range: 'bytes=524288-1048575' });
   });
+  it('retains correctly sized discovery and playback blocks across seek budget resets', async () => {
+    const size = 4 * 1024 * 1024;
+    const request = rangeFetch(size);
+    const reader = new VideoRangeReader(source, size, new AbortController().signal);
+    await reader.read(0, 10);
+    reader.streaming();
+    const sample = await reader.read(65530, 65550);
+    expect([...sample]).toEqual(Array.from({ length: 20 }, (_, index) => (65530 + index) % 251));
+    reader.resetBudget(videoSourceLimits.windowBytes);
+    await reader.read(900000, 900020);
+    await reader.read(65530, 65550);
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls.map((call) => new Headers(call[1].headers).get('Range'))).toEqual([
+      'bytes=0-65535',
+      'bytes=0-524287',
+      'bytes=524288-1048575',
+    ]);
+  });
+  it('bounds mixed discovery/playback cache by actual bytes and clears it on disposal', async () => {
+    const block = videoSourceLimits.playbackBlockBytes;
+    const size = block * 8;
+    const request = rangeFetch(size);
+    const reader = new VideoRangeReader(source, size, new AbortController().signal);
+    await reader.read(0, 1);
+    reader.streaming();
+    reader.resetBudget(videoSourceLimits.windowBytes);
+    for (let index = 0; index < 4; index++) await reader.read(index * block, index * block + 1);
+    await reader.read(0, 1);
+    expect(request).toHaveBeenCalledTimes(5);
+    reader.clear();
+    await reader.read(0, 1);
+    expect(request).toHaveBeenCalledTimes(6);
+  });
   it('evicts old blocks instead of retaining the complete movie', async () => {
     const block = videoSourceLimits.playbackBlockBytes;
     const size = block * 20;
@@ -190,6 +225,76 @@ describe('Motion media lifecycle primitives', () => {
     expect(bufferedContains(buffered, 2)).toBe(true);
     expect(bufferedContains(buffered, 5)).toBe(false);
     expect(bufferedContains(buffered, 11)).toBe(true);
+  });
+  it('retains old compressed frames without an age limit and charges partially removed fragments fully', () => {
+    const budget = new VideoBufferBudget();
+    budget.add(0, 2, 40 * 1024 * 1024);
+    budget.add(300, 302, 50 * 1024 * 1024);
+    expect(budget.bytes).toBe(90 * 1024 * 1024);
+    expect(budget.bytes).toBeLessThan(videoSourceLimits.retainedBytes);
+    budget.reconcile(
+      ranges([
+        [1, 2],
+        [300, 302],
+      ]),
+    );
+    expect(budget.bytes).toBe(90 * 1024 * 1024);
+    budget.add(301, 303, 40 * 1024 * 1024);
+    expect(budget.bytes).toBeGreaterThan(videoSourceLimits.retainedBytes);
+    expect(
+      videoBufferEviction(
+        ranges([
+          [1, 2],
+          [300, 303],
+        ]),
+        301,
+      ),
+    ).toEqual([1, 2]);
+    budget.reconcile(ranges([[300, 303]]));
+    expect(budget.bytes).toBe(90 * 1024 * 1024);
+  });
+  it('refunds cumulatively removed media and initialization bytes once no frames remain', () => {
+    const budget = new VideoBufferBudget();
+    budget.add(0, 0, 1024);
+    budget.add(0, 10, videoSourceLimits.retainedBytes - 1024);
+    budget.reconcile(ranges([[4, 10]]));
+    expect(budget.bytes).toBe(videoSourceLimits.retainedBytes - 1024);
+    budget.reconcile(ranges([]));
+    expect(budget.bytes).toBe(0);
+    budget.add(20, 22, 4096);
+    expect(budget.bytes).toBe(4096);
+  });
+  it('reconciles browser-evicted completed data without refunding a partially appended fragment', () => {
+    const budget = new VideoBufferBudget();
+    budget.add(0, 2, videoSourceLimits.retainedBytes - 4096, 1);
+    budget.add(300, 302, 4096, 2);
+    budget.reconcile(ranges([]), 2);
+    expect(budget.bytes).toBe(4096);
+    budget.reconcile(ranges([[300, 302]]), 3);
+    expect(budget.bytes).toBe(4096);
+    budget.reconcile(ranges([]), 3);
+    expect(budget.bytes).toBe(0);
+  });
+  it('evicts either distant side while protecting active playback and allows quota backpressure', () => {
+    expect(
+      videoBufferEviction(
+        ranges([
+          [0, 15],
+          [28, 40],
+        ]),
+        3,
+      ),
+    ).toEqual([28, 40]);
+    expect(
+      videoBufferEviction(
+        ranges([
+          [0, 15],
+          [28, 40],
+        ]),
+        29,
+      ),
+    ).toEqual([0, 15]);
+    expect(videoBufferEviction(ranges([[2, 4]]), 3)).toBeNull();
   });
   it('captures actual playback preferences without silently starting paused or ended media', () => {
     const media = {

@@ -19,6 +19,7 @@ export const motionTimingPhases = [
   'video.range_queue',
   'video.range_headers',
   'mse.start',
+  'mse.refill',
   'mse.metadata',
   'mse.first_packets',
   'mse.source_open',

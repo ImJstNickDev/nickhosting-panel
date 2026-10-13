@@ -387,4 +387,103 @@ describe('M5 Motion embedded subtitles', () => {
     await page.getByRole('button', { name: /^(Back to files|Torna ai file)$/ }).click();
     debugTiming = false;
   });
+  it('extracts captions during renderer initialization and reuses the window across seeks and metadata events', async () => {
+    debugTiming = true;
+    const firstBatch = timingBatches.length;
+    const events = () =>
+      timingBatches.slice(firstBatch).flatMap((batch) => motionTimingInput.parse(batch).events);
+    let releaseRenderer = () => {};
+    const rendererReady = new Promise<void>((resolve) => {
+      releaseRenderer = resolve;
+    });
+    let rendererRequested = false;
+    await page.route('**/subtitle-renderer.ts*', async (route) => {
+      rendererRequested = true;
+      await rendererReady;
+      await route.continue();
+    });
+    try {
+      await open();
+      await browserExpect.poll(() => rendererRequested).toBe(true);
+      // Caption extraction is not serially blocked behind importing the renderer.
+      await browserExpect
+        .poll(() =>
+          events().some(
+            (event) => event.phase === 'subtitles.window' && event.outcome === 'succeeded',
+          ),
+        )
+        .toBe(true);
+      expect(events().some((event) => event.phase === 'subtitles.renderer_setup')).toBe(false);
+      await seek(2.25);
+      releaseRenderer();
+      await browserExpect(page.locator('.motion-subtitles')).toContainText('English first caption');
+      await page.locator('.motion-player video').evaluate((video) => {
+        video.dispatchEvent(new Event('loadedmetadata'));
+        video.dispatchEvent(new Event('loadedmetadata'));
+      });
+      await seek(7.25);
+      await browserExpect(page.locator('.motion-subtitles')).toContainText(
+        'English second caption',
+      );
+      await seek(2.25);
+      await browserExpect(page.locator('.motion-subtitles')).toContainText('English first caption');
+      await browserExpect
+        .poll(
+          () =>
+            events().filter(
+              (event) => event.phase === 'native.seek' && event.outcome === 'succeeded',
+            ).length,
+        )
+        .toBeGreaterThanOrEqual(3);
+      expect(events().filter((event) => event.phase === 'subtitles.window')).toHaveLength(1);
+      await browserExpect(page.locator('.motion-subtitle-notice')).toHaveCount(0);
+      expect(errors).toEqual([]);
+    } finally {
+      releaseRenderer();
+      await page.unroute('**/subtitle-renderer.ts*');
+      debugTiming = false;
+    }
+  });
+  it('stops background extraction after renderer failure until an explicit retry', async () => {
+    debugTiming = true;
+    const firstBatch = timingBatches.length;
+    const events = () =>
+      timingBatches.slice(firstBatch).flatMap((batch) => motionTimingInput.parse(batch).events);
+    let releaseRenderer = () => {};
+    const failure = new Promise<void>((resolve) => {
+      releaseRenderer = resolve;
+    });
+    await page.route('**/subtitle-renderer.ts*', async (route) => {
+      await failure;
+      await route.abort('failed');
+    });
+    try {
+      await open();
+      await browserExpect
+        .poll(() =>
+          events().some(
+            (event) => event.phase === 'subtitles.window' && event.outcome === 'succeeded',
+          ),
+        )
+        .toBe(true);
+      releaseRenderer();
+      await browserExpect(page.locator('.motion-subtitle-notice')).toBeVisible();
+      await seek(7.25);
+      await page.locator('.motion-player video').evaluate((video) => {
+        video.dispatchEvent(new Event('loadedmetadata'));
+        video.dispatchEvent(new Event('timeupdate'));
+        video.dispatchEvent(new Event('timeupdate'));
+      });
+      await browserExpect
+        .poll(() =>
+          events().some((event) => event.phase === 'native.seek' && event.outcome === 'succeeded'),
+        )
+        .toBe(true);
+      expect(events().filter((event) => event.phase === 'subtitles.window')).toHaveLength(1);
+    } finally {
+      releaseRenderer();
+      await page.unroute('**/subtitle-renderer.ts*');
+      debugTiming = false;
+    }
+  });
 });

@@ -1,7 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from 'react';
 import type { MotionTrace } from '../../../../../../packages/core/src/motion-timing.js';
 import {
-  bufferedContains,
   capturePlayback,
   inspectVideo,
   openVideoInput,
@@ -103,9 +102,8 @@ export function useVideoSource({
       else if (tracks.length) publish({ error: 'unsupported' });
     };
     const seek = () => {
-      if (!session?.ready || !selected || bufferedContains(video.buffered, video.currentTime, 0.05))
-        return;
-      replace(selected, capturePlayback(video));
+      if (!session?.ready || !selected) return;
+      session.seek(video.currentTime);
     };
     const discover = async () => {
       discovery?.abort();

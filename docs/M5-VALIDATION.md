@@ -8537,3 +8537,127 @@ Focused validation for this correction:
 - `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass**.
 - Focused Biome on all five changed source/test files: **pass**.
 - Independent read-only review: **no remaining must-fix findings**, with the evidence boundary above explicitly retained.
+
+### Motion subtitle locality and retained seek buffers (2026-10-13)
+
+M5 / `milestone/m5-webpanel`, PR #21. Owner authorized subtitle aggregation,
+parallel startup/reuse and bounded video cache retention. The final Owner choice
+supersedes intermediate suggestions: **128 MiB encoded retention, no time expiry**.
+This is compressed append accounting, not total browser memory. New forward
+production remains approximately 12 seconds; retained future islands may extend
+farther after backward seeks. No automatic 128 MiB pre-download.
+
+Same-track seeks now preserve the MediaSource, SourceBuffer, input and bounded
+raw cache. Only the serialized remux pump is replaced for missing data. Native
+parser reset permits new compatible fragments without removing retained frames.
+Audio-track changes still rebuild the source. Byte/Quota pressure evicts distant
+ranges, protecting current playback; completed accounting reconciles browser
+removal, while the incomplete fragment stays charged. Initial startup retains
+its original whole-operation 15-second deadline. Initial `mse.start` remains
+comparable; later pumps use `mse.refill`.
+
+Subtitle extraction starts alongside renderer initialization. Duplicate metadata
+and covered seeks retain pending/completed windows; overlapping refresh keeps
+current captions while loading the next window. Failed generations stop further
+reads until Retry. The backend coalesces locally adjacent metadata reads up to
+512 KiB, deciding locality from the last actual requested endpoint, including
+cache hits. Distant skips fall back to 1 KiB. Baseline parser allowance is 8 MiB
+plus at most 24 MiB speculative reads: **32 MiB physical reads per operation**,
+2 MiB retained byte cache and unchanged 15-second deadline.
+
+Research: inspected mpv MKV demux/stream buffering and VLC segment seeking at the
+pinned upstream revisions linked in [format contracts](M5-VIEWER-FORMATS.md#subtitle-lookup-research-and-bounded-simulations).
+They use indexes, buffered locality and retained knowledge of explored regions.
+Our existing index-first/cluster-summary parser remains authoritative; no copied
+LGPL source, new dependency, guessed byte-offset search, full-file indexing job,
+transcode or changed caption-coverage claim was introduced.
+
+**Experiments and their limits:** fixed 32/64/128/512 KiB reads exhausted the old
+8 MiB physical-read budget on the real unindexed file; those were failed trials,
+not successful timings. A bounded first adaptive candidate reduced request count
+but still wasted read-ahead on medium-spaced fixtures. Switching locality from
+cache-chunk end to actual requested end removed that waste. A 32 MiB speculative
+allowance trial reduced calls further but transferred more without a measured
+latency benefit in that pair; the final allowance remains 24 MiB. Preliminary
+600 ms / roughly 49% improvement observations belong to earlier runs/variants,
+not the final three-pair result below.
+
+Final read-only real-file comparison used three alternating baseline/final runs,
+a fresh parser per run and an existing SSH transport. Each returned the same
+three captions. The file was unchanged; connection/handles were closed afterward.
+
+| Metric | Original 1 KiB | Final adaptive ≤512 KiB |
+| --- | ---: | ---: |
+| Window run 1 | 1,278.06 ms | 1,064.25 ms |
+| Window run 2 | 2,310.95 ms | 1,364.97 ms |
+| Window run 3 | 1,476.95 ms | 1,126.62 ms |
+| Mean extraction | 1,688.65 ms | 1,185.28 ms |
+| Median extraction | 1,476.95 ms | 1,126.62 ms |
+| Mean parser open + extraction | 1,698.94 ms | 1,207.04 ms |
+| Read calls, including open | 1,502 | 404 |
+| Bytes, including open | 1,537,995 | 26,102,678 |
+
+Mean extraction improved **29.8%**, median **23.7%**. This is an explicit bounded
+bandwidth-for-latency tradeoff, not a zero-cost optimization or a promise for
+other files/networks. Host variation remains visible. Old measured first-run
+1,728 ms extraction and later multi-second runs are retained in prior entries.
+
+Pure local virtual Matroska fixtures have 1,000 video payloads plus a subtitle;
+large payload spans are synthesized rather than allocated/stored. Final table:
+
+| Virtual bytes | Payload spacing | Original reads | Final reads | Final transferred bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 70,099 | 64 B | 67 | 1 | 70,099 |
+| 2,055,099 | 2 KiB | 1,001 | 4 | 2,049,664 |
+| 8,199,101 | 8 KiB | 1,001 | 16 | 8,192,320 |
+| 32,776,101 | 32 KiB | 1,001 | 986 | 1,531,944 |
+| 131,080,101 | 128 KiB | 1,001 | 998 | 1,544,232 |
+| 262,152,101 | 256 KiB | 1,001 | 1,000 | 1,546,280 |
+| 1,048,584,103 | 1 MiB | 1,001 | 1,001 | 1,547,304 |
+
+These prove selection/bounds and identical parsed captions across density/size;
+their in-memory CPU times are not transport predictions. Reproduction:
+`SUBTITLE_READER_BENCHMARK=1 scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-subtitles.test.ts -t benchmark --disableConsoleIntercept`:
+**1 benchmark passed (all seven sizes), 7 ordinary tests deliberately skipped**.
+
+Read-only final Chromium development smoke of the Owner-supplied MKV: first frame
+1,023.8 ms; initial MSE complete 1,120.8 ms; first subtitle window complete
+2,234.4 ms (one successful initial read, no redundant initial cancellation).
+Seeks 26→3→30→7 retained the same blob URL and earlier buffered ranges. The first
+uncached target took 914 ms end-to-end in the polling probe; cached targets
+130/128/128 ms, including probe scheduling/poll overhead. Background range reads
+continued (one per cached step), so this live probe does **not** claim zero HTTP
+traffic. Subtitle responses were HTTP 200 and no page/subtitle notice occurred.
+The isolated browser cases separately establish zero new requests for controlled
+cached-return steps. The first attempted pre-change live probe was invalidated by
+concurrent HMR/cancelled requests and is not used as a latency baseline. The
+historical Owner trace remains the earlier reference, not a controlled before/
+after browser benchmark.
+
+Independent review found and resolved two memory-accounting progress defects:
+cumulative removals could leave phantom charges, and browser eviction during a
+capacity wait needed reconciliation on every iteration. Regression cases cover
+partial/final removal and disappeared native ranges. Real browsers prove small
+fixture seek/cache behavior; 128 MiB saturation/accounting uses unit models, not
+a claimed full-size browser memory-pressure stress test. Large unindexed/deep
+subtitle seeks can still reach the documented scan/time bounds.
+
+No UI layout/copy change; prior screenshots remain representative. Existing HMR
+loads the sources without manual restarts. No dependency/migration, Blueprint
+update, provider mutation, game-server command, new container/network or media
+asset. The existing isolated browser services were reused. Historical test files,
+credentials and data remain untouched; private probes/results are gitignored.
+Rollback is a source revert. SFTPGo #18 and production-release restrictions are
+unchanged; PR #21 remains open and unmerged.
+
+Final focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-subtitles.test.ts apps/web/src/features/viewer-engine/builtin-viewers/subtitle-source.test.ts apps/web/src/features/viewer-engine/builtin-viewers/motion-timing.test.ts apps/api/src/viewer-timing.test.ts`: **39 passed, 1 opt-in benchmark skipped**; benchmark separately executed above.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/video-mse.test.ts`: **21 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion-subtitles.browser.test.ts`: **7 passed, Chromium**.
+- Same browser command with `apps/web/tests/motion-audio.browser.test.ts`: **4 passed, Chromium**; repeated with `NH_BROWSER=firefox`: **4 passed, Firefox**. Browser evidence does not establish physical millisecond audio/video synchronization.
+- `scripts/dev.sh pnpm typecheck`: **passed**, including browser-test types.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **passed**; existing bundle-size warnings remain.
+- `scripts/dev.sh pnpm exec biome check` on the nine changed TypeScript source/test files: **passed**.
+- Independent final review: **no remaining must-fix findings**. No full historical M1–M5 suite rerun for this scoped change.
+- `python3 scripts/check-governance.py`: **passed**, 834 indexed text files, 276 review PNGs, 681 relative links, 4 TOML files and 44 ignore cases; secret scanning remains heuristic. `git diff --cached --check`: **passed**.

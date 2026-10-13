@@ -308,12 +308,26 @@ describe('M5 Motion multiple audio tracks', () => {
     }
   });
 
-  it('seeks across the indexed file with bounded buffering and survives rapid track selections', async () => {
+  it('retains the source and cached media across seeks and survives rapid track selections', async () => {
     await open();
     await ready();
     const player = page.locator('.motion-player');
     const video = player.locator('video');
-    for (const target of [28, 3, 21]) {
+    await browserExpect
+      .poll(() =>
+        video.evaluate((element: HTMLVideoElement) =>
+          element.buffered.length ? element.buffered.end(0) : 0,
+        ),
+      )
+      .toBeGreaterThanOrEqual(12);
+    const originalSource = await video.evaluate((element: HTMLVideoElement) => element.currentSrc);
+    const originalBuffers = await page.evaluate(
+      () => (window as unknown as { motionFixtureMseTypes: string[] }).motionFixtureMseTypes.length,
+    );
+    let returnReads = 0;
+    let step = 0;
+    for (const target of [28, 3, 28, 21]) {
+      if (step === 1 || step === 2) returnReads = requests.length;
       await video.evaluate((element: HTMLVideoElement, seconds) => {
         element.currentTime = seconds;
       }, target);
@@ -323,13 +337,31 @@ describe('M5 Motion multiple audio tracks', () => {
           timeout: 15000,
         })
         .toBeGreaterThanOrEqual(2);
-      const buffered = await video.evaluate((element: HTMLVideoElement) => ({
-        time: element.currentTime,
-        start: element.buffered.length ? element.buffered.start(0) : 0,
-        end: element.buffered.length ? element.buffered.end(element.buffered.length - 1) : 0,
-      }));
-      expect(buffered.end - buffered.time).toBeLessThanOrEqual(15);
-      expect(buffered.time - buffered.start).toBeLessThanOrEqual(10);
+      await browserExpect
+        .poll(() => video.evaluate((element: HTMLVideoElement) => element.seeking))
+        .toBe(false);
+      expect(await video.evaluate((element: HTMLVideoElement) => element.currentSrc)).toBe(
+        originalSource,
+      );
+      expect(
+        await page.evaluate(
+          () =>
+            (window as unknown as { motionFixtureMseTypes: string[] }).motionFixtureMseTypes.length,
+        ),
+      ).toBe(originalBuffers);
+      const retained = await video.evaluate((element: HTMLVideoElement) =>
+        Array.from({ length: element.buffered.length }, (_, index) => [
+          element.buffered.start(index),
+          element.buffered.end(index),
+        ]),
+      );
+      expect(
+        retained.some(
+          ([start, end]) => start !== undefined && end !== undefined && start <= 3 && end >= 3,
+        ),
+      ).toBe(true);
+      if (step === 1 || step === 2) expect(requests.length).toBe(returnReads);
+      step++;
     }
     for (const name of [/Tono italiano/, /English tone/, /Tono italiano/]) await select(name);
     await ready();

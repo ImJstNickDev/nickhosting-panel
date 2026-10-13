@@ -247,20 +247,32 @@ and the [FFmpeg muxer's subtitle cue generation](https://github.com/FFmpeg/FFmpe
 An otherwise well-formed but incomplete subtitle index cannot establish complete
 caption coverage and is not supported. Missing/incomplete index fields on ordinary
 files use the same parser on the backend through the existing authorized SFTP
-handle. Small 1 KiB reads skip audio/video payload lengths; the browser receives
-only a caption window from `GET /files/viewer/subtitles`. Archive members keep the
+handle. The reader coalesces locally adjacent requests up to 512 KiB, using
+the previous actual requested endpoint (including cache hits) to identify locality.
+Distant jumps use 1 KiB prefixes instead of reading large irrelevant media blocks.
+The browser receives only a caption window from `GET /files/viewer/subtitles`. Archive members keep the
 bounded browser Range fallback. Large unindexed files/deep seeks may still report
 subtitles unavailable when the scan budget is exhausted, rather than download an
 entire movie. This limitation affects captions only.
 No automatic repair, provider write or transcoding is performed.
 
-The browser keeps a 2 MiB range cache and one 20-second caption window. Each
-operation has an 8 MiB read budget and a 15-second deadline; limits also bound
+The browser keeps a 2 MiB range cache, the current 20-second caption window and
+at most one overlapping request in flight. Extraction begins alongside renderer
+initialization; metadata events and seeks within a covered window reuse completed
+or pending work. Refresh starts three seconds before the current window ends,
+keeping its captions visible while the next response arrives.
+Each parser operation has an 8 MiB baseline read budget and a 15-second deadline.
+The backend additionally permits up to 24 MiB of speculative read-ahead (32 MiB
+maximum transferred per operation), then reverts to small reads. This reduces
+round trips by deliberately transferring some unused bytes; it neither stores
+the whole film nor guarantees fast arbitrary seeks into large unindexed media.
+Limits also bound
 index entries, cue text and fonts. The backend keeps at most eight parsed sessions,
 with a 2 MiB metadata cache per reader and 60-second idle expiry. Retained state is
 bound to the authenticated session, actor/subject and file revision; each request
-reauthorizes access. Selecting Off, switching tracks, seeking or
-closing the viewer aborts stale reads and destroys unused rendering workers.
+reauthorizes access. Selecting Off, switching tracks or closing the viewer aborts stale reads and
+destroys unused rendering workers. Seeking outside pending coverage replaces the
+read; a permanent failure stops background extraction until explicit Retry.
 ASS initialization is bounded; runtime operations have a 5-second deadline and
 worker destruction has a 1-second termination fallback.
 
@@ -281,3 +293,45 @@ video/audio continue. English and Italian controls use the existing catalog.
 
 See [dependency notices and distribution obligations](M5-DEPENDENCIES.md#motion-subtitle-rendering)
 and the append-only [validation evidence](M5-VALIDATION.md).
+
+## Motion retained playback buffer
+
+Same-track seeks preserve the MediaSource, SourceBuffer, demux input and bounded
+Range cache. An unbuffered seek replaces only the remux pump; compatible fragment
+initialization resets the segment parser without discarding retained frames.
+Changing audio track may rebuild the source so stale audio cannot be played.
+The initial `mse.start` trace spans metadata through the first playable buffer;
+subsequent pump work is reported separately as `mse.refill`.
+
+The Owner-selected retention policy is **128 MiB of appended compressed audio/video
+bytes, without a time-based expiry**. Forward production remains approximately
+12 seconds, rather than automatically filling 128 MiB. Under byte or browser
+quota pressure, distant media is removed while protecting the current position.
+The byte ledger reconciles native buffered ranges, including browser eviction;
+partially retained fragments remain conservatively charged. Range and demux
+caches, decoder surfaces and other browser allocations are separate: this is not
+a 128 MiB total browser-memory promise. Closing the viewer releases its session;
+cache is not persisted to disk or shared between users.
+
+Reference: [W3C Media Source Extensions](https://www.w3.org/TR/2016/REC-media-source-20161117/),
+particularly parser reset, compatible initialization segments and coded-frame eviction.
+
+## Subtitle lookup research and bounded simulations
+
+Reviewed upstream on 2026-10-13, as design references only; no code was copied:
+
+- [mpv MKV demuxer at c3ac7f3](https://github.com/mpv-player/mpv/blob/c3ac7f39514c7f45bc38a18e66887240539ee33c/demux/demux_mkv.c): deferred Cues, incremental indexing toward a target, and duration-aware subtitle pre-roll.
+- [mpv stream buffering](https://github.com/mpv-player/mpv/blob/c3ac7f39514c7f45bc38a18e66887240539ee33c/stream/stream.c): buffered reads and reuse of nearby positions.
+- [VLC segment seeker at 1176b56](https://github.com/videolan/vlc/blob/1176b56bdef7b96c9d6518b62be37ec8c32d92ed/modules/demux/mkv/matroska_segment_seeker.cpp): known cluster/seekpoint lookup and exclusion of already searched byte intervals.
+
+The inspected files carry LGPL-2.1-or-later notices; they remain references, not
+new bundled dependencies or repository licensing changes. Our existing parser
+already prefers usable subtitle indexes, retains cluster positions/durations and
+skips known expired clusters. Without such an index, an arbitrary byte guess or
+a video-only seekpoint does not prove that a long preceding caption has ended.
+The optimization therefore aggregates nearby metadata reads while preserving
+coverage and bounded work, rather than replacing lookup with a guessed offset.
+Sparse virtual files exercise size/density without allocating their full media
+payload. Their request/byte counts are deterministic; their in-memory CPU times
+are not predictions of SFTP/network performance. See the validation report for
+separate real-file timings and failed fixed-block experiments.

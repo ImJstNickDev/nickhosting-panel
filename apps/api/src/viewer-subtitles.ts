@@ -7,14 +7,22 @@ import {
 import { ViewerFormatError, type ViewerReadSource } from './viewer-cache.js';
 
 const prefixBytes = 1024;
+const coalescedBytes = 512 * 1024;
+const maximumReadAheadBytes = 24 * 1024 * 1024;
+const nearbyGapBytes = 16 * 1024;
 const cacheBytes = 2 * 1024 * 1024;
 
-/** Small forward reads skip A/V payloads instead of fetching 64 KiB HTTP blocks. */
+/** Coalesce nearby metadata reads; distant media payloads still use small prefixes.
+ * The parser keeps its 8 MiB demand budget. Read-ahead has a separate, bounded
+ * allowance, then falls back to small reads without failing a valid sparse scan.
+ */
 export class SubtitleMetadataReader implements SubtitleByteReader {
   #chunks = new Map<number, Uint8Array<ArrayBuffer>>();
   #bytes = 0;
   #budget = 0;
+  #readAheadBudget = 0;
   #generation = 0;
+  #lastRequestedEnd: number | undefined;
   #recent: { start: number; bytes: Uint8Array<ArrayBuffer> } | undefined;
   constructor(
     readonly source: ViewerReadSource,
@@ -23,12 +31,14 @@ export class SubtitleMetadataReader implements SubtitleByteReader {
   ) {}
   resetBudget(bytes: number) {
     this.#budget = bytes;
+    this.#readAheadBudget = Math.min(maximumReadAheadBytes, bytes * 3);
   }
   clear() {
     this.#generation++;
     this.#chunks.clear();
     this.#bytes = 0;
     this.#recent = undefined;
+    this.#lastRequestedEnd = undefined;
   }
   async read(start: number, end: number): Promise<Uint8Array<ArrayBuffer>> {
     this.signal.throwIfAborted();
@@ -42,6 +52,8 @@ export class SubtitleMetadataReader implements SubtitleByteReader {
     )
       throw new ViewerFormatError('viewer_subtitles_unavailable');
     if (start === end) return new Uint8Array();
+    const previousEnd = this.#lastRequestedEnd;
+    this.#lastRequestedEnd = end;
     const hit = (offset: number, bytes: Uint8Array<ArrayBuffer>) =>
       start >= offset && end <= offset + bytes.length;
     if (this.#recent && hit(this.#recent.start, this.#recent.bytes))
@@ -53,9 +65,21 @@ export class SubtitleMetadataReader implements SubtitleByteReader {
       this.#recent = { start: offset, bytes };
       return bytes.subarray(start - offset, end - offset);
     }
-    const length = Math.min(this.source.size - start, Math.max(prefixBytes, end - start));
-    if (length > this.#budget) throw new ViewerFormatError('viewer_subtitles_unavailable');
-    this.#budget -= length;
+    const required = Math.min(this.source.size - start, Math.max(prefixBytes, end - start));
+    if (required > this.#budget) throw new ViewerFormatError('viewer_subtitles_unavailable');
+    // Judge locality by the parser's requested bytes, not by speculative chunk
+    // boundaries: a large skipped video packet is never mistaken for dense text.
+    const nearby =
+      previousEnd === undefined || (start >= previousEnd && start - previousEnd <= nearbyGapBytes);
+    const length = Math.min(
+      this.source.size - start,
+      Math.max(
+        required,
+        Math.min(nearby ? coalescedBytes : prefixBytes, required + this.#readAheadBudget),
+      ),
+    );
+    this.#budget -= required;
+    this.#readAheadBudget -= length - required;
     const generation = this.#generation;
     const aborted = Promise.withResolvers<never>();
     const onAbort = () =>

@@ -1,4 +1,5 @@
 import { type RefObject, useEffect, useRef, useState } from 'react';
+import { subtitleLimits } from '../../../../../../packages/core/src/media-subtitles.js';
 import type { MotionTrace } from '../../../../../../packages/core/src/motion-timing.js';
 import type { SubtitleRenderer } from './subtitle-renderer.js';
 import type { SubtitleSource, SubtitleTrack, SubtitleWindow } from './subtitle-source.js';
@@ -39,34 +40,81 @@ export function useVideoSubtitles({
     let source: SubtitleSource | null = null;
     let renderer: SubtitleRenderer | null = null;
     let window: SubtitleWindow | null = null;
-    let read: AbortController | null = null;
+    let read: { cancellation: AbortController; start: number; end: number } | null = null;
+    let applied: SubtitleWindow | null = null;
+    let applying: { window: SubtitleWindow | null } | null = null;
+    let application = 0;
     let setup: AbortController | null = null;
     let selected: string | null = null;
     let generation = 0;
+    let failed = false;
     const publish = (patch: Partial<SubtitleState>) => {
       if (!lifetime.signal.aborted) setState((current) => ({ ...current, ...patch }));
     };
     const fail = (attempt: number) => {
       if (attempt !== generation || lifetime.signal.aborted) return;
       ++generation;
+      failed = true;
       setup?.abort();
-      read?.abort();
+      read?.cancellation.abort();
       read = null;
       renderer?.destroy();
       renderer = null;
       window = null;
+      applied = null;
+      applying = null;
+      ++application;
       publish({ error: true });
     };
+    const covers = (value: { start: number; end: number }, time: number) =>
+      time >= value.start && time < value.end;
+    const applyWindow = async (next: SubtitleWindow | null) => {
+      if (!renderer || (applying ? applying.window === next : applied === next)) return;
+      const attempt = generation;
+      const update = ++application;
+      applying = { window: next };
+      const finish = trace?.span('subtitles.apply');
+      try {
+        await renderer.setWindow(next ?? { start: 0, end: 0, cues: [] });
+        const cancelled =
+          attempt !== generation || update !== application || lifetime.signal.aborted;
+        finish?.({ outcome: cancelled ? 'cancelled' : 'succeeded', count: next?.cues.length ?? 0 });
+        if (!cancelled) applied = next;
+      } catch {
+        finish?.({
+          outcome: attempt !== generation || lifetime.signal.aborted ? 'cancelled' : 'failed',
+        });
+        if (update === application) fail(attempt);
+      } finally {
+        if (update === application) applying = null;
+      }
+    };
     const load = async () => {
-      if (!source || !selected || !renderer || read) return;
+      if (!source || !selected || failed || lifetime.signal.aborted) return;
       const time = video.currentTime;
       if (!Number.isFinite(time)) return;
-      if (window && time >= window.start && time < window.end - 3) return;
+      // Keep a useful read across duplicate metadata/seek events. A genuinely different
+      // position cancels it; at most one window is ever being extracted in the background.
+      if (read && !covers(read, time)) {
+        read.cancellation.abort();
+        read = null;
+      }
+      if (window && covers(window, time)) {
+        void applyWindow(window);
+        if (time < window.end - 3) return;
+      } else {
+        void applyWindow(null);
+      }
+      if (read) return;
       const attempt = generation;
       const cancellation = new AbortController();
-      read = cancellation;
-      let finish = trace?.span('subtitles.window');
-      let apply: ReturnType<MotionTrace['span']> | undefined;
+      const pending = {
+        cancellation,
+        start: Math.max(0, time - 2),
+        end: time + subtitleLimits.windowSeconds,
+      };
+      read = pending;
+      const finish = trace?.span('subtitles.window');
       try {
         const next = await source.readWindow(selected, time, cancellation.signal);
         finish?.({
@@ -74,38 +122,41 @@ export function useVideoSubtitles({
           count: next.cues.length,
           mediaSeconds: time,
         });
-        finish = undefined;
         if (attempt !== generation || cancellation.signal.aborted || lifetime.signal.aborted)
           return;
-        apply = trace?.span('subtitles.apply');
-        await renderer?.setWindow(next);
-        apply?.({
-          outcome: cancellation.signal.aborted ? 'cancelled' : 'succeeded',
-          count: next.cues.length,
-        });
-        apply = undefined;
-        if (attempt === generation && !cancellation.signal.aborted) window = next;
+        // Retain current captions while obtaining the next overlapping window. Extracting
+        // during renderer initialization is safe: setup applies this cached result later.
+        window = next;
+        if (covers(next, video.currentTime)) await applyWindow(next);
       } catch {
         const outcome =
           cancellation.signal.aborted || lifetime.signal.aborted ? 'cancelled' : 'failed';
         finish?.({ outcome });
-        apply?.({ outcome });
         if (!cancellation.signal.aborted) fail(attempt);
       } finally {
-        if (read === cancellation) read = null;
+        if (read === pending) {
+          read = null;
+          // A source cache can return a shorter existing window. A paused seek made
+          // during that read still needs its final position, without waiting for playback.
+          if (window && !covers(window, video.currentTime)) void load();
+        }
       }
     };
     const select = async (id: string | null) => {
       const attempt = ++generation;
+      failed = false;
       setup?.abort();
       const initialization = new AbortController();
       setup = initialization;
       const signal = AbortSignal.any([lifetime.signal, initialization.signal]);
-      read?.abort();
+      read?.cancellation.abort();
       read = null;
       renderer?.destroy();
       renderer = null;
       window = null;
+      applied = null;
+      applying = null;
+      ++application;
       selected = id;
       publish({ selectedId: id, error: false });
       if (!id || !source) return;
@@ -114,6 +165,8 @@ export function useVideoSubtitles({
         fail(attempt);
         return;
       }
+      // Extraction and renderer modules/fonts are independent; overlap their I/O.
+      void load();
       const finish = trace?.span('subtitles.renderer');
       let rendererReady: ReturnType<MotionTrace['span']> | undefined;
       const imported = trace?.span('subtitles.renderer_import');
@@ -203,15 +256,7 @@ export function useVideoSubtitles({
       }
     };
     const update = () => void load();
-    const seek = () => {
-      read?.abort();
-      read = null;
-      window = null;
-      // Clear the previous position while the newly requested window is arriving.
-      const attempt = generation;
-      void renderer?.setWindow({ start: 0, end: 0, cues: [] }).catch(() => fail(attempt));
-      void load();
-    };
+    const seek = () => void load();
     commands.current = {
       select: (id) => void select(id),
       retry: () => void (source ? select(selected) : discover()),
@@ -224,7 +269,7 @@ export function useVideoSubtitles({
       ++generation;
       lifetime.abort();
       setup?.abort();
-      read?.abort();
+      read?.cancellation.abort();
       renderer?.destroy();
       source?.dispose();
       commands.current = { select: () => {}, retry: () => {} };
