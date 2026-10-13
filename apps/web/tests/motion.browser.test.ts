@@ -199,6 +199,86 @@ describe('M5 Motion video viewer', () => {
     expect(requests.some((request) => request.destination === 'video' && request.range)).toBe(true);
   });
 
+  it('fits native video proportions into the available page height without scroll feedback', async () => {
+    await page.setViewportSize({ width: 1920, height: 1000 });
+    await open();
+    await ready();
+    const player = page.locator('.motion-player');
+    const geometry = () =>
+      player.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        const video = element.querySelector('video');
+        const controls = element.querySelector('.motion-controls');
+        if (!video || !controls || !element.parentElement)
+          throw new Error('Missing player geometry');
+        return {
+          width: bounds.width,
+          height: bounds.height,
+          top: bounds.top + window.scrollY,
+          viewport: window.visualViewport?.height ?? window.innerHeight,
+          ratio: video.videoWidth / video.videoHeight,
+          minimum: Math.max(160, (controls as HTMLElement).offsetHeight + 24),
+          wrapperHeight: element.parentElement.getBoundingClientRect().height,
+          fit: getComputedStyle(video).objectFit,
+        };
+      });
+    const expectFit = async () => {
+      await browserExpect
+        .poll(async () => {
+          const g = await geometry();
+          const desired = Math.max(g.minimum, Math.min(g.width / g.ratio, g.viewport - g.top - 16));
+          return Math.abs(g.height - desired);
+        })
+        .toBeLessThanOrEqual(1);
+      const g = await geometry();
+      expect(g.wrapperHeight - g.height).toBeLessThanOrEqual(2);
+      expect(g.fit).toBe('contain');
+      return g;
+    };
+    try {
+      const large = await expectFit();
+      expect(large.height).toBeGreaterThan(650); // Former 65vh ceiling at this viewport.
+      expect(large.top + large.height).toBeLessThanOrEqual(985);
+      await screenshot('file-viewer-motion-fit-desktop-en');
+      await page.setViewportSize({ width: 1280, height: 1000 });
+      const fitting = await expectFit();
+      expect(Math.abs(fitting.width / fitting.ratio - fitting.height)).toBeLessThanOrEqual(1);
+      // Geometry-only metadata event: no claim of decoding a second media format.
+      const video = player.locator('video');
+      await video.evaluate((element: HTMLVideoElement) => {
+        Object.defineProperty(element, 'videoHeight', { configurable: true, value: 240 });
+        element.dispatchEvent(new Event('resize'));
+      });
+      await expectFit();
+      await video.evaluate((element) => {
+        Reflect.deleteProperty(element, 'videoHeight');
+        element.dispatchEvent(new Event('resize'));
+      });
+      await page.setViewportSize({ width: 840, height: 400 });
+      const short = await expectFit();
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      // Exercise a scheduled resize while scrolled, not just the lack of a scroll listener.
+      await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+      await expectFit();
+      expect((await geometry()).height).toBe(short.height);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
+      await open();
+      await ready();
+      const mobile = await expectFit();
+      expect(Math.abs(mobile.width / mobile.ratio - mobile.height)).toBeLessThanOrEqual(1);
+      await screenshot('file-viewer-motion-fit-mobile-it');
+      expect(
+        (await new AxeBuilder({ page }).include('.motion-player').analyze()).violations,
+      ).toEqual([]);
+    } finally {
+      await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+    }
+    expect(errors).toEqual([]);
+  });
+
   it('uses three stage zones, temporary 2x holds, and F/M without stealing input keys', async () => {
     await open();
     await ready();

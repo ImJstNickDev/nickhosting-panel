@@ -1010,3 +1010,14 @@ A/V range fails instead of waiting indefinitely; an initial gap under one second
 may advance to the actual first common timestamp without shifting packet timing.
 These limits constrain hostile or unusual files and do not certify arbitrary
 high-bitrate, long-GOP, negative-timestamp or damaged media.
+
+Motion's inline height follows the video's intrinsic aspect ratio and the space
+remaining below its Files toolbar, with a 16 px bottom margin. It may grow beyond
+the former 65vh / 672 px ceiling; where the video fits, the stage matches its
+proportions instead of adding artificial bands. `object-fit: contain` preserves
+the complete image when the viewport cannot fit that ratio. A small minimum
+keeps controls usable on very short screens, allowing normal page scrolling.
+Window/visual-viewport, source-dimension and control-layout changes recompute the
+fit; ordinary page scrolling does not enlarge the player. The known ratio is
+retained while an audio switch reloads metadata. Fullscreen keeps its own native
+viewport sizing. No playback, provider or transcoding behavior changes.

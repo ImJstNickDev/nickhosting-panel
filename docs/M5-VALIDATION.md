@@ -8207,3 +8207,39 @@ including relative documentation links, tracked-content hygiene, ignore fixtures
 TOML and reviewed PNGs. Secret scanning remains heuristic. Final independent
 review also checked the disclosed Firefox measurement limit and found no hidden
 pass substitution or remaining must-fix. PR #21 stays open and unmerged.
+
+### Motion viewport and aspect-ratio fit (2026-10-13)
+
+Motion replaces its fixed 65vh / 672 px height with the native video's aspect
+ratio constrained to the remaining viewport below the Files toolbar, leaving
+16 px at the bottom. A Motion-only wrapper override removes the old minimum
+height that otherwise left unused dark space. Video remains `object-fit: contain`:
+unavoidable bands stay when preserving the whole image requires them. Short
+screens retain a usable control area and may scroll. Source metadata, intrinsic
+resize, window/visual viewport and toolbar changes update geometry; ordinary
+page scrolling cannot progressively enlarge the player. Fullscreen is unchanged.
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **pass**.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: **pass**, existing large app/editor chunk warnings remain.
+- Scoped `scripts/dev.sh pnpm exec biome check` on the layout hook, video component/CSS and Motion browser test: **pass**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'fits native video proportions|controls volume, repeat|keeps Italian controls' --silent=false`: **3 passed, 7 skipped**, 24.60 s on the actual workspace. Covers larger desktop sizing, native proportions, wrapper slack, metadata resize, short-window scroll stability, mobile/axe and fullscreen controls.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/motion.browser.test.ts -t 'fits native video proportions' --silent=false`: **1 passed, 9 skipped**, 28.90 s.
+
+The initial browser attempt was blocked before Motion loaded by an unfinished,
+unrelated parallel `server-browser.css` import. A disposable snapshot attempt
+also stopped during harness setup (missing local dependency/test-path wiring);
+no product workaround was applied. Once the parallel file existed, the actual
+workspace runs above passed. The snapshot was removed. Historical full suites
+were not rerun for this layout-only change.
+
+Reviewed screenshots: [desktop EN](screenshots/m5/file-viewer-motion-fit-desktop-en.png)
+and [mobile IT](screenshots/m5/file-viewer-motion-fit-mobile-it.png). Independent
+code and visual review found no must-fix issues: complete image, modest margins,
+unclipped controls and readable mobile rows. Synthetic dimension-change coverage
+is geometry-only, not certification of another codec. No infrastructure/provider
+operations, restarts, live assets or new dependencies; existing HMR applies the
+change. Browser harnesses closed. Rollback is a source revert. SFTPGo #18 and all
+production boundaries remain unchanged; PR #21 stays open and unmerged.
+
+Final indexed `python3 scripts/check-governance.py` and `git diff --cached --check`
+pass, including documentation links, reviewed PNGs and tracked-content hygiene.

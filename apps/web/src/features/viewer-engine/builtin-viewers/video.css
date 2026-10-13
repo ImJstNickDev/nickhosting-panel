@@ -1,4 +1,5 @@
 .ve-body:has(> .motion-player) {
+  min-height: 0;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
   background: #101519;
@@ -7,8 +8,8 @@
   position: relative;
   isolation: isolate;
   width: 100%;
-  height: min(65vh, 42rem);
-  min-height: 20rem;
+  height: var(--motion-height, min(65dvh, 42rem));
+  min-height: 0;
   color: #f6f8f9;
   background: #101519;
   overflow: hidden;
@@ -265,10 +266,6 @@
   color: var(--text, #202b35);
 }
 @media (max-width: 600px) {
-  .motion-player {
-    height: min(60vh, 28rem);
-    min-height: 19rem;
-  }
   .motion-controls {
     padding: 2.5rem 0.75rem 0.5rem;
   }

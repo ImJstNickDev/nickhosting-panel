@@ -16,6 +16,7 @@ import { ViewerSelect } from '../viewer-select.js';
 import { AudioPlaybackClock } from './audio-playback-clock.js';
 import { useMediaShortcuts } from './media-shortcuts.js';
 import { VideoIcon, type VideoIconKind } from './video-icons.js';
+import { useVideoLayout } from './video-layout.js';
 import { useVideoSource } from './video-source.js';
 import { useVideoThumbnail } from './video-thumbnail.js';
 import './video.css';
@@ -37,6 +38,7 @@ export default function VideoViewer({ serverId, source }: ViewerProps) {
   const { locale } = useLocale();
   const stage = useRef<HTMLDivElement>(null);
   const controls = useRef<HTMLDivElement>(null);
+  useVideoLayout(stage, media, controls);
   const generation = useRef(0);
   const lifecycle = useRef(0);
   const lastVolume = useRef(1);
