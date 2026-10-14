@@ -17,7 +17,9 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
   let editorRequests = 0;
   const stage = `./mountdata/test-assets/file-browser-${randomUUID()}`;
   beforeAll(async () => {
-    harness = await browserHarness();
+    harness = await browserHarness({
+      browser: process.env.NH_BROWSER === 'firefox' ? 'firefox' : 'chromium',
+    });
     harness.env.NH_FILE_OPERATIONS_ROOT = stage;
     const identities = await prepareJourneyIdentities(harness);
     user = identities.user;
@@ -2220,5 +2222,80 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       );
     }
     expect(errors).toEqual([]);
+  });
+  it.each([
+    ['windows.csv', '\r\n', ','],
+    ['windows.tsv', '\r\n', '\t'],
+    ['unix.csv', '\n', ','],
+    ['classic.tsv', '\r', '\t'],
+  ])(
+    'opens %s clean and preserves line endings through editing, undo, paste and save',
+    async (name, newline, delimiter) => {
+      const files = await provider.files();
+      const original = `name${delimiter}value${newline}Alice${delimiter}001${newline}`;
+      files.set(name, Buffer.from(original));
+      await openRoot(user);
+      await row(name).getByRole('button', { name, exact: true }).click();
+      const editor = user.locator('.cm-content');
+      await browserExpect(editor).toBeFocused();
+      await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+      await browserExpect(
+        user.getByRole('button', { name: 'Save changes', exact: true }),
+      ).toBeDisabled();
+      await browserExpect(user.getByRole('button', { name: 'Undo', exact: true })).toBeDisabled();
+      expect(files.get(name)?.toString()).toBe(original);
+      await editor.press('Control+Home');
+      await editor.press('x');
+      await browserExpect(
+        user.getByRole('button', { name: 'Save changes', exact: true }),
+      ).toBeEnabled();
+      await editor.press('Control+z');
+      await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+      await editor.press('Control+Shift+z');
+      await editor.press('Control+s');
+      await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+      expect(files.get(name)?.toString()).toBe(`x${original}`);
+      await editor.press('Control+End');
+      await editor.evaluate((element) => {
+        // Supply deterministic clipboard bytes: Firefox restricts DataTransfer on
+        // synthetic clipboard events, independently of CodeMirror's paste handling.
+        const event = new Event('paste', { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'clipboardData', {
+          value: {
+            getData: (type: string) => (type === 'text/plain' ? 'Bob,002\nCarol,003\n' : ''),
+          },
+        });
+        element.dispatchEvent(event);
+      });
+      await browserExpect(editor.locator('.cm-line')).toHaveCount(5);
+      await editor.press('Control+s');
+      await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+      expect(files.get(name)?.toString()).toBe(`x${original}Bob,002${newline}Carol,003${newline}`);
+      await editor.press('Control+f');
+      const search = user.locator('.fm-search-panel');
+      await search.getByRole('textbox', { name: 'Find', exact: true }).fill(',');
+      await search.getByRole('button', { name: 'Replace', exact: true }).click();
+      await search.getByRole('textbox', { name: 'Replace with', exact: true }).fill('\\n');
+      await search.getByRole('button', { name: 'Replace all', exact: true }).click();
+      const replaced = `x${original}Bob,002${newline}Carol,003${newline}`.replaceAll(',', newline);
+      await browserExpect(editor.locator('.cm-line')).toHaveCount(replaced.split(newline).length);
+      await search.getByRole('button', { name: 'Close', exact: true }).click();
+      await editor.press('Control+s');
+      await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+      expect(files.get(name)?.toString()).toBe(replaced);
+    },
+  );
+  it('does not mark mixed line endings as edited merely by opening', async () => {
+    const files = await provider.files();
+    const original = 'a,b\r\n1,2\n3,4\r';
+    files.set('mixed.csv', Buffer.from(original));
+    await openRoot(user);
+    await row('mixed.csv').getByRole('button', { name: 'mixed.csv', exact: true }).click();
+    await browserExpect(user.locator('.cm-content')).toBeFocused();
+    await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+    await browserExpect(
+      user.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toBeDisabled();
+    expect(files.get('mixed.csv')?.toString()).toBe(original);
   });
 });

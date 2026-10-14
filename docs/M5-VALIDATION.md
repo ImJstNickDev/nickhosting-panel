@@ -9098,3 +9098,42 @@ immediate ArrowDown and no footer tooltip, plus the existing precision/copy/acce
 checks. Focused Biome passed for both changed TSX/test files. No production access,
 container changes, new resources or provider mutations; existing dev HMR applies
 this UI-only correction.
+
+### 2026-10-14 — Scribe false unsaved state for CSV/TSV
+
+Read-only inspection of the Owner's two reported table fixtures confirmed 121
+CRLF-terminated records in each. No contents or private paths are published and no
+live file was modified. CodeMirror normalized those separators to LF; the prop
+synchronization compared its normalized text against the original CRLF string,
+replaced the document and emitted a false user edit.
+
+Scribe now tracks the synchronized raw value, preserves uniform CRLF/LF/CR when
+serializing real edits, and marks external updates as non-user/non-history changes.
+CodeMirror keeps its flexible internal parser, including paste/drop and search
+replacement. Syntax diagnostic offsets still use the normalized internal document.
+Separator detection runs at initial load or external replacement, not on each key.
+Mixed-ending files open clean; their existing normalization to LF on actual editing
+is unchanged. Exact mixed-ending edit/undo preservation is not claimed by this fix.
+
+The first browser attempt used the wrong accessible Save label; corrected to the
+existing “Save changes”. The initial fixed-separator implementation was discarded
+after independent review reproduced incorrect logical lines for escaped-newline
+search replacements. The final serialization-only implementation covers that case.
+
+Final validation:
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'line endings'`: **5 passed**, 34 intentionally skipped, Chromium.
+- Same command with `NH_BROWSER=firefox`: **5 passed**, 34 intentionally skipped.
+  Firefox's initial synthetic DataTransfer paste fixture supplied no text; replacing
+  it with deterministic clipboard data made the same application-handler assertions
+  pass. This exercises editor paste handling, not an operating-system clipboard grant.
+- Cases cover CRLF CSV/TSV, LF and CR opening, real edit, undo/redo, exact saved bytes,
+  multiline paste, escaped-newline Replace All and mixed-ending opening without writes.
+- `scripts/dev.sh pnpm exec tsc --noEmit -p apps/web/tsconfig.json` and
+  `scripts/dev.sh pnpm exec tsc --noEmit -p apps/web/tsconfig.tests.json`: passed.
+- Focused Biome and `git diff --check`: passed. Independent final review:
+  no must-fix findings. No complete historical suite rerun for this focused fix.
+
+Only read-only sample inspection used the existing viewer SFTPGo read-only mount.
+Browser mutations used isolated provider fixtures and already approved test services;
+no real files were saved, no infrastructure changed and no containers restarted.
+The update uses existing frontend HMR; rollback is a source revert.
