@@ -587,6 +587,14 @@ button. Pending
 requests disable Cancel/Close/Delete and block Escape; failures remain visible
 without automatically repeating the deletion.
 
+`ConfirmDialog` in `components/ui.tsx` now owns this confirmation layout and
+keyboard/pending/error behavior for Fileman deletion and Datagrid row/column deletion.
+It uses the existing `Dialog`/`ActionForm` primitives and renders outside surrounding
+editor forms; submission must never propagate into an editor save. Datagrid deletion
+changes the shared draft only and remains undoable. Rename forms and unrelated dialogs
+retain their own layouts; other destructive flows can adopt the shared confirmation
+explicitly instead of changing every dialog through global styling.
+
 Toolbar/context-menu moves, copies and folder/parent/breadcrumb drops share one
 conflict flow. Drops move directly when fresh metadata has no collision. Otherwise the
 current conflicting filename and destination appear in a centered confirmation

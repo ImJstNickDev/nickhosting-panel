@@ -20,7 +20,15 @@ import { ApiError, api, apiError, download, queryClient, upload } from '../api/c
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
-import { ActionForm, Dialog, Empty, ErrorNotice, Input, text } from '../components/ui.js';
+import {
+  ActionForm,
+  ConfirmDialog,
+  Dialog,
+  Empty,
+  ErrorNotice,
+  Input,
+  text,
+} from '../components/ui.js';
 import {
   type FileClipboard,
   type FileOrder,
@@ -2802,45 +2810,50 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
           </button>
         </Dialog>
         {transferFlow.dialog}
+        <ConfirmDialog
+          key={`delete:${targets.join(',')}`}
+          open={mode === 'delete'}
+          title={t('web.delete')}
+          confirmLabel={t('web.delete')}
+          destructive
+          busy={mutating}
+          onClose={closeEditor}
+          onConfirm={async () => {
+            if (!canMutate) throw { messageKey: 'error.forbidden' };
+            await mutation({
+              action: 'delete',
+              root: directory,
+              files: targets,
+              confirm: true,
+            });
+          }}
+        >
+          <FileSelectionSummary names={targets} />
+          <p>{t('file.deleteWarning', { count: targets.length })}</p>
+        </ConfirmDialog>
         <Dialog
-          open={Boolean(mode) && (!displaying || mode === 'extract')}
-          className={mode === 'delete' ? 'fm-delete-confirm' : undefined}
+          open={Boolean(mode) && mode !== 'delete' && (!displaying || mode === 'extract')}
           title={t(
             mode === 'mkdir'
               ? 'service.newFolder'
               : mode === 'rename'
                 ? 'service.rename'
-                : mode === 'delete'
-                  ? 'web.delete'
-                  : 'file.extract',
+                : 'file.extract',
           )}
           onClose={() => {
             if (mode && !['view', 'edit', 'new'].includes(mode)) closeEditor();
           }}
           closeIcon
           closeDisabled={mutating}
-          initialFocusSelector={mode === 'delete' ? '[data-form-cancel]' : undefined}
         >
           <ActionForm
             key={`${mode}:${targets.join(',')}`}
             success={false}
-            destructive={mode === 'delete'}
-            arrowActionNavigation={mode === 'delete'}
-            onCancel={mode === 'delete' ? closeEditor : undefined}
-            submitLabel={t(
-              mode === 'delete' ? 'web.delete' : mode === 'extract' ? 'file.extract' : 'web.save',
-            )}
+            submitLabel={t(mode === 'extract' ? 'file.extract' : 'web.save')}
             onSubmit={async (data) => {
               if (!canMutate) throw { messageKey: 'error.forbidden' };
               if (mode === 'mkdir')
                 await mutation({ action: 'mkdir', root: directory, name: text(data, 'name') });
-              else if (mode === 'delete')
-                await mutation({
-                  action: 'delete',
-                  root: directory,
-                  files: targets,
-                  confirm: true,
-                });
               else if (mode === 'rename')
                 await mutation({
                   action: 'rename',
@@ -2874,12 +2887,6 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       : ''
                 }
               />
-            )}
-            {mode === 'delete' && (
-              <>
-                <FileSelectionSummary names={targets} />
-                <p>{t('file.deleteWarning', { count: targets.length })}</p>
-              </>
             )}
             {mode === 'extract' && (
               <>

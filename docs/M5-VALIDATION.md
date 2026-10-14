@@ -9283,3 +9283,39 @@ independent production-release gate.
 Reviewed captures:
 [desktop context menu](screenshots/m5/datagrid-csv-context-menu-desktop-en.png),
 [Italian mobile menu](screenshots/m5/datagrid-csv-context-menu-mobile-it.png).
+
+### 2026-10-14 — Shared destructive confirmation
+
+Extracted Fileman's centered confirmation into `ConfirmDialog`, now used by Fileman
+and Datagrid deletion. Neutral Cancel initially focused, red Delete, close icon,
+arrow navigation, pending-dismissal protection and visible retryable errors reuse
+existing primitives. Rename and other modal layouts are unchanged. Datagrid still
+modifies only its shared draft until Save; Fileman retains its existing permission
+check and delete request. No new backend/API/configuration or dependency.
+
+Focused commands, via `scripts/dev.sh`:
+
+- `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/delimited.browser.test.ts apps/web/tests/file-shortcuts.browser.test.ts -t 'shared destructive confirmation|shared deletion confirmation|defaults Delete confirmation|reconciles removed columns'`:
+  initial **2 passed, 2 failed** exposed a nested editor form/submit propagation.
+  ConfirmDialog now renders through a portal and ActionForm stops submit bubbling.
+  Rerun: **4 passed**, 21 unrelated cases skipped. Includes no unintended editor
+  write, local Undo, column deletion, pending Escape/Close protection, failure/retry
+  and English/Italian Fileman keyboard confirmation.
+- `NH_BROWSER=firefox` with the delimited browser file and
+  `-t 'shared destructive confirmation'`: **1 passed**, eleven skipped; desktop EN
+  and mobile IT, cancellation/focus, no unintended save, viewport bounds and zero
+  Axe WCAG AA violations for the desktop confirmation.
+- `pnpm --filter @nickhosting/web typecheck`, focused Biome and `git diff --check`:
+  **passed**. No full historical suite rerun.
+
+Reviewed screenshots:
+[Datagrid desktop](screenshots/m5/datagrid-delete-confirm-desktop-en.png),
+[Datagrid Italian mobile](screenshots/m5/datagrid-delete-confirm-mobile-it.png),
+[Fileman desktop](screenshots/m5/files-delete-keyboard-en.png),
+[Fileman Italian mobile](screenshots/m5/files-delete-keyboard-it.png).
+
+Existing approved isolated services and synthetic provider files only; harness
+state cleaned. No production files/resources, game servers, containers or networks
+were changed or restarted. Source loads through existing development HMR. Independent
+review covers shared component behavior, preserved mutation contracts and real renders.
+Issue #18 remains an independent production-release gate.

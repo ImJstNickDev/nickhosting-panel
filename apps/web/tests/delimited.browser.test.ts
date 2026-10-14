@@ -262,6 +262,62 @@ describe('Datagrid shared delimited document', () => {
       'name,count\r\nZoe,001\r\nBob,002\r\n"",""',
     );
   });
+  it('uses shared destructive confirmation with safe focus and keyboard controls', async () => {
+    await open('confirmation.csv', source);
+    const beforeWrites = writes.length;
+    await cell('Alice').click({ button: 'right' });
+    await menuItem('Delete row').click();
+    const dialog = page.getByRole('dialog', { name: 'Delete row', exact: true });
+    const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
+    const remove = dialog.getByRole('button', { name: 'Delete', exact: true });
+    await browserExpect(cancel).toBeFocused();
+    await browserExpect(dialog).toHaveClass('confirmation-dialog');
+    await browserExpect(remove).toHaveClass('danger');
+    await harness.screenshot(page, 'datagrid-delete-confirm-desktop-en');
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .include('.confirmation-dialog')
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await page.keyboard.press('Enter');
+    await browserExpect(dialog).not.toBeVisible();
+    await browserExpect(cell('Alice')).toBeVisible();
+    await clean();
+    await cell('Alice').click({ button: 'right' });
+    await menuItem('Delete row').click();
+    await browserExpect(cancel).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await browserExpect(remove).toBeFocused();
+    await page.keyboard.press('Enter');
+    await browserExpect(dialog).not.toBeVisible();
+    await browserExpect(cell('Alice')).toHaveCount(0);
+    expect(writes.length).toBe(beforeWrites);
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await browserExpect(cell('Alice')).toBeVisible();
+    await clean();
+    await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'it' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    try {
+      await open('confirmation.csv', source);
+      await cell('Alice').click({ button: 'right' });
+      await menuItem('Elimina riga').click();
+      const mobileDialog = page.getByRole('dialog', { name: 'Elimina riga', exact: true });
+      await browserExpect(
+        mobileDialog.getByRole('button', { name: 'Annulla', exact: true }),
+      ).toBeFocused();
+      await harness.screenshot(page, 'datagrid-delete-confirm-mobile-it');
+      const bounds = await mobileDialog.boundingBox();
+      expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390).toBe(true);
+      await mobileDialog.getByRole('button', { name: 'Annulla', exact: true }).click();
+      await browserExpect(cell('Alice')).toBeVisible();
+    } finally {
+      await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+    }
+  });
   it('preserves embedded mixed newlines through grid edits, undo and saving', async () => {
     const original = 'name,count\r\n"Alice\nSecond",001\r\nBob,002\r\n';
     await open('multiline.csv', original);

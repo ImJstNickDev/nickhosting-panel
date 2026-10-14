@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../../app/i18n.js';
 import { Tooltip } from '../../../components/tooltip.js';
-import { Dialog } from '../../../components/ui.js';
+import { ConfirmDialog, Dialog } from '../../../components/ui.js';
 import { FilemanToolbarIcon } from '../../fileman/presentation.js';
 import type { DocumentViewProps } from '../core/document-view.js';
 import { useViewerFind } from '../core/use-find.js';
@@ -849,21 +849,38 @@ export default function DelimitedView(props: DocumentViewProps) {
           onClose={() => setMenu(undefined)}
         />
       )}
+      <ConfirmDialog
+        open={!!action && action.type !== 'rename-header'}
+        title={t(action?.type === 'remove-row' ? 'delimited.removeRow' : 'delimited.removeColumn')}
+        confirmLabel={t('delimited.delete')}
+        destructive
+        busy={mutating}
+        onClose={() => setAction(undefined)}
+        onConfirm={async () => {
+          if (action && action.type !== 'rename-header' && (await mutate(action))) {
+            setAction(undefined);
+            setSelected(undefined);
+          }
+        }}
+      >
+        {failure && <p role="alert">{t(failure)}</p>}
+        <p>
+          {t(
+            action?.type === 'remove-row'
+              ? 'delimited.removeRowConfirm'
+              : 'delimited.removeColumnConfirm',
+          )}
+        </p>
+      </ConfirmDialog>
       <Dialog
-        open={!!action}
-        title={t(
-          action?.type === 'rename-header'
-            ? 'delimited.renameHeader'
-            : action?.type === 'remove-row'
-              ? 'delimited.removeRow'
-              : 'delimited.removeColumn',
-        )}
+        open={action?.type === 'rename-header'}
+        title={t('delimited.renameHeader')}
         onClose={() => {
           if (!mutating) setAction(undefined);
         }}
         closeDisabled={mutating}
       >
-        {action?.type === 'rename-header' ? (
+        {action?.type === 'rename-header' && (
           <label>
             {t('delimited.headerName')}
             <input
@@ -871,20 +888,12 @@ export default function DelimitedView(props: DocumentViewProps) {
               onChange={(event) => setAction({ ...action, value: event.target.value })}
             />
           </label>
-        ) : (
-          <p>
-            {t(
-              action?.type === 'remove-row'
-                ? 'delimited.removeRowConfirm'
-                : 'delimited.removeColumnConfirm',
-            )}
-          </p>
         )}
         <button
           type="button"
           disabled={mutating}
           onClick={() => {
-            if (action)
+            if (action?.type === 'rename-header')
               void mutate(action).then((ok) => {
                 if (ok) {
                   setAction(undefined);
@@ -893,7 +902,7 @@ export default function DelimitedView(props: DocumentViewProps) {
               });
           }}
         >
-          {t(action?.type === 'rename-header' ? 'delimited.apply' : 'delimited.delete')}
+          {t('delimited.apply')}
         </button>
       </Dialog>
       <Dialog

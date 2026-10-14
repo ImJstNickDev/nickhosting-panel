@@ -1,6 +1,8 @@
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ApiError, apiError } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
+import './confirmation-dialog.css';
 
 export function Page({
   title,
@@ -194,6 +196,7 @@ export function ActionForm({
   onCancel,
   destructive = false,
   arrowActionNavigation = false,
+  disabled = false,
 }: {
   onSubmit: (data: FormData) => Promise<unknown>;
   children: ReactNode;
@@ -203,6 +206,7 @@ export function ActionForm({
   onCancel?: () => void;
   destructive?: boolean;
   arrowActionNavigation?: boolean;
+  disabled?: boolean;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -214,7 +218,8 @@ export function ActionForm({
   }, [error]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy) return;
+    event.stopPropagation();
+    if (busy || disabled) return;
     setBusy(true);
     setError(undefined);
     setDone(false);
@@ -258,20 +263,24 @@ export function ActionForm({
           <ErrorNotice error={error} />
         </div>
       )}
-      <fieldset disabled={busy}>{children}</fieldset>
+      <fieldset disabled={busy || disabled}>{children}</fieldset>
       <div className="form-footer">
         {onCancel && (
           <button
             type="button"
             data-form-cancel
             className="secondary"
-            disabled={busy}
+            disabled={busy || disabled}
             onClick={onCancel}
           >
             {t('web.cancel')}
           </button>
         )}
-        <button type="submit" disabled={busy} className={destructive ? 'danger' : undefined}>
+        <button
+          type="submit"
+          disabled={busy || disabled}
+          className={destructive ? 'danger' : undefined}
+        >
           {busy ? t('web.pending') : (submitLabel ?? t('web.save'))}
         </button>
         {done && success !== false && <span role="status">{success ?? t('web.saved')}</span>}
@@ -351,6 +360,69 @@ export function Dialog({
       </header>
       {children}
     </dialog>
+  );
+}
+/** Shared confirmation chrome; callers retain ownership of the operation and success state. */
+export function ConfirmDialog({
+  open,
+  title,
+  children,
+  onClose,
+  onConfirm,
+  confirmLabel,
+  destructive = false,
+  busy = false,
+}: {
+  open: boolean;
+  title: string;
+  children: ReactNode;
+  onClose(): void;
+  onConfirm(): Promise<unknown>;
+  confirmLabel?: string;
+  destructive?: boolean;
+  busy?: boolean;
+}) {
+  const t = useT();
+  const [submitting, setSubmitting] = useState(false);
+  const pending = useRef(false);
+  const close = () => {
+    if (!pending.current && !busy) onClose();
+  };
+  return createPortal(
+    <Dialog
+      open={open}
+      title={title}
+      onClose={close}
+      closeIcon
+      closeDisabled={submitting || busy}
+      className="confirmation-dialog"
+      initialFocusSelector="[data-form-cancel]"
+    >
+      {open && (
+        <ActionForm
+          success={false}
+          destructive={destructive}
+          disabled={busy}
+          onCancel={close}
+          arrowActionNavigation
+          submitLabel={confirmLabel ?? t('web.confirm')}
+          onSubmit={async () => {
+            if (pending.current) return;
+            pending.current = true;
+            setSubmitting(true);
+            try {
+              await onConfirm();
+            } finally {
+              pending.current = false;
+              setSubmitting(false);
+            }
+          }}
+        >
+          {children}
+        </ActionForm>
+      )}
+    </Dialog>,
+    document.body,
   );
 }
 export function Time({ value }: { value?: string | null }) {

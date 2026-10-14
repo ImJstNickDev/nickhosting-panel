@@ -498,6 +498,54 @@ describe('M5 file explorer selection and clipboard shortcuts', () => {
     expect(writes).toEqual([]);
   });
 
+  it('keeps shared deletion confirmation open during requests and supports retry after failure', async () => {
+    const remote = await provider.files();
+    const name = 'delete-confirm-retry.txt';
+    remote.set(name, Buffer.from(name));
+    await user.goto(base);
+    await select(name);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let intercepted = 0;
+    await user.route(`**${endpoint}`, async (route) => {
+      const request = route.request();
+      if (request.method() !== 'POST' || request.postDataJSON()?.action !== 'delete')
+        return route.continue();
+      intercepted++;
+      await gate;
+      await route.fulfill({
+        status: 503,
+        json: { error: { code: 'unavailable', messageKey: 'web.errors.request' } },
+      });
+    });
+    try {
+      await user.keyboard.press('Delete');
+      await dialog().getByRole('button', { name: 'Delete', exact: true }).click();
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Cancel', exact: true }),
+      ).toBeDisabled();
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Close', exact: true }),
+      ).toBeDisabled();
+      await user.keyboard.press('Escape');
+      await browserExpect(dialog()).toBeVisible();
+      expect(remote.has(name)).toBe(true);
+      release();
+      await browserExpect(dialog().getByRole('alert')).toBeVisible();
+      await browserExpect(
+        dialog().getByRole('button', { name: 'Delete', exact: true }),
+      ).toBeEnabled();
+      expect(intercepted).toBe(1);
+    } finally {
+      release();
+      await user.unroute(`**${endpoint}`);
+    }
+    await dialog().getByRole('button', { name: 'Delete', exact: true }).click();
+    await browserExpect(dialog()).not.toBeVisible();
+    expect(remote.has(name)).toBe(false);
+  });
   it('defaults Delete confirmation to Cancel and supports arrow selection plus Enter in EN/IT', async () => {
     const remote = await provider.files();
     for (const locale of ['en', 'it'] as const) {
