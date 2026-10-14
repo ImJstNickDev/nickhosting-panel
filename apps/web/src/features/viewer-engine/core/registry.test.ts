@@ -16,6 +16,8 @@ describe('trusted viewer selection', () => {
     expect(preferredViewer(file('server.jar'))).toBe('archive');
     expect(preferredViewer(file('state.dat'))).toBeUndefined();
     expect(preferredViewer(file('world.gz'))).toBe('archive');
+    expect(preferredViewer(file('report.PDF', 10 * 1024 * 1024))).toBe('pdf');
+    expect(preferredViewer({ ...file('report.pdf'), entry: 'reports/report.pdf' })).toBe('pdf');
   });
   it('honors scoped personal choices even when the extension does not suggest that viewer', () => {
     const preferences = [
@@ -63,6 +65,7 @@ describe('trusted viewer selection', () => {
       'archive',
       'sqlite',
       'json',
+      'pdf',
       'text',
     ]);
   });

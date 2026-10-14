@@ -229,3 +229,13 @@ For daily lifecycle operations use the full `viewer_compose` array above, includ
 `"${viewer_compose[@]}" start sftpgo-viewer` or
 `"${viewer_compose[@]}" stop sftpgo-viewer`. Do not rerun the preparation helper on
 existing state. Production remains undeployed; issue18 remains open.
+
+### 2026-10-14 — Folio frontend dependency activation
+
+Owner approved a scoped Vite rebuild/recreate and rollback. PDF.js 6.4.299 and
+self-hosted assets are now included in the development image and production build.
+Only Vite was recreated, with no added ports, networks, mounts or provider changes.
+The prior image is retained locally as `nickhosting-dev-app:before-folio`.
+No database migration is needed. Production remains undeployed.
+See [Folio validation](M5-VALIDATION.md#2026-10-14--folio-read-only-pdf-viewer)
+for exact commands, image identity, tests and real read-only dataset evidence.

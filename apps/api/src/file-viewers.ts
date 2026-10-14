@@ -30,7 +30,7 @@ const preferenceSchema = z.strictObject({
     .max(64)
     .regex(/^[a-z0-9][a-z0-9.+_-]*$/),
   viewerId: z.union([
-    z.enum(['text', 'image', 'audio', 'video', 'archive', 'sqlite', 'json']),
+    z.enum(['text', 'image', 'audio', 'video', 'archive', 'sqlite', 'json', 'pdf']),
     z
       .string()
       .max(128)
@@ -72,6 +72,7 @@ function disposition(name: string) {
   return `attachment; filename="${filename.replace(/[^\x20-\x7e]|["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 }
 type C = Context<{ Variables: Variables }>;
+class ViewerRevisionError extends Error {}
 /** Preview routes reuse the existing file access proof and one shared SFTP broker. */
 export function registerFileViewerRoutes(
   app: Hono<{ Variables: Variables }>,
@@ -121,6 +122,8 @@ export function registerFileViewerRoutes(
       return response;
     } catch (error) {
       timing?.finish(c.req.raw.signal.aborted ? 'cancelled' : 'failed');
+      if (error instanceof ViewerRevisionError)
+        return c.body(null, 412, { 'Cache-Control': 'no-store' });
       if (error instanceof ViewerFormatError)
         return c.json(
           {
@@ -149,6 +152,11 @@ export function registerFileViewerRoutes(
         persistent ? new AbortController().signal : c.req.raw.signal,
       );
     const opened = timing ? await timing.measure('viewerOpen', work) : await work();
+    const revision = c.req.header('If-Match');
+    if (revision !== undefined && revision !== `"${opened.key}"`) {
+      await opened.close();
+      throw new ViewerRevisionError();
+    }
     return { opened, context };
   };
   // Parsed sessions outlive a single HTTP request. An abandoned tab cannot
@@ -357,7 +365,11 @@ export function registerFileViewerRoutes(
     guarded(async (c) => {
       const { opened } = await open(c);
       try {
-        return c.json({ size: opened.source.size, mtimeMs: opened.source.mtimeMs });
+        return c.json(
+          { size: opened.source.size, mtimeMs: opened.source.mtimeMs, revision: opened.key },
+          200,
+          { 'Cache-Control': 'no-store' },
+        );
       } finally {
         await opened.close();
       }

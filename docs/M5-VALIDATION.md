@@ -9319,3 +9319,103 @@ state cleaned. No production files/resources, game servers, containers or networ
 were changed or restarted. Source loads through existing development HMR. Independent
 review covers shared component behavior, preserved mutation contracts and real renders.
 Issue #18 remains an independent production-release gate.
+
+### 2026-10-14 — Folio read-only PDF viewer
+
+Folio adds PDF navigation, text selection, search/highlights, editable zoom,
+fit presets, rotation, thumbnails, outline, password entry and bounded print
+preparation. Fileman retains download/Open with. PDF.js 6.4.299 and its worker,
+fonts/decoders are lazy and self-hosted; all 283 emitted static assets/license
+files were compared byte-for-byte with the pinned package. No Blueprint changes.
+The existing authorized source revision pins Range reads; no content hash or
+repeated provider identity request was introduced.
+
+Validation on the final implementation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/pdf-model.test.ts apps/web/src/features/viewer-engine/core/registry.test.ts`: **8 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run apps/api/src/file-viewers.integration.test.ts`: **17 passed**, including physical/archive stale revision rejection before bytes, permission precedence and PDF preference persistence.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/pdf-viewer.browser.test.ts`: **9 passed**, Chromium, 53.94 s.
+- Same command with `NH_BROWSER=firefox`: **9 passed**, 80.68 s.
+- Targeted existing `file-viewers.browser.test.ts` chooser tests for showing all viewers, unsupported defaults and Italian mobile keyboard navigation: **3 passed**. Expectations now include eight viewers and the additional keyboard stop.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build`, `scripts/dev.sh pnpm i18n:check`, focused Biome and `git diff --check`: **passed**. Existing main/editor chunk-size warnings remain; PDF engine and CSS are lazy chunks. No historical full suite rerun.
+
+Browser coverage uses original generated PDFs and real application content/Range
+handlers, with only the remote source mocked. It includes safe/unsafe links,
+noninteractive forms/no PDF script execution, mixed page sizes, text/search,
+password rejection and success, malformed/empty documents, late first-page
+failure with retry, revision-bound ranges, refresh restoration, PDF within a real
+ZIP, three-page print preparation and afterprint cleanup, responsive fit presets
+and retained numeric zoom. Native OS print dialogs/printer output were not automated.
+Application controls and generated annotation names pass Axe checks. Tiny fixed
+PDF annotation geometry is excluded only from target-size checking under the
+inline/essential-presentation exception; application controls retain that check.
+This is scoped evidence, not a blanket accessibility certification of PDF content.
+
+Earlier failures preserved: the first cold browser fixture setup rejected a
+stale resource observation before Folio ran; the unchanged policy passed warm
+runs. Initial test assertions incorrectly treated read-only directory batch POSTs
+as writes. Review then found missing annotation labels, uncaught asynchronous
+first-page failure, print cleanup and fit presets retaining desktop scale after
+resize; these were corrected and covered by final browser runs. Existing chooser
+assertions also expected outdated JSON Tree whitespace and were corrected without
+changing production behavior. Independent technical/accessibility/UX review found
+no remaining must-fix issue after these corrections.
+
+Reviewed, synthetic screenshots:
+[desktop English](screenshots/m5/folio-desktop-en.png),
+[desktop Italian](screenshots/m5/folio-desktop-it.png),
+[mobile English](screenshots/m5/folio-mobile-en.png),
+[mobile Italian 320px](screenshots/m5/folio-mobile-320-it.png),
+[mobile Italian 390px](screenshots/m5/folio-mobile-390-it.png),
+[thumbnails](screenshots/m5/folio-thumbnails-en.png),
+[outline](screenshots/m5/folio-outline-en.png),
+[search](screenshots/m5/folio-search-empty-en.png),
+[archive member](screenshots/m5/folio-archive-en.png),
+[password](screenshots/m5/folio-password-en.png),
+[loading](screenshots/m5/folio-loading-en.png),
+[error](screenshots/m5/folio-error-en.png),
+[empty PDF](screenshots/m5/folio-empty-en.png),
+[malformed PDF](screenshots/m5/folio-malformed-en.png).
+
+Owner-approved activation saved the old Vite image as
+`nickhosting-dev-app:before-folio`, built the development image, then ran
+`docker compose --env-file .env.dev.local -f compose.dev.yaml up -d --no-deps --wait vite`.
+Only `nickhosting-dev-vite-1` was recreated. New image:
+`sha256:9ce2d8870161b55bc4c177e76b6ae9b2fbec8413e6e4722802acf10df120723a`.
+Vite is healthy, remains solely on dev-edge and publishes no host ports. API is
+healthy on its unchanged image; no API/Gateway/Panel/Wings restart occurred.
+The Compose warning about services supplied by overlays did not cause removal;
+no orphan cleanup command was used. HTTPS font asset returned 200.
+
+A private, authenticated Chromium smoke test read the existing dataset through
+the real viewer transport: `hosting-report-8-pages.pdf` rendered 8 pages,
+`short-report-3-pages.pdf` rendered 3, and `empty.pdf` produced the expected error.
+No browser JavaScript errors. Private screenshots stay ignored; no provider file,
+server state, production configuration or credential was changed. Isolated
+browser schemas/fixtures were cleaned by their harness. No game assets created.
+Rollback is the reviewed previous code plus saved Vite image, recreating only
+Vite; no database migration or data rollback is required. SFTPGo issue #18 remains
+an independent production-release gate.
+
+Owner verification then exposed an additional Firefox issue missed by the initial
+light-OS screenshots: upstream PDF.js CSS included global `.sidebar` selectors
+and `:root { color-scheme: light dark }`, changing the application sidebar and
+leaving it changed after closing Folio. The upstream stylesheet is now imported
+inline, scoped to `.folio`, with root declarations rewritten to `:scope`, and
+removed on unmount. PDF viewport height is maintained locally. Folio's native
+controls/scrollbars inherit the application theme; scrollbars use neutral palette
+colors with forced-color mode preserved. No further image/restart was needed.
+
+Final CSS verification: full Firefox PDF suite **10/10 passed** (64.52 s), after
+initial targeted theme/render tests **2/2 in Firefox and 2/2 in Chromium**. The
+regression compares actual application sidebar styles and document color scheme
+before opening, while reading, and after closing under a dark OS preference.
+Final screenshot set was regenerated; additional
+[before](screenshots/m5/folio-shell-before-dark-preference-firefox.png),
+[during](screenshots/m5/folio-shell-during-dark-preference-firefox.png), and
+[after](screenshots/m5/folio-shell-after-dark-preference-firefox.png) images prove
+isolation. The final scrollbar assertion passed separately: **1/1 Firefox** (17.73 s) and
+**1/1 Chromium** (13.02 s).
+A real Firefox read-only dataset smoke also passed both valid PDFs and the empty
+PDF, with unchanged shell styles, a light viewport color scheme and zero JS
+errors. Final scoped-style production build and web typecheck passed.

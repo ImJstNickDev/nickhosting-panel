@@ -571,3 +571,53 @@ header interpretation persists for the open document across draft reloads, so an
 inserted blank record does not turn the header into data on redo. Explicit header
 changes remain available. Menus expire with the displayed snapshot; no new provider
 requests, remote mutations, dependencies or Blueprint endpoints were introduced.
+
+## Folio — read-only PDF viewer (2026-10-14)
+
+Folio is a lazy builtin, including PDFs selected inside Atlas. Mozilla PDF.js
+6.4.299 (Apache-2.0) parses in a browser worker and renders in the browser. NickHosting supplies
+its own compact controls, using upstream continuous-page rendering, selectable
+text, search and annotation layers. PDF bytes follow the existing authorized
+ViewerEngine transport; no provider credentials, external PDF service or new
+Blueprint endpoint is involved. The current build targets Chromium and Firefox;
+other browsers are not certified by these tests.
+
+Navigation includes page entry, previous/next, fit width/page, actual size,
+editable zoom, rotation, optional thumbnails and outline, text search and print.
+The Fileman toolbar retains original download and Open with. Position preferences
+are bounded per-tab session state; passwords and PDF text are never stored there.
+Forms, editing, signatures, OCR, embedded attachment execution, PDF JavaScript
+and XFA are outside the read-only contract. Only validated HTTP/HTTPS external
+links may open a separate tab; internal destinations stay inside Folio.
+
+Worker, CMaps, standard fonts, WASM decoders, ICC profiles and annotation images
+are served from the same application, version-matched to the npm dependency.
+The Vite asset plugin uses a fixed package inventory in development and emits the
+same inventory with its license files for production. There is no CDN fallback.
+See [PDF.js releases](https://github.com/mozilla/pdf.js/releases/tag/v6.4.299)
+and [upstream browser support](https://github.com/mozilla/pdf.js/wiki/Frequently-Asked-Questions#which-browsersenvironments-are-supported).
+
+An initial authorized metadata read supplies the opaque existing source revision.
+Folio pins subsequent HTTP reads with `If-Match`; a changed root is rejected with
+412 before streaming. Archive members pin the containing archive. This uses the
+existing identity/size/mtime fingerprint, not a full-file hash or new provider
+lookup. It detects ordinary changes, not same-size writes preserving mtime, and
+is not a transactional filesystem snapshot. Compressed archive seeking can
+still require decoding preceding bytes; range requests do not make compressed
+members randomly seekable at zero cost.
+
+Folio bounds input at 256 MiB and 10,000 pages; ordinary page canvases use a
+2,097,152-pixel budget with PDF.js's detail canvas for zoom. Thumbnail rendering
+is windowed, and print preparation is sequential with a 128 MiB summed decoded
+pixel budget. These are individual budgets, not a strict total browser heap cap:
+PDF objects, fonts and complex image decoders also consume memory. Printing over
+the budget reports a failure and offers the existing original download; it never
+silently prints only part of a document. Large raster images use upstream
+image downscaling rather than a custom limit that silently omits them.
+
+PDF.js includes stock application selectors as well as page-layer styles. Folio
+loads these inline inside `@scope (.folio)`, rewrites `:root` to the local scope,
+and removes the stylesheet on unmount. Its viewport height stays local and its
+color scheme follows NickHosting; opening a document cannot restyle the shared
+sidebar or change the application's native controls. The supported current
+Chromium/Firefox targets implement CSS scope (Firefox 146+).

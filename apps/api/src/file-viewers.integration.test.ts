@@ -24,6 +24,8 @@ let root: string;
 let cache: ViewerCache;
 let content: Buffer;
 let reads: number;
+let streams: number;
+const closeSource = vi.fn(async () => {});
 let sourceRevision: number;
 let revoked: AbortController;
 let debugTiming = false;
@@ -43,6 +45,8 @@ beforeEach(async () => {
   cache = new ViewerCache({ root });
   content = Buffer.from('0123456789');
   reads = 0;
+  streams = 0;
+  closeSource.mockClear();
   sourceRevision = 1;
   revoked = new AbortController();
   vi.spyOn(FileViewerService.prototype, 'open').mockImplementation(
@@ -57,19 +61,21 @@ beforeEach(async () => {
             reads++;
             return content.subarray(offset, offset + length);
           },
-          stream: (start = 0, end = content.length) =>
-            new ReadableStream({
+          stream: (start = 0, end = content.length) => {
+            streams++;
+            return new ReadableStream({
               start(c) {
                 c.enqueue(content.subarray(start, end));
                 c.close();
               },
-            }),
+            });
+          },
         },
         path,
         signal: revoked.signal,
         cache,
         key: `${id}:${path}:${sourceRevision}`,
-        close: async () => {},
+        close: closeSource,
         restat: async () => ({ size: content.length, mtimeMs: sourceRevision, mode: 0o644 }),
         siblingExists: async () => false,
       };
@@ -275,6 +281,7 @@ describe('viewer routes with isolated database and fixture byte source', () => {
   });
   it('keeps personal server/game/global preferences scoped and validates first-party IDs', async () => {
     expect((await put({ scope: 'server', extension: 'json', viewerId: 'text' })).status).toBe(204);
+    expect((await put({ scope: 'server', extension: 'pdf', viewerId: 'pdf' })).status).toBe(204);
     expect(
       (await put({ scope: 'game', extension: 'dat', viewerId: 'fixture:binary' })).status,
     ).toBe(204);
@@ -285,6 +292,7 @@ describe('viewer routes with isolated database and fixture byte source', () => {
     expect(await (await request('/preferences')).json()).toMatchObject({
       preferences: expect.arrayContaining([
         { scope: 'server', extension: 'json', viewerId: 'text' },
+        { scope: 'server', extension: 'pdf', viewerId: 'pdf' },
         { scope: 'game', extension: 'dat', viewerId: 'fixture:binary' },
       ]),
     });
@@ -311,6 +319,77 @@ describe('viewer routes with isolated database and fixture byte source', () => {
     const download = await request('/content?path=caf%C3%A9.png&download=true');
     expect(download.headers.get('content-disposition')).toContain("filename*=UTF-8''caf%C3%A9.png");
     await download.arrayBuffer();
+  });
+  it('pins physical ranges to uncached metadata and rejects changed revisions before streaming', async () => {
+    const metadata = await request('?path=document.pdf');
+    expect(metadata.status).toBe(200);
+    expect(metadata.headers.get('cache-control')).toBe('no-store');
+    const { revision } = await metadata.json();
+    expect(revision).toBe(`${id}:document.pdf:1`);
+    expect(reads).toBe(0);
+    expect(streams).toBe(0);
+    const headers = { 'If-Match': `"${revision}"`, Range: 'bytes=2-5' };
+    const range = await request('/content?path=document.pdf', { headers });
+    expect(range.status).toBe(206);
+    expect(await range.text()).toBe('2345');
+    expect(streams).toBe(1);
+    sourceRevision++;
+    content = Buffer.from('abcdefghij');
+    const closedBefore = closeSource.mock.calls.length;
+    const stale = await request('/content?path=document.pdf', { headers });
+    expect(stale.status).toBe(412);
+    expect(await stale.text()).toBe('');
+    expect(stale.headers.get('cache-control')).toBe('no-store');
+    expect(reads).toBe(0);
+    expect(streams).toBe(1);
+    expect(closeSource).toHaveBeenCalledTimes(closedBefore + 1);
+    const unpinned = await request('/content?path=document.pdf', {
+      headers: { Range: 'bytes=2-5' },
+    });
+    expect(await unpinned.text()).toBe('cdef');
+  });
+  it('rejects stale archive member pins before opening or streaming a retained member', async () => {
+    const zip = new ZipFile();
+    zip.addBuffer(Buffer.from('member'), 'document.pdf');
+    zip.end();
+    const chunks: Buffer[] = [];
+    for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+    content = Buffer.concat(chunks);
+    const { revision } = await (await request('?path=fixture.zip')).json();
+    const headers = { 'If-Match': `"${revision}"`, Range: 'bytes=1-3' };
+    const member = await request('/archive/content?path=fixture.zip&entry=document.pdf', {
+      headers,
+    });
+    expect(member.status).toBe(206);
+    expect(await member.text()).toBe('emb');
+    const indexedReads = reads;
+    const openedStreams = streams;
+    const closedBefore = closeSource.mock.calls.length;
+    sourceRevision++;
+    const stale = await request('/archive/content?path=fixture.zip&entry=document.pdf', {
+      headers,
+    });
+    expect(stale.status).toBe(412);
+    expect(await stale.text()).toBe('');
+    expect(reads).toBe(indexedReads);
+    expect(streams).toBe(openedStreams);
+    expect(closeSource).toHaveBeenCalledTimes(closedBefore + 1);
+  });
+  it('checks permission and revocation before evaluating a stale revision pin', async () => {
+    const { revision } = await (await request('?path=document.pdf')).json();
+    sourceRevision++;
+    const headers = { 'If-Match': `"${revision}"` };
+    actor = { ...fixture.context, actorUserId: randomUUID(), subjectUserId: randomUUID() };
+    for (const suffix of [
+      '/content?path=document.pdf',
+      '/archive/content?path=fixture.zip&entry=document.pdf',
+    ])
+      expect((await request(suffix, { headers })).status).toBe(403);
+    actor = fixture.context;
+    revoked.abort();
+    expect((await request('/content?path=document.pdf', { headers })).status).toBe(403);
+    expect(reads).toBe(0);
+    expect(streams).toBe(0);
   });
   it('indexes a ZIP once, navigates retained metadata and downloads only a chosen member', async () => {
     const zip = new ZipFile();

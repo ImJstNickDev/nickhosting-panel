@@ -1,10 +1,11 @@
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+import { pdfjsAssets } from './pdfjs-assets.js';
 import { developmentNetwork } from './vite-network.js';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), pdfjsAssets()],
   resolve: {
     alias: [
       {

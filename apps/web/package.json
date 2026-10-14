@@ -36,6 +36,7 @@
     "media-captions": "0.0.18",
     "mediabunny": "1.61.4",
     "papaparse": "5.7.0",
+    "pdfjs-dist": "6.4.299",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-router": "8.4.0",

@@ -10,6 +10,7 @@ export type ViewerId =
   | 'archive'
   | 'sqlite'
   | 'json'
+  | 'pdf'
   | `${string}:${string}`;
 export interface ViewerSource {
   path: string;
@@ -86,6 +87,7 @@ export const builtinViewers: readonly ViewerDefinition[] = [
     description: 'viewer.readOnly',
     extensions: ['json', 'jsonc', 'json5'],
   },
+  { id: 'pdf', label: 'viewer.name.pdf', description: 'viewer.pdf', extensions: ['pdf'] },
   { id: 'text', label: 'viewer.name.text', description: 'file.editor', extensions: [] },
 ];
 

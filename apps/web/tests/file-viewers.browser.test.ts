@@ -572,10 +572,10 @@ describe('M5 builtin file viewers', () => {
     const chooser = page.getByRole('dialog');
     await chooser.getByRole('button', { name: 'Show all', exact: true }).click();
     await chooser.getByRole('button', { name: 'JSON Tree', exact: true }).click();
-    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await browserExpect(page.locator('.ve-json')).toContainText(/forced:\s*true/);
     expect(preferences).toEqual([]);
     await page.reload();
-    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await browserExpect(page.locator('.ve-json')).toContainText(/forced:\s*true/);
     await browserExpect(page.locator('.fm-breadcrumb')).toContainText('forced.dat');
     expect(preferences).toEqual([]);
 
@@ -1310,12 +1310,12 @@ describe('M5 builtin file viewers', () => {
     await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(0);
     const before = reads.length;
     await dialog.getByRole('button', { name: 'Show all', exact: true }).click();
-    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(7);
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(8);
     expect(reads.length).toBe(before);
     await dialog.getByRole('combobox').selectOption('server');
     await harness.screenshot(page, 'file-viewer-all-desktop-en');
     await dialog.getByRole('button', { name: 'JSON Tree', exact: true }).click();
-    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await browserExpect(page.locator('.ve-json')).toContainText(/forced:\s*true/);
     await root();
     await page
       .locator('.fm-filename')
@@ -1323,9 +1323,9 @@ describe('M5 builtin file viewers', () => {
       .click({ button: 'right' });
     await browserExpect(page.getByRole('menuitem', { name: 'Open', exact: true })).toBeEnabled();
     await page.getByRole('menuitem', { name: 'Open', exact: true }).click();
-    await browserExpect(page.locator('.ve-json')).toContainText('forced: true');
+    await browserExpect(page.locator('.ve-json')).toContainText(/forced:\s*true/);
     await page.getByRole('button', { name: 'Open with', exact: true }).click();
-    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(7);
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(8);
     await dialog.getByRole('button', { name: 'Show suggested', exact: true }).click();
     await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(0);
     await page.keyboard.press('Escape');
@@ -1348,7 +1348,7 @@ describe('M5 builtin file viewers', () => {
       }),
     ).toBeVisible();
     await page.getByRole('button', { name: 'Open with', exact: true }).click();
-    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(7);
+    await browserExpect(dialog.locator('.ve-viewer-card')).toHaveCount(8);
     await dialog.getByRole('button', { name: 'JSON Tree', exact: true }).click();
     await browserExpect(page.locator('.ve-json')).toContainText('9007199254740993123456789');
     expect(errors).toEqual([]);
@@ -2913,10 +2913,10 @@ describe('M5 builtin file viewers', () => {
       .getByRole('dialog')
       .getByRole('button', { name: 'Mostra tutti', exact: true })
       .click();
-    await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(7);
+    await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(8);
     await harness.screenshot(page, 'file-viewer-all-320-it');
     await page.getByRole('dialog').getByRole('button', { name: 'Frame', exact: true }).focus();
-    for (let index = 0; index < 6; index++) await page.keyboard.press('Tab');
+    for (let index = 0; index < 7; index++) await page.keyboard.press('Tab');
     const scribe = page.getByRole('dialog').getByRole('button', { name: 'Scribe', exact: true });
     await browserExpect(scribe).toBeFocused();
     const card = await scribe.boundingBox();

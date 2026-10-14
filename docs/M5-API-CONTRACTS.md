@@ -1004,7 +1004,7 @@ returned to the browser.
 | `GET /preferences` | Current actor's server/game/global extension preferences. Assisted access does not read or rewrite the subject's preferences. |
 | `PUT /preferences` | `{scope, extension, viewerId}`; builtin or namespaced compiled first-party identifier. One preference per actor/scope/extension. |
 | `DELETE /preferences` | `{scope, extension}` removes only that actor's preference. |
-| `GET ?path=...` | Authorized file size and modification time. |
+| `GET ?path=...` | Authorized file size, modification time and opaque `revision`; `Cache-Control: no-store`. |
 | `GET /content?path=...` | Bounded stream with single HTTP Range/HEAD, 206/416 semantics, no-store, nosniff and sandboxed SVG response. `download=true` adds a safe filename. |
 | `GET /archive?path=...&directory=...&offset=0&limit=200` | Retained virtual-folder index, total and next offset. Maximum page size 500. |
 | `GET /archive/content?path=...&entry=...` | Chosen member only, with stream/range/download handling. Compressed-member seeking may decode preceding bytes. |
@@ -1018,6 +1018,12 @@ SFTP credential intent/state. Settings `fileViewers` and write-only secret
 `viewerSftpgoApiKey` are independent of external-user SFTP configuration and follow
 existing Owner/environment precedence. Credential retirement retains its identity
 record; changing transport identity never silently reuses an old account.
+
+Viewer reads optionally accept `If-Match: "<revision>"`. A different source revision
+returns 412 before bytes are read; authorization still happens before comparison.
+Archive reads use the root archive revision. Existing callers without this header
+retain their current behavior. Folio uses this pin across its HTTP Range requests.
+The fingerprint uses identity/configuration/path/size/mtime, not content hashing.
 
 HTTP cancellation releases a subscriber; parsed archive/SQLite/subtitle sessions retain
 shared source handles for bounded reuse. A shared local authorization watch checks

@@ -31,6 +31,7 @@ const Media = lazy(() => import('./builtin-viewers/media.js'));
 const Json = lazy(() => import('./builtin-viewers/json.js'));
 const Sqlite = lazy(() => import('./builtin-viewers/sqlite.js'));
 const Archive = lazy(() => import('./builtin-viewers/archive.js'));
+const Pdf = lazy(() => import('./builtin-viewers/pdf.js'));
 const Text = lazy(() => import('./builtin-viewers/text.js'));
 
 export function FileViewer({
@@ -441,6 +442,8 @@ export function FileViewer({
                   <Image {...props} />
                 ) : viewer === 'audio' || viewer === 'video' ? (
                   <Media {...props} kind={viewer} />
+                ) : viewer === 'pdf' ? (
+                  <Pdf {...props} />
                 ) : viewer === 'json' ? (
                   <Json {...props} />
                 ) : viewer !== 'text' && isDocumentView(renderSource.name, viewer) ? (
