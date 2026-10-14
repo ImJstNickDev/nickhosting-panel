@@ -1064,13 +1064,15 @@ restart. These are observed recovery readings, not a guarantee against all futur
 optimizer peaks. No authenticated provider action, game-file change, migration or
 test asset creation was performed.
 
-## User-facing development SFTP — prepared 2026-10-14
+## User-facing development SFTP — activated 2026-10-14
 
 The Owner selected `sftp.dev.hub.nickhost.ing`; production may later use
 `sftp.hub.nickhost.ing`. [User-SFTP preparation](M5-SFTP-DEPLOYMENT.md) supplies
 `compose.dev.sftp.yaml`, separate state/credentials and the exact activation
-boundary. The approved SFTP service is now healthy; application opt-in activation is
-**pending additional API/worker recreation approval**, recorded in that document.
-The existing private read-only viewer service
-is unchanged. First proposed test scope is one explicitly mounted managed server,
-with TCP2023 on an approved host address; no DNS, router or NPM changes are applied.
+boundary and completed validation. After additional Owner approval, only API and
+worker were rebuilt/recreated; the users-SFTP service and both application services
+are healthy. The private read-only viewer service is unchanged. Real LAN SFTP
+write/read/rename/cleanup and new-login revocation checks passed for the one
+explicitly mounted managed server. TCP2023 is published on the approved host
+address. The advertised hostname still does not resolve from this host; no DNS,
+router or NPM changes were applied. Issue #18 remains a production-release gate.

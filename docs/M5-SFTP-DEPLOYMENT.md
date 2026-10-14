@@ -1,8 +1,9 @@
 # Development user SFTP — activation record and configuration
 
-Prepared on 2026-10-14 within M5 PR #21. **Activation is partial:** the approved
-SFTP service is healthy; API/worker opt-in activation needs the additional
-approval recorded below. The Owner selected
+Activated on 2026-10-14 within M5 PR #21 after both recorded Owner approvals.
+**LAN SFTP is operational for the explicitly mounted test server.** DNS/external
+reachability remains unverified; the advertised hostname does not yet resolve
+from this host. The Owner selected
 `sftp.dev.hub.nickhost.ing` for development and provisionally
 `sftp.hub.nickhost.ing` for production. **Neither hostname selection nor this
 proposal authorizes starting infrastructure.** Production is outside this task.
@@ -204,7 +205,7 @@ Without that approval, this task stops at reviewed configuration and evidence.
   exact activation approval. No infrastructure or game files changed.
 
 
-## Approved activation / additional boundary — 2026-10-14
+## Historical first activation / additional boundary — 2026-10-14
 
 Owner approved the proposal at `adbb8bf`. Preflight rechecked exact clean HEAD,
 container/name/port/network identity and selected server ownership. Created private
@@ -230,7 +231,7 @@ unchanged. The amended overlay intentionally changes only API/worker environment
 in addition to the already-approved users service. Focused deployment tests:
 45 passed. Independent static review found no must-fix findings.
 
-**Additional approval required:** save current API/worker image IDs under separate
+**Additional approval requested at that point (subsequently granted):** save current API/worker image IDs under separate
 local rollback tags; build `api`; recreate only `api worker` with the full overlay
 chain, preserving networks, mounts and database. Commands:
 
@@ -250,3 +251,50 @@ are not restarted. Rollback requires restoring the previous API/worker image IDs
 and omitting the new opt-in for those services, then recreating only them; retain
 all database/SFTP state. Ask for rollback approval if needed unless explicitly
 included in the additional authorization. DNS/router/NPM remain Owner-managed.
+
+
+## Completed activation — 2026-10-14
+
+The Owner approved rebuilding/recreating only API and worker. Saved their distinct
+previous images under `before-sftp-users-api` and `before-sftp-users-worker`, built
+`api`, then ran the complete overlay chain with `up -d --no-deps --wait api worker`.
+Both services are healthy. Comparison against the pre-activation inventory confirms
+only their container IDs changed; `sftpgo-users` is the sole new container. Vite,
+Gateway, viewer, database, ingress and unrelated containers were not recreated.
+API/worker publish no ports. Users-SFTP joins only existing data/egress networks;
+only the approved SSH binding is published. Database and Owner session survived.
+
+Reconciled the first attempt's unused management API key within the new instance,
+then stored its replacement using the protected encrypted secret store. The first
+key cleanup request used an incorrect metadata property and returned HTTP 404 without
+changing anything; corrected to SFTPGo's `id` field and completed cleanup. Updated
+only the five documented SFTP settings. Readback confirmed unrelated settings were
+unchanged. No production provider credentials were used.
+
+Actual validation:
+
+- API image build and scoped Compose health wait passed; API/worker recent logs
+  contained no error-level entries.
+- Authenticated Firefox displayed the configured hostname in the SFTP tab.
+  Credential issuance/revocation used the normal authenticated application API,
+  not a direct SFTPGo bypass; this was not a button-click browser E2E test.
+- Real SSH/SFTP connection through the approved LAN binding pinned the Ed25519
+  host key. Verified the expected server home and virtual parent confinement.
+- Exclusively created `/sftp-activation-test-20261014/`, uploaded a tiny synthetic
+  file, verified exact bytes/SHA256, renamed it, deleted it and removed the empty
+  test directory. Private provenance/result ledger is retained under test-assets.
+- Revoked the temporary credential; a fresh SSH connection failed authentication.
+  This does **not** validate termination of retained transports: issue #18 remains
+  an independent production-release blocker.
+- No game power commands, existing-file edits, ownership changes, Panel/Wings
+  configuration changes, DNS/router/NPM edits or production deployment occurred.
+- Independent security/configuration and runtime-evidence review: no must-fix
+  findings; corrected stale pending-status documentation as requested.
+
+Focused deployment tests previously passed 45 tests for the final implementation;
+no code changed during activation. Historical failure records above are preserved.
+DNS lookup for the advertised development hostname still failed at handoff. The
+Owner can test over LAN using the approved host IP and port 2023, then configure
+DNS/router separately if external access is desired. This activation covers only
+the mounted test server, not arbitrary future servers. User credentials are created
+from its SFTP tab and shown once; no test password is retained in public evidence.
