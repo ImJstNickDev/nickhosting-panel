@@ -9082,3 +9082,19 @@ Final staged governance passed: 868 indexed text files, 309 reviewed PNG assets,
 719 relative links, four TOML files and 44 ignore cases. The secret scan remains
 heuristic; the staged inventory contains only the scoped code, tests, documentation
 and sanitized fixture screenshots.
+
+### 2026-10-14 — JSON Tree initial keyboard focus and footer polish
+
+Removed the footer JSON Pointer tooltip. The ready tree takes focus once when
+mounted, so arrow navigation works immediately without clicking a row. Subsequent
+search/selection updates do not steal focus. Independent read-only review found no
+must-fix issues or late Fileman focus override.
+
+Validation: focused `json-tree.browser.test.ts -t 'preserves source precision'`
+through `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+--config vitest.browser.config.ts` passed in Chromium and `NH_BROWSER=firefox`
+(**one passed, seven intentionally skipped each**). Assertions cover initial focus,
+immediate ArrowDown and no footer tooltip, plus the existing precision/copy/accessibility
+checks. Focused Biome passed for both changed TSX/test files. No production access,
+container changes, new resources or provider mutations; existing dev HMR applies
+this UI-only correction.

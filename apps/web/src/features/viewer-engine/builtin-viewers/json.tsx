@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../../app/i18n.js';
-import { Tooltip } from '../../../components/tooltip.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { readViewerBytes, viewerPath } from '../core/access.js';
 import { previewLimits } from '../core/limits.js';
@@ -84,6 +83,9 @@ function JsonWorkspace({
   const format = useFormat();
   const treeId = useId();
   const tree = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    tree.current?.focus({ preventScroll: true });
+  }, []);
   const [view, setView] = useState(initial);
   const [query, setQuery] = useState('');
   const [composing, setComposing] = useState(false);
@@ -437,20 +439,18 @@ function JsonWorkspace({
         )}
       </div>
       <div className="jt-footer">
-        <Tooltip content={metadata?.pointer || t('jsonTree.root')}>
-          <div className="jt-pointer">
-            <span className="jt-pointer-symbol" aria-hidden="true">
-              /
-            </span>
-            <code>
-              {metadata?.pointer || t('jsonTree.root')}
-              {metadata?.pointerTruncated ? '…' : ''}
-            </code>
-            {metadata?.pointerAmbiguous && (
-              <span className="jt-duplicate">{t('jsonTree.duplicate')}</span>
-            )}
-          </div>
-        </Tooltip>
+        <div className="jt-pointer">
+          <span className="jt-pointer-symbol" aria-hidden="true">
+            /
+          </span>
+          <code>
+            {metadata?.pointer || t('jsonTree.root')}
+            {metadata?.pointerTruncated ? '…' : ''}
+          </code>
+          {metadata?.pointerAmbiguous && (
+            <span className="jt-duplicate">{t('jsonTree.duplicate')}</span>
+          )}
+        </div>
         <div className="jt-tools">
           <JsonButton
             kind="copy"

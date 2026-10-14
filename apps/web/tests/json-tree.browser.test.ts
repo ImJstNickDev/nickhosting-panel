@@ -114,6 +114,11 @@ describe('JSON Tree browsing', () => {
   it('preserves source precision, duplicates and copy paths without extra provider reads', async () => {
     await open();
     await browserExpect(tree()).toBeVisible();
+    await browserExpect(tree()).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await browserExpect(selected()).toContainText('server');
+    await page.locator('.jt-pointer').hover();
+    await browserExpect(page.getByRole('tooltip')).toHaveCount(0);
     const initialReads = reads.length;
     await row('limits').click();
     await page.keyboard.press('ArrowRight');
