@@ -148,6 +148,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
           return route.fulfill({ json: { ...credentials.find((c) => c.id === id), password } });
         }
         const input = route.request().postDataJSON();
+        expect(input.kind).toBe('auxiliary');
         const created = fixture(`created-${credentials.length}`, input.kind);
         if (input.label) created.label = input.label;
         credentials.push(created);
@@ -351,31 +352,32 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     }
   });
 
-  it('issues a masked password, handles clipboard failure and clears it on reload', async () => {
+  it('observes automatic personal access without issuing credentials from the page', async () => {
     credentials = [];
     await open();
-    await page.getByRole('button', { name: 'Generate SFTP password', exact: true }).click();
-    const field = page.getByLabel('Password', { exact: true });
-    await check(field).toHaveValue(password);
-    await check(field).toHaveAttribute('type', 'password');
-    await page
-      .locator('.sftp-issued')
-      .getByRole('button', { name: 'Show password', exact: true })
-      .click();
-    await check(field).toHaveAttribute('type', 'text');
-    await page.evaluate(() =>
-      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }),
+    const waiting = page.getByText(
+      'Your personal SFTP access is not ready yet. This page checks automatically.',
+      { exact: true },
     );
-    await page
-      .locator('.sftp-issued')
-      .getByRole('button', { name: 'Copy password', exact: true })
-      .click();
-    await check(page.getByRole('alert')).toContainText('Could not copy');
+    await check(waiting).toBeVisible();
+    await check(
+      page.getByRole('button', { name: 'Generate SFTP password', exact: true }),
+    ).toHaveCount(0);
+    await page.screenshot({ path: `${screenshots}/sftp-automatic-pending-en.png`, fullPage: true });
+    credentials = [{ ...fixture('primary', 'primary'), state: 'pending' }];
+    await check(page.getByText('fixture-a3f92c18', { exact: true })).toBeVisible();
+    await check(waiting).toBeVisible();
+    await check(page.getByRole('button', { name: 'Show password', exact: true })).toHaveCount(0);
+    credentials = [fixture('primary', 'primary')];
+    await check(
+      page.locator('.sftp-primary').getByRole('button', { name: 'Show password', exact: true }),
+    ).toBeVisible();
+    await check(waiting).toHaveCount(0);
+    expect(writes).toEqual([]);
     await page.reload();
     await check(page.getByText('fixture-a3f92c18', { exact: true })).toBeVisible();
-    await check(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
     await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
-    expect(writes).toHaveLength(1);
+    expect(writes).toEqual([]);
   });
 
   it('retrieves the primary password only on demand and discards it on hide and reload', async () => {
@@ -619,6 +621,13 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     await open();
     await check(
       page.getByRole('button', { name: 'Generate SFTP password', exact: true }),
+    ).toHaveCount(0);
+    await check(page.getByText('Not configured', { exact: true })).toBeVisible();
+    await check(
+      page.getByText(
+        'Your personal SFTP access is not ready yet. This page checks automatically.',
+        { exact: true },
+      ),
     ).toHaveCount(0);
     expect(writes).toEqual([]);
   });

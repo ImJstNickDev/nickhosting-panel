@@ -42,7 +42,25 @@ export async function reconcileServers(
     .where('deleted_at', 'is', null)
     .limit(1)
     .executeTakeFirst();
-  if (!server) return;
+  if (!server) {
+    // Deleting the last server must not strand an interrupted credential
+    // revocation. Keep the unconfigured, empty installation cheap to reconcile.
+    const credential = await db
+      .selectFrom('external_sftp_credentials')
+      .select('id')
+      .where('state', '!=', 'revoked')
+      .limit(1)
+      .executeTakeFirst();
+    const dns = credential
+      ? undefined
+      : await db
+          .selectFrom('dns_assignments')
+          .select('id')
+          .where('state', 'not in', ['active', 'deleted'])
+          .limit(1)
+          .executeTakeFirst();
+    if (!credential && !dns) return;
+  }
   const result = await (await management()).reconcile();
   if (result.external.failed)
     logger.log('warn', 'servers.external_recovery_failed', { count: result.external.failed });

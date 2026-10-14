@@ -65,3 +65,47 @@ it('retired and invalid Gateway states cannot starve other servers or external r
     await f.db.selectFrom('managed_servers').selectAll().where('id', '=', randomUUID()).execute(),
   ).toEqual([]);
 });
+
+it('continues credential recovery after the last server is deleted', async () => {
+  const isolated = await createTestDatabase();
+  try {
+    const f = await managementFixture(isolated.db, { interactive: true });
+    const serverId = await f.server();
+    await f.db
+      .insertInto('external_sftp_credentials')
+      .values({
+        id: randomUUID(),
+        server_id: serverId,
+        actor_id: f.context.actorUserId,
+        envelope: JSON.stringify({ fixture: true }),
+        provider_ref: null,
+        expires_at: new Date(Date.now() + 60_000),
+        state: 'revoking',
+      })
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ deleted_at: new Date() })
+      .where('id', '=', serverId)
+      .execute();
+    const reconcile = vi.fn(async () => ({ external: { failed: 0 }, unavailable: [] }));
+    await reconcileServers(
+      f.db,
+      async () => ({ reconcile }) as unknown as ManagementRuntime,
+      createLogger(() => {}),
+      {},
+    );
+    expect(reconcile).toHaveBeenCalledOnce();
+    await f.db.updateTable('external_sftp_credentials').set({ state: 'revoked' }).execute();
+    reconcile.mockClear();
+    await reconcileServers(
+      f.db,
+      async () => ({ reconcile }) as unknown as ManagementRuntime,
+      createLogger(() => {}),
+      {},
+    );
+    expect(reconcile).not.toHaveBeenCalled();
+  } finally {
+    await isolated.destroy();
+  }
+});

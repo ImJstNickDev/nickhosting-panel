@@ -158,7 +158,14 @@ function SftpContent({ serverId }: { serverId: string }) {
   const credentials = useQuery({
     queryKey: ['sftp', serverId],
     queryFn: () => api<Credentials>(`${serverPath(serverId)}/sftp`),
-    refetchInterval: 30000,
+    refetchInterval: (query) => {
+      const primary = query.state.data?.find((c) => c.kind === 'primary' && c.state !== 'revoked');
+      return transfers.data?.sftp.configured &&
+        transfers.data.sftp.canIssue &&
+        (!primary || primary.state === 'pending')
+        ? 2000
+        : 30000;
+    },
   });
   const [issued, setIssued] = useState<IssuedCredential>(),
     [recovered, setRecovered] = useState(false),
@@ -173,7 +180,7 @@ function SftpContent({ serverId }: { serverId: string }) {
   const [adding, setAdding] = useState(false),
     [label, setLabel] = useState(''),
     [showRevoked, setShowRevoked] = useState(false);
-  const createIds = useRef({ primary: idempotencyKey(), auxiliary: idempotencyKey() }),
+  const createIds = useRef(idempotencyKey()),
     pending = useRef(false),
     createButton = useRef<HTMLButtonElement>(null);
   const passwordRequest = useSftpPassword(serverId);
@@ -189,21 +196,21 @@ function SftpContent({ serverId }: { serverId: string }) {
     setIssued(undefined);
     createButton.current?.focus();
   };
-  async function create(kind: 'primary' | 'auxiliary') {
+  async function create() {
     if (pending.current) return;
     pending.current = true;
     setBusy(true);
     try {
       const value = await api<IssuedCredential>(`${serverPath(serverId)}/sftp`, {
         body: {
-          credentialId: createIds.current[kind],
-          kind,
-          ...(kind === 'auxiliary' ? { label: label.trim() } : {}),
+          credentialId: createIds.current,
+          kind: 'auxiliary',
+          label: label.trim(),
         },
       });
       setRecovered(false);
       setIssued(value);
-      createIds.current[kind] = idempotencyKey();
+      createIds.current = idempotencyKey();
       await credentials.refetch();
     } finally {
       pending.current = false;
@@ -311,7 +318,15 @@ function SftpContent({ serverId }: { serverId: string }) {
                         />
                       ) : (
                         <span>
-                          {t(primary.state === 'active' ? 'sftp.passwordGenerated' : 'web.pending')}
+                          {t(
+                            primary.state === 'active'
+                              ? 'sftp.passwordGenerated'
+                              : primary.state === 'pending'
+                                ? 'sftp.primaryPending'
+                                : primary.state === 'uncertain'
+                                  ? 'web.uncertain'
+                                  : 'web.pending',
+                          )}
                         </span>
                       )}
                       {canIssue && primary.state === 'active' && (
@@ -334,19 +349,9 @@ function SftpContent({ serverId }: { serverId: string }) {
               </div>
             )}
             {!primary && canIssue && !credentials.isPending && !credentials.error && (
-              <button
-                ref={createButton}
-                className="sftp-activate"
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  setError(undefined);
-                  void create('primary').catch(setError);
-                }}
-              >
-                <Icon name="key" />
-                {t('sftp.activate')}
-              </button>
+              <p className="sftp-muted" role="status">
+                {t('sftp.primaryPending')}
+              </p>
             )}
           </div>
         )
@@ -520,7 +525,7 @@ function SftpContent({ serverId }: { serverId: string }) {
         confirmLabel={t('sftp.addAccess')}
         onClose={() => setAdding(false)}
         onConfirm={async () => {
-          await create('auxiliary');
+          await create();
           setAdding(false);
         }}
       >

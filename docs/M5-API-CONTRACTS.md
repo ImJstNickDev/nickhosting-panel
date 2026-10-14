@@ -1169,3 +1169,25 @@ their existing suppression rules. Explicit policy changes remain authoritative.
 Older disabled generated defaults can be repaired through normal reconciliation
 only with original activation provenance, unchanged default policy fields and no
 explicit policy-update audit, including no-op disable requests.
+
+### Automatic personal SFTP access — 2026-10-15
+
+The worker prepares one persistent primary credential for each current
+`server:manage` principal on a provider-bound eligible server: its creator/owner,
+project managers and platform Owners under the existing permission model.
+Project viewers/operators without that permission receive no SFTP access.
+Creation completion, project membership/reassignment and role changes are discovered
+from authoritative persisted state; opening the SFTP page is not an issuance trigger.
+Existing servers are covered as well. Provisioning is asynchronous and retried when
+SFTP configuration/provider availability or a server operation temporarily blocks it.
+
+The same encrypted intent/provider lifecycle handles automatic and explicit issuance.
+A service-issued primary records its subject without inventing an interactive session
+or delivering a password to the worker/UI. Password reveal and rotation still require
+the actual account's regular authorized session. Auxiliary creation remains manual.
+The SFTP view shows preparation state until the credential is ready; list polling is
+secret-free and does not create credentials. Permission loss/deletion revokes access;
+a regrant waits for any old revocation before creating fresh credentials. Background
+cleanup continues after deletion of the last managed server. Issue #18's retained
+SSH transport limitation remains unchanged; this does not claim immediate transport
+termination. No database schema change is required.

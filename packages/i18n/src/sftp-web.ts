@@ -4,7 +4,10 @@ export const sftpWebMessages: Record<string, readonly [string, string]> = {
     'Usa Mostra password per recuperare la password di questo accesso.',
   ],
   'sftp.showRevoked': ['Show revoked', 'Mostra revocati'],
-  'sftp.activate': ['Generate SFTP password', 'Genera password SFTP'],
+  'sftp.primaryPending': [
+    'Your personal SFTP access is not ready yet. This page checks automatically.',
+    'Il tuo accesso SFTP personale non è ancora pronto. Questa pagina controlla automaticamente.',
+  ],
   'sftp.passwordGenerated': ['Generated · 16 characters', 'Generata · 16 caratteri'],
   'sftp.additional': ['Additional accesses', 'Accessi aggiuntivi'],
   'sftp.addAccess': ['Add access', 'Aggiungi accesso'],

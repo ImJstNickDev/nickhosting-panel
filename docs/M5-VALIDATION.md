@@ -9976,3 +9976,62 @@ passed 225/225 and Minecraft binding passed 9/9. Rerunning only
 fixture correction passed 44/44 (21.41s). Final per-suite evidence covers 278 tests;
 this is not reported as a single clean combined run. Staged governance and
 whitespace checks passed. No remaining review findings.
+
+### Automatic personal SFTP access — 2026-10-15
+
+Personal primary credentials are now reconciled from current server-manage
+permissions, without opening the SFTP page or clicking Generate. Creation uses
+shared encrypted pending intents, existing server locks/unique primary reservations
+and the existing SFTPGo adapter. Service authority records a subject without a fake
+interactive session; password disclosure/rotation remain account-scoped interactive
+operations. Existing primaries are reused, auxiliary creation stays manual, and
+permission loss/deletion use existing revocation. Missing configuration/provider
+outages defer SFTP independently of game installation. In-memory scheduling cursors
+provide bounded fair retries; durable desired state and encrypted intents remain in
+PostgreSQL and survive worker restarts. No new migration or scheduler service.
+
+The worker now continues pending external cleanup when the last server has been
+deleted. The UI removes manual primary creation and polls preparation via secret-free
+GETs, retaining configuration errors and uncertain state. Real Firefox fixture tests
+exercise missing→pending→active without issuance POSTs, EN/IT desktop/mobile,
+password controls, permission/support boundaries and accessibility. Sanitized
+[screenshot](screenshots/m5/sftp-automatic-pending-en.png) independently reviewed:
+compact state, no clipping or misleading success, no UX must-fix.
+
+Live dev: existing source watchers applied changes without manual restart. Read-only
+DB/audit verification found three automatically issued service-primary credentials,
+all active, alongside the preserved pre-existing primary. Service audit actors are
+null with the account as subject; no secrets were read/logged for this verification.
+API and worker were healthy. No game creation, power, files, membership changes or
+production infrastructure modifications. Only requested personal SFTP provisioning
+occurred through the regular worker. No live destructive permission-loss test was
+performed; those cases use the isolated database and provider fixture. SFTPGo #18
+still limits retained SSH transports; automatic revocation is not a security pass.
+
+Rollback must retain the new service-authority envelope reader for credentials
+already issued automatically; blindly reverting to the old reader would prevent
+recovery/reveal of those intents. Disable automatic issuance in code while retaining
+reader/revocation support if rollback is needed. Do not delete encrypted credentials
+or rotate existing passwords as cleanup. No new infrastructure/test servers created.
+
+Completed checks: `scripts/dev.sh pnpm typecheck`; scoped Biome; isolated worker
+`reconcile.integration.test.ts` 2/2; real Firefox `sftp-ui.browser.test.ts` 18/18
+(71.52s), including EN/IT screenshots and accessibility cases; catalog compilation
+1686 keys. Governance passed (952 indexed text files, 354 PNGs, 790 relative links,
+4 TOML files, 44 ignore cases), as did staged whitespace. Independent technical
+and screenshot/content review found no implementation must-fix.
+
+The first existing external-service integration run passed 34/41. Seven expectations
+still assumed reconciliation never created additional primary credentials (old
+counts/list ordering); those assertions were updated to identify original
+credentials explicitly and account for the new automatic primary. Final targeted
+rerun outcomes are recorded below, without presenting this as a clean full run.
+
+Final backend rerun: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec
+vitest run --config vitest.integration.config.ts
+packages/server-management/src/external.integration.test.ts` with a name filter for
+the seven affected legacy cases and eight new automatic-primary cases passed 15/15,
+34 skipped (43.83s). The other 34 passed in the preceding full-file run, giving 49
+passing cases across runs; no remaining failures. Final backend typecheck/Biome and
+independent review of the adjusted assertions passed. No unrelated historical suite
+was repeated. PR21 remains open/unmerged.
