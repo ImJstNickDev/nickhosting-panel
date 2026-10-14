@@ -273,11 +273,65 @@ describe('M5 server browser filters, ownership and bounded views', () => {
       owner.getByRole('link', { name: 'Owner workshop', exact: true }),
     ).toHaveCount(0);
     await owner.getByRole('button', { name: 'Server filters', exact: true }).click();
-    await owner.getByLabel('Owner', { exact: true }).selectOption(identities.peerId);
+    await owner.getByRole('checkbox', { name: 'Taylor', exact: true }).check();
     await browserExpect(cards(owner)).toHaveCount(1);
     await browserExpect(cards(owner)).toContainText('Taylor world');
+    const ownerSearch = owner.getByRole('searchbox', { name: 'Search owners', exact: true });
+    await ownerSearch.fill('Alex');
+    const unionResponse = owner.waitForResponse((response) => {
+      const url = new URL(response.url());
+      const owners = url.searchParams.getAll('ownerIds');
+      return (
+        url.pathname === '/v1/platform/servers' &&
+        owners.includes(identities.userId) &&
+        owners.includes(identities.peerId)
+      );
+    });
+    const alex = owner.getByRole('checkbox', { name: 'Alex', exact: true });
+    await alex.focus();
+    await alex.press('Space');
+    await browserExpect(alex).toBeChecked();
+    const union = await unionResponse;
+    expect(union.status()).toBe(200);
+    expect((await union.json()).total).toBe(34);
+    await browserExpect(
+      owner.getByRole('link', { name: 'Taylor world', exact: true }),
+    ).toBeVisible();
+    await browserExpect(owner.getByRole('link', { name: 'World 31', exact: true })).toBeVisible();
+    await ownerSearch.fill('');
     await screenshot(owner, 'server-browser-owner-scope-desktop-en');
     await accessible(owner);
+    await owner.setViewportSize({ width: 390, height: 844 });
+    const panel = owner.getByRole('region', { name: 'Server filters', exact: true });
+    await browserExpect(panel).toBeVisible();
+    expect(
+      await panel.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.left >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight;
+      }),
+    ).toBe(true);
+    await screenshot(owner, 'server-browser-owner-multiselect-mobile-en');
+    await accessible(owner);
+    await owner.setViewportSize({ width: 1440, height: 1000 });
+    await ownerSearch.fill('No matching person');
+    await browserExpect(owner.getByRole('checkbox')).toHaveCount(0);
+    await browserExpect(
+      owner.getByRole('button', { name: 'Remove Alex', exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      owner.getByRole('button', { name: 'Remove Taylor', exact: true }),
+    ).toBeVisible();
+    await owner.getByRole('button', { name: 'Remove Alex', exact: true }).click();
+    await browserExpect(cards(owner)).toHaveCount(1);
+    await browserExpect(cards(owner)).toContainText('Taylor world');
+    await owner.getByRole('button', { name: 'Clear filters', exact: true }).click();
+    await browserExpect(owner.getByRole('button', { name: /^Remove (Alex|Taylor)$/ })).toHaveCount(
+      0,
+    );
+    await browserExpect.poll(() => cards(owner).count()).toBeGreaterThan(1);
+    await ownerSearch.fill('Taylor');
+    await owner.getByRole('checkbox', { name: 'Taylor', exact: true }).check();
+    await browserExpect(cards(owner)).toHaveCount(1);
     await owner.getByRole('button', { name: 'Server filters', exact: true }).click();
     await owner.setViewportSize({ width: 844, height: 390 });
     await bounded(owner);
@@ -286,7 +340,20 @@ describe('M5 server browser filters, ownership and bounded views', () => {
     await scope.click();
     await browserExpect(cards(owner)).toHaveCount(1);
     await browserExpect(cards(owner)).toContainText('Owner workshop');
-    await browserExpect(owner.getByLabel('Owner', { exact: true })).toHaveCount(0);
+    await browserExpect(
+      owner.getByRole('searchbox', { name: 'Search owners', exact: true }),
+    ).toHaveCount(0);
+    await scope.click();
+    await owner.getByRole('button', { name: 'Server filters', exact: true }).click();
+    await browserExpect(
+      owner.getByRole('checkbox', { name: 'Alex', exact: true }),
+    ).not.toBeChecked();
+    await browserExpect(
+      owner.getByRole('checkbox', { name: 'Taylor', exact: true }),
+    ).not.toBeChecked();
+    await browserExpect(owner.getByRole('button', { name: /^Remove (Alex|Taylor)$/ })).toHaveCount(
+      0,
+    );
     await browserExpect(user.getByRole('switch')).toHaveCount(0);
     expect(
       (await user.request.get(`${fixture.origin}/v1/platform/servers?scope=others`)).status(),

@@ -84,9 +84,20 @@ export function registerPlatformRoutes(
       ),
     ),
   );
-  app.get('/v1/platform/servers', async (c) =>
-    c.json(await listPlatformServers(db, await principal(c), c.req.query(), env)),
-  );
+  app.get('/v1/platform/servers', async (c) => {
+    const ownerIds = c.req.queries('ownerIds');
+    return c.json(
+      await listPlatformServers(
+        db,
+        await principal(c),
+        {
+          ...c.req.query(),
+          ...(ownerIds === undefined ? {} : { ownerIds }),
+        },
+        env,
+      ),
+    );
+  });
   app.get('/v1/platform/servers/:id', async (c) =>
     c.json(await getPlatformServer(db, await principal(c), c.req.param('id'), env)),
   );

@@ -118,6 +118,77 @@
     font-variant-numeric: tabular-nums;
     text-align: center;
   }
+  .server-owner-filter {
+    grid-column: 1 / -1;
+    gap: 8px;
+  }
+  .server-owner-filter legend {
+    padding: 0 0 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .server-owner-options {
+    max-height: 144px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .server-owner-options p,
+  .server-owner-filter > p {
+    margin: 0;
+    padding: 8px;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .server-filter-panel .server-owner-option {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 36px;
+    padding: 6px 8px;
+    cursor: pointer;
+  }
+  .server-owner-option > span {
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .server-owner-option:hover,
+  .server-owner-option:focus-within,
+  .server-owner-option:has(input:checked) {
+    background: #edf3f7;
+  }
+  .server-owner-selected {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 88px;
+    overflow: auto;
+  }
+  .server-owner-selected button {
+    min-height: 28px;
+    padding: 3px 7px;
+    gap: 6px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    background: #edf3f7;
+  }
+  .server-owner-selected button > span {
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .server-owner-selected svg {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    flex: none;
+  }
   .server-owner-switch {
     display: flex;
     align-items: center;

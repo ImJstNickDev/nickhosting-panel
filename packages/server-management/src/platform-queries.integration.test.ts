@@ -470,6 +470,62 @@ describe('M5 platform browser queries and metadata', () => {
     expect(others.filterOptions.owners.map((row) => row.id)).not.toContain(f.owner.subjectUserId);
     expect(JSON.stringify(others.filterOptions)).not.toContain('@example.test');
   });
+  it('combines selected owners with other filters and paginates without broadening authority', async () => {
+    const other = await peer();
+    const ids = [
+      await f.server({ name: 'Selected fleet A' }),
+      await other.server({ name: 'Selected fleet B' }),
+    ];
+    await other.server({ name: 'Unmatched name' });
+    const outsiders = await peer();
+    await outsiders.server({ name: 'Selected fleet private' });
+    const ownerIds = [
+      f.context.subjectUserId,
+      other.context.subjectUserId,
+      f.context.subjectUserId,
+    ];
+    const filters = { scope: 'others', ownerIds, q: 'Selected fleet', state: 'offline', limit: 1 };
+    const first = await listPlatformServers(f.db, f.owner, { ...filters, page: 1 });
+    const second = await listPlatformServers(f.db, f.owner, { ...filters, page: 2 });
+    expect(first).toMatchObject({ total: 2, totalPages: 2, page: 1 });
+    expect(second).toMatchObject({ total: 2, totalPages: 2, page: 2 });
+    expect([...first.items, ...second.items].map((server) => server.id).sort()).toEqual(ids.sort());
+    const narrowed = await listPlatformServers(f.db, f.owner, {
+      ...filters,
+      gameId: f.gameId,
+      runtimeId: 'fixture',
+    });
+    expect(narrowed.total).toBe(1);
+    expect(narrowed.items[0]?.ownerId).toBe(f.context.subjectUserId);
+    const ordinary = await listPlatformServers(f.db, f.context, { ownerIds, q: 'Selected fleet' });
+    expect(ordinary.total).toBe(1);
+    expect(ordinary.items[0]?.ownerId).toBe(f.context.subjectUserId);
+    expect(ordinary.filterOptions.owners).toEqual([]);
+    expect(ordinary.filterOptions.games.map((game) => game.id)).toEqual([f.gameId]);
+    expect(
+      (
+        await listPlatformServers(f.db, f.owner, {
+          ...filters,
+          ownerIds: [outsiders.context.subjectUserId],
+        })
+      ).total,
+    ).toBe(1);
+    expect(
+      (await listPlatformServers(f.db, f.owner, { ownerId: other.context.subjectUserId })).total,
+    ).toBe(2);
+  });
+  it('validates owner arrays and rejects mixing legacy and multi-owner filters', async () => {
+    for (const input of [
+      { ownerIds: [] },
+      { ownerIds: [''] },
+      { ownerIds: ['x'.repeat(129)] },
+      { ownerIds: Array.from({ length: 101 }, () => 'same') },
+      { ownerIds: 'one' },
+      { ownerIds: [null] },
+      { ownerIds: ['one'], ownerId: 'one' },
+    ])
+      await expect(listPlatformServers(f.db, f.owner, input)).rejects.toThrow('validation_failed');
+  });
   it('keeps collaborator visibility while mine excludes shared servers and uses installed releases only', async () => {
     const { id, choiceId } = await installedMinecraft();
     const other = await peer();
@@ -1371,7 +1427,9 @@ describe('M5 platform browser queries and metadata', () => {
         },
       };
     expect((await listPlatformServers(f.db, support)).items.map((r) => r.id)).toEqual([id]);
-    const scoped = await listPlatformServers(f.db, support);
+    const scoped = await listPlatformServers(f.db, support, {
+      ownerIds: [f.context.subjectUserId, other.context.subjectUserId],
+    });
     expect(scoped.filterOptions.games.map((game) => game.id)).toEqual([f.gameId]);
     expect(scoped.filterOptions.owners).toEqual([]);
     await expect(listPlatformServers(f.db, support, { scope: 'others' })).rejects.toThrow(

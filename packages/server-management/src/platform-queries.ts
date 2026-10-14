@@ -34,6 +34,7 @@ const pageSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30),
   cursor: z.string().max(1024).optional(),
 });
+const serverOwnerIdSchema = z.string().min(1).max(128);
 const serverQuerySchema = pageSchema
   .extend({
     page: z.coerce.number().int().min(1).max(1_000_000).optional(),
@@ -44,10 +45,17 @@ const serverQuerySchema = pageSchema
     projectId: z.union([z.uuid(), z.literal('none')]).optional(),
     gameId: z.string().max(64).optional(),
     state: z.enum(['offline', 'starting', 'running', 'stopping', 'unknown']).optional(),
-    ownerId: z.string().min(1).max(128).optional(),
+    ownerId: serverOwnerIdSchema.optional(),
+    ownerIds: z
+      .array(serverOwnerIdSchema)
+      .min(1)
+      .max(100)
+      .transform((ids) => [...new Set(ids)])
+      .optional(),
   })
   .strict()
-  .refine((value) => !(value.page !== undefined && value.cursor !== undefined));
+  .refine((value) => !(value.page !== undefined && value.cursor !== undefined))
+  .refine((value) => !(value.ownerId !== undefined && value.ownerIds !== undefined));
 const cursorSchema = z.object({ at: z.iso.datetime(), id: z.string().min(1).max(128) }).strict();
 function cursor(value: string | undefined, uuid = false) {
   if (!value) return null;
@@ -137,6 +145,7 @@ export async function listPlatformServers(
         : query.where('project_id', '=', value.projectId);
   if (value.state) query = query.where('runtime_state', '=', value.state);
   if (value.ownerId) query = query.where('owner_id', '=', value.ownerId);
+  if (value.ownerIds) query = query.where('owner_id', 'in', value.ownerIds);
   if (value.gameId || value.runtimeId) {
     let mappings = db.selectFrom('runtime_egg_mappings').select('id');
     if (value.gameId) mappings = mappings.where('game_id', '=', value.gameId);

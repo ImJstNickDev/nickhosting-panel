@@ -83,3 +83,28 @@ rollback is a code revert without a data migration.
 
 Screenshots: [desktop status strip](screenshots/m5/server-browser-status-list-desktop-en.png),
 [mobile status strip](screenshots/m5/server-browser-status-list-mobile-en.png).
+
+## Searchable owner selection
+
+In the Owner's Others scope, the owner filter is a name search with multiple
+selection. Search is case/accent insensitive within the visible inventory's owner
+options. Native labeled checkboxes support keyboard selection; removable selected
+name chips stay visible when the search no longer matches them. Removing a chip
+returns focus to search. The option list and selected-name area scroll within the
+filter panel instead of expanding the page.
+
+Selecting owners applies OR within that selection and AND with the remaining
+server filters, immediately returning to page one. Empty selection means all
+visible owners. Clearing filters or switching inventory scope clears selection.
+The API accepts repeated `ownerIds` query parameters (up to 100); the existing
+single `ownerId` remains compatible, but combining both forms is rejected.
+Authorization, owner-option scope and omission of emails remain unchanged.
+
+Validated with 33 platform-query integration tests, a focused support-scope check,
+and 6 browser tests (including combined results, keyboard selection, no-result
+search with preserved chips, removal/clear and inventory-scope reset). Root/web
+types, targeted Biome and independent review passed. No migration, production
+interaction or provider test assets; disposable fixtures cleaned. Review the
+search/selection flow and mobile panel; rollback is a code revert.
+Screenshots: [desktop owner search](screenshots/m5/server-browser-owner-scope-desktop-en.png),
+[mobile owner search](screenshots/m5/server-browser-owner-multiselect-mobile-en.png).

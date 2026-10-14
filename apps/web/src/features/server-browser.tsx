@@ -9,6 +9,7 @@ import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Empty, ErrorNotice, Loading, Page, Select } from '../components/ui.js';
 import { creationGamesQuery } from './creation-catalog.js';
+import { ServerOwnerFilter } from './server-owner-filter.js';
 import { ServerCards } from './servers.js';
 import './server-browser.css';
 
@@ -19,7 +20,7 @@ type Filters = {
   runtimeId: string;
   version: string;
   projectId: string;
-  ownerId: string;
+  ownerIds: string[];
 };
 const emptyFilters: Filters = {
   q: '',
@@ -28,7 +29,7 @@ const emptyFilters: Filters = {
   runtimeId: '',
   version: '',
   projectId: '',
-  ownerId: '',
+  ownerIds: [],
 };
 
 export function ServersPage() {
@@ -159,8 +160,10 @@ export function ServersPage() {
   };
   const params = new URLSearchParams({ limit: String(limit), page: String(currentPage) });
   for (const [key, value] of Object.entries(filters)) {
-    if (value && (key !== 'ownerId' || scope === 'others')) params.set(key, value);
+    if (key !== 'ownerIds' && typeof value === 'string' && value) params.set(key, value);
   }
+  if (scope === 'others')
+    for (const ownerId of filters.ownerIds) params.append('ownerIds', ownerId);
   if (scope) params.set('scope', scope);
   const servers = useQuery({
     queryKey: ['servers', 'browse', scope, params.toString(), identity],
@@ -175,8 +178,9 @@ export function ServersPage() {
   });
   const options = servers.data?.filterOptions;
   const busy = servers.isFetching || filters.q !== search.trim();
-  const additional = ['gameId', 'runtimeId', 'version', 'projectId', 'ownerId'] as const;
-  const activeCount = additional.filter((key) => filters[key]).length;
+  const additional = ['gameId', 'runtimeId', 'version', 'projectId'] as const;
+  const activeCount =
+    additional.filter((key) => filters[key]).length + Number(filters.ownerIds.length > 0);
   const setMode = (mode: 'grid' | 'list') => {
     setView(mode);
     resetPage();
@@ -365,25 +369,19 @@ export function ServersPage() {
                 ))}
               </Select>
               {scope === 'others' && (
-                <Select
-                  label={t('platform.owner')}
-                  value={filters.ownerId}
-                  onChange={(event) => update({ ownerId: event.target.value })}
-                >
-                  <option value="">{t('web.all')}</option>
-                  {options?.owners.map((owner) => (
-                    <option key={owner.id} value={owner.id}>
-                      {owner.name}
-                    </option>
-                  ))}
-                </Select>
+                <ServerOwnerFilter
+                  owners={options?.owners ?? []}
+                  value={filters.ownerIds}
+                  onChange={(ownerIds) => update({ ownerIds })}
+                  loading={servers.isPending}
+                />
               )}
               <button
                 type="button"
                 className="secondary server-clear-filters"
                 disabled={!activeCount}
                 onClick={() =>
-                  update({ gameId: '', runtimeId: '', version: '', projectId: '', ownerId: '' })
+                  update({ gameId: '', runtimeId: '', version: '', projectId: '', ownerIds: [] })
                 }
               >
                 {t('platform.clearServerFilters')}
@@ -422,7 +420,9 @@ export function ServersPage() {
           ) : (
             <Empty
               text={
-                Object.values(filters).some(Boolean)
+                Object.values(filters).some((value) =>
+                  Array.isArray(value) ? value.length > 0 : Boolean(value),
+                )
                   ? t('platform.noMatchingServers')
                   : t('web.noServers')
               }
