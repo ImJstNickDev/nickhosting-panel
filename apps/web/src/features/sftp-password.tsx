@@ -84,6 +84,8 @@ export function SftpPassword({
         {shown && password ? (
           <input
             aria-label={t('web.password')}
+            onClick={(event) => event.currentTarget.select()}
+            onFocus={(event) => event.currentTarget.select()}
             value={password}
             readOnly
             type="text"

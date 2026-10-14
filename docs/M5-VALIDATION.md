@@ -9843,3 +9843,10 @@ no longer move on reveal. CSS Biome and the existing `sftp-ui.browser.test.ts`
 and keyboard focus checks. Independent comparison of fresh hidden/shown desktop
 and mobile screenshots found no regressions; revealed screenshots above refreshed.
 CSS-only, existing HMR, no backend or infrastructure operations.
+
+SFTP password selection followup: clicking or focusing either readonly password
+input selects its entire value, including the additional-access/issuance panel.
+Scoped Biome, web typecheck and whitespace checks pass. Real Firefox dev smoke
+verified full selection after explicit reveal and clearing on hide, without
+logging/capturing the secret. Independent diff review: no findings. No provider
+mutation/restart; only the regular disclosure audit is written by verification.

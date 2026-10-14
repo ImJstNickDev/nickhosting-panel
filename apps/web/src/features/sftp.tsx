@@ -90,6 +90,8 @@ function CopyValue({
         {secret ? (
           <input
             aria-label={t('web.password')}
+            onClick={(event) => event.currentTarget.select()}
+            onFocus={(event) => event.currentTarget.select()}
             readOnly
             type={shown ? 'text' : 'password'}
             value={value}
