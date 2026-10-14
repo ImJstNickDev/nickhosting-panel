@@ -9573,3 +9573,41 @@ focused Biome checks. The Quill browser command with `-t 'renders diagrams'` pas
 **1 test / 8 intentionally unselected** (31.23 s), including rejection of malicious
 diagram asset requests. Independent follow-up review confirmed the upstream browser
 distribution, unchanged rendering guards and production entry; no must-fix remains.
+
+### 2026-10-14 — Quill cold-open readiness and Retry
+
+Reported behavior: opening Markdown after Fileman refresh could wait and show
+`viewer.unavailable`; Retry then succeeded quickly. Inspection and a controlled
+reproduction established that the main parser's 12-second deadline included cold
+module loading, unlike the bibliography worker. The main parser now announces
+readiness; loading has a separate 20-second bound and actual parsing retains its
+12-second deadline. Loading/rendering errors have accurate EN/IT messages rather
+than incorrectly instructing the user to download a supposedly unsupported file.
+
+Worker failure now permits an explicit subsequent parse to create a replacement,
+so embedded-note Retry also recovers. Closing the document remains terminal;
+failed-generation events are ignored and all pending work/timers are cleaned.
+No background retries, new provider requests or dependency changes were added.
+
+Read-only Firefox investigation of the Owner-indicated development dataset opened
+its Markdown file after Fileman refresh in **1,480 ms before** the correction
+(worker result 462 ms) and **1,559 ms after** (worker ready 357 ms, result 450 ms).
+The user's intermittent failure was not reproduced spontaneously in these runs;
+these timings are not evidence of a performance improvement or proof of the
+specific original incident's cause. A deliberate 13-second worker request delay
+reproduces the defective deadline boundary and verifies the correction without
+clicking Retry.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/markdown/ui-client.test.ts apps/web/src/features/viewer-engine/builtin-viewers/markdown/parser.test.ts apps/web/src/features/viewer-engine/builtin-viewers/markdown/bibliography-client.test.ts`: **20 passed**, including startup/parsing timeouts, replacement, deduplication and disposal.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/markdown.browser.test.ts -t 'cold worker|shares task|preserves unsaved'`: **3 passed / 7 unselected**, 45.43 s. Covers refresh plus delayed worker, explicit save/undo and Scribe draft/position handoff.
+
+- Chromium's same browser command with `-t 'cold worker'`: **1 passed / 9 unselected**, 27.33 s; the test asserts its delayed-worker interception actually occurred.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm build`, `scripts/dev.sh pnpm i18n:check`, focused Biome and diff whitespace checks: **passed**. No historical full milestone suite was repeated.
+
+Independent review found no remaining must-fix; it also independently verified
+constructor failure and stale worker events. The fix is loaded through existing
+dev source/HMR and catalog compilation. No image update, container restart,
+provider mutation, game-file write or new infrastructure was performed. Real reads
+used the existing authenticated development session; no credentials are published.

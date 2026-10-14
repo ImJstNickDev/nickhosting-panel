@@ -335,7 +335,7 @@ function QuillWorkspace(props: DocumentViewProps) {
         )}
         {error ? (
           <div className="quill-error">
-            <ErrorNotice error={{ messageKey: 'viewer.unavailable' }} />
+            <ErrorNotice error={error} />
             <button type="button" onClick={() => setAttempt((count) => count + 1)}>
               {t('quill.retry')}
             </button>

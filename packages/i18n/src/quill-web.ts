@@ -32,6 +32,14 @@ export const quillWebMessages: Record<string, readonly [string, string]> = {
   ],
   'quill.unavailable': ['This reference is unavailable.', 'Questo riferimento non è disponibile.'],
   'quill.retry': ['Retry', 'Riprova'],
+  'quill.loadFailed': [
+    'Quill could not load. Try again.',
+    'Caricamento di Quill non riuscito. Riprova.',
+  ],
+  'quill.renderFailed': [
+    'Unable to render the document. Try again or open it in Scribe.',
+    'Impossibile visualizzare il documento. Riprova o aprilo in Scribe.',
+  ],
   'quill.embedLimit': [
     'This inclusion exceeds the preview limit or refers back to an open document.',
     'Questa inclusione supera i limiti di anteprima o rimanda a un documento già aperto.',

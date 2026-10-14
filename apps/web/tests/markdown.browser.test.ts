@@ -177,6 +177,34 @@ describe('Quill Markdown documents', () => {
     await browserExpect(name === 'Quill' ? quill() : scribe()).toBeVisible();
   }
 
+  it('survives a cold worker load after Fileman refresh without requiring Retry', async () => {
+    files.set('cold-start.md', Buffer.from('# Cold start\n\nThe document is ready.'));
+    await page.goto(base);
+    await page.reload();
+    await browserExpect(
+      page.locator('.fm-filename').getByText('cold-start.md', { exact: true }),
+    ).toBeVisible();
+    const pattern = '**/markdown/worker.ts?*';
+    let delayedWorkers = 0;
+    await page.route(pattern, async (route) => {
+      delayedWorkers++;
+      await new Promise((resolve) => setTimeout(resolve, 13_000));
+      // StrictMode may dispose its first worker while the request is delayed.
+      await route.continue().catch(() => {});
+    });
+    try {
+      await page.locator('.fm-filename').getByText('cold-start.md', { exact: true }).click();
+      await browserExpect(quill().getByRole('heading', { name: 'Cold start' })).toBeVisible({
+        timeout: 25_000,
+      });
+      await browserExpect(quill().locator('.quill-error')).toHaveCount(0);
+      await browserExpect(quill()).toHaveAttribute('aria-busy', 'false');
+      expect(delayedWorkers).toBeGreaterThan(0);
+    } finally {
+      await page.unroute(pattern);
+    }
+  });
+
   it('renders GFM, mathematics, chemistry, frontmatter, local inclusions and bibliography', async () => {
     await open('guide.md', guide);
     await browserExpect(

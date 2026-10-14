@@ -60,7 +60,10 @@ external links open separately with `noopener noreferrer`.
   and 32 total pending reads; excess admitted reads wait in a bounded queue.
 - Parser: 50,000 initial nodes, 128 levels, 64 KiB frontmatter, 2,000 references;
   generated KaTeX output is also bounded. Worker deadlines terminate pathological
-  work instead of blocking the application thread.
+  work instead of blocking the application thread. Module startup has a separate
+  20-second readiness deadline; the existing 12-second parse deadline starts only
+  after readiness. A failed worker can be replaced on explicit Retry (including
+  embedded notes), while closing the document permanently disposes its client.
 - Includes: at most three levels with aggregate occurrence, source-byte and
   rendered-node budgets; cycles are rejected. These limits concern embedded
   previews, not the ability to open a note separately.

@@ -14,3 +14,4 @@ self.onmessage = async (event: MessageEvent<{ id: number; source: string }>) => 
     });
   }
 };
+self.postMessage({ ready: true });
