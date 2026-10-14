@@ -9611,3 +9611,28 @@ constructor failure and stale worker events. The fix is loaded through existing
 dev source/HMR and catalog compilation. No image update, container restart,
 provider mutation, game-file write or new infrastructure was performed. Real reads
 used the existing authenticated development session; no credentials are published.
+
+### 2026-10-14 — Quill complete-document printing
+
+Fixed print pagination without changing screen layout: hide off-document subtrees,
+release height/overflow/flex constraints along the document's ancestor path, and
+print the article in normal block flow instead of absolute positioning. Previously,
+the new regression reproduced a 727px printed article for a 64-section document.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/markdown.browser.test.ts -t 'prints the complete'`: passed in Chromium; repeated with `NH_BROWSER=firefox`: passed. One targeted test per browser, ten unrelated tests skipped. Chromium PDF extraction checks all 64 section markers and the final-page marker; both browsers check unclipped print layout and restoration after `afterprint`, including printing after scrolling to the bottom.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- Focused Biome checks and `git diff --check`: passed.
+- Read-only development smoke opened the Owner-authorized synthetic long document:
+  Chromium generated a **16-page PDF** containing all 64 markers; Firefox print-media
+  layout expanded from 459px to 16616px and restored to 459px afterward.
+  Firefox's native print-dialog PDF export was not automated. Reviewed
+  [Firefox print-layout screenshot](screenshots/m5/quill-print-firefox.png).
+- Independent reviewer found no must-fix issues. Existing lazy-resource/loading
+  boundaries are unchanged; this fix addresses document clipping/pagination.
+
+No container restarts, provider writes, or server-file changes. Existing isolated
+test services were reused. Development received the CSS through Vite HMR.
+Rollback: revert this scoped CSS/test change. PR #21 remains open and unmerged;
+SFTPGo issue #18 remains unchanged.

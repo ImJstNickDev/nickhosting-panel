@@ -177,6 +177,63 @@ describe('Quill Markdown documents', () => {
     await browserExpect(name === 'Quill' ? quill() : scribe()).toBeVisible();
   }
 
+  it('prints the complete long document across pages without the application shell', async () => {
+    const sections = Array.from(
+      { length: 64 },
+      (_, i) =>
+        `## Print-section-${i + 1}\n\n${'A paragraph of document content for pagination. '.repeat(12)}\n`,
+    );
+    await open('Print.md', `# Print document\n\n${sections.join('\n')}\nPRINT-END-MARKER`);
+    const article = page.locator('.quill-document');
+    const screenHeight = await article.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+      return el.clientHeight;
+    });
+    await page.evaluate(() => {
+      window.print = () => {};
+    });
+    await quill().getByRole('button', { name: 'Print', exact: true }).click();
+    await page.emulateMedia({ media: 'print' });
+    try {
+      expect(await article.evaluate((el) => el.clientHeight)).toBeGreaterThan(screenHeight * 10);
+      expect(
+        await article.evaluate((el) => {
+          for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            if (style.overflowY !== 'visible' || style.display !== 'block') return false;
+          }
+          return true;
+        }),
+      ).toBe(true);
+      if (process.env.NH_BROWSER !== 'firefox') {
+        const pdf = await page.pdf({ format: 'A4' });
+        const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+        const loading = getDocument({ data: new Uint8Array(pdf), useSystemFonts: true });
+        const document = await loading.promise;
+        try {
+          expect(document.numPages).toBeGreaterThan(2);
+          const pages = [];
+          for (let n = 1; n <= document.numPages; n++) {
+            const content = await (await document.getPage(n)).getTextContent();
+            pages.push(content.items.map((item) => ('str' in item ? item.str : '')).join(' '));
+          }
+          const text = pages.join(' ');
+          for (let n = 1; n <= 64; n++) expect(text).toContain(`Print-section-${n}`);
+          expect(pages.at(-1)).toContain('PRINT-END-MARKER');
+          expect(text).not.toContain('Create server');
+        } finally {
+          await loading.destroy();
+        }
+      }
+    } finally {
+      await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+      await page.emulateMedia({ media: 'screen' });
+    }
+    await browserExpect(article).not.toHaveClass(/quill-print-target/);
+    expect(await article.evaluate((el) => el.clientHeight)).toBe(screenHeight);
+    await browserExpect(quill().getByRole('button', { name: 'Print', exact: true })).toBeVisible();
+  });
+
   it('survives a cold worker load after Fileman refresh without requiring Retry', async () => {
     files.set('cold-start.md', Buffer.from('# Cold start\n\nThe document is ready.'));
     await page.goto(base);

@@ -493,16 +493,34 @@
   }
 }
 @media print {
-  body:has(.quill-print-target) * {
-    visibility: hidden;
+  /* Keep only the document's ancestor path in normal paginated flow. Hiding
+     siblings with visibility left their layout (and clipping ancestors) intact. */
+  body:has(.quill-print-target)
+  *:not(.quill-print-target):not(.quill-print-target *):not(:has(.quill-print-target)) {
+    display: none;
   }
-  body .quill-print-target,
-  body .quill-print-target * {
-    visibility: visible;
+  html:has(.quill-print-target),
+  body:has(.quill-print-target),
+  body *:has(.quill-print-target) {
+    display: block;
+    position: static;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    contain: none;
+    transform: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+    background: white;
   }
   body .quill-print-target {
-    position: absolute;
-    inset: 0;
+    position: static;
     width: 100%;
     height: auto;
     max-height: none;
