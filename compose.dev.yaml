@@ -61,7 +61,8 @@ services:
       NH_WEB_CACHE_DIR: /tmp/vite-cache
     command: [web]
     networks: [edge]
-    mem_limit: 768m
+    # Dependency optimization and HMR need headroom beyond the application runtime.
+    mem_limit: 1536m
     volumes: &sources
       - { type: bind, source: ./apps/web/src, target: /app/apps/web/src, bind: { create_host_path: false } }
       - { type: bind, source: ./apps/web/index.html, target: /app/apps/web/index.html, read_only: true, bind: { create_host_path: false } }

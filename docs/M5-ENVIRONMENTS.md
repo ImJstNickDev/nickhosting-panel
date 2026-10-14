@@ -1012,3 +1012,36 @@ data. Use both environment files and the complete overlay chain in the
 [activation record](M5-VIEWER-DEPLOYMENT.md#approved-activation-record--2026-10-13)
 for subsequent lifecycle commands. Existing user-facing SFTP and issue18 are
 unchanged; no production deployment is implied.
+
+## Development Vite memory recovery — 2026-10-14
+
+The development Vite service has a 1536 MiB memory ceiling. The previous 768 MiB
+ceiling was reached during dependency optimization: the cgroup recorded one OOM
+kill and the supervisor logged `web exited (SIGKILL)`. The container remained
+running but unhealthy, with no Vite listener; ingress therefore returned HTTP502.
+A running container or the ingress-only health endpoint does not prove frontend
+readiness. Inspect Vite health and the actual HTTPS application response.
+
+Applying this changed ceiling to an existing dev container requires specific
+Owner approval. The reviewed recovery commands retain its identity, mounts,
+network address and image, with no Compose recreation or provider operation:
+
+```bash
+docker update --memory 1536m --memory-swap 3g nickhosting-dev-vite-1
+docker restart --time 20 nickhosting-dev-vite-1
+```
+
+The combined RAM/swap ceiling follows Docker's default relationship for this
+Compose memory limit; it does not enable host swap. Verify available host memory,
+the exact Compose project/service labels and current resource settings first.
+Check Vite's health, child process, memory events and HTTPS after recovery.
+Rollback of the resource change is `docker update --memory 768m --memory-swap
+1536m nickhosting-dev-vite-1` (restoring the prior OOM risk); no database or image
+rollback is involved. This section documents the proposed recovery, not approval
+or completed activation.
+
+Preparation checks: independent configuration review found no must-fix issue;
+`scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts -t
+'development'` passed 11 tests (33 unrelated cases skipped). Compose parsing was
+read-only. `git diff --check` passed. The source/limit change does not activate
+itself; Owner approval and post-restart HTTP/module checks remain pending.
