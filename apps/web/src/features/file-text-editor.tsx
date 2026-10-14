@@ -4,6 +4,7 @@ import {
   historyKeymap,
   indentMore,
   indentWithTab,
+  isolateHistory,
   redo,
   redoDepth,
   undo,
@@ -43,7 +44,6 @@ import {
   Compartment,
   EditorState,
   type Extension,
-  Text,
   Transaction,
 } from '@codemirror/state';
 import {
@@ -58,26 +58,24 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocale, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
+import {
+  fileDocument,
+  fileDocumentExtensions,
+  replaceFileDocument,
+} from './file-editor-document.js';
 import { editorPhraseKeys, fileLanguage, validateFileSyntax } from './file-editor-model.js';
 
 const externalContent = Annotation.define<boolean>();
-
-// CodeMirror normally normalizes line endings. Preserve a consistent source format;
-// mixed-ending files retain flexible parsing rather than treating breaks as text.
-function sourceSeparator(value: string) {
-  let separator: string | undefined;
-  for (const match of value.matchAll(/\r\n|\r|\n/g)) {
-    if (separator !== undefined && separator !== match[0]) return undefined;
-    separator = match[0];
-  }
-  return separator ?? '\n';
-}
 
 export type FileEditorControls = {
   focus: () => void;
   undo: () => void;
   redo: () => void;
   find: () => void;
+  /** Apply another trusted document view's edit through the same undo history. */
+  replaceContent?: (value: string) => void;
+  flush?: () => Promise<boolean>;
+  pendingChanges?: boolean;
   canUndo: boolean;
   canRedo: boolean;
 };
@@ -387,9 +385,7 @@ export function FileTextEditor({
   const [searchPanel, setSearchPanel] = useState<SearchPanelState>();
   const configuration = useRef(new Compartment());
   const syntaxConfiguration = useRef(new Compartment());
-  const serializationSeparator = useRef<string | null>(null);
-  if (serializationSeparator.current === null)
-    serializationSeparator.current = sourceSeparator(value) ?? '\n';
+  const undoConfiguration = useRef(new Compartment());
   const synchronizedValue = useRef(value);
   const callbacks = useRef({ onChange, onSave, onControls, shouldAutoFocus, readOnly, t });
   callbacks.current = { onChange, onSave, onControls, shouldAutoFocus, readOnly, t };
@@ -405,6 +401,15 @@ export function FileTextEditor({
       };
       callbacks.current.onControls?.({
         focus: () => editor.focus(),
+        replaceContent: (value) => {
+          if (callbacks.current.readOnly) return;
+          const replacement = replaceFileDocument(editor.state, value);
+          if (!replacement) return;
+          editor.dispatch({
+            ...replacement,
+            annotations: [Transaction.userEvent.of('input'), isolateHistory.of('full')],
+          });
+        },
         undo: () => {
           if (!callbacks.current.readOnly) run(undo);
         },
@@ -425,7 +430,8 @@ export function FileTextEditor({
         extensions: [
           lineNumbers(),
           highlightActiveLineGutter(),
-          history(),
+          undoConfiguration.current.of(history()),
+          fileDocumentExtensions(initialValue.current),
           drawSelection(),
           bracketMatching(),
           highlightActiveLine(),
@@ -482,14 +488,11 @@ export function FileTextEditor({
           ]),
           EditorView.updateListener.of((update) => {
             if (
-              update.docChanged &&
+              update.startState.field(fileDocument).text !==
+                update.state.field(fileDocument).text &&
               !update.transactions.some((tr) => tr.annotation(externalContent))
             ) {
-              const next = update.state.doc.sliceString(
-                0,
-                update.state.doc.length,
-                serializationSeparator.current ?? '\n',
-              );
+              const next = update.state.field(fileDocument).text;
               synchronizedValue.current = next;
               callbacks.current.onChange(next);
             }
@@ -563,14 +566,14 @@ export function FileTextEditor({
     const editor = view.current;
     if (!editor || synchronizedValue.current === value) return;
     synchronizedValue.current = value;
-    serializationSeparator.current = sourceSeparator(value) ?? '\n';
-    const document = Text.of(value.split(/\r\n|\r|\n/));
+    const replacement = replaceFileDocument(editor.state, value);
+    if (!replacement) return;
     editor.dispatch({
-      changes: editor.state.doc.eq(document)
-        ? undefined
-        : { from: 0, to: editor.state.doc.length, insert: document },
+      ...replacement,
+      effects: [replacement.effects, undoConfiguration.current.reconfigure([])],
       annotations: [externalContent.of(true), Transaction.addToHistory.of(false)],
     });
+    editor.dispatch({ effects: undoConfiguration.current.reconfigure(history()) });
   }, [value]);
 
   return (

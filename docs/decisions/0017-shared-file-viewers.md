@@ -155,3 +155,31 @@ This preserves duplicate keys, source order and numeric precision while enabling
 keyboard browsing, search and long-value inspection. It introduces no server-side
 parser, filesystem writes, new provider checks, dependencies or Blueprint changes.
 The viewer remains read-only and retains its existing preview budgets.
+
+### 2026-10-14 — Shared editable documents and delimited Datagrid sources
+
+Fileman retains one document session (raw source, save revision, draft/recovery,
+permissions and history). ViewerEngine registers trusted document views against
+that session. Datagrid and Scribe switch through a host toolbar contribution;
+neither patches the other's DOM or obtains another provider transport. Both remain
+mounted while the file is open, so switching preserves text selection, table view
+and undo history without downloading again. The icon switch flushes any active
+cell edit before changing views. Unsupported/malformed delimited text remains
+repairable in Scribe.
+
+The common Datagrid table renderer is independent of its data source. SQLite keeps
+its read-only server snapshot adapter. CSV/TSV uses PapaParse in a bounded browser
+worker and the existing revision-aware text save endpoint. Sorting/filtering is a
+view operation, never a source rewrite; edits refer to source row identities.
+Arrays preserve duplicate/empty headers and exact strings, including leading zeros
+and large integers. Formula-like strings are data, not executable expressions.
+
+CodeMirror owns shared undo/redo. A raw-source state field records minimal raw
+patches alongside normalized editor changes, retaining untouched mixed newline
+sequences (including quoted multiline cells) through both views and undo. External
+replacement resets history; saving the current draft and renaming do not.
+
+CSV/TSV documents inside archives remain read-only, although the same view switch
+is available. SQLite writes, DuckDB/H2 adapters, formulas and spreadsheet exports
+are outside this change. The existing editor byte limit still applies. No Blueprint
+change, API endpoint, provider credentials or live server operation is introduced.

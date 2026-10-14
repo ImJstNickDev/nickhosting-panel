@@ -1,14 +1,22 @@
+import { useState } from 'react';
 import { useT } from '../../../app/i18n.js';
 import { ErrorNotice } from '../../../components/ui.js';
-import { FileTextEditor } from '../../file-text-editor.js';
 import { readViewerBytes, viewerPath } from '../core/access.js';
 import { previewLimits } from '../core/limits.js';
+import type { ViewerId } from '../core/registry.js';
 import type { ViewerProps } from '../core/types.js';
 import { useViewerResource } from '../core/use-resource.js';
+import { DocumentEditor } from '../document-editor.js';
 import { ViewerLoading } from '../loading.js';
 
 /** Archive text entries are read-only; regular text stays in the existing revision-aware editor. */
-export default function TextViewer({ serverId, source }: ViewerProps) {
+export default function TextViewer({
+  serverId,
+  source,
+  chrome,
+  initialView = 'text',
+}: ViewerProps & { initialView?: ViewerId }) {
+  const [view, setView] = useState<ViewerId>(initialView);
   const t = useT();
   const url = viewerPath(serverId, source);
   const result = useViewerResource(url, async (signal) => {
@@ -20,7 +28,10 @@ export default function TextViewer({ serverId, source }: ViewerProps) {
   if (result.value === undefined) return <ViewerLoading />;
   return (
     <div className="ve-text">
-      <FileTextEditor
+      <DocumentEditor
+        selectedView={view}
+        onViewChange={setView}
+        actionTarget={chrome?.tools}
         path={source.name}
         value={result.value}
         readOnly

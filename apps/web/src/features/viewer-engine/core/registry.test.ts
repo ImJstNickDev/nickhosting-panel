@@ -66,4 +66,12 @@ describe('trusted viewer selection', () => {
       'text',
     ]);
   });
+  it('offers shared CSV/TSV views within editor bounds, including read-only archive entries', () => {
+    for (const name of ['users.csv', 'users.tsv']) {
+      expect(preferredViewer(file(name))).toBe('sqlite');
+      expect(availableViewers(file(name)).map((item) => item.id)).toEqual(['sqlite', 'text']);
+      expect(preferredViewer({ ...file(name), entry: name })).toBe('sqlite');
+      expect(availableViewers(file(name, 2 * 1024 * 1024))).toEqual([]);
+    }
+  });
 });

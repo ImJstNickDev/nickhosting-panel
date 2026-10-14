@@ -9,10 +9,37 @@ export function DatagridColumnFilter({
 }: {
   columns: string[];
   value: string;
-  onChange: (value: string) => void;
+  onChange(value: string): void;
   disabled: boolean;
 }) {
   const t = useT();
+  return (
+    <DatagridChoice
+      label={t('datagrid.filterColumn')}
+      value={value}
+      onChange={onChange}
+      disabled={disabled}
+      choices={[
+        { value: '', label: t('datagrid.allColumns') },
+        ...columns.map((column) => ({ value: column, label: column })),
+      ]}
+    />
+  );
+}
+
+export function DatagridChoice({
+  choices,
+  value,
+  onChange,
+  disabled,
+  label,
+}: {
+  choices: Array<{ value: string; label: string }>;
+  value: string;
+  onChange(value: string): void;
+  disabled: boolean;
+  label: string;
+}) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -41,21 +68,21 @@ export function DatagridColumnFilter({
         type="button"
         className="secondary dg-filter-trigger"
         ref={trigger}
-        aria-label={t('datagrid.filterColumn')}
+        aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         disabled={disabled}
         onClick={() => setOpen(!open)}
       >
-        <span>{value || t('datagrid.allColumns')}</span>
+        <span>{choices.find((choice) => choice.value === value)?.label}</span>
         <span aria-hidden="true">⌄</span>
       </button>
       {open && (
         <div
           id={id}
           role="menu"
-          aria-label={t('datagrid.filterColumn')}
+          aria-label={label}
           className="dg-column-menu"
           onKeyDown={(event) => {
             if (event.key === 'Escape') {
@@ -77,20 +104,20 @@ export function DatagridColumnFilter({
             items[next]?.focus();
           }}
         >
-          {['', ...columns].map((column) => (
+          {choices.map((choice) => (
             <button
               type="button"
               role="menuitemradio"
-              aria-checked={value === column}
-              key={column}
+              aria-checked={value === choice.value}
+              key={choice.value}
               onClick={() => {
-                onChange(column);
+                onChange(choice.value);
                 setOpen(false);
                 trigger.current?.focus();
               }}
             >
-              <span>{column || t('datagrid.allColumns')}</span>
-              <span aria-hidden="true">{value === column ? '✓' : ''}</span>
+              <span>{choice.label}</span>
+              <span aria-hidden="true">{value === choice.value ? '✓' : ''}</span>
             </button>
           ))}
         </div>

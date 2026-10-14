@@ -523,3 +523,35 @@ virtualized rows. Details and clipboard feedback use localized EN/IT labels.
 The shared shell continues to own Home, Download, Open with and viewer Escape.
 Editing remains Scribe's responsibility. Validation, screenshots and measured
 fixture costs are recorded in [M5 validation](M5-VALIDATION.md).
+
+## Editable CSV/TSV documents (2026-10-14)
+
+Datagrid now reads and edits physical UTF-8 CSV/TSV files through the same document
+session and conditional save as Scribe. The toolbar icon switches between them
+without another file read. Pending cell edits are committed to the shared draft
+before switching/saving; Undo/Redo spans both views. Remote revision conflicts keep
+the draft and never silently overwrite the changed provider file.
+
+Supported operations: cell edits, row/column insertion and deletion, header rename,
+header interpretation, comma/tab/semicolon/pipe delimiter selection, literal search,
+column filtering, stable sorting and bounded paging. Delimiter/header choices
+interpret the existing source; they do not silently convert its contents. Sorting
+never changes saved row order. Quoting, BOM, final newline, exact strings and untouched
+multiline cells survive edits. No formulas are evaluated or coerced into numbers.
+
+[PapaParse documentation](https://www.papaparse.com/docs) defines the parser/unparser
+contract. Pinned `papaparse` 5.7.0 and `@types/papaparse` 5.5.2 both use MIT licenses;
+the dependency is bundled only in the lazy document worker. No upstream code is
+copied into the project. The worker retains at most a 1 MiB source, 50,000 records,
+100,000 cells and 128 columns. Pages contain at most 100 rows and 256-character
+cell previews; explicit cell inspection/editing retrieves the full value. A five
+second worker deadline terminates stalled work. Exceeding a budget reports a limit;
+it never saves a truncated document.
+
+Archive CSV/TSV entries use the same renderer and switch in read-only mode. SQLite
+remains read-only and uses its existing service. The source-neutral shared table
+renderer provides future adapter extension points, not implemented DuckDB/H2 support.
+
+The production frontend build includes the worker. Persistent development must
+rebuild only its Vite image to install the added dependency; no API/worker/database
+restart, migration, Blueprint update or provider operation is needed.

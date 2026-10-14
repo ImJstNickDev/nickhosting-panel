@@ -1,0 +1,81 @@
+.dg-delimited {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 0 0 5px 5px;
+}
+.dg-delimited > .dg-main {
+  flex: 1;
+}
+.dg-delimited-tools {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.dg-delimited-settings,
+.dg-delimited-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.dg-delimited-settings > span {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.dg-delimited .dg-header-toggle[aria-pressed="true"] {
+  color: var(--blue);
+  background: var(--dg-selected);
+  border-color: var(--blue);
+}
+.dg-delimited .dg-cell-editor {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 92px;
+  max-height: 220px;
+  padding: 0.45rem;
+  border: 1px solid var(--blue);
+  border-radius: 0;
+  font: inherit;
+  resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dg-delimited .dg-grid td:has(.dg-cell-editor) {
+  padding: 0;
+  overflow: visible;
+}
+.dg-delimited-error {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--danger);
+}
+.dg-delimited-detail {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60svh;
+  overflow: auto;
+}
+.dg-delimited dialog {
+  max-width: min(640px, calc(100vw - 2rem));
+}
+@media (max-width: 560px) {
+  .dg-delimited-tools {
+    gap: 0.5rem;
+  }
+  .dg-delimited-settings {
+    flex-wrap: wrap;
+  }
+  .dg-delimited-settings > span {
+    display: none;
+  }
+  .dg-delimited .dg-column-filter {
+    max-width: 130px;
+  }
+  .dg-delimited .dg-footer {
+    align-items: flex-start;
+  }
+}

@@ -228,6 +228,9 @@ importers:
       mediabunny:
         specifier: 1.61.4
         version: 1.61.4
+      papaparse:
+        specifier: 5.7.0
+        version: 5.7.0
       react:
         specifier: 19.3.0
         version: 19.3.0
@@ -265,6 +268,9 @@ importers:
       '@nickhosting/server-management':
         specifier: workspace:*
         version: link:../../packages/server-management
+      '@types/papaparse':
+        specifier: 5.5.2
+        version: 5.5.2
       '@types/react':
         specifier: 19.3.0
         version: 19.3.0
@@ -1251,6 +1257,9 @@ packages:
   '@types/nodemailer@8.0.2':
     resolution: {integrity: sha512-c7M5ox8p0nEOfbJ2E9Qcmt8/QCu/VzsiAhzBiZbvky2PhKZDHpKB3sQHBM5MEZNkCfBOaS6S9//AGPRTNB7IaA==}
 
+  '@types/papaparse@5.5.2':
+    resolution: {integrity: sha512-gFnFp/JMzLHCwRf7tQHrNnfhN4eYBVYYI897CGX4MY1tzY9l2aLkVyx2IlKZ/SAqDbB3I1AOZW5gTMGGsqWliA==}
+
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
 
@@ -2039,6 +2048,9 @@ packages:
   obug@2.2.1:
     resolution: {integrity: sha512-XrsrhT5sybtKI6wakr2SPOlGZWWYbUXZ7a0jT8/QOeAPau+1X/bSegNe5YR75oJmEZQbKningirmGOEJCIk61Q==}
     engines: {node: '>=12.20.0'}
+
+  papaparse@5.7.0:
+    resolution: {integrity: sha512-qBGxg/7Q3Kl9Wfhrz2Z74UnvnHTXLNG6jmKJFeBvP2+y4lV7So+7SR62+Zd47JvdrCkX+nDcnr0ObPzek/+6RA==}
 
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
@@ -3177,6 +3189,10 @@ snapshots:
     dependencies:
       '@types/node': 24.19.1
 
+  '@types/papaparse@5.5.2':
+    dependencies:
+      '@types/node': 24.19.1
+
   '@types/pg@8.23.1':
     dependencies:
       '@types/node': 24.19.1
@@ -3838,6 +3854,8 @@ snapshots:
   normalize-path@3.0.0: {}
 
   obug@2.2.1: {}
+
+  papaparse@5.7.0: {}
 
   pend@1.2.0: {}
 

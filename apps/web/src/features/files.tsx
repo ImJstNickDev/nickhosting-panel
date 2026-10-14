@@ -36,7 +36,9 @@ import {
 import type { FileEditorControls } from './file-text-editor.js';
 
 const importEditor = () =>
-  import('./file-text-editor.js').then((module) => ({ default: module.FileTextEditor }));
+  import('./viewer-engine/document-editor.js').then((module) => ({
+    default: module.DocumentEditor,
+  }));
 let editorModule: ReturnType<typeof importEditor> | undefined;
 function loadEditor() {
   editorModule ??= importEditor().catch((error) => {
@@ -89,6 +91,7 @@ import { validFilename } from './inline-file-rename-model.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
+import { documentViews, isDocumentView } from './viewer-engine/core/document-registry.js';
 import {
   availableViewers,
   preferredViewer,
@@ -277,6 +280,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   const contentRef = useRef(content);
   contentRef.current = content;
   const [editorControls, setEditorControls] = useState<FileEditorControls>();
+  const [editorView, setEditorView] = useState<ViewerId>('text');
+  const [editorViewActions, setEditorViewActions] = useState<HTMLSpanElement | null>(null);
+  const pendingViewChanges = Boolean(editorControls?.pendingChanges);
   const managerRef = useRef<HTMLElement>(null);
   const focusDirectory = useRef(false);
   useLayoutEffect(() => {
@@ -648,6 +654,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     const warn = (event: BeforeUnloadEvent) => {
       if (
         dirty ||
+        pendingViewChanges ||
         uploadRunning.current ||
         uploadQueue.current.length ||
         mutationRunning.current ||
@@ -659,7 +666,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
+  }, [dirty, pendingViewChanges]);
   const navigationGuard = useRef<() => boolean>(() => false);
   navigationGuard.current = () => hasUnsubmittedChanges() || mutationRunning.current;
   const navigationBlocker = useBlocker(useCallback(() => navigationGuard.current(), []));
@@ -684,6 +691,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     );
   }
   function hasUnsubmittedChanges() {
+    if (pendingViewChanges) return true;
     const pending = currentSave();
     return pending?.status === 'pending' ? pending.submittedContent !== contentRef.current : dirty;
   }
@@ -865,7 +873,12 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
       )
         return;
     }
-    if (viewerId && (viewerId !== 'text' || (autoDecodeCompressed && isSingleCompressed(source)))) {
+    viewerId ??= documentViews(source.name)[0]?.id;
+    if (
+      viewerId &&
+      (!isDocumentView(source.name, viewerId) ||
+        (autoDecodeCompressed && isSingleCompressed(source)))
+    ) {
       cancelRead();
       setPathEditing(false);
       setDirectory(folder);
@@ -894,6 +907,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     setSaveError(undefined);
     baseline.current = '';
     setMode('edit');
+    setEditorView(viewerId ?? 'text');
     setContent('');
     setRevision(null);
     setDirty(false);
@@ -982,10 +996,10 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             autoDecodeCompressed: viewed.autoDecodeCompressed,
           }
         : mode === 'edit' && activeFile
-          ? { path: join(directory, activeFile), viewerId: 'text' }
+          ? { path: join(directory, activeFile), viewerId: editorView }
           : undefined,
     );
-  }, [viewerKey, restoredViewerKey, viewing, viewed, mode, directory, activeFile]);
+  }, [viewerKey, restoredViewerKey, viewing, viewed, mode, directory, activeFile, editorView]);
   useEffect(() => () => writeViewerBookmark(viewerKey), [viewerKey]);
 
   async function mutation(body: unknown, endpoint = '/files', method = 'POST') {
@@ -1109,6 +1123,11 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     }
     if (getFileSave(saveScope, serverId, join(directory, name))?.status === 'pending') return;
     const sequence = readSequence.current;
+    const scope = saveIdentity.current;
+    if (editorControls?.flush && !(await editorControls.flush())) return;
+    if (!mounted.current || sequence !== readSequence.current || scope !== saveIdentity.current)
+      return;
+    if (getFileSave(saveScope, serverId, join(directory, name))?.status === 'pending') return;
     const submitted = contentRef.current;
     setSaving(true);
     setSaveError(undefined);
@@ -1125,7 +1144,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     );
   }
   async function renameEditor(name: string, reason: 'enter' | 'blur') {
-    if (!canMutate || dirty || mutationRunning.current || saving || reading)
+    if (!canMutate || dirty || pendingViewChanges || mutationRunning.current || saving || reading)
       throw { messageKey: 'errors.forbidden' };
     if (!validFilename(name)) throw { messageKey: 'file.invalidName' };
     const original = files.data?.find((entry) => entry.name === targets[0]);
@@ -1812,7 +1831,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
         gameId: server.data?.gameId,
         path: editing ? join(directory, mode === 'new' ? newName : (targets[0] ?? '')) : directory,
         surface: displaying ? 'viewer' : 'directory',
-        viewerId: displaying ? (viewing ? viewed?.viewerId : 'text') : undefined,
+        viewerId: displaying ? (viewing ? viewed?.viewerId : editorView) : undefined,
         readOnly: viewing || !canMutate,
         ...(viewing ? viewerContext : {}),
       }}
@@ -1909,7 +1928,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                     ) : (
                       <span aria-current="page" className="fm-current-file">
                         {mode === 'new' ? newName || t('service.newFile') : targets[0]}
-                        {dirty && <span aria-hidden="true"> *</span>}
+                        {(dirty || pendingViewChanges) && <span aria-hidden="true"> *</span>}
                       </span>
                     )}
                   </li>
@@ -1943,7 +1962,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                         className="fm-tool fm-path-edit"
                         aria-label={t('service.rename')}
                         disabled={
-                          !canMutate || dirty || reading || mutating || saving || inlineRename
+                          !canMutate ||
+                          dirty ||
+                          pendingViewChanges ||
+                          reading ||
+                          mutating ||
+                          saving ||
+                          inlineRename
                         }
                         onClick={() => setInlineRename(true)}
                       >
@@ -2117,7 +2142,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       saving ||
                       !!readError ||
                       editorAvailability !== 'text' ||
-                      (!dirty && mode !== 'new'),
+                      (!dirty && !pendingViewChanges && mode !== 'new'),
                     run: saveShortcut,
                   },
                   {
@@ -2152,13 +2177,14 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   </button>
                 </Tooltip>
               ))}
+              <span className="fm-document-view-actions" ref={setEditorViewActions} />
               {mode === 'edit' && (
                 <Tooltip placement="cursor" content={t('viewer.openWith')}>
                   <button
                     type="button"
                     className="fm-viewer-action fm-viewer-open-with"
                     aria-label={t('viewer.openWith')}
-                    disabled={dirty || saving || reading || mutating}
+                    disabled={saving || reading || mutating}
                     onClick={() => {
                       const entry = files.data?.find((item) => item.name === targets[0]);
                       if (entry)
@@ -2329,7 +2355,13 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             >
               {!reading && editorAvailability === 'text' && !readError && (
                 <span className="fm-editor-state sr-only" role="status">
-                  {t(mutating || saving ? 'web.pending' : dirty ? 'file.unsaved' : 'file.saved')}
+                  {t(
+                    mutating || saving
+                      ? 'web.pending'
+                      : dirty || pendingViewChanges
+                        ? 'file.unsaved'
+                        : 'file.saved',
+                  )}
                 </span>
               )}
               {reading ? (
@@ -2382,6 +2414,9 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                   <Suspense fallback={<FileEditorSkeleton />}>
                     <FileTextEditor
                       key={readSequence.current}
+                      selectedView={editorView}
+                      onViewChange={setEditorView}
+                      actionTarget={editorViewActions}
                       path={join(
                         directory,
                         mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
@@ -2662,7 +2697,15 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
             onChoose={(id) => {
               const chosen = openWith;
               setOpenWith(undefined);
-              void open(chosen.entry, directory, id);
+              if (
+                editing &&
+                chosen.source.path === join(directory, targets[0] ?? '') &&
+                isDocumentView(chosen.entry.name, id)
+              ) {
+                void (async () => {
+                  if (!editorControls?.flush || (await editorControls.flush())) setEditorView(id);
+                })();
+              } else void open(chosen.entry, directory, id);
             }}
           />
         )}

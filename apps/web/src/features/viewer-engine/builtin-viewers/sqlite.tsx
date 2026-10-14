@@ -7,7 +7,8 @@ import { ErrorNotice } from '../../../components/ui.js';
 import { FilemanToolbarIcon } from '../../fileman/presentation.js';
 import { serverPath } from '../../service-contracts.js';
 import type { ViewerProps } from '../core/types.js';
-import { DatagridColumnFilter, DatagridResize } from './sqlite-controls.js';
+import { DatagridTable } from './datagrid-table.js';
+import { DatagridColumnFilter } from './sqlite-controls.js';
 import { DatagridDetail, datagridCellText } from './sqlite-detail.js';
 import { DatagridPageCache } from './sqlite-model.js';
 import './datagrid.css';
@@ -362,186 +363,66 @@ function Datagrid({ serverId, source }: ViewerProps) {
             </div>
           ) : (
             <>
-              <div className="dg-grid-scroll" ref={grid} inert={detail ? true : undefined}>
-                <table
-                  // biome-ignore lint/a11y/noNoninteractiveElementToInteractiveRole: WAI-ARIA grids retain native table semantics.
-                  role="grid"
-                  aria-label={table}
-                  aria-readonly="true"
-                  className="dg-grid"
-                  style={{
-                    width:
-                      48 + columns.reduce((sum, column) => sum + (widths.get(column) ?? 190), 0),
-                  }}
-                >
-                  <colgroup>
-                    <col style={{ width: 48 }} />
-                    {columns.map((column) => (
-                      <col key={column} style={{ width: widths.get(column) ?? 190 }} />
-                    ))}
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      <th
-                        scope="col"
-                        className="dg-row-number"
-                        aria-label={t('datagrid.rowNumber')}
-                      >
-                        <span aria-hidden="true">#</span>
-                      </th>
-                      {columns.map((column) => (
-                        <th
-                          scope="col"
-                          key={column}
-                          aria-sort={
-                            controls.sort === column
-                              ? controls.direction === 'asc'
-                                ? 'ascending'
-                                : 'descending'
-                              : 'none'
-                          }
+              <DatagridTable
+                label={table}
+                columns={columns}
+                rows={rows}
+                gridRef={grid}
+                rowKey={(_, index) => `${key}:${actualOffset + index}`}
+                rowNumber={(_, index) => actualOffset + index + 1}
+                selected={selected}
+                onSelect={(selection) => {
+                  setSelected(selection);
+                  setCopy(undefined);
+                }}
+                onOpen={setDetail}
+                onCopy={copyCell}
+                busy={busy}
+                readOnly
+                inert={!!detail}
+                sort={
+                  controls.sort
+                    ? { column: columns.indexOf(controls.sort), direction: controls.direction }
+                    : undefined
+                }
+                onSort={(index) => {
+                  const column = columns[index] ?? '';
+                  changeControls(
+                    controls.sort !== column
+                      ? { sort: column, direction: 'asc' }
+                      : controls.direction === 'asc'
+                        ? { direction: 'desc' }
+                        : { sort: '', direction: 'asc' },
+                  );
+                }}
+                widths={widths}
+                onResize={(column, width) =>
+                  setWidths((current) => new Map(current).set(column, width))
+                }
+                empty={t(controls.query ? 'datagrid.noMatches' : 'datagrid.emptyTable')}
+                cellType={(row, column) => row[column]?.type}
+                renderCell={(row, column) => {
+                  const cell = row[column];
+                  if (!cell) return null;
+                  return (
+                    <span>
+                      {cell.type === 'blob'
+                        ? t('viewer.blob', { size: format.bytes(cell.bytes) })
+                        : datagridCellText(cell)}
+                      {cell.type === 'text' && cell.truncated && (
+                        <span
+                          className="dg-truncated"
+                          role="img"
+                          aria-label={t('viewer.truncated')}
                         >
-                          <button
-                            type="button"
-                            className="dg-sort"
-                            disabled={busy}
-                            aria-label={t('datagrid.sort', { column })}
-                            onClick={() =>
-                              changeControls(
-                                controls.sort !== column
-                                  ? { sort: column, direction: 'asc' }
-                                  : controls.direction === 'asc'
-                                    ? { direction: 'desc' }
-                                    : { sort: '', direction: 'asc' },
-                              )
-                            }
-                          >
-                            <span>{column}</span>
-                            <span className="dg-sort-mark" aria-hidden="true">
-                              {controls.sort === column
-                                ? controls.direction === 'asc'
-                                  ? '↑'
-                                  : '↓'
-                                : ''}
-                            </span>
-                          </button>
-                          <DatagridResize
-                            name={column}
-                            width={widths.get(column) ?? 190}
-                            onResize={(width) =>
-                              setWidths((current) => new Map(current).set(column, width))
-                            }
-                          />
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row, rowIndex) => (
-                      // biome-ignore lint/suspicious/noArrayIndexKey: Absolute row offsets identify immutable snapshot rows.
-                      <tr key={`${key}:${actualOffset + rowIndex}`}>
-                        <th scope="row" className="dg-row-number">
-                          {format.number(actualOffset + rowIndex + 1)}
-                        </th>
-                        {row.map((cell, columnIndex) => {
-                          const active = selected
-                            ? selected.row === rowIndex && selected.column === columnIndex
-                            : rowIndex === 0 && columnIndex === 0;
-                          return (
-                            <td
-                              // biome-ignore lint/a11y/noNoninteractiveElementToInteractiveRole: WAI-ARIA gridcells retain native table semantics.
-                              role="gridcell"
-                              key={columns[columnIndex]}
-                              data-row={rowIndex}
-                              data-column={columnIndex}
-                              data-type={cell.type}
-                              tabIndex={active ? 0 : -1}
-                              aria-selected={!!selected && active}
-                              onFocus={() => {
-                                setSelected({ row: rowIndex, column: columnIndex });
-                                setCopy(undefined);
-                              }}
-                              onClick={(event) => event.currentTarget.focus()}
-                              onDoubleClick={() => {
-                                if (!busy) setDetail({ row: rowIndex, column: columnIndex });
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.nativeEvent.isComposing) return;
-                                if (
-                                  (event.ctrlKey || event.metaKey) &&
-                                  event.key.toLowerCase() === 'c' &&
-                                  !window.getSelection()?.toString()
-                                ) {
-                                  event.preventDefault();
-                                  copyCell();
-                                  return;
-                                }
-                                if (event.key === 'Enter' && !busy) {
-                                  event.preventDefault();
-                                  setDetail({ row: rowIndex, column: columnIndex });
-                                  return;
-                                }
-                                if (
-                                  ![
-                                    'ArrowLeft',
-                                    'ArrowRight',
-                                    'ArrowUp',
-                                    'ArrowDown',
-                                    'Home',
-                                    'End',
-                                  ].includes(event.key)
-                                )
-                                  return;
-                                event.preventDefault();
-                                const next = { row: rowIndex, column: columnIndex };
-                                if (event.key === 'ArrowLeft') next.column--;
-                                if (event.key === 'ArrowRight') next.column++;
-                                if (event.key === 'ArrowUp') next.row--;
-                                if (event.key === 'ArrowDown') next.row++;
-                                if (event.key === 'Home') {
-                                  next.column = 0;
-                                  if (event.ctrlKey || event.metaKey) next.row = 0;
-                                }
-                                if (event.key === 'End') {
-                                  next.column = columns.length - 1;
-                                  if (event.ctrlKey || event.metaKey) next.row = rows.length - 1;
-                                }
-                                next.row = Math.max(0, Math.min(rows.length - 1, next.row));
-                                next.column = Math.max(
-                                  0,
-                                  Math.min(columns.length - 1, next.column),
-                                );
-                                focusCell(next);
-                              }}
-                            >
-                              <span>
-                                {cell.type === 'blob'
-                                  ? t('viewer.blob', { size: format.bytes(cell.bytes) })
-                                  : datagridCellText(cell)}
-                                {cell.type === 'text' && cell.truncated && (
-                                  <span
-                                    className="dg-truncated"
-                                    role="img"
-                                    aria-label={t('viewer.truncated')}
-                                  >
-                                    {' '}
-                                    …
-                                  </span>
-                                )}
-                              </span>
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {!rows.length && (
-                  <div className="dg-empty">
-                    {t(controls.query ? 'datagrid.noMatches' : 'datagrid.emptyTable')}
-                  </div>
-                )}
-              </div>
+                          {' '}
+                          …
+                        </span>
+                      )}
+                    </span>
+                  );
+                }}
+              />
               {detail && page && columns[detail.column] !== undefined && (
                 <DatagridDetail
                   key={`${key}:${detail.row}:${detail.column}`}

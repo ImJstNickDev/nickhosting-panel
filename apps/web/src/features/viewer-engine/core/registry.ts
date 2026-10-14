@@ -1,5 +1,6 @@
 import { fileEditorAvailability } from '../../../../../../packages/core/src/file-content.js';
 import { gameViewerRegistry } from '../trusted-viewers.js';
+import { documentViews } from './document-registry.js';
 
 export type ViewerId =
   | 'text'
@@ -76,8 +77,8 @@ export const builtinViewers: readonly ViewerDefinition[] = [
   {
     id: 'sqlite',
     label: 'viewer.name.sqlite',
-    description: 'viewer.sqlite',
-    extensions: ['db', 'sqlite', 'sqlite3'],
+    description: 'viewer.datagrid',
+    extensions: ['db', 'sqlite', 'sqlite3', 'csv', 'tsv'],
   },
   {
     id: 'json',
@@ -105,13 +106,16 @@ export function selectableViewers(source: ViewerSource): ViewerDefinition[] {
       extensions: descriptor.extensions,
     }));
   return [...gameViewers, ...builtinViewers].filter(
-    (viewer) => !(source.entry || source.archives?.length) || viewer.id !== 'sqlite',
+    (viewer) =>
+      !(source.entry || source.archives?.length) ||
+      viewer.id !== 'sqlite' ||
+      documentViews(source.name).some((item) => item.id === viewer.id),
   );
 }
 export function availableViewers(source: ViewerSource): ViewerDefinition[] {
   const extension = viewerExtension(source.name);
   return selectableViewers(source).filter((viewer) => {
-    if (viewer.id === 'text')
+    if (viewer.id === 'text' || documentViews(source.name).some((item) => item.id === viewer.id))
       return (
         fileEditorAvailability({ name: source.name, size: source.size, is_file: true }) === 'text'
       );

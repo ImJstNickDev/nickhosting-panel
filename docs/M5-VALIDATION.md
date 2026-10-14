@@ -9137,3 +9137,77 @@ Only read-only sample inspection used the existing viewer SFTPGo read-only mount
 Browser mutations used isolated provider fixtures and already approved test services;
 no real files were saved, no infrastructure changed and no containers restarted.
 The update uses existing frontend HMR; rollback is a source revert.
+
+### 2026-10-14 — Editable CSV/TSV Datagrid and shared Scribe session
+
+Physical CSV/TSV opens in Datagrid with editable cells, row/column changes, header
+controls, search/filter/sort and paging. An icon switches to Scribe and back using
+one draft, save revision and undo history. No file reread or write occurs merely
+from switching. The reusable document-view contract is a compiled ViewerEngine
+extension; it does not patch another viewer's DOM. Shared Datagrid rendering is
+independent of SQLite versus delimited-source adapters. SQLite and archive entries
+remain read-only. The existing 1 MiB UTF-8 text editor boundary remains unchanged.
+
+PapaParse 5.7.0 (MIT) runs in a browser worker. Values remain strings; formulas are
+never executed, leading zeros and large integers are preserved. Untouched source
+quoting, BOM and newline sequences are retained. This extends the preceding Scribe
+fix: mixed newline preservation on actual edits is now covered, including embedded
+LF inside CRLF-delimited quoted CSV cells, shared undo/redo and exact saved bytes.
+Actual external document replacement resets old history, preventing stale raw
+patches from affecting a replacement document.
+
+Independent reviews found and resolved: normalized newlines corrupting untouched
+multiline cells, stale column filters after structural edits (including deletion
+of the widest ragged row), stale undo after external replacement, mobile footer
+clipping, and missing keyboard entry into the body after header selection. Reviewers
+subsequently reported no outstanding must-fix findings. Independent model checks
+covered 156 parsing/edit combinations and 350 seeded raw-history edit sequences.
+
+Validation (isolated provider fixtures and existing approved M2 test services):
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-editor-document.test.ts apps/web/src/features/viewer-engine/builtin-viewers/delimited-model.test.ts apps/web/src/features/viewer-engine/core/registry.test.ts`: **21 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/delimited.browser.test.ts`: final **8 passed**, Chromium.
+- Same browser command with `NH_BROWSER=firefox`, also including `apps/web/tests/datagrid.browser.test.ts`: **15 passed** (eight delimited plus seven SQLite journeys).
+- Chromium SQLite suite: **7 passed** during the combined regression run; the delimited portion initially failed a test selector and was corrected/retested separately.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'opens.*clean and preserves|mixed line endings'`: **5 passed**, 34 intentionally skipped, separately on Chromium and Firefox.
+- Browser cases cover live cell flushing before switching, zero switch rereads/writes,
+  cross-view Undo/Redo, conditional save conflict retention, malformed CSV repaired
+  in Scribe, source-row edits after sorting, structural changes, header keyboard
+  navigation, read-only archive switching and mobile pagination. Axe reported no
+  violations in tested desktop/mobile editor surfaces.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build`,
+  `scripts/dev.sh pnpm i18n:check` and focused Biome: passed. Build retains existing
+  large-chunk warnings; the separate delimited worker is about 25.6 kB uncompressed.
+  English/Italian/pseudolocale catalog contains 1,550 keys.
+
+Initial test failures included mismatched accessible labels (Edit cell/menu item/
+Delete column), a blank-origin sessionStorage access in an isolated test, an overly
+strict single initial request assertion under React development remounting, and a
+unit assertion unintentionally grouping two history edits. Test fixtures were
+corrected without weakening switch/no-write assertions. All final cases above pass;
+full historical M1–M5 suites and live game tests were intentionally not rerun.
+
+Reviewed browser captures:
+[desktop](screenshots/m5/datagrid-csv-desktop-en.png),
+[Italian mobile with pagination](screenshots/m5/datagrid-csv-mobile-it.png),
+[parse error](screenshots/m5/datagrid-csv-error-en.png),
+[retained draft after save conflict](screenshots/m5/datagrid-csv-conflict-en.png).
+These use synthetic provider data and real application handlers/browser workers;
+they are not evidence of live server writes. Test databases/caches use harness-owned
+cleanup. No Pterodactyl/Wings resources, real files or Blueprint installation changed.
+Issue #18 and production-release boundaries remain unchanged.
+
+Owner-approved development activation completed: saved the previous Vite image as
+`nickhosting-dev-app:before-datagrid-csv`, built the existing `vite` service and ran
+`docker compose --env-file .env.dev.local up -d --no-deps --wait vite`. Only
+`nickhosting-dev-vite-1` was recreated. It is healthy, with zero restarts, still on
+`nickhosting-dev-edge` only and no published ports. Root HTTPS, document module,
+worker module and its PapaParse dependency return HTTP 200. The existing Compose
+orphan warning was left untouched; no orphan removal or other cleanup ran.
+
+API/worker/database, network configuration, provider and persistent review data
+were not changed. The previous image is retained for the approved scoped rollback;
+a source revert plus retag/recreation of Vite restores the previous frontend.
+The shipped worker license notices now include PapaParse's full MIT notice.
+Final staged governance: **passed**, 883 indexed text files, 313 review PNGs,
+723 relative links, four TOML files and 44 ignore cases (secret scan is heuristic).

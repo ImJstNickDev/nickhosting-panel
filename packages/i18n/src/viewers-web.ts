@@ -75,6 +75,7 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
   'viewer.downloadArchive': ['Download archive', 'Scarica archivio'],
   'viewer.downloadFile': ['Download file', 'Scarica file'],
   'viewer.sqlite': ['SQLite database', 'Database SQLite'],
+  'viewer.datagrid': ['SQLite, CSV and TSV tables', 'Tabelle SQLite, CSV e TSV'],
   'viewer.json': ['JSON tree', 'Albero JSON'],
   'viewer.name.text': ['Scribe', 'Scribe'],
   'viewer.name.image': ['Frame', 'Frame'],
@@ -304,5 +305,60 @@ export const viewerWebMessages: Record<string, readonly [string, string]> = {
   'viewer.sqliteInvalid': [
     'This file is not a supported SQLite database.',
     'Il file non è un database SQLite supportato.',
+  ],
+  'delimited.auto': ['Auto', 'Automatico'],
+  'delimited.delimiter': ['Delimiter', 'Separatore'],
+  'delimited.comma': ['Comma (,)', 'Virgola (,)'],
+  'delimited.semicolon': ['Semicolon (;)', 'Punto e virgola (;)'],
+  'delimited.tab': ['Tab', 'Tabulazione'],
+  'delimited.pipe': ['Pipe (|)', 'Barra (|)'],
+  'delimited.header': ['First row as header', 'Prima riga come intestazione'],
+  'delimited.headerHelp': [
+    'Interpret the first row as column names. This does not change the file.',
+    'Interpreta la prima riga come nomi delle colonne. Il file non viene modificato.',
+  ],
+  'delimited.columnNumber': ['Column {number}', 'Colonna {number}'],
+  'delimited.addRow': ['Add row', 'Aggiungi riga'],
+  'delimited.removeRow': ['Delete row', 'Elimina riga'],
+  'delimited.addColumn': ['Add column', 'Aggiungi colonna'],
+  'delimited.removeColumn': ['Delete column', 'Elimina colonna'],
+  'delimited.renameHeader': ['Rename column', 'Rinomina colonna'],
+  'delimited.headerName': ['Column name', 'Nome colonna'],
+  'delimited.editCell': ['Edit cell', 'Modifica cella'],
+  'delimited.apply': ['Apply', 'Applica'],
+  'delimited.delete': ['Delete', 'Elimina'],
+  'delimited.removeRowConfirm': [
+    'Delete this row and all its values? You can undo this change before saving.',
+    'Eliminare questa riga e tutti i suoi valori? Puoi annullare la modifica prima di salvare.',
+  ],
+  'delimited.removeColumnConfirm': [
+    'Delete this column and all its values, including rows hidden by the search? You can undo this change before saving.',
+    'Eliminare questa colonna e tutti i suoi valori, comprese le righe nascoste dalla ricerca? Puoi annullare la modifica prima di salvare.',
+  ],
+  'delimited.rows': ['{start}–{end} of {total} rows', '{start}–{end} di {total} righe'],
+  'delimited.shortened': ['Long values shortened', 'Valori lunghi abbreviati'],
+  'delimited.error.syntax': [
+    'The file contains an unfinished or invalid quoted value. Open Scribe to correct it.',
+    'Il file contiene un valore tra virgolette incompleto o non valido. Apri Scribe per correggerlo.',
+  ],
+  'delimited.error.limit': [
+    'The table exceeds the grid limits. Open Scribe to edit this file.',
+    'La tabella supera i limiti della griglia. Apri Scribe per modificare il file.',
+  ],
+  'delimited.error.stale': [
+    'The draft changed. Retry using the current content.',
+    'La bozza è cambiata. Riprova con il contenuto attuale.',
+  ],
+  'delimited.error.disposed': [
+    'The table reader stopped. Retry to reload the draft.',
+    'Il lettore della tabella si è arrestato. Riprova per ricaricare la bozza.',
+  ],
+  'delimited.error.timeout': [
+    'Reading the table took too long. Retry or open Scribe.',
+    'La lettura della tabella ha impiegato troppo tempo. Riprova o apri Scribe.',
+  ],
+  'delimited.error.invalid': [
+    'The table could not be updated. Retry or open Scribe.',
+    'Impossibile aggiornare la tabella. Riprova o apri Scribe.',
   ],
 };

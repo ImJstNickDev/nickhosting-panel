@@ -2236,7 +2236,8 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
       files.set(name, Buffer.from(original));
       await openRoot(user);
       await row(name).getByRole('button', { name, exact: true }).click();
-      const editor = user.locator('.cm-content');
+      await user.getByRole('button', { name: 'Scribe', exact: true }).click();
+      const editor = user.locator('.cm-content:visible');
       await browserExpect(editor).toBeFocused();
       await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
       await browserExpect(
@@ -2291,7 +2292,8 @@ describe('M5 file manager interactions with isolated real API handlers', () => {
     files.set('mixed.csv', Buffer.from(original));
     await openRoot(user);
     await row('mixed.csv').getByRole('button', { name: 'mixed.csv', exact: true }).click();
-    await browserExpect(user.locator('.cm-content')).toBeFocused();
+    await user.getByRole('button', { name: 'Scribe', exact: true }).click();
+    await browserExpect(user.locator('.cm-content:visible')).toBeFocused();
     await browserExpect(user.locator('.fm-editor-state')).toHaveText('No unsaved changes');
     await browserExpect(
       user.getByRole('button', { name: 'Save changes', exact: true }),
