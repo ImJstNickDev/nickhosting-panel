@@ -1,5 +1,8 @@
 # M5 viewer format implementation and dependency evidence
 
+Quill adds the shared Markdown view; its syntax, Obsidian link/inclusion behavior,
+resource budgets and dependency decisions are specified in [M5 Quill](M5-QUILL.md).
+
 The backend viewers consume one shared, already-authorized `ViewerReadSource`.
 They do not create Pterodactyl clients, repeat remote ownership discovery, or mint
 download credentials. Source authorization and revocation belong to the central

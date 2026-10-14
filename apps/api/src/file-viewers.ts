@@ -30,7 +30,7 @@ const preferenceSchema = z.strictObject({
     .max(64)
     .regex(/^[a-z0-9][a-z0-9.+_-]*$/),
   viewerId: z.union([
-    z.enum(['text', 'image', 'audio', 'video', 'archive', 'sqlite', 'json', 'pdf']),
+    z.enum(['text', 'image', 'audio', 'video', 'archive', 'sqlite', 'json', 'pdf', 'markdown']),
     z
       .string()
       .max(128)

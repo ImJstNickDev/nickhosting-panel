@@ -1019,6 +1019,13 @@ SFTP credential intent/state. Settings `fileViewers` and write-only secret
 existing Owner/environment precedence. Credential retirement retains its identity
 record; changing transport identity never silently reuses an old account.
 
+Quill adds `markdown` to the builtin preference identifiers. Its shared document
+resource contract resolves local links, archive members and already-indexed wiki
+candidates over these existing authorized endpoints; it adds no provider proxy,
+public signed URLs or server-side Markdown execution. Text caches and pending reads
+are bounded per mounted document and fenced by session identity. See
+[Quill contracts](M5-QUILL.md) and ADR 0017 for syntax, embedding and editing limits.
+
 Viewer reads optionally accept `If-Match: "<revision>"`. A different source revision
 returns 412 before bytes are read; authorization still happens before comparison.
 Archive reads use the root archive revision. Existing callers without this header

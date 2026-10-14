@@ -17,8 +17,12 @@ export interface DocumentViewProps {
   value: string;
   active: boolean;
   readOnly: boolean;
+  resources?: DocumentResources;
+  initialFragment?: string;
   /** Refuses a result calculated from a superseded draft. Never persists by itself. */
   onChange(value: string, expected: string): boolean;
   onSave(): void;
   onControls(controls: DocumentViewControls | undefined): void;
 }
+
+import type { DocumentResources } from './document-resources.js';

@@ -1,5 +1,13 @@
 # M5 WebPanel, UX and full internationalization requirements
 
+Quill's Markdown document controls follow the same compact ViewerEngine/Scribe
+interaction patterns. Its EN/IT catalog is `packages/i18n/src/quill-web.ts`;
+document content and third-party syntax are not translated. See
+[Quill syntax and access boundaries](M5-QUILL.md) for supported Markdown, math,
+diagrams and Obsidian links. Custom directive/tab blocks remain excluded by the
+Owner. External images require explicit loading, and preview task edits use the
+shared draft with explicit save, undo and source-position handoff.
+
 ## Delivery standard
 
 M5 delivers **Complete WebPanel & Common Platform Readiness** after the M1–M4

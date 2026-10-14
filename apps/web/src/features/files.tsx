@@ -293,6 +293,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
   contentRef.current = content;
   const [editorControls, setEditorControls] = useState<FileEditorControls>();
   const [editorView, setEditorView] = useState<ViewerId>('text');
+  const [editorFragment, setEditorFragment] = useState<string>();
   const [editorViewActions, setEditorViewActions] = useState<HTMLSpanElement | null>(null);
   const pendingViewChanges = Boolean(editorControls?.pendingChanges);
   const managerRef = useRef<HTMLElement>(null);
@@ -839,6 +840,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     folder = directory,
     forcedViewer?: ViewerId,
     autoDecodeCompressed = forcedViewer !== 'archive',
+    fragment?: string,
   ) {
     if (mutationRunning.current || transferFlow.active) return;
     if (!menu) menuTrigger.current = document.activeElement as HTMLElement;
@@ -920,6 +922,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     baseline.current = '';
     setMode('edit');
     setEditorView(viewerId ?? 'text');
+    setEditorFragment(fragment);
     setContent('');
     setRevision(null);
     setDirty(false);
@@ -2429,6 +2432,38 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                       selectedView={editorView}
                       onViewChange={setEditorView}
                       actionTarget={editorViewActions}
+                      initialFragment={editorFragment}
+                      resourceContext={{
+                        serverId,
+                        identity: viewerIdentity,
+                        source: {
+                          path: join(
+                            directory,
+                            mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
+                          ),
+                          name: mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',
+                          size: 0,
+                          gameId: server.data?.gameId,
+                        },
+                        onOpen: (source, fragment) => {
+                          void open(
+                            {
+                              name: source.name,
+                              size: source.size,
+                              is_file: true,
+                              is_symlink: false,
+                              mode: '',
+                              mimetype: '',
+                              created_at: '',
+                              modified_at: '',
+                            },
+                            source.path.split('/').slice(0, -1).join('/'),
+                            undefined,
+                            true,
+                            fragment,
+                          );
+                        },
+                      }}
                       path={join(
                         directory,
                         mode === 'edit' ? (targets[0] ?? '') : newName || 'new.txt',

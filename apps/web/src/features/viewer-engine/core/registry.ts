@@ -11,6 +11,7 @@ export type ViewerId =
   | 'sqlite'
   | 'json'
   | 'pdf'
+  | 'markdown'
   | `${string}:${string}`;
 export interface ViewerSource {
   path: string;
@@ -21,6 +22,8 @@ export interface ViewerSource {
   /** Ordered nested archive members, relative to their containing archive. */
   archives?: string[];
   gameId?: string;
+  /** In-document heading/block destination, supplied by a trusted document navigator. */
+  fragment?: string;
 }
 export interface ViewerPreference {
   scope: 'server' | 'game' | 'global';
@@ -88,6 +91,12 @@ export const builtinViewers: readonly ViewerDefinition[] = [
     extensions: ['json', 'jsonc', 'json5'],
   },
   { id: 'pdf', label: 'viewer.name.pdf', description: 'viewer.pdf', extensions: ['pdf'] },
+  {
+    id: 'markdown',
+    label: 'viewer.name.markdown',
+    description: 'viewer.markdown',
+    extensions: ['md', 'markdown', 'mdown', 'mkd'],
+  },
   { id: 'text', label: 'viewer.name.text', description: 'file.editor', extensions: [] },
 ];
 

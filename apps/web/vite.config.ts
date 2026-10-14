@@ -9,6 +9,14 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        // Markdown runs in Web Workers. This package's browser export uses a DOM
+        // element; its default/worker implementation is pure character-entity data.
+        find: /^decode-named-character-reference$/,
+        replacement: fileURLToPath(
+          new URL('./node_modules/decode-named-character-reference/index.js', import.meta.url),
+        ),
+      },
+      {
         find: /^rvfc-polyfill$/,
         replacement: fileURLToPath(
           new URL(

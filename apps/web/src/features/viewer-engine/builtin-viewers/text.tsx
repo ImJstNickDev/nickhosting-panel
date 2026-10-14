@@ -16,6 +16,8 @@ export default function TextViewer({
   chrome,
   initialView = 'text',
   onViewChange,
+  identity,
+  onOpen,
 }: ViewerProps & { initialView?: ViewerId; onViewChange?: (view: ViewerId) => void }) {
   const [view, setView] = useState<ViewerId>(initialView);
   const t = useT();
@@ -33,6 +35,13 @@ export default function TextViewer({
         selectedView={onViewChange ? initialView : view}
         onViewChange={onViewChange ?? setView}
         actionTarget={chrome?.tools}
+        initialFragment={source.fragment}
+        resourceContext={{
+          serverId,
+          source,
+          identity,
+          onOpen: (next, fragment) => onOpen({ ...next, fragment }),
+        }}
         path={source.name}
         value={result.value}
         readOnly

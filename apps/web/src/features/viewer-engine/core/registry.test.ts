@@ -10,6 +10,15 @@ import {
 
 const file = (name: string, size = 100): ViewerSource => ({ name, path: `world/${name}`, size });
 describe('trusted viewer selection', () => {
+  it('uses Quill and Scribe for bounded Markdown documents and archive members', () => {
+    for (const name of ['README.md', 'notes.markdown', 'notes.mdown', 'notes.mkd']) {
+      expect(preferredViewer(file(name))).toBe('markdown');
+      expect(availableViewers(file(name)).map((view) => view.id)).toEqual(['markdown', 'text']);
+      expect(canUseDocumentView(file(name), 'markdown')).toBe(true);
+      expect(availableViewers(file(name, 2 * 1024 * 1024))).toEqual([]);
+      expect(preferredViewer({ ...file(name), entry: `docs/${name}` })).toBe('markdown');
+    }
+  });
   it('shares editable JSON documents without reducing the standalone JSON budget', () => {
     for (const name of ['data.json', 'data.jsonc', 'data.json5']) {
       expect(documentViews(name).map((view) => view.id)).toEqual(['json']);
@@ -80,6 +89,7 @@ describe('trusted viewer selection', () => {
       'sqlite',
       'json',
       'pdf',
+      'markdown',
       'text',
     ]);
   });

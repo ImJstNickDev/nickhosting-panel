@@ -282,6 +282,9 @@ describe('viewer routes with isolated database and fixture byte source', () => {
   it('keeps personal server/game/global preferences scoped and validates first-party IDs', async () => {
     expect((await put({ scope: 'server', extension: 'json', viewerId: 'text' })).status).toBe(204);
     expect((await put({ scope: 'server', extension: 'pdf', viewerId: 'pdf' })).status).toBe(204);
+    expect((await put({ scope: 'server', extension: 'md', viewerId: 'markdown' })).status).toBe(
+      204,
+    );
     expect(
       (await put({ scope: 'game', extension: 'dat', viewerId: 'fixture:binary' })).status,
     ).toBe(204);
@@ -293,6 +296,7 @@ describe('viewer routes with isolated database and fixture byte source', () => {
       preferences: expect.arrayContaining([
         { scope: 'server', extension: 'json', viewerId: 'text' },
         { scope: 'server', extension: 'pdf', viewerId: 'pdf' },
+        { scope: 'server', extension: 'md', viewerId: 'markdown' },
         { scope: 'game', extension: 'dat', viewerId: 'fixture:binary' },
       ]),
     });

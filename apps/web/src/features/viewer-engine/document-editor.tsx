@@ -1,4 +1,12 @@
-import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type ComponentType,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
@@ -13,12 +21,22 @@ import { JsonDocumentView } from './builtin-viewers/json.js';
 import { documentViews } from './core/document-registry.js';
 import type { DocumentViewControls, DocumentViewProps } from './core/document-view.js';
 import type { ViewerId } from './core/registry.js';
+import {
+  type DocumentResourceContext,
+  useDocumentResources,
+} from './core/use-document-resources.js';
+import { ViewerLoading } from './loading.js';
 import { ViewerIcon } from './viewer-icon.js';
 import './document-editor.css';
 
 const renderers: Readonly<Record<string, ComponentType<DocumentViewProps>>> = {
   sqlite: DelimitedView,
   json: JsonDocumentView,
+  markdown: lazy(() =>
+    import('./builtin-viewers/markdown.js').then((module) => ({
+      default: module.MarkdownDocumentView,
+    })),
+  ),
 };
 
 /** One editable document; the host retains save revision, draft, authorization and recovery. */
@@ -27,6 +45,8 @@ export function DocumentEditor(
     selectedView?: ViewerId;
     onViewChange?: (id: ViewerId) => void;
     actionTarget?: HTMLElement | null;
+    resourceContext?: DocumentResourceContext;
+    initialFragment?: string;
   },
 ) {
   const t = useT();
@@ -34,10 +54,12 @@ export function DocumentEditor(
   const definition = options.find((item) => item.id === props.selectedView) ?? options[0];
   const active = props.selectedView !== 'text' && Boolean(definition);
   const Renderer = definition ? renderers[definition.id] : undefined;
+  const resources = useDocumentResources(definition?.resources ? props.resourceContext : undefined);
   const [textControls, setTextControls] = useState<FileEditorControls>();
   const textRef = useRef(textControls);
   textRef.current = textControls;
   const [positionError, setPositionError] = useState<unknown>();
+  const alternateHost = useRef<HTMLDivElement>(null);
   const alternate = useRef<DocumentViewControls | undefined>(undefined);
   const [alternateControls, setAlternateControls] = useState<DocumentViewControls>();
   const current = useRef(props);
@@ -82,6 +104,33 @@ export function DocumentEditor(
     });
   }, [textControls, alternateControls, flush]);
   useEffect(() => () => current.current.onControls?.(undefined), []);
+  useEffect(() => {
+    const save = (event: KeyboardEvent) => {
+      if (
+        !activeRef.current ||
+        current.current.readOnly ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.altKey ||
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== 's'
+      )
+        return;
+      const target = event.target;
+      // A re-render may briefly leave focus on body. Save still belongs to this
+      // document, but never intercept another field/dialog's keyboard interaction.
+      if (
+        target !== document.body &&
+        !(target instanceof Node && alternateHost.current?.contains(target))
+      )
+        return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      event.preventDefault();
+      current.current.onSave();
+    };
+    window.addEventListener('keydown', save);
+    return () => window.removeEventListener('keydown', save);
+  }, []);
   const apply = useCallback(
     (next: string, expected: string) => {
       if (
@@ -159,6 +208,7 @@ export function DocumentEditor(
       {Renderer && (
         // biome-ignore lint/a11y/useSemanticElements: A shared document surface is not a form fieldset.
         <div
+          ref={alternateHost}
           role="group"
           aria-label={t(definition?.label ?? 'viewer.name.text')}
           className="document-view"
@@ -190,15 +240,19 @@ export function DocumentEditor(
             }
           }}
         >
-          <Renderer
-            path={props.path}
-            value={props.value}
-            active={active}
-            readOnly={Boolean(props.readOnly)}
-            onChange={apply}
-            onSave={props.onSave}
-            onControls={registerAlternate}
-          />
+          <Suspense fallback={<ViewerLoading />}>
+            <Renderer
+              path={props.path}
+              value={props.value}
+              active={active}
+              readOnly={Boolean(props.readOnly)}
+              resources={resources}
+              initialFragment={props.initialFragment}
+              onChange={apply}
+              onSave={props.onSave}
+              onControls={registerAlternate}
+            />
+          </Suspense>
         </div>
       )}
     </>

@@ -5,6 +5,7 @@ import { gameUiWebMessages } from '../packages/i18n/src/game-ui-web.js';
 import { ownerInfraWebMessages } from '../packages/i18n/src/owner-infra-web.js';
 import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
 import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
+import { quillWebMessages } from '../packages/i18n/src/quill-web.js';
 import { serviceWebMessages } from '../packages/i18n/src/services-web.js';
 import { viewerWebMessages } from '../packages/i18n/src/viewers-web.js';
 import { webMessages } from '../packages/i18n/src/web.js';
@@ -18,6 +19,7 @@ for (const [key, pair] of Object.entries({
   ...gameUiWebMessages,
   ...ownerInfraWebMessages,
   ...viewerWebMessages,
+  ...quillWebMessages,
 })) {
   if (!pair[0] || !pair[1]) throw new Error(`Missing translation: ${key}`);
   catalogs.en![key] = pair[0];

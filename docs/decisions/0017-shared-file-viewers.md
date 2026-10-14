@@ -194,3 +194,31 @@ viewer-to-viewer DOM coupling and incorrect assumptions about CSV row numbers or
 normalized line endings. JSON Tree remains a read-only representation of Scribe’s
 editable draft; larger JSON retains the independent preview budget. Existing
 file-write authorization, save revisions and archive read-only semantics remain.
+
+### 2026-10-14 — Quill Markdown and shared document resources
+
+Quill registers as another trusted document view, sharing Scribe's exact draft,
+history, save revision and UTF-16 position contract. Rendering does not save or
+rewrite the source. Task-list toggles are draft edits through that same contract;
+archive documents and included notes remain read-only. Custom directives/tabs
+(`:::note`) are explicitly excluded by the Owner from this pass.
+
+The host supplies a generic document-resource capability backed by the existing
+authorized viewer broker and directory caches. Relative links, local images,
+bibliographies and Obsidian-style inclusions share it; Quill never creates a
+provider adapter, requests provider keys, or recursively indexes a server.
+Unqualified wiki names use the current folder and already indexed metadata;
+ambiguous or unknown names require an explicit path. Archive links remain in
+their archive namespace. External images require a deliberate click.
+
+CommonMark/GFM parsing, sanitized HTML, highlighting and KaTeX run in a browser
+worker. A worker-safe parse5 conversion is used for KaTeX output because the
+browser export of rehype-katex's HTML helper requires DOMParser. Mermaid is lazy,
+strict, bounded and displayed as an inert image; document-controlled Mermaid
+configuration is disallowed. No MDX, script execution or remote plugins exist.
+Local BibTeX/CSL-JSON references use basic author/year or numeric presentation;
+this is not a full Pandoc/CSL or Obsidian plugin-ecosystem implementation.
+
+No Blueprint release, Wings/Panel mutation, new service or migration is required.
+The development Vite image needs the new pinned browser dependencies and retains
+its separate activation approval boundary. See [format contract](../M5-QUILL.md).

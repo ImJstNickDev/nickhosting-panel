@@ -9463,3 +9463,63 @@ The historical full milestone suites were not rerun for this frontend-only chang
 Final staged governance passed: 899 indexed text files, 337 review PNGs, 750
 relative links, four TOML files and 44 ignore cases; secret scanning is heuristic.
 `git diff --cached --check` passed.
+
+
+### 2026-10-14 — Quill Markdown documents
+
+Quill is a lazy shared document view alongside Scribe. See [syntax and boundaries](M5-QUILL.md):
+GFM, safe HTML, math/chemistry, callouts, highlighted code, outline/search/print,
+frontmatter, local citations, Mermaid and bounded Obsidian wiki links/inclusions.
+Custom directive/tab blocks (the Owner's item 12) are excluded. Task-list edits
+share the existing explicit save, revision and undo history; archive/included notes
+stay read-only. Source position survives switching to/from Scribe. No Blueprint
+extension update or additional provider API is required.
+
+Validation commands:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/markdown/parser.test.ts apps/web/src/features/viewer-engine/builtin-viewers/markdown/bibliography.test.ts apps/web/src/features/viewer-engine/builtin-viewers/markdown/ui-model.test.ts apps/web/src/features/viewer-engine/core/registry.test.ts apps/web/src/features/viewer-engine/core/document-resources.test.ts`: **37 passed**. Separate `bibliography-client.test.ts`: **2 passed**, covering worker loading/parsing deadlines, cancellation and cleanup.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-viewers.integration.test.ts`: **17 passed**, including the authenticated Markdown viewer preference contract.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/markdown.browser.test.ts`: **9 passed** in Chromium. With `NH_BROWSER=firefox`: final **9 passed**, 44.58 s. Assertions cover real rendering, local BibTeX and inline CSL-JSON, task edit/undo/save readback, no repeated content read during switching, wiki navigation, hostile HTML/diagram assets, archive read-only behavior and Italian mobile search. Scoped Axe WCAG 2/2.1/2.2 AA checks report **zero violations** on the checked EN desktop and IT mobile surfaces; this is not a blanket WCAG certification.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/document-positions.browser.test.ts`: final **10 passed**, 58.26 s, preserving CSV/JSON shared-document behavior.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build`, `scripts/dev.sh pnpm i18n:check` and focused `pnpm exec biome check`: **passed**. Build compiles 1,648 EN/IT/pseudolocale keys. Existing main/editor and lazy diagram large-chunk warnings remain; Markdown, bibliography and diagram work is loaded on demand.
+
+Development failures and corrections are retained here rather than presented as
+successful attempts. Initial browser runs failed because upstream browser exports
+used DOMParser/document inside workers. Math now uses the pure parse5 conversion;
+the named-character decoder explicitly resolves its pure worker-safe entry.
+Subsequent tests caught a double slash in root wiki navigation, CTRL+S focus loss,
+code contrast, missing Mermaid labels and Firefox task checkboxes temporarily
+reverting while the preview reparsed. Those were corrected with targeted coverage.
+A cold bibliography worker also exhausted a deadline that incorrectly included
+module loading: it now has a separate bounded startup handshake and parsing limit.
+The first shared-document regression run was 8 passed / 2 failed during active
+module/dependency changes; the stable-source final run passed all 10 without changes
+to CSV behavior. No historical failed run was counted as a pass.
+
+After the final task-checkbox and worker-startup fixes, the targeted Chromium
+command above with `-t 'bibliography|shares task'` passed **3 tests / 6 intentionally
+unselected**, 18.92 s. Its first attempt stopped in isolated fixture provisioning
+with `resources_unavailable` before any browser assertion; the serial retry passed.
+Final production build and web typecheck were repeated after the worker change
+and passed. Staged governance passed: 924 text files, 339 review PNGs, 760 relative
+links, four TOML files and 44 ignore cases; secret scanning remains heuristic.
+`git diff --cached --check` passed.
+
+Independent code/security and screenshot review resolved eager Mermaid asset
+requests before sanitization, repeated-include budget bypass, Unicode search
+offsets, embedded anchor namespaces, missing footnote return IDs and task labels.
+Final reviewer reports **no remaining must-fix findings**. Resource reads reuse
+existing authorized brokers and indexed metadata; no recursive server crawl or
+per-link provider identity implementation was introduced.
+
+Reviewed real-browser screenshots: [desktop English](screenshots/m5/quill-desktop-en.png)
+and [mobile Italian search](screenshots/m5/quill-mobile-it-search.png).
+
+Tests used isolated application handlers, schemas and provider-byte fixtures with
+the already-approved test services. No game server, real file, Blueprint, Panel,
+Wings or production resource was mutated; test schemas are cleaned by the harness.
+Historical full M1–M5 suites were not repeated. The new dependencies require a
+separately approved update of the existing development Vite container; activation
+is pending Owner approval. Rollback is reverting Quill source/dependency changes
+and recreating only Vite with its saved image, without migrations or data resets.
+SFTPGo issue #18 remains an independent production-release gate.

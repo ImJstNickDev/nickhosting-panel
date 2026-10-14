@@ -8,6 +8,7 @@ export interface DocumentViewDefinition {
   extensions: readonly string[];
   /** The independent viewer can still handle sources beyond the shared editor budget. */
   standalone?: boolean;
+  resources?: boolean;
 }
 export const documentViewDefinitions: readonly DocumentViewDefinition[] = Object.freeze([
   Object.freeze({
@@ -17,6 +18,12 @@ export const documentViewDefinitions: readonly DocumentViewDefinition[] = Object
     standalone: true,
   }),
   Object.freeze({ id: 'sqlite' as const, label: 'viewer.name.sqlite', extensions: ['csv', 'tsv'] }),
+  Object.freeze({
+    id: 'markdown' as const,
+    label: 'viewer.name.markdown',
+    extensions: ['md', 'markdown', 'mdown', 'mkd'],
+    resources: true,
+  }),
 ]);
 export function documentViews(path: string): readonly DocumentViewDefinition[] {
   const extension = path.split('.').at(-1)?.toLowerCase();

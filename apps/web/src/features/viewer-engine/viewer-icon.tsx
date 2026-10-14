@@ -41,6 +41,11 @@ export function ViewerIcon({ id }: { id: ViewerId }) {
           <rect x="4" y="5" width="24" height="22" rx="3" />
           <path d="M4 12h24M4 19h24M12 12v15M20 12v15M9 8.5h3" />
         </>
+      ) : id === 'markdown' ? (
+        <>
+          <path d="M5 27h22M8 24l3-8L24 3l5 5-13 13-8 3zM11 16l5 5M17 10l5 5" />
+          <path d="m8 24 8-8" />
+        </>
       ) : id === 'pdf' ? (
         <path d="M9 3h11l7 7v17H9zM20 3v8h7M5 8v22h17M13 16h10M13 21h7" />
       ) : id === 'json' ? (
