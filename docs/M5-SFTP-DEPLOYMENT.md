@@ -298,3 +298,27 @@ Owner can test over LAN using the approved host IP and port 2023, then configure
 DNS/router separately if external access is desired. This activation covers only
 the mounted test server, not arbitrary future servers. User credentials are created
 from its SFTP tab and shown once; no test password is retained in public evidence.
+
+### Retained-transport rotation/revocation probe — 2026-10-14
+
+With explicit Owner approval, issued one separate temporary credential through
+NickHosting's authenticated API. Used an `ssh2` client with a pinned host key and
+no automatic reconnect. Performed only directory listings; no remote file writes,
+service changes or changes to the Owner's FileZilla credential.
+
+| Check | After password rotation | After credential revocation |
+| --- | --- | --- |
+| Existing SFTP channel directory listing | No result within 5 seconds (timeout, not a proven denial) | No result within 5 seconds (timeout, not a proven denial) |
+| New SFTP channel on the same authenticated SSH connection | **Directory listing succeeded** | Session terminated before listing succeeded |
+| SSH transport closed by provider | No | No |
+| Fresh SSH login with superseded/revoked password | Authentication rejected | Authentication rejected |
+| Fresh SSH login with new rotated password | Succeeded | Not applicable |
+
+Rotation therefore reproduces continued access through a retained SSH transport.
+The revocation probe used a separate connection authenticated with the rotated
+password; that case did not reproduce successful post-revocation reading in this
+run. Neither that result nor the Owner's FileZilla observation closes issue #18.
+Temporary credential revoked and every test SSH connection destroyed. Private
+ledger retained under `mountdata/test-assets/sftp-retained-*.json`; no credentials
+or directory contents appear in evidence. Independent review checks the probe's
+same-client transport semantics and the limits of timeout results.
