@@ -1,4 +1,13 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, MouseEvent, ReactNode, Ref } from 'react';
+import {
+  type ButtonHTMLAttributes,
+  type HTMLAttributes,
+  type MouseEvent,
+  type ReactNode,
+  type Ref,
+  useCallback,
+  useLayoutEffect,
+  useState,
+} from 'react';
 import { useFormat, useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import { Time } from '../../components/ui.js';
@@ -246,10 +255,44 @@ export function FilemanBreadcrumbs({
   actions?: ReactNode;
 }) {
   const t = useT();
+  const [list, setList] = useState<HTMLOListElement | null>(null);
+  const attachList = useCallback(
+    (node: HTMLOListElement | null) => {
+      setList(node);
+      if (typeof listRef === 'function') return listRef(node);
+      if (listRef) listRef.current = node;
+    },
+    [listRef],
+  );
+  useLayoutEffect(() => {
+    if (!list) return;
+    const align = () => {
+      const focused = document.activeElement;
+      // Resizing must not hide a keyboard-selected ancestor or disrupt inline rename.
+      if (focused instanceof HTMLElement && list.contains(focused)) {
+        const bounds = list.getBoundingClientRect();
+        const item = focused.getBoundingClientRect();
+        if (item.left < bounds.left) list.scrollLeft += item.left - bounds.left;
+        else if (item.right > bounds.right) list.scrollLeft += item.right - bounds.right;
+      } else list.scrollLeft = list.scrollWidth;
+    };
+    align();
+    list.addEventListener('focusin', align);
+    // Viewers also append breadcrumb segments through a portal into this list.
+    const mutations = new MutationObserver(() => align());
+    mutations.observe(list, { childList: true, subtree: true, characterData: true });
+    const resize = new ResizeObserver(() => align());
+    resize.observe(list);
+    return () => {
+      list.removeEventListener('focusin', align);
+      mutations.disconnect();
+      resize.disconnect();
+    };
+  }, [list]);
   return (
     <FilemanSlot name="breadcrumb">
       <nav aria-label={t('file.breadcrumb')} className="fm-breadcrumb">
-        <ol ref={listRef}>
+        <ol ref={attachList}>
           {parts.map((part, index) => {
             const props = buttonProps?.(part);
             return (

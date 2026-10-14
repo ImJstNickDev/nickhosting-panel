@@ -52,10 +52,16 @@
   margin: 0;
   padding: 0;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  flex: 1;
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  white-space: nowrap;
 }
 .fm-breadcrumb li {
+  max-width: 100%;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -66,9 +72,13 @@
   color: #9ba3ae;
 }
 .fm-breadcrumb button {
+  display: block;
   max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.fm-breadcrumb :where(ol) button:focus-visible {
+  outline-offset: -2px;
 }
 .fm-breadcrumb button[aria-current="page"] {
   color: #232d3b;
@@ -836,14 +846,6 @@
   flex: 1 1 0;
   min-width: 0;
 }
-.fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb ol {
-  flex-wrap: nowrap;
-  overflow: auto;
-  scrollbar-width: none;
-}
-.fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li {
-  flex-shrink: 0;
-}
 .fm-toolbar-editing:not(:has(.fm-search)) .fm-current-file {
   max-width: 200px;
 }
@@ -1108,18 +1110,6 @@ dialog.fm-delete-confirm {
   }
   .fm-viewer-open-with .fm-viewer-action-icon {
     display: block;
-  }
-  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb ol {
-    flex: 1;
-  }
-  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li:not(:last-child) {
-    display: none;
-  }
-  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li:last-child {
-    flex: 1 1 0;
-  }
-  .fm-toolbar-editing:not(:has(.fm-search)) .fm-breadcrumb li:last-child::before {
-    display: none;
   }
 }
 @media (max-width: 380px) {

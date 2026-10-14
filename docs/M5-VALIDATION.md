@@ -8853,3 +8853,26 @@ were not repeated merely to obtain one monolithic summary.
 288 review PNGs, 696 relative links, 4 TOML files and 44 ignore cases (heuristic
 secret scan). `git diff --cached --check`: **passed**. Read-only final dev status:
 API and Vite running/healthy; no manual restart or real game asset creation.
+
+### 2026-10-14 — Single-line shared Fileman paths
+
+The shared breadcrumb keeps directory, editor and Atlas/viewer paths on one line,
+showing the current/recent tail when space is limited. Older ancestors remain
+scrollable and keyboard-accessible. Portal content changes and resizing update
+only the scroll position; focused ancestors and inline rename keep their focus.
+Long labels use ellipsis, with inset keyboard focus to avoid overflow clipping.
+No provider calls, cache changes or infrastructure operations were added.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm exec biome check apps/web/src/features/fileman/presentation.tsx apps/web/src/features/files.css apps/web/tests/fileman-breadcrumb.browser.test.ts`: passed.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/fileman-breadcrumb.browser.test.ts`: passed (one browser scenario; directory/editor, desktop/mobile, tail visibility and keyboard ancestors).
+- The same browser command with `apps/web/tests/fileman-extension.browser.test.ts`: passed in the combined run (one scenario, actual nested portal viewer transitions). These two scenarios passed in separate runs, not one clean combined run.
+- Earlier attempts exposed test-only database-wrapper/label/alignment assertion mistakes, corrected in the new fixture, plus intermittent isolated provisioning `resources_unavailable` before UI assertions. No admission requirements or production behavior were changed to bypass that fixture failure.
+- Independent code/visual review: focused ancestor retention and clipped keyboard outlines corrected; desktop/mobile screenshots reviewed. No broad historical suite rerun.
+
+Sanitized screenshots: [directory desktop](screenshots/m5/fileman-breadcrumb-desktop.png),
+[directory mobile](screenshots/m5/fileman-breadcrumb-mobile.png),
+[editor mobile](screenshots/m5/fileman-breadcrumb-editor-mobile.png).
+All test provider assets are isolated fixtures; no real server or production changes.
