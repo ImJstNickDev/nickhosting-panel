@@ -1,4 +1,8 @@
 export const sftpWebMessages: Record<string, readonly [string, string]> = {
+  'sftp.retrieveAgain': [
+    'Use Show password to retrieve this access password.',
+    'Usa Mostra password per recuperare la password di questo accesso.',
+  ],
   'sftp.showRevoked': ['Show revoked', 'Mostra revocati'],
   'sftp.activate': ['Generate SFTP password', 'Genera password SFTP'],
   'sftp.passwordGenerated': ['Generated · 16 characters', 'Generata · 16 caratteri'],
@@ -23,8 +27,8 @@ export const sftpWebMessages: Record<string, readonly [string, string]> = {
   'sftp.newPassword': ['Your SFTP password', 'La tua password SFTP'],
   'sftp.limitation': ['About revocation', 'Informazioni sulla revoca'],
   'sftp.rotateConfirm': [
-    'The current password will no longer work for new sign-ins. Save the new password after rotation. Existing SSH connections may remain usable.',
-    'La password attuale non consentirà nuovi accessi. Salva la nuova password dopo la rotazione. Le connessioni SSH già aperte potrebbero restare utilizzabili.',
+    'The current password will no longer work for new sign-ins. Existing SSH connections may remain usable.',
+    'La password attuale non consentirà nuovi accessi. Le connessioni SSH già aperte potrebbero restare utilizzabili.',
   ],
   'sftp.revokeConfirm': [
     'New sign-ins with this credential will be blocked. Existing SSH connections may remain usable. Server files will not be deleted.',

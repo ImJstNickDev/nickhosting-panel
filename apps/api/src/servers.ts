@@ -34,6 +34,7 @@ import {
   reserveUploadIngestion,
   resolveHostOverride,
   resolveUncertainOperation,
+  revealSftpCredential,
   revokeSftpCredential,
   rotateSftpCredential,
   serverStorageLimitBytes,
@@ -978,6 +979,21 @@ export function registerServerRoutes(
         service.externalOptions,
       ),
       201,
+    );
+  });
+  app.post('/v1/servers/:id/sftp/:credentialId/password', async (c) => {
+    c.header('cache-control', 'no-store');
+    const context = await principal(c, true),
+      service = await management();
+    return c.json(
+      await revealSftpCredential(
+        db,
+        context,
+        c.req.param('id'),
+        c.req.param('credentialId'),
+        await body(c),
+        service.externalOptions,
+      ),
     );
   });
   app.post('/v1/servers/:id/sftp/:credentialId/rotate', async (c) => {

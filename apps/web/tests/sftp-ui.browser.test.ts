@@ -32,7 +32,9 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     errors: string[],
     fail: boolean,
     configured: boolean,
-    canIssue: boolean;
+    canIssue: boolean,
+    currentPassword: string,
+    sessionUserId: string;
   beforeAll(async () => {
     vite = await createServer({
       root: `${process.cwd()}/apps/web`,
@@ -59,6 +61,8 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     fail = false;
     configured = true;
     canIssue = true;
+    currentPassword = password;
+    sessionUserId = 'owner';
     context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     page = await context.newPage();
     page.on('pageerror', (e) => errors.push(e.message));
@@ -82,6 +86,31 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     await page.route('**/v1/**', async (route) => {
       const path = new URL(route.request().url()).pathname,
         method = route.request().method();
+      if (path === '/v1/web/session') {
+        const person = {
+          id: sessionUserId,
+          name: 'Fixture owner',
+          username: 'fixture-owner',
+          email: '',
+          emailVerified: true,
+          locale: 'en',
+          role: 'owner',
+          twoFactorEnabled: false,
+        };
+        return route.fulfill({
+          json: {
+            context: {
+              actorUserId: sessionUserId,
+              subjectUserId: sessionUserId,
+              role: 'owner',
+              sessionType: 'regular',
+              ownerElevation: false,
+            },
+            actor: person,
+            subject: person,
+          },
+        });
+      }
       if (path.endsWith('/transfers'))
         return route.fulfill({
           json: {
@@ -105,6 +134,14 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
           const id = path.split('/').at(-1);
           credentials = credentials.map((c) => (c.id === id ? { ...c, state: 'revoked' } : c));
           return route.fulfill({ json: credentials.find((c) => c.id === id) });
+        }
+        if (path.endsWith('/password')) {
+          const id = path.split('/').at(-2);
+          expect(method).toBe('POST');
+          expect(route.request().postDataJSON()).toEqual({});
+          return route.fulfill({
+            json: { ...credentials.find((c) => c.id === id), password: currentPassword },
+          });
         }
         if (path.endsWith('/rotate')) {
           const id = path.split('/').at(-2);
@@ -284,28 +321,270 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
         path: `${screenshots}/sftp-polish-revoked-${locale}-${width}.png`,
         fullPage: true,
       });
+      await page
+        .locator('.sftp-primary')
+        .getByRole('button', {
+          name: locale === 'it' ? 'Mostra password' : 'Show password',
+          exact: true,
+        })
+        .click();
+      const revealed = page.locator('.sftp-primary').getByLabel('Password', { exact: true });
+      await check(revealed).toHaveValue(password);
+      await revealed.focus();
+      await check(revealed).toBeFocused();
+      expect(
+        await revealed.evaluate((element) => {
+          const style = getComputedStyle(element);
+          return (
+            (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0) ||
+            style.boxShadow !== 'none'
+          );
+        }),
+      ).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await page.screenshot({
+        path: `${screenshots}/sftp-password-${locale}-${width}.png`,
+        fullPage: true,
+      });
     }
   });
 
-  it('issues a masked one-time password, handles clipboard failure and clears it on reload', async () => {
+  it('issues a masked password, handles clipboard failure and clears it on reload', async () => {
     credentials = [];
     await open();
     await page.getByRole('button', { name: 'Generate SFTP password', exact: true }).click();
     const field = page.getByLabel('Password', { exact: true });
     await check(field).toHaveValue(password);
     await check(field).toHaveAttribute('type', 'password');
-    await page.getByRole('button', { name: 'Show password', exact: true }).click();
+    await page
+      .locator('.sftp-issued')
+      .getByRole('button', { name: 'Show password', exact: true })
+      .click();
     await check(field).toHaveAttribute('type', 'text');
     await page.evaluate(() =>
       Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }),
     );
-    await page.getByRole('button', { name: 'Copy password', exact: true }).click();
+    await page
+      .locator('.sftp-issued')
+      .getByRole('button', { name: 'Copy password', exact: true })
+      .click();
     await check(page.getByRole('alert')).toContainText('Could not copy');
     await page.reload();
     await check(page.getByText('fixture-a3f92c18', { exact: true })).toBeVisible();
     await check(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
     await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
     expect(writes).toHaveLength(1);
+  });
+
+  it('retrieves the primary password only on demand and discards it on hide and reload', async () => {
+    credentials = [fixture('primary', 'primary')];
+    await open();
+    const primary = page.locator('.sftp-primary');
+    const field = primary.getByLabel('Password', { exact: true });
+    await check(primary.getByRole('button', { name: 'Show password', exact: true })).toBeVisible();
+    await check(primary.getByRole('button', { name: 'Copy password', exact: true })).toBeVisible();
+    await check(field).toHaveCount(0);
+    expect(writes).toEqual([]);
+    await primary.getByRole('button', { name: 'Show password', exact: true }).click();
+    await check(field).toHaveValue(password);
+    await check(field).toHaveAttribute('type', 'text');
+    expect(writes).toEqual(['POST /v1/servers/sftp-fixture/sftp/primary/password']);
+    expect(
+      await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
+    ).not.toContain(password);
+    const cache = await page.evaluate(
+      `import('/src/api/client.ts').then(({ queryClient }) => JSON.stringify(queryClient.getQueryData(['sftp', 'sftp-fixture'])))`,
+    );
+    expect(cache).not.toContain(password);
+    await primary.getByRole('button', { name: 'Hide password', exact: true }).click();
+    await check(field).toHaveCount(0);
+    currentPassword = 'isolated-fresh-password-456';
+    await primary.getByRole('button', { name: 'Show password', exact: true }).click();
+    await check(field).toHaveValue(currentPassword);
+    expect(writes).toHaveLength(2);
+    await page.reload();
+    await check(primary.getByRole('button', { name: 'Show password', exact: true })).toBeVisible();
+    await check(field).toHaveCount(0);
+    expect(writes).toHaveLength(2);
+  });
+
+  it('clears a revealed password when the authenticated identity changes', async () => {
+    credentials = [fixture('primary', 'primary'), fixture()];
+    await open();
+    const primary = page.locator('.sftp-primary');
+    await primary.getByRole('button', { name: 'Show password', exact: true }).click();
+    await check(primary.getByLabel('Password', { exact: true })).toHaveValue(password);
+    await page
+      .getByRole('row')
+      .filter({ hasText: 'nh-fixture-one' })
+      .getByRole('button', { name: 'Show password', exact: true })
+      .click();
+    await check(page.locator('.sftp-issued').getByLabel('Password', { exact: true })).toHaveValue(
+      password,
+    );
+    sessionUserId = 'another-owner';
+    await page.evaluate(
+      `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['session'] }))`,
+    );
+    await check(primary.getByRole('button', { name: 'Show password', exact: true })).toBeVisible();
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    expect(writes).toHaveLength(2);
+  });
+
+  it('clears primary and auxiliary passwords when manage permission is lost', async () => {
+    credentials = [fixture('primary', 'primary'), fixture()];
+    await open();
+    await page
+      .locator('.sftp-primary')
+      .getByRole('button', { name: 'Show password', exact: true })
+      .click();
+    await check(page.locator('.sftp-primary').getByLabel('Password', { exact: true })).toHaveValue(
+      password,
+    );
+    await page
+      .getByRole('row')
+      .filter({ hasText: 'nh-fixture-one' })
+      .getByRole('button', { name: 'Show password', exact: true })
+      .click();
+    await check(page.locator('.sftp-issued').getByLabel('Password', { exact: true })).toHaveValue(
+      password,
+    );
+    canIssue = false;
+    await page.evaluate(
+      `import('/src/api/client.ts').then(({ queryClient }) => queryClient.invalidateQueries({ queryKey: ['transfers', 'sftp-fixture'] }))`,
+    );
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    await check(page.getByRole('button', { name: 'Show password', exact: true })).toHaveCount(0);
+    expect(writes).toHaveLength(2);
+  });
+
+  it('copies the primary password on demand without revealing or retaining it', async () => {
+    credentials = [fixture('primary', 'primary')];
+    await open();
+    const primary = page.locator('.sftp-primary');
+    await primary.getByRole('button', { name: 'Copy password', exact: true }).click();
+    await check
+      .poll(() => page.evaluate(() => (window as unknown as { copied: string }).copied))
+      .toBe(password);
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    expect(writes).toEqual(['POST /v1/servers/sftp-fixture/sftp/primary/password']);
+    expect(
+      await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
+    ).not.toContain(password);
+    await page.reload();
+    await check(primary.getByRole('button', { name: 'Copy password', exact: true })).toBeVisible();
+    expect(writes).toHaveLength(1);
+  });
+
+  it('exposes a manual-copy fallback when the requested primary password cannot be copied', async () => {
+    credentials = [fixture('primary', 'primary')];
+    await open();
+    await page.evaluate(() =>
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }),
+    );
+    await page
+      .locator('.sftp-primary')
+      .getByRole('button', { name: 'Copy password', exact: true })
+      .click();
+    await check(page.getByRole('alert')).toContainText('Could not copy');
+    await check(page.getByLabel('Password', { exact: true })).toHaveValue(password);
+    expect(writes).toEqual(['POST /v1/servers/sftp-fixture/sftp/primary/password']);
+  });
+
+  it('reports password retrieval failure and permits an explicit retry', async () => {
+    credentials = [fixture('primary', 'primary')];
+    fail = true;
+    await open();
+    const primary = page.locator('.sftp-primary');
+    await primary.getByRole('button', { name: 'Show password', exact: true }).click();
+    await check(page.getByRole('alert')).toBeVisible();
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    fail = false;
+    await primary.getByRole('button', { name: 'Show password', exact: true }).click();
+    await check(page.getByLabel('Password', { exact: true })).toHaveValue(password);
+    await check(page.getByRole('alert')).toHaveCount(0);
+    expect(writes).toHaveLength(2);
+  });
+
+  it('retrieves an additional access password explicitly and clears it on close', async () => {
+    await open();
+    const row = page.getByRole('row').filter({ hasText: 'nh-fixture-one' });
+    await row.getByRole('button', { name: 'Show password', exact: true }).click();
+    const panel = page.locator('.sftp-issued');
+    await check(panel.getByLabel('Password', { exact: true })).toHaveValue(password);
+    expect(writes).toEqual(['POST /v1/servers/sftp-fixture/sftp/one/password']);
+    await panel.getByRole('button', { name: 'Close', exact: true }).click();
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    currentPassword = 'isolated-updated-auxiliary-456';
+    await row.getByRole('button', { name: 'Show password', exact: true }).click();
+    await check(panel.getByLabel('Password', { exact: true })).toHaveValue(currentPassword);
+    expect(writes).toHaveLength(2);
+  });
+
+  it('does not reveal a late password response after the pending reveal is hidden', async () => {
+    credentials = [fixture('primary', 'primary')];
+    const requested = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    await page.route('**/sftp/primary/password', async (route) => {
+      requested.resolve();
+      await release.promise;
+      try {
+        await route.fulfill({ json: { ...credentials[0], password } });
+      } finally {
+        finished.resolve();
+      }
+    });
+    await open();
+    const primary = page.locator('.sftp-primary');
+    await primary.getByRole('button', { name: 'Show password', exact: true }).click();
+    await requested.promise;
+    await primary.getByRole('button', { name: 'Hide password', exact: true }).click();
+    release.resolve();
+    await finished.promise;
+    await check(primary.getByRole('button', { name: 'Show password', exact: true })).toBeVisible();
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    await check(page.getByRole('alert')).toHaveCount(0);
+  });
+
+  it('ignores a pending auxiliary password response after the component unmounts', async () => {
+    const requested = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    await page.route('**/tests/fixtures/sftp-page.tsx', async (route) => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        'createRoot(root).render(',
+        'const renderedRoot = createRoot(root); window.unmountSftp = () => renderedRoot.unmount(); renderedRoot.render(',
+      );
+      await route.fulfill({ response, body });
+    });
+    await page.route('**/sftp/one/password', async (route) => {
+      requested.resolve();
+      await release.promise;
+      try {
+        await route.fulfill({ json: { ...credentials[0], password } });
+      } finally {
+        finished.resolve();
+      }
+    });
+    await open();
+    await page
+      .getByRole('row')
+      .filter({ hasText: 'nh-fixture-one' })
+      .getByRole('button', { name: 'Show password', exact: true })
+      .click();
+    await requested.promise;
+    await page.evaluate(() => (window as unknown as { unmountSftp(): void }).unmountSftp());
+    release.resolve();
+    await finished.promise;
+    await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    await check(page.getByRole('alert')).toHaveCount(0);
+    expect(
+      await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage })),
+    ).not.toContain(password);
   });
 
   it('creates named additional access and respects its independent limit', async () => {
@@ -321,6 +600,16 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
       page.locator('.sftp-primary').getByRole('button', { name: 'Rotate password' }),
     ).toBeEnabled();
     expect(writes).toHaveLength(1);
+  });
+
+  it('does not offer stored-password actions without manage permission', async () => {
+    credentials = [fixture('primary', 'primary'), fixture()];
+    canIssue = false;
+    await open();
+    await check(page.getByText('fixture-a3f92c18', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Show password', exact: true })).toHaveCount(0);
+    await check(page.getByRole('button', { name: 'Copy password', exact: true })).toHaveCount(0);
+    expect(writes).toEqual([]);
   });
 
   it('hides issuance when unconfigured or forbidden', async () => {

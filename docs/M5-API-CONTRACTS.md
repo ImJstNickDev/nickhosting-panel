@@ -1094,7 +1094,8 @@ SFTP routes are relative to `/v1/platform/servers/:id`:
 | --- | --- |
 | `GET /sftp` | Issuer-scoped credentials, with `kind`, nullable `label`, state, username and nullable `expiresAt`; never passwords. |
 | `POST /sftp` | Strict `{credentialId, kind?, label?}`; kind defaults to `auxiliary`. Primary rejects labels, has no expiry and reuses the actor/server primary identity. Optional auxiliary labels contain 1–80 trimmed characters. |
-| `POST /sftp/:credentialId/rotate` | `{rotationId}`; issuer-only idempotent rotation. Primary expiry stays null; auxiliary expiry is renewed. Password is returned once. |
+| `POST /sftp/:credentialId/rotate` | `{rotationId}`; issuer-only idempotent rotation. Primary expiry stays null; auxiliary expiry is renewed. Initial response includes the new password once; explicit recovery is available below. |
+| `POST /sftp/:credentialId/password` | Strict `{}`; fresh regular issuer session and current server-manage permission required. Returns the active, unexpired credential and its decrypted password with `Cache-Control: no-store`; never invokes SFTPGo. |
 | `DELETE /sftp/:credentialId` | Issuer-only auxiliary revocation; primary deletion is forbidden. |
 | `GET /transfers` | `sftp.auxiliaryLimit` exposes the configured per-actor/server additional-access limit. |
 
@@ -1105,3 +1106,16 @@ both kinds in the background; issue #18 still applies to retained SSH transports
 Legacy credentials remain auxiliary, without changing their provider identity,
 password or expiry. Additional-access limit defaults to 3 (0–32); revoked rows do
 not consume it. Primary credentials do not consume the additional-access limit.
+
+
+Password recovery (Owner-approved amendment, 2026-10-14) reuses the existing
+context-bound encrypted credential intent. No additional plaintext storage or
+schema migration is introduced; pre-existing active credentials remain recoverable
+if their encrypted secret is intact. Reveals serialize with rotation/revocation,
+reject inactive/uncertain/expired credentials and assisted sessions, and require
+the issuing actor even when another actor is Owner. Each successful disclosure
+records `server.sftp.password_revealed` with server/credential IDs only. Revocation
+continues to clear the retained password. List GET responses remain secret-free.
+No permission is inferred from frontend visibility; POST Origin/session checks
+remain enforced. This replaces the earlier rotate-only recovery UX without
+changing idempotent create/rotate responses or issue #18.

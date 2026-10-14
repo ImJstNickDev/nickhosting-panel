@@ -9760,3 +9760,78 @@ Reviewed fixture screenshots: [desktop](screenshots/m5/sftp-table-desktop-en.png
 [revoked shown mobile](screenshots/m5/sftp-table-revoked-mobile-it.png).
 Issue #18 remains unchanged. Rollback: revert the scoped presentation/catalog/test
 change; no database or provider rollback required. PR #21 stays open/unmerged.
+
+### 2026-10-14 — Explicit encrypted SFTP password recovery
+
+Owner-approved change: passwords can be shown/copied again by their issuing user.
+The existing context-bound encrypted intent already retained the current password;
+no schema migration, password reset or provider mutation is needed. Added strict
+`POST /v1/servers/:id/sftp/:credentialId/password` with fresh regular-session and
+server-manage authorization, issuing-actor isolation, active/unexpired checks,
+serialized rotation/revocation, no-store response and IDs-only audit. Disclosure
+performs no SFTPGo/Pterodactyl request or resource admission. Lists remain secret-free.
+
+Primary access exposes inline Show/Hide/Copy; additional accesses reveal into the
+existing password panel. Copy fetches a current value without displaying it unless
+clipboard access fails. Secrets stay in component memory, never query/browser
+storage. Hide cancels pending retrieval; navigation, identity changes and refreshed
+permission loss discard secrets. Rotation clears an earlier revealed password.
+The previous once-only warning was removed; create/rotate idempotency is preserved.
+
+Validation commands and actual results:
+
+```bash
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/external.integration.test.ts
+# 41 passed: legacy/repeated retrieval, latest rotation, serialization, session,
+# support/Owner/issuer isolation, state/expiry/envelope validation, audit redaction.
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'reveals current passwords|keeps support attributable'
+# 2 passed, 77 unrelated cases skipped: strict body, no GET, Origin/no-store,
+# secrets excluded from logs/list/audit, current rotation and support restrictions.
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/sftp-ui.browser.test.ts
+# 17 passed before final followups; final three changed tests passed separately
+# (15 skipped), covering all 18 current cases without repeating unchanged cases.
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/sftp-ui.browser.test.ts -t 'renders EN/IT|authenticated identity changes|manage permission is lost'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'issues, retrieves'
+# 1 passed, 19 unrelated cases skipped: real handlers and isolated provider.
+scripts/dev.sh pnpm exec tsc --noEmit
+scripts/dev.sh pnpm --filter @nickhosting/web typecheck
+scripts/dev.sh pnpm i18n:check
+# Passed, along with scoped Biome and whitespace checks.
+```
+
+Failures and limits preserved: a first integration invocation used system Node20
+and was interrupted; final results use the pinned Node24 through scripts/dev.sh.
+All descendants of the interrupted process stopped. Its random isolated test
+schema ID was not recorded, so possible schema residue cannot be conclusively
+identified or cleaned; no guessed/broad cleanup was performed. Completed isolated
+runs clean their own schemas. One new support test initially omitted the required
+Owner-elevation fixture and was corrected before the passing run. Two browser
+tests initially used a dynamic import rewritten by the test runner; corrected
+browser evaluation passed. The first services-browser selection matched an old
+test name and skipped all cases; the corrected selection is shown above.
+
+The full API integration file was also attempted and is **not a passing full-suite
+result**: 69/79 cases failed after an existing ordering defect. The earlier durable
+HTTP creation test leaves a GLOBAL_POOL disk=0 server in its shared beforeAll DB;
+the next directory-identity test calls a fixture forcing PER_USER_BUDGET, whose
+admission rejects that existing unlimited-disk server. Failures begin before the
+changed SFTP cases. No unrelated admission/fixture rewrite was undertaken; the
+changed API cases pass in isolation. An old >=40-character password assertion in
+the SFTP API test was corrected to the established 16-character contract.
+
+Real dev smoke: existing Owner primary password explicitly retrieved via the new
+endpoint with no-store, displayed then hidden, with no page errors. No real secret
+was logged or captured in screenshots. This adds only the normal disclosure audit
+event; no credentials or provider files changed. Initial smoke used a stale
+expected hostname; matching the configured SFTP URI fixed the harness assertion.
+No containers restarted or infrastructure changed; existing source watchers apply
+code. Issue #18 and all production-release restrictions remain unchanged.
+
+Independent security/async review found no authorization or lifecycle blockers.
+Its focus-visibility finding was fixed with a subtle keyboard-focus underline
+and forced-colors outline, then checked in real Firefox and screenshots:
+[English desktop](screenshots/m5/sftp-password-desktop-en.png),
+[Italian mobile](screenshots/m5/sftp-password-mobile-it.png).
+These contain deliberately fake fixture passwords. Final independent review:
+no remaining must-fix findings. Rollback is a scoped source/UI revert, without
+migration or password changes. PR #21 remains open/unmerged.

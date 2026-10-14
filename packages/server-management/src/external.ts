@@ -319,7 +319,8 @@ async function deliverCredential(
   );
   const password = intent.request.password;
   intent.delivered = true;
-  // Do not decrypt for GET. Commit delivery before returning; lost HTTP responses require rotation.
+  // Do not decrypt for GET. Commit delivery before returning; explicit password
+  // retrieval can recover a lost response without changing delivery idempotency.
   await saveIntent(db, row, intent, options, 'active');
   return { ...result, password };
 }
@@ -483,6 +484,48 @@ export async function listSftpCredentials(
       .limit(100)
       .execute()
   ).map(publicCredential);
+}
+/** Explicit issuer-only disclosure of the retained encrypted password. */
+export async function revealSftpCredential(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  credentialId: string,
+  input: unknown,
+  options: ExternalServiceOptions,
+) {
+  regular(context);
+  parse(z.uuid(), credentialId);
+  parse(z.object({}).strict(), input);
+  return locked(db, serverId, async (connection) => {
+    const verified = await currentInteractiveContext(connection, context, options.env ?? {});
+    await authorizeServer(connection, verified, serverId, 'server:manage');
+    const row = await connection
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (!row) throw new DomainError('not_found');
+    if (row.actor_id !== verified.actorUserId) throw new DomainError('forbidden');
+    if (row.state !== 'active' || (row.expires_at && row.expires_at <= now(options)))
+      throw new DomainError('conflict');
+    const intent = credentialIntent(row, options);
+    if (
+      !['create', 'rotate'].includes(intent.action) ||
+      typeof intent.request.password !== 'string' ||
+      !intent.request.password ||
+      !Number.isSafeInteger(intent.request.expiresAt) ||
+      intent.request.expiresAt < 0 ||
+      intent.request.expiresAt !== (row.expires_at?.getTime() ?? 0)
+    )
+      throw new DomainError('secret_invalid');
+    await recordAudit(connection, verified, 'server.sftp.password_revealed', {
+      serverId,
+      credentialId,
+    });
+    return { ...publicCredential(row), password: intent.request.password };
+  });
 }
 export async function rotateSftpCredential(
   db: Kysely<Database>,

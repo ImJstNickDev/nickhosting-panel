@@ -71,7 +71,7 @@ function validate<T>(schema: z.ZodType<T>, value: unknown): T {
   return result.data;
 }
 
-/** Return once to the authenticated caller; persist only encrypted if retries need it. */
+/** Persist only encrypted; disclosure requires the issuing actor's authenticated request. */
 export function generateSftpPassword(): string {
   return randomBytes(12).toString('base64url');
 }

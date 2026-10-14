@@ -870,7 +870,7 @@ describe('M5 browser files, backups, console and automation', () => {
     ).toBeVisible();
     await harness.screenshot(user, 'backups-desktop-en');
   });
-  it('issues, rotates and revokes scoped SFTP credentials without claiming retained transport revocation', async () => {
+  it('issues, retrieves, rotates and revokes scoped SFTP credentials without claiming retained transport revocation', async () => {
     await user.goto(`${base}/sftp`);
     await user.getByRole('button', { name: 'Add access', exact: true }).click();
     await user.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Backup script');
@@ -880,6 +880,14 @@ describe('M5 browser files, backups, console and automation', () => {
     const active = user
       .getByRole('row')
       .filter({ has: user.getByRole('button', { name: 'Rotate password', exact: true }) });
+    await active.getByRole('button', { name: 'Show password', exact: true }).click();
+    await browserExpect(user.getByLabel('Password', { exact: true })).not.toHaveValue('');
+    await browserExpect(user.getByLabel('Password', { exact: true })).toHaveAttribute(
+      'type',
+      'text',
+    );
+    await user.getByRole('button', { name: 'Close', exact: true }).click();
+    await browserExpect(user.getByLabel('Password', { exact: true })).toHaveCount(0);
     await active.getByRole('button', { name: 'Rotate password', exact: true }).click();
     await user
       .getByRole('dialog')

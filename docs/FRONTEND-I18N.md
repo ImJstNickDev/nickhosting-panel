@@ -50,7 +50,12 @@ table with quiet icon actions. Revoked accesses are hidden initially; the keyboa
 accessible Show revoked switch filters locally without changing quota accounting.
 Desktop uses labeled columns; mobile stacks each row without horizontal scrolling. Destructive confirmation reuses the shared file-manager dialog with
 Cancel focused first. Passwords returned by issuance/rotation remain in component
-memory only, masked initially, with explicit reveal/copy and dismissal. The
+memory only, masked initially. Primary Show/Copy explicitly retrieves the encrypted
+password through the issuer-only API; additional accesses offer the same recovery
+in their password panel. Copy retrieves a fresh value without displaying it unless
+the clipboard fails. Hiding discards the primary value, and navigation/identity
+changes abort pending retrieval and discard secrets. Passwords never enter query
+or persistent browser caches. The
 retained-SSH limitation remains available in a disclosure and relevant action
 confirmations; it is not advertised as a successful session-revocation guarantee.
 Missing configuration and permission restrictions preserve the existing backend

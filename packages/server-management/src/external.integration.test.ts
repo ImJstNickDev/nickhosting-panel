@@ -16,6 +16,7 @@ import {
   previewServerDns,
   reconcileExternalServices,
   reconcileServerStorageQuota,
+  revealSftpCredential,
   revokeSftpCredential,
   rotateSftpCredential,
   updateServerDns,
@@ -309,6 +310,252 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
 }
 
 describe('durable server external services', () => {
+  it.each(['primary', 'auxiliary'] as const)(
+    'reveals an active %s password repeatedly without provider work or credential mutation',
+    async (kind) => {
+      const f = await fixture();
+      const credentialId = randomUUID();
+      const issued = await createSftpCredential(
+        f.db,
+        f.context,
+        f.serverId,
+        { credentialId, kind },
+        f.options,
+      );
+      const before = await f.db
+        .selectFrom('external_sftp_credentials')
+        .selectAll()
+        .where('id', '=', credentialId)
+        .executeTakeFirstOrThrow();
+      const options: ExternalServiceOptions = {
+        ...f.options,
+        env: {},
+        verifyServer: vi.fn(async () => {
+          throw new Error('Disclosure must not scan provider identity');
+        }),
+        readServerDiskUsage: vi.fn(async () => {
+          throw new Error('Disclosure must not read disk');
+        }),
+        sftpFactory: vi.fn(() => {
+          throw new Error('Disclosure must not construct a provider');
+        }),
+      };
+      const providerCalls = [...f.sftpCalls];
+      for (let attempt = 0; attempt < 2; attempt++)
+        expect(
+          await revealSftpCredential(f.db, f.context, f.serverId, credentialId, {}, options),
+        ).toEqual(issued);
+      expect(f.sftpCalls).toEqual(providerCalls);
+      expect(options.verifyServer).not.toHaveBeenCalled();
+      expect(options.readServerDiskUsage).not.toHaveBeenCalled();
+      expect(options.sftpFactory).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('external_sftp_credentials')
+          .selectAll()
+          .where('id', '=', credentialId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual(before);
+      const rotated = await rotateSftpCredential(
+        f.db,
+        f.context,
+        f.serverId,
+        credentialId,
+        { rotationId: randomUUID() },
+        f.options,
+      );
+      expect(rotated.password).not.toBe(issued.password);
+      expect(
+        await revealSftpCredential(f.db, f.context, f.serverId, credentialId, {}, options),
+      ).toEqual(rotated);
+      const listed = await listSftpCredentials(f.db, f.context, f.serverId);
+      const audits = await f.db.selectFrom('audit_events').selectAll().execute();
+      const disclosures = audits.filter(
+        (entry) => entry.action === 'server.sftp.password_revealed',
+      );
+      expect(disclosures).toHaveLength(3);
+      for (const audit of disclosures)
+        expect(audit.metadata).toEqual({ serverId: f.serverId, credentialId });
+      for (const secret of [issued.password, rotated.password]) {
+        expect(JSON.stringify(listed)).not.toContain(secret);
+        expect(JSON.stringify(audits)).not.toContain(secret);
+      }
+    },
+  );
+
+  it('rejects disclosure by another actor including an Owner, across servers, support and lost authority', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    await createSftpCredential(f.db, f.context, f.serverId, { credentialId }, f.options);
+    const reveal = (context = f.context, serverId = f.serverId) =>
+      revealSftpCredential(f.db, context, serverId, credentialId, {}, f.options);
+    await expect(reveal(f.other)).rejects.toMatchObject({ code: 'forbidden' });
+    await f.db
+      .updateTable('user')
+      .set({ role: 'owner' })
+      .where('id', '=', f.other.actorUserId)
+      .execute();
+    await expect(reveal(f.other)).rejects.toMatchObject({ code: 'forbidden' });
+    const otherServer = await fixture();
+    await expect(reveal(f.other, otherServer.serverId)).rejects.toMatchObject({
+      code: 'not_found',
+    });
+    const at = new Date();
+    await expect(
+      reveal({
+        ...f.other,
+        role: 'owner',
+        subjectUserId: f.context.actorUserId,
+        sessionType: 'support',
+        ownerElevation: true,
+        support: {
+          id: randomUUID(),
+          startedAt: at,
+          expiresAt: new Date(at.getTime() + 600_000),
+          lastActivityAt: at,
+          revokedAt: null,
+          reason: 'Fixture support',
+          idleTtlSeconds: 600,
+          absoluteTtlSeconds: 600,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ owner_id: f.other.actorUserId })
+      .where('id', '=', f.serverId)
+      .execute();
+    await expect(reveal()).rejects.toMatchObject({ code: 'forbidden' });
+    await f.db
+      .updateTable('managed_servers')
+      .set({ owner_id: f.context.actorUserId })
+      .where('id', '=', f.serverId)
+      .execute();
+    await expect(reveal({ ...f.context, [authSessionId]: undefined })).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+    await expect(
+      reveal({ ...f.context, [authSessionId]: f.other[authSessionId] }),
+    ).rejects.toMatchObject({ code: 'unauthenticated' });
+    await f.db
+      .updateTable('session')
+      .set({ expiresAt: new Date(0) })
+      .where('id', '=', f.context[authSessionId] ?? '')
+      .execute();
+    await expect(reveal()).rejects.toMatchObject({ code: 'unauthenticated' });
+    await f.db
+      .deleteFrom('session')
+      .where('id', '=', f.context[authSessionId] ?? '')
+      .execute();
+    await expect(reveal()).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(
+      await f.db
+        .selectFrom('audit_events')
+        .selectAll()
+        .where('action', '=', 'server.sftp.password_revealed')
+        .execute(),
+    ).toEqual([]);
+  });
+
+  it('rejects inactive, expired and corrupt credentials and accepts retained legacy passwords', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    await createSftpCredential(f.db, f.context, f.serverId, { credentialId }, f.options);
+    const reveal = () =>
+      revealSftpCredential(f.db, f.context, f.serverId, credentialId, {}, f.options);
+    for (const state of ['pending', 'uncertain', 'revoking', 'revoked'] as const) {
+      await f.db
+        .updateTable('external_sftp_credentials')
+        .set({ state })
+        .where('id', '=', credentialId)
+        .execute();
+      await expect(reveal()).rejects.toMatchObject({ code: 'conflict' });
+    }
+    await f.db
+      .updateTable('external_sftp_credentials')
+      .set({ state: 'active' })
+      .where('id', '=', credentialId)
+      .execute();
+    const original = await f.db
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .executeTakeFirstOrThrow();
+    const intent = JSON.parse(f.codec.decrypt(original.envelope, `external-sftp:${credentialId}`));
+    const save = async (value: unknown) => {
+      await f.db
+        .updateTable('external_sftp_credentials')
+        .set({
+          envelope: JSON.stringify(
+            f.codec.encrypt(JSON.stringify(value), `external-sftp:${credentialId}`),
+          ),
+        })
+        .where('id', '=', credentialId)
+        .execute();
+    };
+    for (const password of ['', null, 123]) {
+      await save({ ...intent, request: { ...intent.request, password } });
+      await expect(reveal()).rejects.toMatchObject({ code: 'secret_invalid' });
+    }
+    await save({ ...intent, request: { ...intent.request, serverId: randomUUID() } });
+    await expect(reveal()).rejects.toMatchObject({ code: 'secret_invalid' });
+    await f.db
+      .updateTable('external_sftp_credentials')
+      .set({ envelope: '{}' })
+      .where('id', '=', credentialId)
+      .execute();
+    await expect(reveal()).rejects.toMatchObject({ code: 'secret_invalid' });
+    const legacyPassword = randomBytes(32).toString('base64url');
+    await save({
+      ...intent,
+      delivered: true,
+      request: { ...intent.request, password: legacyPassword },
+    });
+    expect((await reveal()).password).toBe(legacyPassword);
+    f.tick();
+    await expect(reveal()).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('serializes disclosure with rotation and does not disclose a pending replacement', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    const issued = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId },
+      f.options,
+    );
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.options.verifyServer = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const rotation = rotateSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      credentialId,
+      { rotationId: randomUUID() },
+      f.options,
+    );
+    await entered.promise;
+    try {
+      await expect(
+        revealSftpCredential(f.db, f.context, f.serverId, credentialId, {}, f.options),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    } finally {
+      release.resolve();
+    }
+    const rotated = await rotation;
+    expect(rotated.password).not.toBe(issued.password);
+    expect(
+      (await revealSftpCredential(f.db, f.context, f.serverId, credentialId, {}, f.options))
+        .password,
+    ).toBe(rotated.password);
+  });
+
   it('keeps one stable primary login without expiry, only rotates explicitly, and forbids direct deletion', async () => {
     const f = await fixture();
     const credentialId = randomUUID();

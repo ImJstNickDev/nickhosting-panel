@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, idempotencyKey } from '../api/client.js';
 import { useT } from '../app/i18n.js';
+import { useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import { Badge, ConfirmDialog, ErrorNotice, Input, Time } from '../components/ui.js';
 import {
@@ -10,6 +11,7 @@ import {
   serverPath,
   useTransfers,
 } from './service-contracts.js';
+import { SftpPassword, useSftpPassword } from './sftp-password.js';
 import './sftp.css';
 
 type IconName = 'copy' | 'key' | 'rotate' | 'revoke' | 'eye' | 'close' | 'plus' | 'connection';
@@ -71,15 +73,17 @@ function CopyValue({
   value,
   label,
   secret = false,
+  initiallyShown = false,
 }: {
   value: string;
   label: string;
   secret?: boolean;
+  initiallyShown?: boolean;
 }) {
   const t = useT();
   const [copied, setCopied] = useState(false),
     [failed, setFailed] = useState(false),
-    [shown, setShown] = useState(false);
+    [shown, setShown] = useState(initiallyShown);
   return (
     <div className="sftp-value-wrap">
       <div className="sftp-value">
@@ -133,8 +137,18 @@ function CopyValue({
   );
 }
 export function SftpPage({ serverId }: { serverId: string }) {
-  // Keyed identity also clears one-time passwords and in-flight UI state on server changes.
-  return <SftpContent key={serverId} serverId={serverId} />;
+  const session = useSession();
+  const context = session.data?.context;
+  // Identity changes discard revealed secrets and pending requests, including support mode.
+  const identity = session.error
+    ? 'unavailable'
+    : [
+        context?.actorUserId,
+        context?.subjectUserId,
+        context?.sessionType,
+        context?.support?.id,
+      ].join(':');
+  return <SftpContent key={`${serverId}:${identity}`} serverId={serverId} />;
 }
 function SftpContent({ serverId }: { serverId: string }) {
   const t = useT(),
@@ -145,6 +159,8 @@ function SftpContent({ serverId }: { serverId: string }) {
     refetchInterval: 30000,
   });
   const [issued, setIssued] = useState<IssuedCredential>(),
+    [recovered, setRecovered] = useState(false),
+    [passwordRevision, setPasswordRevision] = useState(0),
     [busy, setBusy] = useState(false),
     [error, setError] = useState<unknown>();
   const [action, setAction] = useState<{
@@ -158,6 +174,7 @@ function SftpContent({ serverId }: { serverId: string }) {
   const createIds = useRef({ primary: idempotencyKey(), auxiliary: idempotencyKey() }),
     pending = useRef(false),
     createButton = useRef<HTMLButtonElement>(null);
+  const passwordRequest = useSftpPassword(serverId);
   const endpoint = transfers.data?.sftp.endpoint;
   const canIssue = transfers.data?.sftp.configured && transfers.data.sftp.canIssue;
   const primary = credentials.data?.find((c) => c.kind === 'primary' && c.state !== 'revoked');
@@ -166,6 +183,7 @@ function SftpContent({ serverId }: { serverId: string }) {
   const limit = transfers.data?.sftp.auxiliaryLimit ?? 0;
   const activeCount = auxiliary.filter((c) => c.state !== 'revoked').length;
   const dismiss = () => {
+    passwordRequest.cancel();
     setIssued(undefined);
     createButton.current?.focus();
   };
@@ -181,6 +199,7 @@ function SftpContent({ serverId }: { serverId: string }) {
           ...(kind === 'auxiliary' ? { label: label.trim() } : {}),
         },
       });
+      setRecovered(false);
       setIssued(value);
       createIds.current[kind] = idempotencyKey();
       await credentials.refetch();
@@ -189,6 +208,32 @@ function SftpContent({ serverId }: { serverId: string }) {
       setBusy(false);
     }
   }
+  async function reveal(credential: Credentials[number]) {
+    setError(undefined);
+    setIssued(undefined);
+    try {
+      const result = await passwordRequest.load(credential.id);
+      if (result) {
+        setRecovered(true);
+        setIssued(result.credential);
+      }
+    } catch (failure) {
+      setError(failure);
+    }
+  }
+  // Clear displayed secrets if the refreshed access record or permission no longer allows it.
+  useEffect(() => {
+    const current = credentials.data?.find((c) => c.id === issued?.id);
+    if (
+      !canIssue ||
+      (current &&
+        (current.state !== 'active' ||
+          (current.expiresAt && Date.parse(current.expiresAt) <= Date.now())))
+    ) {
+      passwordRequest.cancel();
+      setIssued(undefined);
+    }
+  }, [canIssue, credentials.data, issued, passwordRequest.cancel]);
   const rotate = (credential: Credentials[number]) =>
     setAction({ kind: 'rotate', credential, rotationId: idempotencyKey() });
   return (
@@ -255,16 +300,18 @@ function SftpContent({ serverId }: { serverId: string }) {
                   <div>
                     <dt>{t('web.password')}</dt>
                     <dd className="sftp-primary-password">
-                      <span>
-                        {primary.state === 'active' ? (
-                          <>
-                            <span aria-hidden="true">••••••••••••••••</span>
-                            <span className="visually-hidden">{t('sftp.passwordGenerated')}</span>
-                          </>
-                        ) : (
-                          t('web.pending')
-                        )}
-                      </span>
+                      {primary.state === 'active' && canIssue ? (
+                        <SftpPassword
+                          key={`${primary.id}:${passwordRevision}`}
+                          serverId={serverId}
+                          credentialId={primary.id}
+                          disabled={busy || !!action}
+                        />
+                      ) : (
+                        <span>
+                          {t(primary.state === 'active' ? 'sftp.passwordGenerated' : 'web.pending')}
+                        </span>
+                      )}
                       {canIssue && primary.state === 'active' && (
                         <Tooltip content={t('service.rotate')}>
                           <button
@@ -311,7 +358,7 @@ function SftpContent({ serverId }: { serverId: string }) {
             </h3>
             <IconButton label={t('web.close')} icon="close" onClick={dismiss} />
           </header>
-          <p>{t(issued.password ? 'service.credentialOnce' : 'service.credentialLost')}</p>
+          {!issued.password && <p>{t('sftp.retrieveAgain')}</p>}
           <dl className="sftp-endpoint">
             <div>
               <dt>{t('service.username')}</dt>
@@ -328,6 +375,7 @@ function SftpContent({ serverId }: { serverId: string }) {
                     value={issued.password}
                     label={t('sftp.copyPassword')}
                     secret
+                    initiallyShown={recovered}
                   />
                 </dd>
               </div>
@@ -418,6 +466,15 @@ function SftpContent({ serverId }: { serverId: string }) {
                         <td className="sftp-row-actions">
                           {c.state !== 'revoked' && canIssue && (
                             <>
+                              {c.state === 'active' &&
+                                (!c.expiresAt || Date.parse(c.expiresAt) > Date.now()) && (
+                                  <IconButton
+                                    label={t('sftp.showPassword')}
+                                    icon="eye"
+                                    disabled={busy || passwordRequest.pending}
+                                    onClick={() => void reveal(c)}
+                                  />
+                                )}
                               {c.state === 'active' && (
                                 <IconButton
                                   label={t('service.rotate')}
@@ -482,6 +539,10 @@ function SftpContent({ serverId }: { serverId: string }) {
         onClose={() => setAction(undefined)}
         onConfirm={async () => {
           if (!action) return;
+          passwordRequest.cancel();
+          setPasswordRevision((v) => v + 1);
+          setIssued(undefined);
+          setRecovered(false);
           if (action.kind === 'rotate')
             setIssued(
               await api<IssuedCredential>(

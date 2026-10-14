@@ -401,3 +401,24 @@ No explicit container restart or infrastructure change was performed. Reviewed
 screenshots for this revision:
 [desktop English](screenshots/m5/sftp-primary-desktop-en.png) and
 [mobile Italian](screenshots/m5/sftp-primary-mobile-it.png).
+
+## Recoverable passwords — 2026-10-14 amendment
+
+The Owner approved replacing rotate-only recovery with explicit Show/Copy.
+The encrypted credential intent already retained the current password after its
+initial delivery; recovery now uses that value, without a schema migration,
+provider request, automatic rotation or change to existing accounts. API details
+are in [M5 contracts](M5-API-CONTRACTS.md). A lost create/rotate response no longer
+forces rotation when an active, valid encrypted credential is present.
+
+Only the issuing actor with a current regular session and server-manage permission
+may retrieve an active, unexpired credential. Another Owner cannot retrieve it;
+support sessions and inactive/uncertain credentials are rejected. Responses are
+no-store; audit contains IDs only. Passwords remain hidden initially and live only
+in transient UI state after explicit action, not query/localStorage caches.
+Hiding and navigation clear retrieval state; late replies are ignored. Copy fetches
+the current password and reveals it for manual copying only if clipboard access
+fails. Existing service/SSH revocation limitations and issue #18 are unchanged.
+
+Rollback: revert this recovery endpoint and UI change; no migration or password
+reset is required. Existing encrypted storage and provider passwords stay intact.

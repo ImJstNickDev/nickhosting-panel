@@ -1002,14 +1002,32 @@ describe('M2 Hono API with real invitation, password and session authentication'
       ).status,
     ).toBe(403);
   });
-  it('returns generated per-server secrets once and protects metadata, retries and rotation', async () => {
+  it('reveals current passwords explicitly while protecting metadata, retries and rotation', async () => {
     const server = await f.server(),
       second = await f.server(),
       credentialId = randomUUID();
     const created = await request(user, `/v1/servers/${server}/sftp`, { credentialId });
     expect(created.status).toBe(201);
     const issued = await created.json();
-    expect(issued.password).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    expect(issued.password).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    const passwordPath = `/v1/servers/${server}/sftp/${credentialId}/password`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await request(user, passwordPath, {});
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual(issued);
+    }
+    for (const invalid of [{ password: 'supplied-secret' }, [], null])
+      expect((await request(user, passwordPath, invalid)).status).toBe(400);
+    expect((await request(user, passwordPath)).status).toBe(404);
+    expect((await request(user, passwordPath, {}, { headers: { origin: 'null' } })).status).toBe(
+      403,
+    );
+    expect((await request(outsider, passwordPath, {})).status).toBe(403);
+    expect((await request(owner, passwordPath, {})).status).toBe(403);
+    expect(
+      (await request(user, `/v1/servers/${second}/sftp/${credentialId}/password`, {})).status,
+    ).toBe(404);
     const repeated = await (
       await request(user, `/v1/servers/${server}/sftp`, { credentialId })
     ).json();
@@ -1043,6 +1061,7 @@ describe('M2 Hono API with real invitation, password and session authentication'
     ).json();
     expect(rotated.password).not.toBe(issued.password);
     expect(rotated.password).toBeTruthy();
+    expect(await (await request(user, passwordPath, {})).json()).toEqual(rotated);
     expect(
       (
         await (
@@ -1054,7 +1073,11 @@ describe('M2 Hono API with real invitation, password and session authentication'
       (await request(user, `/v1/servers/${server}/sftp/${credentialId}`, {}, { method: 'DELETE' }))
         .status,
     ).toBe(200);
+    expect((await request(user, passwordPath, {})).status).toBe(409);
     const audits = await f.db.selectFrom('audit_events').selectAll().execute();
+    expect(audits.filter((entry) => entry.action === 'server.sftp.password_revealed')).toHaveLength(
+      3,
+    );
     for (const secret of [issued.password, rotated.password, providerSecret]) {
       expect(JSON.stringify(logs)).not.toContain(secret);
       expect(JSON.stringify(audits)).not.toContain(secret);
@@ -1063,6 +1086,8 @@ describe('M2 Hono API with real invitation, password and session authentication'
   });
   it('keeps support attributable and denies persistent credential issuance and Owner configuration', async () => {
     const server = await f.server();
+    const credentialId = randomUUID();
+    expect((await request(user, `/v1/servers/${server}/sftp`, { credentialId })).status).toBe(201);
     const proof = await (await request(owner, '/v1/identity/step-up', { password })).json();
     const response = await request(owner, '/v1/support', {
       stepUpToken: proof.token,
@@ -1087,6 +1112,10 @@ describe('M2 Hono API with real invitation, password and session authentication'
     ).toBe(204);
     expect(
       (await request(owner, `/v1/servers/${server}/sftp`, { credentialId: randomUUID() }, options))
+        .status,
+    ).toBe(403);
+    expect(
+      (await request(owner, `/v1/servers/${server}/sftp/${credentialId}/password`, {}, options))
         .status,
     ).toBe(403);
     expect((await request(owner, '/v1/owner/infrastructure', undefined, options)).status).toBe(403);

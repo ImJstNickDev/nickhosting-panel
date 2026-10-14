@@ -345,3 +345,29 @@
     background: ButtonText;
   }
 }
+.sftp-recoverable {
+  min-width: 0;
+  flex: 1;
+}
+.sftp-primary-password {
+  align-items: flex-start;
+}
+.sftp-recoverable .sftp-value > input {
+  width: 16ch;
+  flex: 1;
+  font-size: 0.87rem;
+  min-height: 32px;
+}
+.sftp-issued > .sftp-endpoint {
+  margin-top: 14px;
+}
+.sftp-value input:focus-visible {
+  outline: none;
+  box-shadow: inset 0 -2px var(--blue);
+}
+@media (forced-colors: active) {
+  .sftp-value input:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
