@@ -8,7 +8,8 @@ import { FilemanToolbarIcon } from '../../fileman/presentation.js';
 import { serverPath } from '../../service-contracts.js';
 import type { ViewerProps } from '../core/types.js';
 import { useViewerFind } from '../core/use-find.js';
-import { DatagridTable } from './datagrid-table.js';
+import { DatagridMenu, type DatagridMenuItem } from './datagrid-menu.js';
+import { type DatagridContext, type DatagridMenuAnchor, DatagridTable } from './datagrid-table.js';
 import { DatagridColumnFilter, DatagridSearch } from './sqlite-controls.js';
 import { DatagridDetail, datagridCellText } from './sqlite-detail.js';
 import { DatagridPageCache } from './sqlite-model.js';
@@ -54,6 +55,12 @@ function Datagrid({ serverId, source }: ViewerProps) {
   const [selected, setSelected] = useState<Selection>();
   const [detail, setDetail] = useState<Selection>();
   const [copy, setCopy] = useState<'done' | 'failed'>();
+  const [menu, setMenu] = useState<{
+    target: DatagridContext;
+    anchor: DatagridMenuAnchor;
+    key: string;
+    revision: string;
+  }>();
   const [widths, setWidths] = useState<Map<string, number>>(() => new Map());
   const cache = useRef(new DatagridPageCache());
   const grid = useRef<HTMLDivElement>(null);
@@ -82,6 +89,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
     setMetadata(undefined);
     setDetail(undefined);
     setSelected(undefined);
+    setMenu(undefined);
     setChanged(true);
   }, []);
   const accessDenied = useCallback((failure: unknown) => {
@@ -90,6 +98,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
     setMetadata(undefined);
     setDetail(undefined);
     setSelected(undefined);
+    setMenu(undefined);
     setDenied(failure);
   }, []);
   const page =
@@ -115,6 +124,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
     setSelected(undefined);
     setDetail(undefined);
     setCopy(undefined);
+    setMenu(undefined);
     grid.current?.scrollTo({ top: 0 });
   };
   useEffect(() => {
@@ -124,6 +134,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
       setSelected(undefined);
       setDetail(undefined);
       setCopy(undefined);
+      setMenu(undefined);
     }, 200);
     return () => window.clearTimeout(timer);
   }, [search, controls.query]);
@@ -180,16 +191,20 @@ function Datagrid({ serverId, source }: ViewerProps) {
     setDetail(undefined);
     setSelected(undefined);
     setCopy(undefined);
+    setMenu(undefined);
     setControls((current) => ({ ...current, offset: 0, query: search }));
     setRefresh((current) => current + 1);
   }
-  function copyCell() {
-    const cell = selected && rows[selected.row]?.[selected.column];
-    if (!cell || cell.type === 'blob' || (cell.type === 'text' && cell.truncated)) return;
+  function copyText(value: string) {
     void Promise.resolve()
-      .then(() => navigator.clipboard.writeText(datagridCellText(cell)))
+      .then(() => navigator.clipboard.writeText(value))
       .then(() => setCopy('done'))
       .catch(() => setCopy('failed'));
+  }
+  function copyCell(selection = selected) {
+    const cell = selection && rows[selection.row]?.[selection.column];
+    if (!cell || cell.type === 'blob' || (cell.type === 'text' && cell.truncated)) return;
+    copyText(datagridCellText(cell));
   }
   const selectedCell = selected && rows[selected.row]?.[selected.column];
   const canCopy =
@@ -198,6 +213,56 @@ function Datagrid({ serverId, source }: ViewerProps) {
     !(selectedCell.type === 'text' && selectedCell.truncated);
   const detailQuery = new URLSearchParams(query);
   if (table) detailQuery.set('table', table);
+  function openContext(target: DatagridContext, anchor: DatagridMenuAnchor) {
+    if (!page || busy || changed || denied || view !== 'data') return;
+    setSelected({ row: target.row, column: target.column });
+    setCopy(undefined);
+    setMenu({ target, anchor, key, revision: page.revision });
+  }
+  const activeMenu =
+    menu && page && menu.key === key && menu.revision === page.revision && !busy && view === 'data'
+      ? menu
+      : undefined;
+  const contextCell = activeMenu && rows[activeMenu.target.row]?.[activeMenu.target.column];
+  const contextColumn = activeMenu && columns[activeMenu.target.column];
+  const contextItems: DatagridMenuItem[] = activeMenu
+    ? activeMenu.target.kind === 'column'
+      ? [
+          {
+            id: 'copy-column-name',
+            label: t('datagrid.copyColumnName'),
+            icon: <FilemanToolbarIcon kind="copy" />,
+            disabled: contextColumn === undefined,
+            onSelect: () => {
+              if (contextColumn !== undefined) copyText(contextColumn);
+            },
+          },
+        ]
+      : [
+          {
+            id: 'inspect-cell',
+            label: t('datagrid.inspectCell'),
+            icon: <FilemanToolbarIcon kind="find" />,
+            disabled: !contextCell,
+            onSelect: () => setDetail(activeMenu.target),
+          },
+          {
+            id: 'copy-cell',
+            label: t(
+              contextCell?.type === 'text' && contextCell.truncated
+                ? 'datagrid.inspectToCopy'
+                : 'datagrid.copyCell',
+            ),
+            icon: <FilemanToolbarIcon kind="copy" />,
+            disabled: !contextCell || contextCell.type === 'blob',
+            onSelect: () => {
+              if (contextCell?.type === 'text' && contextCell.truncated)
+                setDetail(activeMenu.target);
+              else copyCell(activeMenu.target);
+            },
+          },
+        ]
+    : [];
   return (
     <div className="dg-workspace">
       <aside className="dg-sidebar" aria-label={t('viewer.tables')}>
@@ -258,6 +323,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
               onClick={() => {
                 setView('data');
                 setDetail(undefined);
+                setMenu(undefined);
               }}
             >
               {t('datagrid.data')}
@@ -268,6 +334,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
               onClick={() => {
                 setView('schema');
                 setDetail(undefined);
+                setMenu(undefined);
               }}
             >
               {t('datagrid.schema')}
@@ -305,6 +372,7 @@ function Datagrid({ serverId, source }: ViewerProps) {
               onChange={(value) => {
                 setSearch(value);
                 setDetail(undefined);
+                setMenu(undefined);
               }}
             />
             <DatagridColumnFilter
@@ -379,7 +447,12 @@ function Datagrid({ serverId, source }: ViewerProps) {
                   setCopy(undefined);
                 }}
                 onOpen={setDetail}
-                onCopy={copyCell}
+                onCopy={() => copyCell()}
+                onHeaderFocus={(column) => {
+                  setSelected({ row: -1, column });
+                  setCopy(undefined);
+                }}
+                onContext={openContext}
                 busy={busy}
                 readOnly
                 inert={!!detail}
@@ -470,9 +543,31 @@ function Datagrid({ serverId, source }: ViewerProps) {
                 className="secondary dg-icon"
                 aria-label={t('datagrid.copyCell')}
                 disabled={!canCopy || busy || changed || view !== 'data'}
-                onClick={copyCell}
+                onClick={() => copyCell()}
               >
                 <FilemanToolbarIcon kind="copy" />
+              </button>
+            </Tooltip>
+            <Tooltip content={t('datagrid.actions')}>
+              <button
+                type="button"
+                className="secondary dg-icon"
+                aria-label={t('datagrid.actions')}
+                aria-haspopup="menu"
+                aria-expanded={!!activeMenu}
+                disabled={
+                  !columns.length || busy || changed || !!denied || !!detail || view !== 'data'
+                }
+                onClick={(event) => {
+                  const selection = selected ?? { row: rows.length ? 0 : -1, column: 0 };
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  openContext(
+                    { ...selection, kind: selection.row < 0 ? 'column' : 'cell' },
+                    { x: bounds.left, y: bounds.bottom, trigger: event.currentTarget },
+                  );
+                }}
+              >
+                <span aria-hidden="true">⋯</span>
               </button>
             </Tooltip>
             {copy && (
@@ -513,6 +608,14 @@ function Datagrid({ serverId, source }: ViewerProps) {
           </div>
         </div>
       </div>
+      {activeMenu && (
+        <DatagridMenu
+          anchor={activeMenu.anchor}
+          label={t('datagrid.actions')}
+          items={contextItems}
+          onClose={() => setMenu(undefined)}
+        />
+      )}
     </div>
   );
 }

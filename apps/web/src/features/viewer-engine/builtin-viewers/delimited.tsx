@@ -5,7 +5,13 @@ import { Dialog } from '../../../components/ui.js';
 import { FilemanToolbarIcon } from '../../fileman/presentation.js';
 import type { DocumentViewProps } from '../core/document-view.js';
 import { useViewerFind } from '../core/use-find.js';
-import { type DatagridSelection, DatagridTable } from './datagrid-table.js';
+import { DatagridMenu, type DatagridMenuItem } from './datagrid-menu.js';
+import {
+  type DatagridContext,
+  type DatagridMenuAnchor,
+  type DatagridSelection,
+  DatagridTable,
+} from './datagrid-table.js';
 import { DelimitedClient } from './delimited-client.js';
 import {
   type DelimitedEdit,
@@ -62,6 +68,11 @@ export default function DelimitedView(props: DocumentViewProps) {
   const [view, setView] = useState<DelimitedViewState>({ offset: 0, limit: 100 });
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<DatagridSelection>();
+  const [menu, setMenu] = useState<{
+    target: DatagridContext;
+    anchor: DatagridMenuAnchor;
+    snapshot: DelimitedPage;
+  }>();
   const [edit, setEditState] = useState<Edit>();
   const [action, setAction] = useState<Action>();
   const [detail, setDetail] = useState<string>();
@@ -89,6 +100,10 @@ export default function DelimitedView(props: DocumentViewProps) {
   const editRef = useRef<Edit | undefined>(undefined);
   const pending = useRef<Promise<boolean> | undefined>(undefined);
   const loaded = useRef<{ value: string; options: DelimitedOptions } | undefined>(undefined);
+  // Header interpretation belongs to the open document, not each undo/redo snapshot.
+  const inferredHeader = useRef<
+    { path: string; options: DelimitedOptions; header: boolean } | undefined
+  >(undefined);
   const generation = useRef(0);
   const setEdit = useCallback((next: Edit | undefined) => {
     editRef.current = next;
@@ -136,9 +151,19 @@ export default function DelimitedView(props: DocumentViewProps) {
     const timer = window.setTimeout(
       () => {
         void worker
-          .load(props.value, props.path.split('.').pop() ?? '', options)
+          .load(
+            props.value,
+            props.path.split('.').pop() ?? '',
+            options.header === 'auto' &&
+              inferredHeader.current?.path === props.path &&
+              inferredHeader.current.options === options
+              ? { ...options, header: inferredHeader.current.header }
+              : options,
+          )
+
           .then(async (result) => {
             if (token !== generation.current) return;
+            inferredHeader.current = { path: props.path, options, header: result.header };
             loaded.current = { value: props.value, options };
             const control = reconcileView(viewRef.current, result.columns.length);
             const nextPage =
@@ -326,13 +351,13 @@ export default function DelimitedView(props: DocumentViewProps) {
       report(error);
     }
   }
-  async function copyCell() {
+  async function copyCell(selection = selected) {
     if (busy) return;
     const snapshot = pageRef.current;
-    const row = selected && snapshot?.rows[selected.row];
-    if (!snapshot || !row || !selected || !client.current) return;
+    const row = selection && snapshot?.rows[selection.row];
+    if (!snapshot || !row || !selection || !client.current) return;
     try {
-      const value = await client.current.detail(row.id, selected.column, snapshot.revision);
+      const value = await client.current.detail(row.id, selection.column, snapshot.revision);
       await navigator.clipboard.writeText(value);
       setCopy('done');
     } catch {
@@ -352,6 +377,137 @@ export default function DelimitedView(props: DocumentViewProps) {
   const columns = page?.columns ?? [];
   const rows = page?.rows ?? [];
   const selectedRow = selected && rows[selected.row];
+  async function openMenu(target: DatagridContext, anchor: DatagridMenuAnchor) {
+    const rowId = pageRef.current?.rows[target.row]?.id;
+    const original = current.current.path;
+    if (loading || !(await flush()) || !current.current.active || current.current.path !== original)
+      return;
+    const snapshot = pageRef.current;
+    if (!snapshot || target.column >= snapshot.columns.length) return;
+    const row = target.row < 0 ? -1 : snapshot.rows.findIndex((item) => item.id === rowId);
+    if (target.row >= 0 && row < 0) return;
+    const resolved = { ...target, row };
+    setSelected(resolved);
+    setMenu({ target: resolved, anchor, snapshot });
+  }
+  useEffect(() => {
+    setMenu((previous) =>
+      previous && (!props.active || busy || previous.snapshot !== page) ? undefined : previous,
+    );
+  }, [props.active, busy, page]);
+  const menuCurrent = menu && menu.snapshot === page && props.active && !busy;
+  const menuItems: DatagridMenuItem[] = [];
+  if (menuCurrent) {
+    const { target, snapshot } = menu;
+    const sourceRow = snapshot.rows[target.row];
+    const add = (
+      id: string,
+      label: string,
+      glyph: React.ReactNode,
+      run: () => void,
+      danger = false,
+      disabled = false,
+    ) => {
+      menuItems.push({
+        id,
+        label: t(label),
+        icon: glyph,
+        danger,
+        disabled,
+        onSelect: () => {
+          if (pageRef.current === snapshot && current.current.active) run();
+        },
+      });
+    };
+    if (target.kind !== 'column' && sourceRow) {
+      add(
+        'edit',
+        props.readOnly ? 'datagrid.inspectCell' : 'delimited.editCell',
+        <FilemanToolbarIcon kind="find" />,
+        () => void openCell(target),
+      );
+      add(
+        'copy',
+        'datagrid.copyCell',
+        <FilemanToolbarIcon kind="copy" />,
+        () => void copyCell(target),
+      );
+    }
+    if (target.kind === 'column') {
+      add('copy-header', 'datagrid.copyColumnName', <FilemanToolbarIcon kind="copy" />, () => {
+        void (async () => {
+          try {
+            const value = snapshot.header
+              ? await client.current?.detail(-1, target.column, snapshot.revision)
+              : snapshot.columns[target.column];
+            if (value === undefined) return;
+            await navigator.clipboard.writeText(value);
+            setCopy('done');
+          } catch {
+            setCopy('failed');
+          }
+        })();
+      });
+    }
+    if (!props.readOnly) {
+      const insertion = (axis: 'row' | 'column', choices: [string, DelimitedEdit][]) => {
+        menuItems.push({
+          id: `insert-${axis}`,
+          label: t(`delimited.insert${axis === 'row' ? 'Row' : 'Column'}`),
+          icon: <GridIcon kind={`${axis}-add`} />,
+          children: choices.map(([label, operation], index) => ({
+            id: label,
+            label: t(`delimited.${label}`),
+            icon: (
+              <InsertIcon horizontal={axis === 'column'} end={index % 2 === 1} edge={index >= 2} />
+            ),
+            onSelect: () => {
+              if (pageRef.current === snapshot && current.current.active) void mutate(operation);
+            },
+          })),
+        });
+      };
+      if (target.kind !== 'column' && sourceRow) {
+        const reordered = !!view.sort || !!view.query;
+        insertion('row', [
+          [reordered ? 'beforeRow' : 'above', { type: 'insert-row', beforeId: sourceRow.id }],
+          [reordered ? 'afterRow' : 'below', { type: 'insert-row', afterId: sourceRow.id }],
+          ['firstRow', { type: 'insert-row', position: 'first' }],
+          ['lastRow', { type: 'insert-row', position: 'last' }],
+        ]);
+        add(
+          'delete-row',
+          'delimited.removeRow',
+          <GridIcon kind="row-remove" />,
+          () => setAction({ type: 'remove-row', rowId: sourceRow.id }),
+          true,
+        );
+      }
+      if (target.kind !== 'row') {
+        insertion('column', [
+          ['left', { type: 'insert-column', column: target.column }],
+          ['right', { type: 'insert-column', column: target.column + 1 }],
+          ['firstColumn', { type: 'insert-column', column: 0 }],
+          ['lastColumn', { type: 'insert-column', column: snapshot.columns.length }],
+        ]);
+        if (snapshot.header)
+          add(
+            'rename',
+            'delimited.renameHeader',
+            <GridIcon kind="rename" />,
+            () => void renameHeader(target.column),
+          );
+        add(
+          'delete-column',
+          'delimited.removeColumn',
+          <GridIcon kind="column-remove" />,
+          () => setAction({ type: 'remove-column', column: target.column }),
+          true,
+          snapshot.columns.length <= 1,
+        );
+      }
+    }
+  }
   const columnChoices = columns.map((label, index) => ({
     value: String(index),
     label: label || t('delimited.columnNumber', { number: index + 1 }),
@@ -519,7 +675,7 @@ export default function DelimitedView(props: DocumentViewProps) {
                     }
               }
               rowKey={(row) => row.id}
-              rowNumber={(row) => row.id + 1}
+              rowNumber={(row) => row.sourceRow}
               selected={selected}
               onSelect={(selection) => {
                 setSelected(selection);
@@ -528,6 +684,7 @@ export default function DelimitedView(props: DocumentViewProps) {
               onOpen={(selection) => {
                 void openCell(selection);
               }}
+              onContext={(target, anchor) => void openMenu(target, anchor)}
               onCopy={() => {
                 void copyCell();
               }}
@@ -593,6 +750,26 @@ export default function DelimitedView(props: DocumentViewProps) {
         </div>
         <div className="dg-footer">
           <div className="dg-cell-actions">
+            <Tooltip content={t('datagrid.actions')}>
+              <button
+                type="button"
+                className="secondary dg-icon"
+                aria-label={t('datagrid.actions')}
+                aria-haspopup="menu"
+                disabled={busy || !selected}
+                onClick={(event) => {
+                  if (!selected) return;
+                  const trigger = event.currentTarget;
+                  const rect = trigger.getBoundingClientRect();
+                  void openMenu(
+                    { ...selected, kind: selected.row < 0 ? 'column' : 'cell' },
+                    { x: rect.left, y: rect.bottom, trigger },
+                  );
+                }}
+              >
+                <span aria-hidden="true">⋯</span>
+              </button>
+            </Tooltip>
             <Tooltip content={t(props.readOnly ? 'datagrid.inspectCell' : 'delimited.editCell')}>
               <button
                 type="button"
@@ -661,6 +838,17 @@ export default function DelimitedView(props: DocumentViewProps) {
           </div>
         </div>
       </div>
+      {menuCurrent && (
+        <DatagridMenu
+          anchor={menu.anchor}
+          label={t('datagrid.actions')}
+          items={menuItems}
+          note={
+            !props.readOnly && (view.sort || view.query) ? t('delimited.sourceOrder') : undefined
+          }
+          onClose={() => setMenu(undefined)}
+        />
+      )}
       <Dialog
         open={!!action}
         title={t(
@@ -748,6 +936,25 @@ function GridIcon({
           {kind.endsWith('add') && <path d="M19.5 12.5v7" />}
         </>
       )}
+    </svg>
+  );
+}
+
+function InsertIcon({
+  horizontal,
+  end,
+  edge,
+}: {
+  horizontal: boolean;
+  end: boolean;
+  edge: boolean;
+}) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+      <g transform={`rotate(${horizontal ? (end ? 90 : -90) : end ? 180 : 0} 12 12)`}>
+        <path d="M12 19V5m-5 5 5-5 5 5" />
+        {edge && <path d="M4 3h16" />}
+      </g>
     </svg>
   );
 }

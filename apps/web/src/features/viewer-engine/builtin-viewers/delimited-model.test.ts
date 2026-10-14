@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DelimitedClient, type DelimitedWorker } from './delimited-client.js';
 import { DelimitedModel } from './delimited-model.js';
 import {
+  type DelimitedEdit,
   type DelimitedRequest,
   type DelimitedResponse,
   delimitedLimits,
@@ -117,6 +118,152 @@ describe('delimited model', () => {
     result = model.edit({ type: 'remove-row', rowId: id }, result.page.revision);
     expect(result.page.rows).toHaveLength(1);
     expect(result.page.rows[0]?.cells).toEqual(['x', '1']);
+  });
+
+  it.each(['beforeId', 'afterId'] as const)(
+    'inserts at the source %s anchor selected through sorting, filtering and pagination',
+    (anchor) => {
+      const model = new DelimitedModel(
+        'key,value\nz,keep\nx,hidden\na,keep\nm,keep',
+        'csv',
+        explicitHeader,
+      );
+      const view = {
+        query: 'keep',
+        column: 1,
+        sort: { column: 0, direction: 'desc' },
+        offset: 1,
+        limit: 1,
+      } as const;
+      const row = required(model.view(view).rows[0]);
+      expect(row.cells[0]).toBe('m');
+      expect(row.sourceRow).toBe(5);
+      const result = model.edit(
+        { type: 'insert-row', [anchor]: row.id, cells: ['new', 'keep'] },
+        0,
+        view,
+      );
+      expect(result.text).toBe(
+        anchor === 'beforeId'
+          ? 'key,value\nz,keep\nx,hidden\na,keep\nnew,keep\nm,keep'
+          : 'key,value\nz,keep\nx,hidden\na,keep\nm,keep\nnew,keep',
+      );
+      expect(model.view().rows.find((item) => item.id === row.id)?.sourceRow).toBe(
+        anchor === 'beforeId' ? 6 : 5,
+      );
+      expect(result.page.rows[0]?.sourceRow).toBe(anchor === 'beforeId' ? 5 : 6);
+    },
+  );
+
+  it('resolves repeatedly inserted row identities by source order, with current source ordinals', () => {
+    const model = new DelimitedModel('name\na\nb', 'csv', explicitHeader);
+    let result = model.edit({ type: 'insert-row', beforeId: 2, cells: ['middle'] }, 0);
+    const middle = required(result.page.rows[1]);
+    expect(middle.id).toBe(3);
+    expect(middle.sourceRow).toBe(3);
+    result = model.edit(
+      { type: 'insert-row', afterId: middle.id, cells: ['after'] },
+      result.page.revision,
+    );
+    result = model.edit(
+      { type: 'insert-row', beforeId: middle.id, cells: ['before'] },
+      result.page.revision,
+    );
+    expect(result.text).toBe('name\na\nbefore\nmiddle\nafter\nb');
+    expect(result.page.rows.map(({ id, sourceRow }) => [id, sourceRow])).toEqual([
+      [1, 2],
+      [5, 3],
+      [3, 4],
+      [4, 5],
+      [2, 6],
+    ]);
+    result = model.edit({ type: 'remove-row', rowId: 5 }, result.page.revision);
+    expect(result.page.rows.map((row) => row.sourceRow)).toEqual([2, 3, 4, 5]);
+  });
+
+  it.each([true, false])('inserts first/last data rows with header=%s', (header) => {
+    const model = new DelimitedModel(header ? 'name\na\nb' : 'a\nb', 'csv', {
+      delimiter: ',',
+      header,
+    });
+    let result = model.edit({ type: 'insert-row', position: 'first', cells: ['first'] }, 0);
+    result = model.edit(
+      { type: 'insert-row', position: 'last', cells: ['last'] },
+      result.page.revision,
+    );
+    result = model.edit({ type: 'insert-row', cells: ['append'] }, result.page.revision);
+    expect(result.text).toBe(`${header ? 'name\n' : ''}first\na\nb\nlast\nappend`);
+    expect(result.page.rows.map((row) => row.sourceRow)).toEqual(
+      header ? [2, 3, 4, 5, 6] : [1, 2, 3, 4, 5],
+    );
+    if (header) expect(result.page.columns).toEqual(['name']);
+  });
+
+  it.each([
+    { source: '', header: false, expected: 'new' },
+    { source: '', header: true, expected: '""\nnew' },
+    { source: '""', header: true, expected: '""\nnew' },
+    { source: 'name', header: true, expected: 'name\nnew' },
+    { source: 'name\n', header: true, expected: 'name\nnew' },
+  ])('inserts into empty data rows: %j', ({ source, header, expected }) => {
+    for (const position of ['first', 'last'] as const) {
+      const options = { delimiter: ',', header } as const;
+      const model = new DelimitedModel(source, 'csv', options);
+      const result = model.edit({ type: 'insert-row', position, cells: ['new'] }, 0);
+      expect(result.text).toBe(expected);
+      expect(result.page.rows).toHaveLength(1);
+      expect(result.page.rows[0]?.sourceRow).toBe(header ? 2 : 1);
+      expect(new DelimitedModel(result.text, 'csv', options).view().rows).toEqual(result.page.rows);
+    }
+  });
+
+  it('rejects ambiguous, invalid and header anchors without changing source or revision', () => {
+    const source = 'name\na\nb';
+    const model = new DelimitedModel(source, 'csv', explicitHeader);
+    const initial = model.view();
+    const invalid: DelimitedEdit[] = [
+      { type: 'insert-row', beforeId: 1, afterId: 2 },
+      { type: 'insert-row', beforeId: 1, position: 'first' },
+      { type: 'insert-row', afterId: 1, position: 'last' },
+      { type: 'insert-row', beforeId: 0 },
+      { type: 'insert-row', afterId: 0 },
+      { type: 'insert-row', beforeId: 99 },
+      { type: 'insert-row', afterId: 99 },
+      { type: 'insert-row', afterId: 1.5 },
+      { type: 'insert-row', position: 'middle' } as unknown as DelimitedEdit,
+    ];
+    for (const op of invalid) {
+      expect(() => model.edit(op, 0)).toThrow('invalid');
+      expect(model.view()).toEqual(initial);
+      expect(model.edit({ type: 'set-cell', rowId: 1, column: 0, value: 'a' }, 0).text).toBe(
+        source,
+      );
+    }
+    const result = model.edit({ type: 'insert-row', position: 'first', cells: ['new'] }, 0);
+    expect(result.page.rows[0]?.id).toBe(3);
+  });
+
+  it('preserves exact original fields and undo source when inserting beside quoted records', () => {
+    const source = '\uFEFF"name",value\r\n"a\r\nb",0001\r\n"last",002';
+    const model = new DelimitedModel(source, 'csv', explicitHeader);
+    const originalPage = model.view();
+    let result = model.edit({ type: 'insert-row', afterId: 1, cells: ['new,value', ''] }, 0);
+    expect(result.text).toBe('\uFEFF"name",value\r\n"a\r\nb",0001\r\n"new,value",""\r\n"last",002');
+    expect(new DelimitedModel(result.text, 'csv', explicitHeader).view().rows[1]?.cells).toEqual([
+      'new,value',
+      '',
+    ]);
+    result = model.edit(
+      { type: 'remove-row', rowId: required(result.page.rows[1]).id },
+      result.page.revision,
+    );
+    expect(result.text).toBe(source);
+    // Source undo reloads the prior document, including its original spellings and identities.
+    const restored = new DelimitedModel(source, 'csv', explicitHeader);
+    expect(restored.view()).toEqual(originalPage);
+    expect(restored.edit({ type: 'set-cell', rowId: 1, column: 1, value: '0001' }, 0).text).toBe(
+      source,
+    );
   });
 
   it('bounds pages, previews, file bytes and shape; failed edits are atomic', () => {

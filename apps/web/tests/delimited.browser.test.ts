@@ -55,6 +55,11 @@ describe('Datagrid shared delimited document', () => {
   const edit = () => grid().getByRole('textbox', { name: 'Edit cell', exact: true });
   const clean = () =>
     browserExpect(page.locator('.fm-editor-state')).toHaveText('No unsaved changes');
+  const menuItem = (name: string) => page.getByRole('menuitem', { name, exact: true });
+  async function insertAt(menu: string, position: string) {
+    await menuItem(menu).click();
+    await menuItem(position).click();
+  }
   it('shares draft and undo with Scribe without rereads or writes when switching', async () => {
     await open('shared.csv', source);
     await browserExpect(cell('Alice')).toBeVisible();
@@ -145,6 +150,117 @@ describe('Datagrid shared delimited document', () => {
     await browserExpect(grid().locator('thead th')).toHaveCount(4);
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
     await browserExpect(grid().locator('thead th')).toHaveCount(3);
+  });
+  it('uses the right-clicked source row after sorting and shares insertion undo with Scribe', async () => {
+    await open('context.csv', source);
+    const sort = grid().getByRole('button', { name: 'Sort by name', exact: true });
+    await sort.click();
+    await sort.click();
+    await browserExpect(grid().locator('tbody tr').first()).toContainText('Bob');
+    await cell('Bob').click();
+    await cell('Alice').click({ button: 'right' });
+    await browserExpect(cell('Alice')).toHaveAttribute('aria-selected', 'true');
+    await browserExpect(menuItem('Edit cell')).toBeVisible();
+    await browserExpect(menuItem('Copy cell')).toBeVisible();
+    await menuItem('Insert row').click();
+    await browserExpect(menuItem('Before this row')).toBeVisible();
+    await browserExpect(menuItem('After this row')).toBeVisible();
+    await browserExpect(menuItem('Above')).toHaveCount(0);
+    await harness.screenshot(page, 'datagrid-csv-context-menu-desktop-en');
+    await menuItem('After this row').click();
+    await browserExpect(grid().locator('tbody tr')).toHaveCount(3);
+    await browserExpect(cell('Bob').locator('..').locator('th')).toHaveText('4');
+    await page.getByRole('button', { name: 'Scribe', exact: true }).click();
+    await browserExpect(page.locator('.cm-content:visible')).toContainText('"",""');
+    await page.getByRole('button', { name: 'Datagrid', exact: true }).click();
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await browserExpect(grid().locator('tbody tr')).toHaveCount(2);
+    await clean();
+    await page.getByRole('button', { name: 'Redo', exact: true }).click();
+    await browserExpect(grid().locator('tbody tr')).toHaveCount(3);
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await clean();
+    expect(files.get('context.csv')?.toString()).toBe(
+      'name,count\r\nAlice,001\r\n"",""\r\nBob,002\r\n',
+    );
+  });
+  it('opens nested insertion menus from the keyboard and inserts columns at either boundary', async () => {
+    await open('keyboard-context.csv', source);
+    await cell('Alice').focus();
+    await page.keyboard.press('Shift+F10');
+    await browserExpect(menuItem('Edit cell')).toBeFocused();
+    await menuItem('Insert row').focus();
+    await page.keyboard.press('ArrowRight');
+    await browserExpect(menuItem('Above')).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await browserExpect(menuItem('Below')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await browserExpect(grid().locator('tbody tr')).toHaveCount(3);
+    await browserExpect(grid().locator('tbody tr').nth(1).getByRole('gridcell').first()).toHaveText(
+      '',
+    );
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    await browserExpect(grid().locator('tbody tr')).toHaveCount(2);
+    await clean();
+    for (const position of ['First column', 'Last column']) {
+      const header = grid().getByRole('button', { name: 'Sort by count', exact: true });
+      await browserExpect(header).toBeEnabled();
+      await header.focus();
+      await page.keyboard.press('Shift+F10');
+      await browserExpect(menuItem('Rename column')).toBeVisible();
+      await menuItem('Insert column').focus();
+      await page.keyboard.press('ArrowRight');
+      await browserExpect(menuItem('Left')).toBeFocused();
+      await menuItem(position).click();
+      await browserExpect(grid().locator('thead th')).toHaveCount(4);
+      const values = await grid()
+        .locator('tbody tr')
+        .first()
+        .getByRole('gridcell')
+        .allTextContents();
+      expect(values).toEqual(
+        position === 'First column' ? ['', 'Alice', '001'] : ['Alice', '001', ''],
+      );
+      await page.getByRole('button', { name: 'Undo', exact: true }).click();
+      await browserExpect(grid().locator('thead th')).toHaveCount(3);
+      await clean();
+    }
+    await cell('Alice').focus();
+    await page.keyboard.press('Shift+F10');
+    await page.keyboard.press('Escape');
+    await browserExpect(cell('Alice')).toBeFocused();
+    await browserExpect(page.getByRole('menu')).toHaveCount(0);
+    for (const position of ['First row', 'Last row']) {
+      await cell('Alice').click();
+      await grid().getByRole('button', { name: 'Table actions', exact: true }).click();
+      await insertAt('Insert row', position);
+      await browserExpect(grid().locator('tbody tr')).toHaveCount(3);
+      const row = position === 'First row' ? 0 : 2;
+      await browserExpect(
+        grid().locator('tbody tr').nth(row).getByRole('gridcell').first(),
+      ).toHaveText('');
+      await page.getByRole('button', { name: 'Undo', exact: true }).click();
+      await browserExpect(grid().locator('tbody tr')).toHaveCount(2);
+      await clean();
+    }
+  });
+  it('flushes an edited sort key before binding row-number context to the source row', async () => {
+    await open('editing-context.csv', source);
+    await grid().getByRole('button', { name: 'Sort by name', exact: true }).click();
+    await cell('Alice').dblclick();
+    await edit().fill('Zoe');
+    await cell('Bob').locator('..').locator('.dg-row-target').click({ button: 'right' });
+    await browserExpect(cell('Zoe')).toBeVisible();
+    await browserExpect(menuItem('Delete row')).toBeVisible();
+    await browserExpect(menuItem('Insert column')).toHaveCount(0);
+    await browserExpect(menuItem('Delete column')).toHaveCount(0);
+    await insertAt('Insert row', 'After this row');
+    await browserExpect(grid().locator('tbody tr')).toHaveCount(3);
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await clean();
+    expect(files.get('editing-context.csv')?.toString()).toBe(
+      'name,count\r\nZoe,001\r\nBob,002\r\n"",""',
+    );
   });
   it('preserves embedded mixed newlines through grid edits, undo and saving', async () => {
     const original = 'name,count\r\n"Alice\nSecond",001\r\nBob,002\r\n';
@@ -243,6 +359,12 @@ describe('Datagrid shared delimited document', () => {
     await browserExpect(grid().getByRole('button', { name: 'Add row', exact: true })).toHaveCount(
       0,
     );
+    await cell('Alice').click({ button: 'right' });
+    await browserExpect(menuItem('Inspect cell')).toBeVisible();
+    await browserExpect(menuItem('Copy cell')).toBeVisible();
+    for (const label of ['Edit cell', 'Insert row', 'Insert column', 'Delete row', 'Delete column'])
+      await browserExpect(menuItem(label)).toHaveCount(0);
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Scribe', exact: true }).click();
     await browserExpect(page.locator('.cm-content:visible')).toHaveAttribute(
       'contenteditable',
@@ -271,6 +393,30 @@ describe('Datagrid shared delimited document', () => {
       grid().getByRole('button', { name: 'Pagina successiva', exact: true }),
     ).toBeInViewport();
     await harness.screenshot(page, 'datagrid-csv-mobile-it');
+    await cell('Alice').click();
+    await grid().getByRole('button', { name: 'Azioni tabella', exact: true }).click();
+    await menuItem('Inserisci riga').click();
+    await browserExpect(menuItem('Sopra')).toBeVisible();
+    await browserExpect(menuItem('In fondo')).toBeInViewport();
+    await menuItem('Indietro').click();
+    await browserExpect(menuItem('Inserisci riga')).toBeFocused();
+    await browserExpect(menuItem('Sopra')).toHaveCount(0);
+    await menuItem('Inserisci riga').click();
+    await browserExpect(menuItem('Indietro')).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await harness.screenshot(page, 'datagrid-csv-context-menu-mobile-it');
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .include('.dg-context-root')
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
     expect(
       (
         await new AxeBuilder({ page })

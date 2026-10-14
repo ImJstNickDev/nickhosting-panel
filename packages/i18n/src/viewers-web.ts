@@ -1,4 +1,22 @@
 export const viewerWebMessages: Record<string, readonly [string, string]> = {
+  'datagrid.actions': ['Table actions', 'Azioni tabella'],
+  'datagrid.copyColumnName': ['Copy column name', 'Copia nome colonna'],
+  'delimited.insertRow': ['Insert row', 'Inserisci riga'],
+  'delimited.insertColumn': ['Insert column', 'Inserisci colonna'],
+  'delimited.above': ['Above', 'Sopra'],
+  'delimited.below': ['Below', 'Sotto'],
+  'delimited.beforeRow': ['Before this row', 'Prima di questa riga'],
+  'delimited.afterRow': ['After this row', 'Dopo questa riga'],
+  'delimited.firstRow': ['First row', 'In cima'],
+  'delimited.lastRow': ['Last row', 'In fondo'],
+  'delimited.left': ['Left', 'A sinistra'],
+  'delimited.right': ['Right', 'A destra'],
+  'delimited.firstColumn': ['First column', 'Prima colonna'],
+  'delimited.lastColumn': ['Last column', 'Ultima colonna'],
+  'delimited.sourceOrder': [
+    'Rows are inserted in file order.',
+    'Le righe vengono inserite nell’ordine del file.',
+  ],
   'viewer.notConfigured': [
     'File previews are not configured. Text editing and downloads remain available.',
     'Le anteprime dei file non sono configurate. La modifica dei testi e i download restano disponibili.',

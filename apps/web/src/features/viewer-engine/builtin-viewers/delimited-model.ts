@@ -194,8 +194,10 @@ export class DelimitedModel {
     const columns = Array.from({ length: width }, (_, column) =>
       preview(this.header ? (this.rows[0]?.cells[column] ?? '') : String(column + 1)),
     );
+    const sourceRows = new Map(this.rows.map((row, index) => [row.id, index + 1]));
     const pageRows = rows.slice(offset, offset + limit).map((row) => ({
       id: row.id,
+      sourceRow: sourceRows.get(row.id) as number,
       cells: Array.from({ length: width }, (_, column) => preview(row.cells[column] ?? '')),
     }));
     return {
@@ -264,6 +266,12 @@ export class DelimitedModel {
         setCell(rows[0], op.column, op.value);
         break;
       case 'insert-row': {
+        if (
+          [op.beforeId, op.afterId, op.position].filter((anchor) => anchor !== undefined).length >
+            1 ||
+          (op.position !== undefined && op.position !== 'first' && op.position !== 'last')
+        )
+          fail('invalid');
         const cells = op.cells ?? Array.from({ length: Math.max(1, width) }, () => '');
         if (!cells.length) fail('invalid');
         if (cells.length > delimitedLimits.columns) fail('limit');
@@ -274,7 +282,16 @@ export class DelimitedModel {
             fields: cells.map(() => '""'),
             ending: this.newline,
           });
-        const index = op.beforeId === undefined ? rows.length : rows.indexOf(find(op.beforeId));
+        const index =
+          op.beforeId !== undefined
+            ? rows.indexOf(find(op.beforeId))
+            : op.afterId !== undefined
+              ? rows.indexOf(find(op.afterId)) + 1
+              : op.position === 'first'
+                ? this.header
+                  ? 1
+                  : 0
+                : rows.length;
         rows.splice(index, 0, {
           id: nextId++,
           cells: [...cells],

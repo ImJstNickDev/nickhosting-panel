@@ -9237,3 +9237,49 @@ external focus, Ctrl/Meta shortcuts, Scribe handoff, hint hiding/restoration, Ax
 initially omitted the separator's punctuation; corrected and the mobile check passed.
 Independent review closed the narrow-screen clipping and Schema-shortcut findings;
 no remaining must-fix findings. Changes use existing HMR, with no live mutations.
+
+### 2026-10-14 — Datagrid contextual row/column editing
+
+Added icon context menus on cells, row numbers and headers, keyboard invocation and
+a compact touch actions button. CSV/TSV supports source-relative row/column insertion,
+first/last positions, rename and confirmed deletion; SQLite/archive menus remain
+read-only. Native Tab advances after closing the menu, Escape restores the trigger,
+and row targets do not add 100 tab stops to a page. Mobile submenus expose Back.
+No new file read, write path or provider call is added by opening a menu.
+
+Validation (all commands through `scripts/dev.sh`):
+
+- `pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/delimited-model.test.ts`:
+  **23 passed**; stable identity under sorting/filtering/paging, insertion boundaries,
+  empty/header cases, invalid anchors, exact serialization and source restoration.
+- `pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/delimited.browser.test.ts`:
+  initial run **8 passed, 2 failed**. It exposed automatic header detection changing
+  after redoing a blank-row insertion, fixed by retaining interpretation per open
+  document; the other failure was a test label mismatch (Rename column). The two
+  affected cases then **passed**, and an additional sort-key edit/row-context case
+  **passed**. All eleven cases have passing evidence; the final runs were targeted,
+  not a repeated full suite.
+- The same command with `NH_BROWSER=firefox` and
+  `-t 'context|keyboard.*insertion|Italian mobile'`: **4 passed**. Covers source-order
+  insertion, Scribe/Undo/Redo/save, keyboard submenus, row-number targets and mobile.
+- Final Firefox Italian mobile rerun after adding submenu Back: **1 passed**,
+  including Back/reopen, viewport bounds and zero Axe WCAG AA violations in menus.
+- SQLite browser file with `-t 'context actions|uses keyboard'`: **2 passed**, six
+  unrelated cases skipped. Real SQLite handlers, readonly actions, details and focus.
+- `pnpm typecheck`, `pnpm build`, focused Biome and catalog compilation: **passed**.
+  Build retains the existing large-chunk advisory; no new dependency was added.
+
+These tests use real application handlers/browser workers with synthetic provider
+files and already-approved isolated test services. Harness state is cleaned up;
+no real game-server files, production resources, containers or network configuration
+were changed. Development receives source changes through existing HMR.
+
+Independent technical review found no remaining must-fix findings. Browser review
+confirmed readable desktop menus and contained mobile menus; its mobile Back
+suggestion was implemented. Review also resolved unnecessary row tab stops and menu
+Tab behavior. Historical failed attempts above are retained. SFTPGo #18 remains an
+independent production-release gate.
+
+Reviewed captures:
+[desktop context menu](screenshots/m5/datagrid-csv-context-menu-desktop-en.png),
+[Italian mobile menu](screenshots/m5/datagrid-csv-context-menu-mobile-it.png).

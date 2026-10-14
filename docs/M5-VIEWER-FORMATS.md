@@ -555,3 +555,19 @@ renderer provides future adapter extension points, not implemented DuckDB/H2 sup
 The production frontend build includes the worker. Persistent development must
 rebuild only its Vite image to install the added dependency; no API/worker/database
 restart, migration, Blueprint update or provider operation is needed.
+
+### Datagrid context actions (2026-10-14)
+
+The shared table exposes typed cell/row/column context targets to its source adapter.
+Right-click, Shift+F10 / the Context Menu key and the compact actions button open
+icon menus; mobile submenus include Back. CSV/TSV adapters provide insertion above/
+below or left/right, first/last positions, column rename and confirmed deletion.
+SQLite and archive documents expose only inspection/copy operations.
+
+Row anchors use stable source IDs. With sorting/filtering active, the menu says
+before/after the source row and explains file-order insertion; row numbers show the
+current source record position. Undo/Redo shares Scribe's document session. Automatic
+header interpretation persists for the open document across draft reloads, so an
+inserted blank record does not turn the header into data on redo. Explicit header
+changes remain available. Menus expire with the displayed snapshot; no new provider
+requests, remote mutations, dependencies or Blueprint endpoints were introduced.

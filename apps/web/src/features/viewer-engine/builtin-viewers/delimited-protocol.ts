@@ -18,7 +18,12 @@ export interface DelimitedPage {
   newline: string;
   header: boolean;
   columns: string[];
-  rows: { id: number; cells: string[] }[];
+  rows: {
+    id: number;
+    /** Current 1-based source record position, including the header when present. */
+    sourceRow: number;
+    cells: string[];
+  }[];
   total: number;
   offset: number;
   sourceRows: number;
@@ -26,7 +31,13 @@ export interface DelimitedPage {
 }
 export type DelimitedEdit =
   | { type: 'set-cell'; rowId: number; column: number; value: string }
-  | { type: 'insert-row'; beforeId?: number; cells?: string[] }
+  | {
+      type: 'insert-row';
+      beforeId?: number;
+      afterId?: number;
+      position?: 'first' | 'last';
+      cells?: string[];
+    }
   | { type: 'remove-row'; rowId: number }
   | { type: 'insert-column'; column: number; name?: string }
   | { type: 'remove-column'; column: number }

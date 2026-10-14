@@ -3,6 +3,8 @@ import { useFormat, useT } from '../../../app/i18n.js';
 import { DatagridResize } from './sqlite-controls.js';
 
 export type DatagridSelection = { row: number; column: number };
+export type DatagridContext = DatagridSelection & { kind: 'cell' | 'row' | 'column' };
+export type DatagridMenuAnchor = { x: number; y: number; trigger: HTMLElement };
 
 /** Source-neutral rendering: readers own fetching, values, edits and consistency. */
 export function DatagridTable<Row>({
@@ -30,6 +32,7 @@ export function DatagridTable<Row>({
   columnKey,
   onHeaderFocus,
   onHeaderOpen,
+  onContext,
 }: {
   label: string;
   columns: string[];
@@ -55,9 +58,19 @@ export function DatagridTable<Row>({
   columnKey?(index: number): string;
   onHeaderFocus?(column: number): void;
   onHeaderOpen?(column: number): void;
+  onContext?(target: DatagridContext, anchor: DatagridMenuAnchor): void;
 }) {
   const t = useT();
   const format = useFormat();
+  function openContext(target: DatagridContext, trigger: HTMLElement, x?: number, y?: number) {
+    if (!onContext) return;
+    // Focus synchronously: a deferred cell focus would steal focus back from the menu.
+    trigger.focus();
+    if (target.kind === 'column') onHeaderFocus?.(target.column);
+    else onSelect({ row: target.row, column: target.column });
+    const bounds = trigger.getBoundingClientRect();
+    onContext(target, { x: x ?? bounds.left, y: y ?? bounds.bottom, trigger });
+  }
   return (
     <div className="dg-grid-scroll" ref={gridRef} inert={inert || undefined}>
       <table
@@ -99,6 +112,17 @@ export function DatagridTable<Row>({
                       : 'descending'
                     : 'none'
                 }
+                onContextMenu={(event) => {
+                  const trigger = event.currentTarget.querySelector<HTMLElement>('.dg-sort');
+                  if (!onContext || !trigger) return;
+                  event.preventDefault();
+                  openContext(
+                    { kind: 'column', row: -1, column: index },
+                    trigger,
+                    event.clientX,
+                    event.clientY,
+                  );
+                }}
               >
                 <button
                   type="button"
@@ -109,6 +133,14 @@ export function DatagridTable<Row>({
                   onFocus={() => onHeaderFocus?.(index)}
                   onKeyDown={(event) => {
                     if (event.nativeEvent.isComposing) return;
+                    if (
+                      onContext &&
+                      (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))
+                    ) {
+                      event.preventDefault();
+                      openContext({ kind: 'column', row: -1, column: index }, event.currentTarget);
+                      return;
+                    }
                     if (event.key === 'ArrowDown' && rows.length) {
                       event.preventDefault();
                       gridRef.current
@@ -138,8 +170,50 @@ export function DatagridTable<Row>({
         <tbody>
           {rows.map((row, rowIndex) => (
             <tr key={rowKey(row, rowIndex)}>
-              <th scope="row" className="dg-row-number">
-                {format.number(rowNumber(row, rowIndex))}
+              <th
+                scope="row"
+                className="dg-row-number"
+                onContextMenu={(event) => {
+                  const trigger = event.currentTarget.querySelector<HTMLElement>('.dg-row-target');
+                  if (!onContext || !trigger) return;
+                  event.preventDefault();
+                  openContext(
+                    { kind: 'row', row: rowIndex, column: Math.max(0, selected?.column ?? 0) },
+                    trigger,
+                    event.clientX,
+                    event.clientY,
+                  );
+                }}
+              >
+                {onContext ? (
+                  <button
+                    type="button"
+                    className="dg-row-target"
+                    tabIndex={-1}
+                    data-row-target={rowIndex}
+                    onFocus={() =>
+                      onSelect({ row: rowIndex, column: Math.max(0, selected?.column ?? 0) })
+                    }
+                    onKeyDown={(event) => {
+                      if (event.nativeEvent.isComposing) return;
+                      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                        event.preventDefault();
+                        openContext(
+                          {
+                            kind: 'row',
+                            row: rowIndex,
+                            column: Math.max(0, selected?.column ?? 0),
+                          },
+                          event.currentTarget,
+                        );
+                      }
+                    }}
+                  >
+                    {format.number(rowNumber(row, rowIndex))}
+                  </button>
+                ) : (
+                  format.number(rowNumber(row, rowIndex))
+                )}
               </th>
               {columns.map((_, columnIndex) => {
                 const active =
@@ -168,6 +242,16 @@ export function DatagridTable<Row>({
                     onDoubleClick={() => {
                       if (!busy && !isEditing) onOpen({ row: rowIndex, column: columnIndex });
                     }}
+                    onContextMenu={(event) => {
+                      if (!onContext || isEditing) return;
+                      event.preventDefault();
+                      openContext(
+                        { kind: 'cell', row: rowIndex, column: columnIndex },
+                        event.currentTarget,
+                        event.clientX,
+                        event.clientY,
+                      );
+                    }}
                     onKeyDown={(event) => {
                       if (
                         isEditing ||
@@ -175,6 +259,17 @@ export function DatagridTable<Row>({
                         event.target !== event.currentTarget
                       )
                         return;
+                      if (
+                        onContext &&
+                        (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))
+                      ) {
+                        event.preventDefault();
+                        openContext(
+                          { kind: 'cell', row: rowIndex, column: columnIndex },
+                          event.currentTarget,
+                        );
+                        return;
+                      }
                       if (
                         (event.ctrlKey || event.metaKey) &&
                         event.key.toLowerCase() === 'c' &&

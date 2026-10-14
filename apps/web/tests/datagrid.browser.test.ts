@@ -184,6 +184,39 @@ describe('Datagrid real SQLite journey', () => {
     ).toBeFocused();
     expect(errors).toEqual([]);
   });
+  it('offers read-only context actions through pointer, keyboard and touch controls', async () => {
+    await open();
+    const name = page.getByRole('gridcell', { name: 'Player 001', exact: true });
+    await name.click({ button: 'right' });
+    const menu = page.getByRole('menu', { name: 'Table actions', exact: true });
+    await browserExpect(menu).toBeVisible();
+    await browserExpect(menu.getByRole('menuitem')).toHaveCount(2);
+    await browserExpect(
+      menu.getByRole('menuitem', { name: 'Inspect cell', exact: true }),
+    ).toBeFocused();
+    await browserExpect(menu.getByText(/Insert|Delete|Rename/)).toHaveCount(0);
+    await menu.getByRole('menuitem', { name: 'Inspect cell', exact: true }).click();
+    const detail = page.getByRole('region', { name: 'Cell details' });
+    await browserExpect(detail).toContainText('Player 001');
+    await page.getByRole('button', { name: 'Close details', exact: true }).click();
+    await browserExpect(name).toBeFocused();
+    await name.press('Shift+F10');
+    await browserExpect(menu).toBeVisible();
+    await page.keyboard.press('Escape');
+    await browserExpect(name).toBeFocused();
+    await page.getByRole('button', { name: 'Table actions', exact: true }).click();
+    await browserExpect(menu).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page
+      .getByRole('button', { name: 'Sort by name', exact: true })
+      .click({ button: 'right' });
+    await browserExpect(menu.getByRole('menuitem')).toHaveCount(1);
+    await browserExpect(
+      menu.getByRole('menuitem', { name: 'Copy column name', exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+    expect(errors).toEqual([]);
+  });
   it('resizes arbitrary column names with keyboard and pointer without inherited object values', async () => {
     await open();
     await page
