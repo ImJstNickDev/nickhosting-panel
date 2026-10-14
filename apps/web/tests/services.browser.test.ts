@@ -878,12 +878,15 @@ describe('M5 browser files, backups, console and automation', () => {
     const active = user
       .getByRole('row')
       .filter({ has: user.getByRole('button', { name: 'Rotate password', exact: true }) });
-    await active.getByRole('checkbox').first().check();
     await active.getByRole('button', { name: 'Rotate password', exact: true }).click();
+    await user
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Rotate password', exact: true })
+      .click();
     await browserExpect(user.getByLabel('Password', { exact: true })).not.toHaveValue('');
     await user.getByRole('button', { name: 'Close', exact: true }).click();
-    await active.getByLabel('Confirm', { exact: true }).check();
     await active.getByRole('button', { name: 'Revoke', exact: true }).click();
+    await user.getByRole('dialog').getByRole('button', { name: 'Revoke', exact: true }).click();
     await browserExpect(user.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
     await harness.screenshot(user, 'sftp-desktop-en');
   });

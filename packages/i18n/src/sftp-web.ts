@@ -1,0 +1,29 @@
+export const sftpWebMessages: Record<string, readonly [string, string]> = {
+  'sftp.connection': ['Connection', 'Connessione'],
+  'sftp.credentials': ['Credentials', 'Credenziali'],
+  'sftp.empty': ['No SFTP credentials yet.', 'Nessuna credenziale SFTP.'],
+  'sftp.copyHost': ['Copy hostname', 'Copia nome host'],
+  'sftp.copyPort': ['Copy port', 'Copia porta'],
+  'sftp.copyUsername': ['Copy username', 'Copia nome utente'],
+  'sftp.copyPassword': ['Copy password', 'Copia password'],
+  'sftp.copyFailed': [
+    'Could not copy. Select and copy the value manually.',
+    'Copia non riuscita. Seleziona e copia il valore manualmente.',
+  ],
+  'sftp.showPassword': ['Show password', 'Mostra password'],
+  'sftp.hidePassword': ['Hide password', 'Nascondi password'],
+  'sftp.newPassword': ['Your SFTP password', 'La tua password SFTP'],
+  'sftp.limitation': ['About revocation', 'Informazioni sulla revoca'],
+  'sftp.rotateConfirm': [
+    'The current password will no longer work for new sign-ins. Save the new password after rotation. Existing SSH connections may remain usable.',
+    'La password attuale non consentirà nuovi accessi. Salva la nuova password dopo la rotazione. Le connessioni SSH già aperte potrebbero restare utilizzabili.',
+  ],
+  'sftp.revokeConfirm': [
+    'New sign-ins with this credential will be blocked. Existing SSH connections may remain usable. Server files will not be deleted.',
+    'I nuovi accessi con questa credenziale saranno bloccati. Le connessioni SSH già aperte potrebbero restare utilizzabili. I file del server non verranno eliminati.',
+  ],
+  'sftp.permission': [
+    'You do not have permission to create SFTP credentials.',
+    'Non hai i permessi per creare credenziali SFTP.',
+  ],
+};

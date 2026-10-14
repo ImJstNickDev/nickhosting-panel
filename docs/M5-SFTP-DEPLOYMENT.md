@@ -322,3 +322,30 @@ Temporary credential revoked and every test SSH connection destroyed. Private
 ledger retained under `mountdata/test-assets/sftp-retained-*.json`; no credentials
 or directory contents appear in evidence. Independent review checks the probe's
 same-client transport semantics and the limits of timeout results.
+
+## SFTP interface polish — 2026-10-14
+
+Replaced the original notice-heavy card and inline checkbox forms with compact
+connection details, clipboard actions, credential rows and shared confirmation
+dialogs. Rotating/revoking requires explicit confirmation with Cancel initially
+focused; errors retain the confirmation. One-time passwords are masked initially,
+can be revealed/copied, and are cleared on dismissal, server change or navigation.
+No backend contract, service configuration or credential policy changed. The
+retained-session warning remains in a disclosure and in both confirmations.
+
+Validation uses the actual React component in Firefox with isolated API responses:
+rotation/revocation/cancel, API failure, EN/IT responsive layouts, permission and
+configuration restrictions. Four tests passed, including axe WCAG checks without
+reported violations. A targeted fifth test covers issuance, masking/reveal,
+clipboard unavailability and clearing the secret on reload. Frontend typecheck,
+focused Biome and catalog completeness checks accompany these tests. The older
+backend-connected services browser test was updated for the new confirmations,
+but the historical integration matrix was not rerun for this presentation change.
+
+Read-only Firefox smoke testing against the running development application
+confirmed the new UI and endpoint, with no page errors. No live credentials were
+issued/rotated/revoked during this UI task. No containers restarted, provider files
+modified or test servers created. Sanitized fixture screenshots:
+
+- [Desktop English](screenshots/m5/sftp-polish-desktop-en.png)
+- [Mobile Italian](screenshots/m5/sftp-polish-mobile-it.png)

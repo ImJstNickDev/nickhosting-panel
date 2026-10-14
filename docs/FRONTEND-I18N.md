@@ -42,6 +42,19 @@ defines permission, uncertainty, stream and configuration behavior. These
 implementation notes do not replace the acceptance standards below or claim the
 pending final consolidated review has passed.
 
+### SFTP interface
+
+SFTP uses the Files/Console visual conventions: a compact connection summary,
+copyable host and port, and credential rows with tooltip-labelled rotation/revoke
+actions. Destructive confirmation reuses the shared file-manager dialog with
+Cancel focused first. Passwords returned by issuance/rotation remain in component
+memory only, masked initially, with explicit reveal/copy and dismissal. The
+retained-SSH limitation remains available in a disclosure and relevant action
+confirmations; it is not advertised as a successful session-revocation guarantee.
+Missing configuration and permission restrictions preserve the existing backend
+capabilities. Loading, API failure and clipboard failure are visible; the UI does
+not report success before the API resolves. EN/IT text lives in `sftp-web.ts`.
+
 ### Application and integration ownership
 
 `apps/web` uses React/Vite, React Router, TanStack Query and Lingui; versions are

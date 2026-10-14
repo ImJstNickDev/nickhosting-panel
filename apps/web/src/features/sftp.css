@@ -1,0 +1,225 @@
+.sftp-page {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+.sftp-heading,
+.sftp-issued > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.sftp-page h2,
+.sftp-page h3 {
+  margin: 0;
+}
+.sftp-page h2 {
+  font-size: 1.3rem;
+}
+.sftp-page h3 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+.sftp-connection {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+.sftp-connection-title,
+.sftp-issued h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sftp-connection-title > span {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+.sftp-endpoint {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 16px 32px;
+  margin: 16px 0 0;
+}
+.sftp-endpoint dt {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-bottom: 4px;
+}
+.sftp-endpoint dd {
+  margin: 0;
+  min-width: 0;
+}
+.sftp-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.sftp-value > span {
+  font-family: ui-monospace, monospace;
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.sftp-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 6px;
+  min-height: 32px;
+  width: 32px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+}
+.sftp-icon:hover:not(:disabled) {
+  background: #e9edf0;
+  color: var(--blue);
+}
+.sftp-icon.sftp-danger {
+  color: #b22b38;
+}
+.sftp-icon.sftp-danger:hover:not(:disabled) {
+  background: #fbecef;
+  color: #99202e;
+}
+.sftp-issued {
+  padding: 18px 20px;
+  border: 1px solid #a5b9d3;
+  border-radius: 10px;
+  background: #f4f8fd;
+}
+.sftp-issued p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.sftp-value input {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  font-family: ui-monospace, monospace;
+}
+.sftp-credentials {
+  min-width: 0;
+}
+.sftp-credentials > h3 {
+  margin-bottom: 12px;
+}
+.sftp-credentials table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.sftp-credentials th {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--muted);
+  text-align: left;
+}
+.sftp-credentials th,
+.sftp-credentials td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.sftp-credentials th:first-child,
+.sftp-credentials td:first-child {
+  padding-left: 0;
+}
+.sftp-credentials td {
+  font-size: 0.9rem;
+}
+.sftp-row-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.sftp-empty {
+  padding: 30px 12px;
+  text-align: center;
+  color: var(--muted);
+  border-block: 1px solid var(--line);
+}
+.sftp-muted,
+.sftp-limitation {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+.sftp-limitation {
+  border: 0;
+  padding: 0;
+}
+.sftp-limitation summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.sftp-limitation p {
+  max-width: 75ch;
+  margin: 10px 0 0;
+}
+.sftp-copy-error {
+  color: #a12132;
+  font-size: 0.82rem;
+}
+.sftp-confirm-user {
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+.sftp-skeleton {
+  min-height: 120px;
+  border-radius: 8px;
+  background: #e8ecee;
+}
+@media (max-width: 650px) {
+  .sftp-heading {
+    flex-wrap: wrap;
+  }
+  .sftp-endpoint {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .sftp-connection,
+  .sftp-issued {
+    padding: 16px;
+  }
+  .sftp-credentials thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .sftp-credentials tbody,
+  .sftp-credentials table {
+    display: block;
+  }
+  .sftp-credentials tr {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+    gap: 8px;
+  }
+  .sftp-credentials td {
+    border: 0;
+    padding: 0;
+  }
+  .sftp-credentials td:first-child {
+    grid-column: 1 / -1;
+  }
+  .sftp-credentials td:nth-child(3) {
+    color: var(--muted);
+  }
+  .sftp-credentials .sftp-row-actions {
+    grid-column: 2;
+    grid-row: 2 / 4;
+    align-self: center;
+  }
+}
