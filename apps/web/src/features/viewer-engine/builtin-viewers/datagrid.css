@@ -157,10 +157,29 @@
   width: 32px;
   padding: 0;
 }
-.dg-searchbar > input {
+.dg-searchbar > .dg-search-field {
+  position: relative;
   flex: 1;
-  min-width: 80px;
+  min-width: 170px;
   max-width: 420px;
+}
+.dg-search-field > input {
+  width: 100%;
+  min-width: 0;
+}
+.dg-search-field[data-empty="true"] > input {
+  padding-inline-end: 5.4rem;
+}
+.dg-search-field > kbd {
+  position: absolute;
+  right: 0.65rem;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  white-space: nowrap;
 }
 .dg-column-filter {
   position: relative;

@@ -4,6 +4,7 @@ import { Tooltip } from '../../../components/tooltip.js';
 import { Dialog } from '../../../components/ui.js';
 import { FilemanToolbarIcon } from '../../fileman/presentation.js';
 import type { DocumentViewProps } from '../core/document-view.js';
+import { useViewerFind } from '../core/use-find.js';
 import { type DatagridSelection, DatagridTable } from './datagrid-table.js';
 import { DelimitedClient } from './delimited-client.js';
 import {
@@ -13,7 +14,7 @@ import {
   type DelimitedPage,
   type DelimitedView as DelimitedViewState,
 } from './delimited-protocol.js';
-import { DatagridChoice } from './sqlite-controls.js';
+import { DatagridChoice, DatagridSearch } from './sqlite-controls.js';
 import './datagrid.css';
 import './delimited.css';
 
@@ -73,6 +74,10 @@ export default function DelimitedView(props: DocumentViewProps) {
   const grid = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const editorInput = useRef<HTMLTextAreaElement>(null);
+  useViewerFind(props.active, () => {
+    searchInput.current?.focus();
+    searchInput.current?.select();
+  });
   const client = useRef<DelimitedClient | undefined>(undefined);
   const current = useRef(props);
   current.current = props;
@@ -377,37 +382,10 @@ export default function DelimitedView(props: DocumentViewProps) {
     </Tooltip>
   );
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: Wrapper scopes document shortcuts to its interactive descendants.
-    <div
-      className="dg-workspace dg-delimited"
-      onKeyDown={(event) => {
-        if (
-          !props.active ||
-          event.nativeEvent.isComposing ||
-          event.defaultPrevented ||
-          event.altKey ||
-          !(event.ctrlKey || event.metaKey) ||
-          (event.target as HTMLElement).closest('dialog')
-        )
-          return;
-        if (event.key.toLowerCase() === 'f') {
-          event.preventDefault();
-          searchInput.current?.focus();
-          searchInput.current?.select();
-        }
-      }}
-    >
+    <div className="dg-workspace dg-delimited">
       <div className="dg-main">
         <div className="dg-searchbar">
-          <input
-            ref={searchInput}
-            type="search"
-            aria-label={t('datagrid.searchData')}
-            placeholder={t('datagrid.searchData')}
-            maxLength={200}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
+          <DatagridSearch inputRef={searchInput} value={search} onChange={setSearch} />
           <DatagridChoice
             label={t('datagrid.filterColumn')}
             choices={[{ value: '', label: t('datagrid.allColumns') }, ...columnChoices]}
@@ -416,32 +394,50 @@ export default function DelimitedView(props: DocumentViewProps) {
             onChange={(value) => changeView({ column: value === '' ? undefined : Number(value) })}
           />
           {props.readOnly && <span className="dg-readonly">{t('viewer.readOnly')}</span>}
-        </div>
-        <div className="dg-toolbar dg-delimited-tools">
-          <div className="dg-delimited-settings">
-            <span>{t('delimited.delimiter')}</span>
-            <DatagridChoice
-              label={t('delimited.delimiter')}
-              choices={delimiterChoices}
-              value={options.delimiter}
-              disabled={busy}
-              onChange={(delimiter) => {
-                void flush().then((ok) => {
-                  if (ok) {
-                    setView({ offset: 0, limit: 100 });
-                    setSearch('');
-                    setOptions((previous) => ({
-                      ...previous,
-                      delimiter: delimiter as DelimitedOptions['delimiter'],
-                    }));
-                  }
-                });
-              }}
-            />
-            <Tooltip content={t('delimited.headerHelp')}>
+          <div className="dg-delimited-tools">
+            {!props.readOnly && (
+              <div className="dg-delimited-actions">
+                {icon('delimited.addRow', 'row-add', busy || !page, () => {
+                  void flush().then((ok) => {
+                    if (ok) void mutate({ type: 'insert-row' });
+                  });
+                })}
+                {icon('delimited.removeRow', 'row-remove', busy || !selectedRow, () => {
+                  if (selectedRow) setAction({ type: 'remove-row', rowId: selectedRow.id });
+                })}
+                {icon(
+                  'delimited.addColumn',
+                  'column-add',
+                  busy || !page || columns.length >= 128,
+                  () => {
+                    void flush().then((ok) => {
+                      if (ok) void mutate({ type: 'insert-column', column: columns.length });
+                    });
+                  },
+                )}
+                {icon(
+                  'delimited.removeColumn',
+                  'column-remove',
+                  busy || !selected || columns.length < 2,
+                  () => {
+                    if (selected) setAction({ type: 'remove-column', column: selected.column });
+                  },
+                )}
+                {icon(
+                  'delimited.renameHeader',
+                  'rename',
+                  busy || !selected || !page?.header,
+                  () => {
+                    void renameHeader();
+                  },
+                )}
+              </div>
+            )}
+            <Tooltip content={t('delimited.header')}>
               <button
                 type="button"
-                className="secondary dg-header-toggle"
+                className="secondary dg-icon dg-header-toggle"
+                aria-label={t('delimited.header')}
                 aria-pressed={page?.header ?? false}
                 disabled={busy || !page}
                 onClick={() => {
@@ -454,43 +450,31 @@ export default function DelimitedView(props: DocumentViewProps) {
                   });
                 }}
               >
-                {t('delimited.header')}
+                <GridIcon kind="header" />
               </button>
             </Tooltip>
-          </div>
-          {!props.readOnly && (
-            <div className="dg-delimited-actions">
-              {icon('delimited.addRow', 'row-add', busy || !page, () => {
-                void flush().then((ok) => {
-                  if (ok) void mutate({ type: 'insert-row' });
-                });
-              })}
-              {icon('delimited.removeRow', 'row-remove', busy || !selectedRow, () => {
-                if (selectedRow) setAction({ type: 'remove-row', rowId: selectedRow.id });
-              })}
-              {icon(
-                'delimited.addColumn',
-                'column-add',
-                busy || !page || columns.length >= 128,
-                () => {
+            <div className="dg-delimited-settings">
+              <span>{t('delimited.delimiter')}</span>
+              <DatagridChoice
+                label={t('delimited.delimiter')}
+                choices={delimiterChoices}
+                value={options.delimiter}
+                disabled={busy}
+                onChange={(delimiter) => {
                   void flush().then((ok) => {
-                    if (ok) void mutate({ type: 'insert-column', column: columns.length });
+                    if (ok) {
+                      setView({ offset: 0, limit: 100 });
+                      setSearch('');
+                      setOptions((previous) => ({
+                        ...previous,
+                        delimiter: delimiter as DelimitedOptions['delimiter'],
+                      }));
+                    }
                   });
-                },
-              )}
-              {icon(
-                'delimited.removeColumn',
-                'column-remove',
-                busy || !selected || columns.length < 2,
-                () => {
-                  if (selected) setAction({ type: 'remove-column', column: selected.column });
-                },
-              )}
-              {icon('delimited.renameHeader', 'rename', busy || !selected || !page?.header, () => {
-                void renameHeader();
-              })}
+                }}
+              />
             </div>
-          )}
+          </div>
         </div>
         {failure && (
           <div className="dg-delimited-error" role="alert">
@@ -741,11 +725,17 @@ export default function DelimitedView(props: DocumentViewProps) {
 function GridIcon({
   kind,
 }: {
-  kind: 'row-add' | 'row-remove' | 'column-add' | 'column-remove' | 'rename';
+  kind: 'row-add' | 'row-remove' | 'column-add' | 'column-remove' | 'rename' | 'header';
 }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-      {kind === 'rename' ? (
+      {kind === 'header' ? (
+        <>
+          <rect x="3" y="4" width="18" height="16" rx="1" />
+          <path d="M3 10h18M9 10v10M15 10v10M3 15h18" />
+          <path d="M4 5h16v4H4Z" fill="currentColor" stroke="none" />
+        </>
+      ) : kind === 'rename' ? (
         <>
           <path d="m5 15 10-10 4 4L9 19H5Z" />
           <path d="m13 7 4 4" />

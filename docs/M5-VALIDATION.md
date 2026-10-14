@@ -9211,3 +9211,29 @@ a source revert plus retag/recreation of Vite restores the previous frontend.
 The shipped worker license notices now include PapaParse's full MIT notice.
 Final staged governance: **passed**, 883 indexed text files, 313 review PNGs,
 723 relative links, four TOML files and 44 ignore cases (secret scan is heuristic).
+
+### 2026-10-14 — Compact delimited Datagrid toolbar
+
+Search/filter, editing icons and delimiter controls now share one desktop row;
+icons sit immediately left of the right-aligned delimiter. Header interpretation
+uses a labelled icon toggle with a custom tooltip and `aria-pressed`. Narrow mobile
+layouts wrap the grouped controls without losing actions or pagination. No parsing,
+save or provider contract changed. Existing desktop/mobile screenshots above updated.
+
+`pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/delimited.browser.test.ts -t 'shares draft|Italian mobile'`
+(via `scripts/dev.sh`): **2 passed**, six unrelated cases intentionally skipped.
+Checks include same-row desktop placement, header toggle without dirtying the file,
+shared draft/save behavior, mobile overflow/footer and Axe. Web typecheck and focused
+Biome passed. Source-only HMR update; no rebuild, restart or live provider interaction.
+
+Follow-up: Datagrid owns Ctrl/Cmd+F while active even when focus is on Fileman's
+surrounding toolbar. Hidden delimited views do not intercept Scribe's search;
+SQLite's Schema view retains browser Find. A shared search field shows `CTRL + F`
+(or `⌘ + F` for Apple keyboards) only while empty, alongside the localized placeholder.
+Firefox focused delimited desktop/mobile suite: **2 passed**, six skipped; covers
+external focus, Ctrl/Meta shortcuts, Scribe handoff, hint hiding/restoration, Axe and
+320px Italian reflow with the longest separator label. SQLite keyboard regression:
+**1 passed**, six skipped. Web typecheck and focused Biome passed. A test selector
+initially omitted the separator's punctuation; corrected and the mobile check passed.
+Independent review closed the narrow-screen clipping and Schema-shortcut findings;
+no remaining must-fix findings. Changes use existing HMR, with no live mutations.

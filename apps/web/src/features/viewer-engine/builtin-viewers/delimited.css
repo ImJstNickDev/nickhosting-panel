@@ -6,9 +6,18 @@
 .dg-delimited > .dg-main {
   flex: 1;
 }
-.dg-delimited-tools {
-  justify-content: space-between;
+.dg-delimited > .dg-main > .dg-searchbar {
   flex-wrap: wrap;
+}
+.dg-delimited-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.dg-delimited-tools button {
+  flex-shrink: 0;
 }
 .dg-delimited-settings,
 .dg-delimited-actions {
@@ -64,10 +73,13 @@
 }
 @media (max-width: 560px) {
   .dg-delimited-tools {
-    gap: 0.5rem;
-  }
-  .dg-delimited-settings {
+    max-width: 100%;
     flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .dg-delimited-tools,
+  .dg-delimited-actions {
+    gap: 0.25rem;
   }
   .dg-delimited-settings > span {
     display: none;

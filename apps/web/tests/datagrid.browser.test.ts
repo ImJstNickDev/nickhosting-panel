@@ -156,6 +156,11 @@ describe('Datagrid real SQLite journey', () => {
   });
   it('uses keyboard cells, reads long text on demand and restores focus when closing details', async () => {
     await open();
+    await page.getByRole('button', { name: 'Back to files', exact: true }).focus();
+    await page.keyboard.press('Control+f');
+    await browserExpect(
+      page.getByRole('searchbox', { name: 'Search data', exact: true }),
+    ).toBeFocused();
     const notes = page.getByRole('gridcell').filter({ hasText: 'à😀' }).first();
     await notes.focus();
     await page.keyboard.press('Enter');

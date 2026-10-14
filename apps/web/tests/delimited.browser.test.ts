@@ -59,6 +59,32 @@ describe('Datagrid shared delimited document', () => {
     await open('shared.csv', source);
     await browserExpect(cell('Alice')).toBeVisible();
     await clean();
+    const header = grid().getByRole('button', { name: 'First row as header', exact: true });
+    await browserExpect(header).toHaveAttribute('aria-pressed', 'true');
+    await header.click();
+    await browserExpect(header).toHaveAttribute('aria-pressed', 'false');
+    await header.click();
+    await browserExpect(header).toHaveAttribute('aria-pressed', 'true');
+    await clean();
+    const searchBounds = await grid().getByRole('searchbox').boundingBox();
+    const delimiterBounds = await grid()
+      .getByRole('button', { name: 'Delimiter', exact: true })
+      .boundingBox();
+    expect(
+      searchBounds && delimiterBounds && Math.abs(searchBounds.y - delimiterBounds.y) < 4,
+    ).toBe(true);
+    await page.getByRole('button', { name: 'Back to files', exact: true }).focus();
+    await page.keyboard.press('Control+f');
+    await browserExpect(grid().getByRole('searchbox')).toBeFocused();
+    await page.getByRole('button', { name: 'Back to files', exact: true }).focus();
+    await page.keyboard.press('Meta+f');
+    await browserExpect(grid().getByRole('searchbox')).toBeFocused();
+    const hint = grid().locator('.dg-search-field kbd');
+    await browserExpect(hint).toHaveText('CTRL + F');
+    await grid().getByRole('searchbox').fill('x');
+    await browserExpect(hint).toHaveCount(0);
+    await grid().getByRole('searchbox').fill('');
+    await browserExpect(hint).toHaveText('CTRL + F');
     const beforeReads = reads.length,
       beforeWrites = writes.length;
     await cell('001').dblclick();
@@ -66,6 +92,12 @@ describe('Datagrid shared delimited document', () => {
     // Switch with the cell still editing: host must flush before exposing Scribe.
     await page.getByRole('button', { name: 'Scribe', exact: true }).click();
     await browserExpect(page.locator('.cm-content:visible')).toContainText('009');
+    await page.keyboard.press('Control+f');
+    await browserExpect(page.locator('.fm-search-panel')).toBeVisible();
+    await page
+      .locator('.fm-search-panel')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click();
     await page.getByRole('button', { name: 'Datagrid', exact: true }).click();
     await browserExpect(cell('009')).toBeVisible();
     expect(reads.length).toBe(beforeReads);
@@ -247,6 +279,18 @@ describe('Datagrid shared delimited document', () => {
           .analyze()
       ).violations,
     ).toEqual([]);
+    await page.setViewportSize({ width: 320, height: 844 });
+    const delimiter = grid().getByRole('button', { name: 'Separatore', exact: true });
+    await delimiter.click();
+    await page.getByRole('menuitemradio', { name: 'Punto e virgola (;)', exact: true }).click();
+    const bounds = await grid().boundingBox();
+    const controls = await delimiter.boundingBox();
+    expect(
+      bounds &&
+        controls &&
+        controls.x >= bounds.x &&
+        controls.x + controls.width <= bounds.x + bounds.width,
+    ).toBe(true);
     await journeyRequest(harness, page, '/api/auth/update-user', { locale: 'en' });
   });
 });

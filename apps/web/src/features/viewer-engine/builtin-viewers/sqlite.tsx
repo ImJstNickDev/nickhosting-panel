@@ -7,8 +7,9 @@ import { ErrorNotice } from '../../../components/ui.js';
 import { FilemanToolbarIcon } from '../../fileman/presentation.js';
 import { serverPath } from '../../service-contracts.js';
 import type { ViewerProps } from '../core/types.js';
+import { useViewerFind } from '../core/use-find.js';
 import { DatagridTable } from './datagrid-table.js';
-import { DatagridColumnFilter } from './sqlite-controls.js';
+import { DatagridColumnFilter, DatagridSearch } from './sqlite-controls.js';
 import { DatagridDetail, datagridCellText } from './sqlite-detail.js';
 import { DatagridPageCache } from './sqlite-model.js';
 import './datagrid.css';
@@ -56,6 +57,11 @@ function Datagrid({ serverId, source }: ViewerProps) {
   const [widths, setWidths] = useState<Map<string, number>>(() => new Map());
   const cache = useRef(new DatagridPageCache());
   const grid = useRef<HTMLDivElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  useViewerFind(view === 'data', () => {
+    searchInput.current?.focus();
+    searchInput.current?.select();
+  });
   const endpoint = `${serverPath(serverId)}/files/viewer/sqlite`;
   const params = new URLSearchParams({ path: source.path, offset: String(controls.offset) });
   if (source.entry) params.set('entry', source.entry);
@@ -293,14 +299,11 @@ function Datagrid({ serverId, source }: ViewerProps) {
         </div>
         {view === 'data' && (
           <div className="dg-searchbar">
-            <input
-              type="search"
-              aria-label={t('datagrid.searchData')}
-              placeholder={t('datagrid.searchData')}
-              maxLength={200}
+            <DatagridSearch
+              inputRef={searchInput}
               value={search}
-              onChange={(event) => {
-                setSearch(event.target.value);
+              onChange={(value) => {
+                setSearch(value);
                 setDetail(undefined);
               }}
             />

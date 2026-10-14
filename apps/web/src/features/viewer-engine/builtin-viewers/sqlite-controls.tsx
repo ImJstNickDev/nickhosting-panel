@@ -1,5 +1,33 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { type Ref, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '../../../app/i18n.js';
+
+export function DatagridSearch({
+  value,
+  onChange,
+  inputRef,
+}: {
+  value: string;
+  onChange(value: string): void;
+  inputRef: Ref<HTMLInputElement>;
+}) {
+  const t = useT();
+  const mac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+  return (
+    <div className="dg-search-field" data-empty={value.length === 0}>
+      <input
+        ref={inputRef}
+        type="search"
+        aria-label={t('datagrid.searchData')}
+        placeholder={t('datagrid.searchData')}
+        aria-keyshortcuts={mac ? 'Meta+F' : 'Control+F'}
+        maxLength={200}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {!value && <kbd>{mac ? '⌘ + F' : 'CTRL + F'}</kbd>}
+    </div>
+  );
+}
 
 export function DatagridColumnFilter({
   columns,
