@@ -102,11 +102,14 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
         writes.push(`${method} ${path}`);
         if (fail) return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
         if (method === 'DELETE') {
-          credentials = credentials.map((c) => ({ ...c, state: 'revoked' }));
-          return route.fulfill({ json: credentials[0] });
+          const id = path.split('/').at(-1);
+          credentials = credentials.map((c) => (c.id === id ? { ...c, state: 'revoked' } : c));
+          return route.fulfill({ json: credentials.find((c) => c.id === id) });
         }
-        if (path.endsWith('/rotate'))
-          return route.fulfill({ json: { ...credentials[0], password } });
+        if (path.endsWith('/rotate')) {
+          const id = path.split('/').at(-2);
+          return route.fulfill({ json: { ...credentials.find((c) => c.id === id), password } });
+        }
         const input = route.request().postDataJSON();
         const created = fixture(`created-${credentials.length}`, input.kind);
         if (input.label) created.label = input.label;
@@ -128,15 +131,14 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
   async function open() {
     await page.goto(`${origin}sftp-fixture-page`);
     await check(page.getByRole('heading', { name: 'SFTP', exact: true })).toBeVisible();
-    await page.locator('.sftp-additional > summary').click();
   }
 
   it('copies connection data and confirms rotation/revocation without per-row forms', async () => {
     await open();
-    await check(page.getByText('sftp.example.test', { exact: true })).toBeVisible();
+    await check(page.getByText('sftp://sftp.example.test', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Copy hostname', exact: true }).click();
     expect(await page.evaluate(() => (window as unknown as { copied: string }).copied)).toBe(
-      'sftp.example.test',
+      'sftp://sftp.example.test',
     );
     await page.getByRole('button', { name: 'Rotate password', exact: true }).click();
     const dialog = page.getByRole('dialog');
@@ -155,6 +157,75 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     expect(writes).toHaveLength(2);
   });
 
+  it('hides only revoked accesses and toggles them with the keyboard without changing the limit', async () => {
+    credentials = [
+      fixture('primary', 'primary'),
+      fixture('one'),
+      { ...fixture('pending'), label: 'Pending access', state: 'pending' },
+      { ...fixture('expired'), label: 'Expired access', state: 'expired' },
+      { ...fixture('revoked'), label: 'Old backup', state: 'revoked' },
+    ];
+    await open();
+    const additional = page.locator('.sftp-additional');
+    const toggle = page.getByRole('switch', { name: 'Show revoked', exact: true });
+    await check(additional.getByRole('table')).toBeVisible();
+    await check(additional.getByRole('columnheader')).toHaveText([
+      'Name',
+      'Username',
+      'Status',
+      'Expires',
+      'Actions',
+    ]);
+    await check(toggle).toHaveAttribute('aria-checked', 'false');
+    await check(additional.getByText('Old backup', { exact: true })).toHaveCount(0);
+    await check(additional.getByText('Pending access', { exact: true })).toBeVisible();
+    await check(additional.getByText('Expired access', { exact: true })).toBeVisible();
+    await check(additional.getByRole('row')).toHaveCount(4);
+    await check(additional).toContainText('3 / 3');
+    await check(page.getByRole('button', { name: 'Add access', exact: true })).toBeDisabled();
+    await toggle.focus();
+    await page.keyboard.press('Space');
+    await check(toggle).toHaveAttribute('aria-checked', 'true');
+    await check(additional.getByText('Old backup', { exact: true })).toBeVisible();
+    await check(additional.getByRole('row')).toHaveCount(5);
+    await check(additional).toContainText('3 / 3');
+    await check(page.getByRole('button', { name: 'Add access', exact: true })).toBeDisabled();
+    await page.keyboard.press('Enter');
+    await check(toggle).toHaveAttribute('aria-checked', 'false');
+    await check(additional.getByText('Old backup', { exact: true })).toHaveCount(0);
+    expect(writes).toEqual([]);
+  });
+
+  it('immediately hides a revoked access and releases its place while preserving other accesses', async () => {
+    credentials = [
+      fixture('primary', 'primary'),
+      fixture('one'),
+      fixture('two'),
+      fixture('three'),
+      { ...fixture('revoked'), label: 'Old backup', state: 'revoked' },
+    ];
+    await open();
+    const additional = page.locator('.sftp-additional');
+    const row = additional.getByRole('row').filter({ hasText: 'nh-fixture-one' });
+    await check(additional).toContainText('3 / 3');
+    await check(page.getByRole('button', { name: 'Add access', exact: true })).toBeDisabled();
+    await row.getByRole('button', { name: 'Revoke', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Revoke', exact: true }).click();
+    await check(row).toHaveCount(0);
+    await check(additional).toContainText('2 / 3');
+    await check(additional.getByRole('row')).toHaveCount(3);
+    await check(page.getByRole('button', { name: 'Add access', exact: true })).toBeEnabled();
+    await check(page.getByText('fixture-a3f92c18', { exact: true })).toBeVisible();
+    await page.getByRole('switch', { name: 'Show revoked', exact: true }).click();
+    await check(row).toBeVisible();
+    await check(row.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
+    await check(row.getByRole('button', { name: 'Rotate password', exact: true })).toHaveCount(0);
+    await check(additional).toContainText('2 / 3');
+    await check(additional.getByRole('row')).toHaveCount(5);
+    await check(page.getByRole('button', { name: 'Add access', exact: true })).toBeEnabled();
+    expect(writes).toEqual(['DELETE /v1/servers/sftp-fixture/sftp/one']);
+  });
+
   it('keeps confirmation open on failure and does not claim success', async () => {
     fail = true;
     await open();
@@ -165,7 +236,11 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
   });
 
   it('renders EN/IT desktop/mobile without overflow or automatic accessibility violations', async () => {
-    credentials = [fixture('primary', 'primary'), fixture()];
+    credentials = [
+      fixture('primary', 'primary'),
+      fixture(),
+      { ...fixture('revoked'), label: 'Old backup', state: 'revoked' },
+    ];
     await open();
     for (const [locale, width, height] of [
       ['en', 1280, 800],
@@ -180,7 +255,13 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
           exact: true,
         }),
       ).toBeVisible();
-      await check(page.getByText('sftp.example.test', { exact: true })).toBeVisible();
+      await check(page.getByText('sftp://sftp.example.test', { exact: true })).toBeVisible();
+      await check(page.getByRole('table')).toBeVisible();
+      await check(page.getByRole('cell', { name: 'Backup script', exact: true })).toBeVisible();
+      await check(page.getByText('Old backup', { exact: true })).toHaveCount(0);
+      await check(
+        page.getByRole('switch', { name: locale === 'it' ? 'Mostra revocati' : 'Show revoked' }),
+      ).toHaveAttribute('aria-checked', 'false');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
         true,
       );
@@ -193,6 +274,14 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
       ).toEqual([]);
       await page.screenshot({
         path: `${screenshots}/sftp-polish-${locale}-${width}.png`,
+        fullPage: true,
+      });
+      await page
+        .getByRole('switch', { name: locale === 'it' ? 'Mostra revocati' : 'Show revoked' })
+        .click();
+      await check(page.getByRole('cell', { name: 'Old backup', exact: true })).toBeVisible();
+      await page.screenshot({
+        path: `${screenshots}/sftp-polish-revoked-${locale}-${width}.png`,
         fullPage: true,
       });
     }

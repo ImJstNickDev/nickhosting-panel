@@ -9734,3 +9734,29 @@ Final indexed governance passed: 940 text files, 346 review PNGs, 772 relative
 links, four TOML files and 44 ignore cases; secret scanning remains heuristic.
 `git diff --cached --check` passed. Dev API, worker, Vite and public SFTPGo service
 were all running/healthy at handoff.
+
+### 2026-10-14 — Compact SFTP table and revoked filter
+
+Refined the SFTP tab around Fileman/Console spacing and quiet icon actions. Host
+presentation and clipboard values include `sftp://` (IPv6 hosts are bracketed);
+port stays separately copyable. Additional accesses are an always-visible table
+with separate name, username, status, expiry and action columns. Revoked rows are
+hidden by default and shown with an accessible switch; filtering is entirely local
+and does not change quota counts. Pending and expired entries remain visible.
+Primary credential, password delivery and confirmation contracts are unchanged.
+
+Focused verification:
+
+- `scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/sftp-ui.browser.test.ts`: **8 passed**, including copied URI, keyboard filter, immediate removal after revocation, capacity accounting, errors, secrets, EN/IT desktop/mobile and axe checks.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm i18n:compile` and `scripts/dev.sh pnpm i18n:check`: passed, 1684 EN/IT/pseudolocale keys.
+- Scoped Biome and `git diff --check`: passed (services browser test retains three pre-existing non-null assertion warnings).
+- Read-only Firefox smoke against running dev: passed, no page errors. Activated through existing Vite HMR; no container restart, credential mutation, game-server action or infrastructure change. No backend suites repeated for this presentation-only change.
+
+Independent technical/accessibility/visual review: no remaining must-fix findings.
+Reviewed fixture screenshots: [desktop](screenshots/m5/sftp-table-desktop-en.png),
+[mobile](screenshots/m5/sftp-table-mobile-it.png),
+[revoked shown desktop](screenshots/m5/sftp-table-revoked-desktop-en.png),
+[revoked shown mobile](screenshots/m5/sftp-table-revoked-mobile-it.png).
+Issue #18 remains unchanged. Rollback: revert the scoped presentation/catalog/test
+change; no database or provider rollback required. PR #21 stays open/unmerged.

@@ -1,4 +1,5 @@
 export const sftpWebMessages: Record<string, readonly [string, string]> = {
+  'sftp.showRevoked': ['Show revoked', 'Mostra revocati'],
   'sftp.activate': ['Generate SFTP password', 'Genera password SFTP'],
   'sftp.passwordGenerated': ['Generated · 16 characters', 'Generata · 16 caratteri'],
   'sftp.additional': ['Additional accesses', 'Accessi aggiuntivi'],

@@ -153,7 +153,8 @@ function SftpContent({ serverId }: { serverId: string }) {
     rotationId: string;
   }>();
   const [adding, setAdding] = useState(false),
-    [label, setLabel] = useState('');
+    [label, setLabel] = useState(''),
+    [showRevoked, setShowRevoked] = useState(false);
   const createIds = useRef({ primary: idempotencyKey(), auxiliary: idempotencyKey() }),
     pending = useRef(false),
     createButton = useRef<HTMLButtonElement>(null);
@@ -161,6 +162,7 @@ function SftpContent({ serverId }: { serverId: string }) {
   const canIssue = transfers.data?.sftp.configured && transfers.data.sftp.canIssue;
   const primary = credentials.data?.find((c) => c.kind === 'primary' && c.state !== 'revoked');
   const auxiliary = credentials.data?.filter((c) => c.kind !== 'primary') ?? [];
+  const visibleAuxiliary = auxiliary.filter((c) => showRevoked || c.state !== 'revoked');
   const limit = transfers.data?.sftp.auxiliaryLimit ?? 0;
   const activeCount = auxiliary.filter((c) => c.state !== 'revoked').length;
   const dismiss = () => {
@@ -209,16 +211,17 @@ function SftpContent({ serverId }: { serverId: string }) {
         !transfers.error && (
           <div className="sftp-connection">
             <div className="sftp-connection-title">
-              <Icon name="connection" />
               <h3>{t('sftp.connection')}</h3>
-              <span>SFTP</span>
             </div>
             {endpoint ? (
               <dl className="sftp-endpoint">
                 <div>
                   <dt>{t('service.hostname')}</dt>
                   <dd>
-                    <CopyValue value={endpoint.hostname} label={t('sftp.copyHost')} />
+                    <CopyValue
+                      value={`sftp://${endpoint.hostname.includes(':') ? `[${endpoint.hostname}]` : endpoint.hostname}`}
+                      label={t('sftp.copyHost')}
+                    />
                   </dd>
                 </div>
                 <div>
@@ -253,7 +256,14 @@ function SftpContent({ serverId }: { serverId: string }) {
                     <dt>{t('web.password')}</dt>
                     <dd className="sftp-primary-password">
                       <span>
-                        {t(primary.state === 'active' ? 'sftp.passwordGenerated' : 'web.pending')}
+                        {primary.state === 'active' ? (
+                          <>
+                            <span aria-hidden="true">••••••••••••••••</span>
+                            <span className="visually-hidden">{t('sftp.passwordGenerated')}</span>
+                          </>
+                        ) : (
+                          t('web.pending')
+                        )}
                       </span>
                       {canIssue && primary.state === 'active' && (
                         <Tooltip content={t('service.rotate')}>
@@ -337,59 +347,72 @@ function SftpContent({ serverId }: { serverId: string }) {
         />
       ) : (
         !credentials.error && (
-          <details className="sftp-additional">
-            <summary>
-              {t('sftp.additional')}{' '}
-              <span>
-                {activeCount} / {limit}
-              </span>
-            </summary>
-            <div className="sftp-credentials">
-              <header className="sftp-heading">
+          <section className="sftp-additional" aria-labelledby="sftp-additional-title">
+            <header className="sftp-table-toolbar">
+              <div className="sftp-table-title">
+                <h3 id="sftp-additional-title">{t('sftp.additional')}</h3>
+                <span className="sftp-count">
+                  {activeCount} / {limit}
+                </span>
+              </div>
+              <div className="sftp-tools">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={showRevoked}
+                  className="sftp-revoked-toggle"
+                  onClick={() => setShowRevoked(!showRevoked)}
+                >
+                  <span className="sftp-switch-track" aria-hidden="true" />
+                  {t('sftp.showRevoked')}
+                </button>
                 {canIssue && (
-                  <button
-                    type="button"
-                    className="secondary"
+                  <IconButton
+                    label={t('sftp.addAccess')}
+                    icon="plus"
                     disabled={busy || activeCount >= limit}
                     onClick={() => {
                       setLabel('');
                       setAdding(true);
                     }}
-                  >
-                    {t('sftp.addAccess')}
-                  </button>
+                  />
                 )}
-              </header>
-              {auxiliary.length === 0 ? (
-                <p className="sftp-empty">{t('sftp.noAdditional')}</p>
-              ) : (
-                <table>
-                  <thead>
+              </div>
+            </header>
+            <div className="sftp-credentials">
+              <table aria-labelledby="sftp-additional-title">
+                <thead>
+                  <tr>
+                    <th scope="col">{t('web.name')}</th>
+                    <th scope="col">{t('service.username')}</th>
+                    <th scope="col">{t('web.status')}</th>
+                    <th scope="col">{t('web.expires')}</th>
+                    <th scope="col">
+                      <span className="visually-hidden">{t('web.actions')}</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleAuxiliary.length === 0 ? (
                     <tr>
-                      <th>{t('web.name')}</th>
-                      <th>{t('web.status')}</th>
-                      <th>{t('web.expires')}</th>
-                      <th>
-                        <span className="visually-hidden">{t('web.actions')}</span>
-                      </th>
+                      <td colSpan={5} className="sftp-empty">
+                        {t('sftp.noAdditional')}
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {auxiliary.map((c) => (
-                      <tr key={c.id}>
-                        <td>
-                          <span className="sftp-access-label">
-                            {c.label ?? t('sftp.legacyAccess')}
-                          </span>
+                  ) : (
+                    visibleAuxiliary.map((c) => (
+                      <tr key={c.id} data-revoked={c.state === 'revoked'}>
+                        <td className="sftp-access-label">{c.label ?? t('sftp.legacyAccess')}</td>
+                        <td className="sftp-access-username">
                           <CopyValue
                             value={c.username ?? t('web.pending')}
                             label={t('sftp.copyUsername')}
                           />
                         </td>
-                        <td>
+                        <td className="sftp-access-status">
                           <Badge value={c.state} />
                         </td>
-                        <td>
+                        <td className="sftp-access-expiry">
                           <Time value={c.expiresAt} />
                         </td>
                         <td className="sftp-row-actions">
@@ -420,12 +443,12 @@ function SftpContent({ serverId }: { serverId: string }) {
                           )}
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
-          </details>
+          </section>
         )
       )}
       <details className="sftp-limitation">

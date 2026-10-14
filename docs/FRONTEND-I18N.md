@@ -45,8 +45,10 @@ pending final consolidated review has passed.
 ### SFTP interface
 
 SFTP uses the Files/Console visual conventions: a compact connection summary,
-copyable host and port, and credential rows with tooltip-labelled rotation/revoke
-actions. Destructive confirmation reuses the shared file-manager dialog with
+copyable `sftp://` host and separate port, and an always-visible additional-access
+table with quiet icon actions. Revoked accesses are hidden initially; the keyboard-
+accessible Show revoked switch filters locally without changing quota accounting.
+Desktop uses labeled columns; mobile stacks each row without horizontal scrolling. Destructive confirmation reuses the shared file-manager dialog with
 Cancel focused first. Passwords returned by issuance/rotation remain in component
 memory only, masked initially, with explicit reveal/copy and dismissal. The
 retained-SSH limitation remains available in a disclosure and relevant action
