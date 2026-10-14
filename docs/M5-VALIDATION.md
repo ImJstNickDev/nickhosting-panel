@@ -9519,7 +9519,57 @@ Tests used isolated application handlers, schemas and provider-byte fixtures wit
 the already-approved test services. No game server, real file, Blueprint, Panel,
 Wings or production resource was mutated; test schemas are cleaned by the harness.
 Historical full M1–M5 suites were not repeated. The new dependencies require a
-separately approved update of the existing development Vite container; activation
-is pending Owner approval. Rollback is reverting Quill source/dependency changes
+separately approved update of the existing development Vite container; approval
+was pending at the implementation commit (activation follow-up below). Rollback is reverting Quill source/dependency changes
 and recreating only Vite with its saved image, without migrations or data resets.
 SFTPGo issue #18 remains an independent production-release gate.
+
+
+### 2026-10-14 — Quill development activation and bounded Vite optimization
+
+The Owner explicitly approved updating only Vite and scoped rollback. Saved the
+previous image as `nickhosting-dev-app:before-quill`, then executed:
+
+```sh
+docker compose --env-file .env.dev.local -f compose.dev.yaml build vite
+docker compose --env-file .env.dev.local -f compose.dev.yaml up -d --no-deps --wait vite
+```
+
+The image build passed. Activation exposed two actual container memory failures
+that the unconstrained browser harness did not reproduce: late discovery of worker
+dependencies rebuilt the complete optimization graph, and serving the optimized
+Mermaid/ELK graph caused another OOM after the first correction. Both failed smoke
+attempts are retained in private logs; neither is reported as successful activation.
+
+The correction stays inside application development configuration: explicit worker
+scan entries, and a dev-only alias to Mermaid's existing split browser ESM
+production distribution, excluded from redundant dependency optimization. Production
+builds still use the original Mermaid entry. No dependency version, memory limit,
+network or host setting was changed. See [Vite scanning options](https://vite.dev/config/dep-optimization-options#optimizedeps-entries).
+Two scoped `up -d --no-deps --wait --force-recreate vite` recovery operations replaced
+only the failed Vite container within the approved activation. Compose's warning
+about separately configured development services did not trigger orphan removal.
+
+Final image: `sha256:2460669093a603d7280be97aa927e2fd5d07b08d5774ab0fccda61828a1ee222`.
+`nickhosting-dev-vite-1` is **healthy**, restart count zero, only on the existing
+`nickhosting-dev-edge` network, with no published host ports. Actual HTTPS browser
+smoke returned HTTP 200, confirmed Vite HMR connected, loaded Quill, executed its
+parser/math and bibliography workers, and rendered Mermaid successfully. No page
+JavaScript errors occurred; the anonymous session probe correctly returned 401.
+The first standalone browser launch lacked the already-installed user-local shared
+library path; retry used the same library path as the established browser harness,
+without installing system packages.
+
+After the complete real-dev smoke, cgroup peak memory was **1,133,830,144 bytes**
+(about 1.06 GiB) under the unchanged 1.5 GiB limit, with zero OOM/kill events in the
+replacement container. This is observed smoke evidence, not a universal memory
+bound for arbitrary documents. The prior image remains available for rollback.
+No API, worker, Gateway, provider or production container was recreated; persistent
+state, accounts, files and network attachments remain unchanged. Only anonymous
+application/module requests and synthetic in-browser documents were used.
+
+The final dev-only packaging change passed `scripts/dev.sh pnpm typecheck` and
+focused Biome checks. The Quill browser command with `-t 'renders diagrams'` passed
+**1 test / 8 intentionally unselected** (31.23 s), including rejection of malicious
+diagram asset requests. Independent follow-up review confirmed the upstream browser
+distribution, unchanged rendering guards and production entry; no must-fix remains.

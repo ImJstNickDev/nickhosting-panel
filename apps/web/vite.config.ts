@@ -4,10 +4,22 @@ import { defineConfig } from 'vite';
 import { pdfjsAssets } from './pdfjs-assets.js';
 import { developmentNetwork } from './vite-network.js';
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react(), pdfjsAssets()],
   resolve: {
     alias: [
+      ...(command === 'serve'
+        ? [
+            {
+              // The upstream browser distribution is already split ESM. Rebundling
+              // every diagram layout (especially ELK) wastes dev-container memory.
+              find: /^mermaid$/,
+              replacement: fileURLToPath(
+                new URL('./node_modules/mermaid/dist/mermaid.esm.min.mjs', import.meta.url),
+              ),
+            },
+          ]
+        : []),
       {
         // Markdown runs in Web Workers. This package's browser export uses a DOM
         // element; its default/worker implementation is pure character-entity data.
@@ -28,9 +40,17 @@ export default defineConfig({
     ],
   },
   cacheDir: process.env.NH_WEB_CACHE_DIR,
-  // Worker-only imports escape the initial app scan. Include the decoder now
-  // instead of rebuilding the dependency bundle when Wave first opens.
-  optimizeDeps: { include: ['mediabunny'] },
+  // Discover worker-only dependencies with the app. Late discovery rebuilds the
+  // entire optimized graph and can exhaust the bounded development container.
+  optimizeDeps: {
+    entries: [
+      'index.html',
+      'src/features/viewer-engine/builtin-viewers/markdown/worker.ts',
+      'src/features/viewer-engine/builtin-viewers/markdown/bibliography-worker.ts',
+    ],
+    include: ['mediabunny'],
+    exclude: ['mermaid'],
+  },
   server: {
     ...developmentNetwork(process.env),
     proxy: process.env.NH_WEB_API_PROXY
@@ -46,4 +66,4 @@ export default defineConfig({
       : undefined,
   },
   build: { sourcemap: false, license: { fileName: 'THIRD-PARTY-NOTICES.md' } },
-});
+}));

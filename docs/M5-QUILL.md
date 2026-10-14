@@ -93,3 +93,10 @@ Browser journeys use the real application and isolated authentication/file-edit
 handlers, with external provider bytes supplied by test fixtures. No production
 server files are created or modified. Development dependency activation is a
 separate, explicitly approved Vite image update. SFTPGo issue #18 remains unchanged.
+
+
+Development Vite discovers the Markdown workers during its initial dependency
+scan. Mermaid uses its upstream prebuilt split ESM distribution in development to
+avoid rebundling its large layout graph within the fixed container memory budget.
+The compiled production build retains the normal package entry. This packaging
+choice does not alter diagram security settings or enable external resources.
