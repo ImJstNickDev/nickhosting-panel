@@ -1147,3 +1147,14 @@ concurrent operation retain the reservation. Reconciliation fences both the
 reservation and its owning operation/job revisions, including older jobs. It never
 replays a failed effect, runs an installer, promotes game verification or clears
 another operation's reservation. No API/schema or UI confirmation changes.
+
+### Completing initial Gateway registration after installation recovery
+
+A successful explicit reinstall following failed initial provisioning can complete
+that provisioning's reserved Gateway registration during normal reconciliation.
+Recovery uses the original immutable route plan, current configuration and compiled
+game binding. It does not create replacement routes or repeat provider operations.
+Only untouched, never-activated reservations with no existing Gateway policy are
+eligible. Owner edits, deleted routes, prior activation and concurrent operations
+must be preserved. Recovered running servers still require normal Gateway readiness
+observations; neither a successful reinstall nor recovery itself proves playability.

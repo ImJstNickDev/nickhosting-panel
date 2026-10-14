@@ -9891,3 +9891,46 @@ packages/server-management/src/lifecycle.integration.test.ts` — **225/225 pass
 `python3 scripts/check-governance.py` passed (952 indexed text files, 353 review
 PNGs, 789 relative links, 4 TOML files, 44 ignore cases); staged whitespace passed.
 Historical full M1–M5 suites were not rerun for this targeted recovery fix.
+
+### Gateway activation after recovered provisioning — 2026-10-14
+
+Follow-up to failed-installation retry: an initial failed provision left its route
+reserved but disabled. A later successful Reinstall and Start did not finish that
+initial registration. Normal reconciliation now recovers the original untouched
+route plan after verified installation and successful explicit reinstall, reusing
+the existing activation/configuration logic. It preserves Owner edits/deletions,
+prior activation, existing policy and active operations. A later confirmed explicit
+Start/Restart can restore its missing waking transition; normal readiness evidence
+is still required. Original failed-job chronology is preserved. A candidate check
+avoids recovery query chains for ordinary healthy servers. No new provider requests,
+API, schema, listener configuration or UI controls are introduced by recovery.
+
+Live dev verification: the affected server was already installed and running.
+A passive legacy FE01 query to its backend returned protocol 61, version 1.5.2 and
+the real MOTD. Existing worker hot reload/reconciliation enabled the reserved route
+and the Gateway independently reached online. The same passive query through the
+Gateway public endpoint returned the actual backend response. No login/wake test,
+power command, reinstall, game-file edit, manual DB repair, migration, container
+restart or new test asset was performed. This proves local-host forwarding/status,
+not a remote player's full login or Internet/router reachability. Existing unrelated
+Gateway routes with backend_active_binding failures remain outside this fix; global
+Gateway health must not be represented as fully healthy from this server's success.
+
+Rollback: scoped source revert; already recovered route state remains durable and
+must not be silently disabled or reverted. PR #21 remains open/unmerged and the
+SFTPGo #18 production-release gate is unchanged. Test/review results follow below.
+
+The initial focused run exposed a stale fixture provider-user identity and fake
+historical timestamps older than the provision job; fixture data was corrected,
+without relaxing production identity or chronology checks. The focused suite then
+passed 31/31. Two final concurrency cases were added before the combined run.
+Independent review: no remaining must-fix, including later Stop preservation,
+Owner edits at PostgreSQL timestamp precision and missing/extra routes. Full
+`scripts/dev.sh pnpm typecheck`, scoped Biome and staged governance/whitespace checks
+passed. No historical full M1–M5 matrix was rerun.
+
+Final combined validation: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2
+pnpm exec vitest run --config vitest.integration.config.ts
+packages/server-management/src/gateway-provision.integration.test.ts
+packages/server-management/src/lifecycle.integration.test.ts` — **258/258 passed**
+(33 Gateway provisioning tests, including 20 new; 225 lifecycle tests; 55.76s).

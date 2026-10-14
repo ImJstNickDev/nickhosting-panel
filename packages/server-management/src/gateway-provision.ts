@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import type { Kysely, Selectable } from 'kysely';
+import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { effectiveBackendAllocationPool } from './allocation-pool.js';
@@ -9,6 +9,7 @@ import { trustedGameModules } from './game-modules.js';
 import { gatewayConfiguration, validateGatewayRouteEndpoint } from './gateway-registry.js';
 
 type Server = Selectable<Database['managed_servers']>;
+type Operation = Selectable<Database['server_operations']>;
 const planSchema = z.strictObject({
   gatewayId: z.uuid(),
   physicalHostId: z.uuid(),
@@ -130,98 +131,303 @@ export async function activateProvisionGateway(
       server.installation_state !== 'installed'
     )
       throw new DomainError('conflict');
-    const plan = planSchema.parse(operation.plan.gatewayProvision);
-    // All validation happens before any row becomes visible; rollback is atomic.
-    for (const route of plan.routes) {
-      const stored = await tx
-        .selectFrom('gateway_routes')
-        .selectAll()
-        .where('id', '=', route.id)
-        .executeTakeFirst();
-      if (
-        !stored ||
-        stored.gateway_id !== plan.gatewayId ||
-        stored.server_id !== server.id ||
-        stored.allocation_id !== route.allocationId ||
-        stored.public_address !== route.publicAddress ||
-        stored.public_port !== route.publicPort ||
-        stored.transport !== route.transport
-      )
-        throw new DomainError('conflict');
-    }
-    // Confirmation retries never retarget or re-enable routes. Changed Owner
-    // config is enforced by live snapshot/preflight fences, not replayed effects.
-    if (operation.plan.gatewayRoutesActivated === true) return;
-    const config = await gatewayConfiguration(tx, env);
-    if (plan.gatewayId !== config.gatewayId || plan.physicalHostId !== config.gatewayPhysicalHostId)
-      throw new DomainError('configuration_invalid');
-    const mapping = await tx
-      .selectFrom('runtime_egg_mappings')
-      .select('game_id')
-      .where('id', '=', server.mapping_id)
-      .executeTakeFirstOrThrow();
-    const binding = await modules.get(mapping.game_id)?.gatewayPolicyBinding?.(tx, server, env);
-    if (!binding) throw new DomainError('integration_unavailable');
-    for (const route of plan.routes) {
-      await validateGatewayRouteEndpoint(
-        tx,
-        server.node_id,
-        { ...route, serverId, enabled: true },
-        config,
-        env,
-      );
-    }
-    const initialized = await tx
-      .insertInto('gateway_server_states')
-      .values({
-        server_id: serverId,
-        generation: randomUUID(),
-        enabled: false,
-        protocol_id: binding.protocolId,
-        game_version: binding.gameVersion,
-        state: server.intent === 'maintenance' ? 'maintenance' : 'manually_stopped',
-        idle_timeout_seconds: null,
-        idle_timeout_inherited: true,
-        readiness_timeout_seconds: 600,
-        readiness_max_age_seconds: 30,
-        estimate_max_age_seconds: 604800,
-        wake_retry_seconds: 10,
-        wake_job_id: null,
-        sleep_job_id: null,
-        process_started_at: null,
-        readiness_observed_at: null,
-        startup_deadline_at: null,
-        idle_since: null,
-        last_observed_at: null,
-        last_activity_at: null,
-        blocked_until: null,
-        error_code: null,
-      })
-      .onConflict((c) => c.column('server_id').doNothing())
-      .returning('generation')
-      .executeTakeFirst();
-    await tx
-      .updateTable('gateway_routes')
-      .set({ enabled: true, updated_at: new Date() })
-      .where(
-        'id',
-        'in',
-        plan.routes.map((route) => route.id),
-      )
-      .execute();
-    await tx
-      .updateTable('server_operations')
-      .set({
-        plan: JSON.stringify({
-          ...operation.plan,
-          gatewayRoutesActivated: true,
-          gatewayPolicyGeneration: initialized?.generation ?? null,
-        }),
-        updated_at: new Date(),
-      })
-      .where('job_id', '=', jobId)
-      .execute();
+    await activateReservedGateway(tx, server, operation, env, modules);
   });
+}
+
+/** Reconciliation already holds resource/server locks and has verified provider
+ * identity and installed state. Recover only untouched initial route reservations
+ * after a later successful reinstall; this grants no new automatic wake consent. */
+export async function recoverProvisionGateway(
+  tx: DB,
+  serverId: string,
+  now: Date,
+  env: Environment = {},
+  modules = trustedGameModules,
+) {
+  const server = await tx
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (
+    server?.connection_mode !== 'gateway' ||
+    server.active_operation_id ||
+    server.installation_state !== 'installed' ||
+    !server.pterodactyl_id ||
+    !server.pterodactyl_uuid
+  )
+    return;
+  if (
+    await tx
+      .selectFrom('gateway_server_states')
+      .select('server_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst()
+  )
+    return;
+  if (
+    await tx
+      .selectFrom('installation_reservations')
+      .select('server_id')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst()
+  )
+    return;
+  const provision = await tx
+    .selectFrom('server_operations as operation')
+    .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+    .selectAll('operation')
+    .select('job.completed_at')
+    .where('operation.server_id', '=', serverId)
+    .where('operation.action', '=', 'provision')
+    .where('operation.phase', '=', 'failed')
+    .where('job.state', '=', 'failed')
+    .where('job.completed_at', 'is not', null)
+    .executeTakeFirst();
+  if (
+    !provision?.completed_at ||
+    provision.plan.gatewayProvision === undefined ||
+    provision.plan.gatewayRoutesActivated !== undefined
+  )
+    return;
+  const reinstall = await tx
+    .selectFrom('server_operations as operation')
+    .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+    .selectAll('operation')
+    .select('job.completed_at')
+    .where('operation.server_id', '=', serverId)
+    .where('operation.action', '=', 'reinstall')
+    .where('operation.phase', '=', 'complete')
+    .where('operation.effect_state', '=', 'confirmed')
+    .where('job.state', '=', 'succeeded')
+    .where('job.created_at', '>=', provision.completed_at)
+    .where('job.completed_at', '>', provision.completed_at)
+    .orderBy('job.completed_at', 'desc')
+    .executeTakeFirst();
+  if (!reinstall?.completed_at || reinstall.plan.installConfirmed !== true) return;
+  const plan = planSchema.parse(provision.plan.gatewayProvision);
+  const routes = await tx
+    .selectFrom('gateway_routes')
+    .selectAll()
+    .select(sql<boolean>`created_at = updated_at`.as('untouched'))
+    .where('server_id', '=', serverId)
+    .execute();
+  // Revision alone is insufficient: an Owner disabling an unpublished route
+  // only changes updated_at. Compare timestamps at PostgreSQL precision.
+  if (
+    routes.length !== plan.routes.length ||
+    routes.some(
+      (route) =>
+        route.enabled ||
+        String(route.revision) !== '1' ||
+        route.payload_hash !== null ||
+        route.lease_expires_at !== null ||
+        !route.untouched,
+    )
+  )
+    return;
+  // Validate exact route identities atomically in the shared activation helper.
+  // Never reconstruct a removed route or overwrite an existing Gateway policy.
+  let start: { jobId: string; processStartedAt: string } | undefined;
+  if (server.intent !== 'maintenance' && ['running', 'starting'].includes(server.runtime_state)) {
+    const latest = await tx
+      .selectFrom('server_operations as operation')
+      .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+      .selectAll('operation')
+      .select(['job.state as job_state', 'job.completed_at', 'job.created_at'])
+      .where('operation.server_id', '=', serverId)
+      .where('operation.action', 'in', [
+        'start',
+        'restart',
+        'stop',
+        'provision',
+        'reinstall',
+        'wipe',
+        'delete',
+        'restore',
+      ])
+      .orderBy('job.created_at', 'desc')
+      .orderBy('operation.job_id', 'desc')
+      .executeTakeFirst();
+    const restart = latest?.action === 'restart';
+    const epoch = receiptTime(
+      restart ? latest?.plan.restartProcessStartedAt : latest?.plan.startProcessStartedAt,
+    );
+    const confirmed = receiptTime(
+      restart ? latest?.plan.restartConfirmedAt : latest?.plan.startConfirmedAt,
+    );
+    if (
+      latest &&
+      ['start', 'restart'].includes(latest.action) &&
+      latest.phase === 'complete' &&
+      latest.effect_state === 'confirmed' &&
+      latest.job_state === 'succeeded' &&
+      latest.completed_at &&
+      latest.created_at >= reinstall.completed_at &&
+      latest.plan.gatewayAutomation === undefined &&
+      latest.plan.scheduleAutomation === undefined &&
+      (restart ? latest.plan.restartConfirmed : latest.plan.startConfirmed) === true &&
+      latest.effect_started_at &&
+      epoch !== null &&
+      confirmed !== null &&
+      epoch > BigInt(latest.effect_started_at.getTime()) * 1_000_000n &&
+      confirmed >= epoch &&
+      confirmed <= BigInt(now.getTime()) * 1_000_000n
+    ) {
+      start = {
+        jobId: latest.job_id,
+        processStartedAt: String(
+          restart ? latest.plan.restartProcessStartedAt : latest.plan.startProcessStartedAt,
+        ),
+      };
+    }
+  }
+  await activateReservedGateway(tx, server, provision, env, modules, {
+    reinstallJobId: reinstall.job_id,
+    now,
+    start,
+  });
+}
+
+function receiptTime(value: unknown): bigint | null {
+  if (typeof value !== 'string' || !z.iso.datetime({ offset: true }).safeParse(value).success)
+    return null;
+  const parts = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+    value,
+  );
+  if (!parts) return null;
+  return (
+    BigInt(Date.parse(`${parts[1]}${parts[3]}`)) * 1_000_000n +
+    BigInt((parts[2] ?? '').padEnd(9, '0'))
+  );
+}
+
+/** Shared atomic activation: callers validate their distinct durable authority. */
+async function activateReservedGateway(
+  tx: DB,
+  server: Server,
+  operation: Operation,
+  env: Environment,
+  modules: typeof trustedGameModules,
+  recovery?: {
+    reinstallJobId: string;
+    now: Date;
+    start?: { jobId: string; processStartedAt: string };
+  },
+) {
+  const serverId = server.id;
+  const plan = planSchema.parse(operation.plan.gatewayProvision);
+  // All validation happens before any row becomes visible; rollback is atomic.
+  for (const route of plan.routes) {
+    const stored = await tx
+      .selectFrom('gateway_routes')
+      .selectAll()
+      .where('id', '=', route.id)
+      .executeTakeFirst();
+    if (
+      !stored ||
+      stored.gateway_id !== plan.gatewayId ||
+      stored.server_id !== server.id ||
+      stored.allocation_id !== route.allocationId ||
+      stored.public_address !== route.publicAddress ||
+      stored.public_port !== route.publicPort ||
+      stored.transport !== route.transport
+    )
+      throw new DomainError('conflict');
+  }
+  // Confirmation retries never retarget or re-enable routes. Changed Owner
+  // config is enforced by live snapshot/preflight fences, not replayed effects.
+  if (operation.plan.gatewayRoutesActivated === true) return;
+  const config = await gatewayConfiguration(tx, env);
+  if (plan.gatewayId !== config.gatewayId || plan.physicalHostId !== config.gatewayPhysicalHostId)
+    throw new DomainError('configuration_invalid');
+  const mapping = await tx
+    .selectFrom('runtime_egg_mappings')
+    .select('game_id')
+    .where('id', '=', server.mapping_id)
+    .executeTakeFirstOrThrow();
+  const binding = await modules.get(mapping.game_id)?.gatewayPolicyBinding?.(tx, server, env);
+  if (!binding) throw new DomainError('integration_unavailable');
+  for (const route of plan.routes) {
+    await validateGatewayRouteEndpoint(
+      tx,
+      server.node_id,
+      { ...route, serverId, enabled: true },
+      config,
+      env,
+    );
+  }
+  const initialized = await tx
+    .insertInto('gateway_server_states')
+    .values({
+      server_id: serverId,
+      generation: randomUUID(),
+      enabled: false,
+      protocol_id: binding.protocolId,
+      game_version: binding.gameVersion,
+      state:
+        server.intent === 'maintenance'
+          ? 'maintenance'
+          : recovery?.start
+            ? 'waking'
+            : 'manually_stopped',
+      idle_timeout_seconds: null,
+      idle_timeout_inherited: true,
+      readiness_timeout_seconds: 600,
+      readiness_max_age_seconds: 30,
+      estimate_max_age_seconds: 604800,
+      wake_retry_seconds: 10,
+      wake_job_id: recovery?.start?.jobId ?? null,
+      sleep_job_id: null,
+      process_started_at: recovery?.start?.processStartedAt ?? null,
+      readiness_observed_at: null,
+      startup_deadline_at: recovery?.start ? new Date(recovery.now.getTime() + 600_000) : null,
+      idle_since: null,
+      last_observed_at: null,
+      last_activity_at: null,
+      blocked_until: null,
+      error_code: null,
+    })
+    .onConflict((c) => c.column('server_id').doNothing())
+    .returning('generation')
+    .executeTakeFirst();
+  await tx
+    .updateTable('gateway_routes')
+    .set({ enabled: true, updated_at: new Date() })
+    .where(
+      'id',
+      'in',
+      plan.routes.map((route) => route.id),
+    )
+    .execute();
+  await tx
+    .updateTable('server_operations')
+    .set({
+      plan: JSON.stringify({
+        ...operation.plan,
+        gatewayRoutesActivated: true,
+        gatewayPolicyGeneration: initialized?.generation ?? null,
+        ...(recovery
+          ? {
+              gatewayRecoveredAfterReinstall: recovery.reinstallJobId,
+              gatewayRecoveredAt: recovery.now.toISOString(),
+            }
+          : {}),
+      }),
+      // Recovery bookkeeping must not make this failed provision appear newer
+      // than a subsequent power receipt during normal runtime reconciliation.
+      updated_at: recovery ? undefined : new Date(),
+    })
+    .where('job_id', '=', operation.job_id)
+    .execute();
+  if (recovery?.start)
+    await tx
+      .updateTable('managed_servers')
+      .set({ intent: 'auto_wake_enabled', readiness: 'loading' })
+      .where('id', '=', serverId)
+      .execute();
 }
 
 /** Initial explicit Create+Start is a launch, not permanent auto-start consent.
