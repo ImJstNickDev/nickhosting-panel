@@ -34,6 +34,21 @@ function deployment(environment: Environment): Record<string, string> {
 }
 
 describe('scoped container environment', () => {
+  it('unlocks user SFTP Owner settings only for an explicit real-dev opt-in', () => {
+    const real = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
+    expect(containerEnvironment(real).NH_SFTPGO_API_KEY).toBe('development-disabled');
+    const enabled = containerEnvironment({ ...real, NH_DEV_SFTP_ENABLED: 'true' });
+    expect(enabled.NH_SFTPGO_API_KEY).toBeUndefined();
+    expect(enabled.NH_SFTPGO_BASE_URL).toBeUndefined();
+    expect(enabled.NH_CLOUDFLARE_API_TOKEN).toBe('development-disabled');
+    expect(() =>
+      containerEnvironment({ ...deployment('development'), NH_DEV_SFTP_ENABLED: 'true' }),
+    ).toThrow();
+    expect(() => containerEnvironment({ ...real, NH_DEV_SFTP_ENABLED: 'yes' })).toThrow();
+    const settings = resolveConfig({ sftpgoBaseUrl: 'http://sftpgo-users:8080' }, enabled);
+    expect(settings.values.sftpgoBaseUrl).toBe('http://sftpgo-users:8080');
+  });
+
   it('requires explicit real-mode Gateway opt-in and an independent service identity', () => {
     const bootstrap = {
       NH_DEV_PROVIDER_MODE: 'real',

@@ -2,6 +2,10 @@
 # Append to the full existing real-dev overlay chain. One approved server mount;
 # future servers require additional explicit mounts, not mounting all Wings data.
 services:
+  api:
+    environment: { NH_DEV_SFTP_ENABLED: "true" }
+  worker:
+    environment: { NH_DEV_SFTP_ENABLED: "true" }
   sftpgo-users:
     image: drakkan/sftpgo:v2.7.6@sha256:1edd28d80de2a008863fbfc58c8ff7db47b1b410bae48d4e6076192337809b11
     user: "${NH_SFTP_USERS_UID:?Verified managed-server file owner UID required}:${NH_SFTP_USERS_GID:?Verified managed-server file owner GID required}"

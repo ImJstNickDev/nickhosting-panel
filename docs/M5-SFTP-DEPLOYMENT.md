@@ -1,6 +1,8 @@
-# Development user SFTP — preparation, not activation
+# Development user SFTP — activation record and configuration
 
-Prepared on 2026-10-14 within M5 PR #21. The Owner selected
+Prepared on 2026-10-14 within M5 PR #21. **Activation is partial:** the approved
+SFTP service is healthy; API/worker opt-in activation needs the additional
+approval recorded below. The Owner selected
 `sftp.dev.hub.nickhost.ing` for development and provisionally
 `sftp.hub.nickhost.ing` for production. **Neither hostname selection nor this
 proposal authorizes starting infrastructure.** Production is outside this task.
@@ -75,8 +77,10 @@ Use the existing protected Owner settings interface and encrypted secret store:
 
 Inspect configuration source precedence first: environment overrides must not
 silently retain simulator values. Do not alter `fileViewers` or
-`viewerSftpgoApiKey`. No application rebuild, migration, database reset or API/
-worker restart is planned. Snapshot previous protected settings privately for
+`viewerSftpgoApiKey`. The initial proposal expected no application restart. Activation uncovered a
+synthesized simulator override: the amended overlay sets `NH_DEV_SFTP_ENABLED=true`
+for API/worker. Their image rebuild/recreation requires the additional approval
+below; no migration or database reset is needed. Snapshot previous protected settings privately for
 rollback; do not copy secret values into public evidence.
 
 The adapter confines each account to the verified provider UUID home and grants
@@ -198,3 +202,51 @@ Without that approval, this task stops at reviewed configuration and evidence.
   security/configuration review: no must-fix findings. Runtime startup, actual
   writes, SSH authentication, persistence and client reachability are pending
   exact activation approval. No infrastructure or game files changed.
+
+
+## Approved activation / additional boundary — 2026-10-14
+
+Owner approved the proposal at `adbb8bf`. Preflight rechecked exact clean HEAD,
+container/name/port/network identity and selected server ownership. Created private
+`.env.dev.sftp.local` exclusively (0600), new state via the approved helper (988:988,
+0700), and only `sftpgo-users` with the approved complete Compose chain. Service is
+healthy. The SSH handshake on the approved host TCP2023 succeeds and matches the
+container's Ed25519 host public key. Existing containers retain their original
+IDs; only the data/egress attachments and one SSH binding exist. No game files
+were written; no test credential issued. Viewer service remained untouched.
+
+Created the new instance's dedicated administrator/API key. The subsequent
+NickHosting secret write failed with `conflict`: `containerEnvironment()` still
+synthesized disabled SFTP simulator URL/key, even in real-provider dev mode. The
+initial raw Docker-environment preflight missed this synthesized override. No
+NickHosting settings or secret changes committed; private pre-change settings
+snapshot is retained. One newly created management API key exists in the new
+service; reconcile that instance's own unused key before issuing a replacement.
+
+Prepared correction: explicit `NH_DEV_SFTP_ENABLED=true`, valid only with real
+provider development, removes only the synthesized user-SFTP URL/key overrides.
+Sandbox remains disabled; other providers and private viewer credentials stay
+unchanged. The amended overlay intentionally changes only API/worker environment
+in addition to the already-approved users service. Focused deployment tests:
+45 passed. Independent static review found no must-fix findings.
+
+**Additional approval required:** save current API/worker image IDs under separate
+local rollback tags; build `api`; recreate only `api worker` with the full overlay
+chain, preserving networks, mounts and database. Commands:
+
+```bash
+# Exact current image IDs are recorded privately immediately before execution.
+docker image tag CURRENT_API_IMAGE nickhosting-dev-app:before-sftp-users-api
+docker image tag CURRENT_WORKER_IMAGE nickhosting-dev-app:before-sftp-users-worker
+"${sftp_compose[@]}" build api
+"${sftp_compose[@]}" up -d --no-deps --wait api worker
+```
+
+Risk: brief interruption of web API requests/console streams and worker processing;
+durable jobs retain their normal recovery semantics. No game power commands or
+provider data mutations are part of recreation. After health checks, resume only
+the already-approved private settings and scoped SFTP test. The Gateway and Vite
+are not restarted. Rollback requires restoring the previous API/worker image IDs
+and omitting the new opt-in for those services, then recreating only them; retain
+all database/SFTP state. Ask for rollback approval if needed unless explicitly
+included in the additional authorization. DNS/router/NPM remain Owner-managed.

@@ -9,6 +9,13 @@ export function containerEnvironment(input) {
   const providerMode = development ? (input.NH_DEV_PROVIDER_MODE ?? 'sandbox') : undefined;
   if (development && !['sandbox', 'real'].includes(providerMode))
     throw new Error('Invalid development provider mode');
+  const userSftpEnabled = input.NH_DEV_SFTP_ENABLED ?? 'false';
+  if (
+    development &&
+    (!['true', 'false'].includes(userSftpEnabled) ||
+      (userSftpEnabled === 'true' && providerMode !== 'real'))
+  )
+    throw new Error('Invalid development user SFTP opt-in');
   const evidenceKey = input.NH_DEV_MINECRAFT_EVIDENCE_KEY;
   if (
     development &&
@@ -150,6 +157,12 @@ export function containerEnvironment(input) {
       SMTP_PASSWORD: required('MAIL_PASSWORD', true),
       NODE_EXTRA_CA_CERTS: '/run/dev-mail/cert.pem',
     });
+    if (userSftpEnabled === 'true') {
+      // Explicit approved user-SFTP deployment: protected DB settings own the
+      // endpoint and encrypted key instead of the disabled simulator override.
+      delete env.NH_SFTPGO_BASE_URL;
+      delete env.NH_SFTPGO_API_KEY;
+    }
     if (providerMode === 'sandbox')
       Object.assign(env, {
         NH_PTERODACTYL_BASE_URL: 'http://provider:9090',

@@ -1069,6 +1069,8 @@ test asset creation was performed.
 The Owner selected `sftp.dev.hub.nickhost.ing`; production may later use
 `sftp.hub.nickhost.ing`. [User-SFTP preparation](M5-SFTP-DEPLOYMENT.md) supplies
 `compose.dev.sftp.yaml`, separate state/credentials and the exact activation
-boundary. It is **not activated**. The existing private read-only viewer service
+boundary. The approved SFTP service is now healthy; application opt-in activation is
+**pending additional API/worker recreation approval**, recorded in that document.
+The existing private read-only viewer service
 is unchanged. First proposed test scope is one explicitly mounted managed server,
 with TCP2023 on an approved host address; no DNS, router or NPM changes are applied.
