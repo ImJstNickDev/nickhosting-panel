@@ -1063,3 +1063,12 @@ Post-check cgroup usage was about608MiB (peak628MiB), with zero OOM events since
 restart. These are observed recovery readings, not a guarantee against all future
 optimizer peaks. No authenticated provider action, game-file change, migration or
 test asset creation was performed.
+
+## User-facing development SFTP — prepared 2026-10-14
+
+The Owner selected `sftp.dev.hub.nickhost.ing`; production may later use
+`sftp.hub.nickhost.ing`. [User-SFTP preparation](M5-SFTP-DEPLOYMENT.md) supplies
+`compose.dev.sftp.yaml`, separate state/credentials and the exact activation
+boundary. It is **not activated**. The existing private read-only viewer service
+is unchanged. First proposed test scope is one explicitly mounted managed server,
+with TCP2023 on an approved host address; no DNS, router or NPM changes are applied.
