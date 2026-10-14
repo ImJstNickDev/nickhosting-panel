@@ -304,6 +304,104 @@ describe('delimited model', () => {
     expect(result.page.rows).toHaveLength(1);
     expect(new DelimitedModel(result.text).view().rows).toHaveLength(1);
   });
+
+  it('maps raw UTF-16 positions through BOM, CRLF, multiline fields and escaped quotes', () => {
+    const source = '\uFEFF"name",value,extra\r\n"😀first\r\nline","a""b",0001\r\n"last",002,\r\n';
+    const model = new DelimitedModel(source, 'csv', explicitHeader);
+    const first = required(model.view().rows[0]);
+    const last = required(model.view().rows[1]);
+    expect(model.position(-1, 0, 0)).toEqual({ offset: 1 });
+    expect(model.position(first.id, 1, 0)).toEqual({ offset: source.indexOf('"a""b"') });
+    expect(model.position(last.id, 0, 0)).toEqual({ offset: source.indexOf('"last"') });
+    expect(model.reveal({ offset: source.indexOf('line') + 2 }, {}, 0).selection).toEqual({
+      row: 0,
+      column: 0,
+    });
+    expect(model.reveal({ offset: source.indexOf('a""b') + 2 }, {}, 0).selection).toEqual({
+      row: 0,
+      column: 1,
+    });
+    expect(model.reveal({ offset: source.indexOf('value') + 3 }, {}, 0).selection).toEqual({
+      row: -1,
+      column: 1,
+    });
+    expect(model.reveal({ offset: 0 }, {}, 0).selection).toEqual({ row: -1, column: 0 });
+    expect(model.reveal({ offset: source.length }, {}, 0).selection).toEqual({ row: 1, column: 2 });
+    // Both bytes of a CRLF belong to the preceding record, not a phantom row.
+    for (const offset of [source.indexOf('\r\n'), source.indexOf('\r\n') + 1])
+      expect(model.reveal({ offset }, {}, 0).selection).toEqual({ row: -1, column: 2 });
+  });
+
+  it('reveals the actual record on its sorted page and removes only a hiding query', () => {
+    const source = `key,value\n${Array.from(
+      { length: 250 },
+      (_, index) => `${String(index).padStart(3, '0')},${index % 2 ? 'odd' : 'even'}`,
+    ).join('\n')}`;
+    const model = new DelimitedModel(source, 'csv', explicitHeader);
+    const sort = { column: 0, direction: 'desc' } as const;
+    const view = { query: 'odd', column: 1, sort, offset: 100, limit: 100 };
+    const visible = model.reveal({ offset: source.indexOf('247,odd') + 4 }, view, 0);
+    expect(visible.view).toEqual({ ...view, offset: 0 });
+    expect(visible.selection).toEqual({ row: 1, column: 1 });
+    expect(visible.page.rows[1]?.cells).toEqual(['247', 'odd']);
+    const hidden = model.reveal({ offset: source.indexOf('048,even') + 4 }, view, 0);
+    expect(hidden.view).toEqual({ ...view, query: '', offset: 200 });
+    expect(hidden.selection).toEqual({ row: 1, column: 1 });
+    expect(hidden.page.rows[1]?.cells).toEqual(['048', 'even']);
+    expect(hidden.page.rows[1]?.sourceRow).toBe(50);
+    expect(model.position(required(hidden.page.rows[1]).id, 1, 0)).toEqual({
+      offset: source.indexOf('048,even') + 4,
+    });
+    // Headers stay visible independently of the data filter and current page.
+    const header = model.reveal({ offset: 5 }, view, 0);
+    expect(header.view).toEqual(view);
+    expect(header.selection).toEqual({ row: -1, column: 1 });
+  });
+
+  it('rebuilds lexical positions after cell and structural edits using stable source identities', () => {
+    const model = new DelimitedModel('name,value\r\na,1\r\nb,2', 'csv', explicitHeader);
+    const lastId = required(model.view().rows[1]).id;
+    expect(model.position(lastId, 1, 0)).toEqual({ offset: 19 });
+    let result = model.edit({ type: 'set-cell', rowId: 1, column: 0, value: 'long\r\nquoted' }, 0);
+    expect(model.position(lastId, 1, result.page.revision)).toEqual({
+      offset: result.text.lastIndexOf('2'),
+    });
+    result = model.edit(
+      { type: 'insert-row', beforeId: lastId, cells: ['new', '3'] },
+      result.page.revision,
+    );
+    result = model.edit({ type: 'insert-column', column: 1, name: 'added' }, result.page.revision);
+    expect(model.position(lastId, 2, result.page.revision)).toEqual({
+      offset: result.text.lastIndexOf('2'),
+    });
+    expect(
+      model.reveal({ offset: result.text.lastIndexOf('2') }, {}, result.page.revision).selection,
+    ).toEqual({ row: 2, column: 2 });
+    expect(() => model.position(lastId, 2, 0)).toThrow('stale');
+    expect(() => model.reveal({ offset: 0 }, {}, 0)).toThrow('stale');
+    result = model.edit({ type: 'remove-row', rowId: lastId }, result.page.revision);
+    expect(model.position(lastId, 0, result.page.revision)).toBeNull();
+  });
+
+  it('handles TSV without headers, ragged fields, empty documents and clamped offsets', () => {
+    const source = '\uFEFF"one\ntwo"\tthree\r\nfour\r\n';
+    const model = new DelimitedModel(source, 'tsv', { delimiter: 'auto', header: false });
+    expect(model.position(0, 1, 0)).toEqual({ offset: source.indexOf('three') });
+    expect(model.reveal({ offset: source.indexOf('two') }, {}, 0).selection).toEqual({
+      row: 0,
+      column: 0,
+    });
+    expect(model.position(1, 1, 0)).toEqual({ offset: source.indexOf('four') + 4 });
+    expect(model.reveal({ offset: -99 }, {}, 0).selection).toEqual({ row: 0, column: 0 });
+    expect(model.reveal({ offset: 9999 }, {}, 0).selection).toEqual({ row: 1, column: 0 });
+    expect(() => model.reveal({ offset: Number.NaN }, {}, 0)).toThrow('invalid');
+    const empty = new DelimitedModel('\uFEFF');
+    expect(empty.reveal({ offset: 0 }, {}, 0).selection).toBeUndefined();
+    expect(empty.position(0, 0, 0)).toBeNull();
+    const single = new DelimitedModel('""');
+    expect(single.position(0, 0, 0)).toEqual({ offset: 0 });
+    expect(single.reveal({ offset: 2 }, {}, 0).selection).toEqual({ row: 0, column: 0 });
+  });
 });
 
 class FakeWorker implements DelimitedWorker {
@@ -324,6 +422,49 @@ class FakeWorker implements DelimitedWorker {
 }
 
 describe('delimited client lifecycle', () => {
+  it('transports source position requests and rejects handoffs from a superseded worker', async () => {
+    const workers: FakeWorker[] = [];
+    const client = new DelimitedClient(undefined, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    const model = new DelimitedModel('a,b\nx,y', 'csv', explicitHeader);
+    const loading = client.load('a,b\nx,y', 'csv', explicitHeader);
+    const worker = required(workers[0]);
+    worker.reply({ requestId: required(worker.messages.at(-1)).requestId, result: model.view() });
+    await loading;
+    const position = client.position(1, 1, 0);
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: 'position',
+      rowId: 1,
+      column: 1,
+      revision: 0,
+    });
+    worker.reply({
+      requestId: required(worker.messages.at(-1)).requestId,
+      result: model.position(1, 1, 0),
+    });
+    await expect(position).resolves.toEqual({ offset: 6 });
+    const reveal = client.reveal({ offset: 6 }, { limit: 100 }, 0);
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: 'reveal',
+      position: { offset: 6 },
+      view: { limit: 100 },
+      revision: 0,
+    });
+    const stale = expect(reveal).rejects.toMatchObject({ code: 'stale' });
+    const reloaded = client.load('new', 'csv');
+    await stale;
+    const nextWorker = required(workers[1]);
+    nextWorker.reply({
+      requestId: required(nextWorker.messages.at(-1)).requestId,
+      result: new DelimitedModel('new').view(),
+    });
+    await reloaded;
+    client.dispose();
+  });
+
   it('terminates and fences stale worker messages on source changes', async () => {
     const workers: FakeWorker[] = [];
     const client = new DelimitedClient(undefined, () => {

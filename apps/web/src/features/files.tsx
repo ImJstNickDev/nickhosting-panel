@@ -99,7 +99,11 @@ import { validFilename } from './inline-file-rename-model.js';
 import { useDirectoryPrefetch } from './use-directory-prefetch.js';
 import { useViewerEscape } from './use-viewer-escape.js';
 import { isSingleCompressed } from './viewer-engine/core/compressed.js';
-import { documentViews, isDocumentView } from './viewer-engine/core/document-registry.js';
+import {
+  canUseDocumentView,
+  documentViews,
+  isDocumentView,
+} from './viewer-engine/core/document-registry.js';
 import {
   availableViewers,
   preferredViewer,
@@ -884,7 +888,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
     viewerId ??= documentViews(source.name)[0]?.id;
     if (
       viewerId &&
-      (!isDocumentView(source.name, viewerId) ||
+      (!canUseDocumentView(source, viewerId) ||
         (autoDecodeCompressed && isSingleCompressed(source)))
     ) {
       cancelRead();

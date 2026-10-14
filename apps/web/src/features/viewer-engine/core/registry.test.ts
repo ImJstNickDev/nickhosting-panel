@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { canUseDocumentView, documentViews } from './document-registry.js';
 import {
   availableViewers,
   preferredViewer,
@@ -9,6 +10,19 @@ import {
 
 const file = (name: string, size = 100): ViewerSource => ({ name, path: `world/${name}`, size });
 describe('trusted viewer selection', () => {
+  it('shares editable JSON documents without reducing the standalone JSON budget', () => {
+    for (const name of ['data.json', 'data.jsonc', 'data.json5']) {
+      expect(documentViews(name).map((view) => view.id)).toEqual(['json']);
+      expect(canUseDocumentView(file(name), 'json')).toBe(true);
+      expect(canUseDocumentView(file(name), 'text')).toBe(true);
+      expect(availableViewers(file(name)).map((view) => view.id)).toEqual(['json', 'text']);
+      expect(canUseDocumentView(file(name, 2 * 1024 * 1024), 'json')).toBe(false);
+      expect(availableViewers(file(name, 2 * 1024 * 1024)).map((view) => view.id)).toEqual([
+        'json',
+      ]);
+    }
+    expect(canUseDocumentView(file('server.jar'), 'text')).toBe(false);
+  });
   it('uses compound extensions and never chooses text for binary files', () => {
     expect(viewerExtension('backup.TAR.ZST')).toBe('tar.zst');
     expect(preferredViewer(file('world.tar.xz'))).toBe('archive');

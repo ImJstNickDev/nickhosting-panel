@@ -588,7 +588,7 @@ describe('M5 builtin file viewers', () => {
     expect(preferences).toEqual([]);
     await page.reload();
     await browserExpect(page.locator('.cm-content')).toContainText('9007199254740993123456789');
-    await browserExpect(page.locator('.ve-json')).toHaveCount(0);
+    await browserExpect(page.locator('.ve-json:visible')).toHaveCount(0);
     expect(preferences).toEqual([]);
 
     await root();

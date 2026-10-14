@@ -49,6 +49,7 @@ export interface JsonDetail {
 }
 
 export type JsonAction =
+  | { type: 'revealPosition'; offset: number }
   | { type: 'toggle' | 'select' | 'expand' | 'collapse'; id: number }
   | { type: 'move'; direction: 'next' | 'previous' | 'first' | 'last' | 'parent' | 'child' }
   | { type: 'collapseAll' }

@@ -2,12 +2,14 @@ import { type ComponentType, useCallback, useEffect, useRef, useState } from 're
 import { createPortal } from 'react-dom';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
+import { ErrorNotice } from '../../components/ui.js';
 import {
   type FileEditorControls,
   FileTextEditor,
   type FileTextEditorProps,
 } from '../file-text-editor.js';
 import DelimitedView from './builtin-viewers/delimited.js';
+import { JsonDocumentView } from './builtin-viewers/json.js';
 import { documentViews } from './core/document-registry.js';
 import type { DocumentViewControls, DocumentViewProps } from './core/document-view.js';
 import type { ViewerId } from './core/registry.js';
@@ -16,6 +18,7 @@ import './document-editor.css';
 
 const renderers: Readonly<Record<string, ComponentType<DocumentViewProps>>> = {
   sqlite: DelimitedView,
+  json: JsonDocumentView,
 };
 
 /** One editable document; the host retains save revision, draft, authorization and recovery. */
@@ -32,6 +35,9 @@ export function DocumentEditor(
   const active = props.selectedView !== 'text' && Boolean(definition);
   const Renderer = definition ? renderers[definition.id] : undefined;
   const [textControls, setTextControls] = useState<FileEditorControls>();
+  const textRef = useRef(textControls);
+  textRef.current = textControls;
+  const [positionError, setPositionError] = useState<unknown>();
   const alternate = useRef<DocumentViewControls | undefined>(undefined);
   const [alternateControls, setAlternateControls] = useState<DocumentViewControls>();
   const current = useRef(props);
@@ -89,17 +95,42 @@ export function DocumentEditor(
     },
     [textControls],
   );
+  // Handle both the toolbar shortcut and Open With. Each renderer keeps its state while hidden.
+  const displayed = useRef(active);
+  useEffect(() => {
+    const previous = displayed.current;
+    displayed.current = active;
+    if (previous === active) return;
+    let cancelled = false;
+    const outgoing = previous ? alternate.current : textRef.current;
+    setPositionError(undefined);
+    void (async () => {
+      try {
+        const position = await outgoing?.getPosition?.();
+        if (cancelled) return;
+        // Let the destination become visible before measuring/scrolling its viewport.
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (cancelled) return;
+        const incoming = active ? alternate.current : textRef.current;
+        if (position) await incoming?.revealPosition?.(position);
+        if (!cancelled) incoming?.focus();
+      } catch (error) {
+        if (!cancelled) setPositionError(error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active]);
   const switchView = async () => {
     if (!(await flush())) return;
     const id = active ? 'text' : definition?.id;
     if (!id) return;
     current.current.onViewChange?.(id);
-    requestAnimationFrame(() =>
-      id === 'text' ? textControls?.focus() : alternate.current?.focus(),
-    );
   };
   return (
     <>
+      {positionError ? <ErrorNotice error={positionError} /> : null}
       {Renderer &&
         definition &&
         props.actionTarget &&
@@ -129,7 +160,7 @@ export function DocumentEditor(
         // biome-ignore lint/a11y/useSemanticElements: A shared document surface is not a form fieldset.
         <div
           role="group"
-          aria-label={t('viewer.name.sqlite')}
+          aria-label={t(definition?.label ?? 'viewer.name.text')}
           className="document-view"
           hidden={!active}
           onKeyDown={(event) => {

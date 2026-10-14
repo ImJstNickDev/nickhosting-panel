@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import type { DocumentPosition } from '../core/document-view.js';
 import {
   type DelimitedDelimiter,
   type DelimitedEdit,
@@ -6,6 +7,7 @@ import {
   DelimitedError,
   type DelimitedOptions,
   type DelimitedPage,
+  type DelimitedRevealResult,
   type DelimitedView,
   delimitedLimits,
 } from './delimited-protocol.js';
@@ -83,6 +85,10 @@ export class DelimitedModel {
   private revision = 0;
   private readonly bom: string;
   private text: string;
+  private offsets?: {
+    revision: number;
+    rows: { row: RecordRow; start: number; end: number; fields: number[] }[];
+  };
 
   constructor(
     text: string,
@@ -154,7 +160,7 @@ export class DelimitedModel {
   private dataRows(): RecordRow[] {
     return this.header ? this.rows.slice(1) : this.rows;
   }
-  view(view: DelimitedView = {}): DelimitedPage {
+  private orderedRows(view: DelimitedView): RecordRow[] {
     const width = this.width();
     if (view.column !== undefined && !validIndex(view.column, width)) fail('invalid');
     if (
@@ -179,6 +185,11 @@ export class DelimitedModel {
         return (left < right ? -1 : left > right ? 1 : 0) * (direction === 'asc' ? 1 : -1);
       });
     }
+    return rows;
+  }
+  view(view: DelimitedView = {}): DelimitedPage {
+    const width = this.width();
+    const rows = this.orderedRows(view);
     const requestedOffset = Number.isFinite(view.offset)
       ? Math.max(0, Math.floor(view.offset ?? 0))
       : 0;
@@ -212,6 +223,75 @@ export class DelimitedModel {
       sourceRows: this.dataRows().length,
       truncatedCells,
     };
+  }
+
+  /** Build once per revision from retained lexical spellings, never reparse CSV. */
+  private sourceOffsets() {
+    if (this.offsets?.revision === this.revision) return this.offsets.rows;
+    let cursor = this.bom.length;
+    const rows = this.rows.map((row) => {
+      const start = cursor;
+      const fields = row.fields.map((field, column) => {
+        if (column) cursor += this.delimiter.length;
+        const offset = cursor;
+        cursor += field.length;
+        return offset;
+      });
+      const end = cursor;
+      cursor += row.ending.length;
+      return { row, start, end, fields };
+    });
+    this.offsets = { revision: this.revision, rows };
+    return rows;
+  }
+
+  position(rowId: number, column: number, revision: number): DocumentPosition | null {
+    if (revision !== this.revision) fail('stale');
+    if (!validIndex(column, this.width())) return null;
+    const row = this.sourceOffsets().find((item, index) =>
+      rowId === -1 ? this.header && index === 0 : item.row.id === rowId,
+    );
+    // Padded cells in ragged records have no field spelling; use that record's end.
+    return row ? { offset: row.fields[column] ?? row.end } : null;
+  }
+
+  reveal(position: DocumentPosition, view: DelimitedView, revision: number): DelimitedRevealResult {
+    if (revision !== this.revision) fail('stale');
+    if (!Number.isFinite(position.offset)) fail('invalid');
+    const offset = Math.max(0, Math.min(this.text.length, Math.floor(position.offset)));
+    const offsets = this.sourceOffsets();
+    if (!offsets.length) return { page: this.view(view), view };
+    // Record boundaries use raw source positions, including quoted embedded newlines.
+    let low = 0;
+    let high = offsets.length;
+    while (low + 1 < high) {
+      const middle = Math.floor((low + high) / 2);
+      if ((offsets[middle]?.start ?? Infinity) <= offset) low = middle;
+      else high = middle;
+    }
+    const target = offsets[low];
+    if (!target) return fail('invalid');
+    let column = 0;
+    for (let index = 1; index < target.fields.length; index++) {
+      if ((target.fields[index] ?? Infinity) > offset) break;
+      column = index;
+    }
+    if (this.header && low === 0)
+      return { page: this.view(view), view, selection: { row: -1, column } };
+    let nextView = view;
+    let rows = this.orderedRows(nextView);
+    let index = rows.findIndex((row) => row.id === target.row.id);
+    if (index < 0) {
+      nextView = { ...view, query: '' };
+      rows = this.orderedRows(nextView);
+      index = rows.findIndex((row) => row.id === target.row.id);
+    }
+    const limit = Number.isFinite(view.limit)
+      ? Math.max(1, Math.min(delimitedLimits.page, Math.floor(view.limit ?? delimitedLimits.page)))
+      : delimitedLimits.page;
+    nextView = { ...nextView, offset: Math.floor(index / limit) * limit };
+    const page = this.view(nextView);
+    return { page, view: nextView, selection: { row: index - page.offset, column } };
   }
 
   detail(rowId: number, column: number, revision = this.revision): string {

@@ -10,7 +10,7 @@ import { AtlasPathContribution } from './builtin-viewers/atlas-path-provider.js'
 import { viewerDownloadPath } from './core/access.js';
 import { ViewerBoundary } from './core/boundary.js';
 import { compressedArchiveOptions, decodedMember, isSingleCompressed } from './core/compressed.js';
-import { isDocumentView } from './core/document-registry.js';
+import { canUseDocumentView } from './core/document-registry.js';
 import {
   preferredViewer,
   savedViewer,
@@ -239,7 +239,7 @@ export function FileViewer({
     source.archives,
     source.entry,
     decodedSource?.entry,
-    viewer,
+    canUseDocumentView(renderSource, viewer) ? 'document' : viewer,
     viewer === 'archive' ? archiveDirectory : undefined,
   ]);
   const archiveDepth = source.archives?.length ?? 0;
@@ -444,10 +444,10 @@ export function FileViewer({
                   <Media {...props} kind={viewer} />
                 ) : viewer === 'pdf' ? (
                   <Pdf {...props} />
+                ) : canUseDocumentView(renderSource, viewer) ? (
+                  <Text {...props} initialView={viewer} onViewChange={setViewer} />
                 ) : viewer === 'json' ? (
                   <Json {...props} />
-                ) : viewer !== 'text' && isDocumentView(renderSource.name, viewer) ? (
-                  <Text {...props} initialView={viewer} />
                 ) : viewer === 'sqlite' ? (
                   <Sqlite {...props} />
                 ) : viewer === 'archive' ? (

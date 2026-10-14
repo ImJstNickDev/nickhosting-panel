@@ -9419,3 +9419,47 @@ isolation. The final scrollbar assertion passed separately: **1/1 Firefox** (17.
 A real Firefox read-only dataset smoke also passed both valid PDFs and the empty
 PDF, with unchanged shell styles, a light viewport color scheme and zero JS
 errors. Final scoped-style production build and web typecheck passed.
+
+### 2026-10-14 — Shared JSON/Scribe views and document-position handoff
+
+JSON/JSONC/JSON5 within the existing text-editor budget now share one document
+session with Scribe, with the same icon switch as CSV/TSV. Selected JSON nodes and
+Datagrid cells transfer their exact source position into Scribe; returning selects
+and reveals the matching node/cell. Multiline quoted records, BOM/CRLF, sorting,
+filtering, paging, duplicate JSON keys and unsaved drafts are covered. Parsing and
+position lookup remain in browser workers; switching neither writes nor rereads
+provider files. Standalone large-JSON previews and read-only archive members keep
+their existing limits and permissions. Markdown is not part of this change.
+
+Commands and evidence:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/file-editor-document.test.ts apps/web/src/features/viewer-engine/core/registry.test.ts apps/web/src/features/viewer-engine/builtin-viewers/delimited-model.test.ts apps/web/src/features/viewer-engine/builtin-viewers/json-model.test.ts`: **58 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/document-positions.browser.test.ts apps/web/tests/json-tree.browser.test.ts`: **16 passed** in Chromium (60.12 s; the initial eight position cases and eight standalone JSON cases). Earlier runs exposed fixture assumptions about inferred headers, smart Home and trailing whitespace; those assertions/setup were corrected. Standalone fixtures exceed 1 MiB intentionally, preserving independent preview/read/retry coverage.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/document-positions.browser.test.ts`: final **10 passed** (53.67 s), including added rapid-reparse switching and archived JSON toolbar → Scribe → Open With → JSON Tree. No extra provider reads or writes while switching; invalid drafts remain repairable.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/delimited.browser.test.ts`: final **12 passed** (62.26 s). Initial run was **10 passed / 2 failed**: keyboard insertion and schema/filter reconciliation. Undo could leave a cell focused after reparsing cleared its selection; clicking the already-focused cell did not emit another focus event. Selection now reconciles with that cell after page commit without moving focus or overriding a pending handoff. Both failed cases passed targeted checks before the final suite.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'restores the open viewer|preserves JSON numbers'`: **2 passed / 31 intentionally skipped** (32.30 s). The refresh assertion now checks that retained JSON Tree is hidden rather than unmounted.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed**. Targeted `pnpm exec biome check` for 26 relevant TypeScript/test files: **passed**. `scripts/dev.sh pnpm build`: **passed**, 1608 compiled EN/IT/pseudolocale keys; existing large-chunk warnings remain.
+
+Independent code review found and resolved a shared-view host-state mismatch:
+archived JSON's toolbar previously changed only the nested text viewer, so choosing
+JSON Tree again in Open With could leave Scribe displayed. The host now owns that
+selection with a stable document key, retaining the same document and read. Final
+review found no remaining must-fix issues, including the focused-cell reconciliation.
+Independent screenshot review found no layout/compact-content regression; keyboard
+and actual cursor/selection behavior are established separately by browser tests.
+
+Reviewed sanitized evidence:
+[CSV source line 32](screenshots/m5/document-position-csv-row32-scribe-en.png),
+[JSON node selection](screenshots/m5/document-position-json-duplicate-en.png), and
+[mobile JSON](screenshots/m5/document-position-json-duplicate-mobile-en.png).
+
+Only isolated fixture handlers and the existing approved M2 test services were
+used; the harness cleaned its schemas/fixtures. No real game files, provider state,
+credentials, Blueprint, networks or containers were changed/restarted. Development
+uses its existing source hot reload; no new dependency/image is required. Rollback
+is reverting this source change; no data migration. SFTPGo #18 remains unchanged.
+The historical full milestone suites were not rerun for this frontend-only change.
+
+Final staged governance passed: 899 indexed text files, 337 review PNGs, 750
+relative links, four TOML files and 44 ignore cases; secret scanning is heuristic.
+`git diff --cached --check` passed.

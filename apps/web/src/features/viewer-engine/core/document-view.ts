@@ -1,7 +1,14 @@
+/** UTF-16 offset in the exact shared source, before CodeMirror newline normalization. */
+export interface DocumentPosition {
+  offset: number;
+}
+
 /** Trusted alternate views share the host's draft, save revision and authorization. */
 export interface DocumentViewControls {
   pendingChanges?: boolean;
   focus(): void;
+  getPosition?(): DocumentPosition | undefined | Promise<DocumentPosition | undefined>;
+  revealPosition?(position: DocumentPosition): void | Promise<void>;
   flush?(): Promise<boolean>;
   find?(): void;
 }

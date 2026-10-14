@@ -5,7 +5,7 @@ import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
-/** Actual browser parser/worker and app shell. Remote viewer bytes are isolated fixtures. */
+/** Standalone large-file parser/worker and shell; small shared drafts have their own suite. */
 describe('JSON Tree browsing', () => {
   let harness: Awaited<ReturnType<typeof browserHarness>>;
   let provider: Awaited<ReturnType<typeof installBrowserFixtures>>;
@@ -35,6 +35,7 @@ describe('JSON Tree browsing', () => {
     );
     harness.setManagement(provider.management);
     remote = await provider.files();
+    // Stay above the shared editor limit so retry/cancellation exercise viewer reads.
     for (const [name, text] of Object.entries({
       'tree.json': source,
       'wide.json': JSON.stringify(
@@ -47,7 +48,7 @@ describe('JSON Tree browsing', () => {
       'primitive.json': 'null',
       'broken.json': '{\n "valid": true,\n "missing":\n}',
     }))
-      remote.set(name, Buffer.from(text));
+      remote.set(name, Buffer.from(text.padEnd(1024 * 1024 + 1, ' ')));
     base = `${harness.origin}/servers/${provider.ids.serverId}/files`;
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'clipboard', {

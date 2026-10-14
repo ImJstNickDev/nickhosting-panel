@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useFormat, useT } from '../../../app/i18n.js';
 import { Tooltip } from '../../../components/tooltip.js';
 import { ConfirmDialog, Dialog } from '../../../components/ui.js';
 import { FilemanToolbarIcon } from '../../fileman/presentation.js';
-import type { DocumentViewProps } from '../core/document-view.js';
+import type { DocumentPosition, DocumentViewProps } from '../core/document-view.js';
 import { useViewerFind } from '../core/use-find.js';
 import { DatagridMenu, type DatagridMenuItem } from './datagrid-menu.js';
 import {
@@ -67,7 +67,8 @@ export default function DelimitedView(props: DocumentViewProps) {
   const [options, setOptions] = useState(initialOptions);
   const [view, setView] = useState<DelimitedViewState>({ offset: 0, limit: 100 });
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<DatagridSelection>();
+  const [selected, setSelectedState] = useState<DatagridSelection>();
+  const [revealTick, setRevealTick] = useState(0);
   const [menu, setMenu] = useState<{
     target: DatagridContext;
     anchor: DatagridMenuAnchor;
@@ -94,6 +95,24 @@ export default function DelimitedView(props: DocumentViewProps) {
   current.current = props;
   const pageRef = useRef(page);
   pageRef.current = page;
+  const selectedRef = useRef<DatagridSelection | undefined>(undefined);
+  const selectedSource = useRef<{ rowId: number; column: number } | undefined>(undefined);
+  const setSelected = useCallback((selection: DatagridSelection | undefined) => {
+    selectedRef.current = selection;
+    const rowId = selection?.row === -1 ? -1 : pageRef.current?.rows[selection?.row ?? -1]?.id;
+    selectedSource.current =
+      selection && rowId !== undefined ? { rowId, column: selection.column } : undefined;
+    setSelectedState(selection);
+  }, []);
+  const revealRequest = useRef<
+    | {
+        position: DocumentPosition;
+        resolve: () => void;
+        running?: boolean;
+        page?: DelimitedPage;
+      }
+    | undefined
+  >(undefined);
   const resolvedView = useRef<DelimitedViewState | undefined>(undefined);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -115,14 +134,21 @@ export default function DelimitedView(props: DocumentViewProps) {
     );
   }, []);
   const focusCell = useCallback((selection?: DatagridSelection) => {
-    const target = selection
-      ? `[data-row="${selection.row}"][data-column="${selection.column}"]`
+    const selected = selection ?? selectedRef.current;
+    if (selected?.row === -1) {
+      grid.current?.querySelectorAll<HTMLElement>('.dg-sort')[selected.column]?.focus();
+      return;
+    }
+    const target = selected
+      ? `[data-row="${selected.row}"][data-column="${selected.column}"]`
       : '[role="gridcell"][tabindex="0"]';
     const cell =
       grid.current?.querySelector<HTMLElement>(target) ??
       grid.current?.querySelector<HTMLElement>('[role="gridcell"]');
-    if (cell) cell.focus();
-    else searchInput.current?.focus();
+    if (cell) {
+      cell.focus();
+      cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } else searchInput.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -132,6 +158,8 @@ export default function DelimitedView(props: DocumentViewProps) {
       generation.current++;
       worker.dispose();
       client.current = undefined;
+      revealRequest.current?.resolve();
+      revealRequest.current = undefined;
     };
   }, []);
 
@@ -164,7 +192,6 @@ export default function DelimitedView(props: DocumentViewProps) {
           .then(async (result) => {
             if (token !== generation.current) return;
             inferredHeader.current = { path: props.path, options, header: result.header };
-            loaded.current = { value: props.value, options };
             const control = reconcileView(viewRef.current, result.columns.length);
             const nextPage =
               control.query || control.sort || control.offset || control.column !== undefined
@@ -178,6 +205,8 @@ export default function DelimitedView(props: DocumentViewProps) {
           })
           .then((result) => {
             if (token === generation.current && result) {
+              loaded.current = { value: props.value, options };
+              pageRef.current = result;
               setPage(result);
               setLoading(false);
             }
@@ -192,7 +221,7 @@ export default function DelimitedView(props: DocumentViewProps) {
       props.active ? 0 : 100,
     );
     return () => window.clearTimeout(timer);
-  }, [props.value, props.path, props.active, options, report, retry, setEdit]);
+  }, [props.value, props.path, props.active, options, report, retry, setEdit, setSelected]);
 
   const mutate = useCallback(
     (op: DelimitedEdit): Promise<boolean> => {
@@ -206,6 +235,7 @@ export default function DelimitedView(props: DocumentViewProps) {
         snapshot.columns.length +
         (op.type === 'insert-column' ? 1 : op.type === 'remove-column' ? -1 : 0);
       const nextView = reconcileView(viewRef.current, width, op);
+      const sourceSelection = selectedSource.current;
       const token = ++generation.current;
       setMutating(true);
       setFailure(undefined);
@@ -233,6 +263,29 @@ export default function DelimitedView(props: DocumentViewProps) {
             if (token !== generation.current) return false;
             setPage(refreshed);
             pageRef.current = refreshed;
+          }
+          // Page indices may move after sorting or insertion. Keep the source
+          // identity for handoff even when the edited record leaves this page.
+          if (sourceSelection) {
+            if (op.type === 'remove-row' && op.rowId === sourceSelection.rowId) {
+              selectedSource.current = undefined;
+              selectedRef.current = undefined;
+            } else {
+              let column = sourceSelection.column;
+              if (op.type === 'insert-column' && column >= op.column) column++;
+              if (op.type === 'remove-column' && column > op.column) column--;
+              column = Math.min(column, (pageRef.current?.columns.length ?? 1) - 1);
+              selectedSource.current = { ...sourceSelection, column };
+              const row =
+                sourceSelection.rowId === -1
+                  ? -1
+                  : pageRef.current?.rows.findIndex((item) => item.id === sourceSelection.rowId);
+              selectedRef.current =
+                row !== undefined && (row >= 0 || sourceSelection.rowId === -1)
+                  ? { row, column }
+                  : undefined;
+            }
+            setSelectedState(selectedRef.current);
           }
           return true;
         })
@@ -269,6 +322,116 @@ export default function DelimitedView(props: DocumentViewProps) {
   }, [mutate, setEdit]);
 
   const pendingChanges = (!!edit && edit.value !== edit.original) || mutating;
+  const getPosition = useCallback(async (): Promise<DocumentPosition | undefined> => {
+    const worker = client.current;
+    const snapshot = pageRef.current;
+    const expected = current.current.value;
+    const token = generation.current;
+    if (!worker || !snapshot || loaded.current?.value !== expected) return undefined;
+    const selection =
+      selectedSource.current ??
+      (snapshot.rows[0] ? { rowId: snapshot.rows[0].id, column: 0 } : undefined);
+    if (!selection) return undefined;
+    try {
+      const result = await worker.position(selection.rowId, selection.column, snapshot.revision);
+      return token === generation.current && current.current.value === expected
+        ? (result ?? undefined)
+        : undefined;
+    } catch (error) {
+      if (token === generation.current) report(error);
+      return undefined;
+    }
+  }, [report]);
+  const revealPosition = useCallback((position: DocumentPosition): Promise<void> => {
+    revealRequest.current?.resolve();
+    return new Promise((resolve) => {
+      revealRequest.current = { position, resolve };
+      setRevealTick((value) => value + 1);
+    });
+  }, []);
+
+  // A Scribe edit may still be waiting for the retained worker to parse. Keep the
+  // handoff queued until that exact draft and its current view have settled.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: New requests and stale replies explicitly wake the queued handoff.
+  useEffect(() => {
+    const request = revealRequest.current;
+    if (!request || request.running || request.page) return;
+    if (failure && !loading) {
+      request.resolve();
+      revealRequest.current = undefined;
+      return;
+    }
+    const worker = client.current;
+    if (
+      !worker ||
+      !page ||
+      loading ||
+      mutating ||
+      loaded.current?.value !== props.value ||
+      resolvedView.current !== view
+    )
+      return;
+    request.running = true;
+    const expected = props.value;
+    const token = generation.current;
+    void worker
+      .reveal(request.position, view, page.revision)
+      .then((result) => {
+        if (revealRequest.current !== request) return;
+        if (token !== generation.current || current.current.value !== expected) {
+          request.running = false;
+          setRevealTick((value) => value + 1);
+          return;
+        }
+        request.page = result.page;
+        resolvedView.current = result.view;
+        viewRef.current = result.view;
+        pageRef.current = result.page;
+        setView(result.view);
+        setSearch(result.view.query ?? '');
+        setPage(result.page);
+        setSelected(result.selection);
+      })
+      .catch((error: unknown) => {
+        if (revealRequest.current !== request) return;
+        if (token !== generation.current || current.current.value !== expected) {
+          request.running = false;
+          setRevealTick((value) => value + 1);
+          return;
+        }
+        report(error);
+        request.resolve();
+        revealRequest.current = undefined;
+      });
+  }, [revealTick, page, loading, mutating, props.value, view, failure, report, setSelected]);
+  useLayoutEffect(() => {
+    const request = revealRequest.current;
+    if (request?.page && request.page === page) {
+      request.resolve();
+      revealRequest.current = undefined;
+    }
+  }, [page]);
+  useLayoutEffect(() => {
+    // Undo/reparse can retain a focused DOM cell while clearing its selection.
+    // Clicking it again does not emit focus, so restore its new source identity
+    // after the replacement page commits, without moving keyboard focus.
+    const focused = document.activeElement;
+    if (
+      !page ||
+      selectedRef.current ||
+      revealRequest.current ||
+      !props.active ||
+      !grid.current?.contains(focused) ||
+      !(focused instanceof HTMLElement)
+    )
+      return;
+    if (focused.matches('[role="gridcell"]')) {
+      const row = Number(focused.dataset.row);
+      const column = Number(focused.dataset.column);
+      if (page.rows[row] && column >= 0 && column < page.columns.length)
+        setSelected({ row, column });
+    }
+  }, [page, props.active, setSelected]);
   useEffect(() => {
     props.onControls({
       focus: () => {
@@ -280,10 +443,12 @@ export default function DelimitedView(props: DocumentViewProps) {
         searchInput.current?.select();
       },
       flush,
+      getPosition,
+      revealPosition,
       pendingChanges,
     });
     return () => props.onControls(undefined);
-  }, [props.onControls, focusCell, flush, pendingChanges]);
+  }, [props.onControls, focusCell, flush, getPosition, revealPosition, pendingChanges]);
 
   useEffect(() => {
     if (search === (view.query ?? '')) return;
@@ -313,7 +478,8 @@ export default function DelimitedView(props: DocumentViewProps) {
         if (token !== generation.current) return;
         resolvedView.current = view;
         setPage(result);
-        setSelected((previous) => (previous?.row === -1 ? previous : undefined));
+        pageRef.current = result;
+        setSelected(selectedRef.current?.row === -1 ? selectedRef.current : undefined);
         setCopy(undefined);
         setLoading(false);
         grid.current?.scrollTo({ top: 0 });
@@ -324,7 +490,7 @@ export default function DelimitedView(props: DocumentViewProps) {
           setLoading(false);
         }
       });
-  }, [view, report]);
+  }, [view, report, setSelected]);
 
   useEffect(() => {
     if (edit?.rowId !== undefined && edit.selection.column !== undefined)

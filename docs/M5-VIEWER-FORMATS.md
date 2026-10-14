@@ -493,8 +493,10 @@ separate real-file timings and failed fixed-block experiments.
 
 ## JSON Tree — worker-owned document and virtual browsing
 
-JSON Tree is a read-only builtin hosted by Fileman. The existing same-origin
-viewer source transport handles physical files and archive members. Reading the
+JSON Tree is a read-only view hosted by Fileman. Sources within Scribe’s editor
+budget share its document session and toolbar switch; larger sources retain the
+independent read-only viewer. The existing same-origin transports handle physical
+files and archive members. Reading the
 source happens once per opening/explicit reload; expansion, search, selection,
 value details and clipboard requests are local browser operations. No Blueprint,
 Pterodactyl or Wings endpoint is added, and no parser sends document contents to
@@ -621,3 +623,26 @@ and removes the stylesheet on unmount. Its viewport height stays local and its
 color scheme follows NickHosting; opening a document cannot restyle the shared
 sidebar or change the application's native controls. The supported current
 Chromium/Firefox targets implement CSS scope (Firefox 146+).
+
+### Shared source positions — JSON Tree / Datagrid / Scribe (2026-10-14)
+
+JSON/JSONC/JSON5 within the existing 1 MiB text-editor bound now use the same
+document-view registry as CSV/TSV. JSON Tree only reads the shared draft; Scribe
+remains the editor and owns undo/redo. Invalid drafts remain repairable in Scribe.
+Switching views never saves, normalizes, or downloads the document again. Archive
+entries keep read-only permissions. Larger JSON documents retain the independent
+8 MiB JSON Tree preview without offering an unusable Scribe toggle.
+
+Document views exchange a UTF-16 offset into the exact shared source. Scribe maps
+its normalized line endings back to the retained raw document index. Datagrid
+tracks source-record identity and field spans, independent of displayed sorting,
+filtering and paging: a quoted multiline cell maps to its actual source position,
+not an assumed one-record-per-line number. Returning from Scribe selects the
+corresponding cell/page; only a query that hides that cell is cleared. JSON Tree
+resolves source spans including keys, preserves duplicate-key occurrences and
+expands the ancestors required to reveal the selected node.
+
+Renderers retain their worker and view state while hidden. Position handoff waits
+for any pending draft parse and focuses the newly visible view. Cursor movement
+and view switching use local indexes/worker messages, not provider requests. No
+backend, Blueprint, dependency, infrastructure or authorization change is needed.

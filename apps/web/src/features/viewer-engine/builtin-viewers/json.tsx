@@ -2,6 +2,11 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import { useFormat, useT } from '../../../app/i18n.js';
 import { ErrorNotice } from '../../../components/ui.js';
 import { readViewerBytes, viewerPath } from '../core/access.js';
+import type {
+  DocumentPosition,
+  DocumentViewControls,
+  DocumentViewProps,
+} from '../core/document-view.js';
 import { previewLimits } from '../core/limits.js';
 import { viewerExtension } from '../core/registry.js';
 import type { ViewerProps } from '../core/types.js';
@@ -14,6 +19,134 @@ import './json-tree.css';
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 8;
+
+/** The host owns reads and saves; this adapter only indexes its current draft. */
+export function JsonDocumentView(props: DocumentViewProps) {
+  return <SharedJsonDocument key={props.path} {...props} />;
+}
+
+function SharedJsonDocument({ path, value, active, onControls }: DocumentViewProps) {
+  const t = useT();
+  const [attempt, setAttempt] = useState(0);
+  const [client, setClient] = useState<JsonTreeClient>();
+  const [loaded, setLoaded] = useState<{ source: string; initial: JsonView }>();
+  const [failure, setFailure] = useState<{ source: string; error: unknown }>();
+  const workspace = useRef<DocumentViewControls | undefined>(undefined);
+  const queuedPosition = useRef<DocumentPosition | undefined>(undefined);
+  // An initially active tree focuses once after its first worker result; views
+  // mounted in the background rely on the host's explicit focus request.
+  const focusPending = useRef(active);
+  const current = useRef({ active, value, onControls });
+  current.current = { active, value, onControls };
+  const loadedSource = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    // Retry also replaces a worker terminated by a hard parser deadline.
+    void attempt;
+    const next = new JsonTreeClient();
+    setClient(next);
+    return () => next.dispose();
+  }, [attempt]);
+
+  useEffect(() => {
+    if (!client) return;
+    let cancelled = false;
+    setLoaded(undefined);
+    setFailure(undefined);
+    loadedSource.current = undefined;
+    const timeout = window.setTimeout(() => {
+      void client.load(value, viewerExtension(path)).then(
+        (initial) => {
+          if (!cancelled) {
+            loadedSource.current = value;
+            setLoaded({ source: value, initial });
+          }
+        },
+        (error: unknown) => {
+          if (!cancelled) setFailure({ source: value, error });
+        },
+      );
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [client, value, path]);
+
+  const attachWorkspace = useCallback((controls: DocumentViewControls | undefined) => {
+    workspace.current = controls;
+    if (!controls) return;
+    const position = queuedPosition.current;
+    queuedPosition.current = undefined;
+    const reveal = position ? controls.revealPosition?.(position) : undefined;
+    void Promise.resolve(reveal).then(() => {
+      if (focusPending.current && current.current.active && workspace.current === controls) {
+        focusPending.current = false;
+        controls.focus();
+      }
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    current.current.onControls({
+      focus() {
+        if (!current.current.active) return;
+        if (workspace.current && loadedSource.current === current.current.value) {
+          focusPending.current = false;
+          workspace.current.focus();
+        } else focusPending.current = true;
+      },
+      async getPosition() {
+        if (loadedSource.current !== current.current.value) return queuedPosition.current;
+        return workspace.current?.getPosition?.();
+      },
+      revealPosition(position) {
+        if (workspace.current && loadedSource.current === current.current.value)
+          return workspace.current.revealPosition?.(position);
+        queuedPosition.current = position;
+      },
+      find() {
+        if (current.current.active) workspace.current?.find?.();
+      },
+    });
+    return () => current.current.onControls(undefined);
+  }, []);
+
+  const error = failure?.source === value ? failure.error : undefined;
+  if (error) {
+    const position = error as { line?: number; column?: number };
+    return (
+      <div className="ve-json">
+        <JsonFeedback>
+          <ErrorNotice error={error} />
+          {position.line !== undefined && (
+            <span>
+              {t('jsonTree.location', { line: position.line, column: position.column ?? 1 })}
+            </span>
+          )}
+          <button type="button" className="secondary" onClick={() => setAttempt(attempt + 1)}>
+            {t('jsonTree.retry')}
+          </button>
+        </JsonFeedback>
+      </div>
+    );
+  }
+  if (!client || !loaded || loaded.source !== value)
+    return (
+      <div className="ve-json">
+        <JsonSkeleton label={t('viewer.loading')} />
+      </div>
+    );
+  return (
+    <JsonWorkspace
+      client={client}
+      initial={loaded.initial}
+      active={active}
+      onControls={attachWorkspace}
+      onReload={() => setAttempt(attempt + 1)}
+    />
+  );
+}
 
 export default function JsonViewer(props: ViewerProps) {
   return (
@@ -74,20 +207,28 @@ function JsonWorkspace({
   client,
   initial,
   onReload,
+  active = true,
+  onControls,
 }: {
   client: JsonTreeClient;
   initial: JsonView;
   onReload: () => void;
+  active?: boolean;
+  onControls?: (controls: DocumentViewControls | undefined) => void;
 }) {
   const t = useT();
   const format = useFormat();
   const treeId = useId();
   const tree = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   useLayoutEffect(() => {
-    tree.current?.focus({ preventScroll: true });
-  }, []);
+    if (active && !onControls) tree.current?.focus({ preventScroll: true });
+  }, [active, onControls]);
   const [view, setView] = useState(initial);
   const [query, setQuery] = useState('');
+  const appliedQuery = useRef('');
   const [composing, setComposing] = useState(false);
   const [error, setError] = useState<unknown>();
   const [metadata, setMetadata] = useState<JsonDetail>();
@@ -144,9 +285,31 @@ function JsonWorkspace({
     [client, viewport],
   );
   useLayoutEffect(() => {
+    onControls?.({
+      focus() {
+        if (activeRef.current) tree.current?.focus({ preventScroll: true });
+      },
+      async getPosition() {
+        try {
+          const selection = await mutation.current;
+          return { offset: selection.selectedId };
+        } catch {
+          return undefined;
+        }
+      },
+      revealPosition(position) {
+        return request({ type: 'revealPosition', offset: position.offset }, true);
+      },
+      find() {
+        if (activeRef.current) search.current?.focus();
+      },
+    });
+    return () => onControls?.(undefined);
+  }, [onControls, request]);
+  useLayoutEffect(() => {
     const intent = revealIntent.current;
     const element = tree.current;
-    if (!intent || intent.view !== view || !element) return;
+    if (!active || !intent || intent.view !== view || !element) return;
     revealIntent.current = undefined;
     if (intent.mutation !== mutation.current) return;
     const before = element.scrollTop;
@@ -157,7 +320,7 @@ function JsonWorkspace({
     if (element.scrollTop !== before) programmaticScroll.current = element.scrollTop;
     cancelAnimationFrame(frame.current);
     void request();
-  }, [view, request]);
+  }, [view, request, active]);
   useEffect(() => {
     alive.current = true;
     const observer = new ResizeObserver(() => {
@@ -173,12 +336,15 @@ function JsonWorkspace({
     };
   }, [request]);
   useEffect(() => {
-    if (composing) return;
+    if (!active || composing || query === appliedQuery.current) return;
     const timeout = window.setTimeout(() => {
-      void request({ type: 'search', query }, Boolean(query));
+      if (activeRef.current) {
+        appliedQuery.current = query;
+        void request({ type: 'search', query }, Boolean(query));
+      }
     }, 180);
     return () => window.clearTimeout(timeout);
-  }, [query, composing, request]);
+  }, [query, composing, request, active]);
   useEffect(() => {
     let current = true;
     setMetadata(undefined);
@@ -236,7 +402,9 @@ function JsonWorkspace({
   const closeDetail = () => {
     detailSequence.current++;
     setDetail(false);
-    requestAnimationFrame(() => tree.current?.focus());
+    requestAnimationFrame(() => {
+      if (activeRef.current) tree.current?.focus();
+    });
   };
   const selected = view.rows.find((row) => row.id === view.selectedId);
   return (
@@ -245,6 +413,7 @@ function JsonWorkspace({
         <div className="jt-search">
           <JsonIcon kind="search" />
           <input
+            ref={search}
             type="search"
             aria-label={t('jsonTree.search')}
             placeholder={t('jsonTree.search')}
@@ -254,6 +423,7 @@ function JsonWorkspace({
             onCompositionStart={() => setComposing(true)}
             onCompositionEnd={() => setComposing(false)}
             onKeyDown={(event) => {
+              if (!active) return;
               if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 void request({ type: 'match', direction: event.shiftKey ? -1 : 1 }, true);
@@ -333,6 +503,7 @@ function JsonWorkspace({
             });
           }}
           onKeyDown={(event) => {
+            if (!active) return;
             if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
               if (!window.getSelection()?.toString()) {
                 event.preventDefault();
@@ -429,7 +600,7 @@ function JsonWorkspace({
             ))}
           </div>
         </div>
-        {detail && (
+        {active && detail && (
           <JsonDetailPanel
             client={client}
             id={selectedId}

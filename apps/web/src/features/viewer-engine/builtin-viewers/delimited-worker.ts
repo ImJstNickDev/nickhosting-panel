@@ -23,6 +23,12 @@ self.onmessage = (event: MessageEvent<DelimitedRequest & { requestId: number }>)
         case 'detail':
           result = model.detail(request.rowId, request.column, request.revision);
           break;
+        case 'position':
+          result = model.position(request.rowId, request.column, request.revision);
+          break;
+        case 'reveal':
+          result = model.reveal(request.position, request.view, request.revision);
+          break;
         case 'edit':
           result = model.edit(request.op, request.revision, request.view);
           break;

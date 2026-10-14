@@ -59,9 +59,11 @@ import { createPortal } from 'react-dom';
 import { useLocale, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
+  editorToSourceOffset,
   fileDocument,
   fileDocumentExtensions,
   replaceFileDocument,
+  sourceToEditorOffset,
 } from './file-editor-document.js';
 import { editorPhraseKeys, fileLanguage, validateFileSyntax } from './file-editor-model.js';
 
@@ -69,6 +71,8 @@ const externalContent = Annotation.define<boolean>();
 
 export type FileEditorControls = {
   focus: () => void;
+  getPosition?: () => { offset: number };
+  revealPosition?: (position: { offset: number }) => void;
   undo: () => void;
   redo: () => void;
   find: () => void;
@@ -401,6 +405,16 @@ export function FileTextEditor({
       };
       callbacks.current.onControls?.({
         focus: () => editor.focus(),
+        getPosition: () => ({
+          offset: editorToSourceOffset(editor.state, editor.state.selection.main.head),
+        }),
+        revealPosition: ({ offset }) => {
+          const anchor = sourceToEditorOffset(editor.state, offset);
+          editor.dispatch({
+            selection: { anchor },
+            effects: EditorView.scrollIntoView(anchor, { y: 'center' }),
+          });
+        },
         replaceContent: (value) => {
           if (callbacks.current.readOnly) return;
           const replacement = replaceFileDocument(editor.state, value);

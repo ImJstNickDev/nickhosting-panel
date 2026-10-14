@@ -105,6 +105,72 @@ describe('worker-resident JSON index', () => {
     expect(model.action({ type: 'collapseAll' }).totalVisible).toBe(1);
   });
 
+  it('maps exact UTF-16 draft offsets through BOM, CRLF, escaped keys and array items', () => {
+    const source =
+      '\uFEFF{\r\n  "emoji": "😀",\r\n  "a\\u002fb": [{"leaf": 123}], "tail": true\r\n}';
+    const model = new JsonTreeModel(source, 'json');
+    model.action({ type: 'collapseAll' });
+    for (const offset of [source.indexOf('a\\u002f'), source.indexOf('002f')]) {
+      const view = model.action({ type: 'revealPosition', offset });
+      expect(model.copy(view.selectedId, 'pointer')).toBe('/a~1b');
+      expect(view.selectedId).toBe(source.indexOf('[{'));
+    }
+    const leaf = model.action({ type: 'revealPosition', offset: source.indexOf('leaf') + 2 });
+    expect(leaf.selectedId).toBe(source.indexOf('123'));
+    expect(model.copy(leaf.selectedId, 'pointer')).toBe('/a~1b/0/leaf');
+    expect(leaf.rows.filter((row) => row.expanded).map((row) => row.key)).toEqual([
+      undefined,
+      'a/b',
+      '0',
+    ]);
+    expect(model.detail(leaf.selectedId, 2).offset).toBe(2);
+    expect(model.detail(leaf.selectedId).line).toBe(3);
+    const object = model.action({ type: 'revealPosition', offset: source.indexOf('{"leaf') });
+    expect(model.copy(object.selectedId, 'pointer')).toBe('/a~1b/0');
+    const emoji = model.action({ type: 'revealPosition', offset: source.indexOf('😀') + 1 });
+    expect(emoji.selectedId).toBe(source.indexOf('"😀"'));
+  });
+
+  it('selects the deepest containing node at delimiters, whitespace and source boundaries', () => {
+    const source = '  {"branch": [1, {"deep": 2}], "tail": 3}  ';
+    const model = new JsonTreeModel(source, 'json');
+    const pointerAt = (offset: number) =>
+      model.copy(model.action({ type: 'revealPosition', offset }).selectedId, 'pointer');
+    expect(pointerAt(source.indexOf('1'))).toBe('/branch/0');
+    expect(pointerAt(source.indexOf('1') + 1)).toBe('/branch');
+    expect(pointerAt(source.indexOf('2}') + 1)).toBe('/branch/1');
+    expect(pointerAt(source.indexOf(']'))).toBe('/branch');
+    expect(pointerAt(source.indexOf(']') + 1)).toBe('');
+    expect(pointerAt(source.indexOf(':') + 1)).toBe('/branch');
+    for (const offset of [-20, 0, source.length, 10000, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(pointerAt(offset)).toBe('');
+  });
+
+  it('reveals JSONC and JSON5 source keys without confusing decoded spelling with source ranges', () => {
+    for (const [source, extension, marker, pointer] of [
+      ['{/* comment */"escaped\\u0020key": {"v": 7},}', 'jsonc', '0020', '/escaped key'],
+      ["{bare: ['😀', {nested: 0x10}],}", 'json5', 'nested', '/bare/1/nested'],
+      ["{'quoted\\u0020key': -Infinity,}", 'json5', '0020', '/quoted key'],
+    ] as const) {
+      const model = new JsonTreeModel(source, extension);
+      model.action({ type: 'collapseAll' });
+      const view = model.action({ type: 'revealPosition', offset: source.indexOf(marker) + 1 });
+      expect(model.copy(view.selectedId, 'pointer')).toBe(pointer);
+      expect(view.rows.some((row) => row.id === view.selectedId)).toBe(true);
+    }
+  });
+
+  it('returns the correct revealed row index beyond the serialized viewport', () => {
+    const source = JSON.stringify({ items: Array.from({ length: 500 }, (_, i) => ({ i })) });
+    const model = new JsonTreeModel(source, 'json');
+    model.action({ type: 'collapseAll' });
+    const view = model.action({ type: 'revealPosition', offset: source.indexOf('499') });
+    expect(model.copy(view.selectedId, 'pointer')).toBe('/items/499/i');
+    expect(view.selectedIndex).toBe(502);
+    expect(view.rows.some((row) => row.selected)).toBe(false);
+    expect(model.view(view.selectedIndex, 1).rows[0]?.selected).toBe(true);
+  });
+
   it('bounds every normal reply while explicit clipboard requests retain complete source', () => {
     const key = 'k'.repeat(5000);
     const source = JSON.stringify({ [key]: `${'x'.repeat(20_000)}😀tail` });

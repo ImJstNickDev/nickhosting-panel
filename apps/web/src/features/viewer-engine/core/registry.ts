@@ -117,7 +117,10 @@ export function selectableViewers(source: ViewerSource): ViewerDefinition[] {
 export function availableViewers(source: ViewerSource): ViewerDefinition[] {
   const extension = viewerExtension(source.name);
   return selectableViewers(source).filter((viewer) => {
-    if (viewer.id === 'text' || documentViews(source.name).some((item) => item.id === viewer.id))
+    if (
+      viewer.id === 'text' ||
+      documentViews(source.name).some((item) => item.id === viewer.id && !item.standalone)
+    )
       return (
         fileEditorAvailability({ name: source.name, size: source.size, is_file: true }) === 'text'
       );

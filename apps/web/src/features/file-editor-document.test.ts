@@ -2,9 +2,11 @@ import { history, isolateHistory, redo, undo } from '@codemirror/commands';
 import { Compartment, EditorState, Transaction } from '@codemirror/state';
 import { describe, expect, it } from 'vitest';
 import {
+  editorToSourceOffset,
   fileDocument,
   fileDocumentExtensions,
   replaceFileDocument,
+  sourceToEditorOffset,
 } from './file-editor-document.js';
 
 function document(value: string) {
@@ -109,5 +111,27 @@ describe('shared exact file document', () => {
     ).toBe(false);
     expect(state.field(fileDocument).text).toBe('new\r\nfile');
     expect(state.doc.toString()).toBe('new\nfile');
+  });
+});
+
+describe('shared source positions', () => {
+  it('round trips UTF-16 cursor positions with BOM, emoji and mixed newlines', () => {
+    const editor = document('\uFEFFa😀\r\nsecond\nthird\rlast');
+    for (let offset = 0; offset <= editor.state.doc.length; offset++)
+      expect(sourceToEditorOffset(editor.state, editorToSourceOffset(editor.state, offset))).toBe(
+        offset,
+      );
+    expect(editorToSourceOffset(editor.state, editor.state.doc.line(2).from)).toBe(6);
+    expect(sourceToEditorOffset(editor.state, 5)).toBe(editor.state.doc.line(1).to);
+    expect(sourceToEditorOffset(editor.state, 999)).toBe(editor.state.doc.length);
+    expect(editorToSourceOffset(editor.state, -1)).toBe(0);
+  });
+  it('uses current raw positions after edits and undo', () => {
+    const editor = document('one\r\ntwo');
+    editor.replace('one\r\ninserted\r\ntwo');
+    const at = editor.raw().indexOf('two');
+    expect(editor.state.doc.lineAt(sourceToEditorOffset(editor.state, at)).number).toBe(3);
+    undo(editor);
+    expect(sourceToEditorOffset(editor.state, editor.raw().indexOf('two'))).toBe(4);
   });
 });

@@ -183,3 +183,14 @@ CSV/TSV documents inside archives remain read-only, although the same view switc
 is available. SQLite writes, DuckDB/H2 adapters, formulas and spreadsheet exports
 are outside this change. The existing editor byte limit still applies. No Blueprint
 change, API endpoint, provider credentials or live server operation is introduced.
+
+### 2026-10-14 — Shared JSON documents and source-position handoff
+
+The compiled document-view registry now includes JSON Tree alongside delimited
+Datagrid. Views expose optional `getPosition`/`revealPosition` controls using a
+UTF-16 offset in the exact shared source. The host coordinates handoff and focus;
+format-specific workers resolve the offset into a node or source cell. This avoids
+viewer-to-viewer DOM coupling and incorrect assumptions about CSV row numbers or
+normalized line endings. JSON Tree remains a read-only representation of Scribe’s
+editable draft; larger JSON retains the independent preview budget. Existing
+file-write authorization, save revisions and archive read-only semantics remain.

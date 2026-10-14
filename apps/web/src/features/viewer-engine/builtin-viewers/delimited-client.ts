@@ -1,3 +1,4 @@
+import type { DocumentPosition } from '../core/document-view.js';
 import {
   type DelimitedEdit,
   type DelimitedEditResult,
@@ -6,13 +7,14 @@ import {
   type DelimitedPage,
   type DelimitedRequest,
   type DelimitedResponse,
+  type DelimitedRevealResult,
   type DelimitedView,
   delimitedLimits,
 } from './delimited-protocol.js';
 
 export { DelimitedError } from './delimited-protocol.js';
 
-type Result = DelimitedPage | DelimitedEditResult | string;
+type Result = Extract<DelimitedResponse, { result: unknown }>['result'];
 interface Pending {
   resolve: (value: Result) => void;
   reject: (error: Error) => void;
@@ -109,6 +111,16 @@ export class DelimitedClient {
   }
   detail(rowId: number, column: number, revision?: number): Promise<string> {
     return this.request({ type: 'detail', rowId, column, revision });
+  }
+  position(rowId: number, column: number, revision: number): Promise<DocumentPosition | null> {
+    return this.request({ type: 'position', rowId, column, revision });
+  }
+  reveal(
+    position: DocumentPosition,
+    view: DelimitedView,
+    revision: number,
+  ): Promise<DelimitedRevealResult> {
+    return this.request({ type: 'reveal', position, view, revision });
   }
   edit(op: DelimitedEdit, revision: number, view?: DelimitedView): Promise<DelimitedEditResult> {
     return this.request({ type: 'edit', op, revision, view });

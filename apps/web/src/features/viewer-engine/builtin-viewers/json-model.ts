@@ -11,6 +11,8 @@ import {
 
 interface IndexedNode {
   id: number;
+  /** Includes an object's source key so cursor positions on keys select their value. */
+  sourceStart: number;
   end: number;
   kind: string;
   key?: string;
@@ -74,7 +76,10 @@ export class JsonTreeModel {
       throw new Error('json_bytes');
     const deadline = performance.now() + previewLimits.jsonParseMs;
     const mode = extension === 'json5' ? 'json5' : extension === 'jsonc' ? 'jsonc' : 'json';
-    const document = parse(source, { mode, ranges: true, allowTrailingCommas: mode !== 'json' });
+    // The shared draft retains its BOM. A same-width whitespace replacement keeps
+    // every parser offset in the original source while accepting UTF-8 JSON files.
+    const input = source.startsWith('\uFEFF') ? ` ${source.slice(1)}` : source;
+    const document = parse(input, { mode, ranges: true, allowTrailingCommas: mode !== 'json' });
     const visit = (
       value: ValueNode,
       parent: number | null,
@@ -83,6 +88,7 @@ export class JsonTreeModel {
       setSize: number,
       ambiguous: boolean,
       key?: string,
+      sourceStart = value.loc.start.offset,
     ): number => {
       if (this.nodes.length >= previewLimits.jsonNodes || depth > previewLimits.jsonDepth)
         throw new RangeError('json_complex');
@@ -90,6 +96,7 @@ export class JsonTreeModel {
       const index = this.nodes.length;
       const node: IndexedNode = {
         id: value.loc.start.offset,
+        sourceStart,
         end: value.loc.end.offset,
         kind: value.type,
         key,
@@ -123,6 +130,7 @@ export class JsonTreeModel {
               value.members.length,
               ambiguous || (counts.get(name) ?? 0) > 1,
               name,
+              member.name.loc.start.offset,
             ),
           );
         });
@@ -237,7 +245,23 @@ export class JsonTreeModel {
   }
 
   action(action: JsonAction): JsonView {
-    if (action.type === 'search') {
+    if (action.type === 'revealPosition') {
+      const offset = Number.isFinite(action.offset)
+        ? Math.max(0, Math.min(this.source.length, Math.floor(action.offset)))
+        : 0;
+      // Preorder source starts are sorted. Find the last possible descendant,
+      // then ascend past completed siblings to the deepest containing value.
+      let low = 0;
+      let high = this.nodes.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (this.node(middle).sourceStart <= offset) low = middle + 1;
+        else high = middle;
+      }
+      let index = Math.max(0, low - 1);
+      while (index && offset >= this.node(index).end) index = this.node(index).parent ?? 0;
+      this.reveal(index);
+    } else if (action.type === 'search') {
       const query = action.query.trim().slice(0, 1024).toLocaleLowerCase();
       this.matches = [];
       if (query)

@@ -73,3 +73,23 @@ export function replaceFileDocument(state: EditorState, value: string) {
     effects: sourcePatch.of(difference(before, value)),
   };
 }
+
+/** Convert normalized editor offsets without scanning/copying the source again. */
+export function editorToSourceOffset(state: EditorState, offset: number): number {
+  const position = Math.max(0, Math.min(state.doc.length, Math.trunc(offset) || 0));
+  const line = state.doc.lineAt(position);
+  return (state.field(fileDocument).starts[line.number - 1] ?? 0) + position - line.from;
+}
+export function sourceToEditorOffset(state: EditorState, offset: number): number {
+  const raw = state.field(fileDocument);
+  const position = Math.max(0, Math.min(raw.text.length, Math.trunc(offset) || 0));
+  let low = 0;
+  let high = raw.starts.length;
+  while (low + 1 < high) {
+    const middle = (low + high) >>> 1;
+    if ((raw.starts[middle] ?? 0) <= position) low = middle;
+    else high = middle;
+  }
+  const line = state.doc.line(low + 1);
+  return line.from + Math.min(line.length, position - (raw.starts[low] ?? 0));
+}

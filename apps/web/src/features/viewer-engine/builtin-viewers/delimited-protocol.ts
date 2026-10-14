@@ -1,3 +1,4 @@
+import type { DocumentPosition } from '../core/document-view.js';
 import { previewLimits } from '../core/limits.js';
 
 export type DelimitedDelimiter = ',' | ';' | '\t' | '|';
@@ -46,6 +47,12 @@ export interface DelimitedEditResult {
   text: string;
   page: DelimitedPage;
 }
+export interface DelimitedRevealResult {
+  page: DelimitedPage;
+  view: DelimitedView;
+  /** Page-relative row; -1 identifies the source header. */
+  selection?: { row: number; column: number };
+}
 export type DelimitedErrorCode = 'syntax' | 'limit' | 'stale' | 'disposed' | 'timeout' | 'invalid';
 export class DelimitedError extends Error {
   constructor(readonly code: DelimitedErrorCode) {
@@ -57,9 +64,20 @@ export type DelimitedRequest =
   | { type: 'load'; text: string; extension: string; options: DelimitedOptions }
   | { type: 'view'; view: DelimitedView }
   | { type: 'detail'; rowId: number; column: number; revision?: number }
+  | { type: 'position'; rowId: number; column: number; revision: number }
+  | { type: 'reveal'; position: DocumentPosition; view: DelimitedView; revision: number }
   | { type: 'edit'; op: DelimitedEdit; revision: number; view?: DelimitedView };
 export type DelimitedResponse =
-  | { requestId: number; result: DelimitedPage | DelimitedEditResult | string }
+  | {
+      requestId: number;
+      result:
+        | DelimitedPage
+        | DelimitedEditResult
+        | DelimitedRevealResult
+        | DocumentPosition
+        | null
+        | string;
+    }
   | { requestId: number; error: DelimitedErrorCode };
 export const delimitedLimits = {
   bytes: previewLimits.textBytes,

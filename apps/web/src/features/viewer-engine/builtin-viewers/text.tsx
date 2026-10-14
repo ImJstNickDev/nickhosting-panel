@@ -15,7 +15,8 @@ export default function TextViewer({
   source,
   chrome,
   initialView = 'text',
-}: ViewerProps & { initialView?: ViewerId }) {
+  onViewChange,
+}: ViewerProps & { initialView?: ViewerId; onViewChange?: (view: ViewerId) => void }) {
   const [view, setView] = useState<ViewerId>(initialView);
   const t = useT();
   const url = viewerPath(serverId, source);
@@ -29,8 +30,8 @@ export default function TextViewer({
   return (
     <div className="ve-text">
       <DocumentEditor
-        selectedView={view}
-        onViewChange={setView}
+        selectedView={onViewChange ? initialView : view}
+        onViewChange={onViewChange ?? setView}
         actionTarget={chrome?.tools}
         path={source.name}
         value={result.value}
