@@ -1,6 +1,9 @@
 import type { MessageKey } from './catalogs.js';
 
 export const authErrorKeys: Readonly<Record<string, MessageKey>> = {
+  USERNAME_INVALID: 'auth.username_invalid',
+  USERNAME_TAKEN: 'auth.username_taken',
+  USERNAME_IMMUTABLE: 'auth.username_immutable',
   INVITATION_INVALID: 'errors.invitation_invalid',
   invitation_invalid: 'errors.invitation_invalid',
   account_not_linked: 'auth.account_conflict',

@@ -7,6 +7,7 @@ import { buildBetterAuth } from './better-auth.js';
 import type { IdentityOptions } from './contracts.js';
 import { equalToken, opaqueToken, tokenHash } from './crypto.js';
 import { throttle, transaction, writeAudit } from './storage.js';
+import { generatedUsername, usernamePattern } from './username.js';
 
 export type { IdentityMail, IdentityOptions, SetupSettings } from './contracts.js';
 export { writeAudit } from './storage.js';
@@ -175,6 +176,7 @@ export function createIdentity(options: IdentityOptions) {
         .object({
           token,
           name: z.string().trim().min(1).max(100),
+          username: z.string().regex(usernamePattern).optional(),
           email,
           password,
           locale: z.enum(['en', 'it']).default(defaultLocale),
@@ -193,8 +195,8 @@ export function createIdentity(options: IdentityOptions) {
       const existing = await tx.query('SELECT id FROM instance_setup WHERE id=1');
       if (existing.rowCount) throw new DomainError('setup_completed');
       await tx.query(
-        'INSERT INTO "user"(id,name,email,role,locale) VALUES($1,$2,$3,\'owner\',$4)',
-        [id, input.name, input.email, input.locale],
+        'INSERT INTO "user"(id,name,email,role,locale,username) VALUES($1,$2,$3,\'owner\',$4,$5)',
+        [id, input.name, input.email, input.locale, input.username ?? generatedUsername()],
       );
       await tx.query(
         'INSERT INTO account(id,"accountId","providerId","userId",password) VALUES($1,$2,\'credential\',$2,$3)',
@@ -598,9 +600,48 @@ export function createIdentity(options: IdentityOptions) {
     return (await pool.query('SELECT * FROM audit_events ORDER BY created_at DESC LIMIT 200')).rows;
   }
 
+  async function handler(request: Request): Promise<Response> {
+    // Better Auth wraps insertion-time unique violations as FAILED_TO_CREATE_USER.
+    // Resolve a concurrent username claim after its transaction has rolled back,
+    // without exposing database errors or consuming the losing invitation.
+    const isSignup = new URL(request.url).pathname === '/api/auth/sign-up/email';
+    const input: unknown = isSignup
+      ? await request
+          .clone()
+          .json()
+          .catch(() => null)
+      : null;
+    const response = await auth.handler(request);
+    if (
+      response.status === 422 &&
+      input &&
+      typeof input === 'object' &&
+      'username' in input &&
+      typeof input.username === 'string' &&
+      usernamePattern.test(input.username)
+    ) {
+      const failure: unknown = await response
+        .clone()
+        .json()
+        .catch(() => null);
+      if (
+        failure &&
+        typeof failure === 'object' &&
+        'code' in failure &&
+        failure.code === 'FAILED_TO_CREATE_USER' &&
+        (await pool.query('SELECT id FROM "user" WHERE username=$1', [input.username])).rowCount
+      )
+        return Response.json(
+          { code: 'USERNAME_TAKEN', message: 'auth.username_taken' },
+          { status: 409 },
+        );
+    }
+    return response;
+  }
+
   return {
     auth,
-    handler: auth.handler,
+    handler,
     authenticate,
     bootstrapStatus,
     claimOwner,

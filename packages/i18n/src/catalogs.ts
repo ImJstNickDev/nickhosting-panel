@@ -1,4 +1,8 @@
 export const en = {
+  'auth.username_invalid':
+    'Use 3–40 lowercase letters, numbers, underscores or hyphens, starting with a letter or number.',
+  'auth.username_taken': 'This username is already in use.',
+  'auth.username_immutable': 'Your username cannot be changed.',
   'minecraft.content.backup_restored': 'The verified backup was restored.',
   'minecraft.installation.verified': 'Minecraft installation verified.',
   'minecraft.content.file_verified': 'File verified: {path}.',
@@ -120,6 +124,10 @@ export const en = {
 export type MessageKey = keyof typeof en;
 
 export const it: Record<MessageKey, string> = {
+  'auth.username_invalid':
+    'Usa da 3 a 40 lettere minuscole, numeri, trattini bassi o trattini, iniziando con una lettera o un numero.',
+  'auth.username_taken': 'Questo nome utente è già in uso.',
+  'auth.username_immutable': 'Il nome utente non può essere modificato.',
   'minecraft.content.backup_restored': 'Il backup verificato è stato ripristinato.',
   'minecraft.installation.verified': 'Installazione Minecraft verificata.',
   'minecraft.content.file_verified': 'File verificato: {path}.',

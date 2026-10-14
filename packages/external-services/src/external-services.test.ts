@@ -97,6 +97,40 @@ function sftpFixture() {
 }
 
 describe('SFTPGo credentials', () => {
+  it('keeps a named persistent primary identity through rotation, quota updates and revocation', async () => {
+    const f = sftpFixture();
+    const request = { ...f.request(), username: 'imjstnick-a3f92c18', expiresAt: 0 };
+    expect(request.password).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    const ref = await f.adapter.ensureCredential(request);
+    expect(ref.username).toBe(request.username);
+    expect(ref.expiresAt).toBe(0);
+    const remote = f.users.get(ref.username);
+    if (!remote) throw new Error('Missing fixture user');
+    delete remote.expiration_date; // Real SFTPGo omits the zero value.
+    expect(await f.adapter.inspectCredential(request)).toEqual(ref);
+    const password = generateSftpPassword();
+    await f.adapter.rotateCredential(ref, { password, expiresAt: 0 });
+    expect(f.users.get(ref.username)).toMatchObject({
+      password,
+      username: request.username,
+      expiration_date: 0,
+    });
+    await f.adapter.updateQuota(ref, 0);
+    await f.adapter.revokeCredential(ref);
+    expect(f.users.has(ref.username)).toBe(false);
+  });
+  it('refuses a named account collision and never overwrites the existing identity', async () => {
+    const f = sftpFixture();
+    const first = { ...f.request(), username: 'nico-a3f92c18', expiresAt: 0 };
+    await f.adapter.ensureCredential(first);
+    await expect(
+      f.adapter.ensureCredential({ ...f.request(), username: first.username, expiresAt: 0 }),
+    ).rejects.toThrow();
+    expect(f.calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+    expect(f.users.get(first.username)).toMatchObject({ password: first.password });
+    await expect(f.adapter.ensureCredential({ ...first, username: '../bad' })).rejects.toThrow();
+  });
+
   it('accepts zero as an unlimited server quota while retaining session and protocol limits', async () => {
     const fixture = sftpFixture();
     const ref = await fixture.adapter.ensureCredential({ ...fixture.request(), quotaBytes: 0 });

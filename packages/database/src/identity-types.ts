@@ -4,6 +4,7 @@ import type { Generated } from 'kysely';
 export interface AuthUser {
   id: string;
   name: string;
+  username: Generated<string>;
   email: string;
   emailVerified: Generated<boolean>;
   image: string | null;

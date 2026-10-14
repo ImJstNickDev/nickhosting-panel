@@ -1223,6 +1223,7 @@ export async function getPlatformTransfers(
       totalSizeLimitBytes: null,
     },
     sftp: {
+      auxiliaryLimit: settings.values.sftpAuxiliaryLimit,
       configured:
         !!settings.values.sftpgoBaseUrl &&
         !!settings.values.sftpgoDataRoot &&

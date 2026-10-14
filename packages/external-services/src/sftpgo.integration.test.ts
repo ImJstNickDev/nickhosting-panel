@@ -144,6 +144,32 @@ describe.skipIf(!enabled)('isolated SFTPGo real filesystem and protocol', () => 
     for (const directory of directories) await rm(directory, { recursive: true });
   });
 
+  it('supports a named persistent primary with a 16-character password and stable rotation', async () => {
+    const password = generateSftpPassword();
+    expect(password).toHaveLength(16);
+    const ref = await adapter.ensureCredential({
+      serverId: serverA,
+      externalServerUuid: serverA,
+      credentialId: randomUUID(),
+      username: `fixture-${serverA.slice(0, 8)}`,
+      password,
+      expiresAt: 0,
+      quotaBytes: 0,
+    });
+    refs.push(ref);
+    const first = await connect(ref, password);
+    expect(await read(first.sftp, '/owned.txt')).toBe('server A fixture');
+    first.client.end();
+    const replacement = generateSftpPassword();
+    const rotated = await adapter.rotateCredential(ref, { password: replacement, expiresAt: 0 });
+    expect(rotated.username).toBe(ref.username);
+    expect(rotated.expiresAt).toBe(0);
+    await expect(connect(ref, password)).rejects.toThrow();
+    const second = await connect(rotated, replacement);
+    expect(await read(second.sftp, '/owned.txt')).toBe('server A fixture');
+    second.client.end();
+  });
+
   it('reads/writes only the selected server, denying traversal and pre-existing symlink escapes', async () => {
     const a = await connect(refA, passwordA);
     const b = await connect(refB, passwordB);

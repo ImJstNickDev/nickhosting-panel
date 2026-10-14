@@ -47,7 +47,16 @@ export function registerWebSessionRoutes(
     const context = await principal(c);
     const users = await db
       .selectFrom('user')
-      .select(['id', 'name', 'email', 'emailVerified', 'locale', 'role', 'twoFactorEnabled'])
+      .select([
+        'id',
+        'name',
+        'username',
+        'email',
+        'emailVerified',
+        'locale',
+        'role',
+        'twoFactorEnabled',
+      ])
       .where('id', 'in', [context.actorUserId, context.subjectUserId])
       .execute();
     const actor = users.find((user) => user.id === context.actorUserId);

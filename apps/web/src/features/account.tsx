@@ -95,11 +95,19 @@ export function AccountPage() {
               }}
             >
               <Input
-                label={t('web.name')}
+                label={t('web.displayName')}
                 name="name"
                 defaultValue={profile?.name}
                 required
                 maxLength={100}
+              />
+              <Input
+                label={t('web.username')}
+                hint={t('web.usernameImmutable')}
+                name="username"
+                value={profile?.username ?? ''}
+                placeholder={t('web.unavailable')}
+                readOnly
               />
               <Select
                 label={t('web.locale')}

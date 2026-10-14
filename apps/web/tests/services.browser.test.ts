@@ -872,7 +872,10 @@ describe('M5 browser files, backups, console and automation', () => {
   });
   it('issues, rotates and revokes scoped SFTP credentials without claiming retained transport revocation', async () => {
     await user.goto(`${base}/sftp`);
-    await user.getByRole('button', { name: 'Create SFTP credential', exact: true }).click();
+    await user.locator('.sftp-additional > summary').click();
+    await user.getByRole('button', { name: 'Add access', exact: true }).click();
+    await user.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Backup script');
+    await user.getByRole('dialog').getByRole('button', { name: 'Add access', exact: true }).click();
     await browserExpect(user.getByLabel('Password', { exact: true })).not.toHaveValue('');
     await user.getByRole('button', { name: 'Close', exact: true }).click();
     const active = user

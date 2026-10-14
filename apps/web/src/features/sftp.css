@@ -223,3 +223,42 @@
     align-self: center;
   }
 }
+.sftp-primary {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.sftp-primary-password {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.sftp-activate {
+  margin-top: 20px;
+}
+.sftp-additional {
+  border: 0;
+  padding: 0;
+}
+.sftp-additional > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.sftp-additional > summary > span {
+  margin-left: 10px;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+.sftp-additional .sftp-credentials {
+  margin-top: 14px;
+}
+.sftp-additional .sftp-heading {
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+.sftp-access-label {
+  display: block;
+  margin-bottom: 4px;
+}

@@ -349,3 +349,55 @@ modified or test servers created. Sanitized fixture screenshots:
 
 - [Desktop English](screenshots/m5/sftp-polish-desktop-en.png)
 - [Mobile Italian](screenshots/m5/sftp-polish-mobile-it.png)
+
+## Stable usernames and primary SFTP access — 2026-10-14
+
+Accounts have a unique, immutable `username`, separate from editable display
+`name`. Usernames contain 3–40 lowercase letters, digits, underscores or hyphens,
+starting with a letter or digit. Migration 029 backfills unique handles; new
+credential signup/setup accepts a chosen handle, while OAuth generates one.
+
+Each actor can explicitly generate one persistent primary login per server:
+`<username>-<first eight characters of the NickHosting server UUID>`.
+Its random password has 16 characters, is returned once and changes only through
+explicit rotation. It has no expiry and no user-facing revoke action; loss of
+management authority or server deletion still causes background revocation.
+Username collisions are rejected before provider creation.
+
+Additional accesses have labels, rotate/revoke actions and the configured expiry.
+`sftpAuxiliaryLimit` counts non-revoked additional credentials per actor/server,
+including uncertain outcomes; default 3, range 0–32. Its environment override is
+`NH_SFTP_AUXILIARY_LIMIT`. Set it in Owner settings under SFTP. Migration 030 keeps
+all existing credentials as additional accesses, preserving provider identities,
+passwords and expiry. Lists and mutations are issuer-scoped; GET never returns
+passwords. Encrypted retry state and issue #18 remain unchanged.
+
+Apply migrations 029/030 explicitly before loading the new API/worker source.
+Development migrations and the two Owner-approved username assignments were
+applied without changing existing credentials. No live credentials were generated
+or rotated for verification. The currently running development image predates the
+new migration files; the next normal image build includes them. Do not run its
+old baked migration command against the updated schema; use the updated checkout
+or a newly built image for subsequent explicit migration runs. Normal service
+startup does not run migrations.
+
+Do not roll back by source revert alone after primary credentials exist: old code
+assumes non-null expiry and does not understand primary rows. Preserve migrations
+and use a forward correction, or plan an explicit credential/data rollback with
+the Owner. No automatic credential deletion or password reset is part of rollback.
+
+Validation: 37 identity tests; 36 credential integration tests plus two final
+permission-loss regressions; 22 adapter tests; six Firefox UI tests; one real-handler
+SFTP browser test; one real isolated SFTPGo primary-login/rotation test. The latter
+initially failed because SFTPGo omits `expiration_date` for non-expiring accounts;
+the adapter now treats omission as zero and the test passes. Its temporary fixture
+account was removed after identity verification. The three retained-transport
+regressions were not rerun or reclassified; issue #18 remains a release gate.
+
+A first read-only dev UI attempt failed at the session API during source/schema
+activation; subsequent smoke passed after the existing watcher reloaded. The
+original exception was unavailable, so stale process state is not a proven cause.
+No explicit container restart or infrastructure change was performed. Reviewed
+screenshots for this revision:
+[desktop English](screenshots/m5/sftp-primary-desktop-en.png) and
+[mobile Italian](screenshots/m5/sftp-primary-mobile-it.png).

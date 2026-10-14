@@ -356,9 +356,13 @@ const settingNames: Record<string, readonly [string, string]> = {
   sftpgoInstanceId: ['SFTPGo instance ID', 'ID istanza SFTPGo'],
   sftpPublicHostname: ['Public SFTP hostname', 'Nome host SFTP pubblico'],
   sftpPublicPort: ['Public SFTP port', 'Porta SFTP pubblica'],
+  sftpAuxiliaryLimit: [
+    'Additional SFTP accesses per user and server',
+    'Accessi SFTP aggiuntivi per utente e server',
+  ],
   sftpCredentialTtlSeconds: [
-    'SFTP credential lifetime (seconds)',
-    'Durata credenziali SFTP (secondi)',
+    'Additional SFTP access lifetime (seconds)',
+    'Durata accessi SFTP aggiuntivi (secondi)',
   ],
   dnsInstanceId: ['DNS ownership ID', 'ID proprietà DNS'],
   cloudflareZoneId: ['Cloudflare zone ID', 'ID zona Cloudflare'],

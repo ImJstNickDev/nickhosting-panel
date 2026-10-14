@@ -9672,3 +9672,65 @@ without changing its focus, typing or Enter handling. Refreshed and reviewed
 Firefox desktop/mobile screenshots; read-only smoke and focused CSS Biome pass.
 Button keyboard focus indicators remain visible. No expensive suites repeated
 for this CSS-only adjustment.
+
+### 2026-10-14 — Stable usernames and primary/additional SFTP access
+
+Unique immutable usernames are separate from editable display names. Added a
+persistent primary SFTP identity per actor/server, 16-character passwords and
+named additional accesses with an Owner-configurable limit (default 3). Existing
+credentials stay auxiliary with unchanged provider identity, password and expiry.
+Migrations 029/030 and the two explicitly approved username assignments were
+applied only to dev; existing credential records were compared before/after and
+preserved. See [contracts](M5-API-CONTRACTS.md) and
+[deployment/rollback notes](M5-SFTP-DEPLOYMENT.md).
+
+Exact focused commands/results (no full historical matrix rerun):
+
+```bash
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/auth/src/identity.integration.test.ts packages/auth/src/invitation.integration.test.ts packages/auth/src/username.integration.test.ts
+# 37 passed; migration/default/uniqueness, concurrent registration, invite rollback, immutable username.
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/external.integration.test.ts
+# 36 passed.
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/external.integration.test.ts -t 'revokes .* logins when issuer authority'
+# Final storage-transition correction: 2 passed, 34 unrelated tests skipped.
+scripts/dev.sh pnpm exec vitest run packages/external-services/src/external-services.test.ts
+# 22 passed, including stable named rotation and omitted zero expiry.
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/external-services/src/sftpgo.integration.test.ts -t 'named persistent'
+# 1 passed, 8 unrelated tests skipped. Real isolated SFTPGo login/read/rotate;
+# old password fails fresh authentication, new password works, username preserved.
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/sftp-ui.browser.test.ts
+# 6 passed: confirmations, failures, one-time password, auxiliary limit,
+# EN/IT desktop/mobile, automated axe WCAG checks (no reported violations).
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/services.browser.test.ts -t 'issues, rotates'
+# 1 passed, 19 unrelated tests skipped; real handlers and isolated provider fixture.
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm i18n:check
+# Passed; 1683 keys in EN/IT/pseudolocale.
+```
+
+Scoped Biome check/format passed (11 existing non-null assertion warnings and one
+existing redundant-catch informational notice in services tests/catalog compiler).
+Independent technical review caught omitted primary username during rotation;
+the adapter now sends the persisted username, with regression coverage. Real
+isolated testing then exposed SFTPGo omitting zero `expiration_date`; decoding now
+uses its zero/no-expiry meaning and the rerun passed. The first failing test left
+one fixture account, subsequently removed after exact ID/marker/root verification;
+all test connections and directories were cleaned. No retained-transport regression
+was presented as a pass; issue #18 remains a separate production-release gate.
+
+The initial dev UI smoke failed with session HTTP 500 during source/schema
+activation. A fresh read-only authentication/schema check passed; after the
+existing watcher reloaded, the real Firefox UI smoke passed without page errors.
+The original exception was unavailable; its cause is not conclusively attributed.
+No explicit container restarts, Pterodactyl changes, game-server operations or
+live SFTP password rotations occurred. New primary issuance is left to the Owner.
+
+Reviewed sanitized screenshots: [English desktop](screenshots/m5/sftp-primary-desktop-en.png),
+[Italian mobile](screenshots/m5/sftp-primary-mobile-it.png).
+Independent technical and visual/content review: no remaining must-fix findings.
+PR #21 remains open/unmerged; this does not declare the whole M5 complete.
+
+Final indexed governance passed: 940 text files, 346 review PNGs, 772 relative
+links, four TOML files and 44 ignore cases; secret scanning remains heuristic.
+`git diff --cached --check` passed. Dev API, worker, Vite and public SFTPGo service
+were all running/healthy at handoff.

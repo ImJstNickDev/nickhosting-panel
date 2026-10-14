@@ -273,9 +273,12 @@ export interface ServerTables {
     id: string;
     server_id: string;
     actor_id: string;
+    kind: Generated<'primary' | 'auxiliary'>;
+    label: Generated<string | null>;
+    primary_username: Generated<string | null>;
     envelope: Json<unknown>;
     provider_ref: Json<unknown> | null;
-    expires_at: Date;
+    expires_at: Date | null;
     state: 'pending' | 'active' | 'revoking' | 'revoked' | 'uncertain';
     created_at: Generated<Date>;
   };

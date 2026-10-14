@@ -165,7 +165,10 @@ function credentialIntent(row: SftpRow, options: ExternalServiceOptions): Creden
       value.version !== 1 ||
       value.request.credentialId !== row.id ||
       value.request.serverId !== row.server_id ||
-      value.context.actorUserId !== row.actor_id
+      value.context.actorUserId !== row.actor_id ||
+      (row.kind === 'primary'
+        ? value.request.username !== row.primary_username || value.request.expiresAt !== 0
+        : value.request.expiresAt === 0)
     )
       throw new Error();
     return value;
@@ -177,10 +180,12 @@ const publicCredential = (row: SftpRow) => ({
   id: row.id,
   serverId: row.server_id,
   actorId: row.actor_id,
+  kind: row.kind,
+  label: row.label,
   state: row.state,
   expiresAt: row.expires_at,
   createdAt: row.created_at,
-  username: (row.provider_ref as SftpCredentialRef | null)?.username ?? null,
+  username: (row.provider_ref as SftpCredentialRef | null)?.username ?? row.primary_username,
 });
 async function saveIntent(
   db: Kysely<Database>,
@@ -196,7 +201,7 @@ async function saveIntent(
         options.codec.encrypt(JSON.stringify(intent), credentialContext(row.id)),
       ),
       state,
-      expires_at: new Date(intent.request.expiresAt),
+      expires_at: intent.request.expiresAt === 0 ? null : new Date(intent.request.expiresAt),
     })
     .where('id', '=', row.id)
     .execute();
@@ -209,15 +214,11 @@ async function runCredential(
   const intent = credentialIntent(row, options);
   const { provider, scope } = await sftpProvider(db, options);
   if (scope !== intent.scope) throw new DomainError('configuration_invalid');
-  if (intent.request.expiresAt <= now(options).getTime()) {
+  if (intent.request.expiresAt !== 0 && intent.request.expiresAt <= now(options).getTime()) {
     intent.action = 'revoke';
     await saveIntent(db, row, intent, options, 'revoking');
   }
   if (intent.action !== 'revoke') {
-    await db.transaction().execute(async (tx) => {
-      await lockResources(tx);
-      await assertStoragePolicyIdle(tx);
-    });
     try {
       await authorizeServer(
         db,
@@ -241,6 +242,14 @@ async function runCredential(
           credentialId: row.id,
           reason: 'issuer_permission_removed',
         });
+      });
+    }
+    // A storage transition fences issuance and rotation, but cannot defer
+    // removing credentials after an authoritative loss of permission.
+    if (intent.action !== 'revoke') {
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await assertStoragePolicyIdle(tx);
       });
     }
   }
@@ -300,7 +309,7 @@ async function deliverCredential(
   const intent = credentialIntent(row, options);
   const result = publicCredential(row);
   if (intent.delivered || row.state !== 'active') return { ...result, password: undefined };
-  if (row.expires_at <= now(options)) throw new DomainError('conflict');
+  if (row.expires_at && row.expires_at <= now(options)) throw new DomainError('conflict');
   if (row.actor_id !== context.actorUserId) throw new DomainError('forbidden');
   await authorizeServer(
     db,
@@ -322,7 +331,17 @@ export async function createSftpCredential(
   options: ExternalServiceOptions,
 ) {
   regular(context);
-  const { credentialId } = parse(z.object({ credentialId: z.uuid() }).strict(), input);
+  const { credentialId, kind, label } = parse(
+    z
+      .object({
+        credentialId: z.uuid(),
+        kind: z.enum(['primary', 'auxiliary']).default('auxiliary'),
+        label: z.string().trim().min(1).max(80).optional(),
+      })
+      .strict(),
+    input,
+  );
+  if (kind === 'primary' && label !== undefined) throw new DomainError('validation_failed');
   return locked(db, serverId, async (connection) => {
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
     const server = await authorizeServer(connection, verified, serverId, 'server:manage');
@@ -341,20 +360,53 @@ export async function createSftpCredential(
       row &&
       (row.server_id !== serverId ||
         row.actor_id !== context.actorUserId ||
+        row.kind !== kind ||
+        row.label !== (label ?? null) ||
         row.state === 'revoked' ||
         row.state === 'revoking')
     )
       throw new DomainError('conflict');
+    if (!row && kind === 'primary') {
+      row = await connection
+        .selectFrom('external_sftp_credentials')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .where('actor_id', '=', context.actorUserId)
+        .where('kind', '=', 'primary')
+        .where('state', '!=', 'revoked')
+        .executeTakeFirst();
+      if (row?.state === 'revoking') throw new DomainError('conflict');
+    }
     if (!row) {
+      const { config, scope } = await sftpProvider(connection, options);
       const existing = await connection
         .selectFrom('external_sftp_credentials')
         .select('id')
         .where('server_id', '=', serverId)
+        .where('actor_id', '=', context.actorUserId)
+        .where('kind', '=', 'auxiliary')
         .where('state', '!=', 'revoked')
         .execute();
-      if (existing.length >= 8) throw new DomainError('conflict');
-      const { config, scope } = await sftpProvider(connection, options);
-      const expiresAt = now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
+      if (kind === 'auxiliary' && existing.length >= config.sftpAuxiliaryLimit)
+        throw new DomainError('conflict');
+      let username: string | undefined;
+      if (kind === 'primary') {
+        const user = await connection
+          .selectFrom('user')
+          .select('username')
+          .where('id', '=', context.actorUserId)
+          .executeTakeFirstOrThrow();
+        username = `${user.username}-${serverId.slice(0, 8)}`;
+        const collision = await connection
+          .selectFrom('external_sftp_credentials')
+          .select('id')
+          .where('primary_username', '=', username)
+          .where('state', '!=', 'revoked')
+          .executeTakeFirst();
+        if (collision) throw new DomainError('conflict');
+      }
+      const expiresAt =
+        kind === 'primary' ? 0 : now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
       const intent: CredentialIntent = {
         version: 1,
         context: verified,
@@ -365,32 +417,50 @@ export async function createSftpCredential(
           serverId,
           externalServerUuid: server.pterodactyl_uuid,
           credentialId,
+          ...(username ? { username } : {}),
           password: generateSftpPassword(),
           expiresAt,
           quotaBytes: serverStorageLimitBytes(server.limits.disk) ?? 0,
         },
       };
-      row = await connection.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        await assertStoragePolicyIdle(tx);
-        const inserted = await tx
-          .insertInto('external_sftp_credentials')
-          .values({
-            id: credentialId,
-            server_id: serverId,
-            actor_id: context.actorUserId,
-            envelope: JSON.stringify(
-              options.codec.encrypt(JSON.stringify(intent), credentialContext(credentialId)),
-            ),
-            provider_ref: null,
-            expires_at: new Date(expiresAt),
-            state: 'pending',
-          })
-          .returningAll()
-          .executeTakeFirstOrThrow();
-        await recordAudit(tx, verified, 'server.sftp.issued', { serverId, credentialId });
-        return inserted;
-      });
+      row = await connection
+        .transaction()
+        .execute(async (tx) => {
+          await lockResources(tx);
+          await assertStoragePolicyIdle(tx);
+          const inserted = await tx
+            .insertInto('external_sftp_credentials')
+            .values({
+              id: credentialId,
+              server_id: serverId,
+              actor_id: context.actorUserId,
+              kind,
+              label: label ?? null,
+              primary_username: username ?? null,
+              envelope: JSON.stringify(
+                options.codec.encrypt(JSON.stringify(intent), credentialContext(credentialId)),
+              ),
+              provider_ref: null,
+              expires_at: expiresAt === 0 ? null : new Date(expiresAt),
+              state: 'pending',
+            })
+            .returningAll()
+            .executeTakeFirstOrThrow();
+          await recordAudit(tx, verified, 'server.sftp.issued', { serverId, credentialId });
+          return inserted;
+        })
+        .catch((error: unknown) => {
+          // Different servers can share the truncated UUID portion. The unique
+          // reservation prevents concurrent creation from claiming the same login.
+          if (
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === '23505'
+          )
+            throw new DomainError('conflict');
+          throw error;
+        });
     }
     if (row.state !== 'active') row = await runCredential(connection, row, options);
     return deliverCredential(connection, row, verified, options);
@@ -407,6 +477,8 @@ export async function listSftpCredentials(
       .selectFrom('external_sftp_credentials')
       .selectAll()
       .where('server_id', '=', serverId)
+      .where('actor_id', '=', context.actorUserId)
+      .orderBy('kind', 'desc')
       .orderBy('created_at', 'desc')
       .limit(100)
       .execute()
@@ -448,7 +520,10 @@ export async function rotateSftpCredential(
       intent.rotationId = rotationId;
       intent.delivered = false;
       intent.request.password = generateSftpPassword();
-      intent.request.expiresAt = now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
+      intent.request.expiresAt =
+        row.kind === 'primary'
+          ? 0
+          : now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
       const previous = row;
       await connection.transaction().execute(async (tx) => {
         await lockResources(tx);
@@ -572,6 +647,8 @@ export async function revokeSftpCredential(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!row) throw new DomainError('not_found');
+    if (row.actor_id !== context.actorUserId || row.kind === 'primary')
+      throw new DomainError('forbidden');
     await recordAudit(connection, verified, 'server.sftp.revoked', { serverId, credentialId });
     return publicCredential(await revokeRow(connection, row, options));
   });

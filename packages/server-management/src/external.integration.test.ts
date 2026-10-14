@@ -309,6 +309,303 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
 }
 
 describe('durable server external services', () => {
+  it('keeps one stable primary login without expiry, only rotates explicitly, and forbids direct deletion', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    const user = await f.db
+      .selectFrom('user')
+      .select('username')
+      .where('id', '=', f.context.actorUserId)
+      .executeTakeFirstOrThrow();
+    const issued = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId, kind: 'primary' },
+      f.options,
+    );
+    expect(issued).toMatchObject({
+      id: credentialId,
+      kind: 'primary',
+      label: null,
+      expiresAt: null,
+      username: `${user.username}-${f.serverId.slice(0, 8)}`,
+    });
+    expect(issued.password).toHaveLength(16);
+    const remote = f.users.get(issued.username ?? '');
+    expect(remote).toMatchObject({ expiration_date: 0, password: issued.password });
+    f.tick();
+    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 0, failed: 0 });
+    const replay = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId: randomUUID(), kind: 'primary' },
+      f.options,
+    );
+    expect(replay).toMatchObject({ id: credentialId, expiresAt: null });
+    expect(replay.password).toBeUndefined();
+    expect(f.sftpCalls.filter((method) => method === 'POST')).toHaveLength(1);
+    await expect(
+      revokeSftpCredential(f.db, f.context, f.serverId, credentialId, f.options),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    const rotationId = randomUUID();
+    const rotated = await rotateSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      credentialId,
+      { rotationId },
+      f.options,
+    );
+    expect(rotated).toMatchObject({ username: issued.username, expiresAt: null });
+    expect(rotated.password).toHaveLength(16);
+    expect(rotated.password).not.toBe(issued.password);
+    expect(f.users.get(issued.username ?? '')).toMatchObject({
+      expiration_date: 0,
+      password: rotated.password,
+    });
+    expect(
+      (
+        await rotateSftpCredential(
+          f.db,
+          f.context,
+          f.serverId,
+          credentialId,
+          { rotationId },
+          f.options,
+        )
+      ).password,
+    ).toBeUndefined();
+    await cleanupServerExternalServices(f.db, f.serverId, f.options);
+    expect(f.users.size).toBe(0);
+  });
+
+  it('reserves one primary before remote effects under concurrent requests and recovers its original password', async () => {
+    const f = await fixture();
+    f.loseSftp();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.options.verifyServer = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    const first = createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId: randomUUID(), kind: 'primary' },
+      f.options,
+    );
+    const firstFailure = expect(first).rejects.toThrow();
+    await entered.promise;
+    try {
+      await expect(
+        createSftpCredential(
+          f.db,
+          f.context,
+          f.serverId,
+          { credentialId: randomUUID(), kind: 'primary' },
+          f.options,
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    } finally {
+      release.resolve();
+    }
+    await firstFailure;
+    const rows = await f.db.selectFrom('external_sftp_credentials').selectAll().execute();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'primary', state: 'uncertain', expires_at: null });
+    const pendingPassword = [...f.users.values()][0]?.password;
+    const recovered = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId: randomUUID(), kind: 'primary' },
+      f.options,
+    );
+    expect(recovered.password).toBe(pendingPassword);
+    expect(f.users.size).toBe(1);
+    expect(f.sftpCalls.filter((method) => method === 'POST')).toHaveLength(1);
+  });
+
+  it('does not overwrite an unrelated remote account with the primary username', async () => {
+    const f = await fixture();
+    const user = await f.db
+      .selectFrom('user')
+      .select('username')
+      .where('id', '=', f.context.actorUserId)
+      .executeTakeFirstOrThrow();
+    const username = `${user.username}-${f.serverId.slice(0, 8)}`;
+    const unrelated = {
+      id: 987,
+      username,
+      password: 'unrelated',
+      additional_info: '{}',
+      status: 1,
+      home_dir: '/unrelated',
+      expiration_date: 0,
+      quota_size: 0,
+      filesystem: { provider: 0 },
+      permissions: { '/': ['list'] },
+      filters: {},
+    };
+    f.users.set(username, unrelated);
+    await expect(
+      createSftpCredential(
+        f.db,
+        f.context,
+        f.serverId,
+        { credentialId: randomUUID(), kind: 'primary' },
+        f.options,
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.users.get(username)).toEqual(unrelated);
+    expect(f.sftpCalls.every((method) => method === 'GET')).toBe(true);
+  });
+
+  it('rejects cross-server ID replays and reserves colliding primary usernames before remote writes', async () => {
+    const f = await fixture();
+    const credentialId = randomUUID();
+    await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId, kind: 'primary' },
+      f.options,
+    );
+    const secondId = `${f.serverId.slice(0, 8)}${randomUUID().slice(8)}`;
+    await sql`insert into managed_servers
+      (id, owner_id, mapping_id, node_id, name, external_id, limits,
+       pterodactyl_id, pterodactyl_uuid, pterodactyl_identifier)
+      select ${secondId}, owner_id, mapping_id, node_id, 'Second', ${`nh-${secondId}`}, limits,
+        pterodactyl_id + 100000, ${randomUUID()}::uuid, ${randomUUID().slice(0, 8)}
+      from managed_servers where id=${f.serverId}`.execute(f.db);
+    const before = f.sftpCalls.length;
+    for (const id of [credentialId, randomUUID()])
+      await expect(
+        createSftpCredential(
+          f.db,
+          f.context,
+          secondId,
+          { credentialId: id, kind: 'primary' },
+          f.options,
+        ),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    expect(f.sftpCalls).toHaveLength(before);
+    expect(await f.db.selectFrom('external_sftp_credentials').select('id').execute()).toHaveLength(
+      1,
+    );
+  });
+
+  it('enforces auxiliary limits per actor including uncertain rows and isolates listing and ID replays', async () => {
+    const f = await fixture();
+    f.options.env = { ...f.options.env, NH_SFTP_AUXILIARY_LIMIT: '1' };
+    const projectId = randomUUID();
+    await f.db
+      .insertInto('projects')
+      .values({ id: projectId, owner_id: f.context.actorUserId, name: 'Shared' })
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ project_id: projectId })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.db
+      .insertInto('project_members')
+      .values({ project_id: projectId, user_id: f.other.actorUserId, role: 'manager' })
+      .execute();
+    const credentialId = randomUUID();
+    f.failSftpWrites(true);
+    await expect(
+      createSftpCredential(
+        f.db,
+        f.context,
+        f.serverId,
+        { credentialId, label: 'Deploy' },
+        f.options,
+      ),
+    ).rejects.toThrow();
+    f.failSftpWrites(false);
+    await expect(
+      createSftpCredential(f.db, f.context, f.serverId, { credentialId: randomUUID() }, f.options),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    const own = await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId, label: 'Deploy' },
+      f.options,
+    );
+    const other = await createSftpCredential(
+      f.db,
+      f.other,
+      f.serverId,
+      { credentialId: randomUUID() },
+      f.options,
+    );
+    expect(own).toMatchObject({ kind: 'auxiliary', label: 'Deploy' });
+    expect(own.expiresAt).toBeInstanceOf(Date);
+    expect((await listSftpCredentials(f.db, f.other, f.serverId)).map((row) => row.id)).toEqual([
+      other.id,
+    ]);
+    await expect(
+      createSftpCredential(f.db, f.other, f.serverId, { credentialId, label: 'Deploy' }, f.options),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      rotateSftpCredential(
+        f.db,
+        f.other,
+        f.serverId,
+        credentialId,
+        { rotationId: randomUUID() },
+        f.options,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      revokeSftpCredential(f.db, f.other, f.serverId, credentialId, f.options),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await createSftpCredential(
+      f.db,
+      f.context,
+      f.serverId,
+      { credentialId: randomUUID(), kind: 'primary' },
+      f.options,
+    );
+    const otherPrimary = await createSftpCredential(
+      f.db,
+      f.other,
+      f.serverId,
+      { credentialId: randomUUID(), kind: 'primary' },
+      f.options,
+    );
+    expect((await listSftpCredentials(f.db, f.other, f.serverId)).map((row) => row.id)).toEqual([
+      otherPrimary.id,
+      other.id,
+    ]);
+    await revokeSftpCredential(f.db, f.context, f.serverId, credentialId, f.options);
+    await expect(
+      createSftpCredential(f.db, f.context, f.serverId, { credentialId: randomUUID() }, f.options),
+    ).resolves.toMatchObject({ kind: 'auxiliary' });
+  });
+
+  it('permits a primary when auxiliary issuance is disabled', async () => {
+    const f = await fixture();
+    f.options.env = { ...f.options.env, NH_SFTP_AUXILIARY_LIMIT: '0' };
+    await expect(
+      createSftpCredential(f.db, f.context, f.serverId, { credentialId: randomUUID() }, f.options),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await expect(
+      createSftpCredential(
+        f.db,
+        f.context,
+        f.serverId,
+        { credentialId: randomUUID(), kind: 'primary' },
+        f.options,
+      ),
+    ).resolves.toMatchObject({ kind: 'primary' });
+  });
+
   it.each(['applying', 'blocked'] as const)(
     'fences new and rotated credentials while storage policy is %s but permits reconciliation',
     async (status) => {
@@ -729,91 +1026,109 @@ describe('durable server external services', () => {
     expect(f.users.size).toBe(1);
     expect(f.sftpCalls.filter((method) => method === 'POST')).toHaveLength(1);
   });
-  it('revokes issued logins when the issuer loses project authority while retaining valid server and Owner credentials', async () => {
-    const f = await fixture(),
-      projectId = randomUUID(),
-      memberCredential = randomUUID(),
-      ownerCredential = randomUUID();
-    await f.db
-      .insertInto('projects')
-      .values({ id: projectId, owner_id: f.context.subjectUserId, name: 'Access revalidation' })
-      .execute();
-    await f.db
-      .updateTable('managed_servers')
-      .set({ project_id: projectId })
-      .where('id', '=', f.serverId)
-      .execute();
-    await f.db
-      .insertInto('project_members')
-      .values({ project_id: projectId, user_id: f.other.subjectUserId, role: 'manager' })
-      .execute();
-    const member = await createSftpCredential(
-      f.db,
-      f.other,
-      f.serverId,
-      { credentialId: memberCredential },
-      f.options,
-    );
-    await createSftpCredential(
-      f.db,
-      f.context,
-      f.serverId,
-      { credentialId: randomUUID() },
-      f.options,
-    );
-    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 0, failed: 0 });
-    await f.db
-      .updateTable('project_members')
-      .set({ role: 'viewer' })
-      .where('project_id', '=', projectId)
-      .where('user_id', '=', f.other.subjectUserId)
-      .execute();
-    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 0 });
-    expect(f.users.has(member.username ?? '')).toBe(false);
-    expect(f.users.size).toBe(1);
-    expect(
-      (
+  it.each(['primary', 'auxiliary'] as const)(
+    'revokes %s logins when issuer authority is lost while retaining valid credentials',
+    async (kind) => {
+      const f = await fixture(),
+        projectId = randomUUID(),
+        memberCredential = randomUUID(),
+        ownerCredential = randomUUID();
+      await f.db
+        .insertInto('projects')
+        .values({ id: projectId, owner_id: f.context.subjectUserId, name: 'Access revalidation' })
+        .execute();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ project_id: projectId })
+        .where('id', '=', f.serverId)
+        .execute();
+      await f.db
+        .insertInto('project_members')
+        .values({ project_id: projectId, user_id: f.other.subjectUserId, role: 'manager' })
+        .execute();
+      const member = await createSftpCredential(
+        f.db,
+        f.other,
+        f.serverId,
+        { credentialId: memberCredential, kind },
+        f.options,
+      );
+      await createSftpCredential(
+        f.db,
+        f.context,
+        f.serverId,
+        { credentialId: randomUUID() },
+        f.options,
+      );
+      expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 0, failed: 0 });
+      await f.db
+        .updateTable('project_members')
+        .set({ role: 'viewer' })
+        .where('project_id', '=', projectId)
+        .where('user_id', '=', f.other.subjectUserId)
+        .execute();
+      if (kind === 'primary') {
         await f.db
-          .selectFrom('external_sftp_credentials')
-          .select('state')
-          .where('id', '=', memberCredential)
-          .executeTakeFirstOrThrow()
-      ).state,
-    ).toBe('revoked');
-    const audit = await f.db
-      .selectFrom('audit_events')
-      .selectAll()
-      .where('action', '=', 'server.sftp.access_revoked')
-      .executeTakeFirstOrThrow();
-    expect(audit.actor_user_id).toBe(f.other.actorUserId);
-    expect(audit.metadata).toMatchObject({
-      credentialId: memberCredential,
-      reason: 'issuer_permission_removed',
-    });
-    await f.db
-      .updateTable('user')
-      .set({ role: 'owner' })
-      .where('id', '=', f.other.actorUserId)
-      .execute();
-    const owner = await createSftpCredential(
-      f.db,
-      { ...f.other, role: 'owner' },
-      f.serverId,
-      { credentialId: ownerCredential },
-      f.options,
-    );
-    await f.db.deleteFrom('project_members').where('project_id', '=', projectId).execute();
-    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 0, failed: 0 });
-    expect(f.users.has(owner.username ?? '')).toBe(true);
-    await f.db
-      .updateTable('user')
-      .set({ role: 'user' })
-      .where('id', '=', f.other.actorUserId)
-      .execute();
-    expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 0 });
-    expect(f.users.has(owner.username ?? '')).toBe(false);
-    expect(f.users.size).toBe(1);
-  });
+          .insertInto('storage_policy_transitions')
+          .values({
+            id: randomUUID(),
+            actor_user_id: f.context.actorUserId,
+            status: 'blocked',
+            policy: 'GLOBAL_POOL',
+            previous_policy: 'PER_USER_BUDGET',
+            default_user_storage_mib: 1024,
+            plan: '{}',
+          })
+          .execute();
+      }
+      expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 0 });
+      await f.db.deleteFrom('storage_policy_transitions').execute();
+      expect(f.users.has(member.username ?? '')).toBe(false);
+      expect(f.users.size).toBe(1);
+      expect(
+        (
+          await f.db
+            .selectFrom('external_sftp_credentials')
+            .select('state')
+            .where('id', '=', memberCredential)
+            .executeTakeFirstOrThrow()
+        ).state,
+      ).toBe('revoked');
+      const audit = await f.db
+        .selectFrom('audit_events')
+        .selectAll()
+        .where('action', '=', 'server.sftp.access_revoked')
+        .executeTakeFirstOrThrow();
+      expect(audit.actor_user_id).toBe(f.other.actorUserId);
+      expect(audit.metadata).toMatchObject({
+        credentialId: memberCredential,
+        reason: 'issuer_permission_removed',
+      });
+      await f.db
+        .updateTable('user')
+        .set({ role: 'owner' })
+        .where('id', '=', f.other.actorUserId)
+        .execute();
+      const owner = await createSftpCredential(
+        f.db,
+        { ...f.other, role: 'owner' },
+        f.serverId,
+        { credentialId: ownerCredential, kind },
+        f.options,
+      );
+      await f.db.deleteFrom('project_members').where('project_id', '=', projectId).execute();
+      expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 0, failed: 0 });
+      expect(f.users.has(owner.username ?? '')).toBe(true);
+      await f.db
+        .updateTable('user')
+        .set({ role: 'user' })
+        .where('id', '=', f.other.actorUserId)
+        .execute();
+      expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 0 });
+      expect(f.users.has(owner.username ?? '')).toBe(false);
+      expect(f.users.size).toBe(1);
+    },
+  );
   it('encrypts credential intents, returns password once and excludes secrets/provider identifiers from metadata', async () => {
     const f = await fixture(),
       credentialId = randomUUID();
@@ -824,7 +1139,7 @@ describe('durable server external services', () => {
       { credentialId },
       f.options,
     );
-    expect(created.password?.length).toBeGreaterThanOrEqual(32);
+    expect(created.password).toHaveLength(16);
     expect(
       (await createSftpCredential(f.db, f.context, f.serverId, { credentialId }, f.options))
         .password,

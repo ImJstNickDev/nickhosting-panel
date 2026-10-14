@@ -1,4 +1,11 @@
 export const sftpWebMessages: Record<string, readonly [string, string]> = {
+  'sftp.activate': ['Generate SFTP password', 'Genera password SFTP'],
+  'sftp.passwordGenerated': ['Generated · 16 characters', 'Generata · 16 caratteri'],
+  'sftp.additional': ['Additional accesses', 'Accessi aggiuntivi'],
+  'sftp.addAccess': ['Add access', 'Aggiungi accesso'],
+  'sftp.noAdditional': ['No additional accesses.', 'Nessun accesso aggiuntivo.'],
+  'sftp.legacyAccess': ['Existing access', 'Accesso esistente'],
+  'sftp.accessExample': ['For example, backup script', 'Ad esempio, script backup'],
   'sftp.connection': ['Connection', 'Connessione'],
   'sftp.credentials': ['Credentials', 'Credenziali'],
   'sftp.empty': ['No SFTP credentials yet.', 'Nessuna credenziale SFTP.'],

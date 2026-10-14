@@ -206,6 +206,7 @@ export function Invite() {
               await api('/api/auth/sign-up/email', {
                 body: {
                   name: text(data, 'name'),
+                  username: text(data, 'username'),
                   email: text(data, 'email'),
                   password: String(data.get('password')),
                   locale: locale === 'it' ? 'it' : 'en',
@@ -216,7 +217,25 @@ export function Invite() {
               setRegistered(true);
             }}
           >
-            <Input label={t('web.name')} name="name" autoComplete="name" required maxLength={100} />
+            <Input
+              label={t('web.displayName')}
+              name="name"
+              autoComplete="name"
+              required
+              maxLength={100}
+            />
+            <Input
+              label={t('web.username')}
+              hint={t('web.usernameHint')}
+              name="username"
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              pattern="[a-z0-9][a-z0-9_\-]{2,39}"
+              minLength={3}
+              maxLength={40}
+              required
+            />
             <Input label={t('web.email')} name="email" type="email" autoComplete="email" required />
             <Input
               label={t('web.password')}
@@ -376,6 +395,7 @@ export function Setup() {
                 body: {
                   token: String(data.get('token')),
                   name: text(data, 'name'),
+                  username: text(data, 'username'),
                   email: text(data, 'email'),
                   password: String(data.get('password')),
                   locale: locale === 'it' ? 'it' : 'en',
@@ -393,7 +413,19 @@ export function Setup() {
             autoComplete="off"
             required
           />
-          <Input label={t('web.name')} name="name" autoComplete="name" required />
+          <Input label={t('web.displayName')} name="name" autoComplete="name" required />
+          <Input
+            label={t('web.username')}
+            hint={t('web.usernameHint')}
+            name="username"
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            pattern="[a-z0-9][a-z0-9_\-]{2,39}"
+            minLength={3}
+            maxLength={40}
+            required
+          />
           <Input label={t('web.email')} name="email" type="email" autoComplete="email" required />
           <Input
             label={t('web.password')}

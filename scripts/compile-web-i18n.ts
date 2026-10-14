@@ -8,6 +8,7 @@ import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
 import { quillWebMessages } from '../packages/i18n/src/quill-web.js';
 import { serviceWebMessages } from '../packages/i18n/src/services-web.js';
 import { sftpWebMessages } from '../packages/i18n/src/sftp-web.js';
+import { usernameWebMessages } from '../packages/i18n/src/username-web.js';
 import { viewerWebMessages } from '../packages/i18n/src/viewers-web.js';
 import { webMessages } from '../packages/i18n/src/web.js';
 
@@ -22,6 +23,7 @@ for (const [key, pair] of Object.entries({
   ...viewerWebMessages,
   ...quillWebMessages,
   ...sftpWebMessages,
+  ...usernameWebMessages,
 })) {
   if (!pair[0] || !pair[1]) throw new Error(`Missing translation: ${key}`);
   catalogs.en![key] = pair[0];

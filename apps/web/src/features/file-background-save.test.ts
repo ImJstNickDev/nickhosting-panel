@@ -13,6 +13,7 @@ function session(subject = 'owner', support?: string): WebSession {
   const user = {
     id: 'owner',
     name: 'Owner',
+    username: 'owner',
     email: 'owner@example.invalid',
     emailVerified: true,
     locale: 'en' as const,

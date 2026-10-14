@@ -3,12 +3,11 @@ import { useRef, useState } from 'react';
 import { api, idempotencyKey } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
-import { Badge, ConfirmDialog, ErrorNotice, Time } from '../components/ui.js';
+import { Badge, ConfirmDialog, ErrorNotice, Input, Time } from '../components/ui.js';
 import {
   type Credentials,
   type IssuedCredential,
   serverPath,
-  useServer,
   useTransfers,
 } from './service-contracts.js';
 import './sftp.css';
@@ -139,8 +138,7 @@ export function SftpPage({ serverId }: { serverId: string }) {
 }
 function SftpContent({ serverId }: { serverId: string }) {
   const t = useT(),
-    transfers = useTransfers(serverId),
-    server = useServer(serverId);
+    transfers = useTransfers(serverId);
   const credentials = useQuery({
     queryKey: ['sftp', serverId],
     queryFn: () => api<Credentials>(`${serverPath(serverId)}/sftp`),
@@ -154,44 +152,47 @@ function SftpContent({ serverId }: { serverId: string }) {
     credential: Credentials[number];
     rotationId: string;
   }>();
-  const createId = useRef(idempotencyKey()),
+  const [adding, setAdding] = useState(false),
+    [label, setLabel] = useState('');
+  const createIds = useRef({ primary: idempotencyKey(), auxiliary: idempotencyKey() }),
     pending = useRef(false),
     createButton = useRef<HTMLButtonElement>(null);
   const endpoint = transfers.data?.sftp.endpoint;
   const canIssue = transfers.data?.sftp.configured && transfers.data.sftp.canIssue;
+  const primary = credentials.data?.find((c) => c.kind === 'primary' && c.state !== 'revoked');
+  const auxiliary = credentials.data?.filter((c) => c.kind !== 'primary') ?? [];
+  const limit = transfers.data?.sftp.auxiliaryLimit ?? 0;
+  const activeCount = auxiliary.filter((c) => c.state !== 'revoked').length;
   const dismiss = () => {
     setIssued(undefined);
     createButton.current?.focus();
   };
-  async function create() {
+  async function create(kind: 'primary' | 'auxiliary') {
     if (pending.current) return;
     pending.current = true;
     setBusy(true);
-    setError(undefined);
     try {
       const value = await api<IssuedCredential>(`${serverPath(serverId)}/sftp`, {
-        body: { credentialId: createId.current },
+        body: {
+          credentialId: createIds.current[kind],
+          kind,
+          ...(kind === 'auxiliary' ? { label: label.trim() } : {}),
+        },
       });
       setIssued(value);
-      createId.current = idempotencyKey();
+      createIds.current[kind] = idempotencyKey();
       await credentials.refetch();
-    } catch (e) {
-      setError(e);
     } finally {
       pending.current = false;
       setBusy(false);
     }
   }
+  const rotate = (credential: Credentials[number]) =>
+    setAction({ kind: 'rotate', credential, rotationId: idempotencyKey() });
   return (
     <section className="sftp-page" aria-labelledby="sftp-title">
       <header className="sftp-heading">
         <h2 id="sftp-title">SFTP</h2>
-        {canIssue && (
-          <button ref={createButton} type="button" disabled={busy} onClick={() => void create()}>
-            <Icon name="plus" />
-            {t('service.createCredential')}
-          </button>
-        )}
       </header>
       {error !== undefined && <ErrorNotice error={error} />}
       {transfers.error && (
@@ -236,6 +237,58 @@ function SftpContent({ serverId }: { serverId: string }) {
             {transfers.data?.sftp.configured && endpoint && !canIssue && (
               <p className="sftp-muted">{t('sftp.permission')}</p>
             )}
+            {primary && (
+              <div className="sftp-primary">
+                <dl className="sftp-endpoint">
+                  <div>
+                    <dt>{t('service.username')}</dt>
+                    <dd>
+                      <CopyValue
+                        value={primary.username ?? t('web.pending')}
+                        label={t('sftp.copyUsername')}
+                      />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t('web.password')}</dt>
+                    <dd className="sftp-primary-password">
+                      <span>
+                        {t(primary.state === 'active' ? 'sftp.passwordGenerated' : 'web.pending')}
+                      </span>
+                      {canIssue && primary.state === 'active' && (
+                        <Tooltip content={t('service.rotate')}>
+                          <button
+                            ref={createButton}
+                            type="button"
+                            className="sftp-icon"
+                            aria-label={t('service.rotate')}
+                            disabled={busy}
+                            onClick={() => rotate(primary)}
+                          >
+                            <Icon name="rotate" />
+                          </button>
+                        </Tooltip>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            )}
+            {!primary && canIssue && !credentials.isPending && !credentials.error && (
+              <button
+                ref={createButton}
+                className="sftp-activate"
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setError(undefined);
+                  void create('primary').catch(setError);
+                }}
+              >
+                <Icon name="key" />
+                {t('sftp.activate')}
+              </button>
+            )}
           </div>
         )
       )}
@@ -272,91 +325,132 @@ function SftpContent({ serverId }: { serverId: string }) {
           </dl>
         </section>
       )}
-      <div className="sftp-credentials">
-        <h3>{t('sftp.credentials')}</h3>
-        {credentials.isPending ? (
-          <div
-            className="sftp-skeleton"
-            role="status"
-            aria-busy="true"
-            aria-label={t('web.loading')}
-          />
-        ) : credentials.error ? (
-          <ErrorNotice error={credentials.error} retry={() => void credentials.refetch()} />
-        ) : credentials.data.length === 0 ? (
-          <p className="sftp-empty">{t('sftp.empty')}</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>{t('service.username')}</th>
-                <th>{t('web.status')}</th>
-                <th>{t('web.expires')}</th>
-                <th>
-                  <span className="visually-hidden">{t('web.actions')}</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {credentials.data.map((c) => (
-                <tr key={c.id}>
-                  <td data-label={t('service.username')}>
-                    <CopyValue
-                      value={c.username ?? t('web.pending')}
-                      label={t('sftp.copyUsername')}
-                    />
-                  </td>
-                  <td data-label={t('web.status')}>
-                    <Badge value={c.state} />
-                  </td>
-                  <td data-label={t('web.expires')}>
-                    <Time value={c.expiresAt} />
-                  </td>
-                  <td className="sftp-row-actions">
-                    {c.state !== 'revoked' && (
-                      <>
-                        {canIssue && (
-                          <IconButton
-                            label={t('service.rotate')}
-                            icon="rotate"
-                            disabled={busy}
-                            onClick={() =>
-                              setAction({
-                                kind: 'rotate',
-                                credential: c,
-                                rotationId: idempotencyKey(),
-                              })
-                            }
+      {credentials.error && (
+        <ErrorNotice error={credentials.error} retry={() => void credentials.refetch()} />
+      )}
+      {credentials.isPending ? (
+        <div
+          className="sftp-skeleton"
+          role="status"
+          aria-busy="true"
+          aria-label={t('web.loading')}
+        />
+      ) : (
+        !credentials.error && (
+          <details className="sftp-additional">
+            <summary>
+              {t('sftp.additional')}{' '}
+              <span>
+                {activeCount} / {limit}
+              </span>
+            </summary>
+            <div className="sftp-credentials">
+              <header className="sftp-heading">
+                {canIssue && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy || activeCount >= limit}
+                    onClick={() => {
+                      setLabel('');
+                      setAdding(true);
+                    }}
+                  >
+                    {t('sftp.addAccess')}
+                  </button>
+                )}
+              </header>
+              {auxiliary.length === 0 ? (
+                <p className="sftp-empty">{t('sftp.noAdditional')}</p>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t('web.name')}</th>
+                      <th>{t('web.status')}</th>
+                      <th>{t('web.expires')}</th>
+                      <th>
+                        <span className="visually-hidden">{t('web.actions')}</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auxiliary.map((c) => (
+                      <tr key={c.id}>
+                        <td>
+                          <span className="sftp-access-label">
+                            {c.label ?? t('sftp.legacyAccess')}
+                          </span>
+                          <CopyValue
+                            value={c.username ?? t('web.pending')}
+                            label={t('sftp.copyUsername')}
                           />
-                        )}
-                        {server.data?.permissions.manage && (
-                          <IconButton
-                            label={t('web.revoke')}
-                            icon="revoke"
-                            danger
-                            disabled={busy}
-                            onClick={() =>
-                              setAction({
-                                kind: 'revoke',
-                                credential: c,
-                                rotationId: idempotencyKey(),
-                              })
-                            }
-                          />
-                        )}
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+                        </td>
+                        <td>
+                          <Badge value={c.state} />
+                        </td>
+                        <td>
+                          <Time value={c.expiresAt} />
+                        </td>
+                        <td className="sftp-row-actions">
+                          {c.state !== 'revoked' && canIssue && (
+                            <>
+                              {c.state === 'active' && (
+                                <IconButton
+                                  label={t('service.rotate')}
+                                  icon="rotate"
+                                  disabled={busy}
+                                  onClick={() => rotate(c)}
+                                />
+                              )}
+                              <IconButton
+                                label={t('web.revoke')}
+                                icon="revoke"
+                                danger
+                                disabled={busy}
+                                onClick={() =>
+                                  setAction({
+                                    kind: 'revoke',
+                                    credential: c,
+                                    rotationId: idempotencyKey(),
+                                  })
+                                }
+                              />
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </details>
+        )
+      )}
       <details className="sftp-limitation">
         <summary>{t('sftp.limitation')}</summary>
         <p>{t('service.sftpLimitation')}</p>
       </details>
+      <ConfirmDialog
+        open={adding}
+        title={t('sftp.addAccess')}
+        confirmLabel={t('sftp.addAccess')}
+        onClose={() => setAdding(false)}
+        onConfirm={async () => {
+          await create('auxiliary');
+          setAdding(false);
+        }}
+      >
+        <Input
+          label={t('web.name')}
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          required
+          maxLength={80}
+          placeholder={t('sftp.accessExample')}
+        />
+      </ConfirmDialog>
       <ConfirmDialog
         open={!!action}
         title={t(action?.kind === 'rotate' ? 'service.rotate' : 'web.revoke')}

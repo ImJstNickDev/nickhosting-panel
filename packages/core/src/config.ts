@@ -113,6 +113,7 @@ export const platformConfigSchema = z
     sftpPublicHostname: z.union([z.hostname(), z.ipv4(), z.ipv6()]).optional(),
     sftpPublicPort: z.number().int().min(1).max(65535).optional(),
     dnsInstanceId: z.uuid().optional(),
+    sftpAuxiliaryLimit: z.number().int().min(0).max(32),
     sftpCredentialTtlSeconds: z.number().int().min(60).max(86400),
     cloudflareZoneId: z
       .string()
@@ -194,6 +195,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   maxServersPerUser: null,
   maxConcurrentProvisionsPerUser: 4,
   observationMaxAgeSeconds: 4,
+  sftpAuxiliaryLimit: 3,
   sftpCredentialTtlSeconds: 3600,
   gameIdleTimeouts: {},
   defaultIdleTimeoutSeconds: -1,
@@ -258,6 +260,7 @@ export const configEnvironmentKeys = {
   fileViewers: 'NH_FILE_VIEWERS',
   sftpPublicHostname: 'NH_SFTP_PUBLIC_HOSTNAME',
   sftpPublicPort: 'NH_SFTP_PUBLIC_PORT',
+  sftpAuxiliaryLimit: 'NH_SFTP_AUXILIARY_LIMIT',
   sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
   cloudflareZoneId: 'NH_CLOUDFLARE_ZONE_ID',
   dnsInstanceId: 'NH_DNS_INSTANCE_ID',
@@ -307,6 +310,7 @@ const numericKeys = new Set<PlatformConfigKey>([
   'maxServersPerUser',
   'maxConcurrentProvisionsPerUser',
   'observationMaxAgeSeconds',
+  'sftpAuxiliaryLimit',
   'sftpCredentialTtlSeconds',
   'sftpPublicPort',
   'gatewayLeaseSeconds',

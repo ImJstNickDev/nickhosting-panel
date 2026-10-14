@@ -13,14 +13,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 const screenshots = '.codex/local/m5-browser/screenshots';
 const password = 'isolated-sftp-password-123';
-const fixture = (id = 'one') => ({
+const fixture = (id = 'one', kind: 'primary' | 'auxiliary' = 'auxiliary') => ({
+  kind,
+  label: kind === 'auxiliary' ? 'Backup script' : null,
   id,
   serverId: 'sftp-fixture',
   actorId: 'owner',
   state: 'active',
-  username: `nh-fixture-${id}`,
+  username: kind === 'primary' ? 'fixture-a3f92c18' : `nh-fixture-${id}`,
   createdAt: '2026-10-14T12:00:00Z',
-  expiresAt: '2035-01-01T12:00:00Z',
+  expiresAt: kind === 'primary' ? null : '2035-01-01T12:00:00Z',
 });
 
 describe('SFTP interface (isolated API responses, real rendered component)', () => {
@@ -86,6 +88,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
             sftp: {
               configured,
               canIssue,
+              auxiliaryLimit: 3,
               endpoint: configured ? { hostname: 'sftp.example.test', port: 2023 } : null,
             },
           },
@@ -104,7 +107,9 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
         }
         if (path.endsWith('/rotate'))
           return route.fulfill({ json: { ...credentials[0], password } });
-        const created = fixture('two');
+        const input = route.request().postDataJSON();
+        const created = fixture(`created-${credentials.length}`, input.kind);
+        if (input.label) created.label = input.label;
         credentials.push(created);
         return route.fulfill({ status: 201, json: { ...created, password } });
       }
@@ -123,6 +128,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
   async function open() {
     await page.goto(`${origin}sftp-fixture-page`);
     await check(page.getByRole('heading', { name: 'SFTP', exact: true })).toBeVisible();
+    await page.locator('.sftp-additional > summary').click();
   }
 
   it('copies connection data and confirms rotation/revocation without per-row forms', async () => {
@@ -159,6 +165,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
   });
 
   it('renders EN/IT desktop/mobile without overflow or automatic accessibility violations', async () => {
+    credentials = [fixture('primary', 'primary'), fixture()];
     await open();
     for (const [locale, width, height] of [
       ['en', 1280, 800],
@@ -194,7 +201,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
   it('issues a masked one-time password, handles clipboard failure and clears it on reload', async () => {
     credentials = [];
     await open();
-    await page.getByRole('button', { name: 'Create SFTP credential', exact: true }).click();
+    await page.getByRole('button', { name: 'Generate SFTP password', exact: true }).click();
     const field = page.getByLabel('Password', { exact: true });
     await check(field).toHaveValue(password);
     await check(field).toHaveAttribute('type', 'password');
@@ -206,8 +213,24 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     await page.getByRole('button', { name: 'Copy password', exact: true }).click();
     await check(page.getByRole('alert')).toContainText('Could not copy');
     await page.reload();
-    await check(page.getByText('nh-fixture-two', { exact: true })).toBeVisible();
+    await check(page.getByText('fixture-a3f92c18', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Revoke', exact: true })).toHaveCount(0);
     await check(page.getByLabel('Password', { exact: true })).toHaveCount(0);
+    expect(writes).toHaveLength(1);
+  });
+
+  it('creates named additional access and respects its independent limit', async () => {
+    credentials = [fixture('primary', 'primary'), fixture('one'), fixture('two')];
+    await open();
+    await page.getByRole('button', { name: 'Add access', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Name', { exact: true }).fill('Nightly backup');
+    await dialog.getByRole('button', { name: 'Add access', exact: true }).click();
+    await check(page.getByText('Nightly backup', { exact: true })).toBeVisible();
+    await check(page.getByRole('button', { name: 'Add access', exact: true })).toBeDisabled();
+    await check(
+      page.locator('.sftp-primary').getByRole('button', { name: 'Rotate password' }),
+    ).toBeEnabled();
     expect(writes).toHaveLength(1);
   });
 
@@ -217,7 +240,7 @@ describe('SFTP interface (isolated API responses, real rendered component)', () 
     credentials = [];
     await open();
     await check(
-      page.getByRole('button', { name: 'Create SFTP credential', exact: true }),
+      page.getByRole('button', { name: 'Generate SFTP password', exact: true }),
     ).toHaveCount(0);
     expect(writes).toEqual([]);
   });

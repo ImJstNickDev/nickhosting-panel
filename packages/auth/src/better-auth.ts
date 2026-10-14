@@ -12,6 +12,7 @@ import { twoFactor } from 'better-auth/plugins';
 import type { IdentityOptions } from './contracts.js';
 import { tokenHash } from './crypto.js';
 import { writeAudit } from './storage.js';
+import { generatedUsername, usernamePattern } from './username.js';
 
 const invitationPlugin = {
   id: 'nickhosting-invitation-schema',
@@ -69,6 +70,7 @@ export function buildBetterAuth(options: IdentityOptions) {
     rateLimit: { enabled: true, storage: 'database', window: 60, max: 60 },
     user: {
       additionalFields: {
+        username: { type: 'string', required: false, input: true, unique: true },
         role: { type: ['owner', 'operator', 'user'], defaultValue: 'user', input: false },
         locale: { type: ['en', 'it'], defaultValue: options.defaultLocale ?? 'en', input: true },
       },
@@ -169,6 +171,11 @@ export function buildBetterAuth(options: IdentityOptions) {
     ],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path === '/update-user' && ctx.body && 'username' in ctx.body)
+          throw new APIError('BAD_REQUEST', {
+            code: 'USERNAME_IMMUTABLE',
+            message: 'auth.username_immutable',
+          });
         // No invitation fields from client-controlled OAuth additionalData are trusted.
         if (ctx.path === '/sign-in/social') {
           const invite = ctx.headers?.get('x-invitation-token');
@@ -179,6 +186,15 @@ export function buildBetterAuth(options: IdentityOptions) {
     },
     databaseHooks: {
       user: {
+        update: {
+          before: async (user) => {
+            if ('username' in user)
+              throw new APIError('BAD_REQUEST', {
+                code: 'USERNAME_IMMUTABLE',
+                message: 'auth.username_immutable',
+              });
+          },
+        },
         create: {
           before: async (user, ctx) => {
             if (!ctx) throw denied();
@@ -196,6 +212,28 @@ export function buildBetterAuth(options: IdentityOptions) {
             if (!hash) throw denied();
             // MUST use the current Better Auth transaction, never a separate pool transaction.
             const tx = await getCurrentAdapter(ctx.context.adapter);
+            // Accept a chosen username only from credential signup. OAuth metadata cannot
+            // claim or change handles; existing linked accounts retain their original one.
+            const submitted = ctx.path === '/sign-up/email' ? ctx.body?.username : undefined;
+            if (
+              submitted !== undefined &&
+              (typeof submitted !== 'string' || !usernamePattern.test(submitted))
+            )
+              throw new APIError('BAD_REQUEST', {
+                code: 'USERNAME_INVALID',
+                message: 'auth.username_invalid',
+              });
+            const username = submitted ?? generatedUsername();
+            if (
+              await tx.findOne({
+                model: 'user',
+                where: [{ field: 'username', value: username }],
+              })
+            )
+              throw new APIError('CONFLICT', {
+                code: 'USERNAME_TAKEN',
+                message: 'auth.username_taken',
+              });
             const invitation = await tx.findOne<InvitationRecord>({
               model: 'invitation',
               where: [{ field: 'tokenHash', value: hash }],
@@ -217,7 +255,7 @@ export function buildBetterAuth(options: IdentityOptions) {
               increment: { remainingUses: -1 },
             });
             if (!consumed) throw denied();
-            return { data: { ...user, role: invitation.role } };
+            return { data: { ...user, username, role: invitation.role } };
           },
           after: async (user) => {
             await writeAudit(options.pool, {

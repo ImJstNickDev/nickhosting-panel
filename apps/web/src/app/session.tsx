@@ -6,6 +6,8 @@ import { clearFileListing } from '../features/file-listing-cache.js';
 const user = z.object({
   id: z.string(),
   name: z.string(),
+  // Older running API instances may omit this presentation-only field during rollout.
+  username: z.string().optional(),
   email: z.string(),
   emailVerified: z.boolean(),
   locale: z.enum(['en', 'it']),

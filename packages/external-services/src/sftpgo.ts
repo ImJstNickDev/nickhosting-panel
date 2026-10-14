@@ -20,8 +20,12 @@ const requestSchema = z
     serverId: uuid,
     externalServerUuid: uuid,
     credentialId: uuid,
-    password: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/),
-    expiresAt: z.number().int().positive(),
+    username: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9_-]{2,79}$/)
+      .optional(),
+    password: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+    expiresAt: z.number().int().nonnegative(),
     quotaBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
@@ -43,7 +47,8 @@ const userSchema = z
     status: z.number(),
     home_dir: z.string(),
     additional_info: z.string(),
-    expiration_date: z.number(),
+    // SFTPGo omits zero-valued expiration_date for non-expiring accounts.
+    expiration_date: z.number().default(0),
     quota_size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     used_quota_size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
     filesystem: z.object({ provider: z.number() }).passthrough(),
@@ -68,7 +73,7 @@ function validate<T>(schema: z.ZodType<T>, value: unknown): T {
 
 /** Return once to the authenticated caller; persist only encrypted if retries need it. */
 export function generateSftpPassword(): string {
-  return randomBytes(32).toString('base64url');
+  return randomBytes(12).toString('base64url');
 }
 
 /** No arbitrary paths or virtual folders are accepted. The root is Owner-configured. */
@@ -117,8 +122,10 @@ export class SftpGoAdapter {
     });
   }
 
-  #name(credentialId: string): string {
-    return `nh_${credentialId.replaceAll('-', '').toLowerCase()}`;
+  #name(input: { credentialId: string; username?: string }): string {
+    if (input.username !== undefined)
+      return validate(z.string().regex(/^[a-z0-9][a-z0-9_-]{2,79}$/), input.username);
+    return `nh_${input.credentialId.replaceAll('-', '').toLowerCase()}`;
   }
   #marker(
     input: Pick<SftpCredentialRequest, 'serverId' | 'externalServerUuid' | 'credentialId'>,
@@ -132,6 +139,7 @@ export class SftpGoAdapter {
     });
   }
   #checkExpiry(expiresAt: number): void {
+    if (expiresAt === 0) return; // SFTPGo explicitly uses zero for a persistent primary login.
     if (
       !Number.isSafeInteger(expiresAt) ||
       expiresAt <= this.#now() ||
@@ -144,7 +152,7 @@ export class SftpGoAdapter {
     status: 0 | 1,
   ): Record<string, unknown> {
     return {
-      username: this.#name(input.credentialId),
+      username: this.#name(input),
       status,
       password: input.password,
       home_dir: sftpServerDirectory(this.#dataRoot, input.externalServerUuid),
@@ -173,12 +181,15 @@ export class SftpGoAdapter {
   }
   #assertOwned(
     user: RemoteUser,
-    ref: Pick<SftpCredentialRef, 'serverId' | 'externalServerUuid' | 'credentialId'> & {
+    ref: Pick<
+      SftpCredentialRequest,
+      'serverId' | 'externalServerUuid' | 'credentialId' | 'username'
+    > & {
       externalUserId?: number;
     },
   ): void {
     if (
-      user.username !== this.#name(ref.credentialId) ||
+      user.username !== this.#name(ref) ||
       user.additional_info !== this.#marker(ref) ||
       user.home_dir !== sftpServerDirectory(this.#dataRoot, ref.externalServerUuid) ||
       (ref.externalUserId !== undefined && user.id !== ref.externalUserId)
@@ -204,7 +215,7 @@ export class SftpGoAdapter {
     validate(uuid, ref.credentialId);
     if (
       ref.instanceId !== this.#instanceId ||
-      ref.username !== this.#name(ref.credentialId) ||
+      ref.username !== this.#name(ref) ||
       !Number.isSafeInteger(ref.externalUserId) ||
       ref.externalUserId < 1 ||
       !Number.isSafeInteger(ref.quotaBytes) ||
@@ -217,7 +228,7 @@ export class SftpGoAdapter {
   async ensureCredential(value: SftpCredentialRequest): Promise<SftpCredentialRef> {
     const input = validate(requestSchema, value);
     this.#checkExpiry(input.expiresAt);
-    const username = this.#name(input.credentialId);
+    const username = this.#name(input);
     let user = await this.#read(username);
     if (!user) {
       try {
@@ -253,16 +264,21 @@ export class SftpGoAdapter {
 
   /** Read-only recovery, including expired/disabled credentials. Never creates or re-enables an account. */
   async inspectCredential(
-    input: Pick<SftpCredentialRequest, 'serverId' | 'externalServerUuid' | 'credentialId'>,
+    input: Pick<
+      SftpCredentialRequest,
+      'serverId' | 'externalServerUuid' | 'credentialId' | 'username'
+    >,
   ): Promise<SftpCredentialRef | null> {
     validate(uuid, input.serverId);
     validate(uuid, input.externalServerUuid);
     validate(uuid, input.credentialId);
-    const user = await this.#read(this.#name(input.credentialId));
+    const user = await this.#read(this.#name(input));
     if (!user) return null;
     this.#assertOwned(user, input);
     return {
-      ...input,
+      serverId: input.serverId,
+      externalServerUuid: input.externalServerUuid,
+      credentialId: input.credentialId,
       instanceId: this.#instanceId,
       username: user.username,
       externalUserId: user.id,
@@ -333,6 +349,7 @@ export class SftpGoAdapter {
       serverId: ref.serverId,
       externalServerUuid: ref.externalServerUuid,
       credentialId: ref.credentialId,
+      username: ref.username,
       quotaBytes: ref.quotaBytes,
       ...update,
     });

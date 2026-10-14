@@ -1080,3 +1080,28 @@ test-data reset is a separate, explicitly scoped operation. Retain encryption ke
 for stored key IDs; losing a key makes its links unrecoverable, while their hashes
 still support redemption. Code rollback can leave the nullable column in place;
 do not drop ciphertext during rollback if links must remain recoverable.
+
+### Username and primary/additional SFTP contracts (2026-10-14)
+
+Account profiles expose immutable `username` separately from editable `name`.
+Credential signup and Owner setup accept `^[a-z0-9][a-z0-9_-]{2,39}$`; omission
+and OAuth signup generate a unique handle. Account updates cannot change it.
+Duplicate username claims return a conflict without consuming the losing invite.
+
+SFTP routes are relative to `/v1/platform/servers/:id`:
+
+| Route | Contract |
+| --- | --- |
+| `GET /sftp` | Issuer-scoped credentials, with `kind`, nullable `label`, state, username and nullable `expiresAt`; never passwords. |
+| `POST /sftp` | Strict `{credentialId, kind?, label?}`; kind defaults to `auxiliary`. Primary rejects labels, has no expiry and reuses the actor/server primary identity. Optional auxiliary labels contain 1–80 trimmed characters. |
+| `POST /sftp/:credentialId/rotate` | `{rotationId}`; issuer-only idempotent rotation. Primary expiry stays null; auxiliary expiry is renewed. Password is returned once. |
+| `DELETE /sftp/:credentialId` | Issuer-only auxiliary revocation; primary deletion is forbidden. |
+| `GET /transfers` | `sftp.auxiliaryLimit` exposes the configured per-actor/server additional-access limit. |
+
+Primary usernames are `<account username>-<first eight characters of NickHosting
+server UUID>`. New passwords have 16 characters. Regular-session/manage checks,
+provider ownership and durable retries remain enforced. Permission loss revokes
+both kinds in the background; issue #18 still applies to retained SSH transports.
+Legacy credentials remain auxiliary, without changing their provider identity,
+password or expiry. Additional-access limit defaults to 3 (0–32); revoked rows do
+not consume it. Primary credentials do not consume the additional-access limit.
