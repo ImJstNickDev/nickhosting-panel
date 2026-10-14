@@ -1,5 +1,4 @@
-import { api } from '../../../api/client.js';
-import { serverPath } from '../../service-contracts.js';
+import { archiveQuery } from './archive-query.js';
 import { type ViewerSource, viewerExtension } from './registry.js';
 
 interface CompressedPage {
@@ -14,35 +13,7 @@ export function isSingleCompressed(source: ViewerSource) {
 
 /** Shares Atlas' first-page cache, including its bounded page size and lifetime. */
 export function compressedArchiveOptions(serverId: string, identity: string, source: ViewerSource) {
-  const archives = JSON.stringify(source.archives ?? []);
-  const params = new URLSearchParams({
-    path: source.path,
-    directory: '',
-    offset: '0',
-    limit: '200',
-    query: '',
-    sort: 'name',
-    direction: 'asc',
-    archives,
-  });
-  return {
-    queryKey: [
-      'viewer-archive',
-      identity,
-      serverId,
-      source.path,
-      archives,
-      '',
-      '',
-      'name',
-      'asc',
-      0,
-    ],
-    queryFn: ({ signal }: { signal: AbortSignal }) =>
-      api<CompressedPage>(`${serverPath(serverId)}/files/viewer/archive?${params}`, { signal }),
-    gcTime: 2 * 60_000,
-    staleTime: 15_000,
-  };
+  return archiveQuery(serverId, identity, source);
 }
 
 export function decodedMember(source: ViewerSource, page: CompressedPage): ViewerSource {

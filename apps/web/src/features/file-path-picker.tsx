@@ -1,8 +1,10 @@
+import type { FilemanPathEntry } from '@nickhosting/game-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '../app/i18n.js';
 import { filePathCandidates, parseFilePathInput } from './file-path-model.js';
+import { useFilemanPathProvider } from './fileman/host.js';
 import { fileDirectoryQuery, type ServerFile } from './service-contracts.js';
 import './file-path-picker.css';
 
@@ -29,8 +31,30 @@ export function FilePathPicker({
   const id = useId();
   const input = useRef<HTMLInputElement>(null);
   const popup = useRef<HTMLDivElement>(null);
-  const [value, setValue] = useState(directory ? `/${directory}/` : '/');
+  const provider = useFilemanPathProvider();
+  const [value, setValue] = useState(
+    () => provider?.currentPath ?? (directory ? `/${directory}/` : '/'),
+  );
   const [error, setError] = useState<string>();
+  const confirmation = useRef<AbortController | undefined>(undefined);
+  const cancelConfirmation = useCallback(() => {
+    confirmation.current?.abort();
+    confirmation.current = undefined;
+  }, []);
+  const close = useCallback(() => {
+    cancelConfirmation();
+    onClose();
+  }, [cancelConfirmation, onClose]);
+  useLayoutEffect(() => cancelConfirmation, [cancelConfirmation]);
+  const providerScope = useRef(provider);
+  useLayoutEffect(() => {
+    if (providerScope.current !== provider) {
+      providerScope.current = provider;
+      // A contributed filesystem changed while this picker was open. Close it,
+      // including after its own successful navigation, instead of replaying stale work.
+      close();
+    }
+  }, [provider, close]);
   const [selection, setSelection] = useState<{ revision: string; index: number }>();
   const [position, setPosition] = useState<{
     left: number;
@@ -40,11 +64,25 @@ export function FilePathPicker({
     above: boolean;
   }>();
   const parsed = useMemo(() => parseFilePathInput(value), [value]);
-  const query = useQuery({
+  const virtual = parsed && provider?.owns(parsed.parent) ? provider : undefined;
+  const nativeQuery = useQuery({
     ...fileDirectoryQuery(serverId, parsed?.parent ?? '', { prepareDownloads: false }),
-    enabled: Boolean(parsed),
+    enabled: Boolean(parsed) && !virtual,
     retry: false,
   });
+  const virtualQuery = useQuery({
+    queryKey: ['fileman-path', ...(virtual?.key ?? []), parsed?.parent, parsed?.prefix],
+    queryFn: ({ signal }) => {
+      if (!virtual || !parsed) throw new Error('Fileman path provider unavailable.');
+      return virtual.list(parsed.parent, parsed.prefix, signal);
+    },
+    enabled: Boolean(virtual),
+    retry: false,
+    // The provider owns its bounded metadata cache; the picker retains no duplicate history.
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+  });
+  const query = virtual ? virtualQuery : nativeQuery;
   const candidates = useMemo(
     () => (parsed && !query.isError ? filePathCandidates(query.data ?? [], parsed.prefix) : []),
     [parsed, query.data, query.isError],
@@ -122,16 +160,40 @@ export function FilePathPicker({
         !input.current?.contains(event.target) &&
         !popup.current?.contains(event.target)
       )
-        onClose();
+        close();
     };
     document.addEventListener('pointerdown', outside);
     return () => document.removeEventListener('pointerdown', outside);
-  }, [onClose]);
+  }, [close]);
 
-  const choose = (entry: ServerFile) => {
+  const apply = async (
+    operation: (signal: AbortSignal) => void | Promise<void>,
+    closeOnSuccess: boolean,
+  ) => {
+    if (confirmation.current) return;
+    const controller = new AbortController();
+    confirmation.current = controller;
+    setError(undefined);
+    try {
+      await operation(controller.signal);
+      if (!controller.signal.aborted && closeOnSuccess) close();
+    } catch {
+      if (!controller.signal.aborted) setError('file.pathUnavailable');
+    } finally {
+      if (confirmation.current === controller) confirmation.current = undefined;
+    }
+  };
+  const choose = (entry: FilemanPathEntry) => {
     if (!parsed || entry.is_symlink || query.isError || query.isPending) return;
-    if (entry.is_file) onOpenFile(entry, parsed.parent);
-    else {
+    if (entry.is_file) {
+      const path = join(parsed.parent, entry.name);
+      if (provider?.owns(path)) void apply((signal) => provider.open(path, signal), true);
+      else {
+        const nativeEntry = nativeQuery.data?.find((file) => file.name === entry.name);
+        if (nativeEntry) void apply(() => onOpenFile(nativeEntry, parsed.parent), false);
+      }
+    } else {
+      cancelConfirmation();
       setValue(`/${join(parsed.parent, entry.name)}/`);
       setSelection(undefined);
       setError(undefined);
@@ -143,7 +205,12 @@ export function FilePathPicker({
     if (query.isPending) return;
     if (query.isError) return setError('file.pathUnavailable');
     if (current) return choose(current);
-    if (parsed.directoryInput) return onNavigate(parsed.path);
+    if (parsed.directoryInput) {
+      if (provider?.owns(parsed.path))
+        void apply((signal) => provider.navigate(parsed.path, signal), true);
+      else void apply(() => onNavigate(parsed.path), false);
+      return;
+    }
     const match =
       candidates.find((entry) => entry.name === parsed.prefix) ??
       (candidates.length === 1 ? candidates[0] : undefined);
@@ -174,6 +241,7 @@ export function FilePathPicker({
           data-lpignore="true"
           value={value}
           onChange={(event) => {
+            cancelConfirmation();
             setValue(event.target.value);
             setSelection(undefined);
             setError(undefined);
@@ -181,7 +249,7 @@ export function FilePathPicker({
           onBlur={() => {
             queueMicrotask(() => {
               const target = document.activeElement;
-              if (target !== input.current && !popup.current?.contains(target)) onClose();
+              if (target !== input.current && !popup.current?.contains(target)) close();
             });
           }}
           onKeyDown={(event) => {
@@ -189,7 +257,7 @@ export function FilePathPicker({
             if (event.key === 'Escape') {
               event.preventDefault();
               event.stopPropagation();
-              onClose();
+              close();
             } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
               event.preventDefault();
               if (!candidates.length) return;

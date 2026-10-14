@@ -130,6 +130,30 @@ open Atlas. The download action offers archive versus decoded file. Explicit
 Open With Atlas remains available, and refresh retains that choice. Unsupported
 decoded formats use the existing chooser instead of pretending to support them.
 
+## Contributed path navigation
+
+`FilemanPathProvider` is a trusted SDK capability registered through
+`useRegisterFilemanPathProvider` in the shared Fileman host. It supplies the current
+path, namespace ownership, candidate listing and cancellable navigation/opening.
+The existing path picker consumes it without format-specific branches; outside its
+namespace, ordinary directory navigation remains unchanged. Registration belongs
+to the viewer session and is removed on exit. Scope changes close the old picker.
+
+Atlas supplies the full visible location for ALT + G, for example
+`/backups/world.zip/config/settings.json`, including nested archives. Folder and
+archive candidates complete with `/`; files open in their selected viewer. A
+compressed archive alias such as `bundle.zip.gz/data/` hides its synthetic decoded
+filename while API requests retain the actual nested chain. Explicit Atlas
+preferences still retain wrapper browsing. Typing beyond the first 200 metadata
+entries uses filtered, paginated lookup, not recursive filesystem indexing.
+
+Listings, completion and compressed decoding share the same archive query keys,
+with 200 candidates per picker result, the existing 48-page / 8 MiB metadata cache,
+and no retained duplicate picker history. Complete recent listings answer prefix
+queries locally. Virtual paths never become native server-file requests; original
+root authorization and archive budgets remain in force. Escape, input changes,
+closing or replacing the provider cancel pending navigation before it can commit.
+
 ## Atlas navigation, selection and nested archives
 
 Atlas uses the same Fileman presentation components as real directories: toolbar,

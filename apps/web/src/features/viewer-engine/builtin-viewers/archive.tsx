@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ApiError, api, download } from '../../../api/client.js';
+import { ApiError, download } from '../../../api/client.js';
 import { useFormat, useT } from '../../../app/i18n.js';
 import { Tooltip } from '../../../components/tooltip.js';
 import { Empty, ErrorNotice } from '../../../components/ui.js';
@@ -19,24 +19,14 @@ import {
 import { serverPath } from '../../service-contracts.js';
 import { viewerPath } from '../core/access.js';
 import { trimArchivePages } from '../core/archive-memory.js';
+import {
+  type ArchiveEntry,
+  archiveQuery,
+  archivePageSize as pageSize,
+  type ArchiveSort as Sort,
+} from '../core/archive-query.js';
 import type { ViewerProps } from '../core/types.js';
 
-interface ArchiveEntry {
-  name: string;
-  path: string;
-  directory: boolean;
-  size: number;
-  modifiedAt?: string | null;
-}
-interface ArchivePage {
-  directory: string;
-  offset: number;
-  limit: number;
-  total: number;
-  entries: ArchiveEntry[];
-}
-type Sort = 'name' | 'size' | 'modifiedAt';
-const pageSize = 200;
 export default function ArchiveViewer({
   serverId,
   source,
@@ -78,37 +68,9 @@ export default function ArchiveViewer({
   const prefetchingFolder = useRef(false);
   const archivesKey = JSON.stringify(source.archives ?? []);
   const options = useCallback(
-    (folder: string, start: number, filter = query) => {
-      const params = new URLSearchParams({
-        path: source.path,
-        directory: folder,
-        offset: String(start),
-        limit: String(pageSize),
-        query: filter,
-        sort,
-        direction,
-        archives: archivesKey,
-      });
-      return {
-        queryKey: [
-          'viewer-archive',
-          identity,
-          serverId,
-          source.path,
-          archivesKey,
-          folder,
-          filter,
-          sort,
-          direction,
-          start,
-        ],
-        queryFn: ({ signal }: { signal: AbortSignal }) =>
-          api<ArchivePage>(`${serverPath(serverId)}/files/viewer/archive?${params}`, { signal }),
-        gcTime: 2 * 60_000,
-        staleTime: 15_000,
-      };
-    },
-    [identity, serverId, source.path, archivesKey, query, sort, direction],
+    (folder: string, start: number, filter = query) =>
+      archiveQuery(serverId, identity, source, folder, start, filter, sort, direction),
+    [identity, serverId, source, query, sort, direction],
   );
   const page = useQuery({
     ...options(directory, offset),

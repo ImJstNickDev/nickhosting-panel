@@ -43,6 +43,29 @@ export interface FilemanContext {
   readonly readOnly: boolean;
   readonly entry?: { readonly name: string; readonly directory: boolean; readonly size: number };
 }
+/** Minimal directory metadata shared by real and extension-provided virtual paths. */
+export interface FilemanPathEntry {
+  readonly name: string;
+  readonly is_file: boolean;
+  readonly is_symlink: boolean;
+}
+/** Compiled viewer contribution; filesystem authority stays with its existing controller. */
+export interface FilemanPathProvider {
+  /** Include identity, server and provider scope; never share results across identities. */
+  readonly key: readonly string[];
+  /** Initial picker value: absolute display path, with a trailing slash for directories. */
+  readonly currentPath: string;
+  /** Receives a normalized relative path, without a trailing slash. */
+  owns(path: string): boolean;
+  list(
+    directory: string,
+    prefix: string,
+    signal: AbortSignal,
+  ): Promise<readonly FilemanPathEntry[]>;
+  /** Honor cancellation before committing navigation; closing a picker abandons its intent. */
+  navigate(path: string, signal?: AbortSignal): void | Promise<void>;
+  open(path: string, signal?: AbortSignal): void | Promise<void>;
+}
 export interface FilemanPatch<T> {
   readonly slot: FilemanSlotName;
   readonly mode: 'hide' | 'replace' | 'prepend' | 'append' | 'decorate';

@@ -76,4 +76,20 @@ describe('file path completion', () => {
       ' world ',
     ]);
   });
+  it('completes virtual entries without inventing native metadata and retains richer entry types', () => {
+    const entries = [
+      { name: 'settings.json', is_file: true, is_symlink: false, member: 'virtual-json' },
+      { name: 'settings', is_file: false, is_symlink: false, member: 'virtual-folder' },
+      { name: 'settings-link', is_file: true, is_symlink: true, member: 'unsafe-link' },
+    ];
+    const matches = filePathCandidates(entries, 'sett');
+    expect(matches.map((entry) => entry.member)).toEqual(['virtual-folder', 'virtual-json']);
+    expect(matches[0]).toBe(entries[1]);
+    expect(parseFilePathInput('/backups/world.zip/region/')).toEqual({
+      path: 'backups/world.zip/region',
+      parent: 'backups/world.zip/region',
+      prefix: '',
+      directoryInput: true,
+    });
+  });
 });

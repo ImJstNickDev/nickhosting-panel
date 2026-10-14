@@ -104,3 +104,20 @@ bytes; compound archives and explicit Atlas choices retain virtual-folder browsi
 No Blueprint, provider, infrastructure, credential or backend permission changes.
 See [extension contract and formats](../M5-VIEWER-FORMATS.md) and
 [validation](../M5-VALIDATION.md).
+
+### 2026-10-14 — Contributed Fileman path navigation
+
+Presentation patches alone do not define how the path picker resolves virtual
+folders. Fileman now accepts a typed, compiled `FilemanPathProvider` contribution:
+current path, namespace ownership, bounded candidate listing, navigation and file
+opening. The host shares registration across viewer scopes and removes it on
+unmount. The existing picker remains responsible for its UI, keyboard interaction,
+input validation and cancellation. No archive condition is added to FilesWorkspace.
+
+Atlas supplies this capability for its whole archive session, including when
+another viewer displays a member. It resolves physical root, nested containers
+and relative member paths separately, reuses its existing metadata cache/API and
+retains compressed-container aliases. Leaving the archive namespace uses normal
+Fileman navigation. Callbacks honor cancellation before committing navigation;
+changing the contributing scope closes the old picker. This adds no filesystem
+write capability or alternative provider transport.

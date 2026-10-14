@@ -8876,3 +8876,43 @@ Sanitized screenshots: [directory desktop](screenshots/m5/fileman-breadcrumb-des
 [directory mobile](screenshots/m5/fileman-breadcrumb-mobile.png),
 [editor mobile](screenshots/m5/fileman-breadcrumb-editor-mobile.png).
 All test provider assets are isolated fixtures; no real server or production changes.
+
+### 2026-10-14 — Atlas contributes virtual path navigation to Fileman
+
+ALT + G now includes the physical archive, nested containers, virtual directories
+and current member. Atlas registers a typed `FilemanPathProvider` for the whole
+archive session, including members opened in other viewers. The shared picker
+consumes the capability; FilesWorkspace has no archive-specific path handling.
+Completion, archive listing and single-stream decoding share the same metadata
+query keys and 48-page / 8 MiB cache. Picker results are capped at 200 and discarded
+on leaving the query; no duplicate completion history or recursive indexing.
+
+Focused evidence:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/core/{atlas-path,compressed}.test.ts apps/web/src/features/file-path-model.test.ts apps/web/src/features/fileman/host.test.ts packages/game-sdk/src/fileman.test.ts`: **32 passed**. Covers namespace separation, nested source chains, aliases, filtered pagination beyond 200 entries, invalid paths and cancelled navigation/opening.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/atlas-path.browser.test.ts apps/web/tests/compressed-viewers.browser.test.ts apps/web/tests/fileman-extension.browser.test.ts`: **10 passed**. Full virtual path, arrow/Enter completion, opening JSON members, returning to real root, missing paths, previously unopened compressed nested archives, explicit Atlas overrides, scope cleanup and existing compressed/viewer behavior.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed**.
+- Focused `scripts/dev.sh pnpm exec biome check` on all 13 changed/new TypeScript/TSX files: **passed**.
+
+Independent review identified pending-navigation cancellation and duplicate query
+retention; both were corrected. Provider replacement closes/cancels the old picker.
+Compressed nested containers typed directly now discover the same hidden aliases
+as ordinary opening, respecting explicit Atlas preferences. Final code and rendered
+UI review reported no remaining must-fix findings.
+
+Reviewed screenshots use only isolated fixtures:
+[desktop](screenshots/m5/atlas-path-member-desktop.png),
+[mobile](screenshots/m5/atlas-path-member-mobile.png). Browser tests exercise real
+application handlers with the existing isolated test database/provider harness;
+archive HTTP fixtures distinguish UI/navigation evidence from parser/live-provider
+coverage. No real game resources were created or mutated. No Blueprint, Wings,
+Pterodactyl or container changes/restarts. The change uses existing HMR. SFTPGo #18
+remains unchanged. Broad historical suites were not repeated.
+
+Native Fileman regression command:
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-manager.browser.test.ts -t 'completes actual folders|completes the sole path|keeps path errors|renders bounded path|shows platform-specific search'`:
+**5 passed, 29 intentionally skipped**. Covers native candidate completion,
+Space/Enter/arrows, stale-prefix errors, desktop/Italian mobile accessibility and
+platform-specific shortcuts. Final web typecheck and whitespace checks passed.
+`python3 scripts/check-governance.py` and `git diff --cached --check`: **passed**
+(854 indexed text files, 294 review PNGs, 703 relative links, 4 TOML files, 44 ignore cases; heuristic secret scan).

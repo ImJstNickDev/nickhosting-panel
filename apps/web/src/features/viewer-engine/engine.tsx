@@ -6,6 +6,7 @@ import { Tooltip } from '../../components/tooltip.js';
 import { ErrorNotice } from '../../components/ui.js';
 import { FilemanScope, FilemanSlot } from '../fileman/host.js';
 import { FilemanToolbarIcon } from '../fileman/presentation.js';
+import { AtlasPathContribution } from './builtin-viewers/atlas-path-provider.js';
 import { viewerDownloadPath } from './core/access.js';
 import { ViewerBoundary } from './core/boundary.js';
 import { compressedArchiveOptions, decodedMember, isSingleCompressed } from './core/compressed.js';
@@ -255,6 +256,36 @@ export function FileViewer({
     <FilemanScope
       context={{ viewerId: viewer, path: source.path, surface: 'viewer', readOnly: true }}
     >
+      {insideArchive && (
+        <AtlasPathContribution
+          serverId={serverId}
+          identity={identity}
+          root={initial}
+          source={source}
+          directory={archiveDirectory}
+          aliases={[
+            ...decodedContainers.current.values(),
+            ...(decodedSource && viewer === 'archive'
+              ? [{ original: source, internal: renderSource }]
+              : []),
+          ]}
+          onOpen={props.onOpen}
+          shouldDecode={(next) => savedViewer(next, preferences.data?.preferences) !== 'archive'}
+          onAliases={(aliases) => {
+            for (const alias of aliases)
+              decodedContainers.current.set(JSON.stringify(alias.internal.archives ?? []), alias);
+          }}
+          onNavigate={({ source: next, directory }) => {
+            setSource(next);
+            const depth = next.archives?.length ?? 0;
+            containers.current = containers.current.slice(0, depth + 1);
+            containers.current[depth] = next;
+            setArchiveDirectory(directory);
+            setDecodeEnabled(false);
+            setViewer('archive');
+          }}
+        />
+      )}
       <section
         className="ve-engine"
         ref={region}

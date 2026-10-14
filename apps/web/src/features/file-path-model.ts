@@ -1,5 +1,5 @@
+import type { FilemanPathEntry } from '@nickhosting/game-sdk/ui';
 import { normalizeFilePath } from './file-manager-model.js';
-import type { ServerFile } from './service-contracts.js';
 
 export interface FilePathInput {
   path: string;
@@ -37,7 +37,10 @@ export function parseFilePathInput(value: string): FilePathInput | undefined {
   };
 }
 
-export function filePathCandidates(files: readonly ServerFile[], prefix: string): ServerFile[] {
+export function filePathCandidates<T extends FilemanPathEntry>(
+  files: readonly T[],
+  prefix: string,
+): T[] {
   const query = prefix.toLowerCase();
   return files
     .filter((entry) => {
