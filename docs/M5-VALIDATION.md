@@ -9666,3 +9666,9 @@ Independent technical and visual review: no remaining must-fix findings.
 No provider writes, infrastructure operations or container restarts; changes apply
 through Vite HMR. Rollback: revert this scoped UI/CSS/catalog change. SFTPGo #18 and
 production-release boundaries are unchanged.
+
+Owner polish: removed the extra blue focus outline/shadow from the Scale input
+without changing its focus, typing or Enter handling. Refreshed and reviewed
+Firefox desktop/mobile screenshots; read-only smoke and focused CSS Biome pass.
+Button keyboard focus indicators remain visible. No expensive suites repeated
+for this CSS-only adjustment.

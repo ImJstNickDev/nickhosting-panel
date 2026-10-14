@@ -55,6 +55,10 @@
   text-align: right;
   appearance: textfield;
 }
+.quill-print-options input:focus {
+  outline: none;
+  box-shadow: none;
+}
 .quill-print-scale input::-webkit-inner-spin-button,
 .quill-print-scale input::-webkit-outer-spin-button {
   appearance: none;
@@ -84,7 +88,7 @@
   background: var(--blue);
   color: white;
 }
-.quill-print-options :focus-visible {
+.quill-print-options :focus-visible:not(input) {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
