@@ -89,6 +89,19 @@ Reference contracts: [CommonMark](https://spec.commonmark.org/),
 [Obsidian links](https://help.obsidian.md/links),
 [Citation.js](https://github.com/citation-js/citation-js).
 
+## Print controls
+
+The toolbar omits Information when parsed frontmatter has no properties. A single
+Print icon opens a compact, dismissible options panel: Scale defaults to 100%,
+accepts 25–200%, and supports typed percentages and decrement/increment controls.
+Print (or Enter in the percentage field) opens the browser print dialog. Escape
+or an outside click dismisses the options without closing the document.
+
+Scaling applies only to print layout, including headings, mathematics and images;
+it neither changes the source nor zooms the screen document. The browser's own
+print scaling remains independent. Print settings live outside Fileman's edit
+form so validation and printing cannot submit or block document saves.
+
 ## Verification boundary
 
 Focused unit and browser evidence is recorded in [M5 validation](M5-VALIDATION.md).

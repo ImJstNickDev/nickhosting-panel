@@ -17,21 +17,29 @@ export function QuillButton({
   onClick,
   pressed,
   disabled,
+  popoverTarget,
+  expanded,
 }: {
   kind: keyof typeof paths;
   label: string;
   onClick(): void;
   pressed?: boolean;
   disabled?: boolean;
+  popoverTarget?: string;
+  expanded?: boolean;
 }) {
   return (
-    <Tooltip content={label}>
+    <Tooltip content={expanded ? '' : label}>
       <button
         type="button"
         className="quill-icon"
         aria-label={label}
         aria-pressed={pressed}
         disabled={disabled}
+        popoverTarget={popoverTarget}
+        aria-haspopup={popoverTarget ? 'dialog' : undefined}
+        aria-controls={popoverTarget}
+        aria-expanded={expanded}
         onClick={onClick}
       >
         <svg

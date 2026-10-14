@@ -2,6 +2,93 @@
   padding: 0;
   overflow: hidden;
 }
+
+.quill-print-control {
+  display: inline-flex;
+}
+.quill-print-options {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: 248px;
+  max-width: calc(100vw - 16px);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 8px 28px #0002;
+  font-size: 0.85rem;
+}
+.quill-print-fields {
+  display: grid;
+  gap: 14px;
+}
+.quill-print-scale-row,
+.quill-print-scale,
+.quill-print-scale > span {
+  display: flex;
+  align-items: center;
+}
+.quill-print-scale-row {
+  justify-content: space-between;
+  gap: 12px;
+}
+.quill-print-scale-row label {
+  margin: 0;
+}
+.quill-print-scale {
+  gap: 2px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--muted) 7%, var(--surface));
+}
+.quill-print-scale input {
+  width: 3.5ch;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  font: inherit;
+  text-align: right;
+  appearance: textfield;
+}
+.quill-print-scale input::-webkit-inner-spin-button,
+.quill-print-scale input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+.quill-print-scale > span {
+  gap: 3px;
+}
+.quill-print-scale button {
+  width: 28px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.1rem;
+}
+.quill-print-scale button:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+}
+.quill-print-options .quill-print-submit {
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--blue);
+  color: white;
+}
+.quill-print-options :focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 .ve-quill {
   --quill-tint: color-mix(in srgb, var(--muted) 5%, var(--surface));
   display: flex;
@@ -521,7 +608,8 @@
   }
   body .quill-print-target {
     position: static;
-    width: 100%;
+    zoom: var(--quill-print-scale, 1);
+    width: auto;
     height: auto;
     max-height: none;
     overflow: visible;

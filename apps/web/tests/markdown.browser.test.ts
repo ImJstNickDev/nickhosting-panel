@@ -177,7 +177,7 @@ describe('Quill Markdown documents', () => {
     await browserExpect(name === 'Quill' ? quill() : scribe()).toBeVisible();
   }
 
-  it('prints the complete long document across pages without the application shell', async () => {
+  it('prints the complete long document at different scales without the application shell', async () => {
     const sections = Array.from(
       { length: 64 },
       (_, i) =>
@@ -192,46 +192,157 @@ describe('Quill Markdown documents', () => {
     await page.evaluate(() => {
       window.print = () => {};
     });
-    await quill().getByRole('button', { name: 'Print', exact: true }).click();
-    await page.emulateMedia({ media: 'print' });
-    try {
-      expect(await article.evaluate((el) => el.clientHeight)).toBeGreaterThan(screenHeight * 10);
-      expect(
-        await article.evaluate((el) => {
-          for (let parent = el.parentElement; parent; parent = parent.parentElement) {
-            const style = getComputedStyle(parent);
-            if (style.overflowY !== 'visible' || style.display !== 'block') return false;
+    const pageCounts: number[] = [];
+    for (const scale of [100, 150]) {
+      await quill().getByRole('button', { name: 'Print', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Print', exact: true });
+      await dialog.getByRole('spinbutton', { name: 'Scale', exact: true }).fill(String(scale));
+      expect(await article.evaluate((el) => el.clientHeight)).toBe(screenHeight);
+      expect(await article.evaluate((el) => getComputedStyle(el).zoom)).toBe('1');
+      await dialog.getByRole('button', { name: 'Print', exact: true }).click();
+      await browserExpect(dialog).not.toBeVisible();
+      await page.emulateMedia({ media: 'print' });
+      try {
+        expect(await article.evaluate((el) => getComputedStyle(el).zoom)).toBe(String(scale / 100));
+        expect(await article.evaluate((el) => el.clientHeight)).toBeGreaterThan(screenHeight * 10);
+        expect(
+          await article.evaluate((el) => {
+            for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+              const style = getComputedStyle(parent);
+              if (style.overflowY !== 'visible' || style.display !== 'block') return false;
+            }
+            return true;
+          }),
+        ).toBe(true);
+        if (process.env.NH_BROWSER !== 'firefox') {
+          const pdf = await page.pdf({ format: 'A4' });
+          const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+          const loading = getDocument({ data: new Uint8Array(pdf), useSystemFonts: true });
+          const document = await loading.promise;
+          try {
+            expect(document.numPages).toBeGreaterThan(2);
+            pageCounts.push(document.numPages);
+            const pages = [];
+            for (let n = 1; n <= document.numPages; n++) {
+              const content = await (await document.getPage(n)).getTextContent();
+              pages.push(content.items.map((item) => ('str' in item ? item.str : '')).join(' '));
+            }
+            const text = pages.join(' ');
+            for (let n = 1; n <= 64; n++) expect(text).toContain(`Print-section-${n}`);
+            expect(pages.at(-1)).toContain('PRINT-END-MARKER');
+            expect(text).not.toContain('Create server');
+          } finally {
+            await loading.destroy();
           }
-          return true;
-        }),
-      ).toBe(true);
-      if (process.env.NH_BROWSER !== 'firefox') {
-        const pdf = await page.pdf({ format: 'A4' });
-        const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
-        const loading = getDocument({ data: new Uint8Array(pdf), useSystemFonts: true });
-        const document = await loading.promise;
-        try {
-          expect(document.numPages).toBeGreaterThan(2);
-          const pages = [];
-          for (let n = 1; n <= document.numPages; n++) {
-            const content = await (await document.getPage(n)).getTextContent();
-            pages.push(content.items.map((item) => ('str' in item ? item.str : '')).join(' '));
-          }
-          const text = pages.join(' ');
-          for (let n = 1; n <= 64; n++) expect(text).toContain(`Print-section-${n}`);
-          expect(pages.at(-1)).toContain('PRINT-END-MARKER');
-          expect(text).not.toContain('Create server');
-        } finally {
-          await loading.destroy();
         }
+      } finally {
+        await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+        await page.emulateMedia({ media: 'screen' });
       }
+      await browserExpect(article).not.toHaveClass(/quill-print-target/);
+      expect(await article.evaluate((el) => el.clientHeight)).toBe(screenHeight);
+      expect(await article.evaluate((el) => getComputedStyle(el).zoom)).toBe('1');
+      await browserExpect(
+        quill().getByRole('button', { name: 'Print', exact: true }),
+      ).toBeVisible();
+    }
+    if (process.env.NH_BROWSER !== 'firefox')
+      expect(pageCounts[1]).toBeGreaterThan(pageCounts[0] ?? 0);
+  });
+
+  it('cancels print settings with Escape or an outside click and validates the scale before printing', async () => {
+    await open(
+      'Print-settings.md',
+      '# Print settings\n\nThe screen document keeps its original size.',
+    );
+    const article = page.locator('.quill-document');
+    const screenBounds = await article.boundingBox();
+    const writes = () => requests.filter((request) => !request.startsWith('GET '));
+    const writesBefore = writes();
+    await page.evaluate(() => {
+      Object.assign(window, { quillPrintCalls: 0 });
+      window.print = () => {
+        (window as unknown as { quillPrintCalls: number }).quillPrintCalls++;
+      };
+    });
+    const printCalls = () =>
+      page.evaluate(() => (window as unknown as { quillPrintCalls: number }).quillPrintCalls);
+    const trigger = quill().getByRole('button', { name: 'Print', exact: true });
+    const dialog = page.getByRole('dialog', { name: 'Print', exact: true });
+    const scale = dialog.getByRole('spinbutton', { name: 'Scale', exact: true });
+    await trigger.click();
+    await browserExpect(dialog).toBeVisible();
+    await browserExpect(scale).toHaveValue('100');
+    expect(await scale.evaluate((el) => (el as HTMLInputElement).form)).toBeNull();
+    await scale.fill('150');
+    expect(await article.boundingBox()).toEqual(screenBounds);
+    await scale.press('Escape');
+    await browserExpect(dialog).not.toBeVisible();
+    await browserExpect(trigger).toBeFocused();
+    expect(await printCalls()).toBe(0);
+    await browserExpect(article).not.toHaveClass(/quill-print-target/);
+
+    await trigger.click();
+    await article.getByRole('heading', { name: 'Print settings', exact: true }).click();
+    await browserExpect(dialog).not.toBeVisible();
+    expect(await printCalls()).toBe(0);
+
+    await trigger.click();
+    for (const invalid of ['', '24', '201']) {
+      await scale.fill(invalid);
+      await scale.press('Enter');
+      await browserExpect(dialog).toBeVisible();
+      expect(await printCalls()).toBe(0);
+      expect(await scale.evaluate((el) => (el as HTMLInputElement).validity.valid)).toBe(false);
+      await browserExpect(article).not.toHaveClass(/quill-print-target/);
+    }
+    for (const valid of ['25', '200']) {
+      await scale.fill(valid);
+      expect(await scale.evaluate((el) => (el as HTMLInputElement).validity.valid)).toBe(true);
+    }
+    await scale.fill('125');
+    await scale.press('Enter');
+    try {
+      await browserExpect(dialog).not.toBeVisible();
+      expect(await printCalls()).toBe(1);
+      expect(await article.boundingBox()).toEqual(screenBounds);
+      expect(await article.evaluate((el) => getComputedStyle(el).zoom)).toBe('1');
     } finally {
       await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
-      await page.emulateMedia({ media: 'screen' });
     }
     await browserExpect(article).not.toHaveClass(/quill-print-target/);
-    expect(await article.evaluate((el) => el.clientHeight)).toBe(screenHeight);
-    await browserExpect(quill().getByRole('button', { name: 'Print', exact: true })).toBeVisible();
+    expect(writes()).toEqual(writesBefore);
+  });
+
+  it.each([
+    ['absent', '# No metadata\n\nA plain document.'],
+    ['empty', '---\n---\n# No metadata\n\nAn empty frontmatter document.'],
+    ['empty object', '---\n{}\n---\n# No metadata\n\nAn empty frontmatter object.'],
+  ])('hides the metadata control when frontmatter is %s', async (_kind, source) => {
+    await open('No-metadata.md', source);
+    await browserExpect(
+      quill().getByRole('button', { name: 'Document metadata', exact: true }),
+    ).toHaveCount(0);
+    await browserExpect(
+      quill().getByRole('region', { name: 'Document metadata', exact: true }),
+    ).toHaveCount(0);
+    await browserExpect(
+      quill().getByRole('heading', { name: 'No metadata', exact: true }),
+    ).toBeVisible();
+  });
+
+  it('shows the metadata control for nonempty frontmatter and toggles its values', async () => {
+    await open('Metadata.md', '---\ntitle: Server notes\nauthor: Alex\n---\n# Document');
+    const toggle = quill().getByRole('button', { name: 'Document metadata', exact: true });
+    const metadata = quill().getByRole('region', { name: 'Document metadata', exact: true });
+    await browserExpect(toggle).toBeVisible();
+    await browserExpect(toggle).toBeEnabled();
+    await browserExpect(metadata).not.toBeVisible();
+    await toggle.click();
+    await browserExpect(metadata).toContainText('Server notes');
+    await browserExpect(metadata).toContainText('Alex');
+    await toggle.click();
+    await browserExpect(metadata).not.toBeVisible();
   });
 
   it('survives a cold worker load after Fileman refresh without requiring Retry', async () => {

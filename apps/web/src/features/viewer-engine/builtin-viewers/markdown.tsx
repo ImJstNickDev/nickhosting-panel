@@ -6,6 +6,7 @@ import type { QuillModel } from './markdown/model.js';
 import { QuillClient } from './markdown/ui-client.js';
 import { QuillButton, QuillSkeleton } from './markdown/ui-controls.js';
 import { createQuillEmbedBudget, quillAnchorIds } from './markdown/ui-model.js';
+import { QuillPrintControl } from './markdown/ui-print.js';
 import { QuillDocument, type QuillRenderContext } from './markdown/ui-renderer.js';
 import { useQuillSearch } from './markdown/ui-search.js';
 import 'katex/dist/katex.min.css';
@@ -165,7 +166,9 @@ function QuillWorkspace(props: DocumentViewProps) {
       if (
         event.defaultPrevented ||
         event.isComposing ||
-        document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]')
+        document.querySelector(
+          'dialog[open], [role="dialog"][aria-modal="true"], [popover]:popover-open',
+        )
       )
         return;
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f') {
@@ -182,12 +185,14 @@ function QuillWorkspace(props: DocumentViewProps) {
     window.addEventListener('keydown', keydown, true);
     return () => window.removeEventListener('keydown', keydown, true);
   }, [active, search, openSearch]);
-  const print = () => {
+  const print = (scale: number) => {
     const node = article.current;
     if (!node) return;
+    node.style.setProperty('--quill-print-scale', String(scale / 100));
     node.classList.add('quill-print-target');
     const done = () => {
       node.classList.remove('quill-print-target');
+      node.style.removeProperty('--quill-print-scale');
       window.removeEventListener('afterprint', done);
     };
     window.addEventListener('afterprint', done, { once: true });
@@ -308,14 +313,15 @@ function QuillWorkspace(props: DocumentViewProps) {
           <QuillButton kind="find" label={t('quill.find')} onClick={openSearch} />
         )}
         <div className="quill-tools">
-          <QuillButton
-            kind="metadata"
-            label={t('quill.metadata')}
-            pressed={metadata}
-            disabled={!model?.metadata || !Object.keys(model.metadata).length}
-            onClick={() => setMetadata(!metadata)}
-          />
-          <QuillButton kind="print" label={t('quill.print')} disabled={!model} onClick={print} />
+          {model?.metadata && Object.keys(model.metadata).length > 0 && (
+            <QuillButton
+              kind="metadata"
+              label={t('quill.metadata')}
+              pressed={metadata}
+              onClick={() => setMetadata(!metadata)}
+            />
+          )}
+          <QuillPrintControl disabled={!model} active={active} onPrint={print} />
         </div>
       </div>
       <div className="quill-workspace">

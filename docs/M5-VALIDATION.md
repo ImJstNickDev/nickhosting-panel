@@ -9636,3 +9636,33 @@ No container restarts, provider writes, or server-file changes. Existing isolate
 test services were reused. Development received the CSS through Vite HMR.
 Rollback: revert this scoped CSS/test change. PR #21 remains open and unmerged;
 SFTPGo issue #18 remains unchanged.
+
+### 2026-10-14 — Quill metadata visibility and print scale
+
+Information is absent for documents without nonempty parsed metadata. The single
+Print toolbar icon now opens a compact native popover with a percentage field,
+minus/plus controls and Print. Default 100%, accepted range 25–200%; Enter submits,
+Escape/outside click dismiss. Scale changes print layout only, preserving screen
+geometry and source text. English, Italian and pseudolocale catalogs updated.
+
+Focused validation uses the existing isolated browser harness/provider fixtures:
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/markdown.browser.test.ts -t 'print|metadata'`
+The same command was repeated with the `NH_BROWSER=firefox` prefix: six tests passed, ten unrelated tests skipped.
+Chromium: six targeted tests passed, ten unrelated tests skipped; final settings
+regression rerun passed after adding form-isolation and zero-file-write assertions.
+PDF extraction at 100% and 150% retains all 64 sections and the final-page marker,
+with more pages at 150%. Keyboard dismissal/submission, empty/out-of-range scale,
+valid bounds, screen restoration and empty/nonempty frontmatter are covered.
+During development, review caught nested Fileman form interference; the popover
+now renders through a body portal with explicit print handlers, and its input
+has no form owner. Printing does not submit file edits.
+
+Web typecheck, focused Biome, catalog completeness and whitespace checks passed.
+Read-only Firefox development smoke confirms hidden metadata and popover focus/
+Escape at desktop and mobile widths. Reviewed screenshots:
+[desktop Italian](screenshots/m5/quill-print-options-desktop-it.png),
+[mobile Italian](screenshots/m5/quill-print-options-mobile-it.png).
+Independent technical and visual review: no remaining must-fix findings.
+No provider writes, infrastructure operations or container restarts; changes apply
+through Vite HMR. Rollback: revert this scoped UI/CSS/catalog change. SFTPGo #18 and
+production-release boundaries are unchanged.
