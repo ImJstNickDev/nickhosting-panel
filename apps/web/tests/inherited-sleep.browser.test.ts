@@ -85,7 +85,7 @@ describe('inherited sleep timeout controls', () => {
   });
   it('saves game and runtime defaults through actual Owner handlers', async () => {
     await owner.goto(`${harness.origin}/owner/integrations`);
-    const settings = owner.getByTestId('sleep-settings-minecraft-java');
+    const settings = owner.getByTestId('sleep-settings-minecraft');
     await settings.locator('summary').first().click();
     await settings.locator('select[name="sleepGameMode"]').selectOption('override');
     await settings.locator('input[name="sleepGame"]').fill('30');
@@ -96,7 +96,7 @@ describe('inherited sleep timeout controls', () => {
     ).toHaveText('Inherit (30 min)');
     await settings.locator('select[name="sleepRuntime-vanillaMode"]').selectOption('override');
     await settings.locator('input[name="sleepRuntime-vanilla"]').fill('10');
-    await saved(owner, '/minecraft-java/sleep-policy', () =>
+    await saved(owner, '/minecraft/sleep-policy', () =>
       settings.getByRole('button', { name: 'Save changes', exact: true }).click(),
     );
     await browserExpect(settings.locator('input[name="sleepGame"]')).toHaveValue('30');
@@ -156,11 +156,11 @@ describe('inherited sleep timeout controls', () => {
     await harness.screenshot(user, 'inherited-sleep-server-desktop-en');
   });
   it('enforces shorten-only input bounds and preserves automatic controls', async () => {
-    const settings = owner.getByTestId('sleep-settings-minecraft-java');
+    const settings = owner.getByTestId('sleep-settings-minecraft');
     await settings
       .locator('select[name="sleepRuntimeAccess-vanilla"]')
       .selectOption('shorten-only');
-    await saved(owner, '/minecraft-java/sleep-policy', () =>
+    await saved(owner, '/minecraft/sleep-policy', () =>
       settings.getByRole('button', { name: 'Save changes', exact: true }).click(),
     );
     await user.goto(`${harness.origin}/servers/${provider.ids.serverId}/automation`);
@@ -197,10 +197,10 @@ describe('inherited sleep timeout controls', () => {
     await settings.getByText('Vanilla', { exact: true }).click();
   });
   it('removes runtime overrides and renders effective game inheritance on Italian mobile', async () => {
-    const settings = owner.getByTestId('sleep-settings-minecraft-java');
+    const settings = owner.getByTestId('sleep-settings-minecraft');
     await settings.locator('select[name="sleepRuntime-vanillaMode"]').selectOption('inherit');
     await settings.locator('select[name="sleepRuntimeAccess-vanilla"]').selectOption('inherit');
-    await saved(owner, '/minecraft-java/sleep-policy', () =>
+    await saved(owner, '/minecraft/sleep-policy', () =>
       settings.getByRole('button', { name: 'Save changes', exact: true }).click(),
     );
     await journeyRequest(harness, user, '/api/auth/update-user', { locale: 'it' });
@@ -242,10 +242,10 @@ describe('inherited sleep timeout controls', () => {
       form.getByRole('button', { name: 'Save changes', exact: true }).click(),
     );
     await owner.goto(`${harness.origin}/owner/integrations`);
-    const settings = owner.getByTestId('sleep-settings-minecraft-java');
+    const settings = owner.getByTestId('sleep-settings-minecraft');
     await settings.locator('summary').first().click();
     await settings.locator('select[name="sleepGameMode"]').selectOption('inherit');
-    await saved(owner, '/minecraft-java/sleep-policy', () =>
+    await saved(owner, '/minecraft/sleep-policy', () =>
       settings.getByRole('button', { name: 'Save changes', exact: true }).click(),
     );
     await user.reload();

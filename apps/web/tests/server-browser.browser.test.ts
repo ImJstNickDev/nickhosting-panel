@@ -200,7 +200,7 @@ describe('M5 server browser filters, ownership and bounded views', () => {
     await browserExpect(cards(user)).toHaveCount(4);
     await browserExpect(user.getByLabel('Runtime', { exact: true })).toBeVisible();
     await browserExpect(user.getByLabel('Version', { exact: true })).toBeVisible();
-    await user.getByLabel('Game', { exact: true }).selectOption('minecraft-java');
+    await user.getByLabel('Game', { exact: true }).selectOption('minecraft');
     await user.getByLabel('Runtime', { exact: true }).selectOption('vanilla');
     const release = await user
       .getByLabel('Version', { exact: true })

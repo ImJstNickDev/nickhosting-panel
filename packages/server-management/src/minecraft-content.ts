@@ -843,7 +843,7 @@ export async function verifyMinecraftInitialInstallation(
   await context.authorize();
   if (!verified.imageEvidence.observed) throw new DomainError('configuration_invalid');
   return {
-    integrationId: 'minecraft-java',
+    integrationId: 'minecraft',
     combinationId: profile.combination_id,
     mappingDigest: verified.choice.mappingDigest,
     imageDigest: verified.imageEvidence.observed,

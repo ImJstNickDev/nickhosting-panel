@@ -44,7 +44,7 @@ const groupFor = (key: string) =>
     ? 'identity'
     : key.startsWith('pterodactyl') || key === 'dockerObserverSocket'
       ? 'provider'
-      : key.startsWith('gateway')
+      : key.startsWith('gateway') || key === 'minecraftGatewayResponses'
         ? 'gateway'
         : key.startsWith('minecraft')
           ? 'content'

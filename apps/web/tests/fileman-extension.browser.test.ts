@@ -28,7 +28,7 @@ it('applies compiled Fileman toolbar patches to actual nested viewer transitions
       route.fulfill({
         contentType: 'text/javascript',
         body: `export const gameFilemanExtensions = [{
-        descriptor: {id:'minecraft-java:fixture-context', gameId:'minecraft-java', priority:0},
+        descriptor: {id:'minecraft:fixture-context', gameId:'minecraft', priority:0},
         patches: [{slot:'toolbar', mode:'append', render: context =>
           'fixture-context:' + context.surface + ':' + (context.viewerId || 'none') + ':' + context.readOnly + ':' + context.path}]
       }];`,

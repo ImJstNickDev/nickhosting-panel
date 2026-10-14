@@ -4,9 +4,9 @@ import { minecraftImagePolicy } from './image-policy.js';
 
 /** Public capabilities are implemented backend contracts, not a release support matrix. */
 export const minecraftManifest = gameManifestSchema.parse({
-  id: 'minecraft-java',
+  id: 'minecraft',
   version: '1.0.0',
-  nameKey: 'games.minecraft-java.name',
+  nameKey: 'games.minecraft.name',
   capabilities: {
     console: true,
     files: true,
@@ -27,45 +27,45 @@ export const minecraftManifest = gameManifestSchema.parse({
   ports: [{ role: 'game', transport: 'tcp', required: true }],
   runtimes: minecraftProfiles.map((id) => ({
     id,
-    nameKey: `games.minecraft-java.runtimes.${id}`,
+    nameKey: `games.minecraft.runtimes.${id}`,
     supportedGameVersions: [],
     imagePolicy: minecraftImagePolicy,
     supports: { mods: ['fabric', 'forge'].includes(id), plugins: ['paper', 'folia'].includes(id) },
   })),
   wizard: {
     steps: [
-      { id: 'choose-game', titleKey: 'games.minecraft-java.steps.chooseGame', fields: ['game'] },
+      { id: 'choose-game', titleKey: 'games.minecraft.steps.chooseGame', fields: ['game'] },
       {
         id: 'configure',
-        titleKey: 'games.minecraft-java.steps.configure',
+        titleKey: 'games.minecraft.steps.configure',
         fields: ['choiceId', 'modpack', 'operators', 'whitelist'],
       },
-      { id: 'resources', titleKey: 'games.minecraft-java.steps.resources', fields: ['limits'] },
-      { id: 'create', titleKey: 'games.minecraft-java.steps.create', fields: ['eulaAccepted'] },
+      { id: 'resources', titleKey: 'games.minecraft.steps.resources', fields: ['limits'] },
+      { id: 'create', titleKey: 'games.minecraft.steps.create', fields: ['eulaAccepted'] },
     ],
   },
   management: [
     {
       id: 'content',
-      titleKey: 'games.minecraft-java.management.content',
+      titleKey: 'games.minecraft.management.content',
       requiredCapability: 'mods',
     },
     {
       id: 'worlds',
-      titleKey: 'games.minecraft-java.management.worlds',
+      titleKey: 'games.minecraft.management.worlds',
       requiredCapability: 'worlds',
     },
     {
       id: 'properties',
-      titleKey: 'games.minecraft-java.management.properties',
+      titleKey: 'games.minecraft.management.properties',
       requiredCapability: 'files',
     },
     {
       id: 'players',
-      titleKey: 'games.minecraft-java.management.players',
+      titleKey: 'games.minecraft.management.players',
       requiredCapability: 'players',
     },
   ],
   contentProviders: ['modrinth', 'curseforge'],
-  localizations: { namespace: 'games.minecraft-java', locales: ['en', 'it'] },
+  localizations: { namespace: 'games.minecraft', locales: ['en', 'it'] },
 });

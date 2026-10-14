@@ -53,7 +53,7 @@ async function installedMinecraft() {
   await f.db
     .insertInto('game_integrations')
     .values({
-      id: 'minecraft-java',
+      id: 'minecraft',
       version: minecraftManifest.version,
       manifest: minecraftManifest,
     })
@@ -61,7 +61,7 @@ async function installedMinecraft() {
     .execute();
   await f.db
     .updateTable('runtime_egg_mappings')
-    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+    .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
     .where('id', '=', f.mappingId)
     .execute();
   const mapping = await f.db
@@ -236,7 +236,7 @@ describe('initial sleep policy proposal', () => {
       .execute();
     await f.db
       .updateTable('minecraft_combinations')
-      .set({ combination: JSON.stringify({ ...combination, release: '1.20.4', protocolId: 765 }) })
+      .set({ combination: JSON.stringify({ ...combination, family: 'unknown', protocolId: null }) })
       .where('id', '=', choiceId)
       .execute();
     expect((await getPlatformSleepPolicy(f.db, f.context, id)).proposedPolicy).toBeNull();
@@ -540,7 +540,7 @@ describe('M5 platform browser queries and metadata', () => {
       role: 'viewer',
     });
     const visible = await listPlatformServers(f.db, other.context, {
-      gameId: 'minecraft-java',
+      gameId: 'minecraft',
       runtimeId: 'vanilla',
       version: '26.1',
     });
@@ -646,7 +646,7 @@ describe('M5 platform browser queries and metadata', () => {
           capabilities: { ...minecraftManifest.capabilities, wake: 'unsupported' },
         },
       })
-      .where('id', '=', 'minecraft-java')
+      .where('id', '=', 'minecraft')
       .execute();
     try {
       expect((await getPlatformServer(f.db, f.context, id, env)).wakeEnabled).toBe(false);
@@ -654,7 +654,7 @@ describe('M5 platform browser queries and metadata', () => {
       await f.db
         .updateTable('game_integrations')
         .set({ manifest: minecraftManifest })
-        .where('id', '=', 'minecraft-java')
+        .where('id', '=', 'minecraft')
         .execute();
     }
   });

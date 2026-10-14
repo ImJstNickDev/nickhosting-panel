@@ -45,7 +45,7 @@ function clientFixture() {
 }
 describe('Minecraft browser module and exact API contracts', () => {
   it('contains complete EN/IT catalogs and browser-safe module metadata', () => {
-    expect(minecraftUiModule.descriptor.gameId).toBe('minecraft-java');
+    expect(minecraftUiModule.descriptor.gameId).toBe('minecraft');
     expect(Object.keys(minecraftUiCatalogs.en).sort()).toEqual(
       Object.keys(minecraftUiCatalogs.it).sort(),
     );
@@ -86,8 +86,8 @@ describe('Minecraft browser module and exact API contracts', () => {
       resetFields: ['choiceId', 'operators', 'whitelist', 'whitelistEnabled', 'eula'],
     });
     expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
-      { value: 'vanilla', labelKey: 'games.minecraft-java.runtimes.vanilla', disabled: false },
-      { value: 'paper', labelKey: 'games.minecraft-java.runtimes.paper', disabled: false },
+      { value: 'vanilla', labelKey: 'games.minecraft.runtimes.vanilla', disabled: false },
+      { value: 'paper', labelKey: 'games.minecraft.runtimes.paper', disabled: false },
     ]);
     expect(
       await minecraftUiModule.handlers.choices?.(client, { values: { runtime: 'vanilla' } }),
@@ -103,7 +103,7 @@ describe('Minecraft browser module and exact API contracts', () => {
     ).rejects.toThrow('integration_unavailable');
     client.request.mockResolvedValue([release]);
     expect(await minecraftUiModule.handlers.runtimes?.(client, { values: {} })).toEqual([
-      { value: 'vanilla', labelKey: 'games.minecraft-java.runtimes.vanilla', disabled: false },
+      { value: 'vanilla', labelKey: 'games.minecraft.runtimes.vanilla', disabled: false },
     ]);
   });
   it('retains legacy direct capability flags and clears unsupported player fields in preparation', async () => {
@@ -251,7 +251,7 @@ describe('Minecraft browser module and exact API contracts', () => {
           id: choiceId,
           release: '26.1',
           runtime: 'vanilla',
-          nameKey: 'games.minecraft-java.runtimes.vanilla',
+          nameKey: 'games.minecraft.runtimes.vanilla',
         },
       ],
       derived: { choiceId, release: '26.1', runtime: 'vanilla' },

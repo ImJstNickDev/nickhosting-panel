@@ -54,6 +54,10 @@ export function assertMinecraftDeclaredEnvironment(
 }
 export function minecraftMappingDigest(mapping: Mapping): string {
   const { enabled: _enabled, image_mode, ...identity } = mapping;
+  // The integration was renamed; v1 signed mapping identities retain their
+  // original Java-edition preimage. This is an explicit identity alias, not a
+  // report rewrite: every other mapping field still participates in the hash.
+  if (identity.game_id === 'minecraft') identity.game_id = 'minecraft-java';
   // Preserve the signed pre-image for every pre-existing static mapping.
   return minecraftDigest(image_mode === 'integration' ? { ...identity, image_mode } : identity);
 }
@@ -112,7 +116,7 @@ export async function registerMinecraftCombination(
     .selectAll()
     .where('id', '=', value.mappingId)
     .executeTakeFirst();
-  if (mapping?.game_id !== 'minecraft-java' || mapping.runtime_id !== value.runtime.profile)
+  if (mapping?.game_id !== 'minecraft' || mapping.runtime_id !== value.runtime.profile)
     throw new DomainError('validation_failed');
   const { values } = await getSettings(db, env);
   const metadata =
@@ -336,7 +340,7 @@ export async function requireMinecraftChoice(
   const rollout = await db
     .selectFrom('game_rollouts')
     .selectAll()
-    .where('integration_id', '=', 'minecraft-java')
+    .where('integration_id', '=', 'minecraft')
     .executeTakeFirst();
   assertLoadedMinecraftChoice(choice, rollout, context);
   return choice;
@@ -350,7 +354,7 @@ function assertLoadedMinecraftChoice(
   if (
     !rollout ||
     !evaluateGameAccess(
-      { gameId: 'minecraft-java', state: rollout.state, allowedUserIds: rollout.allowlist },
+      { gameId: 'minecraft', state: rollout.state, allowedUserIds: rollout.allowlist },
       { userId: context.subjectUserId, role: context.role },
     ).canCreate
   )
@@ -375,12 +379,12 @@ export async function minecraftCatalog(db: DB, context: AuthContext, env: Enviro
   const rollout = await db
     .selectFrom('game_rollouts')
     .selectAll()
-    .where('integration_id', '=', 'minecraft-java')
+    .where('integration_id', '=', 'minecraft')
     .executeTakeFirst();
   if (
     !rollout ||
     !evaluateGameAccess(
-      { gameId: 'minecraft-java', state: rollout.state, allowedUserIds: rollout.allowlist },
+      { gameId: 'minecraft', state: rollout.state, allowedUserIds: rollout.allowlist },
       { userId: context.subjectUserId, role: context.role },
     ).canCreate
   )

@@ -63,8 +63,8 @@ async function authorizeOperation(input: GameOperationAuthorization) {
       .selectAll()
       .where('server_id', '=', server.id)
       .executeTakeFirst();
-    if (mapping.game_id === 'minecraft-java' || profile) {
-      if (!profile || mapping.game_id !== 'minecraft-java')
+    if (mapping.game_id === 'minecraft' || profile) {
+      if (!profile || mapping.game_id !== 'minecraft')
         throw new DomainError('configuration_invalid');
       // The queued actor remains separately authorized above. Compatibility and
       // tester eligibility belong to the resource owner, never an elevated helper.
@@ -128,7 +128,7 @@ async function authorizeOperation(input: GameOperationAuthorization) {
   }
 }
 export const minecraftModule: TrustedGameModule = {
-  id: 'minecraft-java',
+  id: 'minecraft',
   manifest: minecraftManifest,
   provisionAsResourceOwner: true,
   readinessSource: minecraftReadinessSource,
@@ -169,8 +169,7 @@ export const minecraftModule: TrustedGameModule = {
       .select('server_id')
       .where('server_id', '=', server.id)
       .executeTakeFirst();
-    if (profile && mapping.game_id !== 'minecraft-java')
-      throw new DomainError('configuration_invalid');
+    if (profile && mapping.game_id !== 'minecraft') throw new DomainError('configuration_invalid');
   },
   authorizeOperation,
   async filterCatalog(db, context, entry, env) {
@@ -243,7 +242,7 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
         .select('mapping.game_id')
         .where('server.id', '=', serverId)
         .executeTakeFirst();
-      if (mapping?.game_id === 'minecraft-java') throw new DomainError('integration_unavailable');
+      if (mapping?.game_id === 'minecraft') throw new DomainError('integration_unavailable');
       return;
     }
     if (requireObserved && !profile.installed) throw new DomainError('integration_unavailable');

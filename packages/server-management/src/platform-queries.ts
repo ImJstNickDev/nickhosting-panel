@@ -120,7 +120,7 @@ const installedServerVersion = sql<string | null>`(
   join runtime_egg_mappings as version_mapping on version_mapping.id = combination.mapping_id
   where profile.server_id = managed_servers.id and profile.installed = true
     and combination.mapping_id = managed_servers.mapping_id
-    and version_mapping.game_id = 'minecraft-java'
+    and version_mapping.game_id = 'minecraft'
 )`;
 
 export async function listPlatformServers(

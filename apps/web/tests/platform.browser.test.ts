@@ -189,7 +189,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     await browserExpect(
       user.getByRole('heading', { name: 'Choose a game', exact: true }),
     ).toBeVisible();
-    await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
+    await user.getByRole('button', { name: 'Minecraft', exact: true }).click();
     await fixture.screenshot(user, 'wizard-game-desktop-en');
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await user
@@ -287,7 +287,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     });
     await peer.setViewportSize({ width: 390, height: 844 });
     await peer.goto(`${fixture.origin}/servers/new`);
-    await peer.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
+    await peer.getByRole('button', { name: 'Minecraft', exact: true }).click();
     await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
     await peer
       .locator('.installer-choice-card')
@@ -579,9 +579,7 @@ describe('M5 real browser platform and Owner journeys', () => {
       user,
       '/v1/games',
     );
-    expect(hidden.find((game) => game.id === 'minecraft-java')?.access.canCreate ?? false).toBe(
-      false,
-    );
+    expect(hidden.find((game) => game.id === 'minecraft')?.access.canCreate ?? false).toBe(false);
     await owner
       .getByLabel('Tester user IDs (one per line)', { exact: true })
       .fill(identities.userId);
@@ -595,7 +593,7 @@ describe('M5 real browser platform and Owner journeys', () => {
               user,
               '/v1/games',
             )
-          ).find((game) => game.id === 'minecraft-java')?.access.canCreate,
+          ).find((game) => game.id === 'minecraft')?.access.canCreate,
       )
       .toBe(true);
     const choices = await journeyRequest<Array<{ runtime: string }>>(

@@ -221,10 +221,7 @@ export async function getGatewayState(
   options: GatewayOrchestrationOptions = {},
 ) {
   const { server, state } = await rows(db, serverId);
-  if (
-    state.enabled &&
-    (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
-  )
+  if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
     await requireMinecraftGatewayProtocol(
       db,
       serverId,
@@ -507,10 +504,7 @@ export async function requestGatewayWake(
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options);
     if (value.generation !== state.generation) throw new DomainError('conflict');
-    if (
-      state.enabled &&
-      (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
-    )
+    if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
       await requireMinecraftGatewayProtocol(
         tx,
         serverId,
@@ -719,10 +713,7 @@ export async function reportGatewayObservation(
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options),
       observed = new Date(value.observedAt);
-    if (
-      state.enabled &&
-      (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
-    )
+    if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
       await requireMinecraftGatewayProtocol(
         tx,
         serverId,

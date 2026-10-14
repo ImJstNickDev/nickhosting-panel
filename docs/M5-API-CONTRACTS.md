@@ -1119,3 +1119,15 @@ continues to clear the retained password. List GET responses remain secret-free.
 No permission is inferred from frontend visibility; POST Origin/session checks
 remain enforced. This replaces the earlier rotate-only recovery UX without
 changing idempotent create/rotate responses or issue #18.
+
+## Minecraft identity and protocol families — 2026-10-14
+
+The canonical game ID and localization namespace are `minecraft` and `games.minecraft`.
+The Java wire handler remains `minecraft-java`; no Bedrock runtime is introduced.
+Migration031 preserves mapping IDs and signed evidence with an explicit historical
+digest preimage alias. Existing API paths `/v1/owner/minecraft/...` are unchanged.
+Public choice capabilities now separate `wake`, `playerIdle` and `sleepWake` from
+`gateway`/`readiness`. Fake protocol counters are never actual player observations.
+Route metadata accepts `family: legacy` as well as `netty`, current declaration
+`minecraft/vanilla` v2 and optional `responses` presentation settings.
+See [protocol contracts and evidence](MINECRAFT-MULTIPROTOCOL.md) and ADR0018.

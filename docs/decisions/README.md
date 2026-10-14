@@ -31,3 +31,5 @@ status and amendment before applying historical milestone numbers.
 - [0016 — Declared provider readiness and responder continuity](0016-provider-readiness.md)
 
 - [0017 — Shared file viewers and private range access](0017-shared-file-viewers.md)
+
+- [0018 — Minecraft identity and protocol-family support](0018-minecraft-identity-and-protocol-families.md)

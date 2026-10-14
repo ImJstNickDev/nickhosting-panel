@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import {
+  minecraftLegacyGatewaySupported,
+  minecraftLegacyStatusVariant,
+} from './protocol-profiles.js';
 
 export const minecraftProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -172,8 +176,8 @@ export function minecraftSupport(
 }
 
 export const minecraftCapabilityDeclaration = {
-  id: 'minecraft-java/vanilla',
-  version: 1,
+  id: 'minecraft/vanilla',
+  version: 2,
 } as const;
 
 export function minecraftGatewaySupported(
@@ -184,20 +188,20 @@ export function minecraftGatewaySupported(
 ): boolean {
   return (
     combination.profile === 'vanilla' &&
-    combination.releaseType === 'release' &&
-    combination.family === 'netty' &&
-    combination.release === '26.1' &&
-    combination.protocolId === 775
+    combination.protocolId !== null &&
+    (combination.family === 'netty' ||
+      (combination.family === 'legacy' && minecraftLegacyGatewaySupported(combination.release)))
   );
 }
 
-/** Compiled integration support is independent of per-installation signed test reports.
- * Installation is offered only after metadata/artifact and local egg validation. This
- * exact Gateway pair has real M4 coverage; unknown/legacy/snapshot protocols retain
- * direct access, without claiming protocol-aware readiness, idle or wake support. */
+/** Families describe responder support; backend status availability separately
+ * controls automatic sleep. No per-installation evidence checkbox grants support. */
 export function minecraftDeclaredCapabilities(combination: MinecraftCombination) {
   const installation = combination.profile === 'vanilla';
   const gateway = minecraftGatewaySupported(combination);
+  const playerIdle =
+    gateway &&
+    (combination.family === 'netty' || !!minecraftLegacyStatusVariant(combination.release));
   // UUID-based ops/whitelist JSON files were introduced in 1.7.6. Opaque
   // snapshots cannot be ordered safely and retain manual provider management.
   const parts = combination.release.split('.').map(Number);
@@ -214,8 +218,9 @@ export function minecraftDeclaredCapabilities(combination: MinecraftCombination)
     playerManagement,
     gateway,
     readiness: gateway,
-    playerIdle: gateway,
-    sleepWake: gateway,
+    playerIdle,
+    wake: gateway,
+    sleepWake: playerIdle,
   };
 }
 

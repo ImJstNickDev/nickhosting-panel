@@ -170,7 +170,7 @@ describe('Owner automatic Vanilla discovery', () => {
     }>;
   }
   it('discovers declared versions without local evidence and exposes honest capabilities', async () => {
-    await owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
     await browserExpect(
       owner.getByRole('heading', { name: 'Minecraft compatibility', exact: true }),
     ).toBeVisible();
@@ -224,7 +224,7 @@ describe('Owner automatic Vanilla discovery', () => {
     }[];
     expect(choices).toHaveLength(2);
     expect(choices.find((choice) => choice.version === '1.21.11')).toMatchObject({
-      capabilities: { installation: true, gateway: false, sleepWake: false },
+      capabilities: { installation: true, gateway: true, sleepWake: true },
     });
     const again = await discover();
     expect(again.items).toEqual(result.items);
@@ -260,7 +260,7 @@ describe('Owner automatic Vanilla discovery', () => {
       ),
     ).toBe(true);
   });
-  it('offers a direct-only declared version through the ordinary operator and whitelist installer pages', async () => {
+  it('offers a declared version through the ordinary operator and whitelist installer pages', async () => {
     const user = identities.user;
     user.on('pageerror', (error) => pageErrors.push(error.message));
     const catalogCalls: string[] = [];
@@ -275,7 +275,7 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.goto(`${fixture.origin}/servers`);
     await preload;
     await user.locator('a[href="/servers/new"]').first().click();
-    const game = user.getByRole('button', { name: 'Minecraft Java', exact: true });
+    const game = user.getByRole('button', { name: 'Minecraft', exact: true });
     await game.focus();
     await game.press('Enter');
     await browserExpect(game).toHaveAttribute('aria-pressed', 'true');
@@ -572,7 +572,7 @@ describe('Owner automatic Vanilla discovery', () => {
       locale: 'it',
     });
     await owner.setViewportSize({ width: 390, height: 844 });
-    await owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
     await owner.getByLabel('Cerca versioni', { exact: true }).fill('25w');
     await owner
       .getByRole('checkbox', { name: 'Includi snapshot e versioni storiche', exact: true })
@@ -598,7 +598,7 @@ describe('Owner automatic Vanilla discovery', () => {
       locale: 'en',
     });
     await owner.setViewportSize({ width: 1440, height: 1000 });
-    await owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
   });
   it('renders runtime and release-only labels on Italian mobile with no overflow', async () => {
     const user = identities.user;
@@ -608,7 +608,7 @@ describe('Owner automatic Vanilla discovery', () => {
     });
     await user.setViewportSize({ width: 390, height: 844 });
     await user.goto(`${fixture.origin}/servers/new`);
-    await user.getByRole('button', { name: 'Minecraft Java', exact: true }).click();
+    await user.getByRole('button', { name: 'Minecraft', exact: true }).click();
     await user.getByRole('button', { name: 'Avanti', exact: true }).click();
     await browserExpect(
       user.getByRole('heading', { name: 'Scegli un runtime', exact: true }),

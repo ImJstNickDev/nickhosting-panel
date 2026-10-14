@@ -16,10 +16,10 @@ import {
 
 export * from './controller.js';
 
-const namespace = 'games.minecraft-java';
+const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
-  name: ['Minecraft Java', 'Minecraft Java'],
+  name: ['Minecraft', 'Minecraft'],
   'installer.runtime': ['Choose a runtime', 'Scegli un runtime'],
   'fields.runtime': ['Runtime', 'Runtime'],
   'runtimes.vanilla': ['Vanilla', 'Vanilla'],
@@ -219,7 +219,7 @@ const propertyFields: unknown[] = [
   }).map(([id, bounds]) => ({ id, type: 'number', min: bounds[0], max: bounds[1] })),
 ].map((f) => ({ ...f, labelKey: k(`properties.${f.id}`) }));
 export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
-  gameId: 'minecraft-java',
+  gameId: 'minecraft',
   schemaVersion: 1,
   nameKey: k('name'),
   artwork: { assetId: 'landscape' },

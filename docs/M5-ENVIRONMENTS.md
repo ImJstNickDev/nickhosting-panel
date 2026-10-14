@@ -1076,3 +1076,38 @@ write/read/rename/cleanup and new-login revocation checks passed for the one
 explicitly mounted managed server. TCP2023 is published on the approved host
 address. The advertised hostname still does not resolve from this host; no DNS,
 router or NPM changes were applied. Issue #18 remains a production-release gate.
+
+## Minecraft identity/multiprotocol activation — 2026-10-14
+
+Owner authorized the necessary development migrations and restarts for this task.
+Only the existing dev application stack was changed. A private, permission0600
+PostgreSQL custom-format backup was taken before migration031. API/worker were
+stopped, the explicit one-off development migration applied031, then API/worker
+were recreated using all seven existing real-provider/observer/Gateway/viewer/SFTP
+overlays. The prior application image remains tagged
+`nickhosting-dev-app:before-minecraft-multiprotocol`. Database/accounts, two managed
+servers, one runtime mapping, signed history, mounts, networks and credentials were
+preserved. The canonical integration is now `minecraft`; Java's Gateway handler
+remains `minecraft-java`.
+
+The first Compose invocation failed interpolation because the viewer overlay's
+private environment file was omitted; it created no resources. The migration ran
+with the documented base environment; recreation then explicitly included both
+private viewer/SFTP environment files and all existing overlays. No orphan removal,
+volume deletion, network change, production deployment or provider mutation occurred.
+API/worker/Vite were healthy and development HTTPS returned200 after activation.
+Vite used the existing source/catalog hot reload; no frontend image rebuild was needed.
+
+Gateway restart exposed an existing second route with no reachability proof and a
+manually stopped backend. This must not be promoted into a valid proof by migration.
+Its refusal originally aborted the whole snapshot, including an independent proven
+sleeping route. The narrow correction isolates `backend_active_binding` rejection
+per server (all its port roles together), while retaining global snapshot/revision/
+lease and other failure handling. The unproven server still requires a normal
+Owner-initiated first start to establish its real backend proof; no game was started
+by the agent. See [protocol validation](MINECRAFT-MULTIPROTOCOL.md) for final results.
+
+Rollback of migration031 requires stopping the updated application processes and a
+reviewed restore/reverse migration, together with the prior image/source. The private
+backup is a recovery artifact, not permission to overwrite subsequent review data.
+Never reset the database or rewrite signed evidence to reverse the display identity.

@@ -8,6 +8,7 @@ import {
   gatewayNodeProbesSchema,
   gatewayObserverSchema,
 } from './gateway-config.js';
+import { minecraftGatewayResponsesSchema } from './minecraft-gateway-config.js';
 
 const httpUrl = z
   .string()
@@ -34,17 +35,30 @@ const origin = (protocols: string[]) =>
 
 export const gameIdleTimeoutSchema = z.union([z.literal(-1), z.number().int().min(1).max(604800)]);
 export const idleTimeoutUserAccessSchema = z.enum(['hidden', 'editable', 'shorten-only']);
-export const gameIdleTimeoutsSchema = z.record(
-  z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
-  z.strictObject({
-    gameTimeoutSeconds: gameIdleTimeoutSchema.nullable(),
-    userAccess: idleTimeoutUserAccessSchema.nullable().default(null),
-    runtimeUserAccess: z
-      .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), idleTimeoutUserAccessSchema)
-      .default({}),
-    runtimeTimeouts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), gameIdleTimeoutSchema),
-  }),
-);
+export const gameIdleTimeoutsSchema = z
+  .record(
+    z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+    z.strictObject({
+      gameTimeoutSeconds: gameIdleTimeoutSchema.nullable(),
+      userAccess: idleTimeoutUserAccessSchema.nullable().default(null),
+      runtimeUserAccess: z
+        .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), idleTimeoutUserAccessSchema)
+        .default({}),
+      runtimeTimeouts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), gameIdleTimeoutSchema),
+    }),
+  )
+  .transform((policies, context) => {
+    // Environment overrides can outlive the database migration. Accept exactly
+    // this historical integration key while exposing only the canonical identity.
+    const legacy = policies['minecraft-java'];
+    if (!legacy) return policies;
+    if (policies.minecraft) {
+      context.addIssue({ code: 'custom', message: 'Conflicting Minecraft integration identities' });
+      return z.NEVER;
+    }
+    const { 'minecraft-java': _legacy, ...current } = policies;
+    return { ...current, minecraft: legacy };
+  });
 
 export const platformConfigSchema = z
   .object({
@@ -140,6 +154,7 @@ export const platformConfigSchema = z
     minecraftSourceFreePercent: z.number().min(0).max(95),
     minecraftContentRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
     minecraftDownloadOrigins: z.array(origin(['https:'])).max(100),
+    minecraftGatewayResponses: minecraftGatewayResponsesSchema.optional(),
     minecraftProtocolSource: z
       .object({
         commit: z.string().regex(/^[a-f0-9]{40}$/),
@@ -281,6 +296,7 @@ export const configEnvironmentKeys = {
   minecraftSourceFreePercent: 'NH_MINECRAFT_SOURCE_FREE_PERCENT',
   minecraftDownloadOrigins: 'NH_MINECRAFT_DOWNLOAD_ORIGINS',
   minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
+  minecraftGatewayResponses: 'NH_MINECRAFT_GATEWAY_RESPONSES',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
   gameIdleTimeouts: 'NH_GAME_IDLE_TIMEOUTS',
   defaultIdleTimeoutSeconds: 'NH_DEFAULT_IDLE_TIMEOUT_SECONDS',
@@ -364,6 +380,7 @@ export function resolveConfig(
         'gatewayDataPolicy',
         'minecraftDownloadOrigins',
         'minecraftProtocolSource',
+        'minecraftGatewayResponses',
       ].includes(key)
     ) {
       try {

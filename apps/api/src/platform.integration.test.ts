@@ -3,7 +3,7 @@ import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { createManagementRuntime } from '@nickhosting/server-management';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
 import { managementFixture } from '../../../packages/server-management/src/test-fixtures.js';
 import { createApp } from './app.js';
@@ -128,6 +128,11 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
   });
   afterAll(async () => {
     await database?.destroy();
+  });
+  beforeEach(async () => {
+    // Auth bootstrap is deliberately real and can outlast admission's strict
+    // physical-observation freshness window. Each case owns a fresh sample.
+    await f.observe();
   });
   it('protects storage-policy plans and completes explicit changes through durable reconciliation', async () => {
     const path = '/v1/owner/storage-policy';
@@ -295,7 +300,7 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     expect((await request(user, '/v1/platform/owner/games')).status).toBe(403);
     expect((await request(user, '/v1/owner/game-modules')).status).toBe(403);
     expect(await (await request(owner, '/v1/owner/game-modules')).json()).toEqual([
-      expect.objectContaining({ id: 'minecraft-java' }),
+      expect.objectContaining({ id: 'minecraft' }),
     ]);
     expect((await request(owner, '/v1/platform/owner/games')).status).toBe(200);
     const auditedProject = await (
@@ -321,11 +326,11 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     });
   });
   it('requires regular Owner authorization for inherited sleep policies and rejects unknown runtimes', async () => {
-    const path = '/v1/owner/integrations/minecraft-java/sleep-policy';
+    const path = '/v1/owner/integrations/minecraft/sleep-policy';
     expect((await request(user, path)).status).toBe(403);
     expect((await request(null, path)).status).toBe(401);
     expect(await (await request(owner, path)).json()).toMatchObject({
-      gameId: 'minecraft-java',
+      gameId: 'minecraft',
       gameTimeoutSeconds: null,
       effectiveGameSeconds: -1,
       locked: false,

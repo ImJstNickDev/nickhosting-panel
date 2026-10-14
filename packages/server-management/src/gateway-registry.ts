@@ -41,7 +41,7 @@ export async function requireMinecraftGatewayProtocol(
     .executeTakeFirst();
   if (!server) throw new DomainError('not_found');
   if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
-  if (server.game_id !== 'minecraft-java') {
+  if (server.game_id !== 'minecraft') {
     if (registration.handlerId === 'minecraft-java') throw new DomainError('configuration_invalid');
     return undefined;
   }
@@ -63,15 +63,17 @@ export async function requireMinecraftGatewayProtocol(
     choice.combination.profile !== server.runtime_id ||
     registration.handlerId !== 'minecraft-java' ||
     registration.gameVersion !== choice.combination.release ||
-    choice.combination.family !== 'netty' ||
+    choice.combination.family === 'unknown' ||
     choice.combination.protocolId === null
   )
     throw unavailable();
   if (!choice.capabilities.gateway) throw unavailable();
+  const { values } = await getSettings(db, env);
   return gatewayMinecraftProtocolSchema.parse({
+    ...(values.minecraftGatewayResponses ? { responses: values.minecraftGatewayResponses } : {}),
     release: choice.combination.release,
     protocolId: choice.combination.protocolId,
-    family: 'netty',
+    family: choice.combination.family,
     transfer: 'transfer' in choice.combination && choice.combination.transfer === true,
     acceptsTransfers: false,
     choiceId: choice.row.id,
@@ -405,7 +407,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       let minecraft: GatewayMinecraftProtocol | undefined;
       try {
         state = await getGatewayState(tx, row.server_id, { env });
-        if (row.game_id === 'minecraft-java') {
+        if (row.game_id === 'minecraft') {
           minecraft = await requireMinecraftGatewayProtocol(
             tx,
             row.server_id,
@@ -417,7 +419,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         }
       } catch (error) {
         if (
-          (row.game_id === 'minecraft-java' || row.stored_handler_id === 'minecraft-java') &&
+          (row.game_id === 'minecraft' || row.stored_handler_id === 'minecraft-java') &&
           (error instanceof DomainError || error instanceof z.ZodError)
         )
           continue;

@@ -421,8 +421,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
     queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
   });
   const eligible =
-    mappings.data?.filter((m) => m.game_id === 'minecraft-java' && m.runtime_id === 'vanilla') ??
-    [];
+    mappings.data?.filter((m) => m.game_id === 'minecraft' && m.runtime_id === 'vanilla') ?? [];
   const [mappingId, setMappingId] = useState('');
   const [all, setAll] = useState(false);
   const [enableSupported, setEnableSupported] = useState(false);
@@ -605,7 +604,7 @@ function RegisterCombination({ refresh }: { refresh: () => void }) {
     queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
   });
   const [mappingId, setMappingId] = useState('');
-  const eligible = mappings.data?.filter((m) => m.game_id === 'minecraft-java') ?? [],
+  const eligible = mappings.data?.filter((m) => m.game_id === 'minecraft') ?? [],
     mapping = eligible.find((m) => m.id === mappingId);
   const eggs = useQuery({
     queryKey: ['runtime-eggs', mapping?.nest_id],

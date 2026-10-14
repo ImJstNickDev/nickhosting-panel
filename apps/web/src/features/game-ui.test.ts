@@ -34,44 +34,57 @@ function render(element: ReactElement, cache?: QueryClient) {
 }
 describe('trusted game frontend rendering', () => {
   it('uses decorative integration file icons with generic fallbacks, independently of editor support', () => {
-    expect(getGameFileIcon('minecraft-java', '/server.PROPERTIES')).toMatch(
-      /minecraft-properties.svg/,
-    );
+    expect(getGameFileIcon('minecraft', '/server.PROPERTIES')).toMatch(/minecraft-properties.svg/);
     expect(getGameFileIcon('unknown-game', 'server.properties')).toBeUndefined();
-    expect(getGameFileIcon('minecraft-java', 'properties')).toBeUndefined();
-    expect(getGameFileIcon('minecraft-java', 'config.json')).toBeUndefined();
+    expect(getGameFileIcon('minecraft', 'properties')).toBeUndefined();
+    expect(getGameFileIcon('minecraft', 'config.json')).toBeUndefined();
     const icon = (name: string, gameId?: string, folder = false) =>
       renderToStaticMarkup(h(FileIcon, { name, gameId, folder }));
-    expect(icon('server.properties', 'minecraft-java')).toContain('alt=""');
-    expect(icon('server.properties', 'minecraft-java')).toContain('fm-type-game');
+    expect(icon('server.properties', 'minecraft')).toContain('alt=""');
+    expect(icon('server.properties', 'minecraft')).toContain('fm-type-game');
     expect(icon('server.properties', 'unknown-game')).toContain('fm-type-config');
     expect(icon('config.json')).toContain('fm-type-json');
     expect(icon('server.jar')).toContain('fm-type-jar');
     expect(icon('json')).toContain('fm-type-text');
-    expect(icon('server.properties', 'minecraft-java', true)).toContain('fm-type-folder');
+    expect(icon('server.properties', 'minecraft', true)).toContain('fm-type-folder');
     expect(icon('level.dat')).toContain('aria-hidden="true"');
   });
   it('resolves only first-party artwork/admin routes with an absent-game fallback', () => {
-    expect(getGameArtwork('minecraft-java')).toMatch(/minecraft-landscape.svg/);
+    expect(getGameArtwork('minecraft')).toMatch(/minecraft-landscape.svg/);
     expect(getGameArtwork('unknown-game')).toBeUndefined();
     expect(getGameAdmin('unknown-game')).toBeUndefined();
-    expect(getGameAdmin('minecraft-java')).toBeTypeOf('function');
-    expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual(['minecraft-java']);
+    expect(getGameAdmin('minecraft')).toBeTypeOf('function');
+    expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual(['minecraft']);
   });
-  it('renders a real archive picker, avoids opaque upload ID input, and hides redundant runtime selection', () => {
+  it('keeps creation runtime-first and renders a real archive picker for pack replacement', () => {
     const markup = render(
       h(GameFields, {
         module: minecraftUiModule,
         fields: minecraftUiModule.descriptor.creation.fields,
-        values: { ...minecraftUiModule.descriptor.creation.defaults, sourceMode: 'modpack' },
+        values: minecraftUiModule.descriptor.creation.defaults,
         onChange: () => {},
       }),
     );
-    expect(markup).toContain('type="file"');
-    expect(markup).toContain('accept=".mrpack,.zip"');
-    expect(markup).not.toContain('Version and runtime');
+    expect(markup).toContain('Runtime');
+    expect(markup).toContain('Version');
+    expect(markup).not.toContain('type="file"');
     expect(markup).toContain('https://www.minecraft.net/en-us/eula');
     expect(markup).not.toContain('format="uuid"');
+    const fields = minecraftUiModule.descriptor.sections
+      .find((section) => section.id === 'content')
+      ?.forms.find((form) => form.id === 'replace-pack')?.fields;
+    expect(fields).toBeDefined();
+    const replacement = render(
+      h(GameFields, {
+        module: minecraftUiModule,
+        fields: fields ?? [],
+        values: {},
+        onChange: () => {},
+      }),
+    );
+    expect(replacement).toContain('type="file"');
+    expect(replacement).toContain('accept=".mrpack,.zip"');
+    expect(replacement).not.toContain('format="uuid"');
   });
   it('renders false and missing property values without submitting guessed defaults', () => {
     const fields =
@@ -165,7 +178,7 @@ describe('trusted game frontend rendering', () => {
       permissions: { read: true, manage: false, operate: false },
     });
     const markup = render(
-      h(GameSections, { serverId: 'server-id', sectionId: 'worlds', gameId: 'minecraft-java' }),
+      h(GameSections, { serverId: 'server-id', sectionId: 'worlds', gameId: 'minecraft' }),
       query,
     );
     expect(markup).toContain('You do not have permission');
@@ -176,7 +189,7 @@ describe('trusted game frontend rendering', () => {
       id: 'paths',
       type: 'preview',
       handler: 'wipe-preview',
-      labelKey: 'games.minecraft-java.fields.expectedDeletePaths',
+      labelKey: 'games.minecraft.fields.expectedDeletePaths',
       maxItems: 100,
       required: true,
     });

@@ -8,7 +8,6 @@ import type {
   PterodactylAdapter,
 } from '@nickhosting/pterodactyl-adapter';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { reserveStart } from './admission.js';
 import * as hostResources from './host-resources.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
@@ -30,6 +29,21 @@ import { managementFixture } from './test-fixtures.js';
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
 let f: Awaited<ReturnType<typeof managementFixture>>;
 let choiceId: string;
+const sampleHost = vi.fn<ReturnType<typeof hostResources.createHostResourceSampler>['sample']>();
+const createHostSampler = vi.spyOn(hostResources, 'createHostResourceSampler');
+function freshHostSample() {
+  return {
+    totalMemoryMiB: 8192,
+    availableMemoryMiB: 8192,
+    cpuCapacityPercent: 800,
+    cpuBusyPercent: 0,
+    availableDiskMiB: 1000000,
+    observedAt: new Date().toISOString(),
+  };
+}
+async function requireFreshHostSample() {
+  await f.db.deleteFrom('host_observations').where('host_id', '=', f.hostId).execute();
+}
 const env = {
   NH_MINECRAFT_EVIDENCE_KEY: '1'.repeat(64),
   NH_OBSERVER_ID: 'isolated-observer',
@@ -70,12 +84,17 @@ const binding = {
   supportedProperties: [],
 };
 beforeAll(async () => {
+  // refreshHostObservations retains its sampler per database. Keep one callable
+  // and reset its behavior per case so cached collectors never escape to the host.
+  createHostSampler.mockImplementation(() => ({ sample: sampleHost }));
   database = await createTestDatabase();
 });
 afterAll(async () => {
   await database?.destroy();
+  createHostSampler.mockRestore();
 });
 beforeEach(async () => {
+  sampleHost.mockReset().mockImplementation(async () => freshHostSample());
   f = await managementFixture(database.db, { interactive: true });
   await f.db
     .updateTable('managed_nodes')
@@ -92,17 +111,17 @@ beforeEach(async () => {
     .execute();
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft-java', version: '1.0.0', manifest: {} })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: {} })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
     .insertInto('game_rollouts')
-    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
     .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
     .execute();
   await f.db
     .updateTable('runtime_egg_mappings')
-    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla', startup: 'java -jar server.jar' })
+    .set({ game_id: 'minecraft', runtime_id: 'vanilla', startup: 'java -jar server.jar' })
     .where('id', '=', f.mappingId)
     .execute();
   const mapping = await f.db
@@ -488,7 +507,7 @@ describe('queued Minecraft provisioning evidence revalidation', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'private-testing', allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     const external = lifecycleFixture();
     await processServerOperation(f.db, operation.jobId, external.options);
@@ -534,7 +553,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     return { ...operation, external, observer, codec, management };
   }
   it.each(['consent', 'schedule'] as const)(
-    'rechecks scheduled %s revocation after a deferred runtime provider proof',
+    'rechecks scheduled %s revocation after deferred durable power preparation',
     async (revoked) => {
       const value = await installed();
       const consent = await getAutomationConsent(f.db, f.context, value.serverId);
@@ -566,29 +585,28 @@ describe('host-bound Minecraft runtime image evidence', () => {
       Object.assign(value.external.adapter, { power });
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      // Defer only the final, post-preparation authorization's provider proof.
-      // Earlier authorizations must pass, otherwise this cannot reproduce the race.
+      // Pause after durable preparation. Lean starts have no second provider
+      // proof, but revocable authority must still be re-read before power.
       const processing = processServerOperation(f.db, jobId, {
         ...value.management.lifecycle,
-        prepareStartAdmission: undefined,
-        reserveStart: (serverId, id, action, db) => reserveStart(db, serverId, id, action, env),
         checkpoint: async (point) => {
           if (point !== 'prepared') return;
-          const remote = await value.external.adapter.getApplicationServer(1);
-          vi.mocked(value.external.adapter.getApplicationServer).mockImplementationOnce(
-            async () => {
-              entered.resolve();
-              await release.promise;
-              return remote;
-            },
-          );
+          entered.resolve();
+          await release.promise;
         },
       });
       try {
         await Promise.race([
           entered.promise,
-          processing.then(() => {
-            throw new Error('Operation finished before the deferred provider proof');
+          processing.then(async (result) => {
+            const row = await f.db
+              .selectFrom('server_operations')
+              .select(['phase', 'plan'])
+              .where('job_id', '=', jobId)
+              .executeTakeFirstOrThrow();
+            throw new Error(
+              `Operation finished before deferred power preparation: ${JSON.stringify({ result, phase: row.phase, waitReason: row.plan.waitReason })}`,
+            );
           }),
         ]);
         expect(power).not.toHaveBeenCalled();
@@ -655,43 +673,52 @@ describe('host-bound Minecraft runtime image evidence', () => {
     'implicit-jvm',
     'missing-environment',
     'unknown-variable',
-  ] as const)('rejects current provider %s drift before power or readiness', async (change) => {
-    const value = await installed();
-    const remote = await value.external.adapter.getApplicationServer(1);
-    if (change === 'startup')
-      remote.container.startup_command = 'java -Dfabric.gameJarPath=other.jar -jar server.jar';
-    else if (change === 'environment') remote.container.environment = { VERSION: 'other' };
-    else if (change === 'implicit-jvm')
-      remote.container.environment = {
-        ...remote.container.environment,
-        JDK_JAVA_OPTIONS: '-Dfabric.gameJarPath=other.jar',
-      };
-    else if (change === 'unknown-variable')
-      remote.container.environment = { ...remote.container.environment, UNBOUND: 'changed' };
-    else delete remote.container.environment;
-    await expect(
-      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
-    ).rejects.toThrow('provenance_mismatch');
-    const job = await enqueueServerOperation(
-      f.db,
-      f.context,
-      value.serverId,
-      { action: 'start', idempotencyKey: randomUUID() },
-      env,
-    );
-    const power = vi.fn(async () => {});
-    Object.assign(value.external.adapter, { power });
-    expect(
-      await processServerOperation(f.db, job.jobId, {
-        ...value.management.lifecycle,
-        // Admission now precedes the final launch proof. Use this fixture's
-        // isolated host observation rather than its nonexistent host disk path.
-        prepareStartAdmission: undefined,
-        reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action, env),
-      }),
-    ).toBe('failed');
-    expect(power).not.toHaveBeenCalled();
-  });
+  ] as const)(
+    'rejects %s drift for readiness while a lean start retains resource admission',
+    async (change) => {
+      const value = await installed();
+      const remote = await value.external.adapter.getApplicationServer(1);
+      if (change === 'startup')
+        remote.container.startup_command = 'java -Dfabric.gameJarPath=other.jar -jar server.jar';
+      else if (change === 'environment') remote.container.environment = { VERSION: 'other' };
+      else if (change === 'implicit-jvm')
+        remote.container.environment = {
+          ...remote.container.environment,
+          JDK_JAVA_OPTIONS: '-Dfabric.gameJarPath=other.jar',
+        };
+      else if (change === 'unknown-variable')
+        remote.container.environment = { ...remote.container.environment, UNBOUND: 'changed' };
+      else delete remote.container.environment;
+      await expect(
+        value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+      ).rejects.toThrow('provenance_mismatch');
+      const job = await enqueueServerOperation(
+        f.db,
+        f.context,
+        value.serverId,
+        { action: 'start', idempotencyKey: randomUUID() },
+        env,
+      );
+      const power = vi.fn(async () => {});
+      Object.assign(value.external.adapter, { power });
+      value.observer.imageIdentity.mockClear();
+      expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
+        'waiting',
+      );
+      expect(power).toHaveBeenCalledOnce();
+      expect(value.observer.imageIdentity).not.toHaveBeenCalled();
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select(['operation_id', 'state'])
+          .where('server_id', '=', value.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ operation_id: job.jobId, state: 'starting' });
+      await expect(
+        value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+      ).rejects.toThrow('provenance_mismatch');
+    },
+  );
   it('uses one fresh provider snapshot for image authorization without inspecting runtime files', async () => {
     const value = await installed();
     const getServer = vi.spyOn(value.external.adapter, 'getApplicationServer').mockClear();
@@ -812,7 +839,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     await expect(proof).rejects.toThrow('isolated provider failure');
   });
   it.each([false, true])(
-    'times an ordinary start without artifact transfers even when logging fails=%s',
+    'times standalone admission and authorization without artifact transfers when logging fails=%s',
     async (throwSink) => {
       const records: LogRecord[] = [];
       const value = await installed(
@@ -821,16 +848,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
           if (throwSink) throw new Error('private-sink-failure');
         }),
       );
-      const sample = vi
-        .spyOn(hostResources, 'sampleLocalResources')
-        .mockImplementation(async () => ({
-          totalMemoryMiB: 8192,
-          availableMemoryMiB: 8192,
-          cpuCapacityPercent: 800,
-          cpuBusyPercent: 0,
-          availableDiskMiB: 1000000,
-          observedAt: new Date().toISOString(),
-        }));
+      const sample = sampleHost;
       const listFiles = vi.mocked(value.external.adapter.listFiles).mockClear();
       const download = vi.mocked(value.external.adapter.downloadFile).mockClear();
       const job = await enqueueServerOperation(
@@ -840,6 +858,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
         { action: 'start', idempotencyKey: randomUUID() },
         env,
       );
+      await requireFreshHostSample();
       try {
         await value.management.lifecycle.reserveStart(value.serverId, job.jobId, 'start', f.db);
         await value.management.lifecycle.authorizeEffect(job.jobId, value.serverId, f.db);
@@ -879,24 +898,17 @@ describe('host-bound Minecraft runtime image evidence', () => {
         }
         expect(JSON.stringify(records)).not.toContain('private-sink-failure');
       } finally {
-        sample.mockRestore();
+        sample.mockReset();
       }
     },
   );
   it.each([false, true])(
-    'checks the image once at final ordinary-start handoff, including drift=%s after preparation',
+    'avoids repeated image proof during an admitted lean start and checks readiness after drift=%s',
     async (drift) => {
       const value = await installed();
       await value.management.assertMinecraftRuntimeImage(value.serverId);
       value.observer.imageIdentity.mockClear();
-      const sample = vi.spyOn(hostResources, 'sampleLocalResources').mockResolvedValue({
-        totalMemoryMiB: 8192,
-        availableMemoryMiB: 8192,
-        cpuCapacityPercent: 800,
-        cpuBusyPercent: 0,
-        availableDiskMiB: 1000000,
-        observedAt: new Date().toISOString(),
-      });
+      const sample = sampleHost;
       const power = vi.fn(async () => {});
       Object.assign(value.external.adapter, { power });
       const job = await enqueueServerOperation(
@@ -907,6 +919,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
         env,
       );
       let prepared = false;
+      await requireFreshHostSample();
       try {
         const result = await processServerOperation(f.db, job.jobId, {
           ...value.management.lifecycle,
@@ -919,12 +932,27 @@ describe('host-bound Minecraft runtime image evidence', () => {
         });
         expect(prepared).toBe(true);
         expect(sample).toHaveBeenCalled();
-        expect(value.observer.imageIdentity).toHaveBeenCalledOnce();
-        expect(power).toHaveBeenCalledTimes(drift ? 0 : 1);
-        expect(result).toBe(drift ? 'failed' : 'waiting');
+        expect(value.observer.imageIdentity).not.toHaveBeenCalled();
+        expect(power).toHaveBeenCalledOnce();
+        expect(result).toBe('waiting');
+        expect(
+          await f.db
+            .selectFrom('resource_reservations')
+            .select(['operation_id', 'state'])
+            .where('server_id', '=', value.serverId)
+            .executeTakeFirst(),
+        ).toEqual({ operation_id: job.jobId, state: 'starting' });
+        if (drift)
+          await expect(
+            value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+          ).rejects.toThrow('provenance_mismatch');
+        else
+          await expect(
+            value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+          ).resolves.toEqual(expect.any(String));
         expect(vi.mocked(value.external.adapter.downloadFile)).not.toHaveBeenCalled();
       } finally {
-        sample.mockRestore();
+        sample.mockReset();
       }
     },
   );
@@ -937,7 +965,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       observerEntered.resolve();
       await release.promise;
     });
-    const sample = vi.spyOn(hostResources, 'sampleLocalResources').mockImplementation(async () => {
+    const sample = sampleHost.mockImplementation(async () => {
       sampleEntered.resolve();
       await release.promise;
       return {
@@ -961,6 +989,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       .selectAll()
       .where('server_id', '=', value.serverId)
       .executeTakeFirst();
+    await requireFreshHostSample();
     const reserving = value.management.lifecycle.reserveStart(
       value.serverId,
       job.jobId,
@@ -979,7 +1008,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     } finally {
       release.resolve();
       await reserving;
-      sample.mockRestore();
+      sample.mockReset();
     }
     expect(
       await f.db
@@ -1191,7 +1220,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'disabled-for-new-servers' })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     await expect(
       value.management.assertMinecraftRuntimeImage(value.serverId),
@@ -1254,7 +1283,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
   });
-  it('rejects a queued start before its power effect if actual image content changed', async () => {
+  it('keeps a changed image unavailable to readiness without repeating proof during lean power', async () => {
     const value = await installed();
     const job = await enqueueServerOperation(
       f.db,
@@ -1267,14 +1296,22 @@ describe('host-bound Minecraft runtime image evidence', () => {
     value.observer.imageIdentity.mockResolvedValue(`sha256:${'c'.repeat(64)}`);
     const power = vi.fn(async () => {});
     Object.assign(value.external.adapter, { power });
+    value.observer.imageIdentity.mockClear();
+    expect(await processServerOperation(f.db, job.jobId, value.management.lifecycle)).toBe(
+      'waiting',
+    );
+    expect(power).toHaveBeenCalledOnce();
+    expect(value.observer.imageIdentity).not.toHaveBeenCalled();
     expect(
-      await processServerOperation(f.db, job.jobId, {
-        ...value.management.lifecycle,
-        prepareStartAdmission: undefined,
-        reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action, env),
-      }),
-    ).toBe('failed');
-    expect(power).not.toHaveBeenCalled();
+      await f.db
+        .selectFrom('resource_reservations')
+        .select(['operation_id', 'state'])
+        .where('server_id', '=', value.serverId)
+        .executeTakeFirst(),
+    ).toEqual({ operation_id: job.jobId, state: 'starting' });
+    await expect(
+      value.management.lifecycle.observeProcessStart(value.serverId, f.db),
+    ).rejects.toThrow('provenance_mismatch');
   });
   it('does not treat a Minecraft mapping with a missing profile as another game', async () => {
     const value = await installed();
@@ -1296,7 +1333,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
       report: null,
     });
   });
-  it('binds observation to the right host and live managed provider identity first', async () => {
+  it('rejects a wrong host or foreign provider identity without accepting parallel image evidence', async () => {
     const value = await installed();
     const wrongHost = await createManagementRuntime({
       db: f.db,
@@ -1314,7 +1351,21 @@ describe('host-bound Minecraft runtime image evidence', () => {
       ...remote,
       external_id: 'unrelated-server',
     });
-    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow();
-    expect(value.observer.imageIdentity).not.toHaveBeenCalled();
+    const power = vi.fn(async () => {});
+    Object.assign(value.external.adapter, { power });
+    await expect(value.management.assertMinecraftRuntimeImage(value.serverId)).rejects.toThrow(
+      'provenance_mismatch',
+    );
+    // Independent reads may overlap, but a foreign provider cannot pin or trust
+    // the local image or trigger any provider mutation.
+    expect(value.observer.imageIdentity).toHaveBeenCalledOnce();
+    expect(power).not.toHaveBeenCalled();
+    expect(
+      await f.db
+        .selectFrom('minecraft_server_profiles')
+        .select('runtime_image_digest')
+        .where('server_id', '=', value.serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ runtime_image_digest: null });
   });
 });

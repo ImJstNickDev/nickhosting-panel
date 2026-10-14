@@ -42,7 +42,7 @@ describe('Owner integration-defined runtime images through real handlers', () =>
     await owner.getByRole('button', { name: 'Runtime and egg mappings', exact: true }).click();
     await owner.getByRole('button', { name: 'Add runtime mapping', exact: true }).click();
     const dialog = owner.getByRole('dialog');
-    await dialog.getByLabel('Game integration', { exact: true }).selectOption('minecraft-java');
+    await dialog.getByLabel('Game integration', { exact: true }).selectOption('minecraft');
     await dialog.getByLabel('Runtime', { exact: true }).selectOption('vanilla');
     await dialog.getByLabel('Pterodactyl node', { exact: true }).selectOption(provider.ids.nodeId);
     await dialog.getByLabel('Nest', { exact: true }).selectOption('1');
@@ -116,9 +116,7 @@ describe('Owner integration-defined runtime images through real handlers', () =>
       .getByRole('button', { name: 'Associazioni tra runtime ed egg', exact: true })
       .click();
     await owner.getByRole('button', { name: 'Aggiungi associazione runtime', exact: true }).click();
-    await dialog
-      .getByLabel('Integrazione del gioco', { exact: true })
-      .selectOption('minecraft-java');
+    await dialog.getByLabel('Integrazione del gioco', { exact: true }).selectOption('minecraft');
     await dialog.getByLabel('Runtime', { exact: true }).selectOption('vanilla');
     await browserExpect(dialog.getByLabel('Scelta dell’immagine', { exact: true })).toHaveValue(
       'integration',

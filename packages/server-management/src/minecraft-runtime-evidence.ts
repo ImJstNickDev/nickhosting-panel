@@ -308,7 +308,7 @@ export async function requireMinecraftRuntimeImageEvidence(
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
   if (
     choice.row.mapping_id !== server.mapping_id ||
-    choice.mapping.game_id !== 'minecraft-java' ||
+    choice.mapping.game_id !== 'minecraft' ||
     choice.mapping.runtime_id !== choice.combination.profile ||
     choice.row.mapping_digest !== choice.mappingDigest
   )
@@ -342,7 +342,7 @@ export async function requireMinecraftRuntimeImageEvidence(
     const rollout = await db
       .selectFrom('game_rollouts')
       .selectAll()
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .executeTakeFirst();
     const owner = await db
       .selectFrom('user')

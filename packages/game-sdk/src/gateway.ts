@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { minecraftGatewayResponsesSchema } from '@nickhosting/core';
 import { z } from 'zod';
 
 const ipAddress = z
@@ -38,7 +39,8 @@ export type GatewayEndpoint = z.infer<typeof gatewayEndpointSchema>;
 const minecraftProtocolBase = z.object({
   release: z.string().min(1).max(128),
   protocolId: z.number().int().nonnegative().max(2147483647),
-  family: z.literal('netty'),
+  family: z.enum(['netty', 'legacy']),
+  responses: minecraftGatewayResponsesSchema.optional(),
   transfer: z.boolean(),
   acceptsTransfers: z.literal(false),
   choiceId: z.uuid(),
@@ -61,7 +63,7 @@ export const gatewayMinecraftProtocolSchema = z
       })
       .strict(),
   ])
-  .refine((value) => !value.transfer || (value.protocolId >= 766 && value.protocolId < 1073741824));
+  .refine((value) => !value.transfer || (value.family === 'netty' && value.protocolId >= 766));
 export type GatewayMinecraftProtocol = z.infer<typeof gatewayMinecraftProtocolSchema>;
 
 export const gatewayRouteSchema = z
@@ -226,17 +228,27 @@ export interface GatewayProbeDiagnostic {
     | 'invalid_frame'
     | 'protocol_mismatch';
 }
+export interface GatewaySessionDiagnostic {
+  family: 'netty' | 'legacy-utf16' | 'legacy-modified-utf8';
+  clientProtocol?: number;
+  announcedProtocol?: number;
+  action: 'status' | 'login' | 'incompatible' | 'transfer';
+}
 export interface GatewayProtocolContext {
   route: Readonly<GatewayRoute>;
   signal: AbortSignal;
   /** Optional trusted diagnostics; implementations must isolate sink failures. */
   onProbeDiagnostic?: (event: GatewayProbeDiagnostic) => void;
+  onSessionDiagnostic?: (event: GatewaySessionDiagnostic) => void;
 }
 export type GatewayIntent = { kind: 'need-more' | 'status' | 'ignore' | 'join' | 'unsupported' };
 
 /** A bounded offline TCP conversation. State belongs to ONE connection. The
  * data plane passes only unconsumed bytes and enforces lifetime/byte limits. */
 export interface GatewayProtocolSession {
+  /** Bounded quiet interval for historically unframed request prefixes only. */
+  readonly classificationIdleMs?: number;
+  finalize?(input: Uint8Array): ReturnType<GatewayProtocolSession['classify']>;
   classify(input: Uint8Array): {
     kind: 'need-more' | 'continue' | 'status' | 'join' | 'reject' | 'unsupported';
     consumedBytes: number;

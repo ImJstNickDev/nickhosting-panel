@@ -84,7 +84,7 @@ async function eligibleChoice(attest = true) {
   await fixture.db
     .insertInto('game_integrations')
     .values({
-      id: 'minecraft-java',
+      id: 'minecraft',
       version: '1.0.0',
       manifest: {},
     })
@@ -93,7 +93,7 @@ async function eligibleChoice(attest = true) {
   await fixture.db
     .insertInto('game_rollouts')
     .values({
-      integration_id: 'minecraft-java',
+      integration_id: 'minecraft',
       state: 'public',
       allowlist: [],
     })
@@ -102,7 +102,7 @@ async function eligibleChoice(attest = true) {
   await fixture.db
     .updateTable('runtime_egg_mappings')
     .set({
-      game_id: 'minecraft-java',
+      game_id: 'minecraft',
       runtime_id: 'vanilla',
       startup: 'java -jar server.jar',
     })
@@ -512,10 +512,11 @@ describe('Minecraft backend API authorization and user projection', () => {
         installation: true,
         directConnection: true,
         playerManagement: true,
-        gateway: false,
-        readiness: false,
-        playerIdle: false,
-        sleepWake: false,
+        gateway: true,
+        readiness: true,
+        playerIdle: true,
+        wake: true,
+        sleepWake: true,
       },
       id: choiceId,
       version: '1.21.1',
@@ -615,8 +616,8 @@ describe('Minecraft backend API authorization and user projection', () => {
       capabilities: {
         installation: true,
         directConnection: true,
-        gateway: false,
-        sleepWake: false,
+        gateway: true,
+        sleepWake: true,
       },
     });
   });
@@ -681,7 +682,7 @@ describe('Minecraft backend API authorization and user projection', () => {
         await fixture.db
           .updateTable('game_rollouts')
           .set({ state: 'private-testing', allowlist: [] })
-          .where('integration_id', '=', 'minecraft-java')
+          .where('integration_id', '=', 'minecraft')
           .execute();
       if (reason === 'unknown') choiceId = randomUUID();
       management.mockClear();

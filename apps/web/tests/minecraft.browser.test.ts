@@ -345,7 +345,7 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
         )
       ).status(),
     ).toBe(403);
-    await identities.owner.goto(`${fixture.origin}/owner/integrations/minecraft-java`);
+    await identities.owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
     await browserExpect(
       identities.owner.getByRole('heading', { name: 'Minecraft compatibility', exact: true }),
     ).toBeVisible();

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { type MinecraftGatewayResponses, minecraftGatewayResponsesSchema } from '@nickhosting/core';
 import type {
   GatewayProbeDiagnostic,
   GatewayProtocolAdapter,
@@ -9,6 +10,22 @@ import type {
   GatewayResponseMode,
   GatewayRoute,
 } from '@nickhosting/game-sdk';
+import {
+  detectMinecraftInitial,
+  encodeMinecraftFrame,
+  encodeSignedVarInt,
+  encodeUtf16String,
+  formattingToComponents,
+  type LegacyStatusVariant,
+  legacyKickPacket,
+  legacyStatusPacket,
+  type MinecraftWireCodec,
+  readMinecraftWireFrame,
+  readSignedVarInt,
+  readUtf8String,
+  readUtf16String,
+} from './protocol-codecs.js';
+import { minecraftLegacyMultiline, minecraftLegacyStatusVariant } from './protocol-profiles.js';
 
 /** Owner-approved lifecycle source; actual idle counts still come from protocol status. */
 export const minecraftReadinessSource = 'provider_running' as const;
@@ -28,11 +45,11 @@ export interface MinecraftProtocolOptions {
   acceptsTransfers?: boolean;
   probeTimeoutMs?: number;
   maxStatusBytes?: number;
+  responses?: MinecraftGatewayResponses;
 }
 
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const maximumHandshakeBytes = 4096;
-const maximumHostnameCharacters = 261;
 const messages = {
   en: {
     sleeping: 'Server sleeping. Join to start it.',
@@ -58,51 +75,13 @@ const messages = {
   },
 } as const;
 
-export function encodeMinecraftVarInt(value: number): Buffer {
-  if (!Number.isInteger(value) || value < 0 || value > 0x7fffffff)
-    throw new Error('minecraft.invalid_varint');
-  const output: number[] = [];
-  do {
-    const next = value & 0x7f;
-    value >>>= 7;
-    output.push(next | (value ? 0x80 : 0));
-  } while (value);
-  return Buffer.from(output);
-}
-
-function varInt(input: Uint8Array, offset = 0): { value: number; bytes: number } | undefined {
-  let value = 0;
-  for (let index = 0; index < 5; index++) {
-    const byte = input[offset + index];
-    if (byte === undefined) return undefined;
-    if (index === 4 && (byte & 0xf8) !== 0) throw new Error('minecraft.invalid_varint');
-    value += (byte & 0x7f) * 2 ** (7 * index);
-    if ((byte & 0x80) === 0) {
-      return { value, bytes: index + 1 };
-    }
-  }
-  throw new Error('minecraft.invalid_varint');
-}
-
-export function frameMinecraftPacket(id: number, payload: Uint8Array = Buffer.alloc(0)): Buffer {
-  const body = Buffer.concat([encodeMinecraftVarInt(id), payload]);
-  return Buffer.concat([encodeMinecraftVarInt(body.length), body]);
-}
-
-export function readMinecraftFrame(
-  input: Uint8Array,
-  maximumBytes: number,
-): { body: Buffer; bytes: number } | undefined {
-  const length = varInt(input);
-  if (!length) return undefined;
-  if (length.bytes > 3 || length.value < 1 || length.value > maximumBytes)
-    throw new Error('minecraft.invalid_frame');
-  if (input.length < length.bytes + length.value) return undefined;
-  return {
-    body: Buffer.from(input.subarray(length.bytes, length.bytes + length.value)),
-    bytes: length.bytes + length.value,
-  };
-}
+export const encodeMinecraftVarInt = encodeSignedVarInt;
+export const frameMinecraftPacket = encodeMinecraftFrame;
+export const readMinecraftFrame = readMinecraftWireFrame;
+const varInt = (input: Uint8Array, offset = 0) => {
+  const result = readSignedVarInt(input, offset);
+  return result && { value: result.value, bytes: result.bytes };
+};
 
 function stringBytes(value: string) {
   const bytes = Buffer.from(value, 'utf8');
@@ -124,36 +103,6 @@ function handshake(protocolId: number, address: string, port: number) {
     ]),
   );
 }
-function decodeHandshake(body: Buffer) {
-  let offset = 0;
-  const integer = () => {
-    const result = varInt(body, offset);
-    if (!result) throw new Error('minecraft.truncated_handshake');
-    offset += result.bytes;
-    return result.value;
-  };
-  if (integer() !== 0) throw new Error('minecraft.invalid_handshake');
-  const protocolId = integer();
-  const hostLength = integer();
-  if (
-    hostLength < 1 ||
-    hostLength > maximumHostnameCharacters * 3 ||
-    offset + hostLength + 3 > body.length
-  )
-    throw new Error('minecraft.invalid_hostname');
-  // Opaque hostname, including bounded Forge NUL markers. Never used for
-  // routing, DNS, authorization, logging, or backend selection.
-  const hostname = decoder.decode(body.subarray(offset, offset + hostLength));
-  if (hostname.length > maximumHostnameCharacters) throw new Error('minecraft.invalid_hostname');
-  offset += hostLength;
-  const port = body.readUInt16BE(offset);
-  offset += 2;
-  const intent = integer();
-  if (offset !== body.length || port === 0 || ![1, 2, 3].includes(intent))
-    throw new Error('minecraft.invalid_handshake');
-  return { protocolId, intent };
-}
-
 /** Queries only the authorized exact route backend. A valid matching status
  * response AND random ping echo prove protocol responsiveness. Missing player
  * data remains unknown, never zero. No connection data is cached across probes. */
@@ -316,6 +265,95 @@ export async function probeMinecraftStatus(
   });
 }
 
+/** Legacy status is observation only: no login, command or change to the backend.
+ * No status support means unknown player count, never an inferred empty server. */
+export async function probeMinecraftLegacyStatus(
+  context: GatewayProtocolContext,
+  version: MinecraftProtocolVersion,
+  options: { timeoutMs?: number; maximumBytes?: number } = {},
+): Promise<{ ready: boolean; playerCount?: number }> {
+  const variant = minecraftLegacyStatusVariant(version.release);
+  if (
+    !variant ||
+    context.signal.aborted ||
+    context.route.public.transport !== 'tcp' ||
+    version.release !== context.route.protocol?.gameVersion
+  )
+    return { ready: false };
+  return new Promise((resolve) => {
+    const socket = connect({
+      host: context.route.backend.address,
+      port: context.route.backend.port,
+    });
+    let buffered = Buffer.alloc(0);
+    let done = false;
+    const finish = (result: { ready: boolean; playerCount?: number }) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      context.signal.removeEventListener('abort', abort);
+      socket.destroy();
+      resolve(result);
+    };
+    const abort = () => finish({ ready: false });
+    const timer = setTimeout(abort, options.timeoutMs ?? 3000);
+    timer.unref();
+    context.signal.addEventListener('abort', abort, { once: true });
+    socket.once('error', abort);
+    socket.once('close', abort);
+    socket.once('connect', () => {
+      if (context.signal.aborted) return abort();
+      if (variant === 'original') return void socket.write(Buffer.from([254]));
+      if (!/^1\.6(?:\.|$)/.test(version.release)) return void socket.write(Buffer.from([254, 1]));
+      const host = encodeUtf16String(context.route.backend.address);
+      const port = Buffer.alloc(4);
+      port.writeUInt32BE(context.route.backend.port);
+      const payload = Buffer.concat([Buffer.from([version.protocolId]), host, port]);
+      const size = Buffer.alloc(2);
+      size.writeUInt16BE(payload.length);
+      socket.write(
+        Buffer.concat([
+          Buffer.from([254, 1, 250]),
+          encodeUtf16String('MC|PingHost'),
+          size,
+          payload,
+        ]),
+      );
+    });
+    socket.on('data', (bytes: Buffer) => {
+      if (buffered.length + bytes.length > (options.maximumBytes ?? 262144)) return abort();
+      buffered = Buffer.concat([buffered, bytes]);
+      try {
+        if (buffered[0] !== 255) return abort();
+        const message = readUtf16String(buffered, 1, 32767);
+        if (!message) return;
+        if (buffered.length !== message.bytes + 1) return abort();
+        const parts = message.value.split(variant === 'original' ? '§' : '\0');
+        if (
+          variant === 'extended' &&
+          (parts.length !== 6 || parts[0] !== '§1' || Number(parts[1]) !== version.protocolId)
+        )
+          return abort();
+        if (parts.length < 3) return abort();
+        const online = parts.at(-2),
+          max = parts.at(-1);
+        if (
+          !online ||
+          !max ||
+          !/^\d{1,7}$/.test(online) ||
+          !/^\d{1,7}$/.test(max) ||
+          Number(online) > 1000000 ||
+          Number(max) > 1000000
+        )
+          return abort();
+        finish({ ready: true, playerCount: Number(online) });
+      } catch {
+        abort();
+      }
+    });
+  });
+}
+
 export function createMinecraftProtocolAdapter(
   options: MinecraftProtocolOptions,
 ): GatewayProtocolAdapter {
@@ -355,8 +393,9 @@ export function createMinecraftProtocolAdapter(
     if (entry.family === 'netty') protocols.set(entry.protocolId, entry);
   }
   const supported = new Set(options.supportedReleases);
-  if ([...supported].some((release) => releases.get(release)?.family !== 'netty'))
+  if ([...supported].some((release) => !releases.has(release)))
     throw new Error('minecraft.unsupported_release');
+  const responses = minecraftGatewayResponsesSchema.parse(options.responses ?? {});
   const selected = (route: Readonly<GatewayRoute>) => {
     const release = route.protocol?.gameVersion;
     return release &&
@@ -369,77 +408,164 @@ export function createMinecraftProtocolAdapter(
   const createSession = (context: GatewayProtocolContext): GatewayProtocolSession => {
     const version = selected(context.route);
     if (!version) throw new Error('minecraft.unsupported_release');
-    let phase: 'handshake' | 'status' | 'ping' | 'done' = 'handshake';
+    let phase: 'handshake' | 'status' | 'ping' | 'login' | 'done' = 'handshake';
     let reply: 'status' | 'ping' | 'login' | 'incompatible' | 'transfer' | undefined;
+    let codec: MinecraftWireCodec = 'netty';
+    let legacyVariant: LegacyStatusVariant = 'extended';
+    let clientProtocol: number | undefined;
+    let loginReply: 'login' | 'incompatible' | 'transfer' = 'login';
     let ping: Buffer | undefined;
-    return {
-      classify(input) {
-        if (context.signal.aborted || phase === 'done')
-          return { kind: 'unsupported', consumedBytes: input.length };
-        try {
-          const frame = readMinecraftFrame(input, maximumHandshakeBytes);
-          if (!frame) return { kind: 'need-more', consumedBytes: 0 };
-          const consumedBytes = frame.bytes;
-          if (phase === 'handshake') {
-            const parsed = decodeHandshake(frame.body);
-            const client = protocols.get(parsed.protocolId);
-            if (client?.family !== 'netty') return { kind: 'unsupported', consumedBytes };
-            if (parsed.intent === 1) {
+    const diagnostic = (
+      action: 'status' | 'login' | 'incompatible' | 'transfer',
+      announcedProtocol?: number,
+    ) => {
+      try {
+        context.onSessionDiagnostic?.({ family: codec, clientProtocol, announcedProtocol, action });
+      } catch {
+        /* Diagnostics do not affect traffic. */
+      }
+    };
+    const classify = (
+      input: Uint8Array,
+      finalize = false,
+    ): ReturnType<GatewayProtocolSession['classify']> => {
+      if (context.signal.aborted || phase === 'done')
+        return { kind: 'unsupported', consumedBytes: input.length };
+      try {
+        if (phase === 'handshake') {
+          const parsed = detectMinecraftInitial(input, {
+            finalize,
+            maximumBytes: maximumHandshakeBytes,
+          });
+          if (parsed.kind === 'need-more') return { kind: 'need-more', consumedBytes: 0 };
+          if (parsed.kind === 'invalid')
+            return { kind: 'unsupported', consumedBytes: input.length };
+          codec = parsed.codec;
+          clientProtocol = parsed.protocolId;
+          const consumedBytes = parsed.bytes;
+          if (parsed.kind === 'status') {
+            if (codec === 'netty') {
               phase = 'status';
               return { kind: 'continue', consumedBytes };
             }
+            legacyVariant = parsed.statusVariant ?? 'original';
             phase = 'done';
-            if (parsed.intent === 3 && !client.transfer)
-              return { kind: 'unsupported', consumedBytes };
-            if (parsed.protocolId !== version.protocolId) {
-              reply = 'incompatible';
-              return { kind: 'reject', consumedBytes };
-            }
-            if (parsed.intent === 3 && !acceptsTransfers) {
-              reply = 'transfer';
-              return { kind: 'reject', consumedBytes };
-            }
-            reply = 'login';
-            return { kind: 'join', consumedBytes };
-          }
-          const packet = varInt(frame.body);
-          if (phase === 'status' && packet?.value === 0 && frame.body.length === packet.bytes) {
-            phase = 'ping';
             reply = 'status';
             return { kind: 'status', consumedBytes };
           }
-          if (phase === 'ping' && packet?.value === 1 && frame.body.length === packet.bytes + 8) {
-            phase = 'done';
-            reply = 'ping';
-            ping = Buffer.from(frame.body.subarray(packet.bytes));
-            return { kind: 'status', consumedBytes };
+          const mismatch =
+            codec === 'netty'
+              ? version.family !== 'netty' || clientProtocol !== version.protocolId
+              : version.family !== 'legacy' ||
+                (clientProtocol !== undefined && clientProtocol !== version.protocolId);
+          loginReply = mismatch
+            ? 'incompatible'
+            : parsed.intent === 3 && !acceptsTransfers
+              ? 'transfer'
+              : 'login';
+          if (parsed.intent === 3 && (clientProtocol === undefined || clientProtocol < 766))
+            return { kind: 'unsupported', consumedBytes };
+          if (codec === 'netty') {
+            phase = 'login';
+            return { kind: 'continue', consumedBytes };
           }
           phase = 'done';
-          return { kind: 'unsupported', consumedBytes };
-        } catch {
-          phase = 'done';
-          return { kind: 'unsupported', consumedBytes: input.length };
+          reply = loginReply;
+          return { kind: loginReply === 'login' ? 'join' : 'reject', consumedBytes };
         }
-      },
+        const frame = readMinecraftFrame(input, maximumHandshakeBytes);
+        if (!frame) return { kind: 'need-more', consumedBytes: 0 };
+        const consumedBytes = frame.bytes;
+        const packet = varInt(frame.body);
+        if (phase === 'login' && packet?.value === 0) {
+          // Username is common to modern Login Start. The bounded suffix changes
+          // between releases; no authentication or gameplay fields are emulated.
+          const username = readUtf8String(frame.body, packet.bytes, 16);
+          if (!username?.value || /[\0-\x20]/.test(username.value))
+            throw new Error('minecraft.invalid_login');
+          phase = 'done';
+          reply = loginReply;
+          return { kind: loginReply === 'login' ? 'join' : 'reject', consumedBytes };
+        }
+        if (phase === 'status' && packet?.value === 0 && frame.body.length === packet.bytes) {
+          phase = 'ping';
+          reply = 'status';
+          return { kind: 'status', consumedBytes };
+        }
+        if (phase === 'ping' && packet?.value === 1 && frame.body.length === packet.bytes + 8) {
+          phase = 'done';
+          reply = 'ping';
+          ping = Buffer.from(frame.body.subarray(packet.bytes));
+          return { kind: 'status', consumedBytes };
+        }
+        phase = 'done';
+        return { kind: 'unsupported', consumedBytes };
+      } catch {
+        phase = 'done';
+        return { kind: 'unsupported', consumedBytes: input.length };
+      }
+    };
+    return {
+      classificationIdleMs: 50,
+      classify: (input) => classify(input),
+      finalize: (input) => classify(input, true),
       response(mode: GatewayResponseMode) {
         if (context.signal.aborted) return { close: true };
         const action = reply;
         reply = undefined;
         if (action === 'ping' && ping) return { bytes: frameMinecraftPacket(1, ping), close: true };
         const catalog = messages[context.route.locale];
-        if (action === 'status')
-          return {
-            bytes: textPacket({
-              version: { name: version.release, protocol: version.protocolId },
-              description: { text: catalog[mode] },
-            }),
-            close: false,
+        const localized = (text: MinecraftGatewayResponses['motd']) =>
+          text?.[mode]?.[context.route.locale];
+        if (action === 'status') {
+          const motd = localized(responses.motd) ?? catalog[mode];
+          const announced =
+            clientProtocol !== undefined && clientProtocol >= 0
+              ? clientProtocol
+              : codec === 'netty'
+                ? (responses.fallbackProtocol ?? version.protocolId)
+                : (responses.legacyProtocol ?? version.protocolId);
+          diagnostic('status', announced);
+          const fields = {
+            protocolId: announced,
+            version: responses.versionName ?? version.release,
+            motd,
+            online: responses.onlinePlayers ?? 0,
+            max: responses.maximumPlayers ?? 0,
           };
-        if (action === 'login' || action === 'incompatible' || action === 'transfer')
-          return {
-            bytes: textPacket({ text: catalog[action === 'login' ? mode : action] }),
-            close: true,
-          };
+          return codec === 'netty'
+            ? {
+                bytes: textPacket({
+                  version: { name: fields.version, protocol: announced },
+                  players: { online: fields.online, max: fields.max, sample: [] },
+                  description: formattingToComponents(motd),
+                }),
+                close: false,
+              }
+            : { bytes: legacyStatusPacket(legacyVariant, fields), close: true };
+        }
+        if (action === 'login' || action === 'incompatible' || action === 'transfer') {
+          diagnostic(action);
+          let text =
+            action === 'login'
+              ? (localized(responses.disconnect) ?? catalog[mode])
+              : catalog[action];
+          if (codec !== 'netty') {
+            // Unversioned client handshakes use the already configured target as
+            // a presentation hint; structured handshakes identify the client.
+            if (
+              codec === 'legacy-modified-utf8' ||
+              (clientProtocol === undefined
+                ? !minecraftLegacyMultiline(version.release)
+                : clientProtocol <= 29)
+            )
+              text = (
+                action === 'login' ? (localized(responses.legacyDisconnect) ?? text) : text
+              ).replace(/\r\n|[\r\n]/g, responses.legacyLineSeparator ?? ' | ');
+            return { bytes: legacyKickPacket(codec, text), close: true };
+          }
+          return { bytes: textPacket(formattingToComponents(text)), close: true };
+        }
         return { close: true };
       },
     };
@@ -449,6 +575,11 @@ export function createMinecraftProtocolAdapter(
   ): Promise<{ ready: boolean; playerCount?: number }> => {
     const version = selected(context.route);
     if (!version) return { ready: false };
+    if (version.family === 'legacy')
+      return probeMinecraftLegacyStatus(context, version, {
+        timeoutMs: probeTimeoutMs,
+        maximumBytes: maxStatusBytes,
+      });
     const deadline = performance.now() + probeTimeoutMs;
     // A running hint can precede Minecraft's first complete status response.
     // Retry only peer closure while waking, never malformed/mismatched responses,

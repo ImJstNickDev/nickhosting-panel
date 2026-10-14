@@ -230,6 +230,33 @@ describe('Minecraft compatibility evidence', () => {
 });
 
 describe('compiled Vanilla capabilities', () => {
+  it('separates ancient wake/forwarding from unavailable player counts', () => {
+    for (const release of ['a1.0.15', 'a1.0.16', 'b1.4', 'b1.7.3'])
+      expect(
+        minecraftDeclaredCapabilities({
+          ...combination,
+          profile: 'vanilla',
+          release,
+          family: 'legacy',
+          protocolId: 13,
+        }),
+      ).toMatchObject({
+        gateway: true,
+        wake: true,
+        readiness: true,
+        playerIdle: false,
+        sleepWake: false,
+      });
+    expect(
+      minecraftDeclaredCapabilities({
+        ...combination,
+        profile: 'vanilla',
+        release: 'a1.0.14',
+        family: 'legacy',
+        protocolId: 12,
+      }).gateway,
+    ).toBe(false);
+  });
   it('allows installable Vanilla independently of signed reports while preserving Owner availability', () => {
     for (const version of [
       { release: '1.6.4', family: 'legacy', protocolId: 78, releaseType: 'release' },
@@ -241,10 +268,11 @@ describe('compiled Vanilla capabilities', () => {
         installation: true,
         directConnection: true,
         playerManagement: version.release === '26.3',
-        gateway: false,
-        readiness: false,
-        playerIdle: false,
-        sleepWake: false,
+        gateway: version.family !== 'unknown',
+        readiness: version.family !== 'unknown',
+        playerIdle: version.family !== 'unknown',
+        wake: version.family !== 'unknown',
+        sleepWake: version.family !== 'unknown',
       });
       const input = {
         combination: selected,
@@ -270,7 +298,7 @@ describe('compiled Vanilla capabilities', () => {
       ).toBe(expected);
     }
   });
-  it('declares Gateway only for exact real-server-covered Vanilla pairs', () => {
+  it('declares supported families without pretending every release has a real-client report', () => {
     expect(
       minecraftDeclaredCapabilities({
         ...combination,
@@ -278,13 +306,17 @@ describe('compiled Vanilla capabilities', () => {
         release: '1.21.4',
         protocolId: 769,
       }).gateway,
-    ).toBe(false);
-    for (const [release, protocolId] of [['26.1', 775]] as const) {
+    ).toBe(true);
+    for (const [release, protocolId] of [
+      ['26.1', 775],
+      ['26.3', 777],
+      ['1.7.2', 4],
+    ] as const) {
       const selected = { ...combination, profile: 'vanilla' as const, release, protocolId };
       expect(minecraftDeclaredCapabilities(selected).sleepWake).toBe(true);
-      expect(minecraftDeclaredCapabilities({ ...selected, protocolId: 999 }).gateway).toBe(false);
+      expect(minecraftDeclaredCapabilities({ ...selected, protocolId: 999 }).gateway).toBe(true);
       expect(minecraftDeclaredCapabilities({ ...selected, releaseType: 'snapshot' }).gateway).toBe(
-        false,
+        true,
       );
       expect(minecraftDeclaredCapabilities({ ...selected, profile: 'paper' }).installation).toBe(
         false,

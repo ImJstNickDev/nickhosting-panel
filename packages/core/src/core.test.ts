@@ -18,6 +18,29 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('normalizes historical Minecraft sleep settings and rejects ambiguous overrides', () => {
+    const policy = { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } };
+    expect(
+      resolveConfig({ gameIdleTimeouts: { 'minecraft-java': policy } }).values.gameIdleTimeouts,
+    ).toMatchObject({ minecraft: policy });
+    const result = resolveConfig(
+      {},
+      {
+        NH_GAME_IDLE_TIMEOUTS: JSON.stringify({ 'minecraft-java': policy }),
+      },
+    );
+    expect(result.values.gameIdleTimeouts).not.toHaveProperty('minecraft-java');
+    expect(result.values.gameIdleTimeouts.minecraft).toMatchObject(policy);
+    expect(result.sources.gameIdleTimeouts).toBe('environment');
+    expect(() =>
+      resolveConfig(
+        {},
+        {
+          NH_GAME_IDLE_TIMEOUTS: JSON.stringify({ 'minecraft-java': policy, minecraft: policy }),
+        },
+      ),
+    ).toThrow('configuration_invalid');
+  });
   it('bounds concurrent uploads and honors Owner/environment precedence', () => {
     expect(resolveConfig().values.uploadConcurrency).toBe(2);
     expect(resolveConfig({ uploadConcurrency: 3 }).values.uploadConcurrency).toBe(3);
@@ -43,9 +66,9 @@ describe('typed configuration', () => {
       ).values,
     ).toMatchObject({ defaultIdleTimeoutSeconds: 600, idleTimeoutUserAccess: 'shorten-only' });
     const stored = {
-      'minecraft-java': { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } },
+      minecraft: { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } },
     };
-    const environment = { 'minecraft-java': { gameTimeoutSeconds: -1, runtimeTimeouts: {} } };
+    const environment = { minecraft: { gameTimeoutSeconds: -1, runtimeTimeouts: {} } };
     expect(resolveConfig({ gameIdleTimeouts: stored }).values.gameIdleTimeouts).toMatchObject(
       stored,
     );

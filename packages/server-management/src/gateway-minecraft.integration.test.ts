@@ -61,17 +61,17 @@ beforeEach(async () => {
   };
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft-java', version: '1.0.0', manifest: {} })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: {} })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
     .insertInto('game_rollouts')
-    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
     .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
     .execute();
   await f.db
     .updateTable('runtime_egg_mappings')
-    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+    .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
     .where('id', '=', f.mappingId)
     .execute();
   const mapping = await f.db
@@ -171,7 +171,7 @@ describe('Minecraft declared-capability Gateway registration', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'disabled-for-new-servers' })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     await f.db
       .updateTable('runtime_egg_mappings')
@@ -186,8 +186,8 @@ describe('Minecraft declared-capability Gateway registration', () => {
       family: 'netty',
       choiceId,
       supportSource: 'integration',
-      declarationId: 'minecraft-java/vanilla',
-      declarationVersion: 1,
+      declarationId: 'minecraft/vanilla',
+      declarationVersion: 2,
       acceptsTransfers: false,
     });
     expect(await getGatewayState(f.db, serverId, { env })).toMatchObject({
@@ -282,14 +282,21 @@ describe('Minecraft declared-capability Gateway registration', () => {
   it('does not promote an undeclared protocol through signed reports or Owner allowlisting', async () => {
     await f.db
       .updateTable('minecraft_combinations')
-      .set({ combination: JSON.stringify({ ...combination, release: '1.21.1', protocolId: 767 }) })
+      .set({
+        combination: JSON.stringify({
+          ...combination,
+          release: '1.21.1',
+          family: 'unknown',
+          protocolId: null,
+        }),
+      })
       .where('id', '=', choiceId)
       .execute();
     await evidence();
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     await expect(
       setGatewayPolicy(f.db, f.owner, serverId, { ...policy, gameVersion: '1.21.1' }, { env }),
@@ -364,7 +371,7 @@ it('automatically registers installed Vanilla 26.1 using the actual compiled bin
       .selectAll()
       .where('id', '=', serverId)
       .executeTakeFirstOrThrow();
-    const plan = await planProvisionGateway(tx, server, 'minecraft-java', env);
+    const plan = await planProvisionGateway(tx, server, 'minecraft', env);
     expect(plan?.routes).toHaveLength(1);
     await tx
       .updateTable('server_operations')

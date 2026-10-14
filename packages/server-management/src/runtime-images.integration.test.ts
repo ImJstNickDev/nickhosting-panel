@@ -28,13 +28,13 @@ beforeEach(async () => {
   f = await managementFixture(database.db, { interactive: true });
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft-java', version: '1.0.0', manifest: JSON.stringify(minecraftManifest) })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: JSON.stringify(minecraftManifest) })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
 });
 const input = () => ({
   id: f.mappingId,
-  gameId: 'minecraft-java',
+  gameId: 'minecraft',
   runtimeId: 'vanilla',
   nodeId: f.nodeId,
   nestId: 1,
@@ -129,9 +129,7 @@ describe('integration-owned runtime images', () => {
       {
         ...minecraftModule,
         id: 'fixture',
-        manifest: JSON.parse(
-          JSON.stringify(minecraftManifest).replaceAll('minecraft-java', 'fixture'),
-        ),
+        manifest: JSON.parse(JSON.stringify(minecraftManifest).replaceAll('minecraft', 'fixture')),
         resolveProvisionImage: (_mapping, binding) => {
           if (
             typeof binding !== 'object' ||
@@ -209,7 +207,12 @@ describe('integration-owned runtime images', () => {
     ).rejects.toThrow('configuration_invalid');
     expect(mappingProvisionImage(mapping, pinned.binding)).toBe(image(25));
     expect(mapping.docker_image).toBe('');
-    expect(rows.every((row) => row.enabled === false)).toBe(true);
+    // Integration-declared Vanilla installation is available under an enabled
+    // mapping without manufacturing local signed compatibility evidence.
+    expect(rows.every((row) => row.enabled === true)).toBe(true);
+    expect(await f.db.selectFrom('minecraft_verification_evidence').select('id').execute()).toEqual(
+      [],
+    );
   });
   it('rejects unavailable egg images and client image/Java overrides', async () => {
     await setRuntimeMapping(f.db, adapter([21]), f.owner, input());

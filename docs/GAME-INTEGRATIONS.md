@@ -19,7 +19,7 @@ type PortRequirement = {
 };
 
 interface GameIntegration {
-  id: string;                      // stable ID, e.g. "minecraft-java"
+  id: string;                      // stable ID, e.g. "minecraft"
   version: string;                 // independently versioned integration
   capabilities: GameCapabilities;
   connection: ConnectionMode;
@@ -191,10 +191,11 @@ candidates it registers; this does not change integration rollout.
 A metadata candidate is not a real-server test result. Existing exact signed reports
 cannot be rebound to another mapping, image or artifact. The compiled integration
 declares Vanilla installation/direct access independently of those reports. Gateway,
-readiness, player-idleness and sleep/wake support are separately declared; currently
-the real M4-covered Vanilla 26.1/protocol 775 combination declares these features.
-Unknown, legacy and snapshot protocols retain direct installation without pretending
-to support those protocol-dependent features. Other runtime profiles are unchanged.
+readiness, player-idleness and sleep/wake support are separately declared. The M5
+[protocol-family amendment](MINECRAFT-MULTIPROTOCOL.md) extends the Java responder
+to modern and historical families while retaining unknown idle counts where no
+backend status profile exists. This is not a per-version real-client certification
+or an expansion of historical installation/egg support. Other runtime profiles are unchanged.
 Owner diagnostics show declared capability and actual test evidence separately.
 
 Creation uses trusted SDK installer-page descriptors for a centered sequence,

@@ -425,7 +425,7 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
       idleTimeoutInherited: true,
       idleTimeoutSeconds: null,
     });
-    const manifest = trustedGameModules.get('minecraft-java')?.manifest;
+    const manifest = trustedGameModules.get('minecraft')?.manifest;
     if (!manifest) throw new Error('Missing trusted Minecraft module');
     await f.db
       .insertInto('game_integrations')
@@ -434,7 +434,7 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
       .execute();
     await f.db
       .updateTable('runtime_egg_mappings')
-      .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+      .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
       .where('id', '=', f.mappingId)
       .execute();
     const before = await f.db
@@ -447,7 +447,7 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
       .set({ idle_since: clock })
       .where('server_id', '=', serverId)
       .execute();
-    await setGameSleepPolicy(f.db, f.owner, 'minecraft-java', {
+    await setGameSleepPolicy(f.db, f.owner, 'minecraft', {
       gameTimeoutSeconds: 60,
       runtimeTimeouts: { vanilla: 30 },
       userAccess: 'shorten-only',
@@ -461,20 +461,20 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     expect(after.idle_since).toBeNull();
     expect(after.generation).toBe(before.generation);
     const env = { NH_GAME_IDLE_TIMEOUTS: '{}' };
-    expect(await getGameSleepPolicy(f.db, f.owner, 'minecraft-java', env)).toMatchObject({
+    expect(await getGameSleepPolicy(f.db, f.owner, 'minecraft', env)).toMatchObject({
       locked: true,
     });
     await expect(
       setGameSleepPolicy(
         f.db,
         f.owner,
-        'minecraft-java',
+        'minecraft',
         { gameTimeoutSeconds: 60, runtimeTimeouts: {} },
         env,
       ),
     ).rejects.toThrow('conflict');
     await expect(
-      setGameSleepPolicy(f.db, { ...f.owner, sessionType: 'support' }, 'minecraft-java', {
+      setGameSleepPolicy(f.db, { ...f.owner, sessionType: 'support' }, 'minecraft', {
         gameTimeoutSeconds: 60,
         runtimeTimeouts: {},
       }),

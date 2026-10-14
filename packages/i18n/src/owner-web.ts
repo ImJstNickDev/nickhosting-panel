@@ -157,6 +157,10 @@ export const ownerWebMessages: Record<string, readonly [string, string]> = {
     'Storage policy applied and server limits verified.',
     'Politica di spazio applicata e limiti dei server verificati.',
   ],
+  'owner.config.minecraftGatewayResponses': [
+    'Minecraft Gateway messages',
+    'Messaggi Gateway Minecraft',
+  ],
   'owner.config.fileViewers': ['Private file viewers', 'Visualizzatori file privati'],
   'owner.readOnlySettings': [
     'Your role can view these settings. Only the Owner can change them.',

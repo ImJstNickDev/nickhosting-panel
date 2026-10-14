@@ -232,7 +232,7 @@ describe('Minecraft four-step public wizard', () => {
       id: 'choice1',
       release: '26.1',
       runtime: 'fabric' as const,
-      nameKey: 'games.minecraft-java.runtime.fabric',
+      nameKey: 'games.minecraft.runtime.fabric',
       protocol: 9999,
       status: 'verified',
     },

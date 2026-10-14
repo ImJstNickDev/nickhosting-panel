@@ -273,3 +273,13 @@ separate. Existing edits/uploads/extraction use the existing Wings operation pat
 See [ADR 0017](decisions/0017-shared-file-viewers.md),
 [format evidence and limitations](M5-VIEWER-FORMATS.md) and the
 [approval-required deployment proposal](M5-VIEWER-DEPLOYMENT.md).
+
+### Minecraft integration identity and wire families
+
+The integration is `minecraft`; its Java TCP handler remains `minecraft-java`.
+Migration031 preserves runtime mappings, jobs and signed historical evidence while
+renaming mutable integration references. Modern/legacy codecs and the known target
+release supply responder behavior without per-client remote lookup. Backend
+installation availability is separate: supporting an Alpha wire format does not
+make an Alpha egg/runtime available. See [ADR0018](decisions/0018-minecraft-identity-and-protocol-families.md)
+and [multiprotocol behavior/evidence](MINECRAFT-MULTIPROTOCOL.md).

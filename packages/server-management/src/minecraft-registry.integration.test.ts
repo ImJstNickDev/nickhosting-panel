@@ -40,17 +40,17 @@ beforeEach(async () => {
   f = await managementFixture(database.db, { interactive: true });
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft-java', version: '1.0.0', manifest: {} })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: {} })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
     .insertInto('game_rollouts')
-    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
     .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
     .execute();
   await f.db
     .updateTable('runtime_egg_mappings')
-    .set({ game_id: 'minecraft-java', runtime_id: 'vanilla' })
+    .set({ game_id: 'minecraft', runtime_id: 'vanilla' })
     .where('id', '=', f.mappingId)
     .execute();
   const mapping = await f.db
@@ -198,7 +198,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     expect(await present()).toBe(true);
     expect((await minecraftCatalog(f.db, f.context, {})).some((row) => row.id === choiceId)).toBe(
@@ -207,7 +207,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     expect(await present()).toBe(false);
   });
@@ -308,7 +308,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     expect((await inspectMinecraftCombination(f.db, choiceId, env)).support).toBe('unverified');
     await expect(requireMinecraftChoice(f.db, f.context, choiceId)).resolves.toMatchObject({
       supportAuthority: 'integration',
-      capabilities: { installation: true, gateway: false, sleepWake: false },
+      capabilities: { installation: true, gateway: true, sleepWake: true },
     });
     expect((await minecraftCatalog(f.db, f.context)).some((row) => row.id === choiceId)).toBe(true);
     const value = await report();
@@ -392,7 +392,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ state: 'private-testing', allowlist: [f.context.subjectUserId] })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     expect((await requireMinecraftChoice(f.db, f.context, choiceId, env)).support).toBe(
       'experimental',
@@ -400,7 +400,7 @@ describe('Minecraft Owner evidence and user eligibility', () => {
     await f.db
       .updateTable('game_rollouts')
       .set({ allowlist: [] })
-      .where('integration_id', '=', 'minecraft-java')
+      .where('integration_id', '=', 'minecraft')
       .execute();
     await expect(requireMinecraftChoice(f.db, f.context, choiceId, env)).rejects.toThrow(
       'forbidden',

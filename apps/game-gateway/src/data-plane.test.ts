@@ -261,22 +261,51 @@ describe('persistent Gateway fixture forwarding', () => {
     );
     expect(probes).toHaveLength(16);
     expect(f.control.requestWake).not.toHaveBeenCalled();
-    expect((await exchange(backend.port, handshake(2, 765))).toString()).toContain(
-      'version selected',
-    );
-    expect((await exchange(backend.port, handshake(3))).toString()).toContain('directly');
-    expect(await exchange(backend.port, handshake(2, 999999))).toHaveLength(0);
+    expect(
+      (
+        await exchange(
+          backend.port,
+          Buffer.concat([handshake(2, 765), frameMinecraftPacket(0, Buffer.from([1, 120]))]),
+        )
+      ).toString(),
+    ).toContain('version selected');
+    expect(
+      (
+        await exchange(
+          backend.port,
+          Buffer.concat([handshake(3), frameMinecraftPacket(0, Buffer.from([1, 120]))]),
+        )
+      ).toString(),
+    ).toContain('directly');
+    expect(
+      (
+        await exchange(
+          backend.port,
+          Buffer.concat([handshake(2, 999999), frameMinecraftPacket(0, Buffer.from([1, 120]))]),
+        )
+      ).toString(),
+    ).toContain('version selected');
     expect(f.control.requestWake).not.toHaveBeenCalled();
     const joins = await Promise.all(
-      Array.from({ length: 16 }, () => exchange(backend.port, handshake(2))),
+      Array.from({ length: 16 }, () =>
+        exchange(
+          backend.port,
+          Buffer.concat([handshake(2), frameMinecraftPacket(0, Buffer.from([1, 120]))]),
+        ),
+      ),
     );
     expect(joins.every((bytes) => bytes.toString().includes('starting'))).toBe(true);
     expect(f.control.requestWake).toHaveBeenCalledTimes(1);
     const stopped = { ...gameRoute, revision: 2, mode: 'manually_stopped' as const };
     await f.gateway.applySnapshot(f.snapshot([stopped], 2));
-    expect((await exchange(backend.port, handshake(2))).toString()).toContain(
-      'Start it from the panel',
-    );
+    expect(
+      (
+        await exchange(
+          backend.port,
+          Buffer.concat([handshake(2), frameMinecraftPacket(0, Buffer.from([1, 120]))]),
+        )
+      ).toString(),
+    ).toContain('Start it from the panel');
     expect(f.control.requestWake).toHaveBeenCalledTimes(1);
   });
   it('isolates stateful offline conversations, retaining status sockets for ping without waking', async () => {
@@ -367,6 +396,181 @@ describe('persistent Gateway fixture forwarding', () => {
       await invalid.gateway.stop();
     }
   });
+  it('finalizes ambiguous passive prefixes only after input idles, keeping complete packets immediate', async () => {
+    const backend = await tcpFixture();
+    const finalize = vi.fn((bytes: Uint8Array) => ({
+      kind: 'status' as const,
+      consumedBytes: bytes.length,
+    }));
+    const classify = vi.fn((bytes: Uint8Array) =>
+      bytes[0] === 0xfe
+        ? { kind: 'need-more' as const, consumedBytes: 0 }
+        : { kind: 'status' as const, consumedBytes: bytes.length },
+    );
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      protocols: [
+        fixtureProtocol({
+          createSession: () => ({
+            classificationIdleMs: 60,
+            classify,
+            finalize,
+            response: () => ({ bytes: Buffer.from('status'), close: true }),
+          }),
+        }),
+      ],
+    });
+    await f.gateway.start();
+    expect((await exchange(backend.port, 'modern')).toString()).toBe('status');
+    expect(finalize).not.toHaveBeenCalled();
+    const socket = connect(backend.port, '127.0.0.1');
+    const reply = once(socket, 'data');
+    await once(socket, 'connect');
+    socket.write(Buffer.from([0xfe]));
+    await vi.waitFor(() => expect(classify).toHaveBeenCalledTimes(2), { interval: 1 });
+    await delay(30);
+    socket.write(Buffer.from([0x01]));
+    await vi.waitFor(() => expect(classify).toHaveBeenCalledTimes(3), { interval: 1 });
+    await delay(30);
+    expect(finalize).not.toHaveBeenCalled();
+    expect((await reply)[0].toString()).toBe('status');
+    expect(finalize).toHaveBeenCalledExactlyOnceWith(Buffer.from([0xfe, 0x01]));
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+    socket.destroy();
+  });
+  it('does not repeatedly finalize an incomplete packet or extend the absolute deadline', async () => {
+    const backend = await tcpFixture();
+    const finalize = vi.fn(() => ({ kind: 'need-more' as const, consumedBytes: 0 }));
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      policy: { classificationTimeoutMs: 100 },
+      protocols: [
+        fixtureProtocol({
+          createSession: () => ({
+            classificationIdleMs: 10,
+            classify: () => ({ kind: 'need-more', consumedBytes: 0 }),
+            finalize,
+            response: () => ({ close: true }),
+          }),
+        }),
+      ],
+    });
+    await f.gateway.start();
+    const socket = connect(backend.port, '127.0.0.1');
+    const closed = once(socket, 'close');
+    await once(socket, 'connect');
+    socket.write(Buffer.from([0xfe, 0x01, 0xfa]));
+    await closed;
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+  });
+  it.each(['close', 'revision', 'lease'] as const)(
+    'never finalizes pending bytes after %s invalidates the session',
+    async (change) => {
+      const backend = await tcpFixture();
+      let clock = Date.now();
+      const r = route(backend.port, 'tcp', 'sleeping');
+      const classify = vi.fn(() => ({ kind: 'need-more' as const, consumedBytes: 0 }));
+      const finalize = vi.fn(() => ({ kind: 'status' as const, consumedBytes: 1 }));
+      const f = plane([r], {
+        now: () => clock,
+        protocols: [
+          fixtureProtocol({
+            createSession: () => ({
+              classificationIdleMs: 50,
+              classify,
+              finalize,
+              response: () => ({ bytes: Buffer.from('status'), close: true }),
+            }),
+          }),
+        ],
+      });
+      await f.gateway.start();
+      const socket = connect(backend.port, '127.0.0.1');
+      await once(socket, 'connect');
+      socket.write(Buffer.from([0xfe]));
+      await vi.waitFor(() => expect(classify).toHaveBeenCalledTimes(1), { interval: 1 });
+      if (change === 'close') socket.resetAndDestroy();
+      else if (change === 'revision')
+        await f.gateway.applySnapshot(f.snapshot([{ ...r, revision: 2 }], 2));
+      else clock += 60001;
+      await delay(70);
+      expect(finalize).not.toHaveBeenCalled();
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+      socket.destroy();
+    },
+  );
+  it('serializes idle finalization with wakes and drains trailing login bytes after a fake disconnect', async () => {
+    const backend = await tcpFixture();
+    const finalize = vi.fn(() => ({ kind: 'join' as const, consumedBytes: 1 }));
+    let finishWake: (() => void) | undefined;
+    const classify = vi.fn(() => ({ kind: 'need-more' as const, consumedBytes: 0 }));
+    const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+      control: {
+        requestWake: vi.fn(async () => {
+          await new Promise<void>((resolve) => {
+            finishWake = resolve;
+          });
+          return { mode: 'waking' as const };
+        }),
+      },
+      protocols: [
+        fixtureProtocol({
+          createSession: () => ({
+            classificationIdleMs: 10,
+            classify,
+            finalize,
+            response: () => ({ bytes: Buffer.from('disconnect'), close: true }),
+          }),
+        }),
+      ],
+    });
+    await f.gateway.start();
+    const socket = connect({ host: '127.0.0.1', port: backend.port, allowHalfOpen: true });
+    const reply = once(socket, 'data');
+    const closed = once(socket, 'close');
+    await once(socket, 'connect');
+    socket.write('J');
+    await vi.waitFor(() => expect(f.control.requestWake).toHaveBeenCalledTimes(1));
+    socket.write('trailing login');
+    await delay(25);
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
+    finishWake?.();
+    expect((await reply)[0].toString()).toBe('disconnect');
+    socket.end('more trailing login');
+    await closed;
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
+  });
+  it.each(['input', 'output', 'consumption'] as const)(
+    'applies %s limits to idle finalization',
+    async (limit) => {
+      const backend = await tcpFixture();
+      const finalize = vi.fn((bytes: Uint8Array) => ({
+        kind: 'status' as const,
+        consumedBytes: limit === 'consumption' ? 0 : bytes.length,
+      }));
+      const f = plane([route(backend.port, 'tcp', 'sleeping')], {
+        policy: {
+          maxClassificationBytes: limit === 'input' ? 1 : 1024,
+          maxProtocolResponseBytes: 4,
+        },
+        protocols: [
+          fixtureProtocol({
+            createSession: () => ({
+              classificationIdleMs: 10,
+              classify: () => ({ kind: 'need-more', consumedBytes: 0 }),
+              finalize,
+              response: () => ({ bytes: Buffer.from('oversized'), close: true }),
+            }),
+          }),
+        ],
+      });
+      await f.gateway.start();
+      expect(await exchange(backend.port, Buffer.from([0xfe, 0x01]))).toHaveLength(0);
+      expect(finalize).toHaveBeenCalledTimes(limit === 'input' ? 0 : 1);
+      expect(f.control.requestWake).not.toHaveBeenCalled();
+    },
+  );
   it('deduplicates stateful joins and rejects explicit incompatible intents without waking', async () => {
     const backend = await tcpFixture();
     const protocol = fixtureProtocol({
@@ -552,6 +756,133 @@ describe('persistent Gateway fixture forwarding', () => {
     await refuses(backend.port);
     expect((await exchange(direct.port, 'still-direct')).toString()).toBe('still-direct');
   });
+  it('binds and renews an independent sleeping route when another server has no active binding proof', async () => {
+    const stopped = await tcpFixture();
+    const sleeping = await tcpFixture();
+    const unproven = route(stopped.port, 'tcp', 'sleeping');
+    const valid = route(sleeping.port, 'tcp', 'sleeping');
+    let timestamp = Date.now();
+    let proofMissing = true;
+    const validate = vi.fn<GatewaySafety['validate']>(async (current) => {
+      if (current.serverId === unproven.serverId && proofMissing)
+        throw new GatewaySafetyError('backend_active_binding');
+    });
+    const f = plane([unproven, valid], {
+      safety: { validate },
+      now: () => timestamp,
+      lease: 5000,
+    });
+    await f.gateway.start();
+    expect(f.gateway.health()).toMatchObject({
+      ready: false,
+      controlAvailable: true,
+      revision: 1,
+      routes: 1,
+    });
+    expect(f.gateway.ownedBindings()).toEqual([valid.public]);
+    const firstExpiry = f.gateway.health().expiresAt;
+    await refuses(stopped.port);
+    expect((await exchange(sleeping.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+
+    timestamp += 4000;
+    await f.gateway.refresh();
+    expect(f.gateway.health().expiresAt).not.toBe(firstExpiry);
+    expect(f.gateway.health()).toMatchObject({ controlAvailable: true, ready: false, routes: 1 });
+    timestamp += 2000;
+    // The first lease has expired, but this independently validated route has
+    // renewed authority. The withheld server remains unbound.
+    expect((await exchange(sleeping.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+    await refuses(stopped.port);
+    await expect(
+      f.gateway.applySnapshot(f.snapshot([{ ...unproven, mode: 'blocked' }, valid])),
+    ).rejects.toThrow('conflict');
+
+    proofMissing = false;
+    await f.gateway.refresh();
+    expect(f.gateway.health()).toMatchObject({ ready: true, controlAvailable: true, routes: 2 });
+    expect((await exchange(stopped.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+  });
+  it('withdraws every existing role of a server when one role loses active binding proof', async () => {
+    const first = await tcpFixture();
+    const second = await tcpFixture();
+    const independent = await tcpFixture();
+    const game = route(first.port, 'tcp', 'sleeping');
+    const query = {
+      ...route(second.port, 'tcp', 'sleeping'),
+      serverId: game.serverId,
+      protocol: { handlerId: 'fixture', gameVersion: '1', role: 'query' },
+    };
+    const valid = route(independent.port, 'tcp', 'sleeping');
+    let proofMissing = false;
+    const f = plane([game, query, valid], {
+      safety: {
+        validate: vi.fn<GatewaySafety['validate']>(async (current) => {
+          if (proofMissing && current.id === query.id)
+            throw new GatewaySafetyError('backend_active_binding');
+        }),
+      },
+    });
+    await f.gateway.start();
+    expect(f.gateway.health().routes).toBe(3);
+    proofMissing = true;
+    await f.gateway.refresh();
+    expect(f.gateway.ownedBindings()).toEqual([valid.public]);
+    expect(f.gateway.health()).toMatchObject({ ready: false, controlAvailable: true, routes: 1 });
+    await refuses(first.port);
+    await refuses(second.port);
+    expect((await exchange(independent.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+  });
+  it('removes staged sibling roles when active binding proof fails at the final pre-bind check', async () => {
+    const first = await tcpFixture();
+    const independent = await tcpFixture();
+    const second = await tcpFixture();
+    const game = route(first.port, 'tcp', 'sleeping');
+    const query = {
+      ...route(second.port, 'tcp', 'sleeping'),
+      serverId: game.serverId,
+      protocol: { handlerId: 'fixture', gameVersion: '1', role: 'query' },
+    };
+    const valid = route(independent.port, 'tcp', 'sleeping');
+    let queryChecks = 0;
+    const validate = vi.fn<GatewaySafety['validate']>(async (current) => {
+      if (current.id === query.id && ++queryChecks === 2)
+        throw new GatewaySafetyError('backend_active_binding');
+    });
+    const f = plane([game, valid, query], { safety: { validate } });
+    await f.gateway.applySnapshot(f.snapshot());
+    expect(validate).toHaveBeenCalledTimes(6);
+    expect(f.gateway.ownedBindings()).toEqual([valid.public]);
+    expect(f.gateway.health()).toMatchObject({ ready: false, controlAvailable: true, routes: 1 });
+    await refuses(first.port);
+    await refuses(second.port);
+    expect((await exchange(independent.port, 'STATUS\n')).toString()).toBe('sleeping\n');
+  });
+  it.each([
+    new DomainError('allocation_unavailable', 409, {
+      gatewaySafetyReason: 'backend_active_binding',
+    }),
+    new GatewaySafetyError('public_collision'),
+  ])(
+    'keeps unrelated safety failures global instead of treating them as absent proof: %s',
+    async (error) => {
+      const first = await tcpFixture();
+      const second = await tcpFixture();
+      const a = route(first.port, 'tcp', 'sleeping');
+      const b = route(second.port, 'tcp', 'sleeping');
+      const f = plane([a, b], {
+        safety: {
+          validate: vi.fn<GatewaySafety['validate']>(async (current) => {
+            if (current.id === a.id) throw error;
+          }),
+        },
+      });
+      await expect(f.gateway.applySnapshot(f.snapshot())).rejects.toBe(error);
+      expect(f.gateway.health()).toMatchObject({ revision: null, routes: 0 });
+      await refuses(first.port);
+      await refuses(second.port);
+    },
+  );
   it('refreshes topology immediately before binding after another route exhausts the earlier evidence TTL', async () => {
     const first = await tcpFixture();
     const second = await tcpFixture();
@@ -1539,7 +1870,14 @@ describe('sleep protocol handling and observations', () => {
     const status = readMinecraftFrame(reply, 1024);
     expect(status?.body.toString()).toContain('Server stopping');
     expect(reply.subarray(status?.bytes)).toEqual(frameMinecraftPacket(1, nonce));
-    expect((await exchange(backend.port, handshake(2))).toString()).toContain('Server stopping');
+    expect(
+      (
+        await exchange(
+          backend.port,
+          Buffer.concat([handshake(2), frameMinecraftPacket(0, Buffer.from([1, 120]))]),
+        )
+      ).toString(),
+    ).toContain('Server stopping');
     expect(f.control.requestWake).not.toHaveBeenCalled();
     expect(f.gateway.metrics().tcpBytesToBackend).toBe(0);
     clock += 60001;

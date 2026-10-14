@@ -25,17 +25,17 @@ beforeEach(async () => {
   f = await managementFixture(database.db, { interactive: true });
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft-java', version: '1.0.0', manifest: JSON.stringify(minecraftManifest) })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: JSON.stringify(minecraftManifest) })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
     .insertInto('game_rollouts')
-    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
     .onConflict((c) => c.column('integration_id').doUpdateSet({ state: 'public', allowlist: [] }))
     .execute();
   await setRuntimeMapping(f.db, adapter(), f.owner, {
     id: f.mappingId,
-    gameId: 'minecraft-java',
+    gameId: 'minecraft',
     runtimeId: 'vanilla',
     nodeId: f.nodeId,
     nestId: 1,
@@ -160,6 +160,7 @@ describe('Owner Vanilla catalog synchronization', () => {
     expect(await minecraftCatalog(f.db, f.owner)).toContainEqual({
       id: row.id,
       version: '1.21.11',
+      releaseTime: null,
       releaseType: 'release',
       runtime: 'vanilla',
       capabilities: minecraftDeclaredCapabilities(

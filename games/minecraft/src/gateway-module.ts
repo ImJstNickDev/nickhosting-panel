@@ -26,16 +26,23 @@ export function createMinecraftGatewayModuleAdapter(
     if (!parsed.success || parsed.data.release !== route.protocol.gameVersion) return;
     if (parsed.data.supportSource === 'integration') {
       const declaration = parsed.data;
+      const historical =
+        declaration.declarationId === 'minecraft-java/vanilla' &&
+        declaration.declarationVersion === 1 &&
+        declaration.release === '26.1' &&
+        declaration.family === 'netty' &&
+        declaration.protocolId === 775;
       if (
-        declaration.declarationId !== minecraftCapabilityDeclaration.id ||
-        declaration.declarationVersion !== minecraftCapabilityDeclaration.version ||
-        !minecraftGatewaySupported({
-          release: declaration.release,
-          releaseType: 'release',
-          profile: 'vanilla',
-          family: declaration.family,
-          protocolId: declaration.protocolId,
-        })
+        !historical &&
+        (declaration.declarationId !== minecraftCapabilityDeclaration.id ||
+          declaration.declarationVersion !== minecraftCapabilityDeclaration.version ||
+          !minecraftGatewaySupported({
+            release: declaration.release,
+            releaseType: 'release',
+            profile: 'vanilla',
+            family: declaration.family,
+            protocolId: declaration.protocolId,
+          }))
       )
         return;
     } else if (
@@ -51,6 +58,7 @@ export function createMinecraftGatewayModuleAdapter(
         acceptsTransfers: parsed.data.acceptsTransfers,
         probeTimeoutMs: options.probeTimeoutMs,
         maxStatusBytes: options.maxStatusBytes,
+        responses: parsed.data.responses,
       });
       cached = { identity, adapter };
       cache.set(route, cached);
@@ -72,6 +80,11 @@ export function createMinecraftGatewayModuleAdapter(
         classify: (input) =>
           select(context.route) === adapter
             ? session.classify(input)
+            : { kind: 'unsupported', consumedBytes: input.length },
+        classificationIdleMs: session.classificationIdleMs,
+        finalize: (input) =>
+          select(context.route) === adapter && session.finalize
+            ? session.finalize(input)
             : { kind: 'unsupported', consumedBytes: input.length },
         response: (state) =>
           select(context.route) === adapter ? session.response(state) : { close: true },

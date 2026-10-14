@@ -75,7 +75,7 @@ export function registerMinecraftRoutes(
         .strict(),
       await body(c),
     );
-    await registerGame(db, context, minecraftManifest, { gameId: 'minecraft-java', ...rollout });
+    await registerGame(db, context, minecraftManifest, { gameId: 'minecraft', ...rollout });
     return c.body(null, 204);
   });
   app.post('/v1/owner/minecraft/catalog/sync', async (c) => {
@@ -138,7 +138,7 @@ export function registerMinecraftRoutes(
           id: choice.id,
           release: choice.version,
           runtime: choice.runtime,
-          nameKey: `games.minecraft-java.runtimes.${choice.runtime}`,
+          nameKey: `games.minecraft.runtimes.${choice.runtime}`,
         })),
       ),
     );
@@ -345,7 +345,7 @@ export function registerMinecraftRoutes(
           id: choice.id,
           release: choice.version,
           runtime: choice.runtime,
-          nameKey: `games.minecraft-java.runtimes.${choice.runtime}`,
+          nameKey: `games.minecraft.runtimes.${choice.runtime}`,
         })),
         {
           provider: plan.format === 'curseforge' ? 'curseforge' : 'modrinth',

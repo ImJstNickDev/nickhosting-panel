@@ -173,7 +173,7 @@ export function minecraftCatalogOptions(
   if (handler === 'runtimes')
     return [...new Set(choices.map((choice) => choice.runtime))].map((runtime) => ({
       value: runtime,
-      labelKey: `games.minecraft-java.runtimes.${runtime}`,
+      labelKey: `games.minecraft.runtimes.${runtime}`,
       disabled: false,
     }));
   if (handler !== 'choices') throw new MinecraftUiError('integration_unavailable');

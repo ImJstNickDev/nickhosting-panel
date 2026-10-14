@@ -45,7 +45,7 @@ export async function syncMinecraftCatalog(
     .selectAll()
     .where('id', '=', value.mappingId)
     .executeTakeFirst();
-  if (mapping?.game_id !== 'minecraft-java' || mapping.runtime_id !== 'vanilla' || !mapping.enabled)
+  if (mapping?.game_id !== 'minecraft' || mapping.runtime_id !== 'vanilla' || !mapping.enabled)
     throw new DomainError('configuration_invalid', 400, { reason: 'minecraft_catalog_mapping' });
   const { values } = await getSettings(db, env);
   const underlying =

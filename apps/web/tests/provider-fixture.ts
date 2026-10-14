@@ -164,7 +164,7 @@ export async function installBrowserFixtures(
   await db
     .insertInto('game_integrations')
     .values({
-      id: 'minecraft-java',
+      id: 'minecraft',
       version: minecraftManifest.version,
       manifest: minecraftManifest,
     })
@@ -173,7 +173,7 @@ export async function installBrowserFixtures(
     .insertInto('runtime_egg_mappings')
     .values({
       id: mappingId,
-      game_id: 'minecraft-java',
+      game_id: 'minecraft',
       runtime_id: 'vanilla',
       node_id: nodeId,
       nest_id: 1,

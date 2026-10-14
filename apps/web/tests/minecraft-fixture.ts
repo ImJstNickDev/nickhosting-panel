@@ -63,7 +63,7 @@ export async function installMinecraftBrowserChoice(
   await db
     .insertInto('game_integrations')
     .values({
-      id: 'minecraft-java',
+      id: 'minecraft',
       version: minecraftManifest.version,
       manifest: minecraftManifest,
     })
@@ -71,12 +71,12 @@ export async function installMinecraftBrowserChoice(
     .execute();
   await db
     .insertInto('game_rollouts')
-    .values({ integration_id: 'minecraft-java', state: 'public', allowlist: [] })
+    .values({ integration_id: 'minecraft', state: 'public', allowlist: [] })
     .execute();
   await db
     .updateTable('runtime_egg_mappings')
     .set({
-      game_id: 'minecraft-java',
+      game_id: 'minecraft',
       runtime_id: 'vanilla',
       docker_image: browserMinecraft.image,
       startup: 'java -jar server.jar',

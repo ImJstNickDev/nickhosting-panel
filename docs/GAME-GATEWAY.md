@@ -18,11 +18,13 @@ to use M2 admission; direct play does not imply automatic wake or readiness dete
 
 Compiled Minecraft declarations identify their own ID/version in service-only route
 metadata. They are not relabeled local test attestations. The Gateway validates the
-compiled declaration and exact supported release/protocol. Existing legacy attestation
+compiled declaration and its supported protocol family. Existing legacy attestation
 DTOs remain readable with their expiry checks. Authenticated control-plane routing,
 lease expiry, collision checks, process epochs and forwarding fences remain required.
-The current declaration enables Vanilla 26.1/protocol 775 Gateway behavior; other
-Vanilla versions can use direct access without a claim of protocol compatibility.
+The v2 `minecraft/vanilla` declaration supports modern and historical Java wire
+families; missing historical player queries disable automatic idle sleep, not the
+responder. See [multiprotocol behavior and evidence](MINECRAFT-MULTIPROTOCOL.md).
+Historical v1 declarations remain valid only for their exact 26.1/775 pair.
 
 An explicit advertised direct hostname/port is a configuration fact, not proof of
 external reachability. No fallback to a private allocation address, no automatic

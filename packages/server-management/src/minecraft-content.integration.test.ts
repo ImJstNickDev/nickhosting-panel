@@ -249,12 +249,12 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     const combinationId = randomUUID();
     await f.db
       .insertInto('game_integrations')
-      .values({ id: 'minecraft-java', version: 'fixture', manifest: {} })
+      .values({ id: 'minecraft', version: 'fixture', manifest: {} })
       .onConflict((conflict) => conflict.column('id').doNothing())
       .execute();
     await f.db
       .updateTable('runtime_egg_mappings')
-      .set({ game_id: 'minecraft-java', runtime_id: profile, docker_image: image, startup })
+      .set({ game_id: 'minecraft', runtime_id: profile, docker_image: image, startup })
       .where('id', '=', f.mappingId)
       .execute();
     const mapping = await f.db
@@ -1114,7 +1114,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     const write = vi.spyOn(context.adapter, 'writeFile');
     const receipt = await verifyMinecraftInitialInstallation(context, options);
     expect(receipt).toMatchObject({
-      integrationId: 'minecraft-java',
+      integrationId: 'minecraft',
       files: [{ path: 'server.jar', size: files.get('server.jar')?.length }],
     });
     expect(write).not.toHaveBeenCalled();

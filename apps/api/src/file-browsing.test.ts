@@ -82,7 +82,7 @@ function fixture(serverName = 'Fixture server') {
 }
 /** Exercise the real Minecraft filesystem guards; only database storage is isolated. */
 function minecraftGuard(f: ReturnType<typeof fixture>) {
-  expect(trustedGameModules.get('minecraft-java')).toBeDefined();
+  expect(trustedGameModules.get('minecraft')).toBeDefined();
   const rows: Record<string, unknown> = {
     minecraft_server_profiles: {
       combination_id: 'choice',

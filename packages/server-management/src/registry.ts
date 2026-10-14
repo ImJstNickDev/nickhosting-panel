@@ -340,7 +340,7 @@ export async function createManagedServer(
       .executeTakeFirst();
     if (!mapping?.enabled) throw new DomainError('not_found');
     const minecraft =
-      mapping.game_id === 'minecraft-java'
+      mapping.game_id === 'minecraft'
         ? await requireMinecraftChoice(
             tx,
             await currentInteractiveContext(tx, context, env),
@@ -349,7 +349,7 @@ export async function createManagedServer(
           )
         : undefined;
     if (
-      (mapping.game_id === 'minecraft-java') !== (value.minecraft !== undefined) ||
+      (mapping.game_id === 'minecraft') !== (value.minecraft !== undefined) ||
       (minecraft && minecraft.row.mapping_id !== mapping.id)
     )
       throw new DomainError('validation_failed');
@@ -725,7 +725,7 @@ export async function enqueueLockedServerOperation(
       .select('game_id')
       .where('id', '=', server.mapping_id)
       .executeTakeFirstOrThrow();
-    if (mapping.game_id === 'minecraft-java') {
+    if (mapping.game_id === 'minecraft') {
       const profile = await tx
         .selectFrom('minecraft_server_profiles')
         .select('installed')
