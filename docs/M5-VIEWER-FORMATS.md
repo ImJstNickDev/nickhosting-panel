@@ -171,6 +171,11 @@ through the same backpressured implementation as the regular file manager. No
 whole ZIP is accumulated in browser memory. Archive content remains read-only:
 selection does not expose rename/delete or imply edits to compressed files.
 
+The `..` row is available at the outer archive root as well: it closes the viewer
+through Fileman's existing exit action and returns to the physical containing
+folder. Within virtual folders or nested archives, it still moves up one logical
+level instead of leaving the entire archive session.
+
 The archive-list API accepts `query`, `sort=name|size|modifiedAt` and
 `direction=asc|desc`. Viewer requests may include `archives`, a JSON array of up
 to four nested archive-member paths; `path` always identifies the real outer file

@@ -2304,6 +2304,7 @@ function FilesWorkspace({ serverId }: { serverId: string }) {
                 tools: viewerTools,
               }}
               onText={() => void open(viewed.entry, directory, 'text')}
+              onClose={closeEditor}
               onExtract={
                 canMutate &&
                 /\.(?:zip|jar|tar|tgz|tar\.(?:gz|bz2|xz|zst)|gz|bz2|xz|zst|7z|rar)$/i.test(

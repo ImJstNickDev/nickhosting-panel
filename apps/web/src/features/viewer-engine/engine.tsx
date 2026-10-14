@@ -38,6 +38,7 @@ export function FileViewer({
   serverId,
   identity,
   onText,
+  onClose,
   onExtract,
   onViewerChange,
   onContextChange,
@@ -48,6 +49,7 @@ export function FileViewer({
   /** False when the caller explicitly selected Atlas for the original container. */
   autoDecodeCompressed?: boolean;
   onText: () => void;
+  onClose: () => void;
   onExtract?: (selection?: ArchiveExtraction) => void;
   onViewerChange?: (viewerId: ViewerId, options?: { autoDecodeCompressed: boolean }) => void;
   onContextChange?: (context: { viewerId?: ViewerId; path: string; readOnly: true }) => void;
@@ -211,7 +213,7 @@ export function FileViewer({
           const member = source.archives?.[depth] ?? '';
           archiveAt(depth, member.split('/').slice(0, -1).join('/'));
         }
-      : undefined,
+      : onClose,
     onOpen: (next) => {
       next = { ...next, gameId: initial.gameId };
       if (next.entry) setArchiveDirectory(next.entry.split('/').slice(0, -1).join('/'));
@@ -385,7 +387,7 @@ export function FileViewer({
                 <Tooltip placement="cursor" content={t('file.extract')}>
                   <button
                     type="button"
-                    className="fm-viewer-action"
+                    className="fm-tool"
                     aria-label={t('file.extract')}
                     onClick={() => onExtract({ archives: renderSource.archives })}
                   >

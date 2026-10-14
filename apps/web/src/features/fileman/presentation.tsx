@@ -104,7 +104,7 @@ export function FilemanToolbarIcon({
       aria-hidden="true"
     >
       {kind === 'extract' ? (
-        <path d="M3 7h7l2 3h9v11H3ZM12 3v11m-4-4 4 4 4-4" />
+        <path d="M5 12v8h14v-8M5 9l-3 4h6l2-4H5Zm14 0 3 4h-6l-2-4h5ZM12 14V2m-3 3 3-3 3 3" />
       ) : kind === 'download' ? (
         <path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" />
       ) : kind === 'move' ? (

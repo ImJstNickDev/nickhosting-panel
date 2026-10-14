@@ -47,6 +47,13 @@ describe('Atlas path extension', () => {
     );
     harness.setManagement(provider.management);
     (await provider.files()).set('virtual.zip', Buffer.from('isolated archive fixture'));
+    const server = await harness.database.db
+      .selectFrom('managed_servers')
+      .select('pterodactyl_identifier')
+      .where('id', '=', provider.ids.serverId)
+      .executeTakeFirstOrThrow();
+    await provider.adapter.createDirectory(server.pterodactyl_identifier ?? '', '', 'backups');
+    (await provider.files()).set('backups/world.zip', Buffer.from('isolated archive fixture'));
     base = `${harness.origin}/servers/${provider.ids.serverId}/files`;
     const endpoint = `/v1/servers/${provider.ids.serverId}/files/viewer`;
     page.on('pageerror', (error) => errors.push(error.message));
@@ -186,6 +193,43 @@ describe('Atlas path extension', () => {
     input = await path();
     await browserExpect(input).toHaveValue('/virtual.zip/packed.zip.gz/data/inside.json');
     await input.press('Escape');
+    expect(errors).toEqual([]);
+  });
+  it('uses parent rows inside folders and nested archives and exits the outer archive to its containing real folder', async () => {
+    await page.goto(base);
+    await page.locator('.fm-breadcrumb').getByRole('button', { name: 'root', exact: true }).click();
+    await page.locator('.fm-filename').getByText('backups', { exact: true }).click();
+    await page.locator('.fm-filename').getByText('world.zip', { exact: true }).click();
+    const archive = page.locator('.ve-archive');
+    const parent = archive.getByRole('button', { name: 'Parent folder', exact: true });
+    await browserExpect(parent).toBeVisible();
+    const extract = page
+      .locator('.fm-toolbar')
+      .getByRole('button', { name: 'Extract', exact: true });
+    await browserExpect(extract).toBeVisible();
+    const icon = await extract.locator('svg').boundingBox();
+    expect(icon?.width).toBeGreaterThanOrEqual(16);
+    expect(icon?.height).toBeGreaterThanOrEqual(16);
+    await extract.click();
+    await browserExpect(page.getByRole('dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await browserExpect(page.getByRole('dialog')).toHaveCount(0);
+    await browserExpect(parent).toBeVisible();
+    await harness.screenshot(page, 'atlas-parent-root-desktop');
+    await archive.locator('.fm-filename').getByText('config', { exact: true }).click();
+    await browserExpect(archive.locator('.fm-filename')).toHaveText('settings.json');
+    await parent.click();
+    await archive.locator('.fm-filename').getByText('nested.zip', { exact: true }).click();
+    await browserExpect(archive.locator('.fm-filename')).toHaveText('inner');
+    await parent.click();
+    await browserExpect(
+      archive.locator('.fm-filename').getByText('nested.zip', { exact: true }),
+    ).toBeVisible();
+    await parent.click();
+    await browserExpect(page.locator('.ve-engine')).toHaveCount(0);
+    await browserExpect(page.locator('.fm-breadcrumb [aria-current="page"]')).toHaveText('backups');
+    await browserExpect(page.locator('.fm-filename')).toHaveText('world.zip');
+    await browserExpect(page.locator('.fm-filename')).toBeFocused();
     expect(errors).toEqual([]);
   });
 });

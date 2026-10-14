@@ -8916,3 +8916,20 @@ Space/Enter/arrows, stale-prefix errors, desktop/Italian mobile accessibility an
 platform-specific shortcuts. Final web typecheck and whitespace checks passed.
 `python3 scripts/check-governance.py` and `git diff --cached --check`: **passed**
 (854 indexed text files, 294 review PNGs, 703 relative links, 4 TOML files, 44 ignore cases; heuristic secret scan).
+
+### 2026-10-14 — Atlas parent row and extraction icon
+
+The outer archive root now includes `..`, using Fileman's existing close action
+to return to the containing physical folder and restore focus. Nested archive
+and virtual-directory parent navigation retain their existing behavior. Extract
+uses the shared icon-button sizing; its symbol is an open box with an upward arrow.
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/atlas-path.browser.test.ts -t 'uses parent rows'`: **1 passed, 2 intentionally skipped** on final code. Covers all three parent levels, actual SVG dimensions, opening/dismissing extraction without submitting it, and restored file-row focus.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: **passed** for the callback changes.
+- Focused Biome check on the four changed TS/TSX files: **passed**.
+
+Reviewed [browser screenshot](screenshots/m5/atlas-parent-root-desktop.png).
+Independent code review reported no findings. Only isolated provider fixtures
+were used; no real extraction, server mutations, infrastructure changes or
+container restarts. Existing HMR applies the UI change. Historical suites were
+not repeated; SFTPGo #18 is unchanged.
