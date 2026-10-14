@@ -137,7 +137,7 @@ export async function activateProvisionGateway(
 
 /** Reconciliation already holds resource/server locks and has verified provider
  * identity and installed state. Recover only untouched initial route reservations
- * after a later successful reinstall; this grants no new automatic wake consent. */
+ * after a later successful reinstall. Manual-stop intent remains authoritative. */
 export async function recoverProvisionGateway(
   tx: DB,
   serverId: string,
@@ -304,6 +304,105 @@ function receiptTime(value: unknown): bigint | null {
   );
 }
 
+/** Upgrade only the old generated policy default, under reconciliation locks.
+ * An explicit policy save (even a no-op disable) is authoritative. Lifecycle
+ * Start/Stop can rotate generation, so generation equality cannot prove intent. */
+export async function reconcileProvisionGatewayAutomation(
+  tx: DB,
+  serverId: string,
+  env: Environment = {},
+  modules = trustedGameModules,
+) {
+  const server = await tx
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (
+    server?.connection_mode !== 'gateway' ||
+    server.active_operation_id ||
+    server.installation_state !== 'installed' ||
+    !server.pterodactyl_id ||
+    !server.pterodactyl_uuid
+  )
+    return;
+  const state = await tx
+    .selectFrom('gateway_server_states')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  if (
+    !state ||
+    state.enabled ||
+    !state.idle_timeout_inherited ||
+    state.idle_timeout_seconds !== null ||
+    state.owner_idle_timeout_seconds !== null ||
+    state.owner_idle_timeout_user_access !== null ||
+    state.readiness_timeout_seconds !== 600 ||
+    state.readiness_max_age_seconds !== 30 ||
+    state.estimate_max_age_seconds !== 604800 ||
+    state.wake_retry_seconds !== 10
+  )
+    return;
+  const operation = await tx
+    .selectFrom('server_operations')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .where('action', '=', 'provision')
+    .where(sql<boolean>`plan->>'gatewayRoutesActivated' = 'true'
+      and plan->>'gatewayAutomationInitialized' is distinct from 'true'`)
+    .executeTakeFirst();
+  if (
+    !operation ||
+    operation.plan.gatewayProvision === undefined ||
+    typeof operation.plan.gatewayPolicyGeneration !== 'string'
+  )
+    return;
+  if (
+    await tx
+      .selectFrom('audit_events')
+      .select('id')
+      .where('action', '=', 'gateway.policy.updated')
+      .where(sql<boolean>`metadata->>'serverId' = ${serverId}`)
+      .executeTakeFirst()
+  )
+    return;
+  const binding = await provisionGatewayBinding(tx, server, env, modules);
+  if (binding.protocolId !== state.protocol_id || binding.gameVersion !== state.game_version)
+    throw new DomainError('conflict');
+  await tx
+    .updateTable('gateway_server_states')
+    .set({ enabled: true })
+    .where('server_id', '=', serverId)
+    .execute();
+  // Existing fresh idle observations remain evidence. The normal observation
+  // path still requires current player/session/epoch proof before issuing sleep.
+  await tx
+    .updateTable('server_operations')
+    .set({
+      plan: JSON.stringify({ ...operation.plan, gatewayAutomationInitialized: true }),
+    })
+    .where('job_id', '=', operation.job_id)
+    .execute();
+}
+
+async function provisionGatewayBinding(
+  tx: DB,
+  server: Server,
+  env: Environment,
+  modules: typeof trustedGameModules,
+) {
+  const mapping = await tx
+    .selectFrom('runtime_egg_mappings')
+    .select('game_id')
+    .where('id', '=', server.mapping_id)
+    .executeTakeFirstOrThrow();
+  const binding = await modules.get(mapping.game_id)?.gatewayPolicyBinding?.(tx, server, env);
+  if (!binding) throw new DomainError('integration_unavailable');
+  return binding;
+}
+
 /** Shared atomic activation: callers validate their distinct durable authority. */
 async function activateReservedGateway(
   tx: DB,
@@ -343,13 +442,7 @@ async function activateReservedGateway(
   const config = await gatewayConfiguration(tx, env);
   if (plan.gatewayId !== config.gatewayId || plan.physicalHostId !== config.gatewayPhysicalHostId)
     throw new DomainError('configuration_invalid');
-  const mapping = await tx
-    .selectFrom('runtime_egg_mappings')
-    .select('game_id')
-    .where('id', '=', server.mapping_id)
-    .executeTakeFirstOrThrow();
-  const binding = await modules.get(mapping.game_id)?.gatewayPolicyBinding?.(tx, server, env);
-  if (!binding) throw new DomainError('integration_unavailable');
+  const binding = await provisionGatewayBinding(tx, server, env, modules);
   for (const route of plan.routes) {
     await validateGatewayRouteEndpoint(
       tx,
@@ -364,7 +457,7 @@ async function activateReservedGateway(
     .values({
       server_id: serverId,
       generation: randomUUID(),
-      enabled: false,
+      enabled: true,
       protocol_id: binding.protocolId,
       game_version: binding.gameVersion,
       state:
@@ -409,6 +502,7 @@ async function activateReservedGateway(
         ...operation.plan,
         gatewayRoutesActivated: true,
         gatewayPolicyGeneration: initialized?.generation ?? null,
+        gatewayAutomationInitialized: true,
         ...(recovery
           ? {
               gatewayRecoveredAfterReinstall: recovery.reinstallJobId,
@@ -430,7 +524,7 @@ async function activateReservedGateway(
       .execute();
 }
 
-/** Initial explicit Create+Start is a launch, not permanent auto-start consent.
+/** Initial explicit Create+Start preserves inherited automation.
  * Replays preserve its generation and any later manual/maintenance suppression. */
 export async function prepareProvisionGatewayStart(
   db: Kysely<Database>,

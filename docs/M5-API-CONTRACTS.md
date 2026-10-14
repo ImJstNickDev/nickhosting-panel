@@ -1158,3 +1158,14 @@ Only untouched, never-activated reservations with no existing Gateway policy are
 eligible. Owner edits, deleted routes, prior activation and concurrent operations
 must be preserved. Recovered running servers still require normal Gateway readiness
 observations; neither a successful reinstall nor recovery itself proves playability.
+
+### Generated Gateway automation defaults
+
+Automatically initialized Gateway policies enable supported automation and inherit
+the configured idle timeout. There is no additional hidden per-server opt-in after
+successful provisioning or recovery. Timeout `-1` disables automatic sleep without
+disabling wake; manual stops/maintenance and missing player observations retain
+their existing suppression rules. Explicit policy changes remain authoritative.
+Older disabled generated defaults can be repaired through normal reconciliation
+only with original activation provenance, unchanged default policy fields and no
+explicit policy-update audit, including no-op disable requests.

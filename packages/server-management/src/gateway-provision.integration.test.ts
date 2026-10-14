@@ -135,7 +135,7 @@ describe('automatic provision Gateway routes', () => {
     const first = await rows(created.serverId);
     expect(first.every((route) => route.enabled)).toBe(true);
     const state = await getGatewayState(f.db, created.serverId, { env });
-    expect(state).toMatchObject({ enabled: false, state: 'manually_stopped' });
+    expect(state).toMatchObject({ enabled: true, state: 'manually_stopped' });
     await activation(created);
     expect(await rows(created.serverId)).toEqual(first);
     const policy = await f.db
@@ -413,8 +413,8 @@ async function lifecycleFixture(autoStart: boolean) {
     ...created,
     options,
     power,
-    advance: () => {
-      clock = new Date(clock.getTime() + 30_000);
+    advance: (ms = 30_000) => {
+      clock = new Date(clock.getTime() + ms);
     },
     now: () => clock,
     processStart: () => processStart,
@@ -426,7 +426,7 @@ async function lifecycleFixture(autoStart: boolean) {
 }
 
 describe('provision worker automatic routing and launch recovery', () => {
-  it('provisions offline with routes, then preserves disabled wake and manual-stop suppression', async () => {
+  it('provisions offline with inherited automation while manual-stop intent suppresses wake', async () => {
     const run = await lifecycleFixture(false);
     expect(await processServerOperation(f.db, run.jobId, run.options)).toBe('succeeded');
     expect(run.power).not.toHaveBeenCalled();
@@ -439,9 +439,9 @@ describe('provision worker automatic routing and launch recovery', () => {
         { generation: state.generation, intent: 'join' },
         { env },
       ),
-    ).toMatchObject({ enabled: false, state: 'manually_stopped', wakeJobId: null });
+    ).toMatchObject({ enabled: true, state: 'manually_stopped', wakeJobId: null });
   });
-  it('confirms initial launch and actual readiness after a lost reply without granting automatic wake', async () => {
+  it('confirms initial launch and readiness after a lost reply with inherited automation', async () => {
     const run = await lifecycleFixture(true);
     run.options.checkpoint = async (point) => {
       if (point === 'remote_succeeded') throw new Error('isolated crash after provider start');
@@ -449,7 +449,7 @@ describe('provision worker automatic routing and launch recovery', () => {
     expect(await processServerOperation(f.db, run.jobId, run.options)).toBe('waiting');
     expect(run.power).toHaveBeenCalledTimes(1);
     const state = await getGatewayState(f.db, run.serverId, { env, now: run.now });
-    expect(state).toMatchObject({ enabled: false, state: 'waking', wakeJobId: run.jobId });
+    expect(state).toMatchObject({ enabled: true, state: 'waking', wakeJobId: run.jobId });
     run.options.checkpoint = undefined;
     run.advance();
     // Gateway settings may be changed while the provider start is being confirmed.
@@ -479,7 +479,7 @@ describe('provision worker automatic routing and launch recovery', () => {
       },
       { env, now: run.now },
     );
-    expect(observed).toMatchObject({ enabled: false, state: 'online' });
+    expect(observed).toMatchObject({ enabled: true, state: 'online' });
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(run.now());
     try {
@@ -682,7 +682,7 @@ describe('Gateway recovery after failed provision and successful reinstall', () 
     expect((await rows(run.serverId)).every((route) => route.enabled)).toBe(true);
     expect(await getGatewayState(f.db, run.serverId, { env })).toMatchObject({
       state: 'manually_stopped',
-      enabled: false,
+      enabled: true,
       wakeJobId: null,
     });
     const recovered = await f.db
@@ -698,13 +698,13 @@ describe('Gateway recovery after failed provision and successful reinstall', () 
     expect(run.power).not.toHaveBeenCalled();
   });
   it.each(['start', 'restart'] as const)(
-    'recovers a running explicit %s through fresh readiness without automatic wake consent',
+    'recovers a running explicit %s through fresh readiness with inherited automation',
     async (action) => {
       const run = await failedProvisionReinstalled();
       const started = await run.start(action);
       expect(await reconcileManagedServer(f.db, run.serverId, run.options)).toBe('observed');
       const state = await getGatewayState(f.db, run.serverId, { env, now: run.now });
-      expect(state).toMatchObject({ state: 'waking', enabled: false, wakeJobId: started.jobId });
+      expect(state).toMatchObject({ state: 'waking', enabled: true, wakeJobId: started.jobId });
       expect(
         await f.db
           .selectFrom('managed_servers')
@@ -728,7 +728,7 @@ describe('Gateway recovery after failed provision and successful reinstall', () 
         },
         { env, now: run.now },
       );
-      expect(ready).toMatchObject({ state: 'online', enabled: false });
+      expect(ready).toMatchObject({ state: 'online', enabled: true });
       const policy = await f.db
         .selectFrom('gateway_server_states')
         .selectAll()
@@ -887,9 +887,215 @@ describe('Gateway recovery after failed provision and successful reinstall', () 
     await reconcileManagedServer(f.db, run.serverId, run.options);
     expect(await getGatewayState(f.db, run.serverId, { env, now: run.now })).toMatchObject({
       state: reason === 'maintenance' ? 'maintenance' : 'manually_stopped',
-      enabled: false,
+      enabled: true,
       wakeJobId: null,
     });
     expect(run.power).not.toHaveBeenCalled();
   });
+});
+
+async function legacyGeneratedAutomation() {
+  const run = await failedProvisionReinstalled();
+  const started = await run.start();
+  await reconcileManagedServer(f.db, run.serverId, run.options);
+  await f.db
+    .updateTable('gateway_server_states')
+    .set({ enabled: false })
+    .where('server_id', '=', run.serverId)
+    .execute();
+  const operation = await f.db
+    .selectFrom('server_operations')
+    .selectAll()
+    .where('job_id', '=', run.jobId)
+    .executeTakeFirstOrThrow();
+  const { gatewayAutomationInitialized: _oldMarker, ...plan } = operation.plan;
+  await f.db
+    .updateTable('server_operations')
+    .set({ plan: JSON.stringify(plan) })
+    .where('job_id', '=', run.jobId)
+    .execute();
+  const state = await getGatewayState(f.db, run.serverId, { env, now: run.now });
+  async function report(playerCount: number | null = 0, quiescence = false) {
+    return reportGatewayObservation(
+      f.db,
+      run.serverId,
+      {
+        generation: state.generation,
+        wakeJobId: started.jobId,
+        observedAt: run.now().toISOString(),
+        processStartedAt: started.processStartedAt,
+        ready: true,
+        idle: playerCount === 0,
+        playerCount: playerCount ?? undefined,
+        activeSessions: 0,
+        ...(quiescence
+          ? { quiescenceUntil: new Date(run.now().getTime() + 15000).toISOString() }
+          : {}),
+      },
+      { env, now: run.now },
+    );
+  }
+  return { ...run, started, report };
+}
+
+describe('generated Gateway policies inherit automation without overriding explicit policy', () => {
+  it.each(['60', '-1'])(
+    'repairs the legacy default with timeout %s and preserves fresh idle evidence',
+    async (timeout) => {
+      env.NH_DEFAULT_IDLE_TIMEOUT_SECONDS = timeout;
+      const run = await legacyGeneratedAutomation();
+      await run.report();
+      for (let n = 0; n < 3; n++) {
+        run.advance(20_000);
+        await run.report();
+      }
+      const before = await f.db
+        .selectFrom('gateway_server_states')
+        .selectAll()
+        .where('server_id', '=', run.serverId)
+        .executeTakeFirstOrThrow();
+      expect(before.enabled).toBe(false);
+      await reconcileManagedServer(f.db, run.serverId, run.options);
+      const after = await f.db
+        .selectFrom('gateway_server_states')
+        .selectAll()
+        .where('server_id', '=', run.serverId)
+        .executeTakeFirstOrThrow();
+      expect(after).toEqual({ ...before, enabled: true });
+      run.advance(1);
+      const reported = await run.report(0, true);
+      if (timeout === '-1') {
+        expect(reported).toMatchObject({ enabled: true, state: 'online', sleepJobId: null });
+      } else {
+        expect(reported.sleepJobId).not.toBeNull();
+        expect(
+          await f.db
+            .selectFrom('server_operations')
+            .select(['action', 'plan'])
+            .where('job_id', '=', reported.sleepJobId ?? '')
+            .executeTakeFirst(),
+        ).toMatchObject({ action: 'stop', plan: { gatewayAutomation: { kind: 'sleep' } } });
+      }
+      expect(run.power).not.toHaveBeenCalled();
+    },
+  );
+  it('unknown player counts never authorize automatic sleep after enabling the inherited policy', async () => {
+    env.NH_DEFAULT_IDLE_TIMEOUT_SECONDS = '60';
+    const run = await legacyGeneratedAutomation();
+    await reconcileManagedServer(f.db, run.serverId, run.options);
+    for (let n = 0; n < 5; n++) {
+      run.advance(20_000);
+      expect(await run.report(null, true)).toMatchObject({ enabled: true, sleepJobId: null });
+    }
+    expect(run.power).not.toHaveBeenCalled();
+  });
+  it('preserves an explicit no-op disable even when the generated generation is unchanged', async () => {
+    const run = await legacyGeneratedAutomation();
+    const before = await getGatewayState(f.db, run.serverId, { env, now: run.now });
+    await setGatewayPolicy(
+      f.db,
+      f.owner,
+      run.serverId,
+      {
+        enabled: false,
+        protocolId: 'fixture',
+        gameVersion: '1',
+        mode: 'auto',
+        readinessTimeoutSeconds: 600,
+        readinessMaxAgeSeconds: 30,
+        estimateMaxAgeSeconds: 604800,
+        wakeRetrySeconds: 10,
+      },
+      { env, now: run.now },
+    );
+    expect((await getGatewayState(f.db, run.serverId, { env, now: run.now })).generation).toBe(
+      before.generation,
+    );
+    await reconcileManagedServer(f.db, run.serverId, run.options);
+    expect(await getGatewayState(f.db, run.serverId, { env, now: run.now })).toMatchObject({
+      enabled: false,
+      generation: before.generation,
+    });
+  });
+  it.each(['manual-stop', 'maintenance', 'rotated-generation'] as const)(
+    'repairs only the generated flag while preserving %s',
+    async (change) => {
+      const run = await legacyGeneratedAutomation();
+      const generation = randomUUID();
+      await f.db
+        .updateTable('gateway_server_states')
+        .set({ generation })
+        .where('server_id', '=', run.serverId)
+        .execute();
+      const intent =
+        change === 'maintenance'
+          ? 'maintenance'
+          : change === 'manual-stop'
+            ? 'manually_stopped'
+            : 'auto_wake_enabled';
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent })
+        .where('id', '=', run.serverId)
+        .execute();
+      await reconcileManagedServer(f.db, run.serverId, run.options);
+      expect(
+        await f.db
+          .selectFrom('gateway_server_states')
+          .select(['generation', 'enabled'])
+          .where('server_id', '=', run.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ generation, enabled: true });
+      expect(
+        await f.db
+          .selectFrom('managed_servers')
+          .select('intent')
+          .where('id', '=', run.serverId)
+          .executeTakeFirst(),
+      ).toEqual({ intent });
+      if (change !== 'rotated-generation')
+        expect(
+          await requestGatewayWake(
+            f.db,
+            run.serverId,
+            { generation, intent: 'join' },
+            { env, now: run.now },
+          ),
+        ).toMatchObject({ wakeJobId: run.started.jobId, state: intent });
+      expect(run.power).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['override', 'modified-policy', 'missing-provenance', 'unsupported-binding'] as const)(
+    'declines automatic policy repair for %s',
+    async (change) => {
+      const run = await legacyGeneratedAutomation();
+      if (change === 'override')
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ owner_idle_timeout_seconds: -1 })
+          .where('server_id', '=', run.serverId)
+          .execute();
+      if (change === 'modified-policy')
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ readiness_timeout_seconds: 601 })
+          .where('server_id', '=', run.serverId)
+          .execute();
+      if (change === 'missing-provenance')
+        await f.db
+          .updateTable('server_operations')
+          .set({ plan: '{}' })
+          .where('job_id', '=', run.jobId)
+          .execute();
+      if (change === 'unsupported-binding') module.gatewayPolicyBinding = async () => null;
+      if (change === 'unsupported-binding')
+        await expect(reconcileManagedServer(f.db, run.serverId, run.options)).rejects.toThrow(
+          'integration_unavailable',
+        );
+      else await reconcileManagedServer(f.db, run.serverId, run.options);
+      expect((await getGatewayState(f.db, run.serverId, { env, now: run.now })).enabled).toBe(
+        false,
+      );
+    },
+  );
 });

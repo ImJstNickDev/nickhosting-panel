@@ -9934,3 +9934,45 @@ pnpm exec vitest run --config vitest.integration.config.ts
 packages/server-management/src/gateway-provision.integration.test.ts
 packages/server-management/src/lifecycle.integration.test.ts` — **258/258 passed**
 (33 Gateway provisioning tests, including 20 new; 225 lifecycle tests; 55.76s).
+
+### Inherited sleep policy on generated Gateway registrations — 2026-10-14
+
+Generated Gateway policies previously stored enabled=false, silently preventing
+inherited idle timeouts from taking effect. New registrations now enable supported
+automation through the existing compiled binding. Normal reconciliation repairs
+only old generated defaults with original activation provenance, unchanged policy
+shape and no explicit policy-update audit (including no-op disables). It preserves
+intent, generation and valid observations; no new provider request or duplicated
+idle detector is added. Timeout -1 still disables sleep only; missing player counts,
+manual stops, maintenance and explicit policy changes remain authoritative.
+
+Read-only dev evidence: the affected 1.5.2 server inherited global timeout of 60 seconds with no
+explicit policy-update audit. Existing source watchers/reconciliation repaired its
+generated flag. A subsequent observed explicit Stop job had succeeded; the server
+remained offline/manually_stopped with automation enabled. No agent-issued start,
+stop, reinstall or manual DB repair was performed. A new real idle cycle remains
+for the Owner to exercise after starting the server. No migrations, manual container
+restarts, new test assets or production configuration changes. Rollback is a scoped
+code revert; reconciled policy flags remain durable and must not be blindly reset.
+SFTPGo #18 unchanged; PR21 remains open/unmerged. Validation results follow below.
+
+Independent review found no must-fix. Coverage includes inherited 60-second sleep after
+fresh zero-player observation, -1, unknown player count, explicit/no-op disable,
+overrides, missing provenance and lifecycle generation changes. The compiled 1.5.2
+binding declares sleepWake; Alpha without status/player counts remains wake-only.
+An initial focused run passed 43/44: the remaining fixture incorrectly represented
+unknown playerCount as null instead of omission; only the fixture was corrected.
+Full root/web/test TypeScript checks and scoped Biome passed. Final suite counts
+and staged governance are recorded below; no full historical matrix rerun.
+
+Final evidence: combined command `scripts/dev.sh pnpm exec tsx scripts/test-env.ts
+--m2 pnpm exec vitest run --config vitest.integration.config.ts
+packages/server-management/src/gateway-provision.integration.test.ts
+packages/server-management/src/gateway-minecraft.integration.test.ts
+packages/server-management/src/lifecycle.integration.test.ts` returned 277 passed,
+1 failed because it had already loaded that pre-correction fixture. Lifecycle
+passed 225/225 and Minecraft binding passed 9/9. Rerunning only
+`gateway-provision.integration.test.ts` with the same command prefix after the
+fixture correction passed 44/44 (21.41s). Final per-suite evidence covers 278 tests;
+this is not reported as a single clean combined run. Staged governance and
+whitespace checks passed. No remaining review findings.

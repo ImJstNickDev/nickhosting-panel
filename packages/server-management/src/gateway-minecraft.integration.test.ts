@@ -347,53 +347,96 @@ describe('Minecraft declared-capability Gateway registration', () => {
   });
 });
 
-it('automatically registers installed Vanilla 26.1 using the actual compiled binding without diagnostic evidence', async () => {
-  await f.db
-    .updateTable('server_allocations')
-    .set({ protocols: ['tcp'] })
-    .where('id', '=', allocationId)
-    .execute();
-  const operation = await f.db
-    .selectFrom('server_operations')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .where('action', '=', 'provision')
-    .executeTakeFirstOrThrow();
-  await f.db
-    .updateTable('managed_servers')
-    .set({ active_operation_id: operation.job_id })
-    .where('id', '=', serverId)
-    .execute();
-  await f.db.transaction().execute(async (tx) => {
-    await lockResources(tx);
-    const server = await tx
-      .selectFrom('managed_servers')
-      .selectAll()
-      .where('id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    const plan = await planProvisionGateway(tx, server, 'minecraft', env);
-    expect(plan?.routes).toHaveLength(1);
-    await tx
-      .updateTable('server_operations')
-      .set({ plan: JSON.stringify({ ...operation.plan, gatewayProvision: plan }) })
-      .where('job_id', '=', operation.job_id)
+it.each([
+  {
+    release: '26.1',
+    protocolId: 775,
+    family: 'netty',
+    releaseType: 'release',
+    javaMajor: 25,
+    sleepWake: true,
+  },
+  {
+    release: '1.5.2',
+    protocolId: 61,
+    family: 'legacy',
+    releaseType: 'release',
+    javaMajor: 8,
+    sleepWake: true,
+  },
+  {
+    release: 'a1.2.6',
+    protocolId: 6,
+    family: 'legacy',
+    releaseType: 'old_alpha',
+    javaMajor: 8,
+    sleepWake: false,
+  },
+])(
+  'initializes inherited automation for compiled Vanilla $release without diagnostic evidence',
+  async (variant) => {
+    const selected = { ...combination, ...variant, transfer: variant.family === 'netty' };
+    const { sleepWake: expectedSleepWake, ...identity } = selected;
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify(identity),
+        identity_digest: minecraftDigest({ combination: identity, mappingId: f.mappingId }),
+      })
+      .where('id', '=', choiceId)
       .execute();
-  });
-  await activateProvisionGateway(f.db, serverId, operation.job_id, env);
-  const state = await getGatewayState(f.db, serverId, { env });
-  expect(state).toMatchObject({
-    protocolId: 'minecraft-java',
-    gameVersion: '26.1',
-    enabled: false,
-    state: 'manually_stopped',
-  });
-  const snapshot = await getGatewaySnapshot(f.db, env);
-  expect(snapshot.routes).toHaveLength(1);
-  expect(snapshot.routes[0]).toMatchObject({
-    protocol: {
-      handlerId: 'minecraft-java',
-      gameVersion: '26.1',
-      minecraft: { protocolId: 775, supportSource: 'integration' },
-    },
-  });
-});
+    expect((await inspectMinecraftCombination(f.db, choiceId, env)).capabilities).toMatchObject({
+      gateway: true,
+      wake: true,
+      sleepWake: expectedSleepWake,
+    });
+    await f.db
+      .updateTable('server_allocations')
+      .set({ protocols: ['tcp'] })
+      .where('id', '=', allocationId)
+      .execute();
+    const operation = await f.db
+      .selectFrom('server_operations')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .where('action', '=', 'provision')
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: operation.job_id })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      const server = await tx
+        .selectFrom('managed_servers')
+        .selectAll()
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      const plan = await planProvisionGateway(tx, server, 'minecraft', env);
+      expect(plan?.routes).toHaveLength(1);
+      await tx
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ ...operation.plan, gatewayProvision: plan }) })
+        .where('job_id', '=', operation.job_id)
+        .execute();
+    });
+    await activateProvisionGateway(f.db, serverId, operation.job_id, env);
+    const state = await getGatewayState(f.db, serverId, { env });
+    expect(state).toMatchObject({
+      protocolId: 'minecraft-java',
+      gameVersion: variant.release,
+      enabled: true,
+      state: 'manually_stopped',
+    });
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes).toHaveLength(1);
+    expect(snapshot.routes[0]).toMatchObject({
+      protocol: {
+        handlerId: 'minecraft-java',
+        gameVersion: variant.release,
+        minecraft: { protocolId: variant.protocolId, supportSource: 'integration' },
+      },
+    });
+  },
+);

@@ -28,6 +28,7 @@ import {
   activateProvisionGateway,
   assertProvisionGatewayStart,
   prepareProvisionGatewayStart,
+  reconcileProvisionGatewayAutomation,
   recoverProvisionGateway,
 } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
@@ -2135,6 +2136,17 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
     `.as('gateway_recovery_candidate'),
     )
     .select(
+      sql<boolean>`server.connection_mode = 'gateway'
+      and server.installation_state = 'installed' and server.active_operation_id is null
+      and exists (select 1 from gateway_server_states policy where policy.server_id = server.id and not policy.enabled)
+      and exists (select 1 from server_operations operation where operation.server_id = server.id
+        and operation.action = 'provision' and operation.plan->>'gatewayRoutesActivated' = 'true'
+        and operation.plan->>'gatewayAutomationInitialized' is distinct from 'true')
+      and not exists (select 1 from audit_events audit where audit.action = 'gateway.policy.updated'
+        and audit.metadata->>'serverId' = server.id::text)
+    `.as('gateway_automation_candidate'),
+    )
+    .select(
       sql<string>`jsonb_build_array(
     server.xmin::text,
     (select node.xmin::text from managed_nodes node where node.id = server.node_id),
@@ -2554,6 +2566,8 @@ export async function reconcileManagedServer(
     }
     if (server.gateway_recovery_candidate && installed(remote) && !locked.active_operation_id)
       await recoverProvisionGateway(tx, server.id, now, options.env);
+    if (server.gateway_automation_candidate && installed(remote) && !locked.active_operation_id)
+      await reconcileProvisionGatewayAutomation(tx, server.id, options.env);
     return 'observed' as const;
   });
 }
