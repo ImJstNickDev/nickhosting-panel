@@ -1037,11 +1037,29 @@ the exact Compose project/service labels and current resource settings first.
 Check Vite's health, child process, memory events and HTTPS after recovery.
 Rollback of the resource change is `docker update --memory 768m --memory-swap
 1536m nickhosting-dev-vite-1` (restoring the prior OOM risk); no database or image
-rollback is involved. This section documents the proposed recovery, not approval
-or completed activation.
+rollback is involved. These commands were proposed before approval; the completed
+activation is recorded below.
 
 Preparation checks: independent configuration review found no must-fix issue;
 `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts -t
 'development'` passed 11 tests (33 unrelated cases skipped). Compose parsing was
 read-only. `git diff --check` passed. The source/limit change does not activate
-itself; Owner approval and post-restart HTTP/module checks remain pending.
+itself; approval and activation were still pending at the preparation stage.
+
+### Approved recovery completed
+
+The Owner approved the exact update and Vite-only restart on2026-10-14. Both
+commands above succeeded. Readback confirmed a 1610612736-byte RAM ceiling and
+3221225472-byte combined RAM/swap ceiling; no host swap was enabled. Container ID,
+image, sorted bind mounts, network membership and IP remained unchanged, with no
+published ports. No other service was restarted or reconfigured.
+
+Vite became healthy. HTTPS `/`, `/@vite/client`, `/src/main.tsx` and the shared
+JSON/Datagrid document modules returned200. A fresh headless Firefox session
+rendered `/login`, connected to the HMR WebSocket, and recorded no page JavaScript
+errors or HTTP5xx responses. The browser required the existing user-local test
+library path after an initial launch failed to find GTK; no packages were installed.
+Post-check cgroup usage was about608MiB (peak628MiB), with zero OOM events since
+restart. These are observed recovery readings, not a guarantee against all future
+optimizer peaks. No authenticated provider action, game-file change, migration or
+test asset creation was performed.
