@@ -26,7 +26,7 @@ describe('file viewer Escape navigation', () => {
     '.ve-wave',
     '.motion-player',
     '.ve-archive',
-    '.ve-database',
+    '.dg-workspace',
   ];
   beforeAll(async () => {
     harness = await browserHarness();
@@ -57,7 +57,16 @@ describe('file viewer Escape navigation', () => {
           json: { directory: '', entries: [], offset: 0, limit: 200, total: 0 },
         });
       if (url.pathname.endsWith('/sqlite'))
-        return route.fulfill({ json: { tables: [], consistency: 'unverified' } });
+        return route.fulfill({
+          json: {
+            tables: [],
+            revision: 'escape-fixture',
+            consistency: 'unverified',
+            rows: [],
+            columns: [],
+            schema: [],
+          },
+        });
       const path = url.searchParams.get('path') ?? '';
       return route.fulfill({
         body: files.get(path) ?? Buffer.from(''),
@@ -90,8 +99,9 @@ describe('file viewer Escape navigation', () => {
       const viewer = viewers[index];
       if (!viewer) throw new Error(`Missing viewer assertion for ${name}`);
       await browserExpect(page.locator(viewer)).toBeVisible();
-      // A closed native select must not trap Escape; lost focus must work as well.
-      if (name.endsWith('.sqlite')) await page.locator('.ve-database select').focus();
+      // Datagrid search must not trap Escape; lost focus must work as well.
+      if (name.endsWith('.sqlite'))
+        await page.getByRole('searchbox', { name: 'Search tables', exact: true }).focus();
       else await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
       await page.keyboard.press('Escape');
       await browserExpect(home()).toHaveCount(0);

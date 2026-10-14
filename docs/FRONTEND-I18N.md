@@ -719,7 +719,7 @@ accessible name and custom tooltip; unavailable actions are disabled. Find opens
 CodeMirror's search. Archive entries keep their own download/chooser target.
 Open with uses immediate-action cards with distinct first-party marks and stable
 EN/IT names: Scribe (text), Frame (images), Wave (audio), Motion (video), Atlas
-(archives), Data Grid (SQLite) and JSON Tree. A compact personal-choice control
+(archives), Datagrid (SQLite) and JSON Tree. A compact personal-choice control
 above the cards defaults to one-time opening; server, game and global defaults
 retain their existing precedence and apply to the file extension. Choosing a card
 saves an explicitly requested preference before opening, retaining the dialog on

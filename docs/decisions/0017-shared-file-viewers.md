@@ -121,3 +121,23 @@ retains compressed-container aliases. Leaving the archive namespace uses normal
 Fileman navigation. Callbacks honor cancellation before committing navigation;
 changing the contributing scope closes the old picker. This adds no filesystem
 write capability or alternative provider transport.
+
+### 2026-10-14 — Datagrid replaces the initial SQLite proof of concept
+
+Datagrid remains a lazy read-only builtin hosted by Fileman. It reuses the central
+source broker, snapshot cache, permissions and revocation; no separate provider
+adapter, Blueprint endpoint or database editor is introduced. The worker is an
+actual ESM module in both development and compiled runtime, avoiding function
+serialization that lost transpiler helpers in the original prototype.
+
+The shared SDK transport describes typed pages, schema, source revision and
+bounded cell details. Search/sort are fixed parameterized read queries with a
+stable row order. The browser retains at most eight pages / a 4 MiB serialized
+UTF-16 estimate in session-local memory. It discards those pages on viewer scope
+changes, known access denial, or observed source revision changes. Inspecting a
+cell requires its original page revision and does not silently read a newer row.
+
+The UI supplies table discovery, keyboard grid navigation, column sizing, schema,
+search/sort and chunked value inspection inside the existing viewer chrome.
+There is no SQL console, server write, live-database consistency claim or unbounded
+cell download. WAL/sidecar restrictions and SFTPGo issue #18 remain unchanged.

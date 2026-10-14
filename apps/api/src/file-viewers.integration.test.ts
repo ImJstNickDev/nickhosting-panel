@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { type AuthContext, createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { authorizeServer, type ManagementRuntime } from '@nickhosting/server-management';
@@ -23,6 +24,7 @@ let root: string;
 let cache: ViewerCache;
 let content: Buffer;
 let reads: number;
+let sourceRevision: number;
 let revoked: AbortController;
 let debugTiming = false;
 const timingLogs = vi.fn();
@@ -41,14 +43,16 @@ beforeEach(async () => {
   cache = new ViewerCache({ root });
   content = Buffer.from('0123456789');
   reads = 0;
+  sourceRevision = 1;
   revoked = new AbortController();
   vi.spyOn(FileViewerService.prototype, 'open').mockImplementation(
     async (context, _runtime, serverId, path) => {
       await authorizeServer(db.db, context, serverId, 'server:read');
+      if (revoked.signal.aborted) throw new DomainError('forbidden');
       return {
         source: {
           size: content.length,
-          mtimeMs: 1,
+          mtimeMs: sourceRevision,
           read: async (offset, length) => {
             reads++;
             return content.subarray(offset, offset + length);
@@ -64,9 +68,9 @@ beforeEach(async () => {
         path,
         signal: revoked.signal,
         cache,
-        key: `${id}:${path}`,
+        key: `${id}:${path}:${sourceRevision}`,
         close: async () => {},
-        restat: async () => ({ size: content.length, mtimeMs: 1, mode: 0o644 }),
+        restat: async () => ({ size: content.length, mtimeMs: sourceRevision, mode: 0o644 }),
         siblingExists: async () => false,
       };
     },
@@ -109,6 +113,114 @@ const put = (value: unknown) =>
   });
 
 describe('viewer routes with isolated database and fixture byte source', () => {
+  it('serves Datagrid first-page/schema, filtered stable rows and revision-bound cell detail through shared authorization', async () => {
+    const path = join(root, 'fixture.db');
+    const database = new DatabaseSync(path);
+    database.exec(
+      'CREATE TABLE data (id INTEGER PRIMARY KEY, category TEXT, text TEXT, bytes BLOB)',
+    );
+    const insert = database.prepare('INSERT INTO data VALUES (?,?,?,?)');
+    for (let index = 0; index < 205; index++)
+      insert.run(
+        index,
+        'same',
+        index === 204 ? '😀'.repeat(70000) : `record ${index}`,
+        new Uint8Array(5),
+      );
+    database.close();
+    content = await readFile(path);
+    const original = Buffer.from(content);
+    const response = await request('/sqlite?path=fixture.db');
+    expect(response.status).toBe(200);
+    const first = await response.json();
+    expect(first).toMatchObject({
+      tables: ['data'],
+      table: 'data',
+      columns: ['id', 'category', 'text', 'bytes'],
+      schema: [
+        { name: 'id', primaryKey: true },
+        { name: 'category' },
+        { name: 'text' },
+        { name: 'bytes' },
+      ],
+      offset: 0,
+      hasMore: true,
+      consistency: 'unverified',
+      revision: expect.any(String),
+    });
+    expect(first.rows).toHaveLength(100);
+    const initialReads = reads;
+    const second = await request(
+      '/sqlite?path=fixture.db&table=data&offset=100&sort=category&direction=desc',
+    );
+    expect((await second.json()).rows[0][0]).toEqual({ type: 'integer', value: '100' });
+    const query = new URLSearchParams({
+      path: 'fixture.db',
+      table: 'data',
+      sort: 'id',
+      direction: 'desc',
+      query: 'same',
+      filterColumn: 'category',
+      rowOffset: '0',
+      column: 'text',
+      revision: first.revision,
+    });
+    const details = await request(`/sqlite/cell?${query}`);
+    expect(details.status).toBe(200);
+    expect(await details.json()).toMatchObject({
+      cell: { type: 'text', value: '😀'.repeat(65536), truncated: true },
+      nextStart: 65536,
+      totalCharacters: 70000,
+    });
+    query.set('start', '65536');
+    expect(await (await request(`/sqlite/cell?${query}`)).json()).toMatchObject({
+      cell: { value: '😀'.repeat(4464), truncated: false },
+      nextStart: null,
+    });
+    expect(reads).toBe(initialReads);
+    expect(FileViewerService.prototype.open).toHaveBeenCalledTimes(4);
+    expect(await readFile(path)).toEqual(original);
+    actor = { ...fixture.context, actorUserId: randomUUID(), subjectUserId: randomUUID() };
+    expect((await request(`/sqlite/cell?${query}`)).status).toBe(403);
+    expect((await request('/sqlite?path=fixture.db')).status).toBe(403);
+    expect(reads).toBe(initialReads);
+    actor = fixture.context;
+    sourceRevision++;
+    query.set('column', 'does-not-exist');
+    const stale = await request(`/sqlite/cell?${query}`);
+    expect(stale.status).toBe(422);
+    expect(await stale.json()).toMatchObject({
+      error: { code: 'viewer_sqlite_changed', messageKey: 'viewer.sqliteChanged' },
+    });
+    revoked.abort();
+    const beforeRevoked = reads;
+    expect((await request(`/sqlite/cell?${query}`)).status).toBe(403);
+    expect(reads).toBe(beforeRevoked);
+  });
+  it('returns an empty SQLite database and rejects malformed paging before reading', async () => {
+    for (const suffix of [
+      'offset=-1',
+      'offset=1000001',
+      'direction=sideways',
+      `query=${'a'.repeat(201)}`,
+    ])
+      expect((await request(`/sqlite?path=empty.db&${suffix}`)).status).toBe(400);
+    expect(FileViewerService.prototype.open).not.toHaveBeenCalled();
+    const path = join(root, 'empty.db');
+    const database = new DatabaseSync(path);
+    database.exec('VACUUM');
+    database.close();
+    content = await readFile(path);
+    const empty = await request('/sqlite?path=empty.db');
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toMatchObject({
+      tables: [],
+      columns: [],
+      schema: [],
+      rows: [],
+      hasMore: false,
+    });
+  });
   it('collects bounded debug browser timings only after server authorization without opening files', async () => {
     const traceId = randomUUID();
     const post = (body: unknown) =>

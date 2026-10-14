@@ -8933,3 +8933,72 @@ Independent code review reported no findings. Only isolated provider fixtures
 were used; no real extraction, server mutations, infrastructure changes or
 container restarts. Existing HMR applies the UI change. Historical suites were
 not repeated; SFTPGo #18 is unchanged.
+
+### 2026-10-14 — Datagrid rebuild and real SQLite correction
+
+The original SQLite proof of concept serialized a function into an eval worker.
+The dev `tsx` transform injected a module helper that was absent in that worker:
+`ReferenceError: __name is not defined`. Three Owner-requested SQLite files all
+returned 422 `viewer_sqlite_unavailable` despite valid headers. This failed attempt
+is preserved as evidence: the earlier Vitest transform did not exercise the real
+dev launch path. Datagrid now uses an autonomous ESM worker and tests both actual
+`tsx` and compiled JavaScript execution.
+
+Implemented: searchable table sidebar, first-table data in the initial response,
+100-row pages, deterministic sorting and literal substring search across a chosen
+column or non-BLOB fields, schema, keyboard cell navigation/copy, accessible column
+resize and on-demand text chunks. Browser cache is local to viewer identity and
+source (eight pages / 4 MiB estimated serialized UTF-16); no persistent browser DB
+contents. Known revocation and source changes clear cached content. BLOBs remain
+size-only, integers preserve precision, and long text never masquerades as a
+complete copied value. Snapshot consistency remains explicitly unverified.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/viewer-sqlite.test.ts`: **11 passed**, including real dev/prod worker startup, read-only source bytes, quoted/alias-collision columns, shadowed rowid/WITHOUT ROWID ordering, 128-column search, exact integers, Unicode chunks, revision and cancellation.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/sqlite-model.test.ts`: **3 passed** for LRU bounds, oversized responses and revision isolation.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/file-viewers.integration.test.ts`: **14 passed**, including real SQLite routes, source reuse, authorization, revocation and revision rejection. External storage is an isolated fixture; SQLite queries and application handlers are real.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/datagrid.browser.test.ts`: **7 passed** in Chromium, covering browsing/search/sort/schema, cached back-navigation, keyboard/pointer resizing, Unicode details, known access denial, changed sources, loading/error recovery and Italian mobile. Axe checks returned no violations for the tested desktop/mobile surfaces; keyboard tests include focus restoration and obscured-grid exclusion.
+- The accompanying `apps/web/tests/file-viewer-escape.browser.test.ts` regression run: **3 passed**, preserving Escape behavior across existing viewers.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check`, `scripts/dev.sh pnpm build` and `scripts/dev.sh pnpm build:runtime`: **passed**. Final frontend build was repeated after the canonical first-page cache correction; the lazy Datagrid chunk is 17.84 kB / 5.35 kB gzip, plus 9.04 kB / 2.42 kB gzip CSS, with no new dependency. Existing large main/editor bundle warnings remain.
+- Focused Biome on 19 changed/new TS/TSX/CSS files passed with two pre-existing non-null-assertion warnings in `file-viewers.ts`.
+
+Initial browser runs exposed two test-harness mistakes (a non-unique Refresh
+locator and the persisted viewer reopening before a filename click); these were
+corrected and the seven-scenario run passed. The initial non-M2 integration wrapper
+reported unavailable services; the existing approved M2 stack was then used. No
+containers were started or changed to resolve this.
+
+Independent technical review found and resolved SQL output-alias ambiguity,
+excessive search expression depth, retained browser data after a denied cell read,
+inherited object-property column widths and keyboard focus behind the mobile
+cell drawer. Final code and rendered desktop/Italian-mobile/content review report
+no remaining must-fix findings.
+
+Sanitized fixture screenshots:
+[desktop](screenshots/m5/datagrid-desktop-en.png),
+[Italian mobile](screenshots/m5/datagrid-mobile-it.png),
+[cell details](screenshots/m5/datagrid-cell-detail-en.png),
+[loading](screenshots/m5/datagrid-loading-en.png),
+[empty](screenshots/m5/datagrid-empty-en.png),
+[error](screenshots/m5/datagrid-error-en.png).
+
+Read-only live evidence: the three Owner-specified `.db`, `.sqlite` and `.sqlite3`
+files each returned HTTP 200 with four tables after the fix. First measured
+requests were 871/206/156 ms; repeated requests were 172/70/92 ms with unchanged
+revision. These are one smoke sample per file, not a benchmark or latency promise.
+The real HTTPS browser opened the SQLite file with four tables and 500 displayed
+cells, without JavaScript errors. Private paths, IDs, cookies and screenshots stay
+ignored. No game files were changed, no live SQL was executed on the source, and
+no Panel/Wings/Blueprint changes, migrations or manual container restarts occurred.
+Normal approved dev watchers/HMR picked up code. Temporary isolated test databases
+and fixture files were cleaned by their harnesses. SFTPGo #18 and the no-production
+release boundary remain unchanged. Rollback is the code commit revert; no source
+file or schema migration rollback is needed.
+
+Final cross-browser/regression evidence:
+
+- `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/datagrid.browser.test.ts`: **7 passed**, including desktop/mobile axe checks and keyboard/detail focus tests.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'displays typed SQLite'`: **1 passed, 32 deliberately skipped**; existing typed-cell/audio/unsupported-video scenario remains intact after its SQLite fixture was updated to the new contract.
+- Combined final SQLite/cache unit run: **14 passed**. Final dev API/Vite inspection: both running and healthy. No additional container operation.
+- Final runtime build passed after the effective primary-key nullability correction (SQLite worker tests: **11 passed**). `git diff --cached --check` and `python3 scripts/check-governance.py` passed: 862 indexed text files, 301 review PNGs, 710 relative links, four TOML files and 44 ignore cases; secret scanning remains heuristic.

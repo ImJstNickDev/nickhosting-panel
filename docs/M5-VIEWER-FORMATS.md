@@ -209,6 +209,30 @@ not a benchmark of production SFTP/network performance.
 
 ## SQLite consistency boundary
 
+Datagrid runs as an autonomous ESM worker module, not a serialized function.
+Development uses the project's native Node 24 TypeScript support; production
+uses the compiled JavaScript counterpart. This avoids captured transpiler helpers
+such as `__name`, which made the initial proof of concept fail under `tsx` despite
+passing Vitest's different transform. Both launch paths have regression coverage.
+See [Node's TypeScript execution contract](https://nodejs.org/docs/latest-v24.x/api/typescript.html).
+
+One retained read-only snapshot serves table navigation, schema, deterministic
+sorting, literal substring search and cell inspection. The first response includes
+the first table's rows, avoiding an extra discovery round trip. Search can target
+all non-BLOB columns or a selected column. Row order uses an unshadowed rowid,
+the primary key of a WITHOUT ROWID table, or the visible columns as a fallback;
+sorting retains a tie order. SQL identifiers are validated against the cached
+schema and qualified to avoid collisions with generated result aliases.
+
+The lazy browser view owns a private cache bounded to eight pages and a 4 MiB
+serialized UTF-16 estimate, cleared on source/identity scope changes or unmount.
+Database values never enter browser persistent storage. Visited pages are shown
+immediately; a newly observed source revision requires an explicit refresh instead
+of mixing rows from different snapshots. Large cells are inspected in bounded
+65,536-code-point chunks, with copy applying only to the displayed chunk when
+the value spans multiple chunks. The grid remains read-only, including keyboard
+navigation and clipboard copying; no SQL console, export or database writes.
+
 The viewer rejects a WAL-mode header and existing `-wal`, `-shm` or `-journal`
 sidecars. The source is re-statted after snapshotting; changed size or modification
 time rejects the snapshot. `quick_check(1)` verifies structural consistency.

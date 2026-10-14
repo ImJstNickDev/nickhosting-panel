@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import { authSessionId, DomainError, type SecretCodec } from '@nickhosting/core';
 import { getSecret, getSettings } from '@nickhosting/database';
+import type { DatagridPage, DatagridQuery } from '@nickhosting/game-sdk/ui';
 import { authorizeServer, parse } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
@@ -38,8 +39,13 @@ const preferenceSchema = z.strictObject({
 });
 const formatMessages: Record<string, string> = {
   viewer_sqlite_wal: 'viewer.sqliteWal',
+  viewer_sqlite_invalid: 'viewer.sqliteInvalid',
   viewer_sqlite_changed: 'viewer.sqliteChanged',
   viewer_sqlite_unavailable: 'viewer.sqliteUnavailable',
+  viewer_sqlite_timeout: 'viewer.sqliteTimeout',
+  viewer_sqlite_budget: 'viewer.sqliteBudget',
+  viewer_sqlite_column: 'viewer.sqliteColumnInvalid',
+  viewer_sqlite_cell: 'viewer.sqliteCellUnavailable',
   viewer_subtitles_unavailable: 'viewer.videoSubtitleFailed',
 };
 const services = new WeakMap<object, Promise<FileViewerService>>();
@@ -586,34 +592,77 @@ export function registerFileViewerRoutes(
       }
     }),
   );
+  const sqliteQuery = (c: C): DatagridQuery => ({
+    table: c.req.query('table') ?? '',
+    offset: parse(z.coerce.number().int().min(0).max(1_000_000), c.req.query('offset') ?? '0'),
+    limit: 100,
+    query: parse(z.string().max(200).optional(), c.req.query('query')),
+    filterColumn: c.req.query('filterColumn'),
+    sort: c.req.query('sort'),
+    direction: parse(z.enum(['asc', 'desc']).optional(), c.req.query('direction')),
+  });
   app.get(
     '/v1/servers/:id/files/viewer/sqlite',
     guarded(async (c) => {
+      const query = sqliteQuery(c);
       const lease = await sqlite(c);
       try {
-        const table = c.req.query('table');
-        const page = table
-          ? await lease.session.rows(
-              {
-                table,
-                offset: parse(z.coerce.number().int().min(0), c.req.query('offset') ?? '0'),
-                limit: 100,
-              },
-              AbortSignal.any([c.req.raw.signal, lease.signal]),
-            )
-          : undefined;
-        return c.json({
-          tables: lease.session.tables().map((row) => row.name),
+        const tables = lease.session.tables().map((row) => row.name);
+        const table = c.req.query('table') ?? tables[0];
+        const page =
+          table === undefined
+            ? undefined
+            : await lease.session.rows(
+                { ...query, table },
+                AbortSignal.any([c.req.raw.signal, lease.signal]),
+              );
+        const result: DatagridPage = {
+          tables,
+          revision: lease.session.revision,
           consistency: lease.session.consistency,
           ...(page
             ? {
+                table,
                 columns: page.columns.map((column) => column.name),
+                schema: page.columns,
                 rows: page.rows,
                 offset: page.offset,
                 hasMore: page.nextOffset !== null,
               }
-            : {}),
-        });
+            : { columns: [], schema: [], rows: [], offset: 0, hasMore: false }),
+        };
+        return c.json(result);
+      } finally {
+        lease.release();
+      }
+    }),
+  );
+  app.get(
+    '/v1/servers/:id/files/viewer/sqlite/cell',
+    guarded(async (c) => {
+      const query = sqliteQuery(c);
+      const rowOffset = parse(
+        z.coerce.number().int().min(0).max(1_000_000),
+        c.req.query('rowOffset'),
+      );
+      const start = parse(
+        z.coerce
+          .number()
+          .int()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER - 65537),
+        c.req.query('start') ?? '0',
+      );
+      const column = parse(z.string(), c.req.query('column'));
+      const revision = parse(z.string().min(1).max(128), c.req.query('revision'));
+      const lease = await sqlite(c);
+      try {
+        return c.json(
+          await lease.session.cell(
+            { ...query, rowOffset, start, column, revision },
+            AbortSignal.any([c.req.raw.signal, lease.signal]),
+          ),
+        );
       } finally {
         lease.release();
       }

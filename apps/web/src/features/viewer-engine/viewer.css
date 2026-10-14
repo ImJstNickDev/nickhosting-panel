@@ -267,32 +267,10 @@
   color: #265f50;
   background: none;
 }
-.ve-kind,
-.ve-snapshot {
+.ve-kind {
   font-size: 0.8rem;
   color: var(--muted, #636977);
   margin-left: auto;
-}
-.ve-table-scroll {
-  max-height: min(60vh, 38rem);
-  overflow: auto;
-}
-.ve-database table {
-  width: 100%;
-  border-collapse: collapse;
-}
-.ve-database th,
-.ve-database td {
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--border, #dddfe4);
-  text-align: left;
-}
-.ve-database th {
-  position: sticky;
-  top: 0;
-  background: var(--surface, #fff);
-  font-size: 0.8rem;
-  font-weight: 500;
 }
 .ve-empty {
   text-align: center;
@@ -303,18 +281,6 @@
   justify-content: flex-end;
   padding: 0.75rem;
   font-size: 0.85rem;
-}
-.ve-database td > span {
-  display: block;
-  max-width: 26rem;
-  max-height: 6rem;
-  overflow: auto;
-  overflow-wrap: anywhere;
-  font-family: ui-monospace, monospace;
-  font-size: 0.8rem;
-}
-.ve-database td {
-  vertical-align: top;
 }
 .ve-chooser {
   width: min(34rem, calc(100vw - 2rem));

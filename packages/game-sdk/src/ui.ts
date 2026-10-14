@@ -659,5 +659,6 @@ export interface UiSectionData {
   editableFields?: readonly string[];
   metadata?: Readonly<Record<string, unknown>>;
 }
+export type * from './datagrid.js';
 export * from './fileman.js';
 export * from './viewers.js';

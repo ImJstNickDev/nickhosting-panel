@@ -393,20 +393,23 @@ describe('M5 builtin file viewers', () => {
             json: {
               tables: ['players'],
               consistency: 'unverified',
-              ...(url.searchParams.get('table')
-                ? {
-                    columns: ['id', 'name', 'data'],
-                    rows: [
-                      [
-                        { type: 'integer', value: '9007199254740993123' },
-                        { type: 'text', value: 'Alex', truncated: false },
-                        { type: 'blob', bytes: 3 },
-                      ],
-                    ],
-                    offset: 0,
-                    hasMore: false,
-                  }
-                : {}),
+              revision: 'sqlite-browser-fixture',
+              table: 'players',
+              schema: [
+                { name: 'id', type: 'INTEGER', nullable: false, primaryKey: true },
+                { name: 'name', type: 'TEXT', nullable: true, primaryKey: false },
+                { name: 'data', type: 'BLOB', nullable: true, primaryKey: false },
+              ],
+              columns: ['id', 'name', 'data'],
+              rows: [
+                [
+                  { type: 'integer', value: '9007199254740993123' },
+                  { type: 'text', value: 'Alex', truncated: false },
+                  { type: 'blob', bytes: 3 },
+                ],
+              ],
+              offset: 0,
+              hasMore: false,
             },
           });
           return;
@@ -1384,7 +1387,7 @@ describe('M5 builtin file viewers', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Show all', exact: true }).click();
     await browserExpect(page.getByRole('dialog').locator('.ve-viewer-card')).toHaveCount(6);
     await browserExpect(
-      page.getByRole('dialog').getByRole('button', { name: /^Data Grid$/ }),
+      page.getByRole('dialog').getByRole('button', { name: /^Datagrid$/ }),
     ).toHaveCount(0);
     await page.keyboard.press('Escape');
     await browserExpect(openWith).toBeFocused();
@@ -1665,9 +1668,11 @@ describe('M5 builtin file viewers', () => {
 
   it('displays typed SQLite values read-only, browser-decoded audio and truthful unsupported video', async () => {
     await open('viewer.sqlite');
-    await page.getByLabel('Tables', { exact: true }).selectOption('players');
-    await browserExpect(page.locator('.ve-table-scroll')).toContainText('9007199254740993123');
-    await browserExpect(page.locator('.ve-table-scroll')).toContainText('Binary data · 3 B');
+    await browserExpect(
+      page.locator('.dg-sidebar').getByRole('button', { name: 'players', exact: true }),
+    ).toBeVisible();
+    await browserExpect(page.locator('.dg-grid-scroll')).toContainText('9007199254740993123');
+    await browserExpect(page.locator('.dg-grid-scroll')).toContainText('Binary data · 3 B');
     await browserExpect(page.getByText('Read only', { exact: true })).toBeVisible();
     await harness.screenshot(page, 'file-viewer-sqlite-desktop-en');
     await open('viewer.wav');

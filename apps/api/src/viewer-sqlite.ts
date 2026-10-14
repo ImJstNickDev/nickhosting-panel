@@ -1,19 +1,26 @@
+import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
+import type {
+  DatagridCell,
+  DatagridCellDetail,
+  DatagridColumn,
+  DatagridQuery,
+} from '@nickhosting/game-sdk/ui';
 import { type ViewerCache, ViewerFormatError, type ViewerReadSource } from './viewer-cache.js';
-import { sqliteViewerWorker } from './viewer-sqlite-worker.js';
 
 export interface ViewerSqliteSource extends ViewerReadSource {
   restat(): Promise<{ size: number; mtimeMs: number }>;
   siblingExists(suffix: '-wal' | '-shm' | '-journal'): Promise<boolean>;
 }
-export type ViewerSqliteCell =
-  | { type: 'null'; value: null }
-  | { type: 'integer'; value: string }
-  | { type: 'real'; value: number }
-  | { type: 'text'; value: string; truncated: boolean }
-  | { type: 'blob'; bytes: number };
+export type ViewerSqliteCell = DatagridCell;
+export type ViewerSqliteCellQuery = DatagridQuery & {
+  rowOffset: number;
+  column: string;
+  revision: string;
+  start?: number;
+};
 export interface ViewerSqlitePage {
-  columns: { name: string; type: string; nullable: boolean; primaryKey: boolean }[];
+  columns: DatagridColumn[];
   rows: ViewerSqliteCell[][];
   offset: number;
   nextOffset: number | null;
@@ -21,13 +28,12 @@ export interface ViewerSqlitePage {
 export interface ViewerSqliteSession {
   /** Stable size/mtime and quick_check cannot certify a live application transaction snapshot. */
   consistency: 'unverified' | 'provider-snapshot';
+  revision: string;
   /** Worker failure/timeout invalidates a retained session immediately. */
   closedSignal: AbortSignal;
   tables(): { name: string }[];
-  rows(
-    options: { table: string; offset?: number; limit?: number },
-    signal?: AbortSignal,
-  ): Promise<ViewerSqlitePage>;
+  rows(options: DatagridQuery, signal?: AbortSignal): Promise<ViewerSqlitePage>;
+  cell(options: ViewerSqliteCellQuery, signal?: AbortSignal): Promise<DatagridCellDetail>;
   close(): Promise<void>;
 }
 
@@ -63,9 +69,13 @@ export async function openSqliteViewer(
     const after = await source.restat();
     if (after.size !== source.size || after.mtimeMs !== source.mtimeMs)
       throw new ViewerFormatError('viewer_sqlite_changed');
-    worker = new Worker(`(${sqliteViewerWorker.toString()})();`, {
-      eval: true,
-      workerData: { path: lease.path },
+    // The standalone module runs with Node's native TypeScript stripping in source
+    // checkouts and emitted JavaScript in runtime builds. Never serialize tsx output.
+    const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
+    const revision = createHash('sha256').update(options.key).digest('hex');
+    worker = new Worker(new URL(`./viewer-sqlite-worker.${extension}`, import.meta.url), {
+      execArgv: [],
+      workerData: { path: lease.path, revision },
       resourceLimits: { maxOldGenerationSizeMb: 64, stackSizeMb: 4 },
     });
     const timeout = options.queryTimeoutMs ?? 3000;
@@ -145,17 +155,27 @@ export async function openSqliteViewer(
     const initial = await wait<{ tables: { name: string }[] }>(0, options.signal);
     return {
       consistency: options.providerSnapshot ? 'provider-snapshot' : 'unverified',
+      revision,
       closedSignal: closedController.signal,
       tables() {
         if (closed) throw new ViewerFormatError('viewer_session_closed');
         return initial.tables;
       },
-      async rows({ table, offset = 0, limit = 100 }, signal) {
+      async rows({ offset = 0, limit = 100, ...query }, signal) {
         if (closed) throw new ViewerFormatError('viewer_session_closed');
         signal?.throwIfAborted();
         const id = nextId++;
         const result = wait<ViewerSqlitePage>(id, signal);
-        activeWorker.postMessage({ id, table, offset, limit });
+        activeWorker.postMessage({ ...query, id, operation: 'rows', offset, limit });
+        return result;
+      },
+      async cell(query, signal) {
+        if (closed) throw new ViewerFormatError('viewer_session_closed');
+        signal?.throwIfAborted();
+        if (query.revision !== revision) throw new ViewerFormatError('viewer_sqlite_changed');
+        const id = nextId++;
+        const result = wait<DatagridCellDetail>(id, signal);
+        activeWorker.postMessage({ ...query, id, operation: 'cell', start: query.start ?? 0 });
         return result;
       },
       close,
