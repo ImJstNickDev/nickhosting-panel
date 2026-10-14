@@ -9850,3 +9850,44 @@ Scoped Biome, web typecheck and whitespace checks pass. Real Firefox dev smoke
 verified full selection after explicit reveal and clearing on hide, without
 logging/capturing the secret. Independent diff review: no findings. No provider
 mutation/restart; only the regular disclosure audit is written by verification.
+
+### Failed installation retry recovery — 2026-10-14
+
+A terminal failed provision/reinstall could leave an installation reservation
+behind after the active operation was cleared, preventing an explicit Reinstall.
+Failure now records the incomplete local installation as failed. Reconciliation
+releases only the exact failed job's reservation after the existing observer
+proves installer and game stopped and fresh owned-provider observations confirm
+offline plus installed or an explicit installation failure. Unknown pending
+installation, missing evidence and concurrent job/reservation changes retain it.
+This does not mark Minecraft installation verified or replay external effects.
+
+Read-only dev diagnosis found a failed provision with a stale installation
+reservation. The Owner confirmed manually reinstalling through Pterodactyl after
+that failure; a subsequently present JAR alone does not prove why the original
+attempt failed. Normal worker reconciliation with this fix changed the local
+state to failed and cleared the orphan reservation. API/worker remained healthy;
+existing source watchers loaded the change, without a manual restart, migration,
+SQL repair or provider mutation. No reinstall/start was performed by the agent;
+the Owner can now request Reinstall through the existing authorized/admitted job
+flow. No test game servers or infrastructure resources were created or removed.
+
+Validation: full targeted lifecycle integration suite, root/web/test TypeScript
+checks and scoped Biome. The first integration run exposed three new fixture
+errors (running/queued jobs incorrectly retained completed_at); those fixtures
+were corrected, preserving the failure history. Final counts are recorded below.
+Independent lifecycle/security review found no remaining must-fix. Coverage
+includes explicit retry, unknown/running installations, unavailable evidence,
+identity and exact reservation/job ownership, concurrency and ABA changes, and
+preserving an already confirmed installation. No UI change or screenshot needed.
+Rollback is a source revert; it does not recreate released reservations or undo
+an Owner-requested reinstall. PR #21 stays open/unmerged; SFTPGo #18 unchanged.
+
+Final evidence: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec
+vitest run --config vitest.integration.config.ts
+packages/server-management/src/lifecycle.integration.test.ts` — **225/225 passed**
+(197 existing, 28 new; 43.93 seconds), using the existing isolated test stack.
+`scripts/dev.sh pnpm typecheck` and scoped `pnpm exec biome check` passed.
+`python3 scripts/check-governance.py` passed (952 indexed text files, 353 review
+PNGs, 789 relative links, 4 TOML files, 44 ignore cases); staged whitespace passed.
+Historical full M1–M5 suites were not rerun for this targeted recovery fix.

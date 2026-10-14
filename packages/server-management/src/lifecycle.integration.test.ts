@@ -3203,3 +3203,297 @@ describe('unlocked reconciliation collection and atomic stale-result fencing', (
     expect((await f.server()).last_observed_at).toEqual(before.server.last_observed_at);
   });
 });
+
+describe('terminal failed installation reservation recovery', () => {
+  async function failedInstallation(action: 'provision' | 'reinstall' = 'provision') {
+    const f = await fixture('reinstall');
+    await f.db
+      .updateTable('managed_servers')
+      .set({
+        active_operation_id: null,
+        installation_state: 'installing',
+        runtime_state: 'offline',
+        intent: 'manually_stopped',
+      })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        action,
+        phase: 'failed',
+        effect_state: 'confirmed',
+        plan: JSON.stringify({ installationEffectPrepared: true }),
+      })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    await f.db
+      .updateTable('operation_jobs')
+      .set({
+        state: 'failed',
+        completed_at: f.now(),
+        error_code: 'conflict',
+      })
+      .where('id', '=', f.jobId)
+      .execute();
+    await f.db
+      .insertInto('installation_reservations')
+      .values({
+        server_id: f.serverId,
+        physical_host_id: f.hostId,
+        operation_id: f.jobId,
+        memory_mib: 1178,
+        cpu_percent: 100,
+      })
+      .execute();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn();
+    return f;
+  }
+  function retry(f: Awaited<ReturnType<typeof fixture>>) {
+    return enqueueServerOperation(
+      f.db,
+      {
+        actorUserId: f.ownerId,
+        subjectUserId: f.ownerId,
+        role: 'user',
+        sessionType: 'regular',
+        ownerElevation: false,
+      },
+      f.serverId,
+      { action: 'reinstall', confirm: true, idempotencyKey: randomUUID() },
+    );
+  }
+  it.each(['provision', 'reinstall'] as const)(
+    'releases only the stopped failed %s reservation and allows an explicit reinstall',
+    async (action) => {
+      const f = await failedInstallation(action);
+      await expect(retry(f)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+      expect(await f.installationReservation()).toBeUndefined();
+      expect(await f.server()).toMatchObject({
+        installation_state: 'failed',
+        active_operation_id: null,
+      });
+      expect((await f.operation()).phase).toBe('failed');
+      expect(f.options.verifyInitialInstallation).not.toHaveBeenCalled();
+      expect(f.adapter.reinstall).not.toHaveBeenCalled();
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      const queued = await retry(f);
+      expect((await f.server()).active_operation_id).toBe(queued.jobId);
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['install_failed', 'reinstall_failed'])(
+    'recovers stopped %s even when the provider installed flag is false',
+    async (status) => {
+      const f = await failedInstallation();
+      f.remote.status = status;
+      f.remote.container.installed = false;
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect(await f.installationReservation()).toBeUndefined();
+      expect((await f.server()).installation_state).toBe('failed');
+    },
+  );
+  it.each([
+    'provider-installing',
+    'provider-pending',
+    'server-running',
+    'observer-false',
+    'no-observer',
+    'job-running',
+    'operation-not-failed',
+    'foreign-job',
+    'job-queued',
+    'active-operation',
+    'confirmed-install',
+  ] as const)('retains the reservation when %s', async (reason) => {
+    const f = await failedInstallation();
+    if (reason === 'provider-installing') f.remote.status = 'installing';
+    if (reason === 'provider-pending') f.remote.container.installed = false;
+    if (reason === 'server-running') f.setState('running');
+    if (reason === 'observer-false')
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => false);
+    if (reason === 'no-observer') f.options.confirmInitialInstallationStopped = undefined;
+    if (reason === 'job-running')
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'running', completed_at: null })
+        .where('id', '=', f.jobId)
+        .execute();
+    if (reason === 'operation-not-failed')
+      await f.db
+        .updateTable('server_operations')
+        .set({ phase: 'installation' })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    if (reason === 'foreign-job') {
+      const foreign = await failedInstallation();
+      await f.db
+        .updateTable('installation_reservations')
+        .set({ operation_id: foreign.jobId })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    }
+    if (reason === 'job-queued')
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'queued', completed_at: null })
+        .where('id', '=', f.jobId)
+        .execute();
+    if (reason === 'active-operation')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: f.jobId })
+        .where('id', '=', f.serverId)
+        .execute();
+    if (reason === 'confirmed-install')
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ installConfirmed: true }) })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeDefined();
+    await expect(retry(f)).rejects.toMatchObject({
+      code: reason === 'active-operation' ? 'conflict' : 'operation_uncertain',
+    });
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+  it.each(['integration_unavailable', 'configuration_invalid', 'provenance_mismatch'] as const)(
+    'preserves and surfaces observer %s without releasing capacity',
+    async (code) => {
+      const f = await failedInstallation();
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+        throw new DomainError(code);
+      });
+      await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toMatchObject({
+        code,
+      });
+      expect(await f.installationReservation()).toBeDefined();
+      await expect(retry(f)).rejects.toMatchObject({ code: 'operation_uncertain' });
+    },
+  );
+  it.each(['provider-installing', 'server-running'] as const)(
+    'retains capacity when %s changes during observer proof',
+    async (change) => {
+      const f = await failedInstallation();
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+        if (change === 'provider-installing') f.remote.status = 'installing';
+        else f.setState('running');
+        return true;
+      });
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect(await f.installationReservation()).toBeDefined();
+    },
+  );
+  it.each(['active-operation', 'operation-aba', 'job', 'reservation'] as const)(
+    'defers stale recovery when %s changes during proof',
+    async (change) => {
+      const f = await failedInstallation();
+      const gate = reconciliationGate<boolean>();
+      // The failed reservation owner need not be the latest power operation.
+      // Its revision must independently fence recovery.
+      if (change === 'job') {
+        const newer = await fixture('stop');
+        await f.db
+          .updateTable('server_operations')
+          .set({
+            server_id: f.serverId,
+            updated_at: new Date(f.now().getTime() + 1000),
+          })
+          .where('job_id', '=', newer.jobId)
+          .execute();
+      }
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+        gate.entered.resolve();
+        return gate.result.promise;
+      });
+      const result = reconcileManagedServer(f.db, f.serverId, f.options);
+      await gate.entered.promise;
+      if (change === 'active-operation' || change === 'operation-aba') {
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: f.jobId })
+          .where('id', '=', f.serverId)
+          .execute();
+        if (change === 'operation-aba')
+          await f.db
+            .updateTable('managed_servers')
+            .set({ active_operation_id: null })
+            .where('id', '=', f.serverId)
+            .execute();
+      } else if (change === 'job') {
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ error_code: 'forbidden' })
+          .where('id', '=', f.jobId)
+          .execute();
+      } else {
+        await f.db
+          .updateTable('installation_reservations')
+          .set({ memory_mib: 2000 })
+          .where('server_id', '=', f.serverId)
+          .execute();
+      }
+      gate.result.resolve(true);
+      expect(await result).toBe('deferred');
+      expect(await f.installationReservation()).toBeDefined();
+      expect((await f.server()).installation_state).toBe('installing');
+    },
+  );
+  it('does not call the installer observer for ordinary servers without an orphan', async () => {
+    const f = await fixture('start');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null, installation_state: 'installed' })
+      .where('id', '=', f.serverId)
+      .execute();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(f.options.confirmInitialInstallationStopped).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getResources).toHaveBeenCalledTimes(1);
+  });
+  it('marks a newly failed incomplete installation failed without releasing unproven capacity', async () => {
+    const f = await fixture('provision');
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn(async () => {
+      throw new DomainError('conflict');
+    });
+    expect(await f.run()).toBe('failed');
+    expect(await f.server()).toMatchObject({
+      installation_state: 'failed',
+      active_operation_id: null,
+    });
+    expect(await f.installationReservation()).toBeDefined();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+  it('preserves confirmed installation when a later provisioning step fails', async () => {
+    const f = await fixture('provision', { autoStart: true });
+    f.options.configureGameProvision = vi.fn(async () => {
+      throw new DomainError('forbidden');
+    });
+    expect(await f.run()).toBe('failed');
+    expect((await f.operation()).plan.installConfirmed).toBe(true);
+    expect((await f.server()).installation_state).toBe('installed');
+    expect(await f.installationReservation()).toBeUndefined();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('retains capacity when the final provider recheck is unavailable', async () => {
+    const f = await failedInstallation();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+      f.adapter.getApplicationServer.mockRejectedValueOnce(
+        new PterodactylError('unavailable', 'application', 'unknown'),
+      );
+      return true;
+    });
+    await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toBeInstanceOf(
+      PterodactylError,
+    );
+    expect(await f.installationReservation()).toBeDefined();
+    expect((await f.server()).installation_state).toBe('installing');
+  });
+});

@@ -1131,3 +1131,19 @@ Public choice capabilities now separate `wake`, `playerIdle` and `sleepWake` fro
 Route metadata accepts `family: legacy` as well as `netty`, current declaration
 `minecraft/vanilla` v2 and optional `responses` presentation settings.
 See [protocol contracts and evidence](MINECRAFT-MULTIPROTOCOL.md) and ADR0018.
+
+### Retrying a failed installation
+
+A terminal failed provision/reinstall remains failed; it does not silently become
+installed after a manual provider reinstall. Normal reconciliation can release its
+retained installer reservation once the exact reservation-owning job is terminal,
+no operation is active, the provider reports installed or an explicit installation
+failure, and the existing host observer confirms both installer and game stopped.
+The local state becomes `failed`; an explicit Reinstall then uses ordinary
+authorization, confirmation, fresh admission and the existing provider flow.
+
+Pending/unknown installer state, unavailable observation, identity mismatch or a
+concurrent operation retain the reservation. Reconciliation fences both the
+reservation and its owning operation/job revisions, including older jobs. It never
+replays a failed effect, runs an installer, promotes game verification or clears
+another operation's reservation. No API/schema or UI confirmation changes.

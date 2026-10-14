@@ -606,6 +606,20 @@ export async function processServerOperation(
           .where('id', '=', server.id)
           .forUpdate()
           .executeTakeFirstOrThrow();
+        if (
+          !success &&
+          operation.plan.installConfirmed !== true &&
+          (operation.action === 'provision' ||
+            (operation.action === 'reinstall' &&
+              operation.plan.installationEffectPrepared === true &&
+              !(operation.plan.rejected === true && operation.effect_state === 'none')))
+        )
+          await tx
+            .updateTable('managed_servers')
+            .set({ installation_state: 'failed' })
+            .where('id', '=', server.id)
+            .where('installation_state', 'in', ['pending', 'installing'])
+            .execute();
         if (success && operation.action === 'delete') {
           await tx
             .updateTable('managed_servers')
@@ -2119,6 +2133,11 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
     (select reservation.xmin::text from resource_reservations reservation where reservation.server_id = server.id),
     (select reservation.xmin::text from installation_reservations reservation where reservation.server_id = server.id),
     (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
+      from installation_reservations reservation
+      join server_operations operation on operation.job_id = reservation.operation_id and operation.server_id = reservation.server_id
+      join operation_jobs job on job.id = operation.job_id
+      where reservation.server_id = server.id),
+    (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
       from server_operations operation join operation_jobs job on job.id = operation.job_id
       where operation.server_id = server.id and operation.action in ('start','restart','stop','provision','reinstall','wipe','delete','restore')
       order by operation.updated_at desc, operation.job_id desc limit 1),
@@ -2305,6 +2324,47 @@ export async function reconcileManagedServer(
       }
     }
   }
+  let failedInstallationJob: string | null = null;
+  if (
+    !server.active_operation_id &&
+    server.installation_state !== 'installed' &&
+    options.confirmInitialInstallationStopped &&
+    current.current_state === 'offline' &&
+    (installed(remote) || ['install_failed', 'reinstall_failed'].includes(remote.status ?? ''))
+  ) {
+    const failedInstallation = await db
+      .selectFrom('installation_reservations as reservation')
+      .innerJoin('server_operations as operation', (join) =>
+        join
+          .onRef('operation.job_id', '=', 'reservation.operation_id')
+          .onRef('operation.server_id', '=', 'reservation.server_id'),
+      )
+      .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+      .select(['operation.job_id', 'operation.plan'])
+      .where('reservation.server_id', '=', server.id)
+      .where('operation.action', 'in', ['provision', 'reinstall'])
+      .where('operation.phase', '=', 'failed')
+      .where('job.state', '=', 'failed')
+      .where('job.completed_at', 'is not', null)
+      .executeTakeFirst();
+    if (failedInstallation && failedInstallation.plan.installConfirmed !== true) {
+      // A terminal failed job is not installation proof. Release its capacity
+      // only after the host observer proves BOTH installer and game stopped.
+      // Identity/configuration/observer errors must leave the reservation intact.
+      if (await options.confirmInitialInstallationStopped(server.id, db)) {
+        const freshRemote = await ownedRemote(db, server, options);
+        const freshResources = await options.adapter.getResources(
+          server.pterodactyl_identifier ?? '',
+        );
+        if (
+          (installed(freshRemote) ||
+            ['install_failed', 'reinstall_failed'].includes(freshRemote.status ?? '')) &&
+          freshResources.current_state === 'offline'
+        )
+          failedInstallationJob = failedInstallation.job_id;
+      }
+    }
+  }
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const node = await tx
@@ -2368,9 +2428,15 @@ export async function reconcileManagedServer(
     if (!fresh || fresh.revision !== server.revision) return 'deferred' as const;
     await tx
       .updateTable('managed_servers')
-      .set({ installation_state: state })
+      .set({ installation_state: failedInstallationJob ? 'failed' : state })
       .where('id', '=', server.id)
       .execute();
+    if (failedInstallationJob && !locked.active_operation_id)
+      await tx
+        .deleteFrom('installation_reservations')
+        .where('server_id', '=', server.id)
+        .where('operation_id', '=', failedInstallationJob)
+        .execute();
     if (suppressCachedRunning) return 'observed' as const;
     await observation(tx, server, current, now, backupBytes);
     const reservation = await tx
