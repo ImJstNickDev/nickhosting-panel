@@ -9835,3 +9835,11 @@ and forced-colors outline, then checked in real Firefox and screenshots:
 These contain deliberately fake fixture passwords. Final independent review:
 no remaining must-fix findings. Rollback is a scoped source/UI revert, without
 migration or password changes. PR #21 remains open/unmerged.
+
+SFTP password layout followup: hidden mask and revealed input now share the same
+non-growing 16ch flex basis, retaining shrinkability on narrow screens. Show/Copy
+no longer move on reveal. CSS Biome and the existing `sftp-ui.browser.test.ts`
+`-t 'renders EN/IT'` check passed (1 passed, 17 skipped), including responsive/axe
+and keyboard focus checks. Independent comparison of fresh hidden/shown desktop
+and mobile screenshots found no regressions; revealed screenshots above refreshed.
+CSS-only, existing HMR, no backend or infrastructure operations.

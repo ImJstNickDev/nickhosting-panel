@@ -352,11 +352,16 @@
 .sftp-primary-password {
   align-items: flex-start;
 }
-.sftp-recoverable .sftp-value > input {
+.sftp-recoverable .sftp-value > :is(input, span) {
   width: 16ch;
-  flex: 1;
+  flex: 0 1 16ch;
   font-size: 0.87rem;
   min-height: 32px;
+}
+.sftp-recoverable .sftp-value > span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
 .sftp-issued > .sftp-endpoint {
   margin-top: 14px;
