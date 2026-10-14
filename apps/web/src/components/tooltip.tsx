@@ -268,7 +268,8 @@ export function Tooltip({
           <div ref={popup} id={id} role="tooltip" className="tooltip">
             {content}
           </div>,
-          document.fullscreenElement ?? document.body,
+          // A modal is in the browser top layer; body portals would sit behind its backdrop.
+          trigger.current?.closest('dialog[open]') ?? document.fullscreenElement ?? document.body,
         )}
     </>
   );

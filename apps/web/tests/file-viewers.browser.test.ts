@@ -1205,7 +1205,8 @@ describe('M5 builtin file viewers', () => {
   it('preserves JSON numbers and switches to the existing editor with a remembered personal default', async () => {
     await open('viewer.json');
     await browserExpect(page.locator('.ve-json')).toContainText('9007199254740993123456789');
-    await page.locator('.ve-json summary').filter({ hasText: 'players' }).click();
+    await page.getByRole('treeitem').filter({ hasText: 'players' }).click();
+    await page.keyboard.press('ArrowRight');
     await browserExpect(page.locator('.ve-json')).toContainText('0:');
     await harness.screenshot(page, 'file-viewer-json-desktop-en');
     await page.getByRole('button', { name: 'Open with', exact: true }).click();

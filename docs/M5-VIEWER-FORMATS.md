@@ -18,6 +18,7 @@ requests. This is separate from the ordinary directory-list cache.
 | TAR.XZ | `xz-decompress` 0.2.3 + TAR | Streaming WASM XZ decode. Fixture compressed independently using Python's standard library. |
 | 7z | `sevenzip-wasm` 26.4.0 / 7-Zip 26.04 | Isolated Node worker, generated LZMA2 fixture; list once and decode selected members on demand into the private cache. Solid archives may require decoding preceding members. |
 | RAR | Same current 7-Zip dependency | Real upstream libarchive RAR5 stored fixture. This does not certify every RAR variant, multipart set, codec or encrypted archive. |
+| JSON / JSONC / JSON5 | Existing `@humanwhocodes/momoa` 3.3.13 | Browser worker retains original source and lexical index; bounded windows feed the virtual tree. Exact numeric lexemes and duplicate keys remain intact; no expression evaluation. |
 | SQLite | Node 24 `node:sqlite` | Read-only private snapshot, fixed schema/table pagination queries in a deadline-limited worker; no user SQL or loadable extensions. Integer values preserve 64-bit precision; BLOBs are represented by byte counts; long text cells are explicitly truncated. |
 
 Single compressed streams (`.gz`, `.bz2`, `.xz`, `.zst` without TAR) now expose one
@@ -489,3 +490,36 @@ Sparse virtual files exercise size/density without allocating their full media
 payload. Their request/byte counts are deterministic; their in-memory CPU times
 are not predictions of SFTP/network performance. See the validation report for
 separate real-file timings and failed fixed-block experiments.
+
+## JSON Tree — worker-owned document and virtual browsing
+
+JSON Tree is a read-only builtin hosted by Fileman. The existing same-origin
+viewer source transport handles physical files and archive members. Reading the
+source happens once per opening/explicit reload; expansion, search, selection,
+value details and clipboard requests are local browser operations. No Blueprint,
+Pterodactyl or Wings endpoint is added, and no parser sends document contents to
+an external service.
+
+The browser worker retains source text and an indexed tree, rather than cloning
+the full tree into React. The renderer requests bounded windows and mounts only
+the viewport plus overscan. Search examines keys/scalar values and reveals matched
+ancestors. Original property order, duplicate names, large numbers and JSON5
+lexemes are not normalized through `JSON.parse` / `JSON.stringify`. Copying a
+branch uses its original source slice, including comments inside that branch.
+JSON Pointer escapes are supported; paths through duplicate property names are
+identified as ambiguous instead of falsely promised to identify one occurrence.
+
+The existing 8 MiB source, 100,000-node and depth-128 preview limits remain.
+Source size is bounded before parsing; node/depth budgets apply while indexing
+the parsed AST, not as a JavaScript heap limit. Worker deadlines and termination
+keep parsing off the main thread; disposal cancels pending work on source or
+identity changes. Values and rows are bounded for routine UI messages; explicit
+copy is the exception and may return a complete selected branch within the source
+budget. Source text is not persisted in browser storage.
+
+Interaction follows the [WAI-ARIA Tree View pattern](https://www.w3.org/WAI/ARIA/apg/patterns/treeview/):
+arrow navigation, expand/collapse, Home/End and explicit hierarchy metadata for
+virtualized rows. Details and clipboard feedback use localized EN/IT labels.
+The shared shell continues to own Home, Download, Open with and viewer Escape.
+Editing remains Scribe's responsibility. Validation, screenshots and measured
+fixture costs are recorded in [M5 validation](M5-VALIDATION.md).

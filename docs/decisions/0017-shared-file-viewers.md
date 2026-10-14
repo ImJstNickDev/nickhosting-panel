@@ -141,3 +141,17 @@ The UI supplies table discovery, keyboard grid navigation, column sizing, schema
 search/sort and chunked value inspection inside the existing viewer chrome.
 There is no SQL console, server write, live-database consistency claim or unbounded
 cell download. WAL/sidecar restrictions and SFTPGo issue #18 remain unchanged.
+
+### 2026-10-14 — JSON Tree indexed browser worker
+
+JSON Tree keeps the existing lexical parser and shared file-source transport,
+but replaces the proof-of-concept recursive DOM with worker-owned navigation and
+a virtualized tree. The source/index stays in a per-viewer worker; bounded row
+windows, selected-node details and search results cross into React. Exact branch
+copy is an explicit operation, not a full-tree transfer on every render. Document
+identity changes and closing the viewer terminate the worker.
+
+This preserves duplicate keys, source order and numeric precision while enabling
+keyboard browsing, search and long-value inspection. It introduces no server-side
+parser, filesystem writes, new provider checks, dependencies or Blueprint changes.
+The viewer remains read-only and retains its existing preview budgets.

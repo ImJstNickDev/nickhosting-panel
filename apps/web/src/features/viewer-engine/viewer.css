@@ -228,45 +228,6 @@
   border-radius: 0.5rem;
   opacity: 0.55;
 }
-.ve-json {
-  height: min(65vh, 42rem);
-  overflow: auto;
-  padding: 0.75rem;
-  font-family: ui-monospace, monospace;
-  font-size: 0.85rem;
-}
-.ve-json ul {
-  list-style: none;
-  margin: 0;
-  padding-left: 1.25rem;
-}
-.ve-json > ul {
-  padding-left: 0;
-}
-.ve-json li {
-  padding: 0.2rem 0;
-}
-.ve-json summary {
-  cursor: pointer;
-  width: fit-content;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-.ve-json summary small {
-  color: var(--muted, #636977);
-}
-.ve-json details > ul {
-  border-left: 1px solid var(--border, #dddfe4);
-  margin-left: 0.3rem;
-}
-.ve-json-value {
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-.ve-json-value > code {
-  color: #265f50;
-  background: none;
-}
 .ve-kind {
   font-size: 0.8rem;
   color: var(--muted, #636977);

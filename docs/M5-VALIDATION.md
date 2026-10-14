@@ -9002,3 +9002,83 @@ Final cross-browser/regression evidence:
 - `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'displays typed SQLite'`: **1 passed, 32 deliberately skipped**; existing typed-cell/audio/unsupported-video scenario remains intact after its SQLite fixture was updated to the new contract.
 - Combined final SQLite/cache unit run: **14 passed**. Final dev API/Vite inspection: both running and healthy. No additional container operation.
 - Final runtime build passed after the effective primary-key nullability correction (SQLite worker tests: **11 passed**). `git diff --cached --check` and `python3 scripts/check-governance.py` passed: 862 indexed text files, 301 review PNGs, 710 relative links, four TOML files and 44 ignore cases; secret scanning remains heuristic.
+
+### 2026-10-14 — JSON Tree rebuild
+
+Replaced the initial recursive `<details>` proof of concept with a read-only,
+virtualized JSON/JSONC/JSON5 browser. Momoa remains the existing parser; the worker
+retains the source and index rather than sending the entire tree to React. Normal
+responses are capped at 200 rows, 240-character previews and 16 Ki UTF-16-unit
+source chunks. Search, expansion, navigation, details and copy require no further
+provider reads after opening. Exact branch copy preserves original numeric
+lexemes, duplicate keys, order and comments; string-value copy decodes the string.
+Ambiguous JSON Pointers are identified. Existing 8 MiB / 100,000 nodes / depth 128
+and worker-deadline limits remain; there is no persistent browser content cache.
+
+Implemented UI: bounded tree with type colors, debounced key/value search,
+previous/next match, branch controls, keyboard arrows/Home/End, Ctrl/Cmd+C,
+source details, EN/IT pluralization and precise syntax locations. Desktop details
+retain tree navigation; mobile details use a native modal with inert background.
+Shared tooltips now portal inside an open ancestor dialog to remain above its
+backdrop. Fileman continues to own Home, Download, Open with and Escape.
+
+Final focused evidence:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/viewer-engine/builtin-viewers/json-model.test.ts --silent=false`: **13 passed**. Covers lexical precision, duplicate/prototype-like keys, original JSONC/JSON5 source, RFC 6901 escaping, ancestor ambiguity, decoded search, navigation, bounded replies, Unicode chunk boundaries, parser budgets, request IDs, abort, timeout and worker-failure cleanup.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/json-tree.browser.test.ts`: **8 passed** in Chromium; the same command prefixed with `NH_BROWSER=firefox` passed **8/8**. Actual React code, Web Worker and parser run in real browsers; viewer bytes and remote provider are isolated fixtures. Includes 60,001-node virtualization, immediate click/copy, exact raw copy, match navigation, long-value paging/focus, formats and primitive roots, parse/read errors, canceled loading, terminated-worker recovery, Italian mobile, modal tooltip placement and depth-35 match reveal. Desktop/mobile axe checks returned zero violations for tested surfaces.
+- After aligning the search focus border with Fileman's existing input styling, the Chromium `-t 'keeps Italian mobile'` check passed **1**, with **7 deliberately skipped**, including the deep-tree screenshot and accessibility check. No complete historical suite was repeated for this CSS-only adjustment.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/tooltip.browser.test.ts`: **7 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewer-escape.browser.test.ts`: **3 passed**, preserving shared Escape and editor discard behavior.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/file-viewers.browser.test.ts -t 'preserves JSON numbers'`: **1 passed, 32 deliberately skipped**, retaining the existing JSON-to-Scribe and personal-default journey.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check` and `scripts/dev.sh pnpm --filter @nickhosting/web build`: **passed**. Catalog contains 1,521 EN/IT/pseudolocale keys. Final lazy JSON UI: 14.77 kB / 5.05 kB gzip JS and 6.54 kB / 1.97 kB gzip CSS; parser worker 34.58 kB. No dependencies added. Existing main/editor bundle-size warnings remain.
+
+The reproducible model test measures local parse/index + search + bounded view,
+excluding source generation, network transfer and browser rendering. Final Node 24
+samples (not end-to-end latency promises):
+
+| Fixture | Source bytes | Time | Serialized response bytes / rows |
+| --- | ---: | ---: | ---: |
+| Wide, 100,000 total nodes | 588,885 | 242 ms | 46,042 / 200 |
+| 128 nested arrays | 257 | <1 ms | 552 / 2 |
+| Single 7 MiB string | 7,340,046 | 140 ms | 794 / 2 |
+
+Development failures remain part of the record: an initial browser helper raced
+remembered-viewer restoration, and a later failed helper left its rejection flag
+set, cascading into other cases. The harness now navigates the mounted viewer
+and resets the fixture flag between tests. Browser tests also exposed real stale
+selection during immediate copy and premature scroll clamping during deep search;
+both were fixed and the complete eight-scenario runs passed. A combined tooltip
+run failed before its tests because isolated provisioning returned
+`resources_unavailable`; the standalone run passed all seven, without changing
+infrastructure or admission policy.
+
+Independent technical and rendered EN-desktop/IT-mobile review resolved worker
+retry using a terminated client, detail/pager focus loss, excessive mobile indent,
+short-key truncation, action-selection races and deep reveal timing. Worker crashes
+now report unavailable rather than incorrectly blaming valid JSON. Final review
+has no outstanding must-fix findings. Automated checks and keyboard tests do not
+constitute a complete screen-reader/WCAG certification.
+
+Reviewed sanitized screenshots:
+[desktop](screenshots/m5/json-tree-desktop-en.png),
+[mobile](screenshots/m5/json-tree-mobile-it.png),
+[desktop details](screenshots/m5/json-tree-details-en.png),
+[mobile details](screenshots/m5/json-tree-details-mobile-it.png),
+[deep mobile search](screenshots/m5/json-tree-deep-mobile-it.png),
+[empty](screenshots/m5/json-tree-empty-en.png),
+[loading](screenshots/m5/json-tree-loading-en.png),
+[syntax error](screenshots/m5/json-tree-error-en.png).
+
+No live game server, file, Panel/Wings/Blueprint configuration or credential was
+read or mutated for this rebuild. Tests reused already approved isolated services;
+temporary fixture schemas are cleaned by their harness. API/Vite dev were inspected
+read-only and both remain healthy in `nickhosting-dev`. Existing HMR applies the
+change; no container restart/build, network operation or production deployment.
+SFTPGo #18 remains unchanged. Rollback is a code revert; there are no migrations,
+provider changes or new persistent resources to undo.
+
+Final focused Biome check: **14 changed/new TS/TSX/CSS files passed**; `git diff --check` passed.
+Final staged governance passed: 868 indexed text files, 309 reviewed PNG assets,
+719 relative links, four TOML files and 44 ignore cases. The secret scan remains
+heuristic; the staged inventory contains only the scoped code, tests, documentation
+and sanitized fixture screenshots.
