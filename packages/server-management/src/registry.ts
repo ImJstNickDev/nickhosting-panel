@@ -6,6 +6,8 @@ import {
   authSessionId,
   DomainError,
   type Permission,
+  resolveDnsOptions,
+  validateDnsLabel,
 } from '@nickhosting/core';
 import {
   assertStoragePolicyIdle,
@@ -77,6 +79,13 @@ export const createServerSchema = z
     projectId: id.optional(),
     limits: limitsSchema.extend({ disk: limitsSchema.shape.disk.optional() }),
     autoStart: z.boolean().default(true),
+    connection: z
+      .object({
+        domainId: z.string().min(1).max(64).optional(),
+        subdomain: z.string().min(1).max(63).optional(),
+      })
+      .strict()
+      .optional(),
     minecraft: z
       .object({ choiceId: z.uuid(), configuration: minecraftConfigurationSchema })
       .strict()
@@ -368,6 +377,25 @@ export async function createManagedServer(
       )
         throw new DomainError('validation_failed');
     } else if (options.minecraftInitialContent) throw new DomainError('validation_failed');
+    const integration = await tx
+      .selectFrom('game_integrations')
+      .select('manifest')
+      .where('id', '=', mapping.game_id)
+      .executeTakeFirstOrThrow();
+    const connectionDeclaration = parse(gameManifestSchema, integration.manifest).connection;
+    const dnsOptions = resolveDnsOptions(config, connectionDeclaration, mapping.game_id);
+    if (value.connection) {
+      if (
+        connectionDeclaration.mode === 'static-host-port' ||
+        !dnsOptions.configured ||
+        (value.connection.domainId &&
+          !dnsOptions.domains.some((domain) => domain.id === value.connection?.domainId)) ||
+        (value.connection.subdomain && !dnsOptions.customizable)
+      )
+        throw new DomainError('validation_failed');
+      if (value.connection.subdomain)
+        value.connection.subdomain = validateDnsLabel(value.connection.subdomain, config);
+    }
     const node = await tx
       .selectFrom('managed_nodes')
       .selectAll()
@@ -529,6 +557,18 @@ export async function createManagedServer(
         deleted_at: null,
       })
       .execute();
+    if (connectionDeclaration.mode !== 'static-host-port' && dnsOptions.configured) {
+      await tx
+        .insertInto('server_dns_preferences')
+        .values({
+          server_id: serverId,
+          domain_id: value.connection?.domainId ?? dnsOptions.defaultDomainId,
+          subdomain: value.connection?.subdomain ?? null,
+          assignment_id: null,
+          enabled: true,
+        })
+        .execute();
+    }
     const allocationRows = roles.map((role, index) => {
       const allocation = free[index];
       if (!allocation) throw new DomainError('allocation_unavailable');

@@ -8,6 +8,7 @@ A game integration owns **game behavior**, including its wizard steps, user mana
 
 ```ts
 type ConnectionMode =
+  | { mode: "shared-host"; defaultLabel: string; allowCustomSubdomain: boolean }
   | { mode: "custom-subdomain"; zoneSettingKey: string; srv?: { service: string; proto: "tcp" | "udp" } }
   | { mode: "static-host-port"; hostnameSettingKey: string; showPort: true };
 
@@ -127,11 +128,48 @@ Minecraft example:
 
 ## DNS/connection strategy
 
-Integrations declare if the user can manage a per-server hostname in the wizard and server settings. No universal subdomain toggle.
+Integrations declare the address behavior; Core owns the domain registry, naming,
+Cloudflare ownership and recovery. No game-specific hostname rules belong in the
+shared UI.
 
-- `custom-subdomain`: choose and validate prefix, reserve uniqueness, create/edit/delete Cloudflare A/AAAA as appropriate plus protocol SRV if supported (Minecraft Java). All zone/target values are configurable by Owner. Use DNS-only for raw game TCP/UDP unless specialized supported services are configured.
-- `static-host-port`: plugin points to an Owner-configured hostname (e.g. `satisfactory.example.com`), app displays `hostname:assigned-port`; no per-server custom subdomain UI. It can still declare multiple ports for different roles.
-- Domain operations run through core Cloudflare provider with job logs/retries and explicit cleanup. Codex test executions against real Cloudflare require specific approval.
+- `custom-subdomain`: one primary hostname per server. A blank label generates
+  three short English words; the 64-word vocabulary offers 262,144 candidates.
+  Uniqueness is reserved in PostgreSQL, not assumed from randomness. Minecraft
+  declares `_minecraft._tcp` SRV support so the primary game address omits its
+  explicit port. Other roles/transports retain their ports.
+- `shared-host`: the integration declares a default label and whether users may
+  replace it with a personal hostname. Shared hosts always show the assigned port;
+  they have integration/domain ownership independent of any server's lifecycle.
+  The worker provisions them without importing or mutating game servers.
+- `static-host-port`: compatibility contract for an externally configured hostname
+  without NickHosting-managed DNS. It remains supported.
+
+Owner `dnsDomains` entries hold stable ID, hostname, Cloudflare zone ID, optional
+target and availability. Targets inherit `dnsTarget` when omitted. Existing
+`dnsBaseDomain`/`cloudflareZoneId` settings remain a single-domain fallback with ID
+`legacy`. Integration policies select all domains, an allowlist or a denylist and
+an optional preferred domain/shared label. Domains are not hardcoded in games.
+A selector appears only when several eligible domains exist. Changing eligibility
+or the default affects new choices, not an already-confirmed address.
+
+The Owner blacklist starts empty. Exact-label, hyphen-separated word/phrase and
+substring rules are case-insensitive. Platform service labels are reserved
+separately. Renames create the replacement before removing the previous name;
+failures retain the last confirmed address and durable recovery intent. Old names
+remain reserved until cleanup, plus optional Owner-configured reuse delay. DNS
+caches can retain an old answer for its TTL; an application rename cannot eliminate
+that external propagation delay.
+
+New server creation persists an optional `{connection:{domainId?,subdomain?}}`
+choice with the provisioning intent. The worker assigns its address once public
+connection information is available. Existing servers are not silently opted into
+DNS publication: their Connection tab can explicitly activate the primary address.
+Console and Connection use the same authoritative `displayAddress`.
+
+All records are DNS-only and use Cloudflare ownership markers/ledgers; foreign
+records are never adopted or overwritten. Real DNS tests require scoped approval.
+Cloudflare reference: [record types](https://developers.cloudflare.com/dns/manage-dns-records/reference/dns-record-types/)
+and [record creation API](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/).
 
 ## Content providers and management
 

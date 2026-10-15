@@ -100,9 +100,11 @@ export function ConsoleSummary({
     connections.data?.ports.filter((port) => port.primary && port.hostname && port.port) ?? [];
   const endpoint = endpoints.find((port) => port.status === 'configured') ?? endpoints[0];
   const hostname = endpoint?.hostname;
-  const address = hostname
-    ? `${hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname}:${endpoint.port}`
-    : undefined;
+  const address =
+    endpoint?.displayAddress ??
+    (hostname
+      ? `${hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname}:${endpoint.port}`
+      : undefined);
   const current = availability === 'ready' ? resources : undefined;
   const fallback = t(availability === 'loading' ? 'web.loading' : 'web.unavailable');
   const offline = current?.current_state === 'offline';

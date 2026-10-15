@@ -282,6 +282,29 @@ export interface ServerTables {
     state: 'pending' | 'active' | 'revoking' | 'revoked' | 'uncertain';
     created_at: Generated<Date>;
   };
+  server_dns_preferences: {
+    server_id: string;
+    domain_id: string | null;
+    subdomain: string | null;
+    assignment_id: string | null;
+    enabled: Generated<boolean>;
+    updated_at: Generated<Date>;
+  };
+  shared_dns_hosts: {
+    id: string;
+    scope_key: string;
+    hostname: string;
+    ownership_token: string;
+    plan: Json<unknown>;
+    ledger: Json<unknown>;
+    state: 'pending' | 'active' | 'uncertain';
+    updated_at: Generated<Date>;
+  };
+  dns_hostname_reservations: {
+    hostname: string;
+    owner_id: string;
+    release_after: Date | null;
+  };
   dns_assignments: {
     id: string;
     server_id: string;

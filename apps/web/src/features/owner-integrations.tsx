@@ -18,6 +18,7 @@ import {
   text,
 } from '../components/ui.js';
 import { getGameAdmin, getGameArtwork } from './integrations.js';
+import { IntegrationConnectionSettings } from './owner-domains.js';
 import { IntegrationSleepSettings } from './sleep-timeout.js';
 
 export function OwnerIntegrationsPage() {
@@ -29,7 +30,9 @@ export function OwnerIntegrationsPage() {
   const modules = useQuery({
     queryKey: ['owner-game-modules'],
     queryFn: () =>
-      api<Array<{ id: string; manifest: { nameKey: string } }>>('/v1/owner/game-modules'),
+      api<Array<{ id: string; manifest: { nameKey: string; connection?: { mode: string } } }>>(
+        '/v1/owner/game-modules',
+      ),
   });
   return (
     <Page title={t('web.integrations')}>
@@ -93,6 +96,10 @@ export function OwnerIntegrationsPage() {
                     <p className="muted">{t('owner.rolloutEvidence')}</p>
                   </ActionForm>
                   <IntegrationSleepSettings gameId={module.id} />
+                  <IntegrationConnectionSettings
+                    gameId={module.id}
+                    shared={module.manifest.connection?.mode === 'shared-host'}
+                  />
                   {stored && (
                     <p>
                       <Time value={stored.rolloutUpdatedAt} />

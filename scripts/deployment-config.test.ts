@@ -41,7 +41,7 @@ describe('scoped container environment', () => {
     expect(enabled).not.toHaveProperty('NH_CLOUDFLARE_API_TOKEN');
     expect(enabled.NH_SFTPGO_API_KEY).toBe('development-disabled');
     expect(enabled.NH_CURSEFORGE_API_KEY).toBe('development-disabled');
-    expect(enabled.NH_SECRETS_MASTER_KEY).toBe(real.NH_DEV_MASTER_KEY);
+    expect(enabled.NH_SECRETS_MASTER_KEY).toBe(containerEnvironment(real).NH_SECRETS_MASTER_KEY);
     expect(
       containerEnvironment({ ...real, NH_DEV_CLOUDFLARE_ENABLED: 'false' }).NH_CLOUDFLARE_API_TOKEN,
     ).toBe('development-disabled');

@@ -21,7 +21,7 @@ export const minecraftManifest = gameManifestSchema.parse({
   },
   connection: {
     mode: 'custom-subdomain',
-    zoneSettingKey: 'cloudflareZoneId',
+    zoneSettingKey: 'dnsBaseDomain',
     srv: { service: '_minecraft', proto: 'tcp' },
   },
   ports: [{ role: 'game', transport: 'tcp', required: true }],

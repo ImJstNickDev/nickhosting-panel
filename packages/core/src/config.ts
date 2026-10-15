@@ -1,5 +1,6 @@
 import { posix } from 'node:path';
 import { z } from 'zod';
+import { dnsBlockedTermsSchema, dnsDomainsSchema, dnsGamePoliciesSchema } from './dns-policy.js';
 import { DomainError } from './errors.js';
 import {
   defaultGatewayDataPolicy,
@@ -135,6 +136,14 @@ export const platformConfigSchema = z
       .optional(),
     dnsBaseDomain: z.string().min(1).max(253).optional(),
     dnsTarget: z.string().min(1).max(253).optional(),
+    dnsDomains: dnsDomainsSchema,
+    dnsDefaultDomainId: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,63}$/)
+      .optional(),
+    dnsGamePolicies: dnsGamePoliciesSchema,
+    dnsBlockedTerms: dnsBlockedTermsSchema,
+    dnsNameReuseDelaySeconds: z.number().int().min(0).max(2592000),
     staticGameHostname: z.string().min(1).max(253).optional(),
     minecraftMetadataUserAgent: z
       .string()
@@ -213,6 +222,10 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   sftpAuxiliaryLimit: 3,
   sftpCredentialTtlSeconds: 3600,
   gameIdleTimeouts: {},
+  dnsDomains: [],
+  dnsGamePolicies: {},
+  dnsBlockedTerms: [],
+  dnsNameReuseDelaySeconds: 0,
   defaultIdleTimeoutSeconds: -1,
   idleTimeoutUserAccess: 'hidden',
   gatewayEnabled: false,
@@ -281,6 +294,11 @@ export const configEnvironmentKeys = {
   dnsInstanceId: 'NH_DNS_INSTANCE_ID',
   dnsBaseDomain: 'NH_DNS_BASE_DOMAIN',
   dnsTarget: 'NH_DNS_TARGET',
+  dnsDomains: 'NH_DNS_DOMAINS',
+  dnsDefaultDomainId: 'NH_DNS_DEFAULT_DOMAIN_ID',
+  dnsGamePolicies: 'NH_DNS_GAME_POLICIES',
+  dnsBlockedTerms: 'NH_DNS_BLOCKED_TERMS',
+  dnsNameReuseDelaySeconds: 'NH_DNS_NAME_REUSE_DELAY_SECONDS',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
   minecraftMetadataUserAgent: 'NH_MINECRAFT_METADATA_USER_AGENT',
   fileOperationsFreeBytes: 'NH_FILE_OPERATIONS_FREE_BYTES',
@@ -313,6 +331,7 @@ export const configEnvironmentKeys = {
 } as const satisfies Record<PlatformConfigKey, string>;
 
 const numericKeys = new Set<PlatformConfigKey>([
+  'dnsNameReuseDelaySeconds',
   'uploadConcurrency',
   'registrationInviteTtlSeconds',
   'supportIdleTtlSeconds',
@@ -373,6 +392,9 @@ export function resolveConfig(
       key === 'pterodactylUploadOrigins' ||
       [
         'gameIdleTimeouts',
+        'dnsDomains',
+        'dnsGamePolicies',
+        'dnsBlockedTerms',
         'fileViewers',
         'gatewayNetworkPolicy',
         'gatewayObserver',

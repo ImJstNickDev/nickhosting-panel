@@ -16,6 +16,12 @@ import {
   Page,
   Section,
 } from '../components/ui.js';
+import { creationConnectionChoice } from './connection.api.js';
+import {
+  type ConnectionChoice,
+  CreationConnection,
+  useConnectionOptions,
+} from './connection-fields.js';
 import { creationGamesQuery, prefetchCreationCatalog } from './creation-catalog.js';
 import { GameFields } from './game-sections.js';
 import { PlayerList, VersionList } from './installer-fields.js';
@@ -54,6 +60,8 @@ export function CreateServerPage() {
     seeded = useRef(new Set<string>()),
     initializedDisk = useRef(false);
   const games = useQuery(creationGamesQuery);
+  const connectionOptions = useConnectionOptions(gameId);
+  const [connectionChoice, setConnectionChoice] = useState<ConnectionChoice>({});
   const quota = useQuery({
     queryKey: ['creation-quota'],
     queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
@@ -135,6 +143,7 @@ export function CreateServerPage() {
     if (!extension) return;
     prefetchCreationCatalog(extension);
     setGameId(id);
+    setConnectionChoice({});
     setValues({ ...extension.descriptor.creation.defaults });
     setChoices({});
     seeded.current.clear();
@@ -204,12 +213,14 @@ export function CreateServerPage() {
     }
     setBusy(true);
     try {
+      const connection = creationConnectionChoice(connectionOptions.data, connectionChoice);
       const submitted = {
         ...submitValues,
         ...(agreement ? { [agreement.field]: true } : {}),
         name,
         limits: { memory, cpu, ...(!shared ? { disk } : {}) },
         autoStart,
+        ...(connection ? { connection } : {}),
       };
       const response = await module.handlers[module.descriptor.creation.createHandler]?.(
         gameUiClient,
@@ -485,6 +496,14 @@ export function CreateServerPage() {
                   [t('gameUi.memory'), format.number(memory)],
                   [t('gameUi.cpu'), format.number(cpu)],
                 ]}
+              />
+              <CreationConnection
+                options={connectionOptions}
+                value={connectionChoice}
+                onChange={(choice) => {
+                  setConnectionChoice(choice);
+                  key.current = idempotencyKey();
+                }}
               />
               {agreement && (
                 <p className="installer-agreement">

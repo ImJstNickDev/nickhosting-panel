@@ -21,6 +21,8 @@ import {
   effectiveNodeOverhead,
   effectiveUploadPolicy,
   enqueueServerOperation,
+  getGameConnectionOptions,
+  getServerConnectionOptions,
   listServerDns,
   listServers,
   listSftpCredentials,
@@ -1024,6 +1026,12 @@ export function registerServerRoutes(
       ),
     );
   });
+  app.get('/v1/games/:id/connection-options', async (c) =>
+    c.json(await getGameConnectionOptions(db, await principal(c), c.req.param('id'), env)),
+  );
+  app.get('/v1/servers/:id/connection-options', async (c) =>
+    c.json(await getServerConnectionOptions(db, await principal(c), c.req.param('id'), env)),
+  );
   app.get('/v1/servers/:id/dns', async (c) =>
     c.json(await listServerDns(db, await principal(c), c.req.param('id'))),
   );

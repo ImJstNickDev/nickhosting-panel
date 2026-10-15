@@ -59,7 +59,19 @@ export async function reconcileServers(
           .where('state', 'not in', ['active', 'deleted'])
           .limit(1)
           .executeTakeFirst();
-    if (!credential && !dns) return;
+    const shared =
+      credential || dns
+        ? []
+        : await db.selectFrom('game_integrations').select('manifest').execute();
+    if (
+      !credential &&
+      !dns &&
+      !shared.some(
+        (game) =>
+          (game.manifest as { connection?: { mode?: string } }).connection?.mode === 'shared-host',
+      )
+    )
+      return;
   }
   const result = await (await management()).reconcile();
   if (result.external.failed)

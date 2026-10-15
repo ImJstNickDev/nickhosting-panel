@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { CloudflareDnsProvider, SftpGoAdapter } from '@nickhosting/external-services';
@@ -172,6 +172,23 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       role: 'game',
       protocols: ['tcp'],
       is_primary: true,
+    })
+    .execute();
+  const allocation = await db
+    .selectFrom('server_allocations')
+    .select('id')
+    .where('server_id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  await db
+    .insertInto('gateway_routes')
+    .values({
+      id: randomUUID(),
+      gateway_id: randomUUID(),
+      server_id: serverId,
+      allocation_id: allocation.id,
+      public_address: '192.0.2.10',
+      public_port: 25000 + number,
+      transport: 'tcp',
     })
     .execute();
   const users = new Map<string, Record<string, unknown>>();
@@ -2023,5 +2040,366 @@ describe('automatic personal primary SFTP reconciliation', () => {
       .where('id', '=', f.serverId)
       .execute();
     expect(await reconcileExternalServices(f.db, f.options)).toEqual({ recovered: 1, failed: 0 });
+  });
+});
+
+describe('managed domain choices and durable automatic addresses', () => {
+  it('recovers legacy zone intents after domain choices change without adopting another zone', async () => {
+    const f = await fixture();
+    const id = randomUUID();
+    await assignServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { assignmentId: id, subdomain: f.subdomain },
+      f.options,
+    );
+    const row = await f.db
+      .selectFrom('dns_assignments')
+      .select('plan')
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const intent = row.plan as { zoneId: string; instanceId: string };
+    await f.db
+      .updateTable('dns_assignments')
+      .set({
+        plan: JSON.stringify({
+          ...intent,
+          version: 1,
+          scope: createHash('sha256')
+            .update(JSON.stringify([intent.zoneId, intent.instanceId]))
+            .digest('hex'),
+        }),
+        state: 'uncertain',
+      })
+      .where('id', '=', id)
+      .execute();
+    const env: NodeJS.ProcessEnv = {
+      ...f.options.env,
+      NH_DNS_DOMAINS: JSON.stringify([
+        {
+          id: 'replacement',
+          hostname: 'other.test',
+          zoneId: 'b'.repeat(32),
+          target: '192.0.2.20',
+          enabled: true,
+        },
+      ]),
+    };
+    delete env.NH_CLOUDFLARE_ZONE_ID;
+    await reconcileExternalServices(f.db, { ...f.options, env });
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]).toMatchObject({
+      state: 'active',
+      connection: { hostname: `${f.subdomain}.example.test` },
+    });
+    expect(f.records.size).toBe(2);
+  });
+
+  it('cancels a foreign-name failure without deleting foreign records and permits a fresh default', async () => {
+    const f = await fixture();
+    const foreign = {
+      id: 'f'.repeat(32),
+      type: 'A',
+      name: `${f.subdomain}.example.test`,
+      content: '192.0.2.10',
+      ttl: 120,
+      proxied: false,
+      comment: 'unrelated-owner',
+    };
+    f.records.set(foreign.id, foreign);
+    const id = randomUUID();
+    await expect(
+      assignServerDns(
+        f.db,
+        f.context,
+        f.serverId,
+        { assignmentId: id, subdomain: f.subdomain },
+        f.options,
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]?.state).toBe('uncertain');
+    await deleteServerDns(f.db, f.context, f.serverId, id, f.options);
+    expect(f.records.get(foreign.id)).toEqual(foreign);
+    const fresh = await assignServerDns(f.db, f.context, f.serverId, {}, f.options);
+    expect(fresh.state).toBe('active');
+    expect(fresh.id).not.toBe(id);
+    expect(f.records.get(foreign.id)).toEqual(foreign);
+  });
+
+  it('adopts a pre-preference assignment without creating a second primary', async () => {
+    const f = await fixture();
+    const original = await assignServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { subdomain: f.subdomain },
+      f.options,
+    );
+    await f.db.deleteFrom('server_dns_preferences').where('server_id', '=', f.serverId).execute();
+    const calls = f.dnsCalls.length;
+    expect((await assignServerDns(f.db, f.context, f.serverId, {}, f.options)).id).toBe(
+      original.id,
+    );
+    expect(f.dnsCalls).toHaveLength(calls);
+    await expect(
+      assignServerDns(
+        f.db,
+        f.context,
+        f.serverId,
+        { assignmentId: randomUUID(), subdomain: 'another-name' },
+        f.options,
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(await f.db.selectFrom('dns_assignments').select('id').execute()).toHaveLength(1);
+  });
+
+  async function shared(f: Awaited<ReturnType<typeof fixture>>, customizable = true) {
+    const mapping = await f.db
+      .selectFrom('managed_servers as s')
+      .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
+      .select('m.game_id')
+      .where('s.id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    await sql`update game_integrations set manifest=jsonb_set(manifest,'{connection}',${JSON.stringify({ mode: 'shared-host', defaultLabel: 'fixture-shared', allowCustomSubdomain: customizable })}::jsonb) where id=${mapping.game_id}`.execute(
+      f.db,
+    );
+  }
+  it('does not opt existing servers into automatic publication, then persists one generated name after explicit opt-in', async () => {
+    const f = await fixture();
+    await reconcileExternalServices(f.db, f.options);
+    expect(f.dnsCalls).toEqual([]);
+    const generated = await assignServerDns(f.db, f.context, f.serverId, {}, f.options);
+    expect(generated.connection.hostname).toMatch(/^[a-z]+-[a-z]+-[a-z]+\.example\.test$/);
+    expect(
+      (await assignServerDns(f.db, f.context, f.serverId, {}, f.options)).connection.hostname,
+    ).toBe(generated.connection.hostname);
+    expect(f.records.size).toBe(2);
+  });
+  it('pins generated preview and resolves Gateway public port instead of backend port', async () => {
+    const f = await fixture();
+    await f.db
+      .updateTable('gateway_routes')
+      .set({ public_port: 28001 })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const preview = await previewServerDns(f.db, f.context, f.serverId, {}, f.options);
+    expect(preview.port).toBe(28001);
+    expect(preview.records[1]).toMatchObject({ type: 'SRV', data: { port: 28001 } });
+    const saved = await assignServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { subdomain: preview.subdomain, domainId: preview.domainId },
+      f.options,
+    );
+    expect(saved.connection).toMatchObject({
+      hostname: preview.hostname,
+      displayAddress: preview.hostname,
+    });
+  });
+  it('does not reserve names when credentials are unavailable', async () => {
+    const f = await fixture();
+    const env = { ...f.options.env };
+    delete env.NH_CLOUDFLARE_API_TOKEN;
+    await expect(
+      assignServerDns(
+        f.db,
+        f.context,
+        f.serverId,
+        { subdomain: f.subdomain },
+        { ...f.options, env },
+      ),
+    ).rejects.toMatchObject({ code: 'configuration_invalid' });
+    expect(await f.db.selectFrom('dns_hostname_reservations').selectAll().execute()).toEqual([]);
+    expect(await f.db.selectFrom('dns_assignments').selectAll().execute()).toEqual([]);
+  });
+  it('applies domain policies and an empty-by-default term blacklist without changing existing names', async () => {
+    const f = await fixture();
+    const env: NodeJS.ProcessEnv = {
+      ...f.options.env,
+      NH_DNS_DOMAINS: JSON.stringify([
+        {
+          id: 'first',
+          hostname: 'example.test',
+          zoneId: 'a'.repeat(32),
+          target: '192.0.2.10',
+          enabled: true,
+        },
+        {
+          id: 'second',
+          hostname: 'other.test',
+          zoneId: 'b'.repeat(32),
+          target: '192.0.2.20',
+          enabled: true,
+        },
+      ]),
+      NH_DNS_BLOCKED_TERMS: JSON.stringify([{ value: 'bad', match: 'word' }]),
+    };
+    await expect(
+      previewServerDns(
+        f.db,
+        f.context,
+        f.serverId,
+        { domainId: 'second', subdomain: 'a-bad-name' },
+        { ...f.options, env },
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    const plan = await previewServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { domainId: 'second', subdomain: 'valid-name' },
+      { ...f.options, env },
+    );
+    expect(plan.hostname).toBe('valid-name.other.test');
+    expect(plan.records[0]).toMatchObject({ content: '192.0.2.20' });
+  });
+  it('renames across zones, keeps the old confirmed address during failure, then recovers and quarantines the old name', async () => {
+    const f = await fixture();
+    const options = {
+      ...f.options,
+      env: {
+        ...f.options.env,
+        NH_DNS_DOMAINS: JSON.stringify([
+          {
+            id: 'first',
+            hostname: 'example.test',
+            zoneId: 'a'.repeat(32),
+            target: '192.0.2.10',
+            enabled: true,
+          },
+          {
+            id: 'second',
+            hostname: 'other.test',
+            zoneId: 'b'.repeat(32),
+            target: '192.0.2.20',
+            enabled: true,
+          },
+        ]),
+        NH_DNS_NAME_REUSE_DELAY_SECONDS: '60',
+      },
+    };
+    const id = randomUUID();
+    await assignServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { assignmentId: id, domainId: 'first', subdomain: 'old-name' },
+      options,
+    );
+    f.failDns(true);
+    await expect(
+      updateServerDns(
+        f.db,
+        f.context,
+        f.serverId,
+        id,
+        { domainId: 'second', subdomain: 'new-name' },
+        options,
+      ),
+    ).rejects.toBeDefined();
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]?.connection.hostname).toBe(
+      'old-name.example.test',
+    );
+    expect(f.records.size).toBe(2);
+    f.failDns(false);
+    await reconcileExternalServices(f.db, options);
+    expect((await listServerDns(f.db, f.context, f.serverId))[0]).toMatchObject({
+      state: 'active',
+      connection: { hostname: 'new-name.other.test' },
+    });
+    expect(
+      [...f.records.values()].every((record) =>
+        String(record.name).includes('new-name.other.test'),
+      ),
+    ).toBe(true);
+    await deleteServerDns(f.db, f.context, f.serverId, id, options);
+    await expect(
+      assignServerDns(
+        f.db,
+        f.context,
+        f.serverId,
+        { assignmentId: randomUUID(), domainId: 'first', subdomain: 'old-name' },
+        options,
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    f.tick();
+    await assignServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { assignmentId: randomUUID(), domainId: 'first', subdomain: 'old-name' },
+      options,
+    );
+  });
+  it('keeps shared host ownership after server cleanup and removes old custom records when reverting to shared', async () => {
+    const f = await fixture();
+    await shared(f);
+    const id = randomUUID();
+    await assignServerDns(
+      f.db,
+      f.context,
+      f.serverId,
+      { assignmentId: id, subdomain: 'custom-name' },
+      f.options,
+    );
+    expect(f.records.size).toBe(1);
+    const result = await updateServerDns(f.db, f.context, f.serverId, id, {}, f.options);
+    expect(result.connection.displayAddress).toMatch(/^fixture-shared\.example\.test:\d+$/);
+    expect(f.records.size).toBe(1);
+    expect([...f.records.values()][0]?.name).toBe('fixture-shared.example.test');
+    await deleteServerDns(f.db, f.context, f.serverId, id, f.options);
+    expect(f.records.size).toBe(1);
+    expect(await f.db.selectFrom('shared_dns_hosts').select('state').execute()).toEqual([
+      { state: 'active' },
+    ]);
+  });
+  it('updates owned shared targets and uses the configured host instead of a direct endpoint override', async () => {
+    const f = await fixture();
+    await shared(f);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'direct' })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.db
+      .updateTable('server_allocations')
+      .set({ direct_endpoint: JSON.stringify({ hostname: 'different.example.test', port: 27001 }) })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const created = await assignServerDns(f.db, f.context, f.serverId, {}, f.options);
+    expect(created.connection.displayAddress).toBe('fixture-shared.example.test:27001');
+    const before = [...f.records.values()][0];
+    expect(before).toMatchObject({ content: '192.0.2.10' });
+    await reconcileExternalServices(f.db, {
+      ...f.options,
+      env: { ...f.options.env, NH_DNS_TARGET: '192.0.2.99' },
+    });
+    expect(f.records.size).toBe(1);
+    expect([...f.records.values()][0]).toMatchObject({
+      id: before?.id,
+      comment: before?.comment,
+      content: '192.0.2.99',
+    });
+  });
+  it('reconciles new creation preferences once without requiring a browser session', async () => {
+    const f = await fixture();
+    await f.db
+      .insertInto('server_dns_preferences')
+      .values({
+        server_id: f.serverId,
+        domain_id: 'legacy',
+        subdomain: null,
+        assignment_id: null,
+        enabled: true,
+      })
+      .execute();
+    await f.db.deleteFrom('session').where('userId', '=', f.context.actorUserId).execute();
+    await reconcileExternalServices(f.db, f.options);
+    const rows = await f.db.selectFrom('dns_assignments').selectAll().execute();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.state).toBe('active');
+    await reconcileExternalServices(f.db, f.options);
+    expect(await f.db.selectFrom('dns_assignments').select('id').execute()).toHaveLength(1);
   });
 });

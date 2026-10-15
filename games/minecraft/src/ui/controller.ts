@@ -294,6 +294,13 @@ export function createMinecraftUiController(client: GameUiClient) {
             })
             .strict(),
           autoStart: z.boolean().default(true),
+          connection: z
+            .object({
+              domainId: z.string().min(1).max(80).optional(),
+              subdomain: z.string().max(63).optional(),
+            })
+            .strict()
+            .optional(),
           minecraft: z
             .object({ choiceId: uuid, configuration: minecraftUiConfigurationSchema })
             .strict(),

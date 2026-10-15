@@ -63,6 +63,11 @@ const translationKey = z.string().regex(/^games\.[a-z][a-z0-9-]*\.[a-zA-Z0-9_.-]
 const settingKey = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/);
 
 export const connectionModeSchema = z.discriminatedUnion('mode', [
+  z.strictObject({
+    mode: z.literal('shared-host'),
+    defaultLabel: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/),
+    allowCustomSubdomain: z.boolean(),
+  }),
   z
     .object({
       mode: z.literal('custom-subdomain'),

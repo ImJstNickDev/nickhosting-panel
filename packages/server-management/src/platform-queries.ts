@@ -1059,7 +1059,7 @@ export async function getPlatformConnections(
   env: Environment = {},
 ) {
   const server = await scopedServer(db, context, serverId);
-  const [settings, mapping, allocations, routes, assignments] = await Promise.all([
+  const [settings, mapping, allocations, routes, assignments, preference] = await Promise.all([
     getSettings(db, env),
     db
       .selectFrom('runtime_egg_mappings as m')
@@ -1087,26 +1087,75 @@ export async function getPlatformConnections(
       .execute(),
     db
       .selectFrom('dns_assignments')
-      .select(['hostname', 'state'])
+      .select(['id', 'hostname', 'state', 'plan'])
       .where('server_id', '=', serverId)
       .where('state', '!=', 'deleted')
       .execute(),
+    db
+      .selectFrom('server_dns_preferences')
+      .select(['assignment_id', 'enabled'])
+      .where('server_id', '=', serverId)
+      .executeTakeFirst(),
   ]);
   const manifest = gameManifestSchema.safeParse(mapping.manifest),
     connection = manifest.success ? manifest.data.connection : null;
+  const assignment =
+    assignments.find((a) => a.id === preference?.assignment_id) ??
+    assignments.find((a) => a.state === 'active');
+  const intent = assignment?.plan as
+    | {
+        connection?: {
+          hostname: string;
+          port: number;
+          displayAddress: string;
+          records: Array<{ type: string; data?: { port: number } }>;
+        };
+        confirmedConnection?: {
+          hostname: string;
+          port: number;
+          displayAddress: string;
+          records: Array<{ type: string; data?: { port: number } }>;
+        };
+      }
+    | undefined;
+  const confirmed =
+    assignment?.state === 'active' ? intent?.connection : intent?.confirmedConnection;
   const hostname =
-    server.connection_mode === 'direct'
-      ? allocations.find((entry) => entry.is_primary)?.direct_endpoint?.hostname
+    confirmed?.hostname ??
+    (server.connection_mode === 'direct'
+      ? allocations.find((a) => a.is_primary)?.direct_endpoint?.hostname
       : connection?.mode === 'static-host-port'
-        ? settings.values.staticGameHostname
-        : assignments.find((a) => a.state === 'active')?.hostname;
+        ? (settings.values as unknown as Record<string, string>)[connection.hostnameSettingKey]
+        : undefined);
+  const display = (
+    host: string | null,
+    port: number | null,
+    primary: boolean,
+    transport: string,
+  ) => {
+    if (!host || !port) return null;
+    const srv = connection?.mode === 'custom-subdomain' ? connection.srv : undefined;
+    return primary &&
+      confirmed?.hostname === host &&
+      confirmed.port === port &&
+      srv?.proto === transport &&
+      confirmed.records.some((r) => r.type === 'SRV' && r.data?.port === port)
+      ? host
+      : `${host.includes(':') ? `[${host}]` : host}:${port}`;
+  };
   return {
     mode: connection?.mode ?? null,
     connectionMode: server.connection_mode,
+    addressState: assignment?.state ?? (preference?.enabled ? 'pending' : 'unconfigured'),
+    primaryDnsAssignmentId: assignment?.id ?? null,
     reachability: server.connection_mode === 'direct' ? ('unverified' as const) : null,
     hostname: hostname ?? null,
     srv: connection?.mode === 'custom-subdomain' ? (connection.srv ?? null) : null,
-    dns: assignments,
+    dns: assignments.map(({ id, state, plan }) => ({
+      id,
+      state,
+      hostname: (plan as { connection?: { hostname?: string } }).connection?.hostname ?? null,
+    })),
     ports: allocations.flatMap((allocation) =>
       allocation.protocols.map((transport) => {
         if (server.connection_mode === 'direct') {
@@ -1116,7 +1165,17 @@ export async function getPlatformConnections(
             primary: allocation.is_primary,
             transport,
             port: endpoint?.port ?? null,
-            hostname: endpoint?.hostname ?? null,
+            hostname: allocation.is_primary
+              ? (hostname ?? endpoint?.hostname ?? null)
+              : (endpoint?.hostname ?? null),
+            displayAddress: display(
+              allocation.is_primary
+                ? (hostname ?? endpoint?.hostname ?? null)
+                : (endpoint?.hostname ?? null),
+              endpoint?.port ?? null,
+              allocation.is_primary,
+              transport,
+            ),
             status: endpoint ? ('configured' as const) : ('unconfigured' as const),
           };
         }
@@ -1128,7 +1187,21 @@ export async function getPlatformConnections(
           primary: allocation.is_primary,
           transport,
           port: route?.public_port ?? null,
-          hostname: route ? (hostname ?? route.public_address) : null,
+          hostname: route
+            ? allocation.is_primary
+              ? (hostname ?? route.public_address)
+              : route.public_address
+            : null,
+          displayAddress: display(
+            route
+              ? allocation.is_primary
+                ? (hostname ?? route.public_address)
+                : route.public_address
+              : null,
+            route?.public_port ?? null,
+            allocation.is_primary,
+            transport,
+          ),
           status: !route
             ? ('unconfigured' as const)
             : !route.enabled

@@ -37,6 +37,42 @@ beforeEach(async () => {
 });
 
 describe('Owner health from actual bounded evidence', () => {
+  it('reports configured enabled multi-domain DNS without requiring legacy zone settings', async () => {
+    const env = {
+      NH_DNS_INSTANCE_ID: randomUUID(),
+      NH_DNS_DOMAINS: JSON.stringify([
+        {
+          id: 'test',
+          hostname: 'example.test',
+          zoneId: 'a'.repeat(32),
+          target: '192.0.2.10',
+          enabled: true,
+        },
+      ]),
+      NH_CLOUDFLARE_API_TOKEN: 'fixture',
+    };
+    expect(
+      (await getOwnerHealth(f.db, f.owner, env, { management, redisProbe })).services.dns,
+    ).toEqual({ configured: true, writes: 'unverified' });
+    const disabled = {
+      ...env,
+      NH_DNS_DOMAINS: JSON.stringify([
+        {
+          id: 'test',
+          hostname: 'example.test',
+          zoneId: 'a'.repeat(32),
+          target: '192.0.2.10',
+          enabled: false,
+        },
+      ]),
+    };
+    expect(
+      (await getOwnerHealth(f.db, f.owner, disabled, { management, redisProbe })).services.dns
+        .configured,
+    ).toBe(false);
+    expect(management).not.toHaveBeenCalled();
+  });
+
   it('requires regular Owner authority before probes', async () => {
     await expect(
       getOwnerHealth(f.db, f.context, {}, { management, redisProbe }),

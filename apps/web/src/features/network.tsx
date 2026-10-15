@@ -3,21 +3,24 @@ import { useState } from 'react';
 import { api } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
+import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
   Badge,
-  Check,
+  ConfirmDialog,
   Dialog,
   Empty,
   ErrorNotice,
-  Input,
   Loading,
   Notice,
   Section,
-  Select,
-  Time,
-  text,
 } from '../components/ui.js';
+import { assignmentConnectionChoice } from './connection.api.js';
+import {
+  type ConnectionChoice,
+  ConnectionFields,
+  type ConnectionOptions,
+} from './connection-fields.js';
 import {
   type Connections,
   type DnsAssignments,
@@ -39,32 +42,176 @@ export function NetworkPage({ serverId }: { serverId: string }) {
   const dns = useQuery({
     queryKey: ['dns', serverId],
     queryFn: () => api<DnsAssignments>(`${serverPath(serverId)}/dns`),
+    refetchInterval: 15000,
   });
-  const [plan, setPlan] = useState<{
-    value: DnsPlan;
-    request: { subdomain: string; portRole?: string };
-    assignmentId?: string;
-  }>();
+  const options = useQuery({
+    queryKey: ['connection-options', 'server', serverId],
+    queryFn: () => api<ConnectionOptions>(`${serverPath(serverId)}/connection-options`),
+  });
   const [remove, setRemove] = useState<DnsAssignments[number]>();
-  const [copied, setCopied] = useState<string>();
-  const [copyError, setCopyError] = useState<unknown>();
+  const [editing, setEditing] = useState(false),
+    [choice, setChoice] = useState<ConnectionChoice>({});
+  const [plan, setPlan] = useState<DnsPlan>(),
+    [error, setError] = useState<unknown>(),
+    [copied, setCopied] = useState(false);
   const canManage =
     server.data?.permissions.manage && session.data?.context.sessionType === 'regular';
-  const roles = [...new Set(connection.data?.ports.map((p) => p.role))];
+  const assignment = connection.data?.primaryDnsAssignmentId
+    ? dns.data?.find((item) => item.id === connection.data?.primaryDnsAssignmentId)
+    : (dns.data?.find((item) => item.state === 'active') ?? dns.data?.[0]);
+  const primary = connection.data?.ports.find((port) => port.primary && port.displayAddress);
+  const address = primary?.displayAddress;
   async function refresh() {
     await Promise.all([connection.refetch(), dns.refetch()]);
   }
+  async function save() {
+    await api(`${serverPath(serverId)}/dns${assignment ? `/${assignment.id}` : ''}`, {
+      method: assignment ? 'PUT' : 'POST',
+      body: choice,
+    });
+    setEditing(false);
+    setPlan(undefined);
+    await refresh();
+  }
   return (
     <>
-      <Section title={t('web.network')}>
+      <Section title={t('service.address')}>
         {connection.isPending ? (
           <Loading />
         ) : connection.error ? (
           <ErrorNotice error={connection.error} />
-        ) : !connection.data.ports.length ? (
-          <Empty text={t('service.noConnection')} />
         ) : (
-          <div className="table-scroll">
+          <>
+            <div className="connection-primary">
+              {address ? <code>{address}</code> : <Empty text={t('service.noConnection')} />}
+              {assignment ? (
+                <Badge value={assignment.state} />
+              ) : connection.data.addressState === 'pending' ? (
+                <Badge value="pending" />
+              ) : null}
+              <div className="connection-actions">
+                {address && (
+                  <Tooltip content={t(copied ? 'web.copied' : 'web.copy')}>
+                    <button
+                      type="button"
+                      aria-label={t('web.copy')}
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(address);
+                          setCopied(true);
+                          setError(undefined);
+                        } catch (failure) {
+                          setError(failure);
+                        }
+                      }}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                      >
+                        <path d="M9 8h11v13H9z M5 16H3V3h11v2" />
+                      </svg>
+                    </button>
+                  </Tooltip>
+                )}
+                {canManage && assignment && ['pending', 'uncertain'].includes(assignment.state) && (
+                  <Tooltip content={t('connection.remove')}>
+                    <button
+                      type="button"
+                      className="connection-remove"
+                      aria-label={t('connection.remove')}
+                      onClick={() => setRemove(assignment)}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                      >
+                        <path d="M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7" />
+                      </svg>
+                    </button>
+                  </Tooltip>
+                )}
+                {canManage && options.data?.configured && options.data.customizable && (
+                  <Tooltip content={t('connection.edit')}>
+                    <button
+                      type="button"
+                      aria-label={t('connection.edit')}
+                      disabled={Boolean(
+                        (connection.data.primaryDnsAssignmentId && !assignment) ||
+                          (assignment && assignment.state !== 'active'),
+                      )}
+                      onClick={() => {
+                        setChoice(assignmentConnectionChoice(assignment, options.data));
+                        setPlan(undefined);
+                        setEditing(true);
+                      }}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                      >
+                        <path d="m16 3 5 5-12 12-6 1 1-6Z M14 5l5 5" />
+                      </svg>
+                    </button>
+                  </Tooltip>
+                )}
+              </div>
+            </div>
+            {canManage &&
+              options.data?.configured &&
+              options.data.mode !== 'static-host-port' &&
+              connection.data.addressState !== 'pending' &&
+              !connection.data.primaryDnsAssignmentId &&
+              !assignment && (
+                <ActionForm
+                  submitLabel={t('connection.activate')}
+                  success={false}
+                  onSubmit={async () => {
+                    await api(`${serverPath(serverId)}/dns`, { body: {} });
+                    await refresh();
+                  }}
+                >
+                  {null}
+                </ActionForm>
+              )}
+            {assignment && assignment.state !== 'active' && (
+              <p className="muted">{t('service.addressPending')}</p>
+            )}
+            {options.data && !options.data.configured && (
+              <p className="muted">{t('connection.unconfigured')}</p>
+            )}
+            {connection.data.connectionMode === 'direct' && (
+              <Notice>{t('service.directReachability')}</Notice>
+            )}
+            {Boolean(error) && <ErrorNotice error={error} />}
+            {dns.error && <ErrorNotice error={dns.error} />}
+            {options.error && <ErrorNotice error={options.error} />}
+          </>
+        )}
+      </Section>
+      {connection.data && connection.data.ports.length > 0 && (
+        <Section title={t('connection.ports')}>
+          <section
+            className="table-scroll connection-ports"
+            aria-label={t('connection.ports')}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users must be able to scroll the named ports table.
+            tabIndex={0}
+          >
             <table>
               <thead>
                 <tr>
@@ -72,179 +219,89 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                   <th>{t('service.address')}</th>
                   <th>{t('service.transport')}</th>
                   <th>{t('web.status')}</th>
-                  <th>{t('web.actions')}</th>
                 </tr>
               </thead>
               <tbody>
-                {connection.data.ports.map((port) => {
-                  const address =
-                    port.hostname && port.port
-                      ? `${port.hostname.includes(':') ? `[${port.hostname}]` : port.hostname}:${port.port}`
-                      : null;
-                  return (
-                    <tr key={`${port.role}:${port.transport}`}>
-                      <td>{port.role}</td>
-                      <td>
-                        <code>{address ?? t('web.unconfigured')}</code>
-                      </td>
-                      <td>{port.transport.toUpperCase()}</td>
-                      <td>
-                        <Badge
-                          value={port.status}
-                          label={
-                            port.status === 'configured' ? t('service.directConfigured') : undefined
-                          }
-                        />
-                      </td>
-                      <td>
-                        {address && (
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={async () => {
-                              try {
-                                await navigator.clipboard.writeText(address);
-                                setCopied(address);
-                                setCopyError(undefined);
-                              } catch (error) {
-                                setCopyError(error);
-                              }
-                            }}
-                          >
-                            {t(copied === address ? 'web.copied' : 'web.copy')}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {connection.data.ports.map((port) => (
+                  <tr key={`${port.role}:${port.transport}`}>
+                    <td>{port.role}</td>
+                    <td>
+                      <code>{port.displayAddress ?? t('web.unconfigured')}</code>
+                    </td>
+                    <td>{port.transport.toUpperCase()}</td>
+                    <td>
+                      <Badge
+                        value={port.status}
+                        label={
+                          port.status === 'configured' ? t('service.directConfigured') : undefined
+                        }
+                      />
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
-          </div>
-        )}
-        {connection.data?.connectionMode === 'direct' && (
-          <Notice>{t('service.directReachability')}</Notice>
-        )}
-        {Boolean(copyError) && <ErrorNotice error={copyError} />}
-        {connection.data?.srv && <p className="muted">{t('service.srvInfo')}</p>}
-      </Section>
-      {connection.data?.mode === 'custom-subdomain' && (
-        <Section title={t('service.subdomains')}>
-          {dns.isPending ? (
-            <Loading />
-          ) : dns.error ? (
-            <ErrorNotice error={dns.error} />
-          ) : (
-            <div className="stack">
-              {dns.data.map((assignment) => (
-                <div className="section-heading" key={assignment.id}>
-                  <div>
-                    <code>{assignment.connection.displayAddress}</code>{' '}
-                    <Badge value={assignment.state} />
-                    <p>
-                      <Time value={assignment.updatedAt} />
-                    </p>
-                  </div>
-                  {canManage && (
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => setRemove(assignment)}
-                    >
-                      {t('web.delete')}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {canManage && (
-            <ActionForm
-              submitLabel={t('service.previewAddress')}
-              success={false}
-              onSubmit={async (data) => {
-                const request = {
-                  subdomain: text(data, 'subdomain'),
-                  ...(text(data, 'role') ? { portRole: text(data, 'role') } : {}),
-                };
-                const value = await api<DnsPlan>(`${serverPath(serverId)}/dns/preview`, {
-                  body: request,
-                });
-                setPlan({ value, request, assignmentId: text(data, 'assignment') || undefined });
-              }}
-            >
-              <Input
-                label={t('service.subdomain')}
-                name="subdomain"
-                required
-                pattern="[a-z0-9][a-z0-9-]*"
-                maxLength={63}
-              />
-              {roles.length > 1 && (
-                <Select label={t('service.portRole')} name="role">
-                  {roles.map((role) => (
-                    <option key={role} value={role}>
-                      {role}
-                    </option>
-                  ))}
-                </Select>
-              )}
-              {Boolean(dns.data?.length) && (
-                <Select label={t('service.assignment')} name="assignment">
-                  <option value="">{t('service.newAddress')}</option>
-                  {dns.data?.map((item) => (
-                    <option value={item.id} key={item.id}>
-                      {item.connection.hostname}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </ActionForm>
-          )}
+          </section>
         </Section>
       )}
-      <Dialog
-        open={Boolean(plan)}
-        title={t('service.previewAddress')}
-        onClose={() => setPlan(undefined)}
+      <ConfirmDialog
+        open={Boolean(remove)}
+        title={t('connection.remove')}
+        confirmLabel={t('web.delete')}
+        destructive
+        onClose={() => setRemove(undefined)}
+        onConfirm={async () => {
+          if (!remove) return;
+          await api(`${serverPath(serverId)}/dns/${remove.id}`, {
+            method: 'DELETE',
+            body: { confirm: true },
+          });
+          setRemove(undefined);
+          await refresh();
+        }}
       >
-        {plan && (
+        <p>{t('connection.removeHelp')}</p>
+      </ConfirmDialog>
+      <Dialog
+        open={editing}
+        title={t('connection.edit')}
+        onClose={() => {
+          setEditing(false);
+          setPlan(undefined);
+        }}
+      >
+        {options.data && (
           <ActionForm
-            submitLabel={t('web.confirm')}
+            submitLabel={t(plan ? 'web.save' : 'service.previewAddress')}
             success={false}
             onSubmit={async () => {
-              await api(
-                `${serverPath(serverId)}/dns${plan.assignmentId ? `/${plan.assignmentId}` : ''}`,
-                { method: plan.assignmentId ? 'PUT' : 'POST', body: plan.request },
-              );
-              setPlan(undefined);
-              await refresh();
+              if (plan) await save();
+              else {
+                const preview = await api<DnsPlan>(`${serverPath(serverId)}/dns/preview`, {
+                  body: choice,
+                });
+                setPlan(preview);
+                setChoice({
+                  ...(preview.domainId ? { domainId: preview.domainId } : {}),
+                  ...(preview.subdomain ? { subdomain: preview.subdomain } : {}),
+                });
+              }
             }}
           >
-            <p>
-              <code>{plan.value.displayAddress}</code>
-            </p>
-            <Notice>{t('service.addressPending')}</Notice>
-            <Check required label={t('web.confirm')} />
-          </ActionForm>
-        )}
-      </Dialog>
-      <Dialog open={Boolean(remove)} title={t('web.delete')} onClose={() => setRemove(undefined)}>
-        {remove && (
-          <ActionForm
-            submitLabel={t('web.delete')}
-            success={false}
-            onSubmit={async () => {
-              await api(`${serverPath(serverId)}/dns/${remove.id}`, {
-                method: 'DELETE',
-                body: { confirm: true },
-              });
-              setRemove(undefined);
-              await refresh();
-            }}
-          >
-            <p>{t('service.deleteAddressWarning', { hostname: remove.connection.hostname })}</p>
-            <Check required label={t('web.confirm')} />
+            <ConnectionFields
+              options={options.data}
+              value={choice}
+              onChange={(value) => {
+                setChoice(value);
+                setPlan(undefined);
+              }}
+            />
+            {plan && (
+              <>
+                <code>{plan.displayAddress}</code>
+                <p className="muted">{t('connection.replaceHelp')}</p>
+              </>
+            )}
           </ActionForm>
         )}
       </Dialog>

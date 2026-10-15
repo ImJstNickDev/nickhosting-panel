@@ -1,0 +1,114 @@
+.connection-label-domain {
+  display: flex;
+  align-items: end;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.connection-label-domain > label {
+  flex: 1;
+  min-width: 0;
+}
+.connection-domain-suffix {
+  padding-bottom: 0.65rem;
+  overflow-wrap: anywhere;
+}
+.creation-connection {
+  text-align: left;
+  margin-block: 1rem;
+}
+.connection-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+.connection-primary code {
+  font-size: 1.15rem;
+  overflow-wrap: anywhere;
+}
+.connection-primary .connection-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.35rem;
+}
+.connection-actions button {
+  padding: 0.4rem;
+  background: transparent;
+  color: inherit;
+  border-color: transparent;
+}
+.domain-editor {
+  display: grid;
+  gap: 1rem;
+}
+.domain-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
+}
+.domain-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  grid-column: 1 / -1;
+}
+.domain-terms {
+  display: grid;
+  gap: 0.5rem;
+}
+.domain-term {
+  display: flex;
+  align-items: end;
+  gap: 0.5rem;
+}
+.domain-term > label {
+  flex: 1;
+  min-width: 0;
+}
+.domain-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+@media (max-width: 600px) {
+  .domain-row {
+    grid-template-columns: 1fr;
+  }
+  .connection-label-domain {
+    flex-wrap: wrap;
+  }
+  .connection-label-domain > label {
+    flex-basis: 55%;
+  }
+  .domain-term {
+    flex-wrap: wrap;
+  }
+}
+
+.connection-actions button:hover {
+  background: #edf1f4;
+}
+
+.connection-ports table {
+  width: max-content;
+  min-width: 100%;
+}
+.connection-ports th,
+.connection-ports td,
+.connection-ports code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.domain-picks button[aria-pressed="true"],
+.domain-row-actions button[aria-pressed="true"] {
+  background: #e9f0fa;
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.connection-actions .connection-remove {
+  color: #ad2932;
+}

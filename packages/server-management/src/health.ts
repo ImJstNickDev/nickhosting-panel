@@ -327,9 +327,12 @@ export async function getOwnerHealth(
       },
       dns: {
         configured: Boolean(
-          config.cloudflareZoneId &&
-            config.dnsBaseDomain &&
-            config.dnsTarget &&
+          config.dnsInstanceId &&
+            (config.dnsDomains.length
+              ? config.dnsDomains.some(
+                  (domain) => domain.enabled && (domain.target ?? config.dnsTarget),
+                )
+              : config.cloudflareZoneId && config.dnsBaseDomain && config.dnsTarget) &&
             configured('cloudflareApiToken'),
         ),
         writes: 'unverified' as const,

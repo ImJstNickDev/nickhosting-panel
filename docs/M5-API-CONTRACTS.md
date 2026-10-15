@@ -1191,3 +1191,47 @@ a regrant waits for any old revocation before creating fresh credentials. Backgr
 cleanup continues after deletion of the last managed server. Issue #18's retained
 SSH transport limitation remains unchanged; this does not claim immediate transport
 termination. No database schema change is required.
+
+## Primary server addresses and Owner domain policies
+
+`GET /v1/games/:id/connection-options` authorizes game creation rollout;
+`GET /v1/servers/:id/connection-options` authorizes server read. They return
+`{mode,customizable,domains:[{id,hostname}],defaultDomainId,defaultHostname,
+supportsSrv,configured}`. They never expose provider keys or zone IDs to ordinary
+users. Configuration readiness is separate from external reachability.
+
+Creation accepts optional `connection:{domainId?,subdomain?}`. Omitted labels use
+server-side automatic naming; the saved preference follows the idempotent creation
+request. DNS preview/assignment/update accept `domainId` alongside the existing
+label/port-role fields. Preview returns the chosen label/domain so saving the
+preview cannot silently choose another random name. Existing servers activate a
+primary address explicitly through the DNS endpoint. Background reconciliation
+uses server-scoped service authority, not a fabricated Owner browser session.
+
+`GET /v1/platform/servers/:id/connections` supplies per-port `displayAddress`, plus `addressState` and
+`primaryDnsAssignmentId` for authoritative primary selection.
+Consumers must not reconstruct hostname/port strings: SRV applies only to the
+matching primary role and transport. Direct endpoints retain their explicit
+configuration and unverified external-reachability status. Gateway DNS uses the
+public route port, never an assumed backend port.
+
+Owner settings add `dnsDomains`, `dnsDefaultDomainId`, `dnsGamePolicies`,
+`dnsBlockedTerms`, and `dnsNameReuseDelaySeconds`. Corresponding environment keys
+are `NH_DNS_DOMAINS`, `NH_DNS_DEFAULT_DOMAIN_ID`, `NH_DNS_GAME_POLICIES`,
+`NH_DNS_BLOCKED_TERMS`, and `NH_DNS_NAME_REUSE_DELAY_SECONDS`; arrays/objects use
+JSON. Blacklist/default domain list are empty and reuse delay is zero initially.
+The existing protected settings write/reset and environment lock rules apply.
+
+Migration032 adds per-server preferences, shared-host intents and hostname
+reservations. It does not opt existing servers into publication. Durable DNS
+intents retain zone/ownership and the last confirmed connection during replacement.
+Preserve the new schema and intents during rollback: older code does not understand
+shared ownership or v2 intents. Do not drop tables to undo an application rollout;
+stop DNS reconciliation and restore compatible code after inspecting pending work.
+
+Shared-host target changes reconcile in the original zone. Changing the zone ID of
+an existing shared intent fails closed; retired shared names remain owned rather
+than being removed from existing connections automatically. Removing a chosen
+domain before a new server's initial DNS intent is prepared leaves its preference
+pending until the configuration is restored or an explicit replacement address is
+submitted. No record has been published in that pre-intent state.

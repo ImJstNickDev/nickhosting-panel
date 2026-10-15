@@ -255,13 +255,15 @@ export function planDnsChanges(input: {
       throw new DomainError('conflict');
   }
   const changes: DnsChange[] = [];
-  // Delete old types/names first so replacing A with CNAME is accepted by Cloudflare.
+  // Same-name type replacements need deletion first; different-name renames
+  // publish the replacement before removing the previous reachable address.
   for (const previous of input.ledger) {
     if (
       !desired.some((entry) => key(entry) === key(previous.record)) &&
       input.observed.some((entry) => entry.id === previous.id)
     )
-      changes.push({ action: 'delete', previous, record: previous.record });
+      if (desired.some((entry) => entry.name === previous.record.name))
+        changes.push({ action: 'delete', previous, record: previous.record });
   }
   for (const item of desired) {
     const previous = input.ledger.find((entry) => key(entry.record) === key(item));
@@ -275,6 +277,13 @@ export function planDnsChanges(input: {
       });
     else if (!equal(live as DnsRecord, item))
       changes.push({ action: 'update', previous, record: item });
+  }
+  for (const previous of input.ledger) {
+    if (
+      !desired.some((entry) => entry.name === previous.record.name) &&
+      input.observed.some((entry) => entry.id === previous.id)
+    )
+      changes.push({ action: 'delete', previous, record: previous.record });
   }
   return changes;
 }

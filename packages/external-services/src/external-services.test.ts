@@ -475,6 +475,37 @@ describe('DNS connection planning and Cloudflare ownership', () => {
     expect(fixture.records.size).toBe(0);
     expect(fixture.ledger).toHaveLength(0);
   });
+  it('publishes every replacement record before deleting the old hostname on rename', async () => {
+    const fixture = dnsFixture();
+    await fixture.provider.apply(
+      await fixture.provider.plan({
+        zoneId,
+        ownership: fixture.ownership,
+        desired: fixture.desired(),
+        ledger: [],
+      }),
+      fixture.callbacks,
+    );
+    const desired = planConnection({
+      mode: 'custom-subdomain',
+      zoneName: 'example.test',
+      subdomain: 'replacement',
+      port: 25565,
+      target: { type: 'A', content: '192.0.2.10' },
+      srv: { service: '_game', protocol: 'tcp' },
+    }).records;
+    const changes = await fixture.provider.plan({
+      zoneId,
+      ownership: fixture.ownership,
+      desired,
+      ledger: fixture.ledger,
+    });
+    expect(changes.map((c) => c.action)).toEqual(['create', 'create', 'delete', 'delete']);
+    await fixture.provider.apply(changes, fixture.callbacks);
+    expect(
+      [...fixture.records.values()].every((r) => r.name.includes('replacement.example.test')),
+    ).toBe(true);
+  });
   it('rejects foreign names regardless of matching content, and never adopts a prefix', async () => {
     const fixture = dnsFixture();
     const desired = fixture.desired();

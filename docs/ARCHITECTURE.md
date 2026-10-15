@@ -283,3 +283,15 @@ release supply responder behavior without per-client remote lookup. Backend
 installation availability is separate: supporting an Alpha wire format does not
 make an Alpha egg/runtime available. See [ADR0018](decisions/0018-minecraft-identity-and-protocol-families.md)
 and [multiprotocol behavior/evidence](MINECRAFT-MULTIPROTOCOL.md).
+
+### Integration-defined addresses (M5)
+
+The Game SDK declares personal generated/custom, shared configurable/fixed, or
+legacy static-host modes. Core resolves Owner domain eligibility and owns durable
+hostname reservations, server preferences and shared-host intents. Shared DNS has
+integration/domain lifetime; deleting one server cannot remove a shared host.
+Provisioning and periodic recovery reuse the existing external-service worker and
+Cloudflare adapter, with no second DNS queue or per-game provider implementation.
+The Connection tab, creation wizard and Console share authoritative address
+contracts; see [primary address API](M5-API-CONTRACTS.md#primary-server-addresses-and-owner-domain-policies)
+and [SDK DNS policy](GAME-INTEGRATIONS.md#dnsconnection-strategy).

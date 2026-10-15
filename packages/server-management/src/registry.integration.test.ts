@@ -43,6 +43,81 @@ function mappingInput() {
 }
 
 describe('managed registry, projects, runtime mapping and allocation ownership', () => {
+  it('freezes the requested DNS choice in idempotent creation and rejects unavailable choices', async () => {
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: {
+          ...f.manifest,
+          connection: {
+            mode: 'custom-subdomain',
+            zoneSettingKey: 'dnsBaseDomain',
+            srv: { service: '_fixture', proto: 'tcp' },
+          },
+        },
+      })
+      .where('id', '=', f.gameId)
+      .execute();
+    const env = {
+      NH_DNS_INSTANCE_ID: randomUUID(),
+      NH_DNS_TARGET: '192.0.2.10',
+      NH_DNS_DOMAINS: JSON.stringify([
+        { id: 'primary', hostname: 'games.example.test', zoneId: 'a'.repeat(32), enabled: true },
+      ]),
+    };
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...f.input(), connection: { domainId: 'missing', subdomain: 'cute-panda-bag' } },
+        env,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...f.input(), connection: { domainId: 'primary', subdomain: 'mail' } },
+        env,
+      ),
+    ).rejects.toThrow('validation_failed');
+    const request = {
+      ...f.input(),
+      connection: { domainId: 'primary', subdomain: 'cute-panda-bag' },
+    };
+    const result = await createManagedServer(f.db, f.adapter, f.context, request, env);
+    expect(await createManagedServer(f.db, f.adapter, f.context, request, env)).toEqual(result);
+    const preference = await f.db
+      .selectFrom('server_dns_preferences')
+      .selectAll()
+      .where('server_id', '=', result.serverId)
+      .executeTakeFirstOrThrow();
+    expect(preference).toMatchObject({
+      domain_id: 'primary',
+      subdomain: 'cute-panda-bag',
+      enabled: true,
+      assignment_id: null,
+    });
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...request, connection: { domainId: 'primary', subdomain: 'other-name' } },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    expect(
+      await f.db
+        .selectFrom('dns_assignments')
+        .select('id')
+        .where('server_id', '=', result.serverId)
+        .execute(),
+    ).toEqual([]);
+  });
+
   it('pins provisioning to the linked account rather than the node default and refuses pending accounts', async () => {
     await f.db
       .updateTable('provider_accounts')

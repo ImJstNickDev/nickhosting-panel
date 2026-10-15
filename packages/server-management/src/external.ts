@@ -1,5 +1,16 @@
+import { deleteDnsRow, reconcileAutomaticDns, runDns } from './dns.js';
+
+export {
+  assignServerDns,
+  deleteServerDns,
+  getGameConnectionOptions,
+  getServerConnectionOptions,
+  listServerDns,
+  previewServerDns,
+  updateServerDns,
+} from './dns.js';
+
 import { createHash, randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
 import {
   type AuthContext,
   assertAuthContext,
@@ -15,17 +26,12 @@ import {
   recordAudit,
 } from '@nickhosting/database';
 import {
-  CloudflareDnsProvider,
-  type ConnectionPlan,
-  type DnsOwnership,
+  type CloudflareDnsProvider,
   generateSftpPassword,
-  type OwnedDnsRecord,
-  planConnection,
   type SftpCredentialRef,
   type SftpCredentialRequest,
   SftpGoAdapter,
 } from '@nickhosting/external-services';
-import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
@@ -34,7 +40,6 @@ import { authorizeServer, parse } from './registry.js';
 import { serverStorageLimitBytes } from './storage-capacity.js';
 
 type SftpRow = Selectable<Database['external_sftp_credentials']>;
-type DnsRow = Selectable<Database['dns_assignments']>;
 type SftpProvider = Pick<
   SftpGoAdapter,
   'ensureCredential' | 'inspectCredential' | 'rotateCredential' | 'revokeCredential' | 'updateQuota'
@@ -62,15 +67,6 @@ type CredentialIntent = CredentialAuthority & {
   rotationId?: string;
   delivered: boolean;
 };
-interface DnsIntent {
-  version: 1;
-  context: AuthContext;
-  zoneId: string;
-  instanceId: string;
-  scope: string;
-  connection: ConnectionPlan;
-  action: 'apply' | 'delete';
-}
 const now = (options: ExternalServiceOptions) => options.now?.() ?? new Date();
 const fingerprint = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -150,7 +146,7 @@ async function credentialAudit(
     })
     .execute();
 }
-async function locked<T>(
+export async function locked<T>(
   db: Kysely<Database>,
   serverId: string,
   work: (connection: Kysely<Database>) => Promise<T>,
@@ -173,7 +169,7 @@ async function locked<T>(
     }
   });
 }
-async function dnsLocked<T>(db: Kysely<Database>, work: () => Promise<T>): Promise<T> {
+export async function dnsLocked<T>(db: Kysely<Database>, work: () => Promise<T>): Promise<T> {
   const result = await sql<{
     acquired: boolean;
   }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ':external:dns',0)) as acquired`.execute(
@@ -204,19 +200,6 @@ async function sftpProvider(db: Kysely<Database>, options: ExternalServiceOption
         dataRoot: config.sftpgoDataRoot,
         auth: { apiKey: key },
       }),
-  };
-}
-async function dnsProvider(db: Kysely<Database>, options: ExternalServiceOptions) {
-  const { values: config } = await getSettings(db, options.env);
-  const key = await getSecret(db, options.codec, 'cloudflareApiToken', options.env);
-  if (!config.cloudflareZoneId || !config.dnsInstanceId || !key)
-    throw new DomainError('configuration_invalid');
-  return {
-    config,
-    scope: fingerprint([config.cloudflareZoneId, config.dnsInstanceId]),
-    provider:
-      options.dnsFactory?.(config, key) ??
-      new CloudflareDnsProvider({ instanceId: config.dnsInstanceId, apiToken: key }),
   };
 }
 function credentialIntent(row: SftpRow, options: ExternalServiceOptions): CredentialIntent {
@@ -785,413 +768,6 @@ export async function revokeSftpCredential(
   });
 }
 
-const dnsRequest = z
-  .object({
-    subdomain: z
-      .string()
-      .regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/)
-      .optional(),
-    portRole: z
-      .string()
-      .regex(/^[a-z][a-z0-9-]{0,63}$/)
-      .optional(),
-  })
-  .strict();
-async function connectionPlan(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  const request = parse(dnsRequest, input);
-  const server = await authorizeServer(db, context, serverId, 'server:manage');
-  const mapping = await db
-    .selectFrom('runtime_egg_mappings')
-    .select('game_id')
-    .where('id', '=', server.mapping_id)
-    .executeTakeFirstOrThrow();
-  const game = await db
-    .selectFrom('game_integrations')
-    .select('manifest')
-    .where('id', '=', mapping.game_id)
-    .executeTakeFirstOrThrow();
-  const manifest = parse(gameManifestSchema, game.manifest);
-  const allocations = await db
-    .selectFrom('server_allocations')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .execute();
-  const allocation = request.portRole
-    ? allocations.find((entry) => entry.role === request.portRole)
-    : allocations.find((entry) => entry.is_primary);
-  if (!allocation || !manifest.ports.some((entry) => entry.role === allocation.role))
-    throw new DomainError('configuration_invalid');
-  const { values: config } = await getSettings(db, options.env);
-  const configured = (key: string): string => {
-    const value = (config as unknown as Record<string, unknown>)[key];
-    if (typeof value !== 'string' || !value) throw new DomainError('configuration_invalid');
-    return value;
-  };
-  const direct = server.connection_mode === 'direct' ? allocation.direct_endpoint : null;
-  if (server.connection_mode === 'direct' && !direct)
-    throw new DomainError('configuration_invalid');
-  const port = direct?.port ?? allocation.port;
-  if (manifest.connection.mode === 'static-host-port') {
-    if (request.subdomain) throw new DomainError('validation_failed');
-    return planConnection({
-      mode: 'static-host-port',
-      hostname: direct?.hostname ?? configured(manifest.connection.hostnameSettingKey),
-      port,
-    });
-  }
-  const dnsTarget = direct?.hostname ?? config.dnsTarget;
-  if (!request.subdomain || !dnsTarget) throw new DomainError('configuration_invalid');
-  if (manifest.connection.srv && !allocation.protocols.includes(manifest.connection.srv.proto))
-    throw new DomainError('configuration_invalid');
-  return planConnection({
-    mode: 'custom-subdomain',
-    zoneName: configured(manifest.connection.zoneSettingKey),
-    subdomain: request.subdomain,
-    port,
-    target: {
-      type: isIP(dnsTarget) === 4 ? 'A' : isIP(dnsTarget) === 6 ? 'AAAA' : 'CNAME',
-      content: dnsTarget,
-    },
-    srv: manifest.connection.srv
-      ? { service: manifest.connection.srv.service, protocol: manifest.connection.srv.proto }
-      : undefined,
-  });
-}
-export async function previewServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  return connectionPlan(db, context, serverId, input, options);
-}
-function publicDns(row: DnsRow) {
-  const intent = row.plan as DnsIntent;
-  return {
-    id: row.id,
-    serverId: row.server_id,
-    state: row.state,
-    connection: intent.connection,
-    updatedAt: row.updated_at,
-  };
-}
-export async function listServerDns(db: Kysely<Database>, context: AuthContext, serverId: string) {
-  await authorizeServer(db, context, serverId, 'server:read');
-  return (
-    await db
-      .selectFrom('dns_assignments')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .where('state', '!=', 'deleted')
-      .execute()
-  ).map(publicDns);
-}
-async function runDns(
-  db: Kysely<Database>,
-  row: DnsRow,
-  options: ExternalServiceOptions,
-): Promise<DnsRow> {
-  const intent = row.plan as DnsIntent;
-  const { provider, scope } = await dnsProvider(db, options);
-  if (intent.version !== 1 || intent.scope !== scope)
-    throw new DomainError('configuration_invalid');
-  const ownership: DnsOwnership = {
-    instanceId: intent.instanceId,
-    serverId: row.server_id,
-    assignmentId: row.ownership_token,
-  };
-  let ledger = row.ledger as OwnedDnsRecord[];
-  const persist = async () => {
-    await db
-      .updateTable('dns_assignments')
-      .set({ ledger: JSON.stringify(ledger), updated_at: now(options) })
-      .where('id', '=', row.id)
-      .execute();
-  };
-  const callbacks = {
-    onRecordCreated: async (entry: OwnedDnsRecord) => {
-      ledger = ledger.filter(
-        (old) =>
-          old.id !== entry.id &&
-          !(old.record.name === entry.record.name && old.record.type === entry.record.type),
-      );
-      ledger.push(entry);
-      await persist();
-    },
-    onRecordDeleted: async (entry: OwnedDnsRecord) => {
-      ledger = ledger.filter((old) => old.id !== entry.id);
-      await persist();
-    },
-  };
-  try {
-    if (intent.action === 'apply') {
-      await authorizeServer(
-        db,
-        await currentContext(db, intent.context),
-        row.server_id,
-        'server:manage',
-      );
-      await options.verifyServer(db, row.server_id);
-      const changes = await provider.plan({
-        zoneId: intent.zoneId,
-        ownership,
-        desired: intent.connection.records,
-        ledger,
-      });
-      await provider.apply(changes, callbacks);
-      const stale = ledger.filter(
-        (entry) =>
-          !intent.connection.records.some(
-            (desired) => desired.name === entry.record.name && desired.type === entry.record.type,
-          ),
-      );
-      await provider.apply(
-        stale.map((previous) => ({ action: 'delete', previous, record: previous.record })),
-        callbacks,
-      );
-      await db
-        .updateTable('dns_assignments')
-        .set({ state: 'active', updated_at: now(options) })
-        .where('id', '=', row.id)
-        .execute();
-    } else {
-      // Recover a create whose response was lost without ever creating missing records to delete them.
-      for (const recovered of await provider.inspectOwned({
-        zoneId: intent.zoneId,
-        ownership,
-        desired: intent.connection.records,
-      })) {
-        if (!ledger.some((entry) => entry.id === recovered.id)) {
-          ledger.push(recovered);
-          await persist();
-        }
-      }
-      await provider.apply(
-        ledger.map((previous) => ({ action: 'delete', previous, record: previous.record })),
-        callbacks,
-      );
-      await db
-        .updateTable('dns_assignments')
-        .set({ state: 'deleted', hostname: `deleted:${row.id}`, updated_at: now(options) })
-        .where('id', '=', row.id)
-        .execute();
-    }
-  } catch (error) {
-    await db
-      .updateTable('dns_assignments')
-      .set({
-        state: intent.action === 'delete' ? 'deleting' : 'uncertain',
-        updated_at: now(options),
-      })
-      .where('id', '=', row.id)
-      .execute();
-    throw error;
-  }
-  return db
-    .selectFrom('dns_assignments')
-    .selectAll()
-    .where('id', '=', row.id)
-    .executeTakeFirstOrThrow();
-}
-export async function assignServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  regular(context);
-  const value = parse(dnsRequest.extend({ assignmentId: z.uuid() }), input);
-  return locked(db, serverId, (connection) =>
-    dnsLocked(connection, async () => {
-      const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      const server = await authorizeServer(connection, verified, serverId, 'server:manage');
-      if (server.active_operation_id || !server.pterodactyl_uuid) throw new DomainError('conflict');
-      const plan = await connectionPlan(
-        connection,
-        verified,
-        serverId,
-        { subdomain: value.subdomain, portRole: value.portRole },
-        options,
-      );
-      if (!plan.records.length)
-        return { id: null, serverId, state: 'static' as const, connection: plan };
-      let row = await connection
-        .selectFrom('dns_assignments')
-        .selectAll()
-        .where('id', '=', value.assignmentId)
-        .executeTakeFirst();
-      if (row) {
-        const old = row.plan as DnsIntent;
-        if (
-          row.server_id !== serverId ||
-          row.state === 'deleted' ||
-          row.state === 'deleting' ||
-          old.context.actorUserId !== context.actorUserId ||
-          fingerprint(old.connection) !== fingerprint(plan)
-        )
-          throw new DomainError('conflict');
-      } else {
-        const occupied = await connection
-          .selectFrom('dns_assignments')
-          .select('id')
-          .where('hostname', '=', plan.hostname)
-          .executeTakeFirst();
-        if (occupied) throw new DomainError('conflict');
-        const { config, scope } = await dnsProvider(connection, options);
-        if (!config.cloudflareZoneId || !config.dnsInstanceId)
-          throw new DomainError('configuration_invalid');
-        const intent: DnsIntent = {
-          version: 1,
-          context: verified,
-          zoneId: config.cloudflareZoneId,
-          instanceId: config.dnsInstanceId,
-          scope,
-          connection: plan,
-          action: 'apply',
-        };
-        row = await connection.transaction().execute(async (tx) => {
-          const inserted = await tx
-            .insertInto('dns_assignments')
-            .values({
-              id: value.assignmentId,
-              server_id: serverId,
-              hostname: plan.hostname,
-              ownership_token: randomUUID(),
-              plan: JSON.stringify(intent),
-              ledger: '[]',
-              state: 'pending',
-            })
-            .returningAll()
-            .executeTakeFirstOrThrow();
-          await recordAudit(tx, verified, 'server.dns.assigned', {
-            serverId,
-            assignmentId: value.assignmentId,
-          });
-          return inserted;
-        });
-      }
-      if (row.state !== 'active') row = await runDns(connection, row, options);
-      return publicDns(row);
-    }),
-  );
-}
-export async function updateServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  assignmentId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  regular(context);
-  parse(z.uuid(), assignmentId);
-  return locked(db, serverId, (connection) =>
-    dnsLocked(connection, async () => {
-      const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      const server = await authorizeServer(connection, verified, serverId, 'server:manage');
-      if (server.active_operation_id) throw new DomainError('conflict');
-      const row = await connection
-        .selectFrom('dns_assignments')
-        .selectAll()
-        .where('id', '=', assignmentId)
-        .where('server_id', '=', serverId)
-        .executeTakeFirst();
-      if (!row || row.state === 'deleted') throw new DomainError('not_found');
-      if (row.state !== 'active') throw new DomainError('conflict');
-      const plan = await connectionPlan(connection, verified, serverId, input, options);
-      if (!plan.records.length) throw new DomainError('conflict');
-      if (
-        await connection
-          .selectFrom('dns_assignments')
-          .select('id')
-          .where('hostname', '=', plan.hostname)
-          .where('id', '!=', assignmentId)
-          .executeTakeFirst()
-      )
-        throw new DomainError('conflict');
-      const intent: DnsIntent = {
-        ...(row.plan as DnsIntent),
-        context: verified,
-        connection: plan,
-        action: 'apply',
-      };
-      await connection.transaction().execute(async (tx) => {
-        await tx
-          .updateTable('dns_assignments')
-          .set({
-            hostname: plan.hostname,
-            plan: JSON.stringify(intent),
-            state: 'pending',
-            updated_at: now(options),
-          })
-          .where('id', '=', assignmentId)
-          .execute();
-        await recordAudit(tx, verified, 'server.dns.updated', { serverId, assignmentId });
-      });
-      return publicDns(
-        await runDns(
-          connection,
-          await connection
-            .selectFrom('dns_assignments')
-            .selectAll()
-            .where('id', '=', assignmentId)
-            .executeTakeFirstOrThrow(),
-          options,
-        ),
-      );
-    }),
-  );
-}
-async function deleteDnsRow(db: Kysely<Database>, row: DnsRow, options: ExternalServiceOptions) {
-  if (row.state === 'deleted') return row;
-  const intent: DnsIntent = { ...(row.plan as DnsIntent), action: 'delete' };
-  await db
-    .updateTable('dns_assignments')
-    .set({ plan: JSON.stringify(intent), state: 'deleting' })
-    .where('id', '=', row.id)
-    .execute();
-  return runDns(
-    db,
-    await db
-      .selectFrom('dns_assignments')
-      .selectAll()
-      .where('id', '=', row.id)
-      .executeTakeFirstOrThrow(),
-    options,
-  );
-}
-export async function deleteServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  assignmentId: string,
-  options: ExternalServiceOptions,
-) {
-  parse(z.uuid(), assignmentId);
-  return locked(db, serverId, (connection) =>
-    dnsLocked(connection, async () => {
-      const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      await authorizeServer(connection, verified, serverId, 'server:manage');
-      const row = await connection
-        .selectFrom('dns_assignments')
-        .selectAll()
-        .where('id', '=', assignmentId)
-        .where('server_id', '=', serverId)
-        .executeTakeFirst();
-      if (!row) throw new DomainError('not_found');
-      await recordAudit(connection, verified, 'server.dns.deleted', { serverId, assignmentId });
-      return publicDns(await deleteDnsRow(connection, row, options));
-    }),
-  );
-}
 /** Internal worker hook after lifecycle authorization. Reentrant on the supplied pinned connection. */
 export async function cleanupServerExternalServices(
   db: Kysely<Database>,
@@ -1365,5 +941,6 @@ export async function reconcileExternalServices(
       failed++;
     }
   }
-  return { recovered, failed };
+  const automatic = await reconcileAutomaticDns(db, options);
+  return { recovered: recovered + automatic.recovered, failed: failed + automatic.failed };
 }

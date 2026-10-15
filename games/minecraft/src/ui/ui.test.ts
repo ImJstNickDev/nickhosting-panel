@@ -169,6 +169,26 @@ describe('Minecraft browser module and exact API contracts', () => {
     client.request.mockResolvedValueOnce([]);
     await expect(controller.create(input)).rejects.toThrow('integration_unavailable');
   });
+  it('forwards common domain choice through the integration handler without losing automatic defaults', async () => {
+    const client = clientFixture();
+    for (const connection of [{ domainId: 'main', subdomain: 'blue-panda' }, {}]) {
+      await minecraftUiModule.handlers.create?.(client, {
+        idempotencyKey: 'domain-create',
+        values: {
+          name: 'World',
+          choiceId,
+          runtime: 'vanilla',
+          eula: true,
+          limits: { memory: 1024, cpu: 100 },
+          connection,
+        },
+      });
+      expect(client.request).toHaveBeenLastCalledWith(
+        '/v1/minecraft/servers',
+        expect.objectContaining({ body: expect.objectContaining({ connection }) }),
+      );
+    }
+  });
   it('never offers or submits a Vanilla mod/plugin install', async () => {
     const client = clientFixture(),
       controller = createMinecraftUiController(client);

@@ -109,3 +109,35 @@ it('continues credential recovery after the last server is deleted', async () =>
     await isolated.destroy();
   }
 });
+
+it('runs shared-host registration reconciliation before the first server exists', async () => {
+  const isolated = await createTestDatabase();
+  try {
+    const f = await managementFixture(isolated.db, { interactive: true });
+    const game = await f.db
+      .selectFrom('game_integrations')
+      .select('manifest')
+      .where('id', '=', f.gameId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: JSON.stringify({
+          ...(game.manifest as Record<string, unknown>),
+          connection: { mode: 'shared-host', defaultLabel: 'fixture', allowCustomSubdomain: false },
+        }),
+      })
+      .where('id', '=', f.gameId)
+      .execute();
+    const reconcile = vi.fn(async () => ({ external: { failed: 0 }, unavailable: [] }));
+    await reconcileServers(
+      f.db,
+      async () => ({ reconcile }) as unknown as ManagementRuntime,
+      createLogger(() => {}),
+      {},
+    );
+    expect(reconcile).toHaveBeenCalledOnce();
+  } finally {
+    await isolated.destroy();
+  }
+});

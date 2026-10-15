@@ -1194,6 +1194,7 @@ describe('M5 platform browser queries and metadata', () => {
           transport: 'tcp',
           port: 22222,
           hostname: 'play.example.test',
+          displayAddress: 'play.example.test:22222',
           status: 'configured',
         },
         {
@@ -1202,6 +1203,7 @@ describe('M5 platform browser queries and metadata', () => {
           transport: 'udp',
           port: null,
           hostname: null,
+          displayAddress: null,
           status: 'unconfigured',
         },
       ]),
@@ -1240,7 +1242,10 @@ describe('M5 platform browser queries and metadata', () => {
     expect(
       result.ports.every(
         (p) =>
-          p.hostname === 'direct.example.test' && p.port === 27090 && p.status === 'configured',
+          p.hostname === 'direct.example.test' &&
+          p.port === 27090 &&
+          p.displayAddress === 'direct.example.test:27090' &&
+          p.status === 'configured',
       ),
     ).toBe(true);
     expect(JSON.stringify(result.ports)).not.toContain('10.0.0.2');

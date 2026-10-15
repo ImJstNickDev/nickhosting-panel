@@ -16,6 +16,7 @@ import {
   Select,
   Textarea,
 } from '../components/ui.js';
+import { domainSettingKeys, OwnerDomains } from './owner-domains.js';
 import { OwnerStoragePolicy } from './owner-storage-policy.js';
 import { GlobalSleepSettings } from './sleep-timeout.js';
 
@@ -125,6 +126,19 @@ export function OwnerSettingsPage() {
           </div>
         )}
       </Section>
+      <Section title={t('connection.domains')}>
+        <OwnerDomains
+          key={JSON.stringify([
+            value.config.values.dnsDomains,
+            value.config.values.dnsDefaultDomainId,
+            value.config.values.dnsBlockedTerms,
+          ])}
+          values={value.config.values}
+          lockedKeys={value.config.lockedKeys}
+          editable={editable}
+          onSaved={() => settings.refetch()}
+        />
+      </Section>
       {groups.map((group) => (
         <Section title={t(`owner.group.${group}`)} key={group}>
           <div className="settings-list">
@@ -133,6 +147,9 @@ export function OwnerSettingsPage() {
                 ([key]) =>
                   groupFor(key) === group &&
                   ![
+                    ...domainSettingKeys,
+                    'cloudflareZoneId',
+                    'dnsBaseDomain',
                     'defaultIdleTimeoutSeconds',
                     'idleTimeoutUserAccess',
                     'gameIdleTimeouts',

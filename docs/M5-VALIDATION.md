@@ -10089,3 +10089,69 @@ Cloudflare token verification and scoped zone DNS-record listing returned HTTP20
 success=true. No token or record contents were logged. No DNS writes, migrations,
 game-server operations, new test resources or production changes. Existing #18
 production-release boundary remains unchanged.
+
+### Integration-defined server subdomains — 2026-10-15
+
+Implemented personal generated/custom names, shared configurable/fixed integration
+hostnames, multiple eligible domains, integration allow/deny policies and an
+initially empty Owner blacklist. Automatic naming has 262,144 candidate combinations
+with transactional uniqueness reservations. Preview pins the proposed name; rename
+publishes replacement records before retiring owned old records. Shared records
+have integration lifetime. Existing servers require explicit activation; creation
+stores the new server's address preference for worker reconciliation.
+
+Validation used focused suites, not the full historical M1–M5 matrix:
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/dns-policy.test.ts
+  packages/core/src/core.test.ts packages/game-sdk/src/ui.test.ts`: 67 passed;
+  final DNS-policy-only rerun 7/7 after adding incomplete-domain filtering
+  (68 distinct cases across these runs).
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.integration.config.ts` with targeted files/name filters:
+  existing external-service suite 49/49; new DNS cases 11/11 across targeted runs;
+  platform connection 2/2; worker/health 4/4. Covers foreign-record isolation,
+  cross-zone rename, shared-host target changes/lifetime, failed-intent cancellation,
+  reservation recovery and legacy-zone recovery.
+- Same integration runner with registry/API files and
+  `-t 'DNS choice|DNS connection choices'`: 2 passed, 103 skipped. Confirms
+  idempotent creation intent, scoped options and no zone-secret disclosure.
+- Provider unit tests 23/23; Minecraft UI 13/13; connection contracts 3/3.
+- Firefox domain browser suite: seven scenarios passed across focused runs,
+  including EN/IT, 390px mobile, keyboard, axe, pinned previews and recovery with
+  an older active address. Browser API responses are isolated fixtures.
+- Final `scripts/dev.sh pnpm build`, `typecheck`, `lint`, `format:check`,
+  `i18n:check`, staged governance and whitespace checks passed. Lint retains 37
+  warnings/two informational diagnostics in existing code; build retains the
+  existing large-chunk warning. Catalogs contain 1,719 keys.
+
+Initial new tests exposed a JSONB key-order comparison defect and fixture mistakes;
+these were corrected and affected checks rerun. Mobile layout/keyboard scrolling
+findings were also corrected. Final typecheck caught an inferred test environment
+object missing an optional key; explicit ProcessEnv typing fixed it, then typecheck
+was repeated. No failed attempt is counted as a passing full-suite run.
+
+Independent backend/security and rendered UX/content review found no remaining
+must-fix findings. Sanitized fixture screenshots:
+[Connection EN](screenshots/m5/domains-en.png),
+[Connection IT/mobile](screenshots/m5/domains-it.png),
+[Owner domains](screenshots/m5/domains-owner-en.png).
+
+Migration032 was explicitly applied only to the existing development database,
+preserving accounts/settings/data; source watchers loaded the implementation.
+Worker briefly failed while the new tables were absent and then on an undeclared
+import; migration and use of the existing query builder resolved these during
+integration. Final API/worker/Vite healthy with restart counts zero; HTTPS200.
+No manual container restart, Pterodactyl/Wings mutation, game-server creation,
+network change or real DNS write occurred. Real Cloudflare token verification and
+zone listing from the preceding activation remain read-only evidence. The exact
+create/rename/delete smoke test with temporary owned DNS names awaits separate
+operation-specific confirmation; no live publication success is claimed yet.
+
+Limits: changing an existing shared host's zone ID fails closed, and retired shared
+hosts are retained for existing connections. Removing a selected domain before a
+new server's first DNS intent leaves it pending until configuration is restored or
+an explicit replacement is submitted. Issue #18 remains a production-release gate.
+Rollback preserves migration032 and all DNS intents/ownership ledgers: stop DNS
+reconciliation before reverting to code that cannot interpret v2/shared intents;
+restore compatible code rather than dropping tables or broadly deleting records.
+PR21 remains open/unmerged; no M6 implementation or production deployment.

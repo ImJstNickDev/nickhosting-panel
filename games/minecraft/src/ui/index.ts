@@ -654,6 +654,7 @@ export const minecraftUiModule = defineTrustedGameUiModule({
           projectId: v.projectId,
           limits: v.limits,
           autoStart: v.autoStart ?? true,
+          connection: v.connection,
           minecraft: {
             choiceId,
             configuration: {

@@ -446,6 +446,38 @@ describe('M2 Hono API with real invitation, password and session authentication'
     }
     expect((await request(user, '/v1/owner/nodes', {}, { method: 'PUT' })).status).toBe(403);
   });
+  it('authorizes DNS connection choices by server scope and integration rollout without exposing zone secrets', async () => {
+    const serverId = await f.server();
+    const serverPath = `/v1/servers/${serverId}/connection-options`;
+    const gamePath = `/v1/games/${f.gameId}/connection-options`;
+    for (const path of [serverPath, gamePath]) expect((await request(null, path)).status).toBe(401);
+    expect((await request(outsider, serverPath)).status).toBe(403);
+    for (const client of [user, owner]) {
+      const response = await request(client, serverPath);
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result).toHaveProperty('customizable');
+      expect(JSON.stringify(result)).not.toContain('zoneId');
+      expect(JSON.stringify(result)).not.toContain(providerSecret);
+    }
+    expect((await request(user, gamePath)).status).toBe(200);
+    await f.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', f.gameId)
+      .execute();
+    try {
+      expect((await request(user, gamePath)).status).toBe(403);
+      expect((await request(owner, gamePath)).status).toBe(200);
+      expect((await request(user, serverPath)).status).toBe(200);
+    } finally {
+      await f.db
+        .updateTable('game_rollouts')
+        .set({ state: 'public', allowlist: [] })
+        .where('integration_id', '=', f.gameId)
+        .execute();
+    }
+  });
   it('saves a 2000-allocation Owner pool with bounded JSON, authentication and Origin checks', async () => {
     const previous = await f.db
       .selectFrom('managed_nodes')
