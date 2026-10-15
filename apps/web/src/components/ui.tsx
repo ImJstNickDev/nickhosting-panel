@@ -197,6 +197,8 @@ export function ActionForm({
   destructive = false,
   arrowActionNavigation = false,
   disabled = false,
+  submitDisabled = false,
+  footerStart,
 }: {
   onSubmit: (data: FormData) => Promise<unknown>;
   children: ReactNode;
@@ -207,6 +209,8 @@ export function ActionForm({
   destructive?: boolean;
   arrowActionNavigation?: boolean;
   disabled?: boolean;
+  submitDisabled?: boolean;
+  footerStart?: ReactNode;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -219,7 +223,7 @@ export function ActionForm({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     event.stopPropagation();
-    if (busy || disabled) return;
+    if (busy || disabled || submitDisabled) return;
     setBusy(true);
     setError(undefined);
     setDone(false);
@@ -265,6 +269,11 @@ export function ActionForm({
       )}
       <fieldset disabled={busy || disabled}>{children}</fieldset>
       <div className="form-footer">
+        {footerStart && (
+          <fieldset className="form-footer-start" disabled={busy || disabled}>
+            {footerStart}
+          </fieldset>
+        )}
         {onCancel && (
           <button
             type="button"
@@ -278,7 +287,7 @@ export function ActionForm({
         )}
         <button
           type="submit"
-          disabled={busy || disabled}
+          disabled={busy || disabled || submitDisabled}
           className={destructive ? 'danger' : undefined}
         >
           {busy ? t('web.pending') : (submitLabel ?? t('web.save'))}

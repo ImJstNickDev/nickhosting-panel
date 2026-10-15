@@ -220,9 +220,12 @@ describe('Owner integration workspace (real components, isolated API responses)'
     await check(page.getByRole('rowheader', { name: 'Game node', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     const dialog = page.getByRole('dialog');
-    await check(dialog.getByLabel('Runtime', { exact: true })).toBeDisabled();
-    await check(dialog.getByLabel('Enabled', { exact: true })).toBeEnabled();
-    await dialog.getByLabel('Enabled', { exact: true }).uncheck();
+    await check(
+      dialog.locator('.mapping-runtime-context').getByText('Vanilla', { exact: true }),
+    ).toBeVisible();
+    await check(dialog.getByLabel('Pterodactyl node', { exact: true })).toBeDisabled();
+    await check(dialog.getByLabel('Available for new servers', { exact: true })).toBeEnabled();
+    await dialog.getByLabel('Available for new servers', { exact: true }).uncheck();
     await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
     await check(dialog).not.toBeVisible();
     const sent = writes.find((item) => item.path.endsWith('/runtime-mappings'))?.body;

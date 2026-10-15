@@ -113,3 +113,46 @@ healthy during validation.
 No Pterodactyl/Wings, DNS, networks, production containers or game-server data were
 mutated. Disposable test schemas were cleaned by their harness. SFTPGo issue #18
 remains the separate production-release gate. PR #21 remains open and unmerged.
+
+## Runtime mapping dialog refinement (2026-10-16)
+
+The selected runtime is fixed context in the association dialog. Node, Nest and
+Egg are grouped together; a sole managed node or nest is preselected, while the
+Owner chooses the egg explicitly. Integration-managed and fixed images use
+compact selectable controls. Startup, variables and port/feature limits are
+collapsed sections; the existing command and counts remain visible. Required
+invalid fields automatically reveal their section and receive native validation
+focus. Availability and Save/Create stay in a bounded dialog footer.
+
+Changing the nest/egg clears dependent values and loads the selected egg's defaults.
+The original static image and port-variable overrides cannot leak into another
+egg. Editing an existing mapping preserves custom values; used mapping identities
+remain immutable, with only availability editable. Empty/failed discovery blocks
+submission while leaving selection/retry controls usable. The supplied integration
+manifest replaces the former duplicate module request.
+
+This is a WebPanel change using the existing mapping API. It adds no migration,
+provider mutation, image dependency or service restart. The earlier migration035
+approval remains separate. Rollback is a source revert of this UI refinement.
+
+Validation: nine new Firefox cases passed across targeted runs, plus the existing
+used-mapping workspace regression. The initial four failures were test locator
+ambiguities (fieldset/select labels and indexed variable labels); corrected cases
+passed their targeted rerun. The final three-case run covered desktop creation,
+mobile Italian with expanded variables, and the existing immutable-mapping flow.
+Desktop/mobile axe AA checks passed. Web/browser-test typecheck, focused Biome,
+production build and indexed governance passed; the existing bundle-size advisory
+remains. No historical backend suite was repeated for this UI change.
+
+Commands: `scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts
+apps/web/tests/runtime-mapping-dialog.browser.test.ts`, targeted `-t` reruns and
+the existing `owner-integration-workspace.browser.test.ts` mapping case;
+`scripts/dev.sh pnpm --filter @nickhosting/web typecheck`, `scripts/dev.sh pnpm build`,
+focused `pnpm exec biome check`, and `python3 scripts/check-governance.py`.
+
+Independent technical/accessibility/UX review found a stale image option after
+changing eggs; it was corrected and regression-tested. No remaining must-fix
+findings. Reviewed screenshots:
+[desktop EN](screenshots/m5/runtime-mapping-desktop-en.png),
+[mobile IT](screenshots/m5/runtime-mapping-mobile-it.png),
+[mobile variables](screenshots/m5/runtime-mapping-mobile-it-variables.png).

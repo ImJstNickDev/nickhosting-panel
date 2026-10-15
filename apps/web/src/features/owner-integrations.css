@@ -104,3 +104,340 @@
 .owner-integration-body .stack > * {
   min-width: 0;
 }
+
+/* Mapping setup keeps the association visible and technical overrides folded. */
+dialog.runtime-mapping-dialog {
+  width: min(760px, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  padding: 0;
+  overflow: hidden;
+}
+.runtime-mapping-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.runtime-mapping-dialog > .section-heading {
+  padding: 1.15rem 1.5rem;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.runtime-mapping-dialog > .section-heading h2 {
+  font-size: 1.3rem;
+}
+.runtime-mapping-dialog .dialog-close-icon {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+}
+.runtime-mapping-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0;
+}
+.runtime-mapping-form > fieldset {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0;
+}
+.runtime-mapping-body {
+  padding: 1.5rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  min-height: 0;
+}
+.runtime-mapping-form > div[tabindex] {
+  padding: 0.75rem 1.5rem 0;
+  overflow-y: auto;
+  flex-shrink: 0;
+  max-height: 25dvh;
+}
+.runtime-mapping-form > div[tabindex] .notice {
+  margin: 0;
+}
+.runtime-mapping-form .mapping-fields {
+  gap: 1.4rem;
+}
+.mapping-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.runtime-mapping-dialog .mapping-pair > *,
+.mapping-image-policy .field {
+  min-width: 0;
+}
+.mapping-association {
+  display: grid;
+  gap: 1rem;
+}
+.mapping-runtime-context {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+.mapping-runtime-context > span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.mapping-runtime-context > strong {
+  font-size: 1.4rem;
+  line-height: 42px;
+  letter-spacing: -0.025em;
+}
+.runtime-mapping-dialog .field label,
+.mapping-image-policy legend {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.runtime-mapping-dialog input,
+.runtime-mapping-dialog select,
+.runtime-mapping-dialog textarea {
+  border-color: var(--line);
+  border-radius: 6px;
+}
+.runtime-mapping-dialog input:focus,
+.runtime-mapping-dialog select:focus,
+.runtime-mapping-dialog textarea:focus {
+  border-color: var(--field-focus);
+}
+.mapping-image-policy {
+  gap: 0.75rem;
+}
+.mapping-image-policy legend {
+  margin-bottom: 0.55rem;
+}
+.mapping-image-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.mapping-image-option {
+  border: 1px solid var(--line);
+  background: #f7f8f9;
+  color: #344858;
+  font-weight: 500;
+  min-height: 46px;
+  gap: 0.65rem;
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+}
+.mapping-image-option[aria-pressed="true"] {
+  border-color: var(--blue);
+  background: #eef3fc;
+  color: #164391;
+}
+.mapping-image-option svg {
+  flex-shrink: 0;
+}
+.mapping-advanced {
+  border-top: 1px solid var(--line);
+}
+.mapping-advanced details {
+  border-bottom: 1px solid var(--line);
+}
+.mapping-advanced summary {
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  gap: 0.75rem;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+  font-size: 0.94rem;
+}
+.mapping-advanced summary::-webkit-details-marker {
+  display: none;
+}
+.mapping-advanced summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  margin: 0 0.3rem;
+  flex-shrink: 0;
+}
+.mapping-advanced details[open] > summary::before {
+  transform: rotate(45deg);
+}
+.mapping-advanced summary > span:first-of-type {
+  flex-shrink: 0;
+}
+.mapping-advanced summary code {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: auto;
+}
+.mapping-count {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-left: auto;
+}
+.mapping-details-body {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.3rem 0 1rem;
+}
+.mapping-details-body textarea,
+.mapping-variable-row input {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.88rem;
+}
+.mapping-variable-row,
+.mapping-variable-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 36px;
+  gap: 0.6rem;
+  align-items: center;
+}
+.mapping-variable-head {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.mapping-icon-button,
+.mapping-add-variable {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.mapping-icon-button {
+  padding: 0;
+  width: 36px;
+  min-height: 36px;
+}
+.mapping-icon-button:hover {
+  color: #962222;
+  background: #fff0ef;
+}
+.mapping-add-variable {
+  justify-self: start;
+  padding-left: 0;
+  color: var(--blue);
+  font-size: 0.9rem;
+}
+.mapping-port-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 1rem;
+  align-items: center;
+  padding: 0.4rem 0;
+}
+.mapping-port-role {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.mapping-port-role .check {
+  min-height: 0;
+}
+.mapping-transport {
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: #f0f3f5;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+}
+.mapping-limits {
+  padding-top: 0.6rem;
+}
+.mapping-availability {
+  min-width: 0;
+}
+.mapping-availability .check {
+  align-items: center;
+  font-size: 0.9rem;
+}
+.mapping-availability input[type="checkbox"] {
+  appearance: none;
+  width: 32px;
+  height: 19px;
+  min-height: 19px;
+  margin: 0;
+  padding: 2px;
+  border-radius: 20px;
+  border: 1px solid #7f8c97;
+  background: #e6eaed;
+}
+.mapping-availability input::before {
+  content: "";
+  display: block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #566675;
+}
+.mapping-availability input:checked {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.mapping-availability input:checked::before {
+  background: #fff;
+  transform: translateX(13px);
+}
+.runtime-mapping-form .form-footer {
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+@media (max-width: 540px) {
+  dialog.runtime-mapping-dialog {
+    width: calc(100% - 1rem);
+    max-height: calc(100dvh - 1rem);
+  }
+  .runtime-mapping-dialog > .section-heading,
+  .runtime-mapping-body {
+    padding: 1rem;
+  }
+  .mapping-pair,
+  .mapping-port-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.75rem;
+  }
+  .mapping-runtime-context {
+    flex-direction: row;
+    align-items: center;
+  }
+  .mapping-runtime-context > strong {
+    font-size: 1.15rem;
+    line-height: 1.4;
+  }
+  .mapping-image-options {
+    flex-direction: column;
+  }
+  .mapping-image-option {
+    justify-content: flex-start;
+  }
+  .runtime-mapping-form .form-footer {
+    padding: 0.8rem 1rem;
+    gap: 0.75rem;
+  }
+  .runtime-mapping-form .form-footer > button {
+    margin-left: auto;
+  }
+}
+@media (forced-colors: active) {
+  .mapping-availability input[type="checkbox"] {
+    appearance: auto;
+  }
+  .mapping-availability input::before {
+    display: none;
+  }
+  .mapping-image-option[aria-pressed="true"] {
+    border-width: 2px;
+    border-color: Highlight;
+  }
+}

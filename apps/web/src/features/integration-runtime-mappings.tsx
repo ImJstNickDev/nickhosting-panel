@@ -7,6 +7,7 @@ import type { Egg, Nest, Node } from '../../../../packages/pterodactyl-adapter/s
 import { ApiError, api, queryClient } from '../api/client.js';
 import type { Json } from '../api/contracts.js';
 import { useT } from '../app/i18n.js';
+import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
   Check,
@@ -41,6 +42,37 @@ function QueryContent<T>({
   if (query.data === undefined) return <Empty />;
   return children(query.data);
 }
+function MappingIcon({ kind }: { kind: 'integration' | 'static' | 'plus' | 'remove' }) {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {kind === 'integration' ? (
+        <>
+          <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" />
+          <path d="m4 7.5 8 4.5 8-4.5M12 12v9" />
+        </>
+      ) : kind === 'static' ? (
+        <>
+          <rect x="4" y="4" width="16" height="16" rx="2" />
+          <path d="M8 9h8M8 15h8M10 7v4M14 13v4" />
+        </>
+      ) : kind === 'plus' ? (
+        <path d="M12 5v14M5 12h14" />
+      ) : (
+        <path d="m6 6 12 12M6 18 18 6" />
+      )}
+    </svg>
+  );
+}
 function MappingForm({
   initial,
   gameId,
@@ -55,12 +87,18 @@ function MappingForm({
   onSaved: () => Promise<void>;
 }) {
   const t = useT();
-  const [nestId, setNestId] = useState(String(initial?.nest_id ?? '')),
-    [eggId, setEggId] = useState(String(initial?.egg_id ?? '')),
-    [runtimeId, setRuntimeId] = useState(initial?.runtime_id ?? selectedRuntimeId),
-    [imageModeOverride, setImageModeOverride] = useState<'static' | 'integration' | undefined>(
-      initial?.image_mode ?? (initial ? 'static' : undefined),
-    );
+  const runtimeId = initial?.runtime_id ?? selectedRuntimeId;
+  const runtime = manifest.runtimes.find((entry) => entry.id === runtimeId);
+  const [nestOverride, setNestId] = useState<string | undefined>(
+    initial ? String(initial.nest_id) : undefined,
+  );
+  const [nodeOverride, setNodeId] = useState<string | undefined>(initial?.node_id);
+  const [eggId, setEggId] = useState(String(initial?.egg_id ?? ''));
+  const [startup, setStartup] = useState(initial?.startup ?? '');
+  const [image, setImage] = useState(initial?.docker_image ?? '');
+  const [imageMode, setImageMode] = useState<'static' | 'integration'>(
+    initial?.image_mode ?? (runtime?.imagePolicy ? 'integration' : 'static'),
+  );
   const [variables, setVariables] = useState(
     Object.entries(initial?.environment ?? {}).map(([name, value]) => ({
       key: crypto.randomUUID(),
@@ -68,35 +106,39 @@ function MappingForm({
       value,
     })),
   );
-  const modules = useQuery({
-    queryKey: ['owner-game-modules'],
-    queryFn: () => api<Array<{ id: string; manifest: GameManifest }>>('/v1/owner/game-modules'),
-  });
   const nodes = useQuery({
     queryKey: ['owner-nodes'],
     queryFn: () => api<ManagedNode[]>(path('nodes')),
+    staleTime: 30_000,
   });
   const inventory = useQuery({
     queryKey: ['owner-provider'],
     queryFn: () => api<Inventory>(path('infrastructure')),
+    staleTime: 30_000,
   });
+  const nestId =
+    nestOverride ?? (inventory.data?.nests.length === 1 ? String(inventory.data.nests[0]?.id) : '');
+  const nodeId = nodeOverride ?? (nodes.data?.length === 1 ? (nodes.data[0]?.id ?? '') : '');
   const eggs = useQuery({
     queryKey: ['owner-eggs', nestId],
     queryFn: () => api<Egg[]>(path(`nests/${encodeURIComponent(nestId)}/eggs`)),
     enabled: Boolean(nestId),
+    staleTime: 30_000,
   });
-  const policy = modules.data
-    ?.find((module) => module.id === gameId)
-    ?.manifest.runtimes.find((runtime) => runtime.id === runtimeId)?.imagePolicy;
-  const imageMode = imageModeOverride ?? (policy ? 'integration' : 'static');
-  const egg = eggs.data?.find((item) => String(item.id) === eggId);
+  const egg = eggs.data?.find((entry) => String(entry.id) === eggId);
   const images = egg
     ? [...new Set([egg.docker_image, ...Object.values(egg.docker_images ?? {})])]
     : [];
+  if (
+    eggId === String(initial?.egg_id) &&
+    initial?.docker_image &&
+    !images.includes(initial.docker_image)
+  )
+    images.push(initial.docker_image);
   const roles = [
-    ...(manifest?.ports ?? []),
+    ...manifest.ports,
     ...(initial?.port_roles ?? [])
-      .filter((role) => !manifest?.ports.some((port) => port.role === role.role))
+      .filter((role) => !manifest.ports.some((port) => port.role === role.role))
       .map((role) => ({
         role: role.role,
         required: true,
@@ -104,8 +146,45 @@ function MappingForm({
           role.protocols.length === 2 ? ('both' as const) : (role.protocols[0] ?? ('tcp' as const)),
       })),
   ];
+  const [included, setIncluded] = useState(
+    () =>
+      new Set(
+        roles
+          .filter(
+            (role) => role.required || initial?.port_roles.some((old) => old.role === role.role),
+          )
+          .map((role) => role.role),
+      ),
+  );
+  const [primary, setPrimary] = useState(
+    initial?.port_roles.find((role) => role.primary)?.role ??
+      (roles.length === 1 && roles[0]?.required ? roles[0].role : ''),
+  );
+  const canSave =
+    initial?.inUse ||
+    Boolean(
+      nodeId &&
+        nestId &&
+        egg &&
+        nodes.data?.some((node) => node.id === nodeId) &&
+        !nodes.error &&
+        !inventory.error &&
+        !eggs.error,
+    );
   return (
     <ActionForm
+      className="form runtime-mapping-form"
+      submitLabel={t(initial ? 'web.save' : 'mapping.createAction')}
+      submitDisabled={!canSave}
+      footerStart={
+        <div className="mapping-availability">
+          <Check
+            label={t('mapping.available')}
+            name="enabled"
+            defaultChecked={initial?.enabled ?? true}
+          />
+        </div>
+      }
       onSubmit={async (data) => {
         if (new Set(variables.map((variable) => variable.name)).size !== variables.length)
           throw new ApiError('validation_failed', 'errors.validation_failed');
@@ -131,12 +210,12 @@ function MappingForm({
                 ...(initial ? { id: initial.id } : {}),
                 gameId,
                 runtimeId,
-                nodeId: text(data, 'node'),
+                nodeId,
                 nestId: Number(nestId),
                 eggId: Number(eggId),
                 imageMode,
                 ...(imageMode === 'static' ? { dockerImage: text(data, 'image') } : {}),
-                startup: text(data, 'startup'),
+                startup,
                 environment: Object.fromEntries(
                   variables.map((variable) => [variable.name, variable.value]),
                 ),
@@ -161,250 +240,339 @@ function MappingForm({
         await onSaved();
       }}
     >
-      {initial?.inUse && <Notice>{t('ownerIntegration.mappingInUse')}</Notice>}
-      <fieldset disabled={initial?.inUse} className="mapping-fields">
-        <Select
-          key={`${gameId}-${manifest?.version ?? 'pending'}`}
-          label={t('infra.runtime')}
-          name="runtime"
-          value={runtimeId}
-          onChange={(event) => {
-            setRuntimeId(event.target.value);
-            setImageModeOverride(undefined);
+      <div className="runtime-mapping-body">
+        {initial?.inUse && <Notice>{t('ownerIntegration.mappingInUse')}</Notice>}
+        <fieldset
+          disabled={initial?.inUse}
+          className="mapping-fields"
+          onInvalidCapture={(event) => {
+            // Native validation must reveal required fields inside collapsed advanced sections.
+            const details =
+              event.target instanceof HTMLElement ? event.target.closest('details') : null;
+            if (details) details.open = true;
           }}
-          required
         >
-          <option value="">{t('infra.select')}</option>
-          {manifest?.runtimes.map((runtime) => (
-            <option key={runtime.id} value={runtime.id}>
-              {t(runtime.nameKey)}
-            </option>
-          ))}
-        </Select>
-        <QueryContent query={nodes}>
-          {(rows) => (
-            <Select
-              label={t('infra.providerNode')}
-              name="node"
-              defaultValue={initial?.node_id ?? ''}
-              required
-            >
-              <option value="">{t('infra.select')}</option>
-              {rows.map((node) => (
-                <option key={node.id} value={node.id}>
-                  {inventory.data?.nodes.find((item) => item.id === node.pterodactyl_node_id)
-                    ?.name ?? `${t('infra.providerNode')} ${node.pterodactyl_node_id}`}
-                </option>
-              ))}
-            </Select>
-          )}
-        </QueryContent>
-        <QueryContent query={inventory}>
-          {(value) => (
-            <Select
-              label={t('infra.nest')}
-              value={nestId}
-              onChange={(event) => {
-                setNestId(event.target.value);
-                setEggId('');
-              }}
-              required
-            >
-              <option value="">{t('infra.select')}</option>
-              {value.nests.map((nest) => (
-                <option key={nest.id} value={nest.id}>
-                  {nest.name}
-                </option>
-              ))}
-            </Select>
-          )}
-        </QueryContent>
-        {nestId && (
-          <QueryContent query={eggs}>
-            {(rows) => (
+          <div className="mapping-association">
+            <div className="mapping-pair">
+              <div className="mapping-runtime-context">
+                <span>{t('infra.runtime')}</span>
+                <strong>{runtime ? t(runtime.nameKey) : runtimeId}</strong>
+              </div>
+              <div>
+                <Select
+                  label={t('infra.providerNode')}
+                  name="node"
+                  value={nodeId}
+                  onChange={(event) => setNodeId(event.target.value)}
+                  required
+                  disabled={nodes.isPending || Boolean(nodes.error)}
+                >
+                  <option value="">{t('infra.select')}</option>
+                  {nodes.data?.map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {inventory.data?.nodes.find((entry) => entry.id === node.pterodactyl_node_id)
+                        ?.name ?? `${t('infra.providerNode')} ${node.pterodactyl_node_id}`}
+                    </option>
+                  ))}
+                </Select>
+                {nodes.isPending && <Loading />}
+                {nodes.error && (
+                  <ErrorNotice error={nodes.error} retry={() => void nodes.refetch()} />
+                )}
+                {nodes.data?.length === 0 && <p className="muted">{t('mapping.noNodes')}</p>}
+              </div>
+            </div>
+            <div className="mapping-pair">
+              <div>
+                <Select
+                  label={t('infra.nest')}
+                  value={nestId}
+                  onChange={(event) => {
+                    setNestId(event.target.value);
+                    setEggId('');
+                    setStartup('');
+                    setImage('');
+                    setVariables([]);
+                  }}
+                  required
+                  disabled={inventory.isPending || Boolean(inventory.error)}
+                >
+                  <option value="">{t('infra.select')}</option>
+                  {inventory.data?.nests.map((nest) => (
+                    <option key={nest.id} value={nest.id}>
+                      {nest.name}
+                    </option>
+                  ))}
+                </Select>
+                {inventory.isPending && <Loading />}
+                {inventory.error && (
+                  <ErrorNotice error={inventory.error} retry={() => void inventory.refetch()} />
+                )}
+                {inventory.data?.nests.length === 0 && (
+                  <p className="muted">{t('mapping.noNests')}</p>
+                )}
+              </div>
+              <div>
+                <Select
+                  label={t('infra.egg')}
+                  value={eggId}
+                  onChange={(event) => {
+                    const next = eggs.data?.find(
+                      (entry) => String(entry.id) === event.target.value,
+                    );
+                    setEggId(event.target.value);
+                    setStartup(next?.startup ?? '');
+                    setImage(next?.docker_image ?? '');
+                    setVariables(
+                      (next?.relationships?.variables?.data ?? []).map(({ attributes }) => ({
+                        key: crypto.randomUUID(),
+                        name: attributes.env_variable,
+                        value: attributes.default_value ?? '',
+                      })),
+                    );
+                  }}
+                  required
+                  disabled={!nestId || eggs.isPending || Boolean(eggs.error)}
+                >
+                  <option value="">{t('infra.select')}</option>
+                  {eggs.data?.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.name}
+                    </option>
+                  ))}
+                </Select>
+                {nestId && eggs.isPending && <Loading />}
+                {nestId && eggs.error && (
+                  <ErrorNotice error={eggs.error} retry={() => void eggs.refetch()} />
+                )}
+                {nestId && eggs.data?.length === 0 && (
+                  <p className="muted">{t('mapping.noEggs')}</p>
+                )}
+              </div>
+            </div>
+          </div>
+          <fieldset className="mapping-image-policy" aria-label={t('infra.image')}>
+            <legend>{t('infra.image')}</legend>
+            <div className="mapping-image-options">
+              {(runtime?.imagePolicy || imageMode === 'integration') && (
+                <button
+                  type="button"
+                  className="mapping-image-option"
+                  aria-pressed={imageMode === 'integration'}
+                  onClick={() => setImageMode('integration')}
+                >
+                  <MappingIcon kind="integration" />
+                  {t('infra.imageIntegration')}
+                </button>
+              )}
+              <button
+                type="button"
+                className="mapping-image-option"
+                aria-pressed={imageMode === 'static'}
+                onClick={() => setImageMode('static')}
+              >
+                <MappingIcon kind="static" />
+                {t('infra.imageStatic')}
+              </button>
+            </div>
+            {imageMode === 'static' && (
               <Select
-                label={t('infra.egg')}
-                value={eggId}
-                onChange={(event) => {
-                  setEggId(event.target.value);
-                  const next = rows.find((item) => String(item.id) === event.target.value);
-                  setVariables(
-                    (next?.relationships?.variables?.data ?? []).map(({ attributes }) => ({
-                      key: crypto.randomUUID(),
-                      name: attributes.env_variable,
-                      value: attributes.default_value ?? '',
-                    })),
-                  );
-                }}
+                label={t('infra.image')}
+                name="image"
+                value={image}
+                onChange={(event) => setImage(event.target.value)}
                 required
+                disabled={!egg}
               >
                 <option value="">{t('infra.select')}</option>
-                {rows.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
+                {images.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
                   </option>
                 ))}
               </Select>
             )}
-          </QueryContent>
-        )}
-        <QueryContent query={modules}>
-          {() => (
-            <>
-              <Select
-                label={t('infra.imageMode')}
-                value={imageMode}
-                onChange={(event) =>
-                  setImageModeOverride(event.target.value as 'static' | 'integration')
-                }
-              >
-                {(policy || imageMode === 'integration') && (
-                  <option value="integration">{t('infra.imageIntegration')}</option>
-                )}
-                <option value="static">{t('infra.imageStatic')}</option>
-              </Select>
-              {imageMode === 'integration' ? (
-                <Notice>{t('infra.imageManaged')}</Notice>
-              ) : (
-                <Select
-                  key={`image-${egg?.id ?? 'pending'}`}
-                  label={t('infra.image')}
-                  name="image"
-                  defaultValue={
-                    eggId === String(initial?.egg_id) ? initial?.docker_image : (images[0] ?? '')
-                  }
+          </fieldset>
+          <div className="mapping-advanced">
+            <details>
+              <summary>
+                <span>{t('mapping.startup')}</span>
+                <code>{startup}</code>
+              </summary>
+              <div className="mapping-details-body">
+                <Textarea
+                  label={t('infra.startup')}
+                  name="startup"
+                  value={startup}
+                  onChange={(event) => setStartup(event.target.value)}
                   required
-                >
-                  <option value="">{t('infra.select')}</option>
-                  {images.map((image) => (
-                    <option key={image} value={image}>
-                      {image}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </>
-          )}
-        </QueryContent>
-        <Textarea
-          key={`startup-${eggId}`}
-          label={t('infra.startup')}
-          name="startup"
-          defaultValue={eggId === String(initial?.egg_id) ? initial?.startup : egg?.startup}
-          required
-        />
-        <details open>
-          <summary>{t('infra.variables')}</summary>
-          {variables.map((variable, index) => (
-            <div className="form-grid" key={variable.key}>
-              <Input
-                label={t('infra.variableName')}
-                value={variable.name}
-                pattern="[A-Za-z_][A-Za-z0-9_]*"
-                required
-                onChange={(event) =>
-                  setVariables((current) =>
-                    current.map((entry, at) =>
-                      at === index ? { ...entry, name: event.target.value } : entry,
-                    ),
-                  )
-                }
-              />
-              <Input
-                label={t('infra.variableValue')}
-                value={variable.value}
-                onChange={(event) =>
-                  setVariables((current) =>
-                    current.map((entry, at) =>
-                      at === index ? { ...entry, value: event.target.value } : entry,
-                    ),
-                  )
-                }
-              />
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setVariables((current) => current.filter((_, at) => at !== index))}
-              >
-                {t('web.remove')}
-              </button>
-            </div>
-          ))}
-          <button
-            type="button"
-            className="secondary"
-            onClick={() =>
-              setVariables((current) => [
-                ...current,
-                { key: crypto.randomUUID(), name: '', value: '' },
-              ])
-            }
-          >
-            {t('infra.addVariable')}
-          </button>
-        </details>
-        <fieldset>
-          <legend>{t('infra.portRoles')}</legend>
-          <Select
-            key={`${gameId}-${manifest?.version ?? 'pending'}`}
-            name="primary"
-            label={t('infra.primary')}
-            defaultValue={initial?.port_roles.find((role) => role.primary)?.role ?? ''}
-            required
-          >
-            <option value="">{t('infra.select')}</option>
-            {roles.map((role) => (
-              <option key={role.role} value={role.role}>
-                {role.role} · {role.transport.toUpperCase()}
-              </option>
-            ))}
-          </Select>
-          {roles.map((role) => (
-            <div key={role.role}>
-              <p>
-                {role.role} · {role.transport.toUpperCase()}
-              </p>
-              {!role.required && (
-                <Check
-                  label={t('infra.enabled')}
-                  name={`include-${role.role}`}
-                  defaultChecked={
-                    initial?.port_roles.some((old) => old.role === role.role) ?? false
-                  }
+                  spellCheck={false}
                 />
-              )}
-              <Input
-                label={t('infra.portVariable')}
-                name={`variable-${role.role}`}
-                defaultValue={
-                  initial?.port_roles.find((old) => old.role === role.role)?.environmentVariable ??
-                  ''
-                }
-                pattern="[A-Za-z_][A-Za-z0-9_]*"
-              />
-            </div>
-          ))}
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span>{t('mapping.variables')}</span>
+                <span className="mapping-count">{variables.length}</span>
+              </summary>
+              <div className="mapping-details-body">
+                {variables.length > 0 && (
+                  <div className="mapping-variable-head" aria-hidden="true">
+                    <span>{t('infra.variableName')}</span>
+                    <span>{t('infra.variableValue')}</span>
+                  </div>
+                )}
+                {variables.map((variable, index) => (
+                  <div className="mapping-variable-row" key={variable.key}>
+                    <input
+                      aria-label={`${t('infra.variableName')} ${index + 1}`}
+                      value={variable.name}
+                      pattern="[A-Za-z_][A-Za-z0-9_]*"
+                      required
+                      spellCheck={false}
+                      onChange={(event) =>
+                        setVariables((current) =>
+                          current.map((entry, at) =>
+                            at === index ? { ...entry, name: event.target.value } : entry,
+                          ),
+                        )
+                      }
+                    />
+                    <input
+                      aria-label={`${t('infra.variableValue')} ${index + 1}`}
+                      value={variable.value}
+                      onChange={(event) =>
+                        setVariables((current) =>
+                          current.map((entry, at) =>
+                            at === index ? { ...entry, value: event.target.value } : entry,
+                          ),
+                        )
+                      }
+                    />
+                    <Tooltip
+                      content={t('mapping.removeVariable', {
+                        name: variable.name || String(index + 1),
+                      })}
+                    >
+                      <button
+                        type="button"
+                        className="mapping-icon-button"
+                        aria-label={t('mapping.removeVariable', {
+                          name: variable.name || String(index + 1),
+                        })}
+                        onClick={() =>
+                          setVariables((current) => current.filter((_, at) => at !== index))
+                        }
+                      >
+                        <MappingIcon kind="remove" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="mapping-add-variable"
+                  onClick={() =>
+                    setVariables((current) => [
+                      ...current,
+                      { key: crypto.randomUUID(), name: '', value: '' },
+                    ])
+                  }
+                >
+                  <MappingIcon kind="plus" />
+                  {t('infra.addVariable')}
+                </button>
+              </div>
+            </details>
+            <details>
+              <summary>
+                <span>{t('mapping.portsLimits')}</span>
+                <span className="mapping-count">{included.size}</span>
+              </summary>
+              <div className="mapping-details-body">
+                {roles.length === 1 && roles[0]?.required ? (
+                  <input type="hidden" name="primary" value={primary} />
+                ) : (
+                  <Select
+                    label={t('infra.primary')}
+                    name="primary"
+                    value={primary}
+                    onChange={(event) => setPrimary(event.target.value)}
+                    required
+                  >
+                    <option value="">{t('infra.select')}</option>
+                    {roles
+                      .filter((role) => included.has(role.role))
+                      .map((role) => (
+                        <option key={role.role} value={role.role}>
+                          {role.role} · {role.transport.toUpperCase()}
+                        </option>
+                      ))}
+                  </Select>
+                )}
+                {roles.map((role) => (
+                  <div className="mapping-port-row" key={role.role}>
+                    <div className="mapping-port-role">
+                      {role.required ? (
+                        <strong>{role.role}</strong>
+                      ) : (
+                        <Check
+                          label={role.role}
+                          name={`include-${role.role}`}
+                          checked={included.has(role.role)}
+                          onChange={(event) => {
+                            setIncluded((current) => {
+                              const next = new Set(current);
+                              if (event.target.checked) next.add(role.role);
+                              else next.delete(role.role);
+                              return next;
+                            });
+                            if (!event.target.checked && primary === role.role) setPrimary('');
+                          }}
+                        />
+                      )}
+                      <span className="mapping-transport">{role.transport.toUpperCase()}</span>
+                    </div>
+                    <Input
+                      key={`${role.role}-${eggId}`}
+                      label={t('infra.portVariable')}
+                      name={`variable-${role.role}`}
+                      defaultValue={
+                        eggId === String(initial?.egg_id)
+                          ? (initial?.port_roles.find((old) => old.role === role.role)
+                              ?.environmentVariable ?? '')
+                          : ''
+                      }
+                      pattern="[A-Za-z_][A-Za-z0-9_]*"
+                      disabled={!included.has(role.role)}
+                    />
+                  </div>
+                ))}
+                <div className="mapping-pair mapping-limits">
+                  <Input
+                    label={t('infra.allocationLimit')}
+                    name="allocations"
+                    type="number"
+                    min={1}
+                    max={32}
+                    defaultValue={initial?.feature_limits.allocations ?? Math.max(1, roles.length)}
+                    required
+                  />
+                  <Input
+                    label={t('infra.backupLimit')}
+                    name="backups"
+                    type="number"
+                    min={0}
+                    max={10}
+                    defaultValue={initial?.feature_limits.backups ?? 1}
+                    required
+                  />
+                </div>
+              </div>
+            </details>
+          </div>
         </fieldset>
-        <Input
-          label={t('infra.allocationLimit')}
-          name="allocations"
-          type="number"
-          min={1}
-          max={32}
-          defaultValue={initial?.feature_limits.allocations ?? Math.max(1, roles.length)}
-          required
-        />
-        <Input
-          label={t('infra.backupLimit')}
-          name="backups"
-          type="number"
-          min={0}
-          max={10}
-          defaultValue={initial?.feature_limits.backups ?? 1}
-          required
-        />
-      </fieldset>
-      <Check label={t('infra.enabled')} name="enabled" defaultChecked={initial?.enabled ?? true} />
+      </div>
     </ActionForm>
   );
 }
@@ -536,7 +704,10 @@ export function IntegrationRuntimeMappings({
       </Section>
       <Dialog
         open={editing !== undefined}
-        title={t('infra.mappings')}
+        title={t(editing ? 'mapping.edit' : 'mapping.create')}
+        className="runtime-mapping-dialog"
+        closeIcon
+        initialFocusSelector="select:not(:disabled), input[name=enabled]"
         onClose={() => setEditing(undefined)}
       >
         {editing !== undefined && selected && (
