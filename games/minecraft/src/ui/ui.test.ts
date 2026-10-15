@@ -79,6 +79,17 @@ describe('Minecraft browser module and exact API contracts', () => {
     const paperId = '10000000-0000-4000-8000-000000000002';
     const release = { id: choiceId, version: '26.1', runtime: 'vanilla' };
     client.request.mockResolvedValue([release, { ...release, id: paperId, runtime: 'paper' }]);
+    expect(minecraftUiModule.descriptor.creation.pages.map((page) => page.id)).toEqual([
+      'runtime',
+      'version',
+      'address',
+      'operators',
+      'whitelist',
+    ]);
+    expect(minecraftUiModule.descriptor.creation.pages[2]).toMatchObject({
+      kind: 'address',
+      field: 'connection',
+    });
     expect(minecraftUiModule.descriptor.creation.pages[0]).toMatchObject({
       field: 'runtime',
       kind: 'choice-list',
@@ -171,7 +182,14 @@ describe('Minecraft browser module and exact API contracts', () => {
   });
   it('forwards common domain choice through the integration handler without losing automatic defaults', async () => {
     const client = clientFixture();
-    for (const connection of [{ domainId: 'main', subdomain: 'blue-panda' }, {}]) {
+    for (const connection of [
+      {
+        domainId: 'main',
+        subdomain: 'blue-panda',
+        reservationId: '20000000-0000-4000-8000-000000000002',
+      },
+      {},
+    ]) {
       await minecraftUiModule.handlers.create?.(client, {
         idempotencyKey: 'domain-create',
         values: {

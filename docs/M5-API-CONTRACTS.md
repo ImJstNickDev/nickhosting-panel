@@ -1235,3 +1235,51 @@ than being removed from existing connections automatically. Removing a chosen
 domain before a new server's initial DNS intent is prepared leaves its preference
 pending until the configuration is restored or an explicit replacement address is
 submitted. No record has been published in that pre-intent state.
+
+### Wizard address availability and temporary reservation
+
+Minecraft declares a dedicated SDK `address` page immediately after version choice;
+the common wizard renders it instead of placing editable connection fields in the
+final summary. An empty name retains automatic naming.
+
+`POST /v1/games/:id/connection-availability` accepts `{domainId?,subdomain}` and
+returns `{available,hostname}`. It requires a regular authorized session, CSRF,
+game rollout access and an eligible/customizable domain; invalid/blocked labels
+are rejected before provider access. Local claims are checked before cached
+Cloudflare results. Presence queries use exact names, `per_page=1`, at most two
+GETs for the hostname and declared SRV name. No record contents are disclosed.
+
+The browser waits 600ms after valid nonempty input, ignores stale responses and
+never retries/refetches on focus automatically. Server defaults are 30-second
+bounded cache (512 names), coalesced concurrent requests, 60 upstream reads per
+minute per credential scope and two concurrent lookup groups. Owner settings are
+`dnsAvailabilityCacheSeconds`, `dnsAvailabilityRequestsPerMinute` and
+`dnsAvailabilityConcurrency`, with corresponding `NH_DNS_AVAILABILITY_CACHE_SECONDS`,
+`NH_DNS_AVAILABILITY_REQUESTS_PER_MINUTE` and `NH_DNS_AVAILABILITY_CONCURRENCY`
+overrides. HTTP429 applies a shared cooldown respecting Retry-After; uncertainty
+is never presented as availability. These budgets/cache are process-local, not a
+distributed quota for every application using the same Cloudflare account.
+
+Cloudflare documents 1,200 requests per five minutes cumulatively per user/account
+token and 200 requests per second per IP. User dashboard and token requests share
+the user quota; other apps/API replicas still consume it. Our preview budget leaves
+headroom but cannot guarantee that external activity will not exhaust it.
+Sources: [API limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/),
+[exact-name DNS queries](https://developers.cloudflare.com/api/typescript/resources/dns/subresources/records/methods/list/).
+
+Next on a custom name calls `POST /v1/games/:id/connection-reservation` with
+`{domainId?,subdomain,previousReservationId?}`. It returns
+`{reservationId,hostname,expiresAt,domainId,subdomain}`. A 15-minute account/game-bound
+hold is atomically stored in the existing hostname registry, with at most five
+active holds per account. Replacing a prior choice releases only an owned wizard
+hold, and only after the replacement succeeds. Abandoned holds expire; no temporary
+Cloudflare record is created. The wizard passes `connection.reservationId` during
+creation; the same transaction verifies ownership, exact choice and expiry and
+transfers the claim to the new server. Transaction failure preserves the hold;
+idempotent creation replay does not consume it twice. An expired hold returns the
+wizard to address selection. Blank automatic names do not require a wizard hold.
+
+A hold excludes other NickHosting assignments, including API calls omitting the
+token; it cannot prevent manual/external Cloudflare changes. Existing owned-record
+checks remain authoritative at publication. Consumed claims survive provisioning
+retries and are released if the server is deleted before DNS intent preparation.

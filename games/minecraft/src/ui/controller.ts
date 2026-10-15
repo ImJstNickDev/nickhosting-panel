@@ -298,6 +298,7 @@ export function createMinecraftUiController(client: GameUiClient) {
             .object({
               domainId: z.string().min(1).max(80).optional(),
               subdomain: z.string().max(63).optional(),
+              reservationId: uuid.optional(),
             })
             .strict()
             .optional(),

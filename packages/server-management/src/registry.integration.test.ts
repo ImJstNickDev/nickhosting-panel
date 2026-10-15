@@ -43,7 +43,7 @@ function mappingInput() {
 }
 
 describe('managed registry, projects, runtime mapping and allocation ownership', () => {
-  it('freezes the requested DNS choice in idempotent creation and rejects unavailable choices', async () => {
+  it('freezes the requested DNS choice, consumes its reservation atomically and rejects unavailable choices', async () => {
     await f.db
       .updateTable('game_integrations')
       .set({
@@ -83,11 +83,79 @@ describe('managed registry, projects, runtime mapping and allocation ownership',
         env,
       ),
     ).rejects.toThrow('validation_failed');
+    const reservationId = randomUUID();
+    const hostname = 'cute-panda-bag.games.example.test';
+    await f.db
+      .insertInto('dns_hostname_reservations')
+      .values({
+        hostname,
+        owner_id: reservationId,
+        release_after: new Date(Date.now() + 900_000),
+        wizard_user_id: f.context.subjectUserId,
+        wizard_game_id: f.gameId,
+        wizard_domain_id: 'primary',
+        wizard_subdomain: 'cute-panda-bag',
+      })
+      .execute();
     const request = {
       ...f.input(),
-      connection: { domainId: 'primary', subdomain: 'cute-panda-bag' },
+      connection: { domainId: 'primary', subdomain: 'cute-panda-bag', reservationId },
     };
+    // Omitting a hold token must not bypass its ownership.
+    await expect(
+      createManagedServer(
+        f.db,
+        f.adapter,
+        f.context,
+        { ...request, connection: { domainId: 'primary', subdomain: 'cute-panda-bag' } },
+        env,
+      ),
+    ).rejects.toThrow('conflict');
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ wizard_user_id: f.owner.subjectUserId })
+      .where('hostname', '=', hostname)
+      .execute();
+    await expect(createManagedServer(f.db, f.adapter, f.context, request, env)).rejects.toThrow();
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ wizard_user_id: f.context.subjectUserId, release_after: new Date(Date.now() - 1_000) })
+      .where('hostname', '=', hostname)
+      .execute();
+    await expect(createManagedServer(f.db, f.adapter, f.context, request, env)).rejects.toThrow();
+    expect(
+      await f.db
+        .selectFrom('managed_servers')
+        .select('id')
+        .where('mapping_id', '=', f.mappingId)
+        .execute(),
+    ).toEqual([]);
+    expect(
+      (
+        await f.db
+          .selectFrom('dns_hostname_reservations')
+          .select('owner_id')
+          .where('hostname', '=', hostname)
+          .executeTakeFirstOrThrow()
+      ).owner_id,
+    ).toBe(reservationId);
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ release_after: new Date(Date.now() + 900_000) })
+      .where('hostname', '=', hostname)
+      .execute();
     const result = await createManagedServer(f.db, f.adapter, f.context, request, env);
+    expect(
+      await f.db
+        .selectFrom('dns_hostname_reservations')
+        .selectAll()
+        .where('hostname', '=', hostname)
+        .executeTakeFirstOrThrow(),
+    ).toMatchObject({
+      owner_id: result.serverId,
+      release_after: null,
+      wizard_user_id: null,
+    });
     expect(await createManagedServer(f.db, f.adapter, f.context, request, env)).toEqual(result);
     const preference = await f.db
       .selectFrom('server_dns_preferences')

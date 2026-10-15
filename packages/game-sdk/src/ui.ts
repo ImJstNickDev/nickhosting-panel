@@ -178,8 +178,14 @@ export const gameUiDescriptorSchema = z
               .object({
                 id,
                 titleKey: key,
-                field: fieldId,
-                kind: z.enum(['choice-list', 'version-list', 'players', 'toggle-players']),
+                field: fieldId.default('connection'),
+                kind: z.enum([
+                  'choice-list',
+                  'version-list',
+                  'players',
+                  'toggle-players',
+                  'address',
+                ]),
                 position: z.enum(['before-name', 'configuration']).default('configuration'),
                 resetFields: z.array(fieldId).max(64).default([]),
                 lookupHandler: id.optional(),
@@ -317,7 +323,21 @@ export const gameUiDescriptorSchema = z
       d.creation.resourcePresets.map((p) => p.id),
       ['creation', 'resourcePresets'],
     );
+    if (d.creation.pages.filter((page) => page.kind === 'address').length > 1)
+      context.addIssue({ code: 'custom', message: 'duplicate_address_page' });
     for (const page of d.creation.pages) {
+      if (page.kind === 'address') {
+        if (
+          page.field !== 'connection' ||
+          page.position !== 'configuration' ||
+          page.lookupHandler ||
+          page.toggleField ||
+          page.seedField ||
+          page.resetFields.length
+        )
+          context.addIssue({ code: 'custom', message: 'invalid_address_page' });
+        continue;
+      }
       const field = d.creation.fields.find((f) => f.id === page.field);
       const toggle = d.creation.fields.find((f) => f.id === page.toggleField);
       const seed = d.creation.fields.find((f) => f.id === page.seedField);

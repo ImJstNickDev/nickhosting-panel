@@ -3,6 +3,21 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     'Custom addresses are not configured.',
     'Gli indirizzi personalizzati non sono configurati.',
   ],
+  'connection.availability.checking': ['Checking availability…', 'Verifica disponibilità…'],
+  'connection.availability.available': ['Available', 'Disponibile'],
+  'connection.availability.taken': ['This name is already in use.', 'Questo nome è già in uso.'],
+  'connection.availability.invalid': [
+    'Use lowercase letters, numbers and hyphens.',
+    'Usa lettere minuscole, numeri e trattini.',
+  ],
+  'connection.availability.unavailable': [
+    'Availability could not be checked. Change the name or leave it empty for an automatic address.',
+    'Impossibile verificare la disponibilità. Cambia nome o lascia vuoto per un indirizzo automatico.',
+  ],
+  'connection.reservationExpired': [
+    'Your address reservation expired. Check it again to continue.',
+    'La prenotazione dell’indirizzo è scaduta. Verificalo di nuovo per continuare.',
+  ],
   'connection.automatic': ['Automatic', 'Automatico'],
   'connection.disableLast': [
     'Make this domain unavailable instead of removing it.',

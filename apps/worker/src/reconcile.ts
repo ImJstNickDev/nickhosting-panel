@@ -59,13 +59,25 @@ export async function reconcileServers(
           .where('state', 'not in', ['active', 'deleted'])
           .limit(1)
           .executeTakeFirst();
-    const shared =
+    const abandonedClaim =
       credential || dns
+        ? undefined
+        : await db
+            .selectFrom('dns_hostname_reservations as r')
+            .innerJoin('managed_servers as s', 's.id', 'r.owner_id')
+            .select('r.hostname')
+            .where('s.deleted_at', 'is not', null)
+            .where('r.release_after', 'is', null)
+            .limit(1)
+            .executeTakeFirst();
+    const shared =
+      credential || dns || abandonedClaim
         ? []
         : await db.selectFrom('game_integrations').select('manifest').execute();
     if (
       !credential &&
       !dns &&
+      !abandonedClaim &&
       !shared.some(
         (game) =>
           (game.manifest as { connection?: { mode?: string } }).connection?.mode === 'shared-host',

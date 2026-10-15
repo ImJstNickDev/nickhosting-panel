@@ -237,7 +237,10 @@ or an expansion of historical installation/egg support. Other runtime profiles a
 Owner diagnostics show declared capability and actual test evidence separately.
 
 Creation uses trusted SDK installer-page descriptors for a centered sequence,
-with no Vanilla content-source or project picker. Runtime choice lists use
+with no Vanilla content-source or project picker. The trusted `address` page kind
+places common connection selection where the integration declares it; Minecraft
+places it immediately after the version, before operators. It is not a game-owned
+DNS implementation. Runtime choice lists use
 release types to reveal snapshots/historical candidates only on request, while
 server-side eligibility remains authoritative. MCHeads images are optional
 presentation; independent Mojang name/UUID validation authorizes no action and

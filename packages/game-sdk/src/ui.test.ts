@@ -302,6 +302,21 @@ it('accepts only registered artwork identifiers and fails safely without artwork
 });
 
 describe('installer page contracts', () => {
+  it('declares a common address page without fake game fields and rejects duplicate or misplaced address pages', () => {
+    const descriptor = fixture();
+    const address = { id: 'address', titleKey: 'games.fixture-arena.name', kind: 'address' };
+    const parse = (pages: unknown[]) =>
+      gameUiDescriptorSchema.safeParse({
+        ...descriptor,
+        creation: { ...descriptor.creation, pages },
+      });
+    expect(parse([address]).success).toBe(true);
+    expect(parse([address, { ...address, id: 'another' }]).success).toBe(false);
+    expect(parse([{ ...address, field: 'mode' }]).success).toBe(false);
+    expect(parse([{ ...address, position: 'before-name' }]).success).toBe(false);
+    expect(parse([{ ...address, lookupHandler: 'lookup' }]).success).toBe(false);
+  });
+
   it('requires existing correctly typed fields and unique resource presets', () => {
     const descriptor = fixture();
     expect(

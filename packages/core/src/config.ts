@@ -144,6 +144,9 @@ export const platformConfigSchema = z
     dnsGamePolicies: dnsGamePoliciesSchema,
     dnsBlockedTerms: dnsBlockedTermsSchema,
     dnsNameReuseDelaySeconds: z.number().int().min(0).max(2592000),
+    dnsAvailabilityCacheSeconds: z.number().int().min(0).max(300),
+    dnsAvailabilityRequestsPerMinute: z.number().int().min(2).max(200),
+    dnsAvailabilityConcurrency: z.number().int().min(1).max(8),
     staticGameHostname: z.string().min(1).max(253).optional(),
     minecraftMetadataUserAgent: z
       .string()
@@ -226,6 +229,9 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   dnsGamePolicies: {},
   dnsBlockedTerms: [],
   dnsNameReuseDelaySeconds: 0,
+  dnsAvailabilityCacheSeconds: 30,
+  dnsAvailabilityRequestsPerMinute: 60,
+  dnsAvailabilityConcurrency: 2,
   defaultIdleTimeoutSeconds: -1,
   idleTimeoutUserAccess: 'hidden',
   gatewayEnabled: false,
@@ -299,6 +305,9 @@ export const configEnvironmentKeys = {
   dnsGamePolicies: 'NH_DNS_GAME_POLICIES',
   dnsBlockedTerms: 'NH_DNS_BLOCKED_TERMS',
   dnsNameReuseDelaySeconds: 'NH_DNS_NAME_REUSE_DELAY_SECONDS',
+  dnsAvailabilityCacheSeconds: 'NH_DNS_AVAILABILITY_CACHE_SECONDS',
+  dnsAvailabilityRequestsPerMinute: 'NH_DNS_AVAILABILITY_REQUESTS_PER_MINUTE',
+  dnsAvailabilityConcurrency: 'NH_DNS_AVAILABILITY_CONCURRENCY',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
   minecraftMetadataUserAgent: 'NH_MINECRAFT_METADATA_USER_AGENT',
   fileOperationsFreeBytes: 'NH_FILE_OPERATIONS_FREE_BYTES',
@@ -332,6 +341,9 @@ export const configEnvironmentKeys = {
 
 const numericKeys = new Set<PlatformConfigKey>([
   'dnsNameReuseDelaySeconds',
+  'dnsAvailabilityCacheSeconds',
+  'dnsAvailabilityRequestsPerMinute',
+  'dnsAvailabilityConcurrency',
   'uploadConcurrency',
   'registrationInviteTtlSeconds',
   'supportIdleTtlSeconds',

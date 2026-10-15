@@ -5,6 +5,8 @@ import { CloudflareDnsProvider, SftpGoAdapter } from '@nickhosting/external-serv
 import type { GameManifest } from '@nickhosting/game-sdk';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getGameConnectionAvailability, reserveGameConnection } from './dns.js';
+import { consumeDnsWizardReservation, reserveDnsWizardHostname } from './dns-reservations.js';
 import {
   assignServerDns,
   cleanupServerExternalServices,
@@ -297,6 +299,7 @@ async function fixture(mode: 'custom-subdomain' | 'static-host-port' = 'custom-s
       }),
   };
   return {
+    gameId: manifest.id,
     db,
     context,
     other,
@@ -2401,5 +2404,201 @@ describe('managed domain choices and durable automatic addresses', () => {
     expect(rows[0]?.state).toBe('active');
     await reconcileExternalServices(f.db, f.options);
     expect(await f.db.selectFrom('dns_assignments').select('id').execute()).toHaveLength(1);
+  });
+});
+
+describe('wizard DNS availability and reservations', () => {
+  async function ready() {
+    const f = await fixture();
+    await f.db
+      .insertInto('game_rollouts')
+      .values({ integration_id: f.gameId, state: 'public', allowlist: [] })
+      .execute();
+    return f;
+  }
+  it('checks exact hostname and SRV once, caches provider reads but never local claims', async () => {
+    const f = await ready();
+    const check = (subdomain: string, context = f.context) =>
+      getGameConnectionAvailability(f.db, context, f.gameId, { subdomain }, f.options);
+    const results = await Promise.all([check('available'), check('available')]);
+    expect(results).toEqual([
+      { available: true, hostname: 'available.example.test' },
+      { available: true, hostname: 'available.example.test' },
+    ]);
+    expect(f.dnsCalls).toEqual(['GET', 'GET']);
+    const hold = await reserveGameConnection(
+      f.db,
+      f.context,
+      f.gameId,
+      { subdomain: 'available' },
+      f.options,
+    );
+    expect((await check('available')).available).toBe(true);
+    expect((await check('available', f.other)).available).toBe(false);
+    expect(f.dnsCalls).toHaveLength(2);
+    f.records.set('foreign', {
+      id: 'foreign',
+      name: '_fixture._tcp.occupied.example.test',
+      type: 'TXT',
+      content: 'foreign',
+    });
+    expect((await check('occupied')).available).toBe(false);
+    await f.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', f.gameId)
+      .execute();
+    await expect(check('hidden')).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.dnsCalls).toEqual(['GET', 'GET', 'GET', 'GET']);
+    expect(hold.reservationId).toEqual(expect.any(String));
+  });
+  it('atomically holds names across accounts, caps holds and preserves the prior choice on conflict', async () => {
+    const f = await ready();
+    const reserve = (subdomain: string, context = f.context, previousReservationId?: string) =>
+      reserveDnsWizardHostname(f.db, context, f.gameId, {
+        domainId: 'legacy',
+        subdomain,
+        hostname: `${subdomain}.example.test`,
+        previousReservationId,
+      });
+    const attempts = await Promise.allSettled([reserve('same'), reserve('same', f.other)]);
+    expect(attempts.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const previous = await reserve('original');
+    // Use a guaranteed foreign claim for rollback regardless of race winner.
+    await reserve('foreign', f.other);
+    await expect(reserve('foreign', f.context, previous.reservationId)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(
+      await f.db
+        .selectFrom('dns_hostname_reservations')
+        .select('owner_id')
+        .where('owner_id', '=', previous.reservationId)
+        .executeTakeFirst(),
+    ).toBeDefined();
+    const replacement = await reserve('replacement', f.context, previous.reservationId);
+    expect(
+      await f.db
+        .selectFrom('dns_hostname_reservations')
+        .select('owner_id')
+        .where('owner_id', '=', previous.reservationId)
+        .executeTakeFirst(),
+    ).toBeUndefined();
+    for (let n = 0; n < 5; n++) {
+      const count = await f.db
+        .selectFrom('dns_hostname_reservations')
+        .select(f.db.fn.countAll<string>().as('count'))
+        .where('wizard_user_id', '=', f.context.subjectUserId)
+        .executeTakeFirstOrThrow();
+      if (Number(count.count) < 5) await reserve(`hold-${n}`);
+    }
+    await expect(reserve('sixth')).rejects.toMatchObject({ code: 'rate_limited' });
+    await f.db
+      .updateTable('dns_hostname_reservations')
+      .set({ release_after: new Date(0) })
+      .where('owner_id', '=', replacement.reservationId)
+      .execute();
+    await reserve('replacement', f.other);
+    expect(f.dnsCalls).toEqual([]);
+  });
+  it('returns a domain conflict when unreserved creation races a wizard hold', async () => {
+    const f = await ready();
+    for (let n = 0; n < 3; n++) {
+      const subdomain = `race-${n}`;
+      const attempts = await Promise.allSettled([
+        f.db
+          .transaction()
+          .execute((tx) =>
+            consumeDnsWizardReservation(
+              tx,
+              f.context,
+              f.gameId,
+              f.serverId,
+              { subdomain },
+              f.options.env,
+            ),
+          ),
+        reserveDnsWizardHostname(f.db, f.other, f.gameId, {
+          domainId: 'legacy',
+          subdomain,
+          hostname: `${subdomain}.example.test`,
+        }),
+      ]);
+      expect(attempts.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const failure = attempts.find((r) => r.status === 'rejected');
+      expect(failure?.status === 'rejected' && failure.reason).toMatchObject({ code: 'conflict' });
+    }
+  });
+  it('transfers a consumed hold through automatic DNS and releases a deleted pre-intent claim', async () => {
+    const f = await ready();
+    const held = await reserveGameConnection(
+      f.db,
+      f.context,
+      f.gameId,
+      { subdomain: 'transfer' },
+      f.options,
+    );
+    await f.db
+      .transaction()
+      .execute((tx) =>
+        consumeDnsWizardReservation(
+          tx,
+          f.context,
+          f.gameId,
+          f.serverId,
+          { subdomain: 'transfer', reservationId: held.reservationId },
+          f.options.env,
+        ),
+      );
+    await f.db
+      .insertInto('server_dns_preferences')
+      .values({ server_id: f.serverId, enabled: true, domain_id: 'legacy', subdomain: 'transfer' })
+      .execute();
+    await reconcileExternalServices(f.db, f.options);
+    const assigned = await f.db
+      .selectFrom('dns_assignments')
+      .selectAll()
+      .where('id', '=', f.serverId)
+      .executeTakeFirstOrThrow();
+    expect(assigned.state).toBe('active');
+    expect(
+      (
+        await f.db
+          .selectFrom('dns_hostname_reservations')
+          .selectAll()
+          .where('hostname', '=', held.hostname)
+          .executeTakeFirstOrThrow()
+      ).owner_id,
+    ).toBe(f.serverId);
+    const g = await ready();
+    const pending = await reserveGameConnection(
+      g.db,
+      g.context,
+      g.gameId,
+      { subdomain: 'pending' },
+      g.options,
+    );
+    await g.db
+      .transaction()
+      .execute((tx) =>
+        consumeDnsWizardReservation(
+          tx,
+          g.context,
+          g.gameId,
+          g.serverId,
+          { subdomain: 'pending', reservationId: pending.reservationId },
+          g.options.env,
+        ),
+      );
+    await cleanupServerExternalServices(g.db, g.serverId, g.options);
+    expect(
+      (
+        await g.db
+          .selectFrom('dns_hostname_reservations')
+          .select('release_after')
+          .where('hostname', '=', pending.hostname)
+          .executeTakeFirstOrThrow()
+      ).release_after,
+    ).not.toBeNull();
   });
 });

@@ -372,6 +372,18 @@ const settingNames: Record<string, readonly [string, string]> = {
   cloudflareZoneId: ['Cloudflare zone ID', 'ID zona Cloudflare'],
   dnsBaseDomain: ['Base domain', 'Dominio base'],
   dnsTarget: ['DNS target', 'Destinazione DNS'],
+  dnsAvailabilityCacheSeconds: [
+    'Address availability cache (seconds)',
+    'Cache disponibilità indirizzi (secondi)',
+  ],
+  dnsAvailabilityRequestsPerMinute: [
+    'DNS availability requests per minute',
+    'Richieste DNS di disponibilità al minuto',
+  ],
+  dnsAvailabilityConcurrency: [
+    'Concurrent address availability checks',
+    'Verifiche simultanee di disponibilità indirizzi',
+  ],
   staticGameHostname: ['Static game hostname', 'Nome host statico giochi'],
   minecraftMetadataUserAgent: ['Metadata request identity', 'Identità richieste metadati'],
   minecraftSourceRoot: ['Content source storage', 'Spazio sorgenti contenuti'],

@@ -44,6 +44,7 @@ import {
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
+import { consumeDnsWizardReservation } from './dns-reservations.js';
 import { planProvisionGateway } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
@@ -81,6 +82,7 @@ export const createServerSchema = z
     autoStart: z.boolean().default(true),
     connection: z
       .object({
+        reservationId: z.uuid().optional(),
         domainId: z.string().min(1).max(64).optional(),
         subdomain: z.string().min(1).max(63).optional(),
       })
@@ -557,13 +559,27 @@ export async function createManagedServer(
         deleted_at: null,
       })
       .execute();
+    const reservedConnection =
+      value.connection?.subdomain || value.connection?.reservationId
+        ? await consumeDnsWizardReservation(
+            tx,
+            context,
+            mapping.game_id,
+            serverId,
+            value.connection,
+            env,
+          )
+        : undefined;
     if (connectionDeclaration.mode !== 'static-host-port' && dnsOptions.configured) {
       await tx
         .insertInto('server_dns_preferences')
         .values({
           server_id: serverId,
-          domain_id: value.connection?.domainId ?? dnsOptions.defaultDomainId,
-          subdomain: value.connection?.subdomain ?? null,
+          domain_id:
+            reservedConnection?.domainId ??
+            value.connection?.domainId ??
+            dnsOptions.defaultDomainId,
+          subdomain: reservedConnection?.subdomain ?? value.connection?.subdomain ?? null,
           assignment_id: null,
           enabled: true,
         })

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { z } from 'zod';
-import { api, idempotencyKey } from '../api/client.js';
+import { ApiError, api, idempotencyKey } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import {
@@ -16,7 +16,12 @@ import {
   Page,
   Section,
 } from '../components/ui.js';
-import { creationConnectionChoice } from './connection.api.js';
+import {
+  type ConnectionReservation,
+  creationConnectionChoice,
+  matchingConnectionReservation,
+} from './connection.api.js';
+import { useConnectionAvailability } from './connection-availability.js';
 import {
   type ConnectionChoice,
   CreationConnection,
@@ -62,6 +67,9 @@ export function CreateServerPage() {
   const games = useQuery(creationGamesQuery);
   const connectionOptions = useConnectionOptions(gameId);
   const [connectionChoice, setConnectionChoice] = useState<ConnectionChoice>({});
+  const [connectionReservation, setConnectionReservation] = useState<ConnectionReservation>();
+  const previousReservation = useRef<string | undefined>(undefined);
+  const reserving = useRef(false);
   const quota = useQuery({
     queryKey: ['creation-quota'],
     queryFn: ({ signal }) => api<Quota>('/v1/platform/quotas', { signal }),
@@ -86,6 +94,17 @@ export function CreateServerPage() {
     step > 0 && step < nameStep
       ? beforeName[step - 1]
       : configurationPages[step - configurationStep];
+  const addressAvailability = useConnectionAvailability(
+    gameId,
+    connectionOptions.data,
+    connectionChoice,
+    page?.kind === 'address',
+  );
+  const addressBlocked =
+    page?.kind === 'address' &&
+    (connectionOptions.isPending ||
+      Boolean(connectionOptions.error) ||
+      !addressAvailability.canContinue);
   const title =
     step === 0
       ? 'gameUi.chooseGame'
@@ -144,6 +163,9 @@ export function CreateServerPage() {
     prefetchCreationCatalog(extension);
     setGameId(id);
     setConnectionChoice({});
+    previousReservation.current =
+      connectionReservation?.reservationId ?? previousReservation.current;
+    setConnectionReservation(undefined);
     setValues({ ...extension.descriptor.creation.defaults });
     setChoices({});
     seeded.current.clear();
@@ -157,7 +179,7 @@ export function CreateServerPage() {
   }
   async function next(event: FormEvent) {
     event.preventDefault();
-    if (busy || playerPending || result || !module) return;
+    if (busy || reserving.current || playerPending || result || !module || addressBlocked) return;
     setFailure(undefined);
     setErrors({});
     if (step === nameStep && !name.trim()) {
@@ -172,6 +194,60 @@ export function CreateServerPage() {
         setErrors({ [page.field]: 'unavailable' });
         return;
       }
+    }
+    if (
+      page?.kind === 'address' &&
+      connectionChoice.subdomain &&
+      connectionOptions.data?.customizable &&
+      !matchingConnectionReservation(
+        connectionReservation,
+        connectionChoice,
+        connectionOptions.data,
+      )
+    ) {
+      reserving.current = true;
+      setBusy(true);
+      try {
+        const held = await api<ConnectionReservation>(
+          `/v1/games/${encodeURIComponent(gameId)}/connection-reservation`,
+          {
+            body: {
+              domainId:
+                connectionChoice.domainId ?? connectionOptions.data.defaultDomainId ?? undefined,
+              subdomain: connectionChoice.subdomain,
+              ...(previousReservation.current
+                ? { previousReservationId: previousReservation.current }
+                : {}),
+            },
+          },
+        );
+        setConnectionReservation(held);
+        previousReservation.current = undefined;
+      } catch (error) {
+        setFailure(error);
+        return;
+      } finally {
+        reserving.current = false;
+        setBusy(false);
+      }
+    }
+    if (
+      step === finalStep &&
+      connectionChoice.subdomain &&
+      connectionOptions.data?.customizable &&
+      !matchingConnectionReservation(
+        connectionReservation,
+        connectionChoice,
+        connectionOptions.data,
+      )
+    ) {
+      previousReservation.current =
+        connectionReservation?.reservationId ?? previousReservation.current;
+      setConnectionReservation(undefined);
+      const addressPage = configurationPages.findIndex((entry) => entry.kind === 'address');
+      if (addressPage >= 0) setStep(configurationStep + addressPage);
+      setFailure(new ApiError('conflict', 'connection.reservationExpired'));
+      return;
     }
     if (step === resourcesStep && !quota.data) return;
     let submitValues = values;
@@ -213,7 +289,16 @@ export function CreateServerPage() {
     }
     setBusy(true);
     try {
-      const connection = creationConnectionChoice(connectionOptions.data, connectionChoice);
+      const connection = creationConnectionChoice(connectionOptions.data, {
+        ...connectionChoice,
+        ...(matchingConnectionReservation(
+          connectionReservation,
+          connectionChoice,
+          connectionOptions.data,
+        )
+          ? { reservationId: connectionReservation?.reservationId }
+          : {}),
+      });
       const submitted = {
         ...submitValues,
         ...(agreement ? { [agreement.field]: true } : {}),
@@ -350,6 +435,21 @@ export function CreateServerPage() {
                   value={values[page.field]}
                   onChange={(v) => update(page.field, v)}
                   onChoices={receiveChoices}
+                />
+              )}
+              {page.kind === 'address' && (
+                <CreationConnection
+                  options={connectionOptions}
+                  availability={addressAvailability.state}
+                  value={connectionChoice}
+                  onChange={(choice) => {
+                    previousReservation.current =
+                      connectionReservation?.reservationId ?? previousReservation.current;
+                    setConnectionReservation(undefined);
+                    setFailure(undefined);
+                    setConnectionChoice(choice);
+                    key.current = idempotencyKey();
+                  }}
                 />
               )}
               {page.kind === 'players' && page.lookupHandler && (
@@ -497,14 +597,6 @@ export function CreateServerPage() {
                   [t('gameUi.cpu'), format.number(cpu)],
                 ]}
               />
-              <CreationConnection
-                options={connectionOptions}
-                value={connectionChoice}
-                onChange={(choice) => {
-                  setConnectionChoice(choice);
-                  key.current = idempotencyKey();
-                }}
-              />
               {agreement && (
                 <p className="installer-agreement">
                   {t(agreement.textKey)}{' '}
@@ -539,7 +631,13 @@ export function CreateServerPage() {
           )}
           <button
             type="submit"
-            disabled={busy || playerPending || !module || (step === resourcesStep && !quota.data)}
+            disabled={
+              busy ||
+              playerPending ||
+              addressBlocked ||
+              !module ||
+              (step === resourcesStep && !quota.data)
+            }
           >
             {t(step === finalStep ? 'web.createServer' : 'web.next')}
           </button>

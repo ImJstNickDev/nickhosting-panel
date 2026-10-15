@@ -10155,3 +10155,67 @@ Rollback preserves migration032 and all DNS intents/ownership ledgers: stop DNS
 reconciliation before reverting to code that cannot interpret v2/shared intents;
 restore compatible code rather than dropping tables or broadly deleting records.
 PR21 remains open/unmerged; no M6 implementation or production deployment.
+
+### Dedicated address step, availability and wizard holds — 2026-10-15
+
+Minecraft's common SDK address step now follows version selection, before operators.
+The final summary no longer contains its editable address form. Valid custom labels
+are checked after 600ms idle; blank labels retain automatic naming. Next acquires a
+15-minute account/game-bound database hold, carried atomically into creation.
+Replacement, expiration and creation retry preserve the existing ownership model.
+No provisional DNS records are written. Backend availability uses exact Cloudflare
+hostname/SRV queries, bounded coalescing/cache and a conservative per-process budget;
+429 responses apply Retry-After cooldown without automatic retry loops.
+
+Focused validation (not a full historical milestone-suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/ui.test.ts
+  games/minecraft/src/ui/ui.test.ts`: 25 passed.
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/ui/ui.test.ts
+  apps/web/src/features/connection.test.ts`: 17 passed (overlaps the previous run).
+- Browser runner with `apps/web/tests/domains.browser.test.ts`, filtered to
+  `debounces availability|ignores late|renders the SDK`: 3 passed; mobile
+  `keeps the address step`: 1 passed. Covers stale responses, held-name reuse,
+  replacement, expired holds before Create, automatic naming, EN/IT, keyboard and
+  mobile axe (zero violations).
+- Isolated integration runner with `packages/server-management/src/registry.integration.test.ts
+  -t 'DNS choice'`: 1 passed, 24 skipped. Verifies token ownership, no-token bypass
+  rejection, expired-hold rollback, successful transfer and idempotent replay.
+- Availability/provider unit suites: initial 30 passed; final cache/HTTP/presence
+  subset 8 passed after an additional record-shape regression (existing provider
+  suite 23 passed). Focused DNS wizard/worker integration: 5 passed, 63 unrelated
+  cases skipped; covers local/foreign claims, coalescing,
+  concurrent accounts, bounded holds, replacement rollback, automatic assignment
+  transfer and deleted-server cleanup.
+
+Read-only real Cloudflare smoke through the actual adapter and configured private
+credentials: two exact-name GETs (hostname plus Minecraft SRV), both unoccupied,
+516ms combined. No writes, no record/test-server creation, no record contents or
+credentials logged. This verifies read connectivity, not real DNS publication.
+Migration033 extends the existing hostname registry with wizard identity; after its
+application, FK cleanup was added in separate migration034 rather than rewriting an
+applied migration. Both applied only to the existing development database; data and
+accounts preserved. API/worker/Vite healthy, restart counts zero; ingress HTTPS200.
+No manual restart, Pterodactyl/Wings, production network or Cloudflare modification.
+
+Screenshots reviewed:
+[Address EN](screenshots/m5/address-wizard-en.png),
+[Address IT/mobile](screenshots/m5/address-wizard-it-mobile.png).
+Rollback must retain migrations and owned claims; older code that ignores wizard
+holds must not continue accepting custom-name creation. Let temporary holds expire
+or restore compatible code; do not drop the reservation registry. The hold prevents
+NickHosting races, not manual/external Cloudflare changes. The preview quota is not
+a distributed account quota; other applications/replicas remain independent users
+of Cloudflare capacity. Issue #18 and all production-release boundaries are unchanged.
+
+Final API regression `apps/api/src/servers.integration.test.ts -t 'protects DNS
+availability'`: 1 passed, 80 skipped; session/Origin rejection and Retry-After
+propagation covered on both routes. Independent review found a concurrent
+unreserved INSERT could return a raw unique-constraint failure; it now returns a
+controlled conflict, covered by a targeted concurrency test. A final creation
+rerun verifies the consumed domain choice is persisted consistently. The initial
+lint attempt caught formatting while backend edits were still underway; fixed
+before final checks. Final build, root/web typecheck, lint, format, i18n and staged
+governance/whitespace checks passed (existing warnings retained). Catalogs contain
+1,729 keys. Independent source/security and rendered UX review has no remaining
+must-fix findings. PR21 remains open/unmerged.

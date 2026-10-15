@@ -27,6 +27,7 @@ const translated: Record<string, [string, string]> = {
   'runtimes.folia': ['Folia', 'Folia'],
   'runtimes.fabric': ['Fabric', 'Fabric'],
   'runtimes.forge': ['Forge', 'Forge'],
+  'installer.address': ['Choose an address', 'Scegli un indirizzo'],
   'installer.version': ['Choose a version', 'Scegli una versione'],
   'installer.operators': ['Who should be an operator?', 'Chi sarà operatore?'],
   'installer.whitelist': ['Do you want to turn whitelist on?', 'Vuoi attivare la whitelist?'],
@@ -242,6 +243,7 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
         resetFields: ['choiceId', 'operators', 'whitelist', 'whitelistEnabled', 'eula'],
       },
       { id: 'version', titleKey: k('installer.version'), field: 'choiceId', kind: 'version-list' },
+      { id: 'address', titleKey: k('installer.address'), kind: 'address' },
       {
         id: 'operators',
         titleKey: k('installer.operators'),

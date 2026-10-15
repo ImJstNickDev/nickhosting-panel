@@ -355,6 +355,22 @@ export class CloudflareDnsProvider {
       comment: parsed.data.comment ?? undefined,
     };
   }
+  /** Presence only: a single bounded read, never inventory pagination or record disclosure. */
+  async hasRecordsAtName(zoneId: string, name: string): Promise<boolean> {
+    const normalized = recordName(name);
+    const response = (await this.#request(
+      zoneId,
+      `?${new URLSearchParams({ name: normalized, per_page: '1', page: '1' })}`,
+    )) as { result: unknown[] } | null;
+    if (!response || !Array.isArray(response.result))
+      throw new DomainError('integration_unavailable');
+    for (const value of response.result) {
+      const record = z.object({ id: z.string().min(1), name: z.string().min(1) }).safeParse(value);
+      if (!record.success || recordName(record.data.name) !== normalized)
+        throw new DomainError('integration_unavailable');
+    }
+    return response.result.length > 0;
+  }
   async listAtName(zoneId: string, name: string): Promise<ObservedDnsRecord[]> {
     const normalized = recordName(name);
     const result: ObservedDnsRecord[] = [];

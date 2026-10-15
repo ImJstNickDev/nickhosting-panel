@@ -141,3 +141,30 @@ it('runs shared-host registration reconciliation before the first server exists'
     await isolated.destroy();
   }
 });
+
+it('reconciles a consumed hostname claim when its server was deleted before DNS intent existed', async () => {
+  const isolated = await createTestDatabase();
+  try {
+    const f = await managementFixture(isolated.db, { interactive: true });
+    const serverId = await f.server();
+    await f.db
+      .insertInto('dns_hostname_reservations')
+      .values({ hostname: 'orphan.example.test', owner_id: serverId, release_after: null })
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ deleted_at: new Date() })
+      .where('id', '=', serverId)
+      .execute();
+    const reconcile = vi.fn(async () => ({ external: { failed: 0 }, unavailable: [] }));
+    await reconcileServers(
+      f.db,
+      async () => ({ reconcile }) as unknown as ManagementRuntime,
+      createLogger(() => {}),
+      {},
+    );
+    expect(reconcile).toHaveBeenCalledOnce();
+  } finally {
+    await isolated.destroy();
+  }
+});

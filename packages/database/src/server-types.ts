@@ -301,6 +301,10 @@ export interface ServerTables {
     updated_at: Generated<Date>;
   };
   dns_hostname_reservations: {
+    wizard_user_id: Generated<string | null>;
+    wizard_game_id: Generated<string | null>;
+    wizard_domain_id: Generated<string | null>;
+    wizard_subdomain: Generated<string | null>;
     hostname: string;
     owner_id: string;
     release_after: Date | null;

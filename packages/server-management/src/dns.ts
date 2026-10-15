@@ -20,11 +20,14 @@ import {
   CloudflareDnsProvider,
   type ConnectionPlan,
   type OwnedDnsRecord,
+  ProviderRateLimitError,
   planConnection,
 } from '@nickhosting/external-services';
 import { evaluateGameAccess, gameManifestSchema } from '@nickhosting/game-sdk';
 import type { Kysely, Selectable } from 'kysely';
 import { z } from 'zod';
+import { cachedDnsAvailability } from './dns-availability.js';
+import { reserveDnsWizardHostname } from './dns-reservations.js';
 import { dnsLocked, type ExternalServiceOptions, locked } from './external.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, parse } from './registry.js';
@@ -94,11 +97,10 @@ export async function getServerConnectionOptions(
     (await secretStatus(db, env)).some((s) => s.name === 'cloudflareApiToken' && s.configured);
   return { ...options, configured: options.configured && ready };
 }
-export async function getGameConnectionOptions(
+async function authorizedGameConnection(
   db: Kysely<Database>,
   context: AuthContext,
   gameId: string,
-  env: ExternalServiceOptions['env'] = {},
 ) {
   const game = await db
     .selectFrom('game_integrations as g')
@@ -114,15 +116,138 @@ export async function getGameConnectionOptions(
     ).canCreate
   )
     throw new DomainError('forbidden');
-  const options = resolveDnsOptions(
-    (await getSettings(db, env)).values,
-    parse(gameManifestSchema, game.manifest).connection,
-    gameId,
-  );
+  return parse(gameManifestSchema, game.manifest).connection;
+}
+export async function getGameConnectionOptions(
+  db: Kysely<Database>,
+  context: AuthContext,
+  gameId: string,
+  env: ExternalServiceOptions['env'] = {},
+) {
+  const [connection, settings] = await Promise.all([
+    authorizedGameConnection(db, context, gameId),
+    getSettings(db, env),
+  ]);
+  const options = resolveDnsOptions(settings.values, connection, gameId);
   const ready =
     options.mode === 'static-host-port' ||
     (await secretStatus(db, env)).some((s) => s.name === 'cloudflareApiToken' && s.configured);
   return { ...options, configured: options.configured && ready };
+}
+export async function getGameConnectionAvailability(
+  db: Kysely<Database>,
+  context: AuthContext,
+  gameId: string,
+  input: unknown,
+  options: ExternalServiceOptions,
+) {
+  if (context.sessionType !== 'regular') throw new DomainError('forbidden');
+  const request = parse(serverConnectionRequest.required({ subdomain: true }), input);
+  const [connection, settings] = await Promise.all([
+    authorizedGameConnection(db, context, gameId),
+    getSettings(db, options.env),
+  ]);
+  if (
+    connection.mode === 'static-host-port' ||
+    (connection.mode === 'shared-host' && !connection.allowCustomSubdomain)
+  )
+    throw new DomainError('forbidden');
+  const config = settings.values;
+  const choices = resolveDnsOptions(config, connection, gameId);
+  const domain = resolveDnsDomains(config, connection, gameId).find(
+    (d) => d.id === (request.domainId ?? choices.defaultDomainId),
+  );
+  if (!domain || !choices.configured) throw new DomainError('configuration_invalid');
+  const subdomain = validateDnsLabel(request.subdomain, config),
+    hostname = `${subdomain}.${domain.hostname}`;
+  if (hostname.length > 253) throw new DomainError('validation_failed');
+  const reservation = await db
+    .selectFrom('dns_hostname_reservations')
+    .select(['hostname', 'wizard_user_id', 'wizard_game_id'])
+    .where('hostname', '=', hostname)
+    .where((eb) => eb.or([eb('release_after', 'is', null), eb('release_after', '>', now(options))]))
+    .executeTakeFirst();
+  if (reservation)
+    return {
+      available:
+        reservation.wizard_user_id === context.subjectUserId &&
+        reservation.wizard_game_id === gameId,
+      hostname,
+    };
+  const key = await getSecret(db, options.codec, 'cloudflareApiToken', options.env);
+  if (!key || !config.dnsInstanceId) throw new DomainError('configuration_invalid');
+  const names = [
+    hostname,
+    ...(connection.mode === 'custom-subdomain' && connection.srv
+      ? [`${connection.srv.service}._${connection.srv.proto}.${hostname}`]
+      : []),
+  ];
+  const scope = fingerprint(key),
+    cacheKey = fingerprint([scope, config.dnsInstanceId, domain.zoneId, names]);
+  const available = await cachedDnsAvailability(
+    scope,
+    cacheKey,
+    names.length,
+    {
+      cacheSeconds: config.dnsAvailabilityCacheSeconds,
+      requestsPerMinute: config.dnsAvailabilityRequestsPerMinute,
+      concurrency: config.dnsAvailabilityConcurrency,
+    },
+    async () => {
+      const provider =
+        options.dnsFactory?.(config, key) ??
+        new CloudflareDnsProvider({ instanceId: config.dnsInstanceId ?? '', apiToken: key });
+      if (!provider.hasRecordsAtName) throw new DomainError('integration_unavailable');
+      const readName = provider.hasRecordsAtName.bind(provider);
+      const results = await Promise.allSettled(names.map((name) => readName(domain.zoneId, name)));
+      const limited = results.find(
+        (result) => result.status === 'rejected' && result.reason instanceof ProviderRateLimitError,
+      );
+      if (limited?.status === 'rejected') throw limited.reason;
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
+      return results.every((result) => result.status === 'fulfilled' && !result.value);
+    },
+  );
+  return { available, hostname };
+}
+export async function reserveGameConnection(
+  db: Kysely<Database>,
+  context: AuthContext,
+  gameId: string,
+  input: unknown,
+  options: ExternalServiceOptions,
+) {
+  const request = parse(
+    serverConnectionRequest
+      .required({ subdomain: true })
+      .extend({ previousReservationId: z.uuid().optional() }),
+    input,
+  );
+  const { previousReservationId, ...selection } = request;
+  const availability = await getGameConnectionAvailability(db, context, gameId, selection, options);
+  if (!availability.available) throw new DomainError('conflict');
+  const [connection, settings] = await Promise.all([
+    authorizedGameConnection(db, context, gameId),
+    getSettings(db, options.env),
+  ]);
+  const choices = resolveDnsOptions(settings.values, connection, gameId);
+  const domainId = request.domainId ?? choices.defaultDomainId;
+  const domain = resolveDnsDomains(settings.values, connection, gameId).find(
+    (d) => d.id === domainId,
+  );
+  if (!domain || !choices.configured || !choices.customizable)
+    throw new DomainError('configuration_invalid');
+  const subdomain = validateDnsLabel(request.subdomain, settings.values);
+  const hostname = `${subdomain}.${domain.hostname}`;
+  // Settings can change while the provider read is in flight. Never reserve a
+  // different name than the one whose availability was actually checked.
+  if (hostname !== availability.hostname) throw new DomainError('conflict');
+  return reserveDnsWizardHostname(db, context, gameId, {
+    domainId: domain.id,
+    subdomain,
+    hostname,
+    previousReservationId,
+  });
 }
 async function dnsProvider(db: Kysely<Database>, options: ExternalServiceOptions) {
   const { values: config } = await getSettings(db, options.env);
@@ -180,6 +305,13 @@ async function releaseNames(
     .where('release_after', 'is', null);
   if (keep) query = query.where('hostname', '!=', keep);
   await query.execute();
+}
+export async function releaseServerDnsClaims(
+  db: Kysely<Database>,
+  serverId: string,
+  options: ExternalServiceOptions,
+) {
+  await releaseNames(db, serverId, null, options);
 }
 async function connectionPlan(
   db: Kysely<Database>,
@@ -731,7 +863,8 @@ export async function assignServerDns(
           .executeTakeFirst();
         if (!legacy) throw new DomainError('conflict');
       }
-      const assignmentId = value.assignmentId ?? primaryId ?? randomUUID();
+      const assignmentId =
+        value.assignmentId ?? primaryId ?? (preference ? serverId : randomUUID());
       const result = await prepareAssignment(
         connection,
         { context: verified },
@@ -948,6 +1081,20 @@ async function reconcileSharedDnsHosts(db: Kysely<Database>, options: ExternalSe
   return { recovered, failed };
 }
 export async function reconcileAutomaticDns(db: Kysely<Database>, options: ExternalServiceOptions) {
+  const { values: config } = await getSettings(db, options.env);
+  await db
+    .updateTable('dns_hostname_reservations')
+    .set({
+      release_after: new Date(now(options).getTime() + config.dnsNameReuseDelaySeconds * 1000),
+    })
+    .where('release_after', 'is', null)
+    .where('wizard_user_id', 'is', null)
+    .where(
+      'owner_id',
+      'in',
+      db.selectFrom('managed_servers').select('id').where('deleted_at', 'is not', null),
+    )
+    .execute();
   const candidates = await db
     .selectFrom('server_dns_preferences as p')
     .innerJoin('managed_servers as s', 's.id', 'p.server_id')
@@ -988,7 +1135,7 @@ export async function reconcileAutomaticDns(db: Kysely<Database>, options: Exter
             { service: 'server-default' },
             candidate.server_id,
             {
-              assignmentId: randomUUID(),
+              assignmentId: candidate.server_id,
               ...(current.domain_id ? { domainId: current.domain_id } : {}),
               ...(current.subdomain ? { subdomain: current.subdomain } : {}),
             },

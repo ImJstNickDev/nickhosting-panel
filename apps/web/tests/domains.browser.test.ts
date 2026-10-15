@@ -28,6 +28,9 @@ describe('Domain choices and management (isolated responses, real components)', 
     errors: string[],
     canManage: boolean;
   let addressState: string;
+  let availabilityRequests: Array<{ domainId: string; subdomain: string }>;
+  let releaseSlow: (() => void) | undefined;
+  let reservationExpiry: string;
   let assignments: Array<{ id: string; state: string; connection: { displayAddress: string } }>;
   beforeAll(async () => {
     vite = await createServer({
@@ -69,6 +72,9 @@ describe('Domain choices and management (isolated responses, real components)', 
     assignments = [];
     canManage = true;
     addressState = 'unconfigured';
+    availabilityRequests = [];
+    releaseSlow = undefined;
+    reservationExpiry = new Date(Date.now() + 15 * 60_000).toISOString();
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
@@ -105,6 +111,60 @@ describe('Domain choices and management (isolated responses, real components)', 
             },
             actor: user,
             subject: user,
+          },
+        });
+      }
+      if (path === '/v1/games')
+        return route.fulfill({
+          json: [
+            { id: 'minecraft', access: { canCreate: true }, manifest: { runtimes: ['vanilla'] } },
+          ],
+        });
+      if (path === '/v1/platform/quotas')
+        return route.fulfill({
+          json: {
+            remaining: { memoryMiB: 8192, cpuPercent: 400, storageMiB: null },
+            storagePolicy: 'GLOBAL_POOL',
+            creationStorage: { mode: 'shared', defaultDiskMiB: 4096 },
+          },
+        });
+      if (path === '/v1/minecraft/choices')
+        return route.fulfill({
+          json: [
+            {
+              id: '10000000-0000-4000-8000-000000000001',
+              version: '26.1',
+              runtime: 'vanilla',
+              capabilities: { playerManagement: true },
+            },
+          ],
+        });
+      if (path.endsWith('/connection-availability')) {
+        const body = route.request().postDataJSON();
+        availabilityRequests.push(body);
+        if (body.subdomain === 'slow')
+          await new Promise<void>((resolve) => {
+            releaseSlow = resolve;
+          });
+        if (body.subdomain === 'unreachable')
+          return route.fulfill({ status: 503, json: { code: 'integration_unavailable' } });
+        return route.fulfill({
+          json: {
+            available: body.subdomain !== 'taken',
+            hostname: `${body.subdomain}.${domain.hostname}`,
+          },
+        });
+      }
+      if (path.endsWith('/connection-reservation')) {
+        const body = route.request().postDataJSON();
+        writes.push({ path, body });
+        return route.fulfill({
+          json: {
+            reservationId: '20000000-0000-4000-8000-000000000002',
+            domainId: 'main',
+            subdomain: body.subdomain,
+            hostname: `${body.subdomain}.${domain.hostname}`,
+            expiresAt: reservationExpiry,
           },
         });
       }
@@ -175,6 +235,7 @@ describe('Domain choices and management (isolated responses, real components)', 
     });
   });
   afterEach(async () => {
+    releaseSlow?.();
     await context.close();
     expect(errors).toEqual([]);
   });
@@ -185,6 +246,160 @@ describe('Domain choices and management (isolated responses, real components)', 
   async function open(view = 'network') {
     await page.goto(`${origin}domains-fixture?view=${view}`);
   }
+  it('debounces availability, blocks unchecked custom names, and never checks empty or invalid input', async () => {
+    await open('availability');
+    const input = page.getByLabel('Subdomain', { exact: true }),
+      next = page.getByRole('button', { name: 'Next', exact: true });
+    await check(input).toBeFocused();
+    await check(next).toBeEnabled();
+    await input.fill('one');
+    await page.waitForTimeout(200);
+    await input.fill('two');
+    await page.waitForTimeout(250);
+    expect(availabilityRequests).toEqual([]);
+    await check(next).toBeDisabled();
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    expect(availabilityRequests).toEqual([{ domainId: 'main', subdomain: 'two' }]);
+    await input.fill('bad-');
+    await page.waitForTimeout(650);
+    expect(availabilityRequests).toHaveLength(1);
+    await check(next).toBeDisabled();
+    await input.fill('');
+    await check(next).toBeEnabled();
+    await page.waitForTimeout(650);
+    expect(availabilityRequests).toHaveLength(1);
+    await input.press('Enter');
+    await check(page.locator('output')).toHaveText('continued');
+  });
+  it('ignores late availability responses, does not retry errors or refetch on focus, and invalidates results on domain change', async () => {
+    options.domains.push({ id: 'other', hostname: 'other.example.test' });
+    await open('availability');
+    const input = page.getByLabel('Subdomain', { exact: true }),
+      next = page.getByRole('button', { name: 'Next', exact: true });
+    await input.fill('slow');
+    await check.poll(() => availabilityRequests.length).toBe(1);
+    await input.fill('taken');
+    await check(page.locator('.connection-availability')).toHaveText(
+      'This name is already in use.',
+    );
+    releaseSlow?.();
+    await page.waitForTimeout(100);
+    await check(next).toBeDisabled();
+    await check(page.locator('.connection-availability')).toHaveText(
+      'This name is already in use.',
+    );
+    await input.fill('unreachable');
+    await check(page.locator('.connection-availability')).toContainText(
+      'Availability could not be checked',
+    );
+    const count = availabilityRequests.length;
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.waitForTimeout(700);
+    expect(availabilityRequests).toHaveLength(count);
+    await input.fill('free');
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    await page.getByLabel('Domain', { exact: true }).selectOption('other');
+    await check(next).toBeDisabled();
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    expect(availabilityRequests.at(-1)).toEqual({ domainId: 'other', subdomain: 'free' });
+  });
+  it('renders the SDK address step after version, reserves on Next and reuses the hold when navigating back', async () => {
+    await open('wizard');
+    await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByText('Vanilla', { exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByLabel('Server name', { exact: true }).fill('Island');
+    await page.getByLabel('Server name', { exact: true }).press('Enter');
+    await check(page.getByRole('heading', { name: 'Choose a version', exact: true })).toBeVisible();
+    await page.getByText('26.1', { exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await check(
+      page.getByRole('heading', { name: 'Choose an address', exact: true }),
+    ).toBeVisible();
+    const input = page.getByLabel('Subdomain', { exact: true });
+    await check(input).toBeFocused();
+    await input.fill('island');
+    await check(page.getByRole('button', { name: 'Next', exact: true })).toBeDisabled();
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/address-wizard-en.png',
+      fullPage: true,
+    });
+    await input.press('Enter');
+    await check(
+      page.getByRole('heading', { name: 'Who should be an operator?', exact: true }),
+    ).toBeVisible();
+    expect(writes.filter((entry) => entry.path.endsWith('/connection-reservation'))).toHaveLength(
+      1,
+    );
+    await page.getByRole('button', { name: 'Back', exact: true }).click();
+    await check(
+      page.getByRole('heading', { name: 'Choose an address', exact: true }),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    expect(writes.filter((entry) => entry.path.endsWith('/connection-reservation'))).toHaveLength(
+      1,
+    );
+    await page.getByRole('button', { name: 'Back', exact: true }).click();
+    await input.fill('island-two');
+    await check(page.locator('.connection-availability')).toHaveText('Available');
+    await input.press('Enter');
+    expect(writes.at(-1)?.body).toEqual({
+      domainId: 'main',
+      subdomain: 'island-two',
+      previousReservationId: '20000000-0000-4000-8000-000000000002',
+    });
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.evaluate(() => {
+      const original = Date.now.bind(Date);
+      Date.now = () => original() + 16 * 60_000;
+    });
+    await page.getByRole('button', { name: 'Create server', exact: true }).click();
+    await check(
+      page.getByRole('heading', { name: 'Choose an address', exact: true }),
+    ).toBeVisible();
+    await check(page.getByRole('alert')).toContainText('Your address reservation expired');
+  });
+  it('keeps the address step usable on mobile in Italian with accessible status and keyboard controls', async () => {
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open('wizard');
+    await page.getByRole('button', { name: 'Minecraft', exact: true }).click();
+    await page.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await page.getByText('Vanilla', { exact: true }).click();
+    await page.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await page.getByLabel('Nome del server', { exact: true }).fill('Isola');
+    await page.getByLabel('Nome del server', { exact: true }).press('Enter');
+    await page.getByText('26.1', { exact: true }).click();
+    await page.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await check(
+      page.getByRole('heading', { name: 'Scegli un indirizzo', exact: true }),
+    ).toBeVisible();
+    const input = page.getByLabel('Sottodominio', { exact: true });
+    await check(input).toBeFocused();
+    await input.fill('isola');
+    await check(page.locator('.connection-availability')).toHaveText('Disponibile');
+    expect(
+      (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+        .violations,
+    ).toEqual([]);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/address-wizard-it-mobile.png',
+      fullPage: true,
+    });
+    await input.fill('');
+    await input.press('Enter');
+    await check(
+      page.getByRole('heading', { name: 'Chi sarà operatore?', exact: true }),
+    ).toBeVisible();
+    expect(writes).toEqual([]);
+  });
   it('uses automatic labels and only shows domain selection when necessary', async () => {
     await open('creation');
     await check(page.getByPlaceholder('Automatic')).toBeVisible();

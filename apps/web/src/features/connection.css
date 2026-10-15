@@ -112,3 +112,18 @@
 .connection-actions .connection-remove {
   color: #ad2932;
 }
+
+.connection-availability {
+  min-height: 1.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+.connection-availability[data-state="available"] {
+  color: #287744;
+}
+.connection-availability[data-state="taken"],
+.connection-availability[data-state="invalid"],
+.connection-availability[data-state="unavailable"] {
+  color: #ad2932;
+}

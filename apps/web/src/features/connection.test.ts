@@ -3,6 +3,7 @@ import {
   assignmentConnectionChoice,
   type ConnectionOptions,
   creationConnectionChoice,
+  matchingConnectionReservation,
 } from './connection.api.js';
 
 const options: ConnectionOptions = {
@@ -22,6 +23,33 @@ describe('Connection edit label', () => {
     expect(creationConnectionChoice({ ...options, mode: 'static-host-port' }, {})).toBeUndefined();
     expect(creationConnectionChoice({ ...options, configured: false }, {})).toBeUndefined();
     expect(creationConnectionChoice(options, {})).toEqual({});
+  });
+  it('rejects expired holds and holds for another name or domain', () => {
+    const reservation = {
+      reservationId: 'id',
+      hostname: 'foo.example.test',
+      subdomain: 'foo',
+      domainId: 'root',
+      expiresAt: '2026-10-16T12:00:00Z',
+    };
+    const now = Date.parse('2026-10-16T11:59:59Z');
+    expect(matchingConnectionReservation(reservation, { subdomain: 'foo' }, options, now)).toBe(
+      true,
+    );
+    expect(matchingConnectionReservation(reservation, { subdomain: 'bar' }, options, now)).toBe(
+      false,
+    );
+    expect(
+      matchingConnectionReservation(
+        reservation,
+        { subdomain: 'foo', domainId: 'games' },
+        options,
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      matchingConnectionReservation(reservation, { subdomain: 'foo' }, options, now + 1000),
+    ).toBe(false);
   });
   it('uses stored identity and longest suffix for legacy overlapping domains', () => {
     const connection = { hostname: 'blue.games.example.test' };

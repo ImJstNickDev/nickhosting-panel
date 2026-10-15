@@ -8,6 +8,7 @@ import { createIdentity, type IdentityMail } from '@nickhosting/auth';
 import { authSessionId, createLogger, DomainError, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
+import { ProviderRateLimitError } from '@nickhosting/external-services';
 import { localizeError } from '@nickhosting/i18n';
 import { minecraftManifest } from '@nickhosting/minecraft';
 import {
@@ -475,6 +476,89 @@ describe('M2 Hono API with real invitation, password and session authentication'
         .updateTable('game_rollouts')
         .set({ state: 'public', allowlist: [] })
         .where('integration_id', '=', f.gameId)
+        .execute();
+    }
+  });
+  it('protects DNS availability and reservation and preserves provider Retry-After', async () => {
+    const paths = ['availability', 'reservation'].map(
+      (kind) => `/v1/games/${f.gameId}/connection-${kind}`,
+    );
+    const keys = [
+      'NH_DNS_INSTANCE_ID',
+      'NH_CLOUDFLARE_ZONE_ID',
+      'NH_CLOUDFLARE_API_TOKEN',
+      'NH_DNS_BASE_DOMAIN',
+      'NH_DNS_TARGET',
+    ];
+    const previous = Object.fromEntries(keys.map((key) => [key, env[key]]));
+    const originalFactory = runtime.externalOptions.dnsFactory;
+    const manifest = await f.db
+      .selectFrom('game_integrations')
+      .select('manifest')
+      .where('id', '=', f.gameId)
+      .executeTakeFirstOrThrow();
+    const read = vi.fn(async () => {
+      throw new ProviderRateLimitError(2300);
+    });
+    try {
+      Object.assign(env, {
+        NH_DNS_INSTANCE_ID: randomUUID(),
+        NH_CLOUDFLARE_ZONE_ID: 'a'.repeat(32),
+        NH_CLOUDFLARE_API_TOKEN: randomUUID(),
+        NH_DNS_BASE_DOMAIN: 'example.test',
+        NH_DNS_TARGET: '192.0.2.1',
+      });
+      await f.db
+        .updateTable('game_integrations')
+        .set({
+          manifest: {
+            ...(manifest.manifest as Record<string, unknown>),
+            connection: {
+              mode: 'custom-subdomain',
+              zoneSettingKey: 'dnsBaseDomain',
+              srv: { service: '_minecraft', proto: 'tcp' },
+            },
+          },
+        })
+        .where('id', '=', f.gameId)
+        .execute();
+      runtime.externalOptions.dnsFactory = () => ({
+        hasRecordsAtName: read,
+        plan: async () => {
+          throw new Error('must not mutate DNS');
+        },
+        apply: async () => {
+          throw new Error('must not mutate DNS');
+        },
+        inspectOwned: async () => {
+          throw new Error('must not inspect records');
+        },
+      });
+      for (const path of paths) {
+        expect((await request(null, path, { subdomain: 'probe' })).status).toBe(401);
+        expect(
+          (
+            await request(
+              user,
+              path,
+              { subdomain: 'probe' },
+              { headers: { origin: 'https://foreign.test' } },
+            )
+          ).status,
+        ).toBe(403);
+        const response = await request(user, path, { subdomain: 'probe' });
+        expect(response.status).toBe(429);
+        expect(response.headers.get('Retry-After')).toBe('3');
+        expect(JSON.stringify(await response.json())).not.toContain('retryAfterMs');
+      }
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      Object.assign(env, previous);
+      runtime.externalOptions.dnsFactory = originalFactory;
+      await f.db
+        .updateTable('game_integrations')
+        .set({ manifest: manifest.manifest })
+        .where('id', '=', f.gameId)
         .execute();
     }
   });

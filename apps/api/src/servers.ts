@@ -21,6 +21,7 @@ import {
   effectiveNodeOverhead,
   effectiveUploadPolicy,
   enqueueServerOperation,
+  getGameConnectionAvailability,
   getGameConnectionOptions,
   getServerConnectionOptions,
   listServerDns,
@@ -33,6 +34,7 @@ import {
   previewServerDns,
   publicServer,
   recoverUploadIngestion,
+  reserveGameConnection,
   reserveUploadIngestion,
   resolveHostOverride,
   resolveUncertainOperation,
@@ -1026,6 +1028,28 @@ export function registerServerRoutes(
       ),
     );
   });
+  for (const kind of ['availability', 'reservation'] as const)
+    app.post(`/v1/games/:id/connection-${kind}`, async (c) => {
+      try {
+        const context = await principal(c, true),
+          service = await management();
+        const operation =
+          kind === 'availability' ? getGameConnectionAvailability : reserveGameConnection;
+        return c.json(
+          await operation(db, context, c.req.param('id'), await body(c), service.externalOptions),
+          kind === 'reservation' ? 201 : 200,
+        );
+      } catch (error) {
+        if (error instanceof DomainError && error.code === 'rate_limited') {
+          const retry = error.details?.retryAfterMs;
+          c.header(
+            'Retry-After',
+            String(Math.ceil((typeof retry === 'number' ? retry : 1000) / 1000)),
+          );
+        }
+        throw error;
+      }
+    });
   app.get('/v1/games/:id/connection-options', async (c) =>
     c.json(await getGameConnectionOptions(db, await principal(c), c.req.param('id'), env)),
   );

@@ -7,7 +7,7 @@ export type ConnectionOptions = {
   supportsSrv: boolean;
   configured: boolean;
 };
-export type ConnectionChoice = { domainId?: string; subdomain?: string };
+export type ConnectionChoice = { domainId?: string; subdomain?: string; reservationId?: string };
 
 /** Prefer stored domain identity; overlapping DNS suffixes must not alter the editable label. */
 export function assignmentConnectionChoice(
@@ -38,4 +38,26 @@ export function creationConnectionChoice(
   choice: ConnectionChoice,
 ) {
   return options?.configured && options.mode !== 'static-host-port' ? choice : undefined;
+}
+
+export type ConnectionReservation = {
+  reservationId: string;
+  hostname: string;
+  expiresAt: string;
+  domainId: string;
+  subdomain: string;
+};
+export function matchingConnectionReservation(
+  reservation: ConnectionReservation | undefined,
+  choice: ConnectionChoice,
+  options: ConnectionOptions | undefined,
+  now = Date.now(),
+) {
+  return Boolean(
+    reservation &&
+      reservation.subdomain === choice.subdomain &&
+      reservation.domainId ===
+        (choice.domainId ?? options?.defaultDomainId ?? options?.domains[0]?.id) &&
+      Date.parse(reservation.expiresAt) > now,
+  );
 }

@@ -1,12 +1,14 @@
-import { deleteDnsRow, reconcileAutomaticDns, runDns } from './dns.js';
+import { deleteDnsRow, reconcileAutomaticDns, releaseServerDnsClaims, runDns } from './dns.js';
 
 export {
   assignServerDns,
   deleteServerDns,
+  getGameConnectionAvailability,
   getGameConnectionOptions,
   getServerConnectionOptions,
   listServerDns,
   previewServerDns,
+  reserveGameConnection,
   updateServerDns,
 } from './dns.js';
 
@@ -44,7 +46,8 @@ type SftpProvider = Pick<
   SftpGoAdapter,
   'ensureCredential' | 'inspectCredential' | 'rotateCredential' | 'revokeCredential' | 'updateQuota'
 >;
-type DnsProvider = Pick<CloudflareDnsProvider, 'plan' | 'apply' | 'inspectOwned'>;
+type DnsProvider = Pick<CloudflareDnsProvider, 'plan' | 'apply' | 'inspectOwned'> &
+  Partial<Pick<CloudflareDnsProvider, 'hasRecordsAtName'>>;
 export interface ExternalServiceOptions {
   codec: SecretCodec;
   env?: Environment;
@@ -790,6 +793,7 @@ export async function cleanupServerExternalServices(
         .where('state', '!=', 'deleted')
         .execute())
         await deleteDnsRow(connection, row, options);
+      await releaseServerDnsClaims(connection, serverId, options);
     });
   });
 }
