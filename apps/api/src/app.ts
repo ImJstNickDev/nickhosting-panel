@@ -7,6 +7,7 @@ import {
   assertPermission,
   type createLogger,
   DomainError,
+  normalizeLegacyContentSettings,
   platformConfigSchema,
   type SecretCodec,
   safeError,
@@ -444,7 +445,8 @@ export function createApp(options: Options) {
     c.json(await updateSettings(db, await principal(c, true), await body(c), env)),
   );
   app.delete('/v1/owner/settings/:key', async (c) => {
-    const key = validate(platformConfigSchema.keyof(), c.req.param('key'));
+    const normalized = normalizeLegacyContentSettings({ [c.req.param('key')]: undefined });
+    const key = validate(platformConfigSchema.keyof(), Object.keys(normalized as object)[0]);
     return c.json(await updateSettings(db, await principal(c, true), { [key]: undefined }, env));
   });
   app.put('/v1/owner/secrets/:name', async (c) => {

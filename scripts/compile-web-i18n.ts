@@ -1,8 +1,10 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { compileMessageOrThrow } from '@lingui/message-utils/compileMessage';
 import { en, it } from '../packages/i18n/src/catalogs.js';
+import { contentSettingsWebMessages } from '../packages/i18n/src/content-settings-web.js';
 import { gameUiWebMessages } from '../packages/i18n/src/game-ui-web.js';
 import { ownerInfraWebMessages } from '../packages/i18n/src/owner-infra-web.js';
+import { ownerIntegrationWebMessages } from '../packages/i18n/src/owner-integration-web.js';
 import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
 import { platformWebMessages } from '../packages/i18n/src/platform-web.js';
 import { quillWebMessages } from '../packages/i18n/src/quill-web.js';
@@ -15,9 +17,11 @@ import { webMessages } from '../packages/i18n/src/web.js';
 const catalogs: Record<string, Record<string, string>> = { en: { ...en }, it: { ...it } };
 for (const [key, pair] of Object.entries({
   ...webMessages,
+  ...contentSettingsWebMessages,
   ...platformWebMessages,
   ...serviceWebMessages,
   ...ownerWebMessages,
+  ...ownerIntegrationWebMessages,
   ...gameUiWebMessages,
   ...ownerInfraWebMessages,
   ...viewerWebMessages,

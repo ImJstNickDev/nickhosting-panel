@@ -149,7 +149,7 @@ export function registerMinecraftRoutes(
     const player = await verifyMinecraftPlayer(
       c.req.param('name'),
       createMinecraftIdentityProvider({
-        userAgent: settings.values.minecraftMetadataUserAgent ?? '',
+        userAgent: settings.values.contentMetadataUserAgent ?? '',
       }),
     );
     return c.json({

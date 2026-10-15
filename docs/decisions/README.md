@@ -7,7 +7,7 @@ Each ADR is a short record of an intentional project decision and the consequenc
 - [0003 Invite auth, linking and first-run](0003-authentication-and-setup.md)
 - [0004 Active compute quotas](0004-resource-policy.md)
 - [0005 Permanent gateway isolation](0005-permanent-gateway.md)
-- [0006 Game SDK and connection policies](0006-game-integrations-and-domains.md)
+- [0006 Game SDK and connection policies — Owner workspace and shared content policy clarified 2026-10-16](0006-game-integrations-and-domains.md)
 - [0007 SFTPGo and persistent mounts](0007-file-transfer-and-storage.md)
 - [0008 Complete frontend — original M6 decision, amended 2026-10-09 to M5 WebPanel/common readiness and M6 game expansion](0008-complete-frontend.md)
 - [0009 Production test permissions](0009-production-safety.md)

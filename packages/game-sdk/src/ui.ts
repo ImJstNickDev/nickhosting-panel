@@ -169,6 +169,22 @@ export const gameUiDescriptorSchema = z
       )
       .max(32)
       .optional(),
+    /** Owner sections are metadata only; the app resolves bundled first-party renderers. */
+    administration: z
+      .array(
+        z
+          .object({
+            id: id.refine(
+              (value) => !['general', 'runtime', 'connection', 'sleep', 'content'].includes(value),
+              'reserved_owner_section',
+            ),
+            titleKey: key,
+            component: id,
+          })
+          .strict(),
+      )
+      .max(16)
+      .default([]),
     creation: z
       .object({
         fields: z.array(uiFieldSchema).max(64),
@@ -300,6 +316,10 @@ export const gameUiDescriptorSchema = z
       if (new Set(values).size !== values.length)
         context.addIssue({ code: 'custom', path, message: 'duplicate_identifier' });
     };
+    unique(
+      d.administration.map((section) => section.id),
+      ['administration'],
+    );
     unique(
       d.sections.map((s) => s.id),
       ['sections'],

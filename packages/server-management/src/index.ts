@@ -1,6 +1,7 @@
 export * from './admission.js';
 export * from './allocation-pool.js';
 export * from './configuration.js';
+export * from './content-admission.js';
 export { createDirectoryIdentityCache } from './directory-identity.js';
 export { consumeDnsWizardReservation } from './dns-reservations.js';
 export * from './external.js';
@@ -9,6 +10,7 @@ export * from './gateway-orchestration.js';
 export * from './gateway-registry.js';
 export * from './health.js';
 export * from './host-observations.js';
+export * from './integration-settings.js';
 export * from './lifecycle.js';
 export * from './minecraft-catalog.js';
 export * from './minecraft-content.js';

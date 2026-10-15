@@ -139,6 +139,7 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
           headers,
           body: JSON.stringify({
             instanceName: 'Changed instance',
+            minecraftSourceConcurrent: 3,
             sftpPublicHostname: 'sftp.example.test',
             sftpPublicPort: 2022,
           }),
@@ -153,6 +154,15 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     expect(await reset.json()).toMatchObject({
       values: { instanceName: 'NickHosting' },
       sources: { instanceName: 'default' },
+    });
+    const legacyReset = await app.request(`${origin}/v1/owner/settings/minecraftSourceConcurrent`, {
+      method: 'DELETE',
+      headers,
+    });
+    expect(legacyReset.status).toBe(200);
+    expect(await legacyReset.json()).toMatchObject({
+      values: { contentSourceConcurrent: 4 },
+      sources: { contentSourceConcurrent: 'default' },
     });
     expect(
       (await app.request(`${origin}/v1/owner/settings/publicUrl`, { method: 'DELETE', headers }))

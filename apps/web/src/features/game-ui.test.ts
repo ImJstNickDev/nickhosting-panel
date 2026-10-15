@@ -16,7 +16,12 @@ import { gameUiWebMessages } from '../../../../packages/i18n/src/game-ui-web.js'
 import { webMessages } from '../../../../packages/i18n/src/web.js';
 import { FileIcon } from './file-icon.js';
 import { GameFields, GameSections } from './game-sections.js';
-import { gameUiRegistry, getGameAdmin, getGameArtwork, getGameFileIcon } from './integrations.js';
+import {
+  gameUiRegistry,
+  getGameAdminSections,
+  getGameArtwork,
+  getGameFileIcon,
+} from './integrations.js';
 
 function render(element: ReactElement, cache?: QueryClient) {
   const messages = Object.fromEntries(
@@ -52,8 +57,8 @@ describe('trusted game frontend rendering', () => {
   it('resolves only first-party artwork/admin routes with an absent-game fallback', () => {
     expect(getGameArtwork('minecraft')).toMatch(/minecraft-landscape.svg/);
     expect(getGameArtwork('unknown-game')).toBeUndefined();
-    expect(getGameAdmin('unknown-game')).toBeUndefined();
-    expect(getGameAdmin('minecraft')).toBeTypeOf('function');
+    expect(getGameAdminSections('unknown-game')).toEqual([]);
+    expect(getGameAdminSections('minecraft').map((section) => section.id)).toEqual(['versions']);
     expect(gameUiRegistry.list().map((m) => m.descriptor.gameId)).toEqual(['minecraft']);
   });
   it('keeps creation runtime-first and renders a real archive picker for pack replacement', () => {

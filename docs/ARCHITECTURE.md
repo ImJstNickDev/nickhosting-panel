@@ -295,3 +295,19 @@ Cloudflare adapter, with no second DNS queue or per-game provider implementation
 The Connection tab, creation wizard and Console share authoritative address
 contracts; see [primary address API](M5-API-CONTRACTS.md#primary-server-addresses-and-owner-domain-policies)
 and [SDK DNS policy](GAME-INTEGRATIONS.md#dnsconnection-strategy).
+
+### Owner integration settings and shared content admission
+
+The Owner integration workspace reuses shared runtime, rollout, domain and sleep
+contracts and statically registered Game SDK administration contributions. Each
+concept has one editor; Infrastructure links to the integration's runtime mappings.
+Game-scoped domain/content updates merge under the settings lock instead of
+rewriting other integrations' maps from a stale browser snapshot.
+
+Content source/staging admission is shared Core infrastructure. PostgreSQL
+aggregates reservations across integrations under the existing resource lock;
+per-integration overrides restrict that common budget. Existing Minecraft ledgers
+retain their durable identities and paths with an explicit `game_id` column.
+Minecraft catalog/protocol/runtime behavior stays in its integration. See
+[Owner workspace](GAME-INTEGRATIONS.md#owner-administration-workspace) and
+[configuration migration](CONFIGURATION-AND-DEPLOYMENT.md#shared-content-limits-and-integration-overrides-2026-10-16).

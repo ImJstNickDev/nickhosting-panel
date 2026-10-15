@@ -1,0 +1,106 @@
+.owner-integration-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
+  gap: 1rem;
+}
+.owner-integration-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #202b37;
+  text-decoration: none;
+  background: var(--surface);
+}
+.owner-integration-card:hover {
+  background: #f0f3f5;
+}
+.owner-integration-card img {
+  width: 5rem;
+  height: 5rem;
+  object-fit: cover;
+  border-radius: 0.5rem;
+}
+.owner-integration-card-copy {
+  display: grid;
+  gap: 0.5rem;
+}
+.owner-integration-card strong {
+  font-size: 1.125rem;
+}
+.owner-integration-tabs {
+  margin-bottom: 1.5rem;
+}
+.owner-integration-body {
+  min-width: 0;
+  display: grid;
+  gap: 1.25rem;
+}
+.owner-integration-body > [hidden] {
+  display: none;
+}
+.owner-integration-body .page-heading {
+  display: none;
+}
+.integration-runtime-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.integration-runtime-selector button[aria-pressed="true"] {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.mapping-fields {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+.mapping-fields[disabled] {
+  opacity: 0.7;
+}
+@media (max-width: 680px) {
+  .owner-integration-tabs {
+    margin-bottom: 1rem;
+  }
+  .owner-integration-card {
+    padding: 0.8rem;
+  }
+}
+.integration-runtime-selector {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.owner-integration-body .integration-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+@media (max-width: 680px) {
+  .owner-integration-body .integration-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.owner-integration-body .section-heading {
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+.owner-integration-body .section-heading h2 {
+  white-space: nowrap;
+}
+.owner-integration-body .section-heading > a {
+  font-size: 0.9rem;
+}
+/* Keep wide catalogs inside their scroll region rather than sizing the workspace. */
+.owner-integration-body,
+.owner-integration-body .stack {
+  grid-template-columns: minmax(0, 1fr);
+}
+.owner-integration-body > *,
+.owner-integration-body .stack > * {
+  min-width: 0;
+}

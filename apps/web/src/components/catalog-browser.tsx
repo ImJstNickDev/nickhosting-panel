@@ -47,7 +47,7 @@ export function CatalogBrowser<T extends CatalogItem>({
     request: CatalogRequest;
     total: number;
     pending: boolean;
-    onChange(request: CatalogRequest): void;
+    onChange(patch: Partial<CatalogRequest>): void;
   };
   items: T[];
   label: string;
@@ -85,7 +85,7 @@ export function CatalogBrowser<T extends CatalogItem>({
     pages = Math.max(1, Math.ceil((server?.total ?? matching.length) / pageSize)),
     current = server ? server.request.page - 1 : Math.min(page, pages - 1);
   function change(patch: Partial<CatalogRequest>) {
-    server?.onChange({ ...server.request, page: 1, ...patch });
+    server?.onChange({ page: 1, ...patch });
   }
   return (
     <div className="catalog-browser">
@@ -108,7 +108,7 @@ export function CatalogBrowser<T extends CatalogItem>({
             label={filter.label}
             value={selected[filter.id] ?? ''}
             onChange={(event) => {
-              if (server) change({ filters: { ...selected, [filter.id]: event.target.value } });
+              if (server) change({ filters: { [filter.id]: event.target.value } });
               else {
                 setSelected((previous) => ({ ...previous, [filter.id]: event.target.value }));
                 setPage(0);

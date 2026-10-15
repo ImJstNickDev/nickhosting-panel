@@ -211,6 +211,10 @@ describe('M5 real browser platform and Owner journeys', () => {
     await accessible(user);
     await user.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect(
+      user.getByRole('heading', { name: 'Choose an address', exact: true }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
       user.getByRole('heading', { name: 'Who should be an operator?' }),
     ).toBeVisible();
     await user.getByLabel('Player name', { exact: true }).fill(player.name);
@@ -303,6 +307,10 @@ describe('M5 real browser platform and Owner journeys', () => {
       .click();
     await peer.getByLabel('Mostra tutte le versioni', { exact: true }).check();
     await fixture.screenshot(peer, 'installer-version-mobile-it');
+    await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await browserExpect(
+      peer.getByRole('heading', { name: 'Scegli un indirizzo', exact: true }),
+    ).toBeVisible();
     await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
     await fixture.screenshot(peer, 'installer-operators-mobile-it');
     await peer.getByRole('button', { name: 'Avanti', exact: true }).click();
@@ -569,7 +577,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     expect(
       JSON.stringify(await journeyRequest(fixture, owner, '/v1/owner/settings')),
     ).not.toContain('browser-fixture-rotated-application');
-    await owner.goto(`${fixture.origin}/owner/integrations`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft/general`);
     await owner.getByLabel('Availability', { exact: true }).selectOption('private-testing');
     await owner.getByLabel('Tester user IDs (one per line)', { exact: true }).fill('');
     await owner.getByRole('button', { name: 'Save changes', exact: true }).click();

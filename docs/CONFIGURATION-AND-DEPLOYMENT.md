@@ -200,8 +200,46 @@ explicit disk value. This setting is not an unlimited-storage or auto-expansion
 implementation.
 
 Minecraft metadata requests default to the public NickHosting application identity
-and project repository contact; Owner `minecraftMetadataUserAgent` or
-`NH_MINECRAFT_METADATA_USER_AGENT` can override it. Catalog discovery needs no
+and project repository contact; Owner `contentMetadataUserAgent` or
+`NH_CONTENT_METADATA_USER_AGENT` can override it. Catalog discovery needs no
 private provider key for Mojang metadata. Compatibility report verification still
 requires the existing private `NH_MINECRAFT_EVIDENCE_KEY` and legitimately produced
 identity-matching evidence; metadata discovery does not create or replace that key.
+
+## Shared content limits and integration overrides (2026-10-16)
+
+Owner Settings → Content owns temporary source/work directories, aggregate staging
+bytes, per-user bytes, concurrency, free-space margins, download origins and the
+metadata HTTP user agent. These are platform resources, not Minecraft resources.
+Integration → Content limits can restrict that integration's budgets and origins;
+blank numeric values inherit. Minimum disk headroom can only increase. Global
+byte/concurrency ceilings count all integrations together, including active source
+transfers and staging jobs. Ready archives keep their byte charge; uncertain work
+keeps its reservation. Integration overrides do not allocate extra physical space.
+
+Canonical settings are `contentSourceRoot`, `contentWorkRoot`,
+`contentSourceGlobalBytes`, `contentSourceUserBytes`, `contentSourceConcurrent`,
+`contentSourceUserConcurrent`, `contentSourceFreeBytes`, `contentSourceFreePercent`,
+`contentDownloadOrigins`, `contentMetadataUserAgent` and `gameContentPolicies`.
+Their environment names use `NH_CONTENT_*` and `NH_GAME_CONTENT_POLICIES`; see
+[the example](../.env.example). Existing `minecraftSource*`,
+`minecraftContentRoot`, `minecraftDownloadOrigins`, `minecraftMetadataUserAgent`
+and matching `NH_MINECRAFT_*` variables remain accepted aliases. If both old and
+new names exist in one source, the canonical name wins. Environment still takes
+precedence over DB settings and locks the canonical field in the UI. API reads
+return canonical names; legacy PATCH and reset names remain accepted.
+
+Migration `035_content_policy.sql` adds the integration identity to existing
+source/staging ledgers and normalizes stored setting names without replacing
+values already stored under the canonical name. Historical rows belong to
+Minecraft. Historical table names, reservation digests and storage roots remain
+unchanged so existing jobs and retained archives can recover. No directory is
+moved, emptied or recreated by the migration. Apply it before activating the new
+API/worker code. Development and production require their own explicit migration;
+this documentation does not authorize production deployment.
+
+For rollback, stop affected content work and restore the previous application
+revision plus the saved platform settings document (old code cannot read the new
+canonical setting names). Added columns/indexes can remain. Do not drop ledgers,
+reset the database or delete staged data. Reconcile active/uncertain operations
+before any rollback that changes their owning implementation.

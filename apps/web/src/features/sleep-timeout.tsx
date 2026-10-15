@@ -119,7 +119,15 @@ export function SleepTimeoutField({
   );
 }
 
-export function IntegrationSleepSettings({ gameId }: { gameId: string }) {
+export function IntegrationSleepSettings({
+  gameId,
+  embedded = false,
+  initialRuntimeId,
+}: {
+  gameId: string;
+  embedded?: boolean;
+  initialRuntimeId?: string;
+}) {
   const t = useT();
   const [gameDraft, setGameDraft] = useState<number | null | undefined>();
   const [accessDraft, setAccessDraft] = useState<SleepAccess | null | undefined>();
@@ -130,9 +138,8 @@ export function IntegrationSleepSettings({ gameId }: { gameId: string }) {
         `/v1/owner/integrations/${encodeURIComponent(gameId)}/sleep-policy`,
       ),
   });
-  return (
-    <details data-testid={`sleep-settings-${gameId}`}>
-      <summary>{t('sleepTiming.title')}</summary>
+  const content = (
+    <>
       {policy.isPending ? (
         <Loading />
       ) : policy.error ? (
@@ -182,7 +189,7 @@ export function IntegrationSleepSettings({ gameId }: { gameId: string }) {
                 />
                 <p className="muted">{t('sleepTiming.capability')}</p>
                 {policy.data.runtimes.map((runtime) => (
-                  <details key={runtime.id}>
+                  <details key={runtime.id} open={runtime.id === initialRuntimeId || undefined}>
                     <summary>{runtime.nameKey ? t(runtime.nameKey) : runtime.name}</summary>
                     <SleepTimeoutField
                       name={`sleepRuntime-${runtime.id}`}
@@ -209,6 +216,14 @@ export function IntegrationSleepSettings({ gameId }: { gameId: string }) {
           </fieldset>
         </>
       )}
+    </>
+  );
+  return embedded ? (
+    <div data-testid={`sleep-settings-${gameId}`}>{content}</div>
+  ) : (
+    <details data-testid={`sleep-settings-${gameId}`}>
+      <summary>{t('sleepTiming.title')}</summary>
+      {content}
     </details>
   );
 }

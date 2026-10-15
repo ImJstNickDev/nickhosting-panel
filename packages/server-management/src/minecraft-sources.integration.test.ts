@@ -386,6 +386,18 @@ describe('durable Minecraft archive source admission', () => {
   it('charges expanded job staging against the same archive budget and preserves claims until audited cleanup', async () => {
     await store().reserveUpload(uploadInput());
     const serverId = await f.server();
+    // The shared staging helper derives the integration from the server mapping.
+    // This case exercises Minecraft's scoped recovery, not a generic fixture game.
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft', version: '1.0.0', manifest: { ...f.manifest, id: 'minecraft' } })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft' })
+      .where('id', '=', f.mappingId)
+      .execute();
     const operation = await f.db
       .selectFrom('server_operations')
       .select('job_id')

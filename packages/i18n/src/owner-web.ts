@@ -311,8 +311,8 @@ export const ownerWebMessages: Record<string, readonly [string, string]> = {
   ],
   'owner.testerAllowlist': ['Tester user IDs (one per line)', 'ID utenti tester (uno per riga)'],
   'owner.rolloutEvidence': [
-    'Availability does not establish compatibility. Runtime evidence and provider configuration remain required.',
-    'La disponibilità non dimostra la compatibilità. Restano necessarie evidenze sul runtime e configurazione del provider.',
+    'Availability depends on the configured runtime and the integration’s supported capabilities.',
+    'La disponibilità dipende dal runtime configurato e dalle funzionalità supportate dall’integrazione.',
   ],
 };
 
@@ -385,28 +385,31 @@ const settingNames: Record<string, readonly [string, string]> = {
     'Verifiche simultanee di disponibilità indirizzi',
   ],
   staticGameHostname: ['Static game hostname', 'Nome host statico giochi'],
-  minecraftMetadataUserAgent: ['Metadata request identity', 'Identità richieste metadati'],
-  minecraftSourceRoot: ['Content source storage', 'Spazio sorgenti contenuti'],
-  minecraftSourceGlobalBytes: ['Global source allowance (bytes)', 'Limite globale sorgenti (byte)'],
-  minecraftSourceUserBytes: [
-    'Source allowance per user (bytes)',
-    'Limite sorgenti per utente (byte)',
+  contentMetadataUserAgent: ['Metadata request identity', 'Identità richieste metadati'],
+  contentSourceRoot: ['Content source storage', 'Spazio sorgenti contenuti'],
+  contentSourceGlobalBytes: [
+    'Global content staging allowance (bytes)',
+    'Budget globale preparazione contenuti (byte)',
   ],
-  minecraftSourceConcurrent: ['Concurrent source transfers', 'Trasferimenti sorgenti simultanei'],
-  minecraftSourceUserConcurrent: [
-    'Concurrent transfers per user',
-    'Trasferimenti simultanei per utente',
+  contentSourceUserBytes: [
+    'Content staging allowance per user (bytes)',
+    'Budget preparazione contenuti per utente (byte)',
   ],
-  minecraftSourceFreeBytes: [
+  contentSourceConcurrent: ['Concurrent content operations', 'Operazioni contenuti simultanee'],
+  contentSourceUserConcurrent: [
+    'Concurrent content operations per user',
+    'Operazioni contenuti simultanee per utente',
+  ],
+  contentSourceFreeBytes: [
     'Required free content storage (bytes)',
     'Spazio libero contenuti richiesto (byte)',
   ],
-  minecraftSourceFreePercent: [
+  contentSourceFreePercent: [
     'Required free content storage (%)',
     'Spazio libero contenuti richiesto (%)',
   ],
-  minecraftContentRoot: ['Content work directory', 'Directory lavoro contenuti'],
-  minecraftDownloadOrigins: [
+  contentWorkRoot: ['Content work directory', 'Directory lavoro contenuti'],
+  contentDownloadOrigins: [
     'Allowed content download origins',
     'Origini download contenuti consentite',
   ],

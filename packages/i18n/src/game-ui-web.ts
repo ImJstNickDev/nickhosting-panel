@@ -343,8 +343,8 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
     'Chiavi proprietà dichiarate (una per riga)',
   ],
   'gameAdmin.registrationBoundary': [
-    'Registration resolves upstream metadata and records an immutable mapping. Pterodactyl executes installation. Real tests are still required before public availability.',
-    'La registrazione risolve i metadati upstream e registra un’associazione immutabile. Pterodactyl esegue l’installazione. Servono comunque test reali prima della disponibilità pubblica.',
+    'Registration resolves upstream metadata and records an immutable mapping. Pterodactyl executes installation. Availability follows declared integration support or the applicable evidence requirements.',
+    'La registrazione risolve i metadati upstream e registra un’associazione immutabile. Pterodactyl esegue l’installazione. La disponibilità segue il supporto dichiarato dall’integrazione o i requisiti di verifica applicabili.',
   ],
   'gameAdmin.protocol-fixture': ['Protocol fixture', 'Fixture di protocollo'],
   'gameAdmin.installation-bootstrap': ['Installation bootstrap', 'Avvio installazione'],

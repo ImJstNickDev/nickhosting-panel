@@ -12,7 +12,7 @@ export async function pollMinecraftMetadata(
   try {
     const { values } = await getSettings(db, env);
     const result = await refreshMinecraftMetadata(db, {
-      userAgent: values.minecraftMetadataUserAgent ?? '',
+      userAgent: values.contentMetadataUserAgent ?? '',
     });
     if (result.state === 'failed') logger.log('warn', 'minecraft.metadata_refresh_failed');
     else if (result.state !== 'skipped') logger.log('info', 'minecraft.metadata_refreshed', result);

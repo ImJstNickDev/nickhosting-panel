@@ -278,12 +278,13 @@ not delete saved secrets or undo previously created DNS records.
 3. Open `/owner/infrastructure` to discover actual nodes, nests, eggs and existing
    allocations through the standard adapter. Missing scopes remain errors; no
    automatic privilege increase or allocation/node/egg edit occurs. Configure
-   physical host, managed node, validated backend allocation pool and the Vanilla
-   runtime/egg mapping, including the actual image, startup and egg variables.
+   physical host, managed node and validated backend allocation pool. Configure the
+   Vanilla runtime/egg mapping in `/owner/integrations/minecraft/runtime`, including
+   the actual image policy, startup and egg variables.
    Configure the required metadata user-agent and exact trusted Wings WebSocket,
    upload and download origins through Owner settings where applicable.
-4. In `/owner/integrations`, enable the trusted `minecraft-java` module and choose
-   its rollout. In `/owner/integrations/minecraft-java`, select the Vanilla mapping
+4. In `/owner/integrations/minecraft/general`, enable the trusted `minecraft` module
+   and choose its rollout. In `/owner/integrations/minecraft/versions`, select the Vanilla mapping
    and synchronize the official version catalog. New supported Vanilla entries are
    enabled by default. Existing disabled entries stay disabled unless the Owner
    explicitly enables them. To include previously disabled catalog entries, select

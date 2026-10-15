@@ -1,5 +1,6 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { z } from 'zod';
 import { ApiError, api, queryClient } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
@@ -14,7 +15,6 @@ import {
   Input,
   Loading,
   Notice,
-  Page,
   Section,
   Select,
   Textarea,
@@ -55,6 +55,7 @@ interface Mapping {
   docker_image: string;
   image_mode?: 'static' | 'integration';
   environment: Record<string, string>;
+  node_id: string;
 }
 interface Egg {
   id: number;
@@ -103,7 +104,47 @@ interface Combination {
 /** Owner-only technical UI. Ordinary creation never imports this support matrix. */
 export function OwnerMinecraftPage() {
   const t = useT();
-  const [catalogRequest, setCatalogRequest] = useState(initialCatalogRequest);
+  const [params, setParams] = useSearchParams();
+  const mappingLabel = useMappingLabel();
+  const mappings = useQuery({
+    queryKey: ['runtime-mappings'],
+    queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
+    staleTime: 30_000,
+  });
+  const catalogRequest = {
+    ...initialCatalogRequest,
+    page: Math.max(1, Number(params.get('catalogPage')) || 1),
+    search: params.get('catalogSearch') ?? '',
+    order: (params.get('catalogOrder') ??
+      initialCatalogRequest.order) as typeof initialCatalogRequest.order,
+    filters: Object.fromEntries(
+      ['runtime', 'releaseType', 'availability'].map((key) => [
+        key,
+        params.get(`catalog-${key}`) ?? '',
+      ]),
+    ),
+  };
+  // URL navigation can commit after the next input event. Merge only the fields
+  // changed by this event into the latest requested URL, so a quick sort change
+  // cannot restore an obsolete search/filter from the previous render.
+  const renderedSearch = params.toString();
+  const pendingSearch = useRef({ base: renderedSearch, value: new URLSearchParams(params) });
+  if (pendingSearch.current.base !== renderedSearch)
+    pendingSearch.current = { base: renderedSearch, value: new URLSearchParams(params) };
+  const updateSearch = (change: (current: URLSearchParams) => void) => {
+    const current = new URLSearchParams(pendingSearch.current.value);
+    change(current);
+    pendingSearch.current.value = current;
+    setParams(current, { replace: true });
+  };
+  const setCatalogRequest = (patch: Partial<typeof initialCatalogRequest>) =>
+    updateSearch((current) => {
+      if (patch.search !== undefined) current.set('catalogSearch', patch.search);
+      if (patch.order !== undefined) current.set('catalogOrder', patch.order);
+      if (patch.page !== undefined) current.set('catalogPage', String(patch.page));
+      for (const [key, value] of Object.entries(patch.filters ?? {}))
+        current.set(`catalog-${key}`, value);
+    });
   const combinations = useQuery({
     queryKey: ['owner-minecraft-compatibility', catalogRequest],
     staleTime: 60_000,
@@ -121,7 +162,11 @@ export function OwnerMinecraftPage() {
         { signal },
       ),
   });
-  const [selected, setSelected] = useState<string>('');
+  const selected = params.get('combination') ?? '';
+  const setSelected = (id: string) =>
+    updateSearch((current) => {
+      current.set('combination', id);
+    });
   const detail = useQuery({
     queryKey: ['owner-minecraft-detail', selected],
     enabled: Boolean(selected),
@@ -133,8 +178,8 @@ export function OwnerMinecraftPage() {
     if (selected) void detail.refetch();
   };
   return (
-    <Page title={t('gameAdmin.minecraft')}>
-      <Notice>{t('gameAdmin.evidenceBoundary')}</Notice>
+    <div className="stack">
+      <p className="muted">{t('ownerIntegration.versionSupport')}</p>
       <Section title={t('gameAdmin.combinations')}>
         {combinations.isPending ? (
           <Loading />
@@ -188,6 +233,7 @@ export function OwnerMinecraftPage() {
                     <th>{t('gameAdmin.version')}</th>
                     <th>{t('catalog.releaseDate')}</th>
                     <th>{t('gameAdmin.runtime')}</th>
+                    <th>{t('infra.providerNode')}</th>
                     <th>{t('gameAdmin.java')}</th>
                     <th>{t('gameAdmin.protocol')}</th>
                     <th>{t('gameAdmin.installationSupport')}</th>
@@ -207,6 +253,12 @@ export function OwnerMinecraftPage() {
                         )}
                       </td>
                       <td>{choice.combination.profile}</td>
+                      <td>
+                        {mappingLabel(
+                          mappings.data?.find((mapping) => mapping.id === choice.mappingId),
+                          false,
+                        )}
+                      </td>
                       <td>{choice.combination.javaMajor}</td>
                       <td>{choice.combination.protocolId ?? t('web.unknown')}</td>
                       <td>
@@ -259,12 +311,11 @@ export function OwnerMinecraftPage() {
         ) : detail.data ? (
           <CombinationDetail key={detail.data.id} choice={detail.data} refresh={refresh} />
         ) : null)}
-      <SyncVanillaCatalog refresh={refresh} />
       <details>
         <summary>{t('gameAdmin.advancedRegistration')}</summary>
         <RegisterCombination refresh={refresh} />
       </details>
-    </Page>
+    </div>
   );
 }
 function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: () => void }) {
@@ -413,9 +464,14 @@ function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: 
     </>
   );
 }
-function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
+export function MinecraftCatalogScan() {
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['owner-minecraft-compatibility'] });
+    void queryClient.invalidateQueries({ queryKey: ['creation'] });
+  };
   const t = useT();
   const format = useFormat();
+  const mappingLabel = useMappingLabel();
   const mappings = useQuery({
     queryKey: ['runtime-mappings'],
     queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
@@ -478,7 +534,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
   }
   return (
     <Section title={t('gameAdmin.syncCatalog')}>
-      <Notice>{t('gameAdmin.syncHelp')}</Notice>
+      <p className="muted">{t('ownerIntegration.scanNavigation')}</p>
       {mappings.isPending ? (
         <Loading />
       ) : mappings.error ? (
@@ -501,7 +557,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
             <option value="">{t('gameAdmin.mapping')}</option>
             {eligible.map((mapping) => (
               <option key={mapping.id} value={mapping.id}>
-                {mapping.runtime_id} · {mapping.id}
+                {mappingLabel(mapping)}
               </option>
             ))}
           </Select>
@@ -599,6 +655,7 @@ function SyncVanillaCatalog({ refresh }: { refresh: () => void }) {
 }
 function RegisterCombination({ refresh }: { refresh: () => void }) {
   const t = useT();
+  const mappingLabel = useMappingLabel();
   const mappings = useQuery({
     queryKey: ['runtime-mappings'],
     queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
@@ -681,7 +738,7 @@ function RegisterCombination({ refresh }: { refresh: () => void }) {
             <option value="">{t('gameUi.select')}</option>
             {eligible.map((mapping) => (
               <option key={mapping.id} value={mapping.id}>
-                {mapping.runtime_id} · {mapping.docker_image} · {mapping.id.slice(0, 8)}
+                {mappingLabel(mapping)}
               </option>
             ))}
           </Select>
@@ -795,4 +852,26 @@ function RegisterCombination({ refresh }: { refresh: () => void }) {
       )}
     </Section>
   );
+}
+
+function useMappingLabel() {
+  const t = useT();
+  const nodes = useQuery({
+    queryKey: ['owner-nodes'],
+    queryFn: ({ signal }) =>
+      api<Array<{ id: string; pterodactyl_node_id: number }>>('/v1/owner/nodes', { signal }),
+    staleTime: 30_000,
+  });
+  const inventory = useQuery({
+    queryKey: ['owner-provider'],
+    queryFn: ({ signal }) =>
+      api<{ nodes: Array<{ id: number; name: string }> }>('/v1/owner/infrastructure', { signal }),
+    staleTime: 30_000,
+  });
+  return (mapping: Mapping | undefined, includeRuntime = true) => {
+    if (!mapping) return t('web.unavailable');
+    const id = nodes.data?.find((node) => node.id === mapping.node_id)?.pterodactyl_node_id;
+    const label = inventory.data?.nodes.find((node) => node.id === id)?.name;
+    return `${includeRuntime ? `${mapping.runtime_id} · ` : ''}${label ?? (id ? `${t('infra.providerNode')} ${id}` : mapping.id.slice(0, 8))}`;
+  };
 }

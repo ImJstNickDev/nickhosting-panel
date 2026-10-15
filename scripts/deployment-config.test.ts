@@ -461,7 +461,7 @@ describe('scoped container environment', () => {
       pterodactylWebSocketOrigins: ['wss://wings.example.test'],
       pterodactylDownloadOrigins: ['https://downloads.example.test'],
       pterodactylUploadOrigins: ['https://uploads.example.test'],
-      minecraftDownloadOrigins: ['https://content.example.test'],
+      contentDownloadOrigins: ['https://content.example.test'],
     };
     const input = deployment('development');
     const real = containerEnvironment({ ...input, NH_DEV_PROVIDER_MODE: 'real' });
@@ -474,7 +474,7 @@ describe('scoped container environment', () => {
     expect(() => assertConfigWritable(ownerSettings, resolved)).not.toThrow();
     const unavailable = resolveConfig({}, real);
     expect(unavailable.values.pterodactylBaseUrl).toBeUndefined();
-    expect(unavailable.sources.minecraftDownloadOrigins).toBe('default');
+    expect(unavailable.sources.contentDownloadOrigins).toBe('default');
     const sandbox = resolveConfig(ownerSettings, containerEnvironment(input));
     expect(sandbox.values.pterodactylBaseUrl).toBe('http://provider:9090');
     expect(sandbox.values.pterodactylUploadOrigins).toEqual([]);

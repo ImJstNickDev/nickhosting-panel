@@ -1297,3 +1297,22 @@ is confirmed. Pending/uncertain first publication shows address preparation/fail
 rename continues displaying the last confirmed hostname. Static-host integrations
 retain their explicit configured address. Console consumes `displayAddress` rather
 than reconstructing an IP/port pair when it is null.
+
+## Owner integration policies (2026-10-16)
+
+Regular Owner sessions only; unknown/uncompiled game IDs are rejected.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /v1/owner/integrations/:gameId/domain-policy` | `{gameId,policy,domains,inheritedDefaultDomainId,locked}`. Domain summaries expose only ID, hostname and enabled state. |
+| `PUT /v1/owner/integrations/:gameId/domain-policy` | Body `{selection,domainIds,defaultDomainId?,sharedLabel?}`; validates existing domains and the integration's connection mode. Saves only that game's policy under the settings lock. |
+| `GET /v1/owner/integrations/:gameId/content-policy` | `{gameId,policy,effective,locked}`; effective includes resolved values and per-field global/override/source/lock metadata. |
+| `PUT /v1/owner/integrations/:gameId/content-policy` | Optional `sourceGlobalBytes`, `sourceUserBytes`, `sourceConcurrent`, `sourceUserConcurrent`, `sourceFreeBytes`, `sourceFreePercent`, `downloadOrigins`; `{}` restores inheritance. Resource lock precedes settings lock. Global ceilings still apply. |
+| `GET /v1/owner/runtime-mappings` | Adds `inUse`: a nondeleted managed server references this mapping. Used mappings retain the existing immutable-field guards. |
+
+Policy updates preserve other games and honor environment locks. Download-origin
+overrides can only narrow global trust; empty explicit origins differ from
+inheritance. Content source/work paths remain global. No provider call or DNS
+mutation is performed while saving these policy objects. Global setting reads
+expose the canonical `content*` names; legacy Minecraft names are accepted aliases
+for PATCH and reset. [Migration/precedence details](CONFIGURATION-AND-DEPLOYMENT.md#shared-content-limits-and-integration-overrides-2026-10-16).

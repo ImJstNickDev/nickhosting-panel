@@ -121,7 +121,7 @@ export async function registerMinecraftCombination(
   const { values } = await getSettings(db, env);
   const metadata =
     options.metadata ??
-    createRuntimeMetadataClient({ userAgent: values.minecraftMetadataUserAgent ?? '' });
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
   const runtime = await resolveMinecraftRuntime(value.runtime, metadata);
   const egg = await adapter.getEgg(mapping.nest_id, mapping.egg_id);
   const suppliedBinding =

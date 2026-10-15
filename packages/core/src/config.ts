@@ -1,5 +1,10 @@
 import { posix } from 'node:path';
 import { z } from 'zod';
+import {
+  gameContentPoliciesSchema,
+  legacyContentEnvironmentKeys,
+  normalizeLegacyContentSettings,
+} from './content-policy.js';
 import { dnsBlockedTermsSchema, dnsDomainsSchema, dnsGamePoliciesSchema } from './dns-policy.js';
 import { DomainError } from './errors.js';
 import {
@@ -148,7 +153,7 @@ export const platformConfigSchema = z
     dnsAvailabilityRequestsPerMinute: z.number().int().min(2).max(200),
     dnsAvailabilityConcurrency: z.number().int().min(1).max(8),
     staticGameHostname: z.string().min(1).max(253).optional(),
-    minecraftMetadataUserAgent: z
+    contentMetadataUserAgent: z
       .string()
       .min(10)
       .max(256)
@@ -157,15 +162,16 @@ export const platformConfigSchema = z
     fileOperationsFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     fileOperationsFreePercent: z.number().min(0).max(95),
     fileOperationsRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
-    minecraftSourceRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
-    minecraftSourceGlobalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    minecraftSourceUserBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    minecraftSourceConcurrent: z.number().int().min(1).max(100),
-    minecraftSourceUserConcurrent: z.number().int().min(1).max(20),
-    minecraftSourceFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    minecraftSourceFreePercent: z.number().min(0).max(95),
-    minecraftContentRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
-    minecraftDownloadOrigins: z.array(origin(['https:'])).max(100),
+    gameContentPolicies: gameContentPoliciesSchema,
+    contentSourceRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    contentSourceGlobalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    contentSourceUserBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    contentSourceConcurrent: z.number().int().min(1).max(100),
+    contentSourceUserConcurrent: z.number().int().min(1).max(20),
+    contentSourceFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    contentSourceFreePercent: z.number().min(0).max(95),
+    contentWorkRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    contentDownloadOrigins: z.array(origin(['https:'])).max(100),
     minecraftGatewayResponses: minecraftGatewayResponsesSchema.optional(),
     minecraftProtocolSource: z
       .object({
@@ -195,7 +201,10 @@ export const platformConfigSchema = z
   })
   .strict();
 
-export const platformConfigPatchSchema = platformConfigSchema.partial();
+export const platformConfigPatchSchema = z.preprocess(
+  normalizeLegacyContentSettings,
+  platformConfigSchema.partial(),
+);
 export type PlatformConfig = z.infer<typeof platformConfigSchema>;
 export type PlatformConfigKey = keyof PlatformConfig;
 export type ConfigSource = 'default' | 'database' | 'environment';
@@ -238,20 +247,22 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   gatewayLeaseSeconds: 15,
   gatewayNodeProbes: {},
   gatewayDataPolicy: defaultGatewayDataPolicy,
-  minecraftMetadataUserAgent:
+  contentMetadataUserAgent:
     'NickHostingPanel/0.1 (+https://github.com/ImJstNickDev/nickhosting-panel)',
   fileOperationsFreeBytes: 512 * 1024 ** 2,
   fileOperationsFreePercent: 0,
   fileOperationsRoot: './mountdata/file-operations',
-  minecraftContentRoot: './mountdata/minecraft-content',
-  minecraftSourceRoot: './mountdata/minecraft-sources',
-  minecraftSourceGlobalBytes: 20 * 1024 ** 3,
-  minecraftSourceUserBytes: 5 * 1024 ** 3,
-  minecraftSourceConcurrent: 4,
-  minecraftSourceUserConcurrent: 2,
-  minecraftSourceFreeBytes: 512 * 1024 ** 2,
-  minecraftSourceFreePercent: 10,
-  minecraftDownloadOrigins: [
+  // Keep historical storage locations: existing files and in-flight jobs must not move.
+  gameContentPolicies: {},
+  contentWorkRoot: './mountdata/minecraft-content',
+  contentSourceRoot: './mountdata/minecraft-sources',
+  contentSourceGlobalBytes: 20 * 1024 ** 3,
+  contentSourceUserBytes: 5 * 1024 ** 3,
+  contentSourceConcurrent: 4,
+  contentSourceUserConcurrent: 2,
+  contentSourceFreeBytes: 512 * 1024 ** 2,
+  contentSourceFreePercent: 10,
+  contentDownloadOrigins: [
     'https://cdn.modrinth.com',
     'https://edge.forgecdn.net',
     'https://mediafilez.forgecdn.net',
@@ -309,19 +320,20 @@ export const configEnvironmentKeys = {
   dnsAvailabilityRequestsPerMinute: 'NH_DNS_AVAILABILITY_REQUESTS_PER_MINUTE',
   dnsAvailabilityConcurrency: 'NH_DNS_AVAILABILITY_CONCURRENCY',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
-  minecraftMetadataUserAgent: 'NH_MINECRAFT_METADATA_USER_AGENT',
+  gameContentPolicies: 'NH_GAME_CONTENT_POLICIES',
+  contentMetadataUserAgent: 'NH_CONTENT_METADATA_USER_AGENT',
   fileOperationsFreeBytes: 'NH_FILE_OPERATIONS_FREE_BYTES',
   fileOperationsFreePercent: 'NH_FILE_OPERATIONS_FREE_PERCENT',
   fileOperationsRoot: 'NH_FILE_OPERATIONS_ROOT',
-  minecraftContentRoot: 'NH_MINECRAFT_CONTENT_ROOT',
-  minecraftSourceRoot: 'NH_MINECRAFT_SOURCE_ROOT',
-  minecraftSourceGlobalBytes: 'NH_MINECRAFT_SOURCE_GLOBAL_BYTES',
-  minecraftSourceUserBytes: 'NH_MINECRAFT_SOURCE_USER_BYTES',
-  minecraftSourceConcurrent: 'NH_MINECRAFT_SOURCE_CONCURRENT',
-  minecraftSourceUserConcurrent: 'NH_MINECRAFT_SOURCE_USER_CONCURRENT',
-  minecraftSourceFreeBytes: 'NH_MINECRAFT_SOURCE_FREE_BYTES',
-  minecraftSourceFreePercent: 'NH_MINECRAFT_SOURCE_FREE_PERCENT',
-  minecraftDownloadOrigins: 'NH_MINECRAFT_DOWNLOAD_ORIGINS',
+  contentWorkRoot: 'NH_CONTENT_WORK_ROOT',
+  contentSourceRoot: 'NH_CONTENT_SOURCE_ROOT',
+  contentSourceGlobalBytes: 'NH_CONTENT_SOURCE_GLOBAL_BYTES',
+  contentSourceUserBytes: 'NH_CONTENT_SOURCE_USER_BYTES',
+  contentSourceConcurrent: 'NH_CONTENT_SOURCE_CONCURRENT',
+  contentSourceUserConcurrent: 'NH_CONTENT_SOURCE_USER_CONCURRENT',
+  contentSourceFreeBytes: 'NH_CONTENT_SOURCE_FREE_BYTES',
+  contentSourceFreePercent: 'NH_CONTENT_SOURCE_FREE_PERCENT',
+  contentDownloadOrigins: 'NH_CONTENT_DOWNLOAD_ORIGINS',
   minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
   minecraftGatewayResponses: 'NH_MINECRAFT_GATEWAY_RESPONSES',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
@@ -361,12 +373,12 @@ const numericKeys = new Set<PlatformConfigKey>([
   'sftpCredentialTtlSeconds',
   'sftpPublicPort',
   'gatewayLeaseSeconds',
-  'minecraftSourceGlobalBytes',
-  'minecraftSourceUserBytes',
-  'minecraftSourceConcurrent',
-  'minecraftSourceUserConcurrent',
-  'minecraftSourceFreeBytes',
-  'minecraftSourceFreePercent',
+  'contentSourceGlobalBytes',
+  'contentSourceUserBytes',
+  'contentSourceConcurrent',
+  'contentSourceUserConcurrent',
+  'contentSourceFreeBytes',
+  'contentSourceFreePercent',
 ]);
 
 function invalid(fields: string[]): never {
@@ -395,7 +407,8 @@ export function resolveConfig(
       merged[key] = owner.data[key];
       sources[key] = 'database';
     }
-    const value = env[configEnvironmentKeys[key]];
+    const alias = legacyContentEnvironmentKeys[key as keyof typeof legacyContentEnvironmentKeys];
+    const value = env[configEnvironmentKeys[key]] ?? (alias ? env[alias] : undefined);
     if (value === undefined) continue;
     if (value.trim() === '') invalid([key]);
     if (
@@ -404,6 +417,7 @@ export function resolveConfig(
       key === 'pterodactylUploadOrigins' ||
       [
         'gameIdleTimeouts',
+        'gameContentPolicies',
         'dnsDomains',
         'dnsGamePolicies',
         'dnsBlockedTerms',
@@ -412,7 +426,7 @@ export function resolveConfig(
         'gatewayObserver',
         'gatewayNodeProbes',
         'gatewayDataPolicy',
-        'minecraftDownloadOrigins',
+        'contentDownloadOrigins',
         'minecraftProtocolSource',
         'minecraftGatewayResponses',
       ].includes(key)

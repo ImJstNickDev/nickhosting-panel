@@ -390,3 +390,28 @@ it('shares a trusted integration catalog across field handlers without executabl
     gameUiDescriptorSchema.safeParse({ ...source.descriptor, creationCatalog: catalog }).success,
   ).toBe(false);
 });
+
+it('declares bounded Owner sections without granting server access or executable URLs', () => {
+  const source = moduleFixture();
+  const section = {
+    id: 'versions',
+    titleKey: 'games.fixture-arena.name',
+    component: 'arena-versions',
+  };
+  const registered = defineTrustedGameUiModule({
+    ...source,
+    descriptor: { ...source.descriptor, administration: [section] },
+  });
+  expect(registered.descriptor.administration).toEqual([section]);
+  expect(Object.isFrozen(registered.descriptor.administration)).toBe(true);
+  for (const administration of [
+    [{ ...section, id: 'runtime' }],
+    [section, section],
+    [{ ...section, component: 'https://example.test/module.js' }],
+    [{ ...section, titleKey: 'games.other.name' }],
+    [{ ...section, requiredCapabilities: ['enabled'] }],
+  ])
+    expect(gameUiDescriptorSchema.safeParse({ ...source.descriptor, administration }).success).toBe(
+      false,
+    );
+});

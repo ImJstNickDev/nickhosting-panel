@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router';
 import { ApiError, api } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
@@ -45,9 +46,9 @@ const groupFor = (key: string) =>
     ? 'identity'
     : key.startsWith('pterodactyl') || key === 'dockerObserverSocket'
       ? 'provider'
-      : key.startsWith('gateway') || key === 'minecraftGatewayResponses'
+      : key.startsWith('gateway')
         ? 'gateway'
-        : key.startsWith('minecraft')
+        : key.startsWith('content')
           ? 'content'
           : key.startsWith('sftp') || key === 'fileViewers'
             ? 'sftp'
@@ -82,6 +83,12 @@ export function OwnerSettingsPage() {
     queryFn: () => api<Schema>('/v1/owner/settings/schema'),
   });
   const [reset, setReset] = useState<string>();
+  const { hash } = useLocation();
+  const sectionsReady = Boolean(settings.data && schema.data);
+  useEffect(() => {
+    if (!sectionsReady || !hash) return;
+    document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' });
+  }, [hash, sectionsReady]);
   if (settings.isPending || schema.isPending) return <Loading />;
   if (settings.error || schema.error) return <ErrorNotice error={settings.error ?? schema.error} />;
   const value = settings.data;
@@ -89,6 +96,7 @@ export function OwnerSettingsPage() {
     <Page title={t('owner.platformSettings')}>
       <Notice>{t('owner.precedence')}</Notice>
       <Section title={t('sleepTiming.title')}>
+        <span id="sleep" />
         <GlobalSleepSettings
           values={value.config.values}
           lockedKeys={value.config.lockedKeys}
@@ -127,6 +135,7 @@ export function OwnerSettingsPage() {
         )}
       </Section>
       <Section title={t('connection.domains')}>
+        <span id="dns" />
         <OwnerDomains
           key={JSON.stringify([
             value.config.values.dnsDomains,
@@ -141,6 +150,7 @@ export function OwnerSettingsPage() {
       </Section>
       {groups.map((group) => (
         <Section title={t(`owner.group.${group}`)} key={group}>
+          <span id={group} />
           <div className="settings-list">
             {Object.entries(schema.data.properties ?? {})
               .filter(
@@ -156,6 +166,9 @@ export function OwnerSettingsPage() {
                     'storagePolicy',
                     'defaultUserStorageMiB',
                     'defaultServerStorageMiB',
+                    'gameContentPolicies',
+                    'minecraftGatewayResponses',
+                    'minecraftProtocolSource',
                   ].includes(key),
               )
               .map(([key, definition]) => (

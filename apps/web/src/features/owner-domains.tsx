@@ -15,7 +15,13 @@ type Policy = {
   defaultDomainId?: string;
   sharedLabel?: string;
 };
-type Settings = { config: { values: Record<string, unknown>; lockedKeys: string[] } };
+type IntegrationDomainSettings = {
+  gameId: string;
+  policy: Policy;
+  domains: Pick<Domain, 'id' | 'hostname' | 'enabled'>[];
+  inheritedDefaultDomainId: string | null;
+  locked: boolean;
+};
 export const domainSettingKeys = [
   'dnsDomains',
   'dnsDefaultDomainId',
@@ -281,31 +287,36 @@ export function OwnerDomains({
 export function IntegrationConnectionSettings({
   gameId,
   shared = false,
+  embedded = false,
 }: {
   gameId: string;
   shared?: boolean;
+  embedded?: boolean;
 }) {
   const t = useT();
   const settings = useQuery({
-    queryKey: ['owner-settings'],
-    queryFn: () => api<Settings>('/v1/owner/settings'),
+    queryKey: ['integration-domain-policy', gameId],
+    queryFn: () => api<IntegrationDomainSettings>(`/v1/owner/integrations/${gameId}/domain-policy`),
   });
-  return (
+  const content = settings.isPending ? (
+    <Loading />
+  ) : settings.error ? (
+    <ErrorNotice error={settings.error} />
+  ) : (
+    <IntegrationDomainForm
+      key={JSON.stringify(settings.data)}
+      gameId={gameId}
+      shared={shared}
+      settings={settings.data}
+      onSaved={() => settings.refetch()}
+    />
+  );
+  return embedded ? (
+    content
+  ) : (
     <details>
       <summary>{t('connection.domains')}</summary>
-      {settings.isPending ? (
-        <Loading />
-      ) : settings.error ? (
-        <ErrorNotice error={settings.error} />
-      ) : (
-        <IntegrationDomainForm
-          key={JSON.stringify(settings.data.config.values.dnsGamePolicies)}
-          gameId={gameId}
-          shared={shared}
-          settings={settings.data}
-          onSaved={() => settings.refetch()}
-        />
-      )}
+      {content}
     </details>
   );
 }
@@ -317,15 +328,13 @@ function IntegrationDomainForm({
 }: {
   gameId: string;
   shared: boolean;
-  settings: Settings;
+  settings: IntegrationDomainSettings;
   onSaved: () => Promise<unknown>;
 }) {
   const t = useT();
   const session = useSession();
-  const values = settings.config.values;
-  const all = (values.dnsGamePolicies ?? {}) as Record<string, Policy>;
-  const [policy, setPolicy] = useState<Policy>(all[gameId] ?? { selection: 'all', domainIds: [] });
-  const domains = configuredDomains(values);
+  const [policy, setPolicy] = useState<Policy>(settings.policy);
+  const domains = settings.domains;
   const eligible = domains.filter(
     (entry) =>
       entry.enabled &&
@@ -337,16 +346,17 @@ function IntegrationDomainForm({
   return (
     <fieldset
       disabled={
-        settings.config.lockedKeys.includes('dnsGamePolicies') ||
+        settings.locked ||
         session.data?.context.role !== 'owner' ||
         session.data?.context.sessionType !== 'regular'
       }
     >
+      {settings.locked && <Notice>{t('sleepTiming.locked')}</Notice>}
       <ActionForm
         onSubmit={async () => {
-          await api('/v1/owner/settings', {
-            method: 'PATCH',
-            body: { dnsGamePolicies: { ...all, [gameId]: policy } },
+          await api(`/v1/owner/integrations/${gameId}/domain-policy`, {
+            method: 'PUT',
+            body: policy,
           });
           await onSaved();
         }}

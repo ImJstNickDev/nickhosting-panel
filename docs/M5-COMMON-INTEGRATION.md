@@ -193,3 +193,14 @@ Pterodactyl/Wings remains responsible for egg installation/reinstallation.
    approved test resources and cleanup separately from application readiness.
    Issue #18 remains a production-release gate; it is neither silently solved nor
    a reason to postpone the rest of the functional M5 WebPanel.
+
+## Owner integration workspace follow-up (2026-10-16)
+
+Runtime mapping configuration now lives in each integration's Runtime tab;
+Infrastructure retains the physical/node/port layers and links to that editor.
+General rollout, Versions, Connection, Sleep/Wake and Content limits have distinct
+ownership. Trusted SDK contributions supply game-specific sections. Common
+staging/concurrency/free-space limits are global and local overrides restrict the
+shared budget across games. This closes the historical Minecraft-only naming and
+accounting gap rather than deferring it to M6. See
+[implementation and validation](M5-INTEGRATION-ADMIN.md).

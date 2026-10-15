@@ -20,6 +20,7 @@ const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   name: ['Minecraft', 'Minecraft'],
+  'admin.versions': ['Versions', 'Versioni'],
   'installer.runtime': ['Choose a runtime', 'Scegli un runtime'],
   'fields.runtime': ['Runtime', 'Runtime'],
   'runtimes.vanilla': ['Vanilla', 'Vanilla'],
@@ -224,6 +225,9 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
   schemaVersion: 1,
   nameKey: k('name'),
   artwork: { assetId: 'landscape' },
+  administration: [
+    { id: 'versions', titleKey: k('admin.versions'), component: 'minecraft-versions' },
+  ],
   fileIcons: [{ extensions: ['properties'], assetId: 'properties' }],
   creation: {
     defaults: {

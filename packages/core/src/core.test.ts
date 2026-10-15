@@ -86,19 +86,19 @@ describe('typed configuration', () => {
       ).toThrow('configuration_invalid');
   });
   it('supplies a public metadata client identity while preserving Owner and environment overrides', () => {
-    expect(resolveConfig().values.minecraftMetadataUserAgent).toContain(
+    expect(resolveConfig().values.contentMetadataUserAgent).toContain(
       'https://github.com/ImJstNickDev/nickhosting-panel',
     );
     const owner = 'OwnerClient/1.0 (+https://example.test)';
     const env = 'EnvironmentClient/1.0 (+https://example.test)';
     expect(
-      resolveConfig({ minecraftMetadataUserAgent: owner }).values.minecraftMetadataUserAgent,
+      resolveConfig({ minecraftMetadataUserAgent: owner }).values.contentMetadataUserAgent,
     ).toBe(owner);
     expect(
       resolveConfig(
         { minecraftMetadataUserAgent: owner },
         { NH_MINECRAFT_METADATA_USER_AGENT: env },
-      ).values.minecraftMetadataUserAgent,
+      ).values.contentMetadataUserAgent,
     ).toBe(env);
   });
   it('disables total count limits by default while preserving independent pending-work safeguards', () => {

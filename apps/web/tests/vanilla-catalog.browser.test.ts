@@ -170,9 +170,9 @@ describe('Owner automatic Vanilla discovery', () => {
     }>;
   }
   it('discovers declared versions without local evidence and exposes honest capabilities', async () => {
-    await owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft/versions`);
     await browserExpect(
-      owner.getByRole('heading', { name: 'Minecraft compatibility', exact: true }),
+      owner.getByRole('heading', { name: 'Minecraft', exact: true }),
     ).toBeVisible();
     await browserExpect(
       owner.getByRole('button', { name: 'Register runtime combination', exact: true }),
@@ -404,6 +404,10 @@ describe('Owner automatic Vanilla discovery', () => {
     await browserExpect(user.getByRole('radio', { name: '1.21.11', exact: true })).toBeFocused();
     await user.keyboard.press('Enter');
     await browserExpect(
+      user.getByRole('heading', { name: 'Choose an address', exact: true }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Next', exact: true }).click();
+    await browserExpect(
       user.getByRole('heading', { name: 'Who should be an operator?', exact: true }),
     ).toBeVisible();
     const player = user.getByLabel('Player name', { exact: true });
@@ -540,7 +544,7 @@ describe('Owner automatic Vanilla discovery', () => {
     await region.focus();
     await owner.keyboard.press('End');
     await owner.getByRole('button', { name: 'Next', exact: true }).click();
-    expect(await region.evaluate((element) => element.scrollTop)).toBe(0);
+    await browserExpect.poll(() => region.evaluate((element) => element.scrollTop)).toBe(0);
     await owner.getByLabel('Version type', { exact: true }).selectOption('release');
     await browserExpect(region.getByRole('row')).toHaveCount(4);
     await owner.getByLabel('Availability', { exact: true }).selectOption('enabled');
@@ -554,6 +558,7 @@ describe('Owner automatic Vanilla discovery', () => {
       '25w01a',
     );
     await owner.getByLabel('Sort by', { exact: true }).selectOption('newest');
+    await owner.evaluate(() => window.scrollTo(0, 0));
     await fixture.screenshot(owner, 'catalog-browser-desktop-en');
     expect(
       (
@@ -572,7 +577,7 @@ describe('Owner automatic Vanilla discovery', () => {
       locale: 'it',
     });
     await owner.setViewportSize({ width: 390, height: 844 });
-    await owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft/versions`);
     await owner.getByLabel('Cerca versioni', { exact: true }).fill('25w');
     await owner
       .getByRole('checkbox', { name: 'Includi snapshot e versioni storiche', exact: true })
@@ -581,6 +586,7 @@ describe('Owner automatic Vanilla discovery', () => {
     await browserExpect(
       owner.getByRole('button', { name: 'Scopri versioni Vanilla', exact: true }),
     ).toBeEnabled();
+    await owner.evaluate(() => window.scrollTo(0, 0));
     await fixture.screenshot(owner, 'catalog-browser-mobile-it');
     expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -598,7 +604,7 @@ describe('Owner automatic Vanilla discovery', () => {
       locale: 'en',
     });
     await owner.setViewportSize({ width: 1440, height: 1000 });
-    await owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
+    await owner.goto(`${fixture.origin}/owner/integrations/minecraft/versions`);
   });
   it('renders runtime and release-only labels on Italian mobile with no overflow', async () => {
     const user = identities.user;
@@ -663,6 +669,10 @@ describe('Owner automatic Vanilla discovery', () => {
     await user.getByRole('button', { name: 'Avanti', exact: true }).click();
     await user.getByRole('button', { name: 'Avanti', exact: true }).click();
     await user.getByRole('button', { name: 'Avanti', exact: true }).click();
+    await browserExpect(
+      user.getByRole('heading', { name: 'Scegli un indirizzo', exact: true }),
+    ).toBeVisible();
+    await user.getByRole('button', { name: 'Avanti', exact: true }).click();
     const player = user.getByLabel('Nome giocatore', { exact: true });
     const beforePlayers = await positions(user);
     await player.fill('FixtureAlex');
@@ -701,6 +711,10 @@ describe('Owner automatic Vanilla discovery', () => {
     const variable = egg.relationships?.variables?.data[0]?.attributes;
     if (!variable) throw new Error('Missing isolated egg variable');
     variable.env_variable = 'UNRECOGNIZED_VERSION';
+    // Scanning options intentionally survive tab navigation; test this error for stable releases.
+    await owner
+      .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
+      .uncheck();
     const result = await discover();
     expect(
       result.items.filter((item) => item.reason === 'minecraft_egg_contract_unsupported'),

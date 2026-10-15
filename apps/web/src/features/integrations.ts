@@ -28,10 +28,38 @@ export function getGameFileIcon(gameId: string | undefined, name: string): strin
   return icon ? module?.assets?.[icon.assetId] : undefined;
 }
 
-// Owner executable contributions are also static first-party imports.
-import { OwnerMinecraftPage } from './minecraft-admin.js';
+// Owner executable contributions are bundled first-party imports. Metadata never imports code.
+import { lazy } from 'react';
+import {
+  MinecraftProtocolSettings,
+  MinecraftResponseSettings,
+} from './integration-game-settings.js';
 
-const adminModules = new Map([[minecraftUiModule.descriptor.gameId, OwnerMinecraftPage]]);
-export function getGameAdmin(gameId: string) {
-  return adminModules.get(gameId);
+const MinecraftVersions = lazy(() =>
+  import('./minecraft-admin.js').then((module) => ({ default: module.OwnerMinecraftPage })),
+);
+const MinecraftScan = lazy(() =>
+  import('./minecraft-admin.js').then((module) => ({ default: module.MinecraftCatalogScan })),
+);
+const ownerComponents = new Map([
+  [
+    'minecraft-versions',
+    {
+      Component: MinecraftVersions,
+      Background: MinecraftScan,
+      Settings: MinecraftProtocolSettings,
+    },
+  ],
+]);
+const ownerConnectionComponents = new Map([
+  [minecraftUiModule.descriptor.gameId, MinecraftResponseSettings],
+]);
+export function getGameAdminSections(gameId: string) {
+  return (gameUiRegistry.get(gameId)?.descriptor.administration ?? []).flatMap((section) => {
+    const registered = ownerComponents.get(section.component);
+    return registered ? [{ ...section, ...registered }] : [];
+  });
+}
+export function getGameConnectionAdmin(gameId: string) {
+  return ownerConnectionComponents.get(gameId);
 }

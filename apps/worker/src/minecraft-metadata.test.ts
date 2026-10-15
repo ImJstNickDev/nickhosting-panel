@@ -17,7 +17,7 @@ beforeEach(() => {
   records.length = 0;
   vi.clearAllMocks();
   get.mockResolvedValue({
-    values: { minecraftMetadataUserAgent: 'Fixture https://example.test' },
+    values: { contentMetadataUserAgent: 'Fixture https://example.test' },
   } as Awaited<ReturnType<typeof getSettings>>);
 });
 it('uses resolved Owner/environment settings and does not log skipped checks', async () => {

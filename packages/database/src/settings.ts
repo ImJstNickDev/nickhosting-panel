@@ -4,7 +4,9 @@ import {
   assertConfigWritable,
   assertPermission,
   DomainError,
+  normalizeLegacyContentSettings,
   type PlatformConfig,
+  platformConfigPatchSchema,
   resolveConfig,
   type SecretCodec,
 } from '@nickhosting/core';
@@ -57,6 +59,9 @@ export async function updateSettings(
   env: Environment = {},
 ) {
   regularOwner(context);
+  const parsedPatch = platformConfigPatchSchema.safeParse(patch);
+  if (!parsedPatch.success) throw new DomainError('configuration_invalid');
+  patch = parsedPatch.data;
   return db.transaction().execute(async (tx) => {
     await sql`select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources', 0))`.execute(
       tx,
@@ -70,7 +75,10 @@ export async function updateSettings(
       .where('key', '=', 'platform')
       .executeTakeFirst();
     assertConfigWritable(patch, resolveConfig(previous?.value ?? {}, env));
-    const value = { ...previous?.value, ...patch };
+    const value = {
+      ...(normalizeLegacyContentSettings(previous?.value ?? {}) as Partial<PlatformConfig>),
+      ...patch,
+    };
     // Internal reset requests use undefined; JSON PATCH clients cannot supply
     // it. Remove the stored override before resolving/validating default policy.
     for (const key of Object.keys(value) as Array<keyof PlatformConfig>)

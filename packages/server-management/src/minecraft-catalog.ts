@@ -50,7 +50,7 @@ export async function syncMinecraftCatalog(
   const { values } = await getSettings(db, env);
   const underlying =
     options.metadata ??
-    createRuntimeMetadataClient({ userAgent: values.minecraftMetadataUserAgent ?? '' });
+    createRuntimeMetadataClient({ userAgent: values.contentMetadataUserAgent ?? '' });
   const reads = new Map<string, ReturnType<RuntimeMetadataClient['read']>>();
   const metadata: RuntimeMetadataClient = {
     read(url) {

@@ -1,4 +1,5 @@
 export * from './config.js';
+export * from './content-policy.js';
 export * from './dns-policy.js';
 export * from './errors.js';
 export * from './file-content.js';

@@ -182,7 +182,23 @@ export function registerServerRoutes(
   });
   app.get('/v1/owner/runtime-mappings', async (c) => {
     await owner(c);
-    return c.json(await db.selectFrom('runtime_egg_mappings').selectAll().execute());
+    return c.json(
+      await db
+        .selectFrom('runtime_egg_mappings as mapping')
+        .selectAll('mapping')
+        .select((eb) =>
+          eb
+            .exists(
+              eb
+                .selectFrom('managed_servers as server')
+                .select('server.id')
+                .whereRef('server.mapping_id', '=', 'mapping.id')
+                .where('server.deleted_at', 'is', null),
+            )
+            .as('inUse'),
+        )
+        .execute(),
+    );
   });
   app.put('/v1/owner/runtime-mappings', async (c) => {
     const context = await owner(c);

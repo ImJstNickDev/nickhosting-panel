@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -19,7 +20,6 @@ describe('inherited sleep timeout controls', () => {
     owner.setDefaultTimeout(10000);
     user.setDefaultTimeout(10000);
     for (const page of [owner, user]) page.on('pageerror', (error) => errors.push(error.message));
-    harness.env.NH_GATEWAY_ENABLED = 'true';
     provider = await installBrowserFixtures(
       harness.database,
       identities.ownerId,
@@ -27,6 +27,21 @@ describe('inherited sleep timeout controls', () => {
       harness.env,
       harness.codec,
     );
+    // The provider fixture provisions directly. This suite exercises an already managed
+    // server's policy editor, not listener installation or automatic route provisioning.
+    harness.env.NH_GATEWAY_ENABLED = 'true';
+    harness.env.NH_GATEWAY_ID = randomUUID();
+    harness.env.NH_GATEWAY_PHYSICAL_HOST_ID = provider.ids.hostId;
+    await harness.database.db
+      .updateTable('managed_servers')
+      .set({ connection_mode: 'gateway' })
+      .where('id', '=', provider.ids.serverId)
+      .execute();
+    await harness.database.db
+      .updateTable('server_allocations')
+      .set({ direct_endpoint: null })
+      .where('server_id', '=', provider.ids.serverId)
+      .execute();
     harness.setManagement(provider.management);
   });
   afterAll(async () => {
@@ -84,9 +99,8 @@ describe('inherited sleep timeout controls', () => {
     await harness.screenshot(user, 'inherited-sleep-hidden-desktop-en');
   });
   it('saves game and runtime defaults through actual Owner handlers', async () => {
-    await owner.goto(`${harness.origin}/owner/integrations`);
+    await owner.goto(`${harness.origin}/owner/integrations/minecraft/sleep`);
     const settings = owner.getByTestId('sleep-settings-minecraft');
-    await settings.locator('summary').first().click();
     await settings.locator('select[name="sleepGameMode"]').selectOption('override');
     await settings.locator('input[name="sleepGame"]').fill('30');
     await settings.locator('select[name="sleepGameAccess"]').selectOption('editable');
@@ -241,9 +255,8 @@ describe('inherited sleep timeout controls', () => {
     await saved(owner, '/gateway', () =>
       form.getByRole('button', { name: 'Save changes', exact: true }).click(),
     );
-    await owner.goto(`${harness.origin}/owner/integrations`);
+    await owner.goto(`${harness.origin}/owner/integrations/minecraft/sleep`);
     const settings = owner.getByTestId('sleep-settings-minecraft');
-    await settings.locator('summary').first().click();
     await settings.locator('select[name="sleepGameMode"]').selectOption('inherit');
     await saved(owner, '/minecraft/sleep-policy', () =>
       settings.getByRole('button', { name: 'Save changes', exact: true }).click(),

@@ -280,3 +280,43 @@ They have no Gateway routes, automatic player-idle sleep or join-triggered wake.
 Authorized schedules remain separate and preserve manual-stop suppression. Existing
 servers retain their previous delivery identity; changing a pool or support declaration
 does not silently reroute them. See the dated [ADR 0013 amendment](decisions/0013-minecraft-evidence-and-content.md#owner-amendment--2026-10-10-declared-capabilities-and-direct-delivery).
+
+## Owner administration workspace
+
+`/owner/integrations` lists installed trusted modules. Each module opens a tabbed
+workspace at `/owner/integrations/:gameId/:section`:
+
+- **General:** rollout and tester allowlist.
+- **Runtime:** the single runtime/egg mapping editor, scoped to the integration.
+- **Versions:** Minecraft's compiled contribution for catalog discovery, filtering,
+  mapping-specific availability and evidence detail; other games can contribute
+  their own declared sections.
+- **Connection:** allowed/default domains, plus Minecraft's Gateway response text
+  editor. DNS zones, credentials and platform domains remain global settings.
+- **Sleep/Wake:** game default and runtime overrides, when supported. Global
+  defaults remain in Settings; individual server policy remains on the server.
+- **Content limits:** per-integration restrictions within the shared platform budget.
+
+Infrastructure retains physical hosts, managed nodes, allocations, Gateway routes
+and provider discovery. Its mapping overview links to Runtime rather than offering
+a second editor. A used mapping permits enabled/disabled changes only; immutable
+provider/runtime identity is not silently retargeted. The existing unique
+(game, runtime, node) contract remains in force.
+
+The Game SDK's optional `administration` metadata supplies validated section IDs,
+translation keys and compiled component IDs. The application resolves those IDs
+through its trusted first-party component registry; no API response imports
+executable code or grants permissions. Generic tabs work without a bespoke game
+renderer. Detailed version/protocol evidence remains Owner-only.
+
+Tabs fetch their own data on first visit. Catalog filters and selected evidence
+remain in URL query parameters. A started catalog scan continues when switching
+tabs within the integration; only its coordinator stays mounted. Leaving that
+workspace or reloading still cancels browser-driven discovery. This is not a new
+durable background job.
+
+Paths, staging budgets, concurrency and download-origin configuration are shared
+Core content policy. Integrations can narrow budgets/trust and raise free-space
+minimums, never multiply global capacity. Protocol sources, Minecraft response
+formats and Minecraft player/runtime rules remain Minecraft-specific. See
+[configuration and migration](CONFIGURATION-AND-DEPLOYMENT.md#shared-content-limits-and-integration-overrides-2026-10-16).

@@ -1,7 +1,12 @@
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { CurseForgeProvider, SafeContentHttp } from '@nickhosting/content-providers';
-import { type AuthContext, DomainError, type SecretCodec } from '@nickhosting/core';
+import {
+  type AuthContext,
+  contentPolicyValues,
+  DomainError,
+  type SecretCodec,
+} from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
 import {
   minecraftManifest,
@@ -365,22 +370,22 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
   /** Resolve provider settings only for Minecraft calls, preserving other integrations. */
   async function minecraftOptions(): Promise<MinecraftContentOptions> {
     const { values: minecraft } = await getSettings(db, env);
-    if (!minecraft.minecraftMetadataUserAgent) throw new DomainError('configuration_invalid');
+    if (!minecraft.contentMetadataUserAgent) throw new DomainError('configuration_invalid');
     const http = new SafeContentHttp({
-      userAgent: minecraft.minecraftMetadataUserAgent,
+      userAgent: minecraft.contentMetadataUserAgent,
       allowedOrigins: [
         'https://api.modrinth.com',
         'https://api.curseforge.com',
-        ...minecraft.minecraftDownloadOrigins,
+        ...contentPolicyValues(minecraft, 'minecraft').downloadOrigins,
       ],
     });
     const key = await getSecret(db, options.codec, 'curseforgeApiKey', env);
-    const mountdataRoot = resolve(minecraft.minecraftContentRoot);
+    const mountdataRoot = resolve(minecraft.contentWorkRoot);
     return {
       http,
       mountdataRoot,
-      sourceRoot: resolve(minecraft.minecraftSourceRoot),
-      userAgent: minecraft.minecraftMetadataUserAgent,
+      sourceRoot: resolve(minecraft.contentSourceRoot),
+      userAgent: minecraft.contentMetadataUserAgent,
       env,
       observedImageDigest,
       curseforge: key ? new CurseForgeProvider(http, { apiKey: key }) : undefined,

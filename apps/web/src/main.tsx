@@ -91,7 +91,7 @@ const router = createBrowserRouter(
         <Route path="/owner/servers" element={<ServersPage />} />
         <Route path="/owner/infrastructure" element={<OwnerInfrastructurePage />} />
         <Route path="/owner/integrations" element={<OwnerIntegrationsPage />} />
-        <Route path="/owner/integrations/:gameId" element={<OwnerGameAdmin />} />
+        <Route path="/owner/integrations/:gameId/*" element={<OwnerGameAdmin />} />
         <Route path="/owner/operations" element={<OwnerOperationsPage />} />
         <Route path="/owner/audit" element={<OwnerAuditPage />} />
         <Route path="/owner/settings" element={<OwnerSettingsPage />} />

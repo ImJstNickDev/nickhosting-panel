@@ -1,6 +1,8 @@
 import { DomainError } from '@nickhosting/core';
 import {
   deletePlatformProject,
+  getGameContentPolicy,
+  getGameDomainPolicy,
   getGameSleepPolicy,
   getPlatformConnections,
   getPlatformJob,
@@ -19,6 +21,8 @@ import {
   listPlatformUsers,
   lookupProjectCollaborator,
   retryPlatformJob,
+  setGameContentPolicy,
+  setGameDomainPolicy,
   setGameSleepPolicy,
   updatePlatformProject,
   updatePlatformServer,
@@ -72,6 +76,34 @@ export function registerPlatformRoutes(
   });
   app.get('/v1/owner/integrations/:gameId/sleep-policy', async (c) =>
     c.json(await getGameSleepPolicy(db, await principal(c, true), c.req.param('gameId'), env)),
+  );
+  app.get('/v1/owner/integrations/:gameId/domain-policy', async (c) =>
+    c.json(await getGameDomainPolicy(db, await principal(c, true), c.req.param('gameId'), env)),
+  );
+  app.put('/v1/owner/integrations/:gameId/domain-policy', async (c) =>
+    c.json(
+      await setGameDomainPolicy(
+        db,
+        await principal(c, true),
+        c.req.param('gameId'),
+        await body(c),
+        env,
+      ),
+    ),
+  );
+  app.get('/v1/owner/integrations/:gameId/content-policy', async (c) =>
+    c.json(await getGameContentPolicy(db, await principal(c, true), c.req.param('gameId'), env)),
+  );
+  app.put('/v1/owner/integrations/:gameId/content-policy', async (c) =>
+    c.json(
+      await setGameContentPolicy(
+        db,
+        await principal(c, true),
+        c.req.param('gameId'),
+        await body(c),
+        env,
+      ),
+    ),
   );
   app.put('/v1/owner/integrations/:gameId/sleep-policy', async (c) =>
     c.json(
