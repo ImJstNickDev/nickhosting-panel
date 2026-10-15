@@ -10293,3 +10293,11 @@ the previously recorded delegation/local-DNS blocker remains unchanged.
 Screenshots: [Desktop EN](screenshots/m5/console-address-en.png),
 [Mobile IT](screenshots/m5/console-address-it-mobile.png).
 Rollback is a source revert; backend address semantics and DNS records are unchanged.
+
+Connection table follow-up: added the localized Port column between Transport and
+Status. It displays the existing public `port` contract, not a backend allocation;
+missing values remain unavailable. Scoped Biome and web typecheck passed;
+independent read-only contract review found no issues. No backend or infrastructure
+changes.
+The existing DNS-state Firefox regression passed (1 passed, 13 unrelated skipped);
+its Network screenshot above was refreshed and reviewed with the added column.

@@ -225,6 +225,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                   <th>{t('service.portRole')}</th>
                   <th>{t('service.address')}</th>
                   <th>{t('service.transport')}</th>
+                  <th>{t('service.port')}</th>
                   <th>{t('web.status')}</th>
                 </tr>
               </thead>
@@ -236,6 +237,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                       <code>{port.displayAddress ?? t(missingAddress)}</code>
                     </td>
                     <td>{port.transport.toUpperCase()}</td>
+                    <td>{port.port ?? t('web.unavailable')}</td>
                     <td>
                       <Badge
                         value={
