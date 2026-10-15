@@ -1064,3 +1064,13 @@ Window/visual-viewport, source-dimension and control-layout changes recompute th
 fit; ordinary page scrolling does not enlarge the player. The known ratio is
 retained while an audio switch reloads metadata. Fullscreen keeps its own native
 viewport sizing. No playback, provider or transcoding behavior changes.
+
+### Console connection address
+
+The Console address card uses the backend's authoritative display address: clicking
+it copies that exact value, with brief checkmark feedback after clipboard success.
+A separate quiet edit icon opens Connection settings, also when the address is
+pending or unavailable. Long addresses truncate on one line and remain available
+in a custom tooltip and accessible button name. Clipboard failure is reported
+without claiming success. Publication is not presented as a reachability badge;
+DNS-mode addresses never fall back to raw IPs while awaiting publication.

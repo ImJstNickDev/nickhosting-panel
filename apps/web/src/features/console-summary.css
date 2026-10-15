@@ -53,12 +53,67 @@
     color: var(--muted);
   }
   .console-summary-address {
-    font-family: ui-monospace, monospace;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    justify-content: flex-start;
+    min-height: 24px;
+    width: 100%;
+    min-width: 0;
+    padding: 0.15rem 0;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    font: inherit;
     font-size: 0.85rem;
+    user-select: text;
   }
-  .console-summary-detail {
-    display: block;
+  .console-summary-address:hover {
+    background: transparent;
+    color: var(--blue);
+  }
+  .console-summary-address-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .console-summary-address svg {
+    flex: 0 0 1rem;
+    width: 1rem;
+    height: 1rem;
     color: var(--muted);
+  }
+  .console-summary-address-edit {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    margin: -0.35rem -0.25rem -0.35rem auto;
+    border-radius: 3px;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .console-summary dt:has(.console-summary-address-edit) {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .console-summary-address-edit svg {
+    width: 0.95rem;
+    height: 0.95rem;
+  }
+  .console-summary-address-edit:hover {
+    background: #edf1f5;
+    color: inherit;
+  }
+  .console-summary-copy-error {
+    display: block;
+    margin-top: 0.25rem;
+    color: #ac2525;
     font-size: 0.8rem;
     font-weight: 400;
   }

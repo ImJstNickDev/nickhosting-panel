@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api/client.js';
 import { useFormat, useLocale, useT } from '../app/i18n.js';
+import { Tooltip } from '../components/tooltip.js';
 import type { DisplayResources } from './console-resources.js';
 import { type Connections, platformPath } from './service-contracts.js';
 import './console-summary.css';
@@ -23,12 +24,14 @@ function SummaryCard({
   children,
   offline = false,
   muted = false,
+  action,
 }: {
   icon: keyof typeof iconPaths;
   label: string;
   children: ReactNode;
   offline?: boolean;
   muted?: boolean;
+  action?: ReactNode;
 }) {
   return (
     <div className="console-summary-card">
@@ -45,9 +48,62 @@ function SummaryCard({
           </svg>
         </span>
         {label}
+        {action}
       </dt>
       <dd className={muted ? 'is-offline' : undefined}>{children}</dd>
     </div>
+  );
+}
+
+function AddressCopy({ address }: { address: string }) {
+  const t = useT();
+  const [feedback, setFeedback] = useState<'copied' | 'failed' | undefined>();
+  useEffect(() => {
+    if (feedback !== 'copied') return;
+    const timeout = setTimeout(() => setFeedback(undefined), 2000);
+    return () => clearTimeout(timeout);
+  }, [feedback]);
+  return (
+    <>
+      <Tooltip content={feedback === 'copied' ? t('web.copied') : address}>
+        <button
+          type="button"
+          className="console-summary-address"
+          aria-label={`${t('connection.copyAddress')}: ${address}`}
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(address);
+              setFeedback('copied');
+            } catch {
+              setFeedback('failed');
+            }
+          }}
+        >
+          <span className="console-summary-address-text">{address}</span>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+          >
+            <path
+              d={feedback === 'copied' ? 'm5 12 4 4L19 6' : 'M9 8h11v13H9z M5 16H3V3h11v2'}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      </Tooltip>
+      <span className="visually-hidden" role="status">
+        {feedback === 'copied' ? t('web.copied') : ''}
+      </span>
+      {feedback === 'failed' && (
+        <span className="console-summary-copy-error" role="alert">
+          {t('connection.copyFailed')}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -106,7 +162,7 @@ export function ConsoleSummary({
       ? 'connection.addressPreparing'
       : addressState === 'uncertain' || addressState === 'deleting'
         ? 'connection.addressUnavailable'
-        : 'web.unconfigured';
+        : 'connection.addressUnavailable';
   const current = availability === 'ready' ? resources : undefined;
   const fallback = t(availability === 'loading' ? 'web.loading' : 'web.unavailable');
   const offline = current?.current_state === 'offline';
@@ -123,7 +179,33 @@ export function ConsoleSummary({
 
   return (
     <dl className="console-summary" aria-label={t('service.summary.title')}>
-      <SummaryCard icon="address" label={t('service.address')}>
+      <SummaryCard
+        icon="address"
+        label={t('service.address')}
+        action={
+          <Tooltip content={t('connection.openSettings')}>
+            <Link
+              className="console-summary-address-edit"
+              to={`/servers/${serverId}/network`}
+              aria-label={t('connection.openSettings')}
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+              >
+                <path
+                  d="m16 3 5 5-12 12-6 1 1-6Z M14 5l5 5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Link>
+          </Tooltip>
+        }
+      >
         {connections.isPending ? (
           t('web.loading')
         ) : connections.error ? (
@@ -139,14 +221,7 @@ export function ConsoleSummary({
             </button>
           </>
         ) : address ? (
-          <>
-            <Link className="console-summary-address" to={`/servers/${serverId}/network`}>
-              {address}
-            </Link>
-            {endpoint?.status !== 'configured' && (
-              <span className="console-summary-detail">{t(`web.${endpoint?.status}`)}</span>
-            )}
-          </>
+          <AddressCopy key={`${serverId}:${address}`} address={address} />
         ) : (
           t(missingAddress)
         )}

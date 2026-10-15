@@ -645,6 +645,12 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     '{count, plural, one {# missed run} other {# missed runs}}',
     '{count, plural, one {# esecuzione saltata} other {# esecuzioni saltate}}',
   ],
+  'connection.copyAddress': ['Copy address', 'Copia indirizzo'],
+  'connection.openSettings': ['Connection settings', 'Impostazioni connessione'],
+  'connection.copyFailed': [
+    'Could not copy. Select the address and copy it manually.',
+    'Copia non riuscita. Seleziona l’indirizzo e copialo manualmente.',
+  ],
   'connection.addressPreparing': ['Preparing address…', 'Preparazione indirizzo…'],
   'connection.addressUnavailable': ['Address unavailable', 'Indirizzo non disponibile'],
   'service.noConnection': [

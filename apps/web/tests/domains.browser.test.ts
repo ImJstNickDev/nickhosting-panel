@@ -455,6 +455,87 @@ describe('Domain choices and management (isolated responses, real components)', 
       await check(page.getByText('old.example.test', { exact: true }).first()).toBeVisible();
     }
   });
+  it('copies the console address with keyboard feedback and keeps connection settings separate', async () => {
+    displayAddress = 'blue-panda-bag.games.example.test';
+    addressState = 'active';
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async (value: string) => sessionStorage.setItem('copied-address', value),
+        },
+      });
+    });
+    await open('summary');
+    const copy = page.locator('button.console-summary-address');
+    await check(copy).toContainText(displayAddress);
+    await copy.focus();
+    await copy.press('Enter');
+    await check
+      .poll(() => page.evaluate(() => sessionStorage.getItem('copied-address')))
+      .toBe(displayAddress);
+    await check(page.getByRole('status')).toHaveText('Copied');
+    await check(
+      page.getByRole('link', { name: 'Connection settings', exact: true }),
+    ).toHaveAttribute('href', '/servers/domain-fixture/network');
+    await check(page.getByRole('status')).toHaveText('', { timeout: 4000 });
+    await page.mouse.move(0, 0);
+    await copy.blur();
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/console-address-en.png',
+      fullPage: true,
+    });
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async () => {
+            throw new Error('Clipboard denied');
+          },
+        },
+      });
+    });
+    await copy.click();
+    await check(page.getByRole('alert')).toContainText('Could not copy.');
+    await check(page.getByRole('status')).toHaveText('');
+    expect(writes).toEqual([]);
+  });
+  it('truncates long console hostnames on mobile, exposes their full value and localizes actions', async () => {
+    displayAddress = `${'long-'.repeat(10)}hostname.games.example.test`;
+    addressState = 'active';
+    await page.addInitScript(() => localStorage.setItem('nh.locale', 'it'));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await open('summary');
+    const copy = page.locator('button.console-summary-address');
+    await check(copy).toContainText(displayAddress);
+    await check(
+      page.getByRole('link', { name: 'Impostazioni connessione', exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    expect(
+      await page
+        .locator('.console-summary-address-text')
+        .evaluate(
+          (element) =>
+            element.scrollWidth > element.clientWidth &&
+            getComputedStyle(element).textOverflow === 'ellipsis',
+        ),
+    ).toBe(true);
+    await copy.hover();
+    await check(page.getByRole('tooltip')).toContainText(displayAddress);
+    expect(
+      (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+        .violations,
+    ).toEqual([]);
+    await page.mouse.move(0, 0);
+    await page.screenshot({
+      path: '.codex/local/m5-browser/screenshots/console-address-it-mobile.png',
+      fullPage: true,
+    });
+    expect(writes).toEqual([]);
+  });
   it('requires explicit activation, pins automatic preview and does not claim pending DNS is ready', async () => {
     await open();
     expect(writes).toEqual([]);

@@ -10273,3 +10273,23 @@ and [Console address summary](screenshots/m5/dns-unavailable-summary.png).
 The latter exercises the actual summary component, not the full Console shell.
 Cloudflare documents the Free-plan comment limit in its
 [record attributes reference](https://developers.cloudflare.com/dns/manage-dns-records/reference/record-attributes/).
+
+### Console address card — 2026-10-15
+
+The authoritative address is now a compact copy button with custom full-address
+tooltip, temporary success checkmark and accessible feedback. A separate edit
+icon links to Connection settings even while publication is pending/unavailable.
+Long names truncate without overflowing the card; no raw-IP reconstruction or
+reachability badge was added. Clipboard rejection remains visible and actionable.
+
+Three focused Firefox tests passed (11 unrelated tests skipped), covering clipboard success/failure, keyboard access, edit URL,
+EN/IT mobile truncation and existing pending/uncertain hostname-only states.
+Web typecheck, scoped Biome, i18n completeness (1,734 keys) and staged governance
+passed. Independent source/accessibility/content and rendered-screen review found
+no must-fix. These are actual React components with isolated API/clipboard fixtures,
+not evidence of live DNS resolution. No infrastructure or DNS operations were needed;
+the previously recorded delegation/local-DNS blocker remains unchanged.
+
+Screenshots: [Desktop EN](screenshots/m5/console-address-en.png),
+[Mobile IT](screenshots/m5/console-address-it-mobile.png).
+Rollback is a source revert; backend address semantics and DNS records are unchanged.
