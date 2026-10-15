@@ -61,6 +61,13 @@ export function NetworkPage({ serverId }: { serverId: string }) {
     : (dns.data?.find((item) => item.state === 'active') ?? dns.data?.[0]);
   const primary = connection.data?.ports.find((port) => port.primary && port.displayAddress);
   const address = primary?.displayAddress;
+  const addressState = connection.data?.addressState;
+  const missingAddress =
+    addressState === 'pending'
+      ? 'connection.addressPreparing'
+      : addressState === 'uncertain' || addressState === 'deleting'
+        ? 'connection.addressUnavailable'
+        : 'service.noConnection';
   async function refresh() {
     await Promise.all([connection.refetch(), dns.refetch()]);
   }
@@ -83,7 +90,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
         ) : (
           <>
             <div className="connection-primary">
-              {address ? <code>{address}</code> : <Empty text={t('service.noConnection')} />}
+              {address ? <code>{address}</code> : <Empty text={t(missingAddress)} />}
               {assignment ? (
                 <Badge value={assignment.state} />
               ) : connection.data.addressState === 'pending' ? (
@@ -189,7 +196,7 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                   {null}
                 </ActionForm>
               )}
-            {assignment && assignment.state !== 'active' && (
+            {assignment?.state === 'pending' && address && (
               <p className="muted">{t('service.addressPending')}</p>
             )}
             {options.data && !options.data.configured && (
@@ -226,14 +233,22 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                   <tr key={`${port.role}:${port.transport}`}>
                     <td>{port.role}</td>
                     <td>
-                      <code>{port.displayAddress ?? t('web.unconfigured')}</code>
+                      <code>{port.displayAddress ?? t(missingAddress)}</code>
                     </td>
                     <td>{port.transport.toUpperCase()}</td>
                     <td>
                       <Badge
-                        value={port.status}
+                        value={
+                          port.displayAddress
+                            ? port.status
+                            : addressState === 'pending' || addressState === 'uncertain'
+                              ? addressState
+                              : 'unconfigured'
+                        }
                         label={
-                          port.status === 'configured' ? t('service.directConfigured') : undefined
+                          port.displayAddress && port.status === 'configured'
+                            ? t('service.directConfigured')
+                            : undefined
                         }
                       />
                     </td>

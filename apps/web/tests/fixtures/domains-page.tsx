@@ -11,6 +11,7 @@ import {
   CreationConnection,
   useConnectionOptions,
 } from '../../src/features/connection-fields.js';
+import { ConsoleSummary } from '../../src/features/console-summary.js';
 import { CreateServerPage } from '../../src/features/create-server.js';
 import { NetworkPage } from '../../src/features/network.js';
 import { IntegrationConnectionSettings, OwnerDomains } from '../../src/features/owner-domains.js';
@@ -40,7 +41,9 @@ function Fixture() {
   return (
     <main style={{ padding: 24, maxWidth: 1000, margin: 'auto' }}>
       <h1>Domains fixture</h1>
-      {view === 'wizard' ? (
+      {view === 'summary' ? (
+        <ConsoleSummary serverId="domain-fixture" availability="unavailable" />
+      ) : view === 'wizard' ? (
         <CreateServerPage />
       ) : view === 'availability' ? (
         <form

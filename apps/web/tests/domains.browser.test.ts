@@ -28,6 +28,7 @@ describe('Domain choices and management (isolated responses, real components)', 
     errors: string[],
     canManage: boolean;
   let addressState: string;
+  let displayAddress: string | null;
   let availabilityRequests: Array<{ domainId: string; subdomain: string }>;
   let releaseSlow: (() => void) | undefined;
   let reservationExpiry: string;
@@ -72,6 +73,7 @@ describe('Domain choices and management (isolated responses, real components)', 
     assignments = [];
     canManage = true;
     addressState = 'unconfigured';
+    displayAddress = '192.0.2.1:28000';
     availabilityRequests = [];
     releaseSlow = undefined;
     reservationExpiry = new Date(Date.now() + 15 * 60_000).toISOString();
@@ -196,7 +198,7 @@ describe('Domain choices and management (isolated responses, real components)', 
                 port: 28000,
                 transport: 'tcp',
                 status: 'configured',
-                displayAddress: '192.0.2.1:28000',
+                displayAddress,
               },
             ],
           },
@@ -424,6 +426,34 @@ describe('Domain choices and management (isolated responses, real components)', 
     options.configured = false;
     await page.reload();
     await check(page.getByText('Custom addresses are not configured.')).toBeVisible();
+  });
+  it('shows DNS state without falling back to raw addresses in Network or Console', async () => {
+    displayAddress = null;
+    for (const [state, label] of [
+      ['pending', 'Preparing address…'],
+      ['uncertain', 'Address unavailable'],
+    ] as const) {
+      addressState = state;
+      assignments = [
+        { id: 'assignment', state, connection: { displayAddress: 'unconfirmed.example.test' } },
+      ];
+      for (const view of ['network', 'summary']) {
+        await open(view);
+        await check(page.getByText(label, { exact: true }).first()).toBeVisible();
+        await check(page.locator('main')).not.toContainText('192.0.2.1');
+        await check(page.locator('main')).not.toContainText('unconfirmed.example.test');
+        if (state === 'uncertain')
+          await page.screenshot({
+            path: `.codex/local/m5-browser/screenshots/dns-unavailable-${view}.png`,
+            fullPage: true,
+          });
+      }
+    }
+    displayAddress = 'old.example.test';
+    for (const view of ['network', 'summary']) {
+      await open(view);
+      await check(page.getByText('old.example.test', { exact: true }).first()).toBeVisible();
+    }
   });
   it('requires explicit activation, pins automatic preview and does not claim pending DNS is ready', async () => {
     await open();

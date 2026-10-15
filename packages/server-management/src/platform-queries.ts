@@ -1090,6 +1090,7 @@ export async function getPlatformConnections(
       .select(['id', 'hostname', 'state', 'plan'])
       .where('server_id', '=', serverId)
       .where('state', '!=', 'deleted')
+      .orderBy('updated_at', 'desc')
       .execute(),
     db
       .selectFrom('server_dns_preferences')
@@ -1101,7 +1102,8 @@ export async function getPlatformConnections(
     connection = manifest.success ? manifest.data.connection : null;
   const assignment =
     assignments.find((a) => a.id === preference?.assignment_id) ??
-    assignments.find((a) => a.state === 'active');
+    assignments.find((a) => a.state === 'active') ??
+    assignments[0];
   const intent = assignment?.plan as
     | {
         connection?: {
@@ -1120,13 +1122,31 @@ export async function getPlatformConnections(
     | undefined;
   const confirmed =
     assignment?.state === 'active' ? intent?.connection : intent?.confirmedConnection;
+  const dnsAddress = connection?.mode === 'custom-subdomain' || connection?.mode === 'shared-host';
+  const primaryAllocation = allocations.find((allocation) => allocation.is_primary);
+  const primaryTransport =
+    (connection?.mode === 'custom-subdomain' ? connection.srv?.proto : undefined) ??
+    primaryAllocation?.protocols[0];
+  const primaryPublicHost =
+    server.connection_mode === 'direct'
+      ? primaryAllocation?.direct_endpoint?.hostname
+      : routes.find(
+          (route) =>
+            route.allocation_id === primaryAllocation?.id &&
+            route.transport === primaryTransport &&
+            (!confirmed || route.public_port === confirmed.port),
+        )?.public_address;
+  const confirmedHostFor = (publicHost: string | undefined) =>
+    publicHost && publicHost === primaryPublicHost ? (confirmed?.hostname ?? null) : null;
   const hostname =
     confirmed?.hostname ??
-    (server.connection_mode === 'direct'
-      ? allocations.find((a) => a.is_primary)?.direct_endpoint?.hostname
-      : connection?.mode === 'static-host-port'
-        ? (settings.values as unknown as Record<string, string>)[connection.hostnameSettingKey]
-        : undefined);
+    (dnsAddress
+      ? undefined
+      : server.connection_mode === 'direct'
+        ? allocations.find((a) => a.is_primary)?.direct_endpoint?.hostname
+        : connection?.mode === 'static-host-port'
+          ? (settings.values as unknown as Record<string, string>)[connection.hostnameSettingKey]
+          : undefined);
   const display = (
     host: string | null,
     port: number | null,
@@ -1160,18 +1180,19 @@ export async function getPlatformConnections(
       allocation.protocols.map((transport) => {
         if (server.connection_mode === 'direct') {
           const endpoint = allocation.direct_endpoint;
+          const publicHostname = dnsAddress
+            ? confirmedHostFor(endpoint?.hostname)
+            : allocation.is_primary
+              ? (hostname ?? endpoint?.hostname ?? null)
+              : (endpoint?.hostname ?? null);
           return {
             role: allocation.role,
             primary: allocation.is_primary,
             transport,
             port: endpoint?.port ?? null,
-            hostname: allocation.is_primary
-              ? (hostname ?? endpoint?.hostname ?? null)
-              : (endpoint?.hostname ?? null),
+            hostname: publicHostname,
             displayAddress: display(
-              allocation.is_primary
-                ? (hostname ?? endpoint?.hostname ?? null)
-                : (endpoint?.hostname ?? null),
+              publicHostname,
               endpoint?.port ?? null,
               allocation.is_primary,
               transport,
@@ -1182,22 +1203,21 @@ export async function getPlatformConnections(
         const route = routes.find(
           (r) => r.allocation_id === allocation.id && r.transport === transport,
         );
+        const publicHostname = !route
+          ? null
+          : dnsAddress
+            ? confirmedHostFor(route.public_address)
+            : allocation.is_primary
+              ? (hostname ?? route.public_address)
+              : route.public_address;
         return {
           role: allocation.role,
           primary: allocation.is_primary,
           transport,
           port: route?.public_port ?? null,
-          hostname: route
-            ? allocation.is_primary
-              ? (hostname ?? route.public_address)
-              : route.public_address
-            : null,
+          hostname: publicHostname,
           displayAddress: display(
-            route
-              ? allocation.is_primary
-                ? (hostname ?? route.public_address)
-                : route.public_address
-              : null,
+            publicHostname,
             route?.public_port ?? null,
             allocation.is_primary,
             transport,

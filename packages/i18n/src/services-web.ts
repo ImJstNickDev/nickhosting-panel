@@ -645,6 +645,8 @@ export const serviceWebMessages: Record<string, readonly [string, string]> = {
     '{count, plural, one {# missed run} other {# missed runs}}',
     '{count, plural, one {# esecuzione saltata} other {# esecuzioni saltate}}',
   ],
+  'connection.addressPreparing': ['Preparing address…', 'Preparazione indirizzo…'],
+  'connection.addressUnavailable': ['Address unavailable', 'Indirizzo non disponibile'],
   'service.noConnection': [
     'No connection address configured',
     'Nessun indirizzo di connessione configurato',

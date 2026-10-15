@@ -10219,3 +10219,57 @@ before final checks. Final build, root/web typecheck, lint, format, i18n and sta
 governance/whitespace checks passed (existing warnings retained). Catalogs contain
 1,729 keys. Independent source/security and rendered UX review has no remaining
 must-fix findings. PR21 remains open/unmerged.
+
+### First live DNS assignment recovery and hostname-only presentation — 2026-10-15
+
+An Owner-requested existing-server assignment returned integration_unavailable and
+remained uncertain. Read-only inspection showed an empty ledger and no matching
+records. The zone is Cloudflare Free: our ownership comment was 122 characters,
+exceeding its documented 100-character limit. New markers are 79-character versioned
+SHA-256 digests of the exact validated ownership tuple; exact legacy markers remain
+recognized, with all identity/content/ledger checks retained. Provider fixtures now
+enforce the real Free-plan limit. Source hot reload allowed normal reconciliation
+to complete the Owner's existing request; no manual create/retry was issued.
+Read-only verification subsequently confirmed active state, two ledger entries and
+matching owned A/SRV records. This is actual publication evidence, unlike the prior
+empty-name read-only probe.
+
+DNS-mode DTOs and Console no longer fall back to a raw IP before first confirmed
+publication. Pending/uncertain state is shown instead; rename keeps the previously
+confirmed hostname. Secondary ports only reuse that hostname when their public host
+matches the primary DNS transport's endpoint; different-host roles remain without a
+presented address. Explicit static-host integrations preserve their address contract.
+
+Independent review retained strict marker ownership and identified the multiport
+host/transport edge, which was corrected and covered by regression tests.
+Validation: provider/HTTP 28 passed; targeted platform connection regressions and
+Network/Console browser coverage recorded below. Initial expanded fixture errors
+(column name and JSON typing) were corrected before final reruns.
+
+Important deployment finding: Cloudflare's configured zone currently reports
+`moved`; public recursive DNS still delegates to another provider and resolves the
+new label to that provider's parking wildcard. The host's local authoritative DNS
+instead returns NXDOMAIN. A successful owned Cloudflare write does not establish
+public or local reachability. No registrar, nameserver delegation, Bind9, NPM,
+Pterodactyl/Wings or network configuration was changed. The two records complete
+the Owner-requested server address and are retained, not disposable test assets.
+DNS delegation/local resolution require separate Owner work/approval. Issue #18
+and production-release boundaries remain unchanged.
+
+Rollback: new code reads both exact legacy and compact markers. Do not revert the
+provider to legacy-only matching after compact records exist; retain the compatible
+reader or restore compatible code. Do not delete records or reservation state to
+roll back UI presentation. PR21 stays open/unmerged.
+
+Final focused results: three platform connection cases passed across targeted runs
+(one expanded DNS-mode regression plus retained static/direct cases); one real
+Firefox Network/Console regression passed. Root and web typechecks, production
+build, scoped Biome, 1,731-key i18n check, whitespace and staged governance passed.
+Independent final review found no remaining must-fix. API/worker remained healthy;
+no manual container restart or migration was needed.
+
+Sanitized Firefox fixture screenshots: [Network uncertain address](screenshots/m5/dns-unavailable-network.png)
+and [Console address summary](screenshots/m5/dns-unavailable-summary.png).
+The latter exercises the actual summary component, not the full Console shell.
+Cloudflare documents the Free-plan comment limit in its
+[record attributes reference](https://developers.cloudflare.com/dns/manage-dns-records/reference/record-attributes/).

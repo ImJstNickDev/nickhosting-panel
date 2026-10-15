@@ -1218,6 +1218,205 @@ describe('M5 platform browser queries and metadata', () => {
       'unavailable',
     );
   });
+  it('withholds raw endpoints for DNS integrations until confirmed and preserves confirmed addresses during rename', async () => {
+    const id = await f.server();
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: {
+          ...((
+            await f.db
+              .selectFrom('game_integrations')
+              .select('manifest')
+              .where('id', '=', f.gameId)
+              .executeTakeFirstOrThrow()
+          ).manifest as object),
+          connection: {
+            mode: 'custom-subdomain',
+            zoneSettingKey: 'cloudflareZoneId',
+            srv: { service: '_minecraft', proto: 'tcp' },
+          },
+        },
+      })
+      .where('id', '=', f.gameId)
+      .execute();
+    const allocation = await f.db
+      .selectFrom('server_allocations')
+      .select('id')
+      .where('server_id', '=', id)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .insertInto('gateway_routes')
+      .values({
+        id: randomUUID(),
+        gateway_id: randomUUID(),
+        server_id: id,
+        allocation_id: allocation.id,
+        public_address: '192.0.2.50',
+        public_port: 22222,
+        transport: 'tcp',
+        payload_hash: null,
+        lease_expires_at: new Date(Date.now() + 60000),
+      })
+      .execute();
+    await f.db
+      .updateTable('server_allocations')
+      .set({ direct_endpoint: JSON.stringify({ hostname: '192.0.2.51', port: 22222 }) })
+      .where('server_id', '=', id)
+      .execute();
+    const assignmentId = randomUUID();
+    const confirmed = {
+      hostname: 'old.example.test',
+      port: 22222,
+      displayAddress: 'old.example.test',
+      records: [{ type: 'SRV', data: { port: 22222 } }],
+    };
+    for (const mode of ['gateway', 'direct'] as const) {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ connection_mode: mode })
+        .where('id', '=', id)
+        .execute();
+      const result = await getPlatformConnections(f.db, f.context, id);
+      expect(result.hostname).toBeNull();
+      expect(result.ports.every((p) => p.hostname === null && p.displayAddress === null)).toBe(
+        true,
+      );
+    }
+    await f.db
+      .insertInto('dns_assignments')
+      .values({
+        id: assignmentId,
+        server_id: id,
+        hostname: 'new.example.test',
+        ownership_token: randomUUID(),
+        plan: JSON.stringify({ connection: { ...confirmed, hostname: 'new.example.test' } }),
+        ledger: JSON.stringify([]),
+        state: 'uncertain',
+      })
+      .execute();
+    let result = await getPlatformConnections(f.db, f.context, id);
+    expect(result.addressState).toBe('uncertain');
+    expect(result.primaryDnsAssignmentId).toBe(assignmentId);
+    expect(result.ports.every((p) => p.displayAddress === null)).toBe(true);
+    for (const state of ['pending', 'uncertain'] as const) {
+      await f.db
+        .updateTable('dns_assignments')
+        .set({
+          state,
+          plan: JSON.stringify({
+            connection: { ...confirmed, hostname: 'new.example.test' },
+            confirmedConnection: confirmed,
+          }),
+        })
+        .where('id', '=', assignmentId)
+        .execute();
+      result = await getPlatformConnections(f.db, f.context, id);
+      expect(result.hostname).toBe('old.example.test');
+      expect(result.ports.find((p) => p.transport === 'tcp')?.displayAddress).toBe(
+        'old.example.test',
+      );
+    }
+    const original = await f.db
+      .selectFrom('server_allocations')
+      .selectAll()
+      .where('id', '=', allocation.id)
+      .executeTakeFirstOrThrow();
+    const secondaryId = randomUUID();
+    await f.db
+      .insertInto('server_allocations')
+      .values({
+        ...original,
+        id: secondaryId,
+        role: 'query',
+        is_primary: false,
+        pterodactyl_allocation_id: original.pterodactyl_allocation_id + 1,
+        port: 22223,
+        protocols: ['tcp'],
+        direct_endpoint: JSON.stringify({ hostname: '192.0.2.52', port: 22223 }),
+      })
+      .execute();
+    await f.db
+      .insertInto('gateway_routes')
+      .values({
+        id: randomUUID(),
+        gateway_id: randomUUID(),
+        server_id: id,
+        allocation_id: secondaryId,
+        public_address: '192.0.2.52',
+        public_port: 22223,
+        transport: 'tcp',
+        payload_hash: null,
+        lease_expires_at: new Date(Date.now() + 60000),
+      })
+      .execute();
+    await f.db
+      .insertInto('gateway_routes')
+      .values({
+        id: randomUUID(),
+        gateway_id: randomUUID(),
+        server_id: id,
+        allocation_id: allocation.id,
+        public_address: '192.0.2.99',
+        public_port: 22222,
+        transport: 'udp',
+        payload_hash: null,
+        lease_expires_at: new Date(Date.now() + 60000),
+      })
+      .execute();
+    for (const mode of ['direct', 'gateway'] as const) {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ connection_mode: mode })
+        .where('id', '=', id)
+        .execute();
+      result = await getPlatformConnections(f.db, f.context, id);
+      expect(result.ports.find((p) => p.role === 'query')?.displayAddress).toBeNull();
+      if (mode === 'gateway') {
+        expect(result.ports.find((p) => p.primary && p.transport === 'tcp')?.displayAddress).toBe(
+          'old.example.test',
+        );
+        expect(
+          result.ports.find((p) => p.primary && p.transport === 'udp')?.displayAddress,
+        ).toBeNull();
+      }
+      if (mode === 'direct')
+        await f.db
+          .updateTable('server_allocations')
+          .set({ direct_endpoint: JSON.stringify({ hostname: '192.0.2.51', port: 22223 }) })
+          .where('id', '=', secondaryId)
+          .execute();
+      else
+        await f.db
+          .updateTable('gateway_routes')
+          .set({ public_address: '192.0.2.50' })
+          .where('allocation_id', '=', secondaryId)
+          .execute();
+      result = await getPlatformConnections(f.db, f.context, id);
+      expect(result.ports.find((p) => p.role === 'query')?.displayAddress).toBe(
+        'old.example.test:22223',
+      );
+    }
+    await f.db
+      .updateTable('game_integrations')
+      .set({
+        manifest: {
+          ...((
+            await f.db
+              .selectFrom('game_integrations')
+              .select('manifest')
+              .where('id', '=', f.gameId)
+              .executeTakeFirstOrThrow()
+          ).manifest as object),
+          connection: { mode: 'shared-host', defaultLabel: 'shared', allowCustomSubdomain: false },
+        },
+      })
+      .where('id', '=', f.gameId)
+      .execute();
+    await f.db.deleteFrom('dns_assignments').where('id', '=', assignmentId).execute();
+    result = await getPlatformConnections(f.db, f.context, id);
+    expect(result.ports.every((p) => p.hostname === null && p.displayAddress === null)).toBe(true);
+  });
   it('uses frozen direct endpoints without claiming reachability or falling back to private addresses', async () => {
     const id = await f.server();
     await f.db

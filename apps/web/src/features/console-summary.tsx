@@ -99,12 +99,14 @@ export function ConsoleSummary({
   const endpoints =
     connections.data?.ports.filter((port) => port.primary && port.hostname && port.port) ?? [];
   const endpoint = endpoints.find((port) => port.status === 'configured') ?? endpoints[0];
-  const hostname = endpoint?.hostname;
-  const address =
-    endpoint?.displayAddress ??
-    (hostname
-      ? `${hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname}:${endpoint.port}`
-      : undefined);
+  const address = endpoint?.displayAddress;
+  const addressState = connections.data?.addressState;
+  const missingAddress =
+    addressState === 'pending'
+      ? 'connection.addressPreparing'
+      : addressState === 'uncertain' || addressState === 'deleting'
+        ? 'connection.addressUnavailable'
+        : 'web.unconfigured';
   const current = availability === 'ready' ? resources : undefined;
   const fallback = t(availability === 'loading' ? 'web.loading' : 'web.unavailable');
   const offline = current?.current_state === 'offline';
@@ -146,7 +148,7 @@ export function ConsoleSummary({
             )}
           </>
         ) : (
-          t('web.unconfigured')
+          t(missingAddress)
         )}
       </SummaryCard>
       <SummaryCard icon="uptime" label={t('service.summary.uptime')} offline={offline}>

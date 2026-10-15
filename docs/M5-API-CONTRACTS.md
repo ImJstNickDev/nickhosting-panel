@@ -1283,3 +1283,17 @@ A hold excludes other NickHosting assignments, including API calls omitting the
 token; it cannot prevent manual/external Cloudflare changes. Existing owned-record
 checks remain authoritative at publication. Consumed claims survive provisioning
 retries and are released if the server is deleted before DNS intent preparation.
+
+### Cloudflare Free ownership marker and address presentation correction
+
+New/updated records use `nickhosting:v2:<sha256>` (79 ASCII characters), hashing the
+validated instance/server/assignment UUID tuple. The original 122-character marker
+exceeded Cloudflare Free's 100-character comment limit. Exact legacy markers remain
+recognized for owned-record recovery/update/delete; identity, content and ledger
+checks are unchanged. This does not adopt foreign records.
+
+DNS-mode connection descriptors withhold raw public-IP fallbacks until an address
+is confirmed. Pending/uncertain first publication shows address preparation/failure;
+rename continues displaying the last confirmed hostname. Static-host integrations
+retain their explicit configured address. Console consumes `displayAddress` rather
+than reconstructing an IP/port pair when it is null.

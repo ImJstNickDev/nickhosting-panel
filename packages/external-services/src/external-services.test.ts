@@ -354,6 +354,11 @@ function dnsFixture() {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ method, path: `${url.pathname}${url.search}`, body });
     const recordId = url.pathname.split('/').at(-1) ?? '';
+    if (body?.comment && body.comment.length > 100)
+      return Response.json(
+        { success: false, errors: [{ code: 1004, message: 'Comment exceeds Free plan limit' }] },
+        { status: 400 },
+      );
     let result: unknown;
     if (method === 'GET' && url.searchParams.has('name'))
       result = [...records.values()].filter((entry) => entry.name === url.searchParams.get('name'));
@@ -474,6 +479,44 @@ describe('DNS connection planning and Cloudflare ownership', () => {
     await fixture.provider.apply(await plan([]), fixture.callbacks);
     expect(fixture.records.size).toBe(0);
     expect(fixture.ledger).toHaveLength(0);
+  });
+  it('fits ownership comments within Cloudflare Free limits and binds all three identifiers', async () => {
+    const f = dnsFixture();
+    const input = { zoneId, ownership: f.ownership, desired: f.desired(), ledger: f.ledger };
+    await f.provider.apply(await f.provider.plan(input), f.callbacks);
+    for (const call of f.calls.filter((entry) => entry.method === 'POST')) {
+      const marker = String(call.body?.comment);
+      expect(marker).toMatch(/^nickhosting:v2:[a-f0-9]{64}$/);
+      expect(marker.length).toBeLessThanOrEqual(100);
+    }
+    for (const key of ['serverId', 'assignmentId'] as const)
+      await expect(
+        f.provider.plan({
+          ...input,
+          ledger: [],
+          ownership: { ...f.ownership, [key]: randomUUID() },
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    expect(await f.provider.inspectOwned(input)).toHaveLength(2);
+  });
+  it('recovers exact legacy ownership markers without adopting foreign records', async () => {
+    const f = dnsFixture();
+    const input = { zoneId, ownership: f.ownership, desired: f.desired(), ledger: f.ledger };
+    await f.provider.apply(await f.provider.plan(input), f.callbacks);
+    const { instanceId, serverId, assignmentId } = f.ownership;
+    for (const record of f.records.values())
+      record.comment = `nickhosting:${instanceId}:${serverId}:${assignmentId}`;
+    expect(await f.provider.plan(input)).toEqual([]);
+    expect(await f.provider.inspectOwned(input)).toHaveLength(2);
+    const changed = f
+      .desired()
+      .map((record) => (record.type === 'A' ? { ...record, content: '192.0.2.42' } : record));
+    await f.provider.apply(await f.provider.plan({ ...input, desired: changed }), f.callbacks);
+    expect(f.calls.findLast((call) => call.method === 'PUT')?.body?.comment).toMatch(
+      /^nickhosting:v2:/,
+    );
+    await f.provider.apply(await f.provider.plan({ ...input, desired: [] }), f.callbacks);
+    expect(f.records.size).toBe(0);
   });
   it('publishes every replacement record before deleting the old hostname on rename', async () => {
     const fixture = dnsFixture();
