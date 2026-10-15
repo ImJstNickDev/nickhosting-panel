@@ -8,7 +8,7 @@ const requestSchema = z
     serverId: z.uuid(),
     externalServerUuid: z.uuid(),
     credentialId: z.uuid(),
-    password: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/),
+    password: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
     expiresAt: z.number().int().positive(),
   })
   .strict();

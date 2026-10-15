@@ -62,6 +62,30 @@ function fixture() {
 }
 
 describe('private read-only viewer SFTPGo credentials', () => {
+  it.each([generateSftpPassword(), 'a'.repeat(43)])(
+    'accepts generated and existing longer credentials without rotating them',
+    async (password) => {
+      const f = fixture();
+      const request = { ...f.request, password };
+      const ref = await f.adapter.ensureCredential(request);
+      expect(await f.adapter.ensureCredential(request)).toEqual(ref);
+      expect(f.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+      expect(f.calls.find((call) => call.method === 'POST')?.body?.password).toBe(password);
+      expect(f.calls.some((call) => call.method === 'PUT')).toBe(false);
+    },
+  );
+
+  it.each(['a'.repeat(15), 'a'.repeat(129), `${'a'.repeat(15)}!`])(
+    'rejects invalid credentials before contacting SFTPGo',
+    async (password) => {
+      const f = fixture();
+      await expect(f.adapter.ensureCredential({ ...f.request, password })).rejects.toMatchObject({
+        code: 'validation_failed',
+      });
+      expect(f.calls).toHaveLength(0);
+    },
+  );
+
   it('uses a separate namespace and exact list/download scope without filesystem initialization', async () => {
     const f = fixture();
     const ref = await f.adapter.ensureCredential(f.request);

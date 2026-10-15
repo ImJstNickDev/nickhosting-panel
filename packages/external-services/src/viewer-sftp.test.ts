@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client, type Connection, Server, utils } from 'ssh2';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { generateSftpPassword } from './sftpgo.js';
 import { type ViewerSftpConnection, ViewerSftpPool, viewerSftpPath } from './viewer-sftp.js';
 
 const { privateKey } = generateKeyPairSync('rsa', {
@@ -25,6 +26,7 @@ let closes = 0;
 let activeReads = 0;
 let peakReads = 0;
 let port = 0;
+const generatedPassword = generateSftpPassword();
 
 const server = new Server({ hostKeys: [privateKey] }, (client) => {
   clients.add(client);
@@ -32,7 +34,11 @@ const server = new Server({ hostKeys: [privateKey] }, (client) => {
   client.on('error', () => {});
   client.on('close', () => clients.delete(client));
   client.on('authentication', (context) => {
-    if (context.method === 'password' && context.password === 'a'.repeat(43)) context.accept();
+    if (
+      context.method === 'password' &&
+      [generatedPassword, 'a'.repeat(43)].includes(context.password)
+    )
+      context.accept();
     else context.reject();
   });
   client.on('ready', () =>
@@ -140,6 +146,24 @@ afterAll(async () => {
 });
 
 describe('private viewer SFTP transport with real SSH protocol fixtures', () => {
+  it('opens and reads using the current generated SFTP credential', async () => {
+    expect(generatedPassword).toHaveLength(16);
+    const file = await pool().openFile(connection({ password: generatedPassword }), 'fixture.bin');
+    expect(await file.read(0, 64)).toEqual(content.subarray(0, 64));
+    await file.close();
+  });
+
+  it.each(['a'.repeat(15), 'a'.repeat(129), `${'a'.repeat(15)}!`])(
+    'rejects invalid passwords before connecting',
+    async (password) => {
+      const before = connections;
+      await expect(pool().openFile(connection({ password }), 'fixture.bin')).rejects.toMatchObject({
+        code: 'configuration_invalid',
+      });
+      expect(connections).toBe(before);
+    },
+  );
+
   it('disables Nagle once on the shared SSH socket before file operations', async () => {
     const noDelay = vi.spyOn(Client.prototype, 'setNoDelay');
     try {

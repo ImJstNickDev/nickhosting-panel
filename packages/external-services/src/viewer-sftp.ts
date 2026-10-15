@@ -90,7 +90,7 @@ function validateConnection(input: ViewerSftpConnection): void {
     input.host.includes('\0') ||
     !/^nhv_[0-9a-f]{32}$/.test(input.username) ||
     input.username !== `nhv_${input.credentialId.replaceAll('-', '').toLowerCase()}` ||
-    !/^[A-Za-z0-9_-]{32,128}$/.test(input.password) ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(input.password) ||
     !/^SHA256:[A-Za-z0-9+/]{43}$/.test(input.hostFingerprint) ||
     !Number.isSafeInteger(input.expiresAt)
   )

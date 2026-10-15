@@ -10307,3 +10307,33 @@ Address, Transport and Port. DNS assignment feedback remains above the table.
 Scoped Biome/whitespace and independent diff review passed; no backend changes.
 Existing Firefox DNS-state test passed (1 passed, 13 unrelated skipped); screenshot
 refreshed and reviewed with the four-column layout. No infrastructure operations.
+
+### Shared binary viewer credential regression — 2026-10-16
+
+Frame, Wave, Motion, Atlas, SQLite Datagrid and Folio failed together with HTTP400
+`validation_failed`. Personal SFTP's shared password generator had changed from
+43 to16 URL-safe characters; both the private viewer issuance adapter and SSH pool
+still required32. Text viewers used a different read path and remained functional.
+The pre-fix adapter suite reproduced this with10/10 failures.
+
+Aligned both validators to the existing16–128 character SFTP contract. Generated
+passwords use12 cryptographically random bytes (96bits), and old longer passwords
+remain accepted. Existing encrypted pending intents recover through normal issuance,
+without changing identity, rotating credentials or migrating state. The dedicated
+read-only viewer namespace, expiry, exact server root, host-key verification and
+filesystem protections remain unchanged.
+
+Focused tests: `scripts/dev.sh pnpm exec vitest run
+packages/external-services/src/viewer-sftpgo.test.ts
+packages/external-services/src/viewer-sftp.test.ts` —30 passed. Includes actual local
+SSH reads with generated passwords, legacy43-character credentials, idempotent
+recovery and rejection of invalid inputs before external calls. Scoped Biome and
+independent review passed with no must-fix findings.
+
+Live dev authenticated read smoke on existing dataset: Frame/Wave/Motion/Folio
+returned206 and1024 bytes each; Atlas archive listing200; SQLite Datagrid200.
+This verifies backend transport/parser recovery, not a fresh full browser matrix.
+The existing source watcher loaded the fix; no manual container restart, migration,
+game-file write or Pterodactyl/Wings change occurred. No disposable assets created.
+Issue18 remains unchanged. Rollback must keep validators compatible with existing
+16-character intents; reverting only their minimum would reproduce the failure.
