@@ -10072,3 +10072,20 @@ Activation requires the documented scoped API/worker rebuild/recreation; approva
 was requested with exact commands, private-env backup and previous-image rollback.
 Until activation, the running environment still reports the token as environment
 managed. No live Cloudflare connectivity claim is made.
+
+Activation subsequently approved and completed. Image
+`sha256:08e7e080d1f89b3b2e143e2dbb100fa14057d142041a851bd6f75f5664b98e3b`
+built; only API/worker recreated. The first command exposed a pre-existing mismatch:
+the private COMPOSE_FILE selection omitted the viewer/user-SFTP overlays present
+in the running containers. Restored that complete selection and recreated the
+same two services with the existing additional private env files, preserving SFTP
+opt-in. No SFTP container was removed/restarted. Previous image retained as
+`nickhosting-dev-app:before-cloudflare`, private env backup retained locally.
+
+Final read-only checks: API, worker and both SFTP services healthy, restart count
+zero; HTTPS ingress 200. Cloudflare credential is configured, database-sourced,
+unlocked; all four DNS settings are present. Owner supplied the token interactively.
+Cloudflare token verification and scoped zone DNS-record listing returned HTTP200,
+success=true. No token or record contents were logged. No DNS writes, migrations,
+game-server operations, new test resources or production changes. Existing #18
+production-release boundary remains unchanged.

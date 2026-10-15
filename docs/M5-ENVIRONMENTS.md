@@ -250,7 +250,13 @@ own explicit authorization.
 After the configuration change, the scoped activation commands (requiring Owner
 approval) are `docker compose --env-file .env.dev.local build api` followed by
 `docker compose --env-file .env.dev.local up -d --no-deps --wait api worker`.
-The deployment entrypoint is baked into the image; HMR alone cannot apply it.
+Preserve the complete running overlay chain and all of its private interpolation
+files. In the current development stack, `COMPOSE_FILE` also includes
+`compose.dev.viewers.yaml:compose.dev.sftp.yaml`; both commands above must additionally
+include `--env-file .env.dev.viewer.local --env-file .env.dev.sftp.local` after the
+main env-file argument. Omitting the SFTP overlay would restore the disabled SFTP
+credential override in API/worker. Never remove the existing SFTP containers as
+orphans. The deployment entrypoint is baked into the image; HMR alone cannot apply it.
 Preserve the previous image ID and private environment file for rollback. Disable
 the opt-in and recreate only API/worker to restore the credential lock; this does
 not delete saved secrets or undo previously created DNS records.
