@@ -109,7 +109,26 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     expect((await request(user, '/v1/owner/settings/schema')).status).toBe(403);
     const schema = await request(owner, '/v1/owner/settings/schema');
     expect(schema.status).toBe(200);
-    expect((await schema.json()).properties.sftpPublicHostname).toBeTruthy();
+    const definition = await schema.json();
+    expect(definition.properties.sftpPublicHostname).toBeTruthy();
+    expect(definition.properties.gameIdleTimeouts).toMatchObject({
+      type: 'object',
+      propertyNames: { pattern: '^[a-z][a-z0-9-]{0,63}$' },
+      additionalProperties: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          runtimeTimeouts: {
+            additionalProperties: {
+              anyOf: [
+                { type: 'number', const: -1 },
+                { type: 'integer', minimum: 1, maximum: 604800 },
+              ],
+            },
+          },
+        },
+      },
+    });
     const headers = owner.headers();
     headers.set('origin', origin);
     headers.set('content-type', 'application/json');

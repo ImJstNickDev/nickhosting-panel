@@ -10035,3 +10035,22 @@ the seven affected legacy cases and eight new automatic-primary cases passed 15/
 passing cases across runs; no remaining failures. Final backend typecheck/Biome and
 independent review of the adjusted assertions passed. No unrelated historical suite
 was repeated. PR21 remains open/unmerged.
+
+### Owner settings schema HTTP 500 — 2026-10-15
+
+The legacy Minecraft idle-policy key normalization added a Zod transform. The Owner
+settings schema endpoint incorrectly serialized the output schema, which cannot
+represent transforms, causing HTTP500 before the form rendered. It now describes
+the input schema (`io: 'input'`); runtime validation/normalization and saved settings
+remain unchanged. Independent review confirmed this narrowly scoped correction.
+
+The existing authenticated API regression passed (1 passed, 5 skipped) via
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config
+vitest.integration.config.ts apps/api/src/web-session.integration.test.ts -t
+'exposes only Owner configuration schemas'`. It verifies Owner200, ordinary-user403,
+retained bounded idle-timeout schema and the existing settings/reset guards. Scoped
+Biome passed. Existing dev watcher reloaded API; no manual restart, migration,
+configuration reset or DNS/provider write. Rollback is a two-file source revert,
+which would restore the broken form; no state rollback needed. DNS development
+remains paused pending Owner approval.
+Root `tsc --noEmit`, staged governance and whitespace checks also passed.

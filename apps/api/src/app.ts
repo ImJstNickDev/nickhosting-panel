@@ -437,7 +437,8 @@ export function createApp(options: Options) {
   app.get('/v1/owner/settings/schema', async (c) => {
     const context = await principal(c, true);
     assertPermission(context, 'settings:read');
-    return c.json(z.toJSONSchema(platformConfigSchema));
+    // The form describes accepted inputs, before configuration normalization.
+    return c.json(z.toJSONSchema(platformConfigSchema, { io: 'input' }));
   });
   app.patch('/v1/owner/settings', async (c) =>
     c.json(await updateSettings(db, await principal(c, true), await body(c), env)),
