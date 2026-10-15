@@ -34,6 +34,29 @@ function deployment(environment: Environment): Record<string, string> {
 }
 
 describe('scoped container environment', () => {
+  it('unlocks Cloudflare credentials only for an explicit real-dev opt-in', () => {
+    const real = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
+    expect(containerEnvironment(real).NH_CLOUDFLARE_API_TOKEN).toBe('development-disabled');
+    const enabled = containerEnvironment({ ...real, NH_DEV_CLOUDFLARE_ENABLED: 'true' });
+    expect(enabled).not.toHaveProperty('NH_CLOUDFLARE_API_TOKEN');
+    expect(enabled.NH_SFTPGO_API_KEY).toBe('development-disabled');
+    expect(enabled.NH_CURSEFORGE_API_KEY).toBe('development-disabled');
+    expect(enabled.NH_SECRETS_MASTER_KEY).toBe(real.NH_DEV_MASTER_KEY);
+    expect(
+      containerEnvironment({ ...real, NH_DEV_CLOUDFLARE_ENABLED: 'false' }).NH_CLOUDFLARE_API_TOKEN,
+    ).toBe('development-disabled');
+    for (const input of [
+      { ...deployment('development'), NH_DEV_CLOUDFLARE_ENABLED: 'true' },
+      { ...real, NH_DEV_CLOUDFLARE_ENABLED: 'yes' },
+      { ...deployment('production'), NH_DEV_CLOUDFLARE_ENABLED: 'true' },
+      { ...real, NH_DEV_CLOUDFLARE_ENABLED: 'true', NH_CLOUDFLARE_API_TOKEN: 'forbidden-env-key' },
+    ])
+      expect(() => containerEnvironment(input)).toThrow();
+    expect(containerEnvironment(deployment('production'))).not.toHaveProperty(
+      'NH_CLOUDFLARE_API_TOKEN',
+    );
+  });
+
   it('unlocks user SFTP Owner settings only for an explicit real-dev opt-in', () => {
     const real = { ...deployment('development'), NH_DEV_PROVIDER_MODE: 'real' };
     expect(containerEnvironment(real).NH_SFTPGO_API_KEY).toBe('development-disabled');

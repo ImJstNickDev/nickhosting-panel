@@ -10054,3 +10054,21 @@ configuration reset or DNS/provider write. Rollback is a two-file source revert,
 which would restore the broken form; no state rollback needed. DNS development
 remains paused pending Owner approval.
 Root `tsc --noEmit`, staged governance and whitespace checks also passed.
+
+### Development Cloudflare credential opt-in — 2026-10-15
+
+Added `NH_DEV_CLOUDFLARE_ENABLED=true` for explicit real-provider development.
+It removes only the placeholder Cloudflare token environment override so the
+Owner can save the real token through the existing encrypted secret store.
+Default sandbox/real-dev behavior and production remain unchanged; invalid or
+sandbox opt-ins fail. No credentials are included in images or frontend code.
+
+Validation: `scripts/dev.sh pnpm exec vitest run scripts/deployment-config.test.ts`
+passed 46/46; scoped Biome, Compose `config --quiet`, whitespace and governance
+checks passed. Independent configuration/security review found no must-fix issues.
+Read-only dev inspection confirmed API/worker healthy, no published host ports,
+zero DNS assignments and no stored Cloudflare token. No DNS writes or test assets.
+Activation requires the documented scoped API/worker rebuild/recreation; approval
+was requested with exact commands, private-env backup and previous-image rollback.
+Until activation, the running environment still reports the token as environment
+managed. No live Cloudflare connectivity claim is made.

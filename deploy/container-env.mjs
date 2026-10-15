@@ -9,6 +9,13 @@ export function containerEnvironment(input) {
   const providerMode = development ? (input.NH_DEV_PROVIDER_MODE ?? 'sandbox') : undefined;
   if (development && !['sandbox', 'real'].includes(providerMode))
     throw new Error('Invalid development provider mode');
+  const cloudflareEnabled = input.NH_DEV_CLOUDFLARE_ENABLED ?? 'false';
+  if (
+    development &&
+    (!['true', 'false'].includes(cloudflareEnabled) ||
+      (cloudflareEnabled === 'true' && providerMode !== 'real'))
+  )
+    throw new Error('Invalid development Cloudflare opt-in');
   const userSftpEnabled = input.NH_DEV_SFTP_ENABLED ?? 'false';
   if (
     development &&
@@ -157,6 +164,8 @@ export function containerEnvironment(input) {
       SMTP_PASSWORD: required('MAIL_PASSWORD', true),
       NODE_EXTRA_CA_CERTS: '/run/dev-mail/cert.pem',
     });
+    // The Owner's encrypted secret store supplies the token after explicit opt-in.
+    if (cloudflareEnabled === 'true') delete env.NH_CLOUDFLARE_API_TOKEN;
     if (userSftpEnabled === 'true') {
       // Explicit approved user-SFTP deployment: protected DB settings own the
       // endpoint and encrypted key instead of the disabled simulator override.

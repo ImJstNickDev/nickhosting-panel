@@ -229,6 +229,32 @@ Review data, independent secrets, PostgreSQL/Redis state and source watching are
 preserved. Existing provider simulator credentials may remain private for a later
 return to sandbox; real mode never uses them.
 
+### Optional Cloudflare access in development
+
+Real-provider mode keeps Cloudflare disabled by default. Set
+`NH_DEV_CLOUDFLARE_ENABLED=true` in the private `.env.dev.local` to remove the
+entrypoint's `development-disabled` token override. This opt-in requires real
+provider mode; sandbox and invalid values are rejected. Save the actual API token
+in **Owner settings → Credentials → Cloudflare API token** (`cloudflareApiToken`),
+using the existing encrypted, write-only store. Do not put it in the environment
+file or copy production credentials automatically. Other provider opt-ins and
+production configuration remain unchanged.
+
+Configure `cloudflareZoneId`, `dnsBaseDomain`, `dnsTarget` and a stable, independent
+`dnsInstanceId` through Owner settings. The token should have DNS Edit permission
+limited to the intended zone. Enabling access alone does not create records;
+requested DNS operations use the real Cloudflare adapter, not a simulator. Check
+existing pending assignments before activation. Real DNS writes require their
+own explicit authorization.
+
+After the configuration change, the scoped activation commands (requiring Owner
+approval) are `docker compose --env-file .env.dev.local build api` followed by
+`docker compose --env-file .env.dev.local up -d --no-deps --wait api worker`.
+The deployment entrypoint is baked into the image; HMR alone cannot apply it.
+Preserve the previous image ID and private environment file for rollback. Disable
+the opt-in and recreate only API/worker to restore the credential lock; this does
+not delete saved secrets or undo previously created DNS records.
+
 ### Owner connection and Minecraft eligibility
 
 1. Sign in to the existing Owner account at `/owner/settings`. A completed sandbox
