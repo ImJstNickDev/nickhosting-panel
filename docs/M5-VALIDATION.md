@@ -10301,3 +10301,9 @@ independent read-only contract review found no issues. No backend or infrastruct
 changes.
 The existing DNS-state Firefox regression passed (1 passed, 13 unrelated skipped);
 its Network screenshot above was refreshed and reviewed with the added column.
+
+Owner UI follow-up: removed the State column from the ports table, leaving Role,
+Address, Transport and Port. DNS assignment feedback remains above the table.
+Scoped Biome/whitespace and independent diff review passed; no backend changes.
+Existing Firefox DNS-state test passed (1 passed, 13 unrelated skipped); screenshot
+refreshed and reviewed with the four-column layout. No infrastructure operations.

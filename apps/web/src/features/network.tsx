@@ -226,7 +226,6 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                   <th>{t('service.address')}</th>
                   <th>{t('service.transport')}</th>
                   <th>{t('service.port')}</th>
-                  <th>{t('web.status')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -238,22 +237,6 @@ export function NetworkPage({ serverId }: { serverId: string }) {
                     </td>
                     <td>{port.transport.toUpperCase()}</td>
                     <td>{port.port ?? t('web.unavailable')}</td>
-                    <td>
-                      <Badge
-                        value={
-                          port.displayAddress
-                            ? port.status
-                            : addressState === 'pending' || addressState === 'uncertain'
-                              ? addressState
-                              : 'unconfigured'
-                        }
-                        label={
-                          port.displayAddress && port.status === 'configured'
-                            ? t('service.directConfigured')
-                            : undefined
-                        }
-                      />
-                    </td>
                   </tr>
                 ))}
               </tbody>
