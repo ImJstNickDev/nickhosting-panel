@@ -1,0 +1,142 @@
+.profile-photo-control {
+  margin-bottom: 1.5rem;
+}
+.profile-photo-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.profile-photo-avatar {
+  flex-shrink: 0;
+  width: 72px;
+  height: 72px;
+  border: 1px solid #bbc8d0;
+  border-radius: 50%;
+}
+.profile-photo-details {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.profile-photo-label {
+  font-weight: 600;
+}
+.profile-photo-details small,
+.profile-photo-hint,
+.profile-photo-status {
+  color: var(--muted);
+}
+.profile-photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 0.4rem;
+}
+.profile-photo-actions button {
+  min-height: 36px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.875rem;
+}
+.profile-photo-remove {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-weight: 400;
+}
+.profile-photo-remove:hover {
+  background: #eef2f4;
+  filter: none;
+}
+.profile-photo-control > .notice,
+.profile-photo-status {
+  margin-top: 0.75rem;
+  margin-bottom: 0;
+}
+.profile-photo-status {
+  font-size: 0.875rem;
+}
+dialog.profile-photo-dialog {
+  width: min(416px, calc(100vw - 32px));
+  padding: 1.5rem;
+}
+.profile-photo-dialog h2 {
+  font-size: 1.2rem;
+}
+.profile-photo-editor {
+  display: grid;
+  gap: 1rem;
+}
+.profile-photo-crop {
+  position: relative;
+  display: block;
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  min-height: 0;
+  justify-self: center;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: #e9eff3;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.profile-photo-crop:hover {
+  filter: none;
+}
+.profile-photo-crop:active {
+  cursor: grabbing;
+}
+.profile-photo-crop img {
+  position: absolute;
+  max-width: none;
+  pointer-events: none;
+}
+.profile-photo-crop::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border: 1px solid #ffffffd9;
+  border-radius: 50%;
+  box-shadow: 0 0 0 150px #14273680;
+  pointer-events: none;
+}
+.profile-photo-hint {
+  font-size: 0.875rem;
+}
+.profile-photo-zoom {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.profile-photo-zoom label {
+  font-weight: 600;
+}
+.profile-photo-zoom input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  accent-color: var(--blue);
+}
+.profile-photo-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.profile-photo-editor > .notice {
+  margin-bottom: 0;
+}
+@media (max-width: 400px) {
+  dialog.profile-photo-dialog {
+    padding: 1.25rem;
+  }
+  .profile-photo-row {
+    gap: 0.75rem;
+  }
+  .profile-photo-avatar {
+    width: 60px;
+    height: 60px;
+  }
+}

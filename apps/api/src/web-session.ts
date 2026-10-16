@@ -4,6 +4,7 @@ import { type createDatabase, getSecret, getSettings } from '@nickhosting/databa
 import type { Context, Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Variables } from './app.js';
+import { profilePhotoUrl } from './profile-photo.js';
 
 type C = Context<{ Variables: Variables }>;
 const cookieName = 'nh.support';
@@ -47,18 +48,26 @@ export function registerWebSessionRoutes(
     const context = await principal(c);
     const users = await db
       .selectFrom('user')
+      .leftJoin('user_profile_photos', 'user_profile_photos.user_id', 'user.id')
       .select([
-        'id',
-        'name',
-        'username',
-        'email',
-        'emailVerified',
-        'locale',
-        'role',
-        'twoFactorEnabled',
+        'user.id',
+        'user.name',
+        'user.username',
+        'user.email',
+        'user.emailVerified',
+        'user.locale',
+        'user.role',
+        'user.twoFactorEnabled',
+        'user_profile_photos.revision',
       ])
-      .where('id', 'in', [context.actorUserId, context.subjectUserId])
-      .execute();
+      .where('user.id', 'in', [context.actorUserId, context.subjectUserId])
+      .execute()
+      .then((rows) =>
+        rows.map(({ revision, ...user }) => ({
+          ...user,
+          avatarUrl: profilePhotoUrl(user.id, revision),
+        })),
+      );
     const actor = users.find((user) => user.id === context.actorUserId);
     const subject = users.find((user) => user.id === context.subjectUserId);
     if (!actor || !subject) throw new DomainError('unauthenticated');

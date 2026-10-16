@@ -101,6 +101,9 @@ importers:
       nodemailer:
         specifier: 10.0.16
         version: 10.0.16
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
       sevenzip-wasm:
         specifier: 26.4.0
         version: 26.4.0
@@ -123,6 +126,9 @@ importers:
         specifier: 4.6.5
         version: 4.6.5
     devDependencies:
+      '@types/pngjs':
+        specifier: 6.0.5
+        version: 6.0.5
       '@types/tar-stream':
         specifier: 3.1.5
         version: 3.1.5
@@ -1561,6 +1567,9 @@ packages:
 
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
+
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
 
   '@types/react-dom@19.3.0':
     resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
@@ -4411,6 +4420,10 @@ snapshots:
       '@types/node': 24.19.1
       pg-protocol: 1.16.1
       pg-types: 2.2.0
+
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 24.19.1
 
   '@types/react-dom@19.3.0(@types/react@19.3.0)':
     dependencies:

@@ -3,24 +3,18 @@ import { Link, useNavigate } from 'react-router';
 import { api } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { identityChanged } from '../app/session.js';
+import { ProfileAvatar } from './profile-avatar.js';
 import { ErrorNotice } from './ui.js';
 import './account-menu.css';
 
-function ProfileAvatar() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-      <circle cx="12" cy="8" r="3.5" />
-      <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
-    </svg>
-  );
-}
-
 export function AccountMenu({
   name,
+  avatarUrl,
   support,
   onExitSupport,
 }: {
   name: string;
+  avatarUrl?: string | null;
   support: boolean;
   onExitSupport: () => Promise<void>;
 }) {
@@ -87,13 +81,13 @@ export function AccountMenu({
         aria-controls={id}
         onClick={() => setOpen(!open)}
       >
-        <ProfileAvatar />
+        <ProfileAvatar avatarUrl={avatarUrl} />
       </button>
       {open && (
         <div className="account-dropdown" id={id}>
           <div className="account-dropdown-profile">
             <span className="account-profile-avatar">
-              <ProfileAvatar />
+              <ProfileAvatar avatarUrl={avatarUrl} />
             </span>
             <div className="account-dropdown-name">{name}</div>
           </div>

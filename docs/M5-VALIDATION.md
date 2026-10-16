@@ -10414,3 +10414,70 @@ Only the existing dev source watcher is needed. No container restart, migration,
 production/provider mutation or game-server asset creation; the browser harness
 cleans its disposable schemas. No historical full-suite rerun. Issue18 remains
 unchanged. Rollback: revert this UI commit; no server data rollback is required.
+
+
+### Uploaded profile photo — 2026-10-16
+
+Profile now accepts PNG/JPEG/WebP up to 5 MiB with a circular crop preview,
+keyboard/pointer positioning and zoom. Only a 256 px PNG thumbnail is uploaded;
+original files stay in browser memory. The shared avatar updates in Profile,
+topbar and account menu, supports removal and uses a local silhouette fallback.
+Discord images do not overwrite the uploaded photo. Save failures retain the
+previous photo; pending saves freeze dismissal and crop controls. English/Italian
+copy, focus return and mobile layout are included.
+
+The authenticated API normalizes bounded noninterlaced RGB/RGBA PNG input, strips
+ancillary metadata and stores at most 300 KiB in the dedicated photo table with an
+atomic audit entry. Reads are private/no-store and limited to the actor/effective
+subject; writes require a regular self session and the existing Origin checks.
+No external image URL, raw original, photo bytes in session responses or browser
+storage is introduced. Contracts: [M5 API](M5-API-CONTRACTS.md).
+
+Focused final evidence:
+
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/profile-photo-image.test.ts
+  apps/web/src/features/profile-photo-crop.test.ts`: 12 passed (9 parser/encoder,
+  3 crop geometry).
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 bash -c
+  'cd .codex/local/profile-photo-worktree && scripts/dev.sh pnpm exec vitest run
+  --config vitest.integration.config.ts apps/api/src/profile-photo.integration.test.ts
+  apps/api/src/web-session.integration.test.ts'`: 16 passed. Actual authentication,
+  Origin, support-session rejection, foreign/old-revision read denial, replacement,
+  removal, byte limits, audit rollback and identity-provider image independence.
+- The same isolated wrapper with `--config vitest.browser.config.ts
+  apps/web/tests/profile-photo.browser.test.ts`: 6 passed across Chromium/Firefox.
+  Actual application/API/auth and disposable DB schemas; external providers are
+  fixtures. PNG/JPEG/WebP, keyboard crop, pending-save race, save/reload/remove,
+  malformed/oversize input,503 recovery and Italian mobile reflow are covered.
+  Axe found no violations in the sampled Profile and crop screens.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build` and
+  `scripts/dev.sh pnpm i18n:check`: passed (1863 EN/IT keys plus pseudolocale).
+  The existing large-bundle advisory remains. Scoped Biome, whitespace and indexed
+  governance passed. No full historical M1–M5 suite rerun was required.
+
+Initial browser run: 2 passed/4 failed. One malformed-file fixture exercised the
+format rejection instead of decoding; it was replaced by a correctly typed,
+truncated PNG. Firefox exposed an actual 400: its canvas adds a `deBG` ancillary
+chunk. The normalizer now discards all ancillary chunks without interpreting or
+decompressing them; structure, critical chunks, APNG, CRC and bounded inflate
+checks remain. The targeted pending-request test also needed to wait for the
+continued PUT response before removing its interception. All final browser tests
+passed; these earlier failures remain recorded rather than reclassified.
+
+Independent source/security, accessibility and rendered-screen review found no
+remaining must-fix findings. Reviewed fixture-only screenshots:
+[crop desktop EN](screenshots/m5/profile-photo-crop-desktop-en.png),
+[profile/menu desktop EN](screenshots/m5/profile-photo-desktop-en.png),
+[profile mobile IT](screenshots/m5/profile-photo-mobile-it.png).
+This focused review is not a complete WCAG audit.
+
+Prepared in an isolated worktree so live development remains on its previous
+source/image. **Activation is pending specific Owner approval.** Read-only dev
+inspection found migrations through 034 applied: the normal runner will apply
+existing 035 (generic content policy) and new 036 (photo table). Both are explicitly
+included in the [activation proposal](M5-ENVIRONMENTS.md#profile-photo-activation-proposal--2026-10-16).
+No live database/schema/profile, container, network, game file or external provider
+was mutated. Disposable test schemas are cleaned by the harness; no game assets
+were created. Issue18 and production-release boundaries remain unchanged.
+Rollback retains additive schema/photo data and restores the prior application
+image/source; no database reset or automatic restoration of a backup.

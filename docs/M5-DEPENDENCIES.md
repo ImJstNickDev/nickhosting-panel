@@ -73,3 +73,17 @@ default font are used. pnpm's blocked `lfa-ponyfill` postinstall remains blocked
 no Google font-list download or browser font discovery is enabled. No additional
 COOP/COEP deployment headers, backend transcoder, Blueprint change or native
 dependency is required.
+
+## Profile photo normalization
+
+The API pins `pngjs` 7.0.0 (MIT, unmodified, already present as a transitive test
+dependency) and development-only `@types/pngjs` 6.0.5. It decodes and re-encodes
+bounded 256×256 PNG thumbnails; no native image processor or new browser library
+is introduced. Runtime packaging retains the dependency's license in node_modules.
+The source file is resized/cropped using browser
+[Canvas drawImage](https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/drawImage)
+and [toBlob](https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toBlob).
+The server validates the restricted PNG structure before using the
+[upstream decoder](https://github.com/pngjs/pngjs/tree/v7.0.0), rejecting animation,
+interlacing, oversized dimensions and malformed streams rather than processing
+arbitrary uploaded originals. Stored thumbnails exclude metadata.

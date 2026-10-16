@@ -24,7 +24,10 @@ in JavaScript-readable storage. Locale preference is not an authentication token
 | Method/path | Result or behavior |
 | --- | --- |
 | `GET /v1/web/config` | Safe instance name/default locale, email/Discord configuration availability, supported passkey/TOTP flows and whether a support cookie is present. Presence is not proof of authorization. |
-| `GET /v1/web/session` | Current `context`, safe `actor` and `subject` profiles. Actor and effective subject are displayed separately in assisted mode. |
+| `GET /v1/web/session` | Current `context`, safe `actor` and `subject` profiles, including nullable same-origin `avatarUrl` for their uploaded photo. Actor and effective subject are displayed separately in assisted mode. No image bytes or OAuth image URLs are projected. |
+| `PUT /v1/web/profile-photo` | Regular session; `image/png` body, at most 300 KiB, exactly 256×256 pixels. Validates and re-encodes a static, non-interlaced PNG, atomically replaces the caller's thumbnail and audits the change; returns `{avatarUrl}`. |
+| `DELETE /v1/web/profile-photo` | Regular session; removes only the caller's photo, idempotently, with audit. Returns 204. |
+| `GET /v1/web/profile-photo/:userId?v=:revision` | Authenticated image read, restricted to current actor/effective subject and exact content revision. Returns `image/png`, `nosniff`, no public caching. Foreign/missing/old revisions return 404. |
 | `POST /v1/web/support` | Existing regular-Owner step-up/reason/grant requirements; sets `nh.support` as HttpOnly, SameSite Strict, path `/`, HTTPS Secure when configured. Returns grant metadata/expiry, never its token. |
 | `POST /v1/web/support/exit` | Revokes the exact grant when the parent session authorizes it and clears the browser cookie. Expired/invalid parent authority still permits local cookie removal; this does not claim durable revocation of an unauthenticated grant. Storage failures remain errors. |
 
@@ -33,6 +36,15 @@ is rejected. Regular-only identity/admin endpoints reject either assisted transp
 Native file/backup downloads carry the same HttpOnly cookie and authorization as
 API calls, without returning privileged upstream URLs. Original user sessions are
 unchanged by assisted access or Exit.
+
+Profile photos use the dedicated `user_profile_photos` table (migration036), with
+one bounded thumbnail per user and cascading deletion. They never populate Better
+Auth's provider-controlled `user.image` field or pass through the game-provider
+file APIs. Existing Origin/session checks apply, including assisted-write denial.
+No public avatar URL, remote URL import, extra volume or image service is required.
+Browser originals are decoded/cropped locally; the server accepts only the small
+PNG representation, discards metadata and stores its SHA-256 revision. Replacing
+or deleting a photo invalidates its old URL. Schema migration precedes activation.
 
 ## Scoped platform queries
 

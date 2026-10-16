@@ -1144,3 +1144,52 @@ Rollback of migration031 requires stopping the updated application processes and
 reviewed restore/reverse migration, together with the prior image/source. The private
 backup is a recovery artifact, not permission to overwrite subsequent review data.
 Never reset the database or rewrite signed evidence to reverse the display identity.
+
+
+## Profile photo activation proposal — 2026-10-16
+
+Prepared and tested; not activated. The API adds a direct `pngjs` dependency and
+migration 036 for uploaded thumbnails, so source hot reload alone is insufficient.
+An isolated feature worktree keeps the running dev checkout unchanged until the
+Owner approves activation. Vite needs no new dependency or image; source HMR
+supplies the UI after activation. API and worker share the development image.
+
+Read-only inspection found dev migrations only through 034. The ordinary migration
+runner must therefore apply both pending files in order:
+
+- 035 adds the integration identity to existing content-source/staging rows and
+ indexes, and migrates old Minecraft content-setting keys to generic content keys,
+ preserving any existing generic override. It belongs to the prior content-policy
+ implementation; this is not silently treated as a photo-only migration.
+- 036 adds `user_profile_photos` with a user FK, bounded thumbnail bytes, revision
+ and timestamp. It does not replace Better Auth identity/provider fields.
+
+Proposed activation, requiring specific Owner approval:
+
+1. Recheck reviewed HEAD, clean live checkout, exact dev container labels, pending
+   migration checksums, topology and free resources. Preserve the current API/worker
+   image as `nickhosting-dev-app:before-profile-photo`.
+2. Build the reviewed worktree's Docker `development` target as
+   `nickhosting-dev-app:local`; running services remain unchanged during the build.
+3. Stop only dev API/worker, then take a non-overwriting private custom-format
+   `pg_dump` of the existing dev database. Retain all other services and data.
+4. Run the explicit one-off `migrate` tool on existing dev networks, applying
+   only 035/036. Fast-forward the live source checkout to the reviewed commit.
+5. Recreate only API/worker with `up -d --no-deps --no-build --wait api worker`.
+   Preserve all current overlays and all three private environment files in order:
+   `.env.dev.local`, `.env.dev.viewer.local`, `.env.dev.sftp.local`.
+6. Verify API/worker health, logs, applied migrations, unchanged mounts/networks,
+   HTTPS and Vite HMR. The Owner uploads their own profile photo through Profile.
+
+The exact host command plan and baseline fingerprints are kept in ignored local
+state. No Vite/Gateway/SFTP/Pterodactyl/Wings restart, published port, DNS, network,
+production deployment or user/game-data reset is part of this proposal. A temporary
+migration container is the only additional container. API and worker can be briefly
+unavailable during their replacement; no server power commands are requested.
+
+If activation fails, stop the changed API/worker, retain logs and additive migration
+history, restore the prior reviewed source/image, and recreate only those services
+with the same private configuration. The pre-photo application is compatible with
+retaining these added tables/columns. Do not restore the database snapshot over
+subsequent data or delete uploaded photos as routine rollback; a data restore needs
+separate review. Approval is not inferred from earlier feature deployments.

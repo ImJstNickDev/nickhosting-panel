@@ -8,6 +8,7 @@ const user = z.object({
   name: z.string(),
   // Older running API instances may omit this presentation-only field during rollout.
   username: z.string().optional(),
+  avatarUrl: z.string().nullable().optional(),
   email: z.string(),
   emailVerified: z.boolean(),
   locale: z.enum(['en', 'it']),

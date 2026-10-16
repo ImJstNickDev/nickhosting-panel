@@ -41,6 +41,12 @@ export interface AuthAccount {
 }
 export interface AuthTables {
   user: AuthUser;
+  user_profile_photos: {
+    user_id: string;
+    content: Buffer;
+    revision: string;
+    updated_at: Generated<Date>;
+  };
   session: AuthSession;
   account: AuthAccount;
   verification: {

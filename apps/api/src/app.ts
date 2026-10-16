@@ -38,6 +38,7 @@ import { registerHealthRoutes } from './health.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
 import { registerPlatformRoutes } from './platform.js';
+import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
@@ -156,6 +157,9 @@ export function createApp(options: Options) {
     },
   });
   app.use('*', async (c, next) => {
+    // This route authenticates before reading and bounds actual bytes itself,
+    // including requests without Content-Length or with an incorrect value.
+    if (c.req.method === 'PUT' && c.req.path === '/v1/web/profile-photo') return next();
     if (
       c.req.method === 'POST' &&
       /^\/v1\/servers\/[^/]+\/files(?:\/(?:copy|archive|extract|viewer\/archive\/download))?$/.test(
@@ -504,6 +508,7 @@ export function createApp(options: Options) {
     };
   };
   registerWebSessionRoutes(app, { db, env, codec: options.codec, principal, body });
+  registerProfilePhotoRoutes(app, { db, principal });
   registerHealthRoutes(app, {
     db,
     env,

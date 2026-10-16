@@ -169,6 +169,7 @@ export function Shell() {
               <AccountMenu
                 key={`${location.pathname}:${current.subject.id}:${current.context.sessionType}`}
                 name={current.subject.name}
+                avatarUrl={current.subject.avatarUrl}
                 support={support}
                 onExitSupport={exit}
               />

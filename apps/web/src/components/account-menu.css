@@ -31,7 +31,7 @@
 .account-avatar {
   width: 40px;
   height: 40px;
-  padding: 7px;
+  padding: 0;
   border: 1px solid #bbc8d0;
   border-radius: 50%;
   background: #e9eff3;
@@ -41,10 +41,6 @@
 .account-avatar[aria-expanded="true"] {
   background: #dbe4eb;
   border-color: #36556a;
-}
-.account-avatar svg {
-  width: 24px;
-  height: 24px;
 }
 .account-dropdown {
   position: absolute;
@@ -78,10 +74,6 @@
   border-radius: 50%;
   background: #e9eff3;
   color: #36556a;
-}
-.account-profile-avatar svg {
-  width: 42px;
-  height: 42px;
 }
 .account-dropdown-name {
   max-width: 100%;

@@ -19,6 +19,7 @@ import {
   text,
 } from '../components/ui.js';
 import { authClient } from './auth.js';
+import { ProfilePhoto } from './profile-photo.js';
 
 async function refreshAccount() {
   await queryClient.invalidateQueries({ queryKey: ['session'] });
@@ -80,6 +81,9 @@ export function AccountProfile() {
   return (
     <div className="account-profile">
       <Section title={t('web.profile')}>
+        {profile && (
+          <ProfilePhoto key={profile.id} userId={profile.id} avatarUrl={profile.avatarUrl} />
+        )}
         <ActionForm
           onSubmit={async (data) => {
             const nextLocale = text(data, 'locale') as 'en' | 'it';

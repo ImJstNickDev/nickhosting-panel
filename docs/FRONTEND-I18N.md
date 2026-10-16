@@ -108,7 +108,13 @@ focus leaving the disclosure or navigation. Escape restores avatar focus;
 activating Settings while already there also preserves focus. Logout uses the
 existing identity/cache reset and exposes request errors with repeat submissions
 disabled while pending. Assisted sessions show Exit assistance instead of personal
-account actions. The avatar is local artwork and requires no stored profile photo.
+account actions. Profile settings allow a local PNG/JPEG/WebP photo (up to 5 MiB),
+with a circular crop preview, pointer/keyboard positioning and zoom. Saving updates
+the topbar and account disclosure; removal restores the silhouette. The browser
+prepares a 256 px square PNG, and the API validates and re-encodes the thumbnail
+before storing it. Originals and draft object URLs are discarded, not retained in
+browser storage. Failed changes preserve the saved photo and expose retryable
+errors. Discord image metadata is independent and does not replace this photo.
 
 Owner Users groups search, role filtering and Invitations in one toolbar. Search
 applies after a 200 ms typing pause; role changes apply immediately with the

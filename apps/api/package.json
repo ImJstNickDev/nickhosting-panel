@@ -19,6 +19,7 @@
     "hono": "4.13.13",
     "kysely": "0.29.6",
     "nodemailer": "10.0.16",
+    "pngjs": "7.0.0",
     "sevenzip-wasm": "26.4.0",
     "tar-stream": "3.2.2",
     "unbzip2-stream": "1.4.3",
@@ -28,8 +29,9 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@types/pngjs": "6.0.5",
     "@types/tar-stream": "3.1.5",
-    "@types/yauzl": "3.4.0",
-    "@types/unbzip2-stream": "1.4.3"
+    "@types/unbzip2-stream": "1.4.3",
+    "@types/yauzl": "3.4.0"
   }
 }
