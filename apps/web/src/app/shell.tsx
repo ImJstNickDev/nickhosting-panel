@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useEffectEvent, useState } from 'react';
-import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
+import { Link, Navigate, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
 import { Sidebar, type SidebarIconName, useSidebarCollapsed } from '../components/sidebar.js';
@@ -192,8 +192,10 @@ export function Shell() {
 
 export function AuthCallback() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const target = params.get('reauth') === 'security' ? '/settings/security' : '/';
   useEffect(() => {
-    void identityChanged().then(() => navigate('/', { replace: true }));
-  }, [navigate]);
+    void identityChanged().then(() => navigate(target, { replace: true }));
+  }, [navigate, target]);
   return <Loading />;
 }

@@ -1,5 +1,5 @@
 import type { AuthContext, SecretCodec } from '@nickhosting/core';
-import { DomainError } from '@nickhosting/core';
+import { authSessionId, DomainError } from '@nickhosting/core';
 import { type createDatabase, getSecret, getSettings } from '@nickhosting/database';
 import type { Context, Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
@@ -72,6 +72,40 @@ export function registerWebSessionRoutes(
     const subject = users.find((user) => user.id === context.subjectUserId);
     if (!actor || !subject) throw new DomainError('unauthenticated');
     return c.json({ context, actor, subject });
+  });
+  // Unlike Better Auth's token-bearing list, this projection needs only an
+  // authenticated session. A closed browser still owns a valid session.
+  app.get('/v1/web/account/sessions', async (c) => {
+    const context = await principal(c, true);
+    const sessions = await db
+      .selectFrom('session')
+      .select(['id', 'createdAt', 'expiresAt', 'userAgent', 'ipAddress'])
+      .where('userId', '=', context.actorUserId)
+      .where('expiresAt', '>', new Date())
+      .orderBy('createdAt', 'desc')
+      .execute();
+    return c.json(
+      sessions.map((session) => ({
+        ...session,
+        current: session.id === context[authSessionId],
+      })),
+    );
+  });
+  app.delete('/v1/web/account/sessions/:id', async (c) => {
+    const context = await principal(c, true);
+    const session = await db
+      .selectFrom('session')
+      .select('token')
+      .where('id', '=', c.req.param('id'))
+      .where('userId', '=', context.actorUserId)
+      .executeTakeFirst();
+    if (!session) throw new DomainError('not_found');
+    // Keep revocation, authority checks and audit hooks in the identity provider.
+    await c.get('identity').auth.api.revokeSession({
+      headers: c.get('authHeaders'),
+      body: { token: session.token },
+    });
+    return c.body(null, 204);
   });
   app.post('/v1/web/support', async (c) => {
     await principal(c, true);

@@ -1,4 +1,5 @@
 export const accountSecurityWebMessages: Record<string, readonly [string, string]> = {
+  'accountSecurity.signInAgain': ['Sign in again', 'Accedi di nuovo'],
   'accountSecurity.passwordSessions': [
     'Changing your password signs out your other sessions.',
     'Cambiare la password disconnette le altre sessioni.',

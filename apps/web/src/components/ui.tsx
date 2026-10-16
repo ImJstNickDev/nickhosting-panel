@@ -1,5 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Link } from 'react-router';
 import { ApiError, apiError } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import './confirmation-dialog.css';
@@ -64,14 +65,20 @@ export function ErrorNotice({ error, retry }: { error: unknown; retry?: () => vo
   return (
     <div className="notice error" role="alert">
       <p>{t(normalized.messageKey)}</p>
-      {normalized.requestId && (
+      {normalized.requestId && normalized.messageKey !== 'auth.step_up_required' && (
         <small>{t('web.errorReference', { id: normalized.requestId })}</small>
       )}
-      {retry && (
+      {normalized.messageKey === 'auth.step_up_required' ? (
+        <div className="actions">
+          <Link className="button secondary" to="/login?reauth=security">
+            {t('accountSecurity.signInAgain')}
+          </Link>
+        </div>
+      ) : retry ? (
         <button type="button" className="secondary" onClick={retry}>
           {t('web.retry')}
         </button>
-      )}
+      ) : null}
     </div>
   );
 }

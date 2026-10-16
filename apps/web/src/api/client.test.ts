@@ -105,6 +105,10 @@ it('rejects non-API destinations and maps authentication failures without provid
     apiError({ code: 'INVALID_EMAIL_OR_PASSWORD', message: 'private provider detail' }).messageKey,
   ).toBe('auth.invalid_credentials');
   expect(apiError({ error: { code: 'TOO_MANY_REQUESTS' } }).messageKey).toBe('errors.rate_limited');
+  expect(apiError({ code: 'SESSION_NOT_FRESH' }).messageKey).toBe('auth.step_up_required');
+  expect(apiError({ error: { messageKey: 'auth.step_up_required' } }).messageKey).toBe(
+    'auth.step_up_required',
+  );
 });
 
 it('observes debug response timing only after body consumption', async () => {

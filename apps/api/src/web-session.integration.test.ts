@@ -105,6 +105,63 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     expect(json.actor.id).toBe(userId);
     expect(JSON.stringify(json)).not.toContain(password);
   });
+  it('lists persisted sessions without freshness or tokens and revokes only owned identities', async () => {
+    const device = new AuthClient(identity);
+    const login = await device.request('/sign-in/email', {
+      email: 'member@example.test',
+      password,
+    });
+    expect(login.status).toBe(200);
+    const session = await identity.auth.api.getSession({ headers: device.headers() });
+    const ownerSession = await identity.auth.api.getSession({ headers: owner.headers() });
+    if (!session || !ownerSession) throw new Error('Missing fixture sessions');
+    await database.db
+      .updateTable('session')
+      .set({ createdAt: new Date(Date.now() - 600_000) })
+      .where('id', '=', session.session.id)
+      .execute();
+    const read = await request(device, '/v1/web/account/sessions');
+    expect(read.status).toBe(200);
+    const rows = await read.json();
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    expect(rows.find((row: { current: boolean }) => row.current)?.id).toBe(session.session.id);
+    expect(rows.every((row: object) => !('token' in row) && !('userId' in row))).toBe(true);
+    expect(rows.some((row: { id: string }) => row.id === ownerSession.session.id)).toBe(false);
+    expect((await app.request(`${origin}/v1/web/account/sessions`)).status).toBe(401);
+    const remove = (id: string, headers = device.headers()) =>
+      app.request(`${origin}/v1/web/account/sessions/${id}`, { method: 'DELETE', headers });
+    expect((await remove(ownerSession.session.id)).status).toBe(404);
+    expect((await remove('missing-session')).status).toBe(404);
+    expect(
+      (await remove(session.session.id, device.headers({ origin: 'https://other.example.test' })))
+        .status,
+    ).toBe(403);
+    // An expired browser is absent from the list even if its durable row remains.
+    const expired = new AuthClient(identity);
+    await expired.request('/sign-in/email', { email: 'member@example.test', password });
+    const expiredSession = await identity.auth.api.getSession({ headers: expired.headers() });
+    if (!expiredSession) throw new Error('Missing expired fixture');
+    await database.db
+      .updateTable('session')
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where('id', '=', expiredSession.session.id)
+      .execute();
+    const active = await (await request(device, '/v1/web/account/sessions')).json();
+    expect(active.some((row: { id: string }) => row.id === expiredSession.session.id)).toBe(false);
+    expect((await remove(session.session.id)).status).toBe(204);
+    expect((await request(device, '/v1/web/account/sessions')).status).toBe(401);
+    expect((await request(user, '/v1/web/account/sessions')).status).toBe(200);
+    expect(
+      (
+        await database.db
+          .selectFrom('audit_events')
+          .select('action')
+          .where('actor_user_id', '=', userId)
+          .where('action', '=', 'identity.session_revoked')
+          .execute()
+      ).length,
+    ).toBeGreaterThan(0);
+  });
   it('exposes only Owner configuration schemas and resets saved overrides under the existing guards', async () => {
     expect((await request(user, '/v1/owner/settings/schema')).status).toBe(403);
     const schema = await request(owner, '/v1/owner/settings/schema');
@@ -207,6 +264,17 @@ describe('WebPanel parent-bound HttpOnly assisted sessions', () => {
     expect(
       (await request(owner, '/api/auth/update-user', { name: 'Changed' }, assistedHeaders()))
         .status,
+    ).toBe(403);
+    expect(
+      (await request(owner, '/v1/web/account/sessions', undefined, assistedHeaders())).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.request(`${origin}/v1/web/account/sessions/untrusted-id`, {
+          method: 'DELETE',
+          headers: owner.headers(assistedHeaders()),
+        })
+      ).status,
     ).toBe(403);
     expect((await request(user, '/v1/web/session')).status).toBe(200);
     expect((await request(user, '/v1/web/session', undefined, assistedHeaders(user))).status).toBe(

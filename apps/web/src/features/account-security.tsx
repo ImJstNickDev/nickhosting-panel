@@ -23,15 +23,15 @@ import './account-security.css';
 type Passkey = { id: string; name?: string; createdAt: string };
 type BrowserSession = {
   id: string;
-  token: string;
+  current: boolean;
   createdAt: string;
   expiresAt: string;
-  userAgent?: string;
-  ipAddress?: string;
+  userAgent?: string | null;
+  ipAddress?: string | null;
 };
 
 /** Only recognized values from the actual session UA; never infer a device from screen size. */
-function browserLabel(agent: string | undefined) {
+function browserLabel(agent: string | null | undefined) {
   if (!agent) return undefined;
   const browser = /Edg\//.test(agent)
     ? 'Edge'
@@ -596,7 +596,7 @@ function SessionSettings() {
   const t = useT();
   const sessions = useQuery({
     queryKey: ['account', 'sessions'],
-    queryFn: () => api<BrowserSession[]>('/api/auth/list-sessions'),
+    queryFn: () => api<BrowserSession[]>('/v1/web/account/sessions'),
   });
   const [revoking, setRevoking] = useState<BrowserSession | 'others'>();
   const heading = useRef<HTMLDivElement>(null);
@@ -632,6 +632,7 @@ function SessionSettings() {
               </span>
               <div className="account-security-item-label">
                 <strong>{browserLabel(session.userAgent) ?? t('web.browserSession')}</strong>
+                {session.current && <small>{t('web.thisSession')}</small>}
                 <small>
                   {t('accountSecurity.sessionDates')} <Time value={session.createdAt} />
                 </small>
@@ -670,12 +671,11 @@ function SessionSettings() {
           onClose={() => setRevoking(undefined)}
           onConfirm={async () => {
             if (!revoking) return;
-            await api(
-              revoking === 'others'
-                ? '/api/auth/revoke-other-sessions'
-                : '/api/auth/revoke-session',
-              { body: revoking === 'others' ? {} : { token: revoking.token } },
-            );
+            if (revoking === 'others') await api('/api/auth/revoke-other-sessions', { body: {} });
+            else
+              await api(`/v1/web/account/sessions/${encodeURIComponent(revoking.id)}`, {
+                method: 'DELETE',
+              });
             await refreshAccount();
             setRevoking(undefined);
             requestAnimationFrame(() =>

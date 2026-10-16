@@ -143,7 +143,11 @@ describe('M5 real browser identity and Owner setup', () => {
   it('enrolls TOTP and a real WebAuthn virtual authenticator, then signs in using recovery', async () => {
     const securityRequests: string[] = [];
     user.on('request', (request) => {
-      if (/\/api\/auth\/(list-sessions|passkey\/list-user-passkeys)$/.test(request.url()))
+      if (
+        /\/(?:api\/auth\/passkey\/list-user-passkeys|v1\/web\/account\/sessions)$/.test(
+          request.url(),
+        )
+      )
         securityRequests.push(request.url());
     });
     await user.goto(`${fixture.origin}/settings`);

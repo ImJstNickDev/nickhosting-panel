@@ -30,6 +30,7 @@ export const authErrorKeys: Readonly<Record<string, MessageKey>> = {
   FAILED_TO_GET_USER_INFO: 'auth.oauth_unavailable',
   ACCOUNT_NOT_LINKED: 'auth.link_required',
   FRESH_SESSION_REQUIRED: 'auth.step_up_required',
+  SESSION_NOT_FRESH: 'auth.step_up_required',
   CHALLENGE_NOT_FOUND: 'auth.passkey_unavailable',
   AUTHENTICATION_FAILED: 'auth.passkey_unavailable',
   FAILED_TO_VERIFY_AUTHENTICATION: 'auth.passkey_unavailable',

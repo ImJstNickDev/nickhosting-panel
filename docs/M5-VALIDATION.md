@@ -10648,3 +10648,52 @@ provider, infrastructure or production mutation; no game assets or new persisten
 resources. Test schemas are cleaned by the harness. No historical full-suite
 rerun; issue18 and production-release gates remain unchanged. Rollback is the
 UI commit revert, with no data restoration required.
+
+## Persistent session management and passkey reauthentication — 2026-10-16
+
+Live development diagnosis reproduced HTTP403 from Better Auth's session list and
+passkey registration-options endpoint with an otherwise valid session older than
+five minutes. Passkey listing returned200. Both features were configured; the
+unmapped `SESSION_NOT_FRESH` error incorrectly became the generic internal-error
+message. Prior browser tests authenticated immediately before visiting Security,
+so they did not exercise this age boundary.
+
+Session discovery now uses `GET /v1/web/account/sessions`: all unexpired persisted
+sessions belonging to the caller, including closed browsers, with an exact current
+session marker and no bearer tokens. Revocation resolves the caller-owned ID and
+uses the existing Better Auth revocation/audit implementation. Neither operation
+requires a fresh login. Anonymous, foreign, assisted-session and cross-origin
+requests retain their existing boundaries. Passkey enrollment still requires a
+recent authentication; its localized notice links to the existing login flow and
+returns to Security, without automatically replaying enrollment or weakening 2FA.
+Only the literal `reauth=security` destination is recognized.
+
+Focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run packages/i18n/src/i18n.test.ts apps/web/src/api/client.test.ts`: **17 passed**.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 scripts/dev.sh pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/web-session.integration.test.ts`: **7 passed**. Includes older/expired sessions, safe projection, owned/current revocation, audit hooks, anonymous/foreign/support denial and DELETE Origin checks.
+- `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check`: **passed**, 1893 EN/IT and pseudolocale keys. Focused product lint/format and whitespace checks passed; pre-existing older-test warnings remain.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/account-freshness.browser.test.ts`: final **8/8 passed** in39.19s across Chromium/Firefox. Initial run **7/8 passed**: its second enrollment reused an already-registered virtual authenticator, which correctly rejected duplicate registration. The fixture now proves enrollment once and checks fresh registration-options for subsequent recovery. An initial invocation without `scripts/dev.sh` stopped at the Node20 engine guard before running tests; the pinned Node24 wrapper was then used.
+
+Browser coverage proves closed-browser session persistence, other/current-session
+revocation, token-free responses and foreign denial; EN password and IT
+password+TOTP reauthentication, return to Security and fresh passkey enrollment.
+Sampled axe and desktop/mobile reflow checks pass. Reviewed screenshots:
+[Security desktop EN](screenshots/m5/settings-security-reauth-desktop-en.png),
+[Security mobile IT](screenshots/m5/settings-security-reauth-mobile-it.png),
+[sign-in handoff](screenshots/m5/settings-security-reauth-login-en.png).
+
+Live read-only smoke: the new endpoint returned200 with three existing Owner
+sessions, exactly one current marker and no exposed token; passkey listing also
+returned200. No real account was enrolled, revoked or edited. Source changes loaded
+through the existing API watcher/Vite; no manual container restart, migration,
+provider call, game mutation or new persistent infrastructure was needed.
+Independent technical review found no must-fix. Actual OAuth and passkey sign-in
+roundtrips were not rerun; password/TOTP recovery uses real handlers, while passkey
+enrollment uses Chromium's virtual authenticator. Rollback is a code revert; no
+schema/data restoration is required. PR21 stays open and unmerged; issue18 and
+production-release boundaries remain unchanged.
+
+Final independent source/visual review: no remaining must-fix. Indexed governance
+passed: 1022 text files, 397 reviewed PNG assets, 849 relative links, four TOML
+files and 44 ignore cases. No historical full-suite rerun.

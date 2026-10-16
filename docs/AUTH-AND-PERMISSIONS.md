@@ -6,6 +6,7 @@
 - Discord OAuth login; no forced linkage to a pre-existing account by matching email.
 - For either registration origin, later **explicitly link** the other method to the same NickHosting identity. Accounts created through Discord can add verified email + password.
 - Optional passkeys and optional TOTP with recovery codes; do not require either for ordinary users.
+- Personal Security lists every unexpired, unrevoked session, including sessions whose browser is closed. Listing and revocation require a valid regular session, not a recent login. The browser receives session IDs and metadata, never bearer tokens; revocation remains authoritative in Better Auth. New passkey enrollment retains the five-minute fresh-login requirement. A freshness rejection offers the existing sign-in flow and returns to Security after authentication, including configured second-factor verification.
 - On linking conflicts, make user authenticate to the existing target account or contact Owner; never silently merge accounts.
 - Preserve identity and resources if the user changes primary email or Discord display name.
 
