@@ -17,7 +17,7 @@ for (const browser of ['chromium', 'firefox'] as const) {
       page = identities.user;
       page.on('pageerror', (error) => errors.push(error.message));
       await page.goto(`${fixture.origin}/settings`);
-      await browserExpect(page.getByLabel('Display name', { exact: true })).toHaveValue('Alex');
+      await browserExpect(page.getByRole('button', { name: /^Edit display name:/ })).toBeVisible();
     });
     afterAll(async () => fixture?.close());
 
@@ -46,6 +46,25 @@ for (const browser of ['chromium', 'firefox'] as const) {
     }
     const picker = () => page.locator('input[type="file"]').first();
     const crop = () => page.getByRole('dialog', { name: 'Adjust photo' });
+    async function dropPhotos(photos: Array<Awaited<ReturnType<typeof source>>>) {
+      const dataTransfer = await page.evaluateHandle(
+        (images) => {
+          const transfer = new DataTransfer();
+          for (const image of images) {
+            transfer.items.add(
+              new File([Uint8Array.from(image.bytes)], image.name, { type: image.mimeType }),
+            );
+          }
+          return transfer;
+        },
+        photos.map(({ name, mimeType, buffer }) => ({ name, mimeType, bytes: [...buffer] })),
+      );
+      try {
+        await page.locator('.profile-photo-control').dispatchEvent('drop', { dataTransfer });
+      } finally {
+        await dataTransfer.dispose();
+      }
+    }
     async function expectSaved() {
       try {
         await browserExpect(crop()).not.toBeVisible();
@@ -76,7 +95,10 @@ for (const browser of ['chromium', 'firefox'] as const) {
     }
 
     it('crops a local photo with keyboard controls and persists the shared avatar on reload', async () => {
-      await picker().setInputFiles(await source());
+      const photo = await source();
+      const pickerOpened = page.waitForEvent('filechooser');
+      await page.getByRole('button', { name: 'Change photo', exact: true }).click();
+      await (await pickerOpened).setFiles(photo);
       await browserExpect(crop()).toBeVisible();
       const zoom = crop().getByRole('slider', { name: 'Zoom', exact: true });
       await zoom.focus();
@@ -123,13 +145,18 @@ for (const browser of ['chromium', 'firefox'] as const) {
       if (browser === 'firefox') await fixture.screenshot(page, 'profile-photo-desktop-en');
       await page.keyboard.press('Escape');
       await accessibility();
-      const photo = await page.request.get(`${fixture.origin}${firstUrl}`);
-      expect(photo.status()).toBe(200);
-      expect(photo.headers()['content-type']).toBe('image/png');
-      expect(photo.headers()['cache-control']).toBe('private, no-store');
+      const responsePhoto = await page.request.get(`${fixture.origin}${firstUrl}`);
+      expect(responsePhoto.status()).toBe(200);
+      expect(responsePhoto.headers()['content-type']).toBe('image/png');
+      expect(responsePhoto.headers()['cache-control']).toBe('private, no-store');
     });
 
     it('rejects invalid input, cancels drafts and preserves the saved photo on upload failure', async () => {
+      const image = await source();
+      await dropPhotos([image, { ...image, name: 'second.png' }]);
+      await browserExpect(page.getByText('Choose one photo at a time.')).toBeVisible();
+      await browserExpect(crop()).not.toBeVisible();
+      await browserExpect(page.locator('.account-avatar img')).toHaveAttribute('src', firstUrl);
       await picker().setInputFiles({
         name: 'bad.svg',
         mimeType: 'image/svg+xml',
@@ -174,7 +201,7 @@ for (const browser of ['chromium', 'firefox'] as const) {
     });
 
     it('accepts WebP, shows the Italian mobile interface and removes the stored photo', async () => {
-      await picker().setInputFiles(await source('image/webp'));
+      await dropPhotos([await source('image/webp')]);
       await crop().getByRole('button', { name: 'Save changes', exact: true }).click();
       const photoUrl = await expectSaved();
       await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });

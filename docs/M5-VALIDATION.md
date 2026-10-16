@@ -10569,3 +10569,82 @@ live account/provider mutation, production change or game test asset. Browser
 fixtures clean their disposable schemas; no persistent review data is reset.
 No historical full-suite rerun. Issue18 remains unchanged. Rollback: revert the
 UI commit; no database or infrastructure rollback is required.
+
+### Interactive personal Settings — 2026-10-16
+
+Following Owner feedback, the refinement above is superseded by a change to
+interaction as well as layout. The heading/tabs/content are centered at a bounded
+width. The identity header replaces the always-open name form: click the name,
+Enter or blur to save, Escape to discard. Language segments apply immediately,
+save only the locale and roll back the preview on failure. Name and language
+updates send independent fields; a concurrent blur/save cannot overwrite the
+other preference. The shell adopts changed session preferences/identities without
+reverting a local language preview on every render.
+
+The avatar opens the picker and accepts one dropped photo through the existing
+validation/crop/upload flow. Multiple-file drops are rejected, and pending uploads
+cannot be replaced. Email remains verified through the existing flow. Security now
+has contextual password/TOTP controls, passkey naming/removal, recovery-code copy
+and readable session rows with confirmed revocation. Existing password, session
+revocation and TOTP rules remain authoritative; setup secrets/recovery codes stay
+in the layout's memory across tabs. Shared account hooks and icons are reused;
+there are no new endpoints, dependencies or migrations.
+
+Focused evidence:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/account-profile.browser.test.ts
+  apps/web/tests/profile-photo.browser.test.ts apps/web/tests/account.browser.test.ts`:
+  initial **13/19 passed**. Six failures exposed the changing accessible name of
+  the inline name control and the clipped native-radio hit area. Heading/control
+  names now preserve the visible user name, tests target the edit action, and
+  transparent native radios cover their visible segment. Historical failures are
+  retained rather than counted as initial successes.
+- The affected-case rerun of `account-profile.browser.test.ts` and
+  `account.browser.test.ts`, filtering to inline-name/language plus their
+  setup/invitation/security/profile journey prerequisites, passed **8/8** with
+  5 unrelated cases filtered out. All 19 distinct cases have passing evidence
+  across the two runs; the six photo cases and two email cases were not repeated.
+  Exact targeted command:
+
+  ```sh
+  scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 scripts/dev.sh pnpm exec vitest run \
+    --config vitest.browser.config.ts \
+    apps/web/tests/account-profile.browser.test.ts apps/web/tests/account.browser.test.ts \
+    -t 'edits the name inline|saves language immediately|completes protected first-run|creates an invitation|enrolls TOTP|updates profile/locale'
+  ```
+
+- Actual handlers and disposable DB schemas prove name Enter/blur/Escape and
+  failed/pending behavior; immediate language/503 rollback; concurrent name and
+  locale partial updates; reload persistence; keyboard radio selection; picker,
+  WebP drag/drop and multiple-file rejection; email verification; real TOTP,
+  virtual WebAuthn passkeys and recovery-code sign-in. A gated passkey rename
+  proves Add/Edit/Delete/Cancel cannot replace the editor while its request is
+  pending. Browser/provider/mail fixtures remain isolated, with no live-account
+  mutation. Chromium/Firefox cover Profile/photo; the account/security journey
+  uses Chromium and a virtual authenticator.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`,
+  `scripts/dev.sh pnpm build`, `scripts/dev.sh pnpm i18n:check`: passed
+  (1892 English/Italian keys plus pseudolocale). The existing large-chunk advisory
+  remains. Scoped Biome/format, whitespace and indexed governance passed.
+
+  Scoped lint retains the existing non-null-assertion warnings in the older
+  account journey and catalog compiler, plus the compiler's existing rethrow-only
+  catch advisory; no new lint error was introduced.
+
+Independent source and visual/accessibility review found and resolved a pending
+passkey-editor switch race and a surviving global width limit. Final review has no
+remaining must-fix. Axe and mobile overflow checks passed on sampled Profile and
+Security states; this is not a complete WCAG audit. Reviewed fixture screenshots:
+[Profile desktop EN](screenshots/m5/settings-interactive-profile-desktop-en.png),
+[Profile mobile IT](screenshots/m5/settings-interactive-profile-mobile-it.png),
+[Security desktop EN](screenshots/m5/settings-interactive-security-desktop-en.png),
+[Security mobile IT](screenshots/m5/settings-interactive-security-mobile-it.png),
+[password change](screenshots/m5/settings-interactive-password-edit-desktop-en.png),
+[passkey confirmation](screenshots/m5/settings-interactive-passkey-remove-desktop-en.png).
+
+Dev updates through existing HMR. No container restart, live database/account,
+provider, infrastructure or production mutation; no game assets or new persistent
+resources. Test schemas are cleaned by the harness. No historical full-suite
+rerun; issue18 and production-release gates remain unchanged. Rollback is the
+UI commit revert, with no data restoration required.

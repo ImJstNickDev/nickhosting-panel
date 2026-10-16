@@ -1,4 +1,4 @@
-import { type PointerEvent, useEffect, useId, useRef, useState } from 'react';
+import { type PointerEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ApiError, api, apiError, queryClient } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
@@ -75,11 +75,13 @@ export function ProfilePhoto({
   avatarUrl,
   displayName,
   username,
+  nameControl,
 }: {
   userId: string;
   avatarUrl?: string | null;
   displayName?: string;
   username?: string;
+  nameControl?: ReactNode;
 }) {
   const t = useT();
   const { locale } = useLocale();
@@ -95,6 +97,8 @@ export function ProfilePhoto({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const [status, setStatus] = useState<string>();
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -122,6 +126,7 @@ export function ProfilePhoto({
   }
 
   async function choose(file: File) {
+    if (busy.current) return;
     const selected = ++generation.current;
     setError(undefined);
     setStatus(undefined);
@@ -220,13 +225,60 @@ export function ProfilePhoto({
   }
 
   return (
-    <div className="profile-photo-control">
+    <fieldset
+      className={`profile-photo-control${dragging ? ' is-dragging' : ''}`}
+      aria-label={t('web.profilePhoto')}
+      onDragEnter={(event) => {
+        if (!event.dataTransfer.types.includes('Files') || busy.current || draftRef.current) return;
+        event.preventDefault();
+        dragDepth.current++;
+        setDragging(true);
+      }}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes('Files')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = busy.current || draftRef.current ? 'none' : 'copy';
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (!dragDepth.current) setDragging(false);
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.types.includes('Files')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setDragging(false);
+        dragDepth.current = 0;
+        if (busy.current || draftRef.current) return;
+        if (event.dataTransfer.files.length !== 1) {
+          setError(new ApiError('photo_single', 'web.profilePhotoSingle'));
+          return;
+        }
+        const file = event.dataTransfer.files[0];
+        if (file) void choose(file);
+      }}
+    >
       <div className="profile-photo-row" aria-busy={pending}>
-        <span className="profile-photo-avatar">
-          <ProfileAvatar avatarUrl={avatarUrl} />
-        </span>
+        <Tooltip content={t('web.changePhoto')}>
+          <button
+            ref={trigger}
+            type="button"
+            className="profile-photo-avatar"
+            disabled={pending}
+            aria-label={t('web.changePhoto')}
+            aria-describedby={`${id}-formats`}
+            onClick={() => input.current?.click()}
+          >
+            <ProfileAvatar avatarUrl={avatarUrl} />
+            <span className="profile-photo-camera">
+              <AccountIcon name="camera" />
+            </span>
+          </button>
+        </Tooltip>
         <div className="profile-photo-details">
-          <h3 className="profile-photo-name">{displayName ?? t('web.profilePhoto')}</h3>
+          {nameControl ?? (
+            <h3 className="profile-photo-name">{displayName ?? t('web.profilePhoto')}</h3>
+          )}
           {username && (
             <p className="profile-photo-username">
               <span className="visually-hidden">{t('web.username')}: </span>@{username}
@@ -237,19 +289,6 @@ export function ProfilePhoto({
           </small>
         </div>
         <div className="profile-photo-actions">
-          <Tooltip content={t('web.profilePhotoFormats')}>
-            <button
-              ref={trigger}
-              type="button"
-              className="account-quiet-action"
-              disabled={pending}
-              aria-describedby={`${id}-formats`}
-              onClick={() => input.current?.click()}
-            >
-              <AccountIcon name="camera" />
-              {t('web.changePhoto')}
-            </button>
-          </Tooltip>
           {avatarUrl && (
             <Tooltip content={t('web.removePhoto')}>
               <button
@@ -278,6 +317,12 @@ export function ProfilePhoto({
           }}
         />
       </div>
+      {dragging && (
+        <div className="profile-photo-drop-hint" aria-hidden="true">
+          <AccountIcon name="camera" />
+          <span>{t('web.profileDropPhoto')}</span>
+        </div>
+      )}
       {!draft && Boolean(error) && <ErrorNotice error={error} />}
       <div className="profile-photo-feedback">
         {!draft && pending && (
@@ -305,7 +350,7 @@ export function ProfilePhoto({
           />,
           document.body,
         )}
-    </div>
+    </fieldset>
   );
 }
 

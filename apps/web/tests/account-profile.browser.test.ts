@@ -2,7 +2,7 @@ import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { browserHarness } from './harness.js';
-import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
+import { prepareJourneyIdentities } from './journey-fixture.js';
 
 for (const browser of ['chromium', 'firefox'] as const) {
   describe(`Profile settings through actual handlers (${browser})`, () => {
@@ -27,11 +27,10 @@ for (const browser of ['chromium', 'firefox'] as const) {
           reactErrors.push(message.text());
       });
       await page.goto(`${fixture.origin}/settings`);
-      await browserExpect(page.getByLabel('Display name', { exact: true })).toHaveValue('Alex');
+      await browserExpect(page.getByRole('button', { name: /^Edit display name:/ })).toBeVisible();
     });
     afterAll(async () => fixture?.close());
 
-    const save = () => page.locator('.account-details-form button[type="submit"]');
     const profile = () => page.locator('.account-profile');
     async function storedProfile() {
       return fixture.database.db
@@ -54,26 +53,29 @@ for (const browser of ['chromium', 'firefox'] as const) {
       expect(reactErrors).toEqual([]);
     }
 
-    it('keeps unchanged profiles quiet and preserves the draft through failed and pending saves', async () => {
-      await browserExpect(save()).toBeDisabled();
+    it('edits the name inline, cancels with Escape and preserves failed or pending drafts', async () => {
       const initial = await storedProfile();
       expect(initial.username).toBeTruthy();
-      await browserExpect(profile().getByLabel('Username', { exact: true })).toHaveCount(0);
+      await browserExpect(
+        profile().getByRole('textbox', { name: 'Username', exact: true }),
+      ).toHaveCount(0);
       await browserExpect(profile()).toContainText(initial.username ?? '');
-      const name = page.getByLabel('Display name', { exact: true });
-      const restingBorder = await name.evaluate(
-        (element) => getComputedStyle(element).borderTopColor,
-      );
-      await name.focus();
-      await browserExpect(name).not.toHaveCSS('border-top-color', restingBorder);
+      await browserExpect(
+        profile().getByRole('button', { name: 'Save changes', exact: true }),
+      ).toHaveCount(0);
+      const edit = page.getByRole('button', { name: /^Edit display name:/ });
+      const name = page.getByRole('textbox', { name: 'Display name', exact: true });
+      await browserExpect(name).toHaveCount(0);
+      await edit.click();
+      await browserExpect(name).toBeFocused();
       await browserExpect(name).toHaveCSS('outline-style', 'none');
       await browserExpect(name).toHaveCSS('box-shadow', 'none');
-      await page.keyboard.press('Tab');
-      await browserExpect(page.getByLabel('Language', { exact: true })).toBeFocused();
-      await page.keyboard.press('Shift+Tab');
-      await browserExpect(name).toBeFocused();
+      await name.fill('Discarded name');
+      await page.keyboard.press('Escape');
+      await browserExpect(name).toHaveCount(0);
+      expect((await storedProfile()).name).toBe(initial.name);
+      await edit.click();
       await name.fill('Alex Rivera');
-      await browserExpect(save()).toBeEnabled();
       await page.route('**/api/auth/update-user', (route) =>
         route.fulfill({
           status: 503,
@@ -81,57 +83,49 @@ for (const browser of ['chromium', 'firefox'] as const) {
           body: JSON.stringify({ error: { code: 'internal_error' } }),
         }),
       );
-      await save().click();
+      await name.press('Enter');
       await browserExpect(profile().getByRole('alert')).toBeVisible();
       await browserExpect(name).toHaveValue('Alex Rivera');
-      expect((await storedProfile()).name).toBe('Alex');
+      expect((await storedProfile()).name).toBe(initial.name);
       await page.unroute('**/api/auth/update-user');
 
       let release = () => {};
       let pending = false;
+      const payloads: unknown[] = [];
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
       await page.route('**/api/auth/update-user', async (route) => {
+        payloads.push(route.request().postDataJSON());
         pending = true;
         await gate;
         await route.continue();
       });
       try {
-        await save().click();
+        await name.press('Enter');
         await browserExpect.poll(() => pending).toBe(true);
         await browserExpect(name).toBeDisabled();
-        await browserExpect(page.getByLabel('Language', { exact: true })).toBeDisabled();
-        await browserExpect(save()).toBeDisabled();
-        expect((await storedProfile()).name).toBe('Alex');
+        await browserExpect(
+          page.getByRole('radio', { name: 'English', exact: true }),
+        ).toBeEnabled();
+        expect((await storedProfile()).name).toBe(initial.name);
       } finally {
         release();
       }
       await browserExpect(
         page.getByRole('button', { name: 'Profile: Alex Rivera', exact: true }),
       ).toBeVisible();
+      await browserExpect(name).toHaveCount(0);
       await page.unroute('**/api/auth/update-user');
-      await browserExpect(save()).toBeDisabled();
-      await browserExpect(name).toHaveValue('Alex Rivera');
+      expect(payloads).toEqual([{ name: 'Alex Rivera' }]);
       await page.reload();
-      await browserExpect(name).toHaveValue('Alex Rivera');
-      await browserExpect(save()).toBeDisabled();
+      await browserExpect(
+        profile().getByRole('heading', { name: 'Alex Rivera', exact: true }),
+      ).toBeVisible();
       expect((await storedProfile()).username).toBe(initial.username);
       await accessibility();
-      if (browser === 'firefox') {
+      if (browser === 'firefox')
         await fixture.screenshot(page, 'settings-profile-polish-desktop-en');
-        await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
-        await page.setViewportSize({ width: 390, height: 844 });
-        await page.reload();
-        await browserExpect(page.getByLabel('Lingua', { exact: true })).toHaveValue('it');
-        await accessibility();
-        await fixture.screenshot(page, 'settings-profile-polish-mobile-it');
-        await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
-        await page.setViewportSize({ width: 1440, height: 1000 });
-        await page.reload();
-        await browserExpect(name).toHaveValue('Alex Rivera');
-      }
-      expect(reactErrors).toEqual([]);
     });
 
     it('opens email changes inline and keeps the current address until verification', async () => {
@@ -152,6 +146,8 @@ for (const browser of ['chromium', 'firefox'] as const) {
       await change().click();
       const nextEmail = 'alex-updated@journey.example.test';
       await email.fill(nextEmail);
+      if (browser === 'firefox')
+        await fixture.screenshot(page, 'settings-profile-email-edit-desktop-en');
       let release = () => {};
       let pending = false;
       const gate = new Promise<void>((resolve) => {
@@ -193,29 +189,77 @@ for (const browser of ['chromium', 'firefox'] as const) {
       await browserExpect(email).toHaveCount(0);
     });
 
-    it('keeps the only login method, localizes saved preferences and fits desktop and mobile', async () => {
+    it('saves language immediately, rolls back failures and preserves a concurrent name change', async () => {
+      const initial = await storedProfile();
+      const english = page.getByRole('radio', { name: 'English', exact: true });
+      const italian = page.getByRole('radio', { name: 'Italiano', exact: true });
       const methods = profile().locator('.account-method');
       await browserExpect(methods.getByText('Email', { exact: true })).toBeVisible();
       await browserExpect(profile().getByRole('button', { name: /^Unlink/ })).toHaveCount(0);
       await browserExpect(
         profile().getByRole('button', { name: 'Link Discord', exact: true }),
       ).toHaveCount(0);
-      await accessibility();
-      if (browser === 'firefox')
-        await fixture.screenshot(page, 'settings-profile-polish-desktop-en');
-      await page.getByLabel('Language', { exact: true }).selectOption('it');
-      await browserExpect(save()).toBeEnabled();
-      await save().click();
+      let release = () => {};
+      let pending = false;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route('**/api/auth/update-user', async (route) => {
+        pending = true;
+        await gate;
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: { code: 'internal_error' } }),
+        });
+      });
+      try {
+        await english.focus();
+        await page.keyboard.press('ArrowRight');
+        await browserExpect.poll(() => pending).toBe(true);
+        await browserExpect(italian).toBeChecked();
+        await browserExpect(italian).toBeDisabled();
+        await browserExpect(english).toBeDisabled();
+        await browserExpect(
+          page.getByRole('heading', { name: 'Impostazioni', exact: true }),
+        ).toBeVisible();
+        expect((await storedProfile()).locale).toBe(initial.locale);
+      } finally {
+        release();
+      }
+      await browserExpect(profile().getByRole('alert')).toBeVisible();
+      await browserExpect(english).toBeChecked();
       await browserExpect(
-        page.getByRole('heading', { name: 'Impostazioni', exact: true }),
+        page.getByRole('heading', { name: 'Settings', exact: true }),
       ).toBeVisible();
+      await page.unroute('**/api/auth/update-user');
+      const payloads: unknown[] = [];
+      await page.route('**/api/auth/update-user', async (route) => {
+        payloads.push(route.request().postDataJSON());
+        await route.continue();
+      });
+      await page.getByRole('button', { name: /^Edit display name:/ }).click();
+      await page.getByRole('textbox', { name: 'Display name', exact: true }).fill('Alex Updated');
+      // Clicking the language also blurs the name: both independent updates must survive.
+      await italian.check();
+      await browserExpect
+        .poll(async () => {
+          const stored = await storedProfile();
+          return { name: stored.name, locale: stored.locale };
+        })
+        .toEqual({ name: 'Alex Updated', locale: 'it' });
       await browserExpect(
-        page.getByRole('button', { name: 'Salva modifiche', exact: true }),
-      ).toBeDisabled();
-      expect((await storedProfile()).locale).toBe('it');
+        page.getByRole('button', { name: 'Profilo: Alex Updated', exact: true }),
+      ).toBeVisible();
+      await browserExpect(italian).toBeEnabled();
+      await page.unroute('**/api/auth/update-user');
+      expect(payloads).toHaveLength(2);
+      expect(payloads).toEqual(
+        expect.arrayContaining([{ name: 'Alex Updated' }, { locale: 'it' }]),
+      );
       await page.setViewportSize({ width: 390, height: 844 });
       await page.reload();
-      await browserExpect(page.getByLabel('Lingua', { exact: true })).toHaveValue('it');
+      await browserExpect(italian).toBeChecked();
       await browserExpect(
         page.getByRole('button', { name: 'Cambia foto', exact: true }),
       ).toBeVisible();

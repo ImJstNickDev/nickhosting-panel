@@ -152,7 +152,7 @@ describe('M5 real browser identity and Owner setup', () => {
       'aria-current',
       'page',
     );
-    await browserExpect(user.getByLabel('Display name', { exact: true })).toHaveValue('Alex');
+    await browserExpect(user.getByRole('button', { name: /^Edit display name:/ })).toBeVisible();
     await browserExpect(user.getByRole('heading', { name: 'Passkeys', exact: true })).toHaveCount(
       0,
     );
@@ -182,9 +182,25 @@ describe('M5 real browser identity and Owner setup', () => {
     await browserExpect(
       user.getByRole('heading', { name: 'Linked accounts', exact: true }),
     ).toHaveCount(0);
+    const passwordRequests: string[] = [];
+    user.on('request', (request) => {
+      if (request.url().endsWith('/api/auth/change-password')) passwordRequests.push(request.url());
+    });
+    const password = user.locator('section').filter({
+      has: user.getByRole('heading', { name: 'Password', exact: true }),
+    });
+    await password.getByRole('button', { name: 'Change password', exact: true }).click();
+    await browserExpect(password.getByLabel('Current password', { exact: true })).toBeFocused();
+    await fixture.screenshot(user, 'settings-security-password-edit-desktop-en');
+    await password.getByLabel('Current password', { exact: true }).fill(browserPassword);
+    await password.getByLabel('New password', { exact: true }).fill(`${browserPassword}-cancelled`);
+    await password.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(password.getByLabel('Current password', { exact: true })).toHaveCount(0);
+    expect(passwordRequests).toEqual([]);
     const twoFactor = user.locator('section').filter({
       has: user.getByRole('heading', { name: 'Two-factor authentication', exact: true }),
     });
+    await twoFactor.getByRole('button', { name: 'Enable', exact: true }).click();
     await twoFactor.getByLabel('Current password').fill(browserPassword);
     await twoFactor.getByRole('button', { name: 'Enable', exact: true }).click();
     const secret = await twoFactor.getByLabel('Authenticator setup key').inputValue();
@@ -215,13 +231,63 @@ describe('M5 real browser identity and Owner setup', () => {
     const passkeys = user
       .locator('section')
       .filter({ has: user.getByRole('heading', { name: 'Passkeys', exact: true }) });
-    await passkeys.getByLabel('Name', { exact: true }).fill('Browser test passkey');
+    await passkeys.getByRole('button', { name: 'Add passkey', exact: true }).click();
+    await passkeys.getByLabel('Name', { exact: true }).fill('Initial browser passkey');
     await passkeys.getByRole('button', { name: 'Add passkey' }).click();
-    await browserExpect(passkeys.getByLabel('Name', { exact: true })).toHaveCount(2);
-    await browserExpect(passkeys.getByLabel('Name', { exact: true }).first()).toHaveValue(
-      'Browser test passkey',
-    );
-    expect(await fixture.database.db.selectFrom('passkey').select('id').execute()).toHaveLength(1);
+    await browserExpect(passkeys.getByLabel('Name', { exact: true })).toHaveCount(0);
+    await passkeys
+      .getByRole('button', { name: 'Rename passkey: Initial browser passkey', exact: true })
+      .click();
+    await browserExpect(passkeys.getByLabel('Name', { exact: true })).toBeFocused();
+    await passkeys.getByLabel('Name', { exact: true }).fill('Browser test passkey');
+    let releaseRename = () => {};
+    let renaming = false;
+    const renameGate = new Promise<void>((resolve) => {
+      releaseRename = resolve;
+    });
+    await user.route('**/api/auth/passkey/update-passkey', async (route) => {
+      renaming = true;
+      await renameGate;
+      await route.continue();
+    });
+    try {
+      await passkeys.getByRole('button', { name: 'Save changes', exact: true }).click();
+      await browserExpect.poll(() => renaming).toBe(true);
+      await browserExpect(
+        passkeys.getByRole('button', { name: 'Add passkey', exact: true }),
+      ).toBeDisabled();
+      await browserExpect(passkeys.getByLabel('Name', { exact: true })).toBeDisabled();
+      await browserExpect(
+        passkeys.getByRole('button', { name: 'Cancel', exact: true }),
+      ).toBeDisabled();
+    } finally {
+      releaseRename();
+    }
+    await browserExpect(passkeys.getByLabel('Name', { exact: true })).toHaveCount(0);
+    await user.unroute('**/api/auth/passkey/update-passkey');
+    await browserExpect(
+      passkeys.getByRole('button', { name: 'Rename passkey: Browser test passkey', exact: true }),
+    ).toBeFocused();
+    await browserExpect(passkeys.getByText('Browser test passkey', { exact: true })).toBeVisible();
+    const persistedPasskeys = await fixture.database.db
+      .selectFrom('passkey')
+      .select(['id', 'name'])
+      .execute();
+    expect(persistedPasskeys).toHaveLength(1);
+    expect(persistedPasskeys[0]?.name).toBe('Browser test passkey');
+    await passkeys
+      .getByRole('button', { name: 'Remove passkey: Browser test passkey', exact: true })
+      .click();
+    const removePasskey = user.getByRole('dialog', { name: 'Remove this passkey?', exact: true });
+    await browserExpect(
+      removePasskey.getByRole('button', { name: 'Cancel', exact: true }),
+    ).toBeFocused();
+    await fixture.screenshot(user, 'settings-security-passkey-remove-desktop-en');
+    await removePasskey.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(removePasskey).not.toBeVisible();
+    expect(
+      await fixture.database.db.selectFrom('passkey').select(['id', 'name']).execute(),
+    ).toEqual(persistedPasskeys);
     await browserExpect(user.getByRole('button', { name: 'Revoke', exact: true })).toBeVisible();
     await user.getByRole('heading', { name: 'Settings', exact: true }).focus();
     await user.evaluate(() => window.scrollTo(0, 0));
@@ -257,12 +323,14 @@ describe('M5 real browser identity and Owner setup', () => {
   });
   it('updates profile/locale, keeps keyboard focus visible and checks EN/IT mobile reflow', async () => {
     await user.goto(`${fixture.origin}/settings`);
-    const profile = user
-      .locator('section')
-      .filter({ has: user.getByRole('heading', { name: 'Profile', exact: true }) });
+    const profile = user.locator('.account-profile');
+    await profile.getByRole('button', { name: /^Edit display name:/ }).click();
     await profile.getByLabel('Display name', { exact: true }).fill('Alex Updated');
-    await profile.getByLabel('Language', { exact: true }).selectOption('it');
-    await profile.getByRole('button', { name: 'Save changes' }).click();
+    await profile.getByLabel('Display name', { exact: true }).press('Enter');
+    await browserExpect(
+      profile.getByRole('heading', { name: 'Alex Updated', exact: true }),
+    ).toBeVisible();
+    await profile.getByRole('radio', { name: 'Italiano', exact: true }).check();
     await browserExpect(
       user.getByRole('heading', { name: 'Impostazioni', exact: true }),
     ).toBeVisible();
@@ -293,9 +361,8 @@ describe('M5 real browser identity and Owner setup', () => {
       user
         .locator('section')
         .filter({ has: user.getByRole('heading', { name: 'Passkey', exact: true }) })
-        .getByLabel('Nome', { exact: true })
-        .first(),
-    ).toHaveValue('Browser test passkey');
+        .getByText('Browser test passkey', { exact: true }),
+    ).toBeVisible();
     await user.getByRole('heading', { name: 'Impostazioni', exact: true }).focus();
     await user.evaluate(() => window.scrollTo(0, 0));
     await fixture.screenshot(user, 'settings-security-mobile-it');

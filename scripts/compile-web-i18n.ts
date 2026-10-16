@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { compileMessageOrThrow } from '@lingui/message-utils/compileMessage';
+import { accountSecurityWebMessages } from '../packages/i18n/src/account-security-web.js';
 import { en, it } from '../packages/i18n/src/catalogs.js';
 import { contentSettingsWebMessages } from '../packages/i18n/src/content-settings-web.js';
 import { gameUiWebMessages } from '../packages/i18n/src/game-ui-web.js';
@@ -18,6 +19,7 @@ import { webMessages } from '../packages/i18n/src/web.js';
 const catalogs: Record<string, Record<string, string>> = { en: { ...en }, it: { ...it } };
 for (const [key, pair] of Object.entries({
   ...webMessages,
+  ...accountSecurityWebMessages,
   ...contentSettingsWebMessages,
   ...platformWebMessages,
   ...serviceWebMessages,

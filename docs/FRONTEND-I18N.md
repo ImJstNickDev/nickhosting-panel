@@ -59,16 +59,33 @@ discarded when leaving Settings; neither is persisted in browser storage. Assist
 sessions retain the existing restriction on personal account settings. Both tabs
 use the shared responsive forms, EN/IT catalog and keyboard-accessible navigation.
 
-Profile presents one compact surface: photo, display name and read-only @username
-at the top, followed by aligned name/language fields, the verified email state
-and linked-account rows. Save is disabled until values change. Email changes and
-adding an email login open inline only when requested; the current email remains
-visible until verification completes. Unlinking uses the shared confirmation
-dialog with Cancel focused first, and never offers removal of the last login
-method. Pending forms prevent repeat submission; failures retain editable drafts.
-Quiet icon actions have accessible names/tooltips. Mobile stacks the labeled
-fields, wraps long identity values and preserves keyboard focus without a second
-decorative input outline. Profile styling is scoped and does not alter Security.
+Personal Settings is centered with a bounded reading width, including its heading
+and tabs. Profile opens with identity rather than a permanent form. Clicking the
+name edits it in place: Enter or leaving the field saves only the name; Escape
+cancels. Empty names are rejected, and failures keep the draft. Language uses
+English/Italiano segments with native radio keyboard behavior and saves immediately
+without another button. The interface previews the selected language immediately
+and restores the previous language if saving fails. These independent operations
+send partial fields so one cannot overwrite the other.
+
+The avatar is a file-picker button with a camera badge. Dropping one photo on the
+identity header opens the same validated crop flow; multiple files are rejected
+and drop/picker activity cannot replace a pending upload. Email and linked login
+methods share a compact surface below. Email changes and adding an email login
+open inline on request; the current email remains visible until verification
+completes. Unlinking uses the shared Cancel-first confirmation and never offers
+removal of the last login method. Quiet icon actions have accessible names/tooltips.
+Mobile wraps long identity values without overflow; text-entry focus uses its
+existing border without an extra decorative outline.
+
+Security uses compact action rows. Password and TOTP forms open on request;
+password changes still revoke other sessions, and TOTP retains the existing
+password/verification requirements. Passkeys support contextual naming and
+Cancel-first removal. Recovery codes remain in memory, with a copy action and
+visible clipboard failures. Session rows derive browser/OS labels only from the
+returned user-agent, expose full details on demand and confirm revocation. No
+current-device claim is inferred without a matching session identity. Shared
+account queries and TOTP setup memory are reused between the two routes.
 
 ### SFTP interface
 

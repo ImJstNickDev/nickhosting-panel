@@ -1,50 +1,25 @@
-import { useQuery } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
-import { NavLink, Outlet, useNavigate, useOutletContext, useSearchParams } from 'react-router';
-import { api, apiError, queryClient } from '../api/client.js';
+import { NavLink, Outlet, useSearchParams } from 'react-router';
+import { api } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
-import { identityChanged, useSession, useWebConfig, type WebSession } from '../app/session.js';
+import { useSession, useWebConfig, type WebSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
-  Check,
   ConfirmDialog,
-  Empty,
   ErrorNotice,
   Input,
   Loading,
   Notice,
   Page,
-  Section,
-  Select,
-  Time,
   text,
 } from '../components/ui.js';
 import { AccountIcon } from './account-icons.js';
-import { authClient } from './auth.js';
+import { refreshAccount, useLinkedAccounts, useSecuritySetup } from './account-shared.js';
 import { ProfilePhoto } from './profile-photo.js';
 import './account-profile.css';
 
-async function refreshAccount() {
-  await queryClient.invalidateQueries({ queryKey: ['session'] });
-  await queryClient.invalidateQueries({ queryKey: ['account'] });
-}
-
-function useLinkedAccounts() {
-  const session = useSession();
-  const ordinary = session.data?.context.sessionType === 'regular';
-  return useQuery({
-    queryKey: ['account', 'links'],
-    queryFn: () => api<Array<{ id: string; providerId: string }>>('/api/auth/list-accounts'),
-    enabled: ordinary,
-  });
-}
-
-function useSecuritySetup() {
-  const [codes, setCodes] = useState<string[]>([]);
-  const [totpURI, setTotpURI] = useState<string>();
-  return { codes, setCodes, totpURI, setTotpURI };
-}
+export { AccountSecurity } from './account-security.js';
 
 export function AccountPage() {
   const t = useT();
@@ -62,16 +37,18 @@ export function AccountPage() {
       </Page>
     );
   return (
-    <Page title={t('web.settings')}>
-      <nav className="tabs" aria-label={t('web.settings')}>
-        <NavLink to="/settings" end>
-          {t('web.profile')}
-        </NavLink>
-        <NavLink to="/settings/security">{t('web.securityTab')}</NavLink>
-      </nav>
-      {params.get('error') && <ErrorNotice error={{ code: params.get('error') }} />}
-      <Outlet context={securitySetup} />
-    </Page>
+    <div className="account-settings-page">
+      <Page title={t('web.settings')}>
+        <nav className="tabs" aria-label={t('web.settings')}>
+          <NavLink to="/settings" end>
+            {t('web.profile')}
+          </NavLink>
+          <NavLink to="/settings/security">{t('web.securityTab')}</NavLink>
+        </nav>
+        {params.get('error') && <ErrorNotice error={{ code: params.get('error') }} />}
+        <Outlet context={securitySetup} />
+      </Page>
+    </div>
   );
 }
 
@@ -92,54 +69,208 @@ export function AccountProfile() {
           userId={profile.id}
           avatarUrl={profile.avatarUrl}
           displayName={profile.name}
+          nameControl={<ProfileName key={profile.id} profile={profile} />}
           username={profile.username}
         />
-        <ProfileDetails key={`details:${profile.id}`} profile={profile} />
+        <ProfileLanguage key={`language:${profile.id}`} profile={profile} />
       </section>
-      <ProfileEmail key={profile.id} profile={profile} />
-      <ProfileMethods />
+      <div className="account-access-surface">
+        <ProfileEmail key={profile.id} profile={profile} />
+        <ProfileMethods />
+      </div>
     </div>
   );
 }
 
-function ProfileDetails({ profile }: { profile: WebSession['subject'] }) {
+function ProfileName({ profile }: { profile: WebSession['subject'] }) {
+  const t = useT();
+  const validationId = useId();
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(profile.name);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const [invalid, setInvalid] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const busy = useRef(false);
+  const cancelled = useRef(false);
+  useEffect(() => {
+    if (editing) {
+      input.current?.focus();
+      input.current?.select();
+    }
+  }, [editing]);
+  function edit() {
+    cancelled.current = false;
+    setName(profile.name);
+    setError(undefined);
+    setInvalid(false);
+    setEditing(true);
+  }
+  async function save(returnFocus = false) {
+    if (busy.current || cancelled.current) return;
+    const nextName = name.trim();
+    if (!nextName) {
+      setInvalid(true);
+      return;
+    }
+    if (nextName === profile.name) {
+      setEditing(false);
+      if (returnFocus) requestAnimationFrame(() => trigger.current?.focus());
+      return;
+    }
+    busy.current = true;
+    setPending(true);
+    setError(undefined);
+    try {
+      await api('/api/auth/update-user', { body: { name: nextName } });
+      await refreshAccount();
+      setEditing(false);
+      if (
+        returnFocus &&
+        (document.activeElement === input.current || document.activeElement === document.body)
+      )
+        requestAnimationFrame(() => trigger.current?.focus());
+    } catch (cause) {
+      setError(cause);
+    } finally {
+      busy.current = false;
+      setPending(false);
+    }
+  }
+  return (
+    <div className="profile-name-editor">
+      {editing ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save(true);
+          }}
+          aria-busy={pending}
+        >
+          <input
+            ref={input}
+            aria-label={t('web.displayName')}
+            aria-invalid={invalid || undefined}
+            aria-describedby={invalid ? validationId : undefined}
+            value={name}
+            maxLength={100}
+            autoComplete="name"
+            disabled={pending}
+            onChange={(event) => {
+              setName(event.currentTarget.value);
+              setInvalid(false);
+            }}
+            onBlur={() => void save()}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && !pending) {
+                event.preventDefault();
+                cancelled.current = true;
+                setEditing(false);
+                setError(undefined);
+                setInvalid(false);
+                requestAnimationFrame(() => trigger.current?.focus());
+              }
+            }}
+          />
+          {pending && (
+            <span className="profile-name-saving" role="status" aria-label={t('web.pending')}>
+              <span className="settings-spinner" />
+            </span>
+          )}
+        </form>
+      ) : (
+        <h3 className="profile-photo-name" aria-label={profile.name}>
+          <Tooltip content={t('web.profileEditName')}>
+            <button
+              ref={trigger}
+              type="button"
+              className="profile-name-trigger"
+              aria-label={t('web.profileEditNameAction', { name: profile.name })}
+              onClick={edit}
+            >
+              <span>{profile.name}</span>
+              <AccountIcon name="edit" />
+            </button>
+          </Tooltip>
+        </h3>
+      )}
+      {invalid && (
+        <p id={validationId} className="field-error" role="alert">
+          {t('web.profileNameRequired')}
+        </p>
+      )}
+      {Boolean(error) && <ErrorNotice error={error} />}
+    </div>
+  );
+}
+
+function ProfileLanguage({ profile }: { profile: WebSession['subject'] }) {
   const t = useT();
   const { locale, setLocale } = useLocale();
-  const [name, setName] = useState(profile.name);
-  const [language, setLanguage] = useState(profile.locale ?? locale);
-  const dirty = name !== profile.name || language !== (profile.locale ?? locale);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const busy = useRef(false);
+  const group = useRef<HTMLFieldSetElement>(null);
+  const selected = locale === 'pseudo' ? profile.locale : locale;
+  async function change(next: 'en' | 'it') {
+    if (busy.current || next === selected) return;
+    const previous = locale;
+    const restoreFocus = group.current?.contains(document.activeElement);
+    busy.current = true;
+    setPending(true);
+    setError(undefined);
+    setLocale(next);
+    try {
+      await api('/api/auth/update-user', { body: { locale: next } });
+      await refreshAccount();
+    } catch (cause) {
+      setLocale(previous);
+      setError(cause);
+    } finally {
+      busy.current = false;
+      setPending(false);
+      if (restoreFocus)
+        requestAnimationFrame(() => {
+          if (document.activeElement === document.body)
+            group.current
+              ?.querySelector<HTMLInputElement>('input:checked')
+              ?.focus({ preventScroll: true });
+        });
+    }
+  }
   return (
-    <ActionForm
-      className="account-details-form"
-      submitDisabled={!dirty}
-      onSubmit={async (data) => {
-        const nextName = text(data, 'name');
-        const nextLocale = text(data, 'locale') as 'en' | 'it';
-        await api('/api/auth/update-user', { body: { name: nextName, locale: nextLocale } });
-        setName(nextName);
-        setLocale(nextLocale);
-        await refreshAccount();
-      }}
-    >
-      <Input
-        label={t('web.displayName')}
-        name="name"
-        value={name}
-        onChange={(event) => setName(event.currentTarget.value)}
-        autoComplete="name"
-        required
-        maxLength={100}
-      />
-      <Select
-        label={t('web.locale')}
-        name="locale"
-        value={language}
-        onChange={(event) => setLanguage(event.currentTarget.value as 'en' | 'it')}
-      >
-        <option value="en">English</option>
-        <option value="it">Italiano</option>
-      </Select>
-    </ActionForm>
+    <div className="account-language-row">
+      <fieldset ref={group} className="account-language" disabled={pending} aria-busy={pending}>
+        <legend>
+          <AccountIcon name="globe" />
+          {t('web.locale')}
+        </legend>
+        <div className="account-language-options">
+          {(['en', 'it'] as const).map((value) => (
+            <label key={value}>
+              <input
+                type="radio"
+                name="locale"
+                value={value}
+                checked={selected === value}
+                onChange={() => void change(value)}
+              />
+              <span>{value === 'en' ? 'English' : 'Italiano'}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <span className="account-language-progress" role="status">
+        {pending && (
+          <>
+            <span className="settings-spinner" aria-hidden="true" />
+            <span className="visually-hidden">{t('web.pending')}</span>
+          </>
+        )}
+      </span>
+      {Boolean(error) && <ErrorNotice error={error} />}
+    </div>
   );
 }
 
@@ -160,6 +291,9 @@ function ProfileEmail({ profile }: { profile: WebSession['subject'] }) {
   return (
     <section className="account-email-section" aria-labelledby={id}>
       <div className="account-setting-row">
+        <span className="account-email-icon">
+          <AccountIcon name="mail" />
+        </span>
         <h2 id={id}>{t('web.email')}</h2>
         <div className="account-email-value">
           <span>{email || t('web.accountNotSet')}</span>
@@ -171,17 +305,19 @@ function ProfileEmail({ profile }: { profile: WebSession['subject'] }) {
           )}
         </div>
         {email && !editing && (
-          <button
-            ref={trigger}
-            type="button"
-            className="account-quiet-action"
-            aria-expanded={false}
-            aria-controls={`${id}-edit`}
-            onClick={() => setEditing(true)}
-          >
-            <AccountIcon name="edit" />
-            {t('web.changeEmail')}
-          </button>
+          <Tooltip content={t('web.changeEmail')}>
+            <button
+              ref={trigger}
+              type="button"
+              className="account-icon-action"
+              aria-label={t('web.changeEmail')}
+              aria-expanded={false}
+              aria-controls={`${id}-edit`}
+              onClick={() => setEditing(true)}
+            >
+              <AccountIcon name="edit" />
+            </button>
+          </Tooltip>
         )}
       </div>
       {editing && (
@@ -370,327 +506,5 @@ function ProfileMethods() {
         <p>{t('web.accountUnlinkHint', { provider: unlink?.provider ?? '' })}</p>
       </ConfirmDialog>
     </section>
-  );
-}
-
-export function AccountSecurity() {
-  const t = useT();
-  const session = useSession();
-  const navigate = useNavigate();
-  const { codes, setCodes, totpURI, setTotpURI } =
-    useOutletContext<ReturnType<typeof useSecuritySetup>>();
-  const [passkeyError, setPasskeyError] = useState<unknown>();
-  const ordinary = session.data?.context.sessionType === 'regular';
-  const accounts = useLinkedAccounts();
-  const sessions = useQuery({
-    queryKey: ['account', 'sessions'],
-    queryFn: () =>
-      api<
-        Array<{
-          id: string;
-          token: string;
-          createdAt: string;
-          expiresAt: string;
-          userAgent?: string;
-          ipAddress?: string;
-        }>
-      >('/api/auth/list-sessions'),
-    enabled: ordinary,
-  });
-  const passkeys = useQuery({
-    queryKey: ['account', 'passkeys'],
-    queryFn: () =>
-      api<Array<{ id: string; name?: string; createdAt: string }>>(
-        '/api/auth/passkey/list-user-passkeys',
-      ),
-    enabled: ordinary,
-  });
-  const hasPassword =
-    accounts.data?.some((account) => account.providerId === 'credential') === true;
-  const passwordBody = (data: FormData) =>
-    hasPassword ? { password: String(data.get('password')) } : {};
-  const profile = session.data?.subject;
-  return (
-    <>
-      <div className="columns">
-        <div>
-          {hasPassword && (
-            <Section title={t('web.changePassword')}>
-              <ActionForm
-                onSubmit={async (data) => {
-                  await api('/api/auth/change-password', {
-                    body: {
-                      currentPassword: String(data.get('currentPassword')),
-                      newPassword: String(data.get('newPassword')),
-                      revokeOtherSessions: true,
-                    },
-                  });
-                  await refreshAccount();
-                }}
-              >
-                <Input
-                  label={t('web.currentPassword')}
-                  name="currentPassword"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                />
-                <Input
-                  label={t('web.newPassword')}
-                  hint={t('web.passwordHint')}
-                  name="newPassword"
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={12}
-                  maxLength={128}
-                  required
-                />
-              </ActionForm>
-            </Section>
-          )}
-          <Section title={t('web.passkeys')}>
-            {Boolean(passkeyError) && <ErrorNotice error={passkeyError} />}
-            {passkeys.error && <ErrorNotice error={passkeys.error} />}
-            {passkeys.data?.map((passkey) => (
-              <div className="stack" key={passkey.id}>
-                <ActionForm
-                  onSubmit={async (data) => {
-                    await api('/api/auth/passkey/update-passkey', {
-                      body: { id: passkey.id, name: text(data, 'name') },
-                    });
-                    await refreshAccount();
-                  }}
-                >
-                  <Input
-                    label={t('web.name')}
-                    name="name"
-                    defaultValue={passkey.name ?? ''}
-                    required
-                    maxLength={100}
-                  />
-                </ActionForm>
-                <ActionForm
-                  submitLabel={t('web.remove')}
-                  onSubmit={async () => {
-                    await api('/api/auth/passkey/delete-passkey', { body: { id: passkey.id } });
-                    await refreshAccount();
-                  }}
-                >
-                  <Check label={t('web.confirm')} required />
-                </ActionForm>
-                <hr />
-              </div>
-            ))}
-            <ActionForm
-              submitLabel={t('web.addPasskey')}
-              onSubmit={async (data) => {
-                setPasskeyError(undefined);
-                const result = await authClient.passkey.addPasskey({ name: text(data, 'name') });
-                if (result.error) throw apiError(result.error);
-                await refreshAccount();
-              }}
-            >
-              <Input label={t('web.name')} name="name" required maxLength={100} />
-            </ActionForm>
-          </Section>
-        </div>
-        <div>
-          <Section title={t('web.twoFactor')}>
-            {accounts.isPending && <Loading />}
-            {accounts.error && <ErrorNotice error={accounts.error} />}
-            <fieldset disabled={accounts.isPending || Boolean(accounts.error)}>
-              {!profile?.twoFactorEnabled && !totpURI && (
-                <ActionForm
-                  submitLabel={t('web.enable')}
-                  success={false}
-                  onSubmit={async (data) => {
-                    const result = await api<{ totpURI: string; backupCodes: string[] }>(
-                      '/api/auth/two-factor/enable',
-                      { body: passwordBody(data) },
-                    );
-                    setTotpURI(result.totpURI);
-                    setCodes(result.backupCodes);
-                  }}
-                >
-                  {hasPassword && (
-                    <Input
-                      label={t('web.currentPassword')}
-                      name="password"
-                      type="password"
-                      autoComplete="current-password"
-                      required
-                    />
-                  )}
-                </ActionForm>
-              )}
-              {totpURI && (
-                <>
-                  <p>{t('web.authenticatorHelp')}</p>
-                  <Input
-                    label={t('web.authenticatorKey')}
-                    value={new URL(totpURI).searchParams.get('secret') ?? ''}
-                    readOnly
-                    autoComplete="off"
-                  />
-                  <ActionForm
-                    submitLabel={t('web.verify')}
-                    onSubmit={async (data) => {
-                      await api('/api/auth/two-factor/verify-totp', {
-                        body: { code: text(data, 'code') },
-                      });
-                      setTotpURI(undefined);
-                      await refreshAccount();
-                    }}
-                  >
-                    <Input
-                      label={t('web.code')}
-                      name="code"
-                      autoComplete="one-time-code"
-                      inputMode="numeric"
-                      required
-                    />
-                  </ActionForm>
-                </>
-              )}
-              {profile?.twoFactorEnabled && (
-                <>
-                  <Notice>{t('web.enabled')}</Notice>
-                  <ActionForm
-                    submitLabel={t('web.newRecoveryCodes')}
-                    success={false}
-                    onSubmit={async (data) => {
-                      const result = await api<{ backupCodes: string[] }>(
-                        '/api/auth/two-factor/generate-backup-codes',
-                        { body: passwordBody(data) },
-                      );
-                      setCodes(result.backupCodes);
-                    }}
-                  >
-                    {hasPassword && (
-                      <Input
-                        label={t('web.currentPassword')}
-                        name="password"
-                        type="password"
-                        autoComplete="current-password"
-                        required
-                      />
-                    )}
-                  </ActionForm>
-                  <hr />
-                  <ActionForm
-                    submitLabel={t('web.disable')}
-                    onSubmit={async (data) => {
-                      await api('/api/auth/two-factor/disable', { body: passwordBody(data) });
-                      setCodes([]);
-                      await refreshAccount();
-                    }}
-                  >
-                    {hasPassword && (
-                      <Input
-                        label={t('web.currentPassword')}
-                        name="password"
-                        type="password"
-                        autoComplete="current-password"
-                        required
-                      />
-                    )}
-                    <Check name="confirm" label={t('web.confirm')} required />
-                  </ActionForm>
-                </>
-              )}
-              {codes.length > 0 && (
-                <div className="notice">
-                  <h3>{t('web.recoveryCodes')}</h3>
-                  <p>{t('web.recoveryWarning')}</p>
-                  <ul>
-                    {codes.map((code) => (
-                      <li key={code}>
-                        <code>{code}</code>
-                      </li>
-                    ))}
-                  </ul>
-                  <button type="button" className="secondary" onClick={() => setCodes([])}>
-                    {t('web.close')}
-                  </button>
-                </div>
-              )}
-            </fieldset>
-          </Section>
-        </div>
-      </div>
-      <Section title={t('web.sessions')}>
-        {sessions.isPending ? (
-          <Loading />
-        ) : sessions.error ? (
-          <ErrorNotice error={sessions.error} />
-        ) : !sessions.data?.length ? (
-          <Empty />
-        ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t('web.created')}</th>
-                  <th>{t('web.expires')}</th>
-                  <th>{t('web.details')}</th>
-                  <th>{t('web.actions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sessions.data.map((session) => (
-                  <tr key={session.id}>
-                    <td>
-                      <Time value={session.createdAt} />
-                    </td>
-                    <td>
-                      <Time value={session.expiresAt} />
-                    </td>
-                    <td>
-                      <details>
-                        <summary>{t('web.browserSession')}</summary>
-                        <p className="session-agent">{session.userAgent ?? t('web.unknown')}</p>
-                      </details>
-                    </td>
-                    <td>
-                      <ActionForm
-                        submitLabel={t('web.revoke')}
-                        success={false}
-                        onSubmit={async () => {
-                          await api('/api/auth/revoke-session', { body: { token: session.token } });
-                          await refreshAccount();
-                        }}
-                      >
-                        <span />
-                      </ActionForm>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <hr />
-        <ActionForm
-          submitLabel={t('web.revokeOthers')}
-          onSubmit={async () => {
-            await api('/api/auth/revoke-other-sessions', { body: {} });
-            await refreshAccount();
-          }}
-        >
-          <span />
-        </ActionForm>
-      </Section>
-      <ActionForm
-        submitLabel={t('web.signOut')}
-        success={false}
-        onSubmit={async () => {
-          await api('/api/auth/sign-out', { body: {} });
-          await identityChanged();
-          navigate('/login');
-        }}
-      >
-        <span />
-      </ActionForm>
-    </>
   );
 }

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useEffectEvent, useState } from 'react';
 import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 import { api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
@@ -31,10 +31,15 @@ export function Shell() {
     setOpen(false);
     document.querySelector<HTMLElement>('h1')?.focus();
   }, [location.pathname]);
+  const applySessionLocale = useEffectEvent((value: 'en' | 'it') => {
+    if (value && locale !== 'pseudo' && locale !== value) setLocale(value);
+  });
+  // Adopt a changed server preference/identity, not every local language preview
+  // while its save is in flight. Failed saves restore the prior local preference.
   useEffect(() => {
     const value = session.data?.subject.locale;
-    if (value && locale !== 'pseudo' && locale !== value) setLocale(value);
-  }, [session.data?.subject.locale, locale, setLocale]);
+    if (value && session.data?.subject.id) applySessionLocale(value);
+  }, [session.data?.subject.id, session.data?.subject.locale]);
   async function exit() {
     try {
       await api('/v1/web/support/exit', { body: {} });
