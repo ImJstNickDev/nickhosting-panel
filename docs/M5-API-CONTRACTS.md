@@ -666,8 +666,10 @@ This checkpoint supersedes the earlier all-pages WebPanel loading and request-ti
 Mojang date lookup. Legacy no-query array and `pageSize`/`after` cursor responses
 remain supported, now with bulk related-data reads.
 
-The current Owner UI uses
+The original summary view uses
 `GET /v1/owner/minecraft/compatibility?view=summary&page=1&pageSize=25`.
+The contextual workspace introduced on 2026-10-16 adds grouped release pagination
+while retaining this summary contract.
 Optional `search`, `runtime`, `releaseType`, `availability=enabled|disabled` and
 `order=newest|oldest|name-asc|name-desc` are applied before pagination. Response:
 `{items,total,page,pageSize,runtimes,metadataStatus}`. Runtime facets span the full
@@ -1316,3 +1318,45 @@ inheritance. Content source/work paths remain global. No provider call or DNS
 mutation is performed while saving these policy objects. Global setting reads
 expose the canonical `content*` names; legacy Minecraft names are accepted aliases
 for PATCH and reset. [Migration/precedence details](CONFIGURATION-AND-DEPLOYMENT.md#shared-content-limits-and-integration-overrides-2026-10-16).
+
+## 2026-10-16 — Contextual Minecraft Versions workspace
+
+Owner Versions shares the selected `runtime` with Runtime administration and scopes
+the catalog to an explicit `mappingId`. Friendly node/egg labels come from the
+existing cached infrastructure discovery. They do not replace immutable mapping
+or combination IDs.
+
+`GET /v1/owner/minecraft/compatibility?view=workspace&runtime=vanilla&mappingId=<uuid>`
+accepts the existing search/type/availability/order/page controls and returns
+`{items,total,page,pageSize,metadataStatus}`. Pagination counts release groups.
+Each group contains `release`, `releaseType`, `releaseTime`,
+`releaseTimeStatus`, `variantCount`, and a summary `choice` only for a singleton.
+Expanding a multiple-configuration release loads bounded summary pages with
+`view=summary&mappingId=<uuid>&runtime=vanilla&release=<exact-release>`.
+Distinct builds/bindings remain distinct configuration IDs. Existing summary,
+cursor and unpaginated APIs remain available.
+
+Summary and protected detail projections include the resolved container `image`,
+`mappingEnabled` and `creation: {state,reason}`. `state` is `available`,
+`private-testing` or `blocked`. Blocking reasons distinguish disabled choices,
+disabled/changed mappings, disabled nodes, rollout state and missing required
+evidence. This is static ordinary-user catalog eligibility using the existing rules and batched
+related-data reads; it is not a promise of live provider connectivity, free
+capacity or successful installation. Dynamic checks remain at creation/admission.
+The `availability=enabled|disabled` filter is explicitly the Owner's stored choice,
+not a second frontend implementation of eligibility.
+
+`PUT /v1/owner/minecraft/compatibility/availability` takes
+`{mappingId,ids,enabled}`, with 1–500 distinct combination UUIDs, and returns 204.
+One transaction reauthorizes the current interactive Owner, validates every ID
+against that mapping, changes availability and records the audit event. Missing or
+foreign IDs fail the whole request. No provider mutation, runtime retargeting or
+evidence promotion occurs. The UI selects concrete configurations; an unopened
+multiple-configuration release does not silently select hidden IDs.
+
+Scanning continues through the existing bounded catalog API. Normal discovery
+preserves previously disabled choices. Reenabling is a separate explicit catalog
+action. The scan panel retains measured progress and a bounded optional log while
+switching integration tabs; leaving/reloading the workspace cancels this
+browser-driven scan. Registered test reports remain separate from integration
+capabilities and are fetched only with detail. No new migration is required.

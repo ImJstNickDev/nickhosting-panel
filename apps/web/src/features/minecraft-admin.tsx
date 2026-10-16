@@ -1,877 +1,792 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router';
-import { z } from 'zod';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import { Link, useLocation, useNavigationType, useSearchParams } from 'react-router';
+import type { GameManifest } from '../../../../packages/game-sdk/src/index.js';
 import { ApiError, api, queryClient } from '../api/client.js';
-import { useFormat, useT } from '../app/i18n.js';
-import { CatalogBrowser, initialCatalogRequest } from '../components/catalog-browser.js';
-import { ScanProgress } from '../components/scan-progress.js';
+import { useLocale, useT } from '../app/i18n.js';
+import { Tooltip } from '../components/tooltip.js';
+import { Dialog, Empty, ErrorNotice, Loading, Notice, Select, Time } from '../components/ui.js';
+import { MinecraftProtocolSettings } from './integration-game-settings.js';
+import { CombinationDetail } from './minecraft-admin-detail.js';
 import {
-  ActionForm,
-  Check,
-  Details,
-  Empty,
-  ErrorNotice,
-  Input,
-  Loading,
-  Notice,
-  Section,
-  Select,
-  Textarea,
-  Time,
-  text,
-} from '../components/ui.js';
-import { type CatalogBatch, type CatalogMeasurement, syncCatalogPages } from './catalog-sync.js';
+  type Combination,
+  mappingsQuery,
+  type ReleaseGroup,
+  useMappingLabel,
+} from './minecraft-admin-model.js';
+import { PendingCatalogSearch } from './minecraft-admin-navigation.js';
+import { CreationState, MinecraftAdminIcon } from './minecraft-admin-presentation.js';
+import { RegisterCombination } from './minecraft-admin-register.js';
 
-const checks = [
-  'installation',
-  'status',
-  'intentionalJoin',
-  'sleepingResponse',
-  'wakingResponse',
-  'blockedResponse',
-  'manualStop',
-  'transparentLogin',
-  'readiness',
-  'playerIdle',
-  'wakeAdmission',
-  'gracefulSave',
-] as const;
-const semantics = [
-  'release',
-  'buildId',
-  'loaderVersion',
-  'loaderCoordinate',
-  'installerVersion',
-  'serverArtifactUrl',
-  'installerArtifactUrl',
-] as const;
-interface Mapping {
-  id: string;
-  game_id: string;
-  runtime_id: string;
-  nest_id: number;
-  egg_id: number;
-  docker_image: string;
-  image_mode?: 'static' | 'integration';
-  environment: Record<string, string>;
-  node_id: string;
-}
-interface Egg {
-  id: number;
-  name: string;
-  relationships?: { variables?: { data: { attributes: { env_variable: string } }[] } };
-}
-interface Evidence {
-  runId: string;
-  kind: string;
-  recordedAt: string;
-  checks: Record<string, boolean>;
-  client?: { implementation: string; version: string; protocolId: number };
-  server?: { uuid: string; javaMajor: number; imageDigest: string };
-  evidenceSha256: string;
-}
-interface Combination {
-  id: string;
-  mappingId: string;
-  enabled: boolean;
-  support: string;
-  releaseTime?: string | null;
-  releaseTimeStatus?: 'available' | 'unknown' | 'unavailable';
-  supportAuthority?: 'integration' | 'evidence';
-  capabilities?: {
-    installation: boolean;
-    directConnection: boolean;
-    gateway: boolean;
-    readiness: boolean;
-    playerIdle: boolean;
-    sleepWake: boolean;
-    playerManagement: boolean;
-  };
-  combination: {
-    release: string;
-    releaseType?: string;
-    profile: string;
-    javaMajor: number;
-    protocolId: number | null;
-    family: string;
-    buildId?: string;
-    loaderVersion?: string;
-  };
-  evidence: Evidence[];
-}
+export { MinecraftCatalogScan } from './minecraft-admin-scan.js';
 
-/** Owner-only technical UI. Ordinary creation never imports this support matrix. */
+import './minecraft-admin.css';
+
+function FeatureIndicators({ choice }: { choice: Combination }) {
+  const t = useT();
+  return (
+    <span className="minecraft-version-features">
+      {(['gateway', 'sleepWake'] as const).map((feature) => (
+        <Tooltip
+          key={feature}
+          content={`${t(`gameAdmin.capability.${feature}`)}: ${t(choice.capabilities?.[feature] ? 'gameUi.yes' : 'gameUi.no')}`}
+        >
+          <span
+            role="img"
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: Feature tooltips also support keyboard focus.
+            tabIndex={0}
+            className={choice.capabilities?.[feature] ? '' : 'unavailable'}
+            aria-label={`${t(`gameAdmin.capability.${feature}`)}: ${t(choice.capabilities?.[feature] ? 'gameUi.yes' : 'gameUi.no')}`}
+          >
+            <MinecraftAdminIcon kind={feature === 'gateway' ? 'gateway' : 'sleep'} />
+          </span>
+        </Tooltip>
+      ))}
+    </span>
+  );
+}
+function ReleaseDate({ value }: { value: string | null | undefined }) {
+  const { locale } = useLocale(),
+    t = useT();
+  return value ? (
+    <time dateTime={value}>
+      {new Intl.DateTimeFormat(locale === 'it' ? 'it-IT' : 'en-GB', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      }).format(new Date(value))}
+    </time>
+  ) : (
+    <span className="muted">{t('web.unknown')}</span>
+  );
+}
+/** One scoped catalog. All remote eligibility is aggregated by the Owner endpoint. */
 export function OwnerMinecraftPage() {
   const t = useT();
   const [params, setParams] = useSearchParams();
+  const location = useLocation(),
+    navigationKind = useNavigationType();
+  const detailFocus = useRef<HTMLElement | null>(null);
   const mappingLabel = useMappingLabel();
-  const mappings = useQuery({
-    queryKey: ['runtime-mappings'],
-    queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
-    staleTime: 30_000,
-  });
-  const catalogRequest = {
-    ...initialCatalogRequest,
-    page: Math.max(1, Number(params.get('catalogPage')) || 1),
-    search: params.get('catalogSearch') ?? '',
-    order: (params.get('catalogOrder') ??
-      initialCatalogRequest.order) as typeof initialCatalogRequest.order,
-    filters: Object.fromEntries(
-      ['runtime', 'releaseType', 'availability'].map((key) => [
-        key,
-        params.get(`catalog-${key}`) ?? '',
-      ]),
-    ),
-  };
-  // URL navigation can commit after the next input event. Merge only the fields
-  // changed by this event into the latest requested URL, so a quick sort change
-  // cannot restore an obsolete search/filter from the previous render.
-  const renderedSearch = params.toString();
-  const pendingSearch = useRef({ base: renderedSearch, value: new URLSearchParams(params) });
-  if (pendingSearch.current.base !== renderedSearch)
-    pendingSearch.current = { base: renderedSearch, value: new URLSearchParams(params) };
-  const updateSearch = (change: (current: URLSearchParams) => void) => {
-    const current = new URLSearchParams(pendingSearch.current.value);
-    change(current);
-    pendingSearch.current.value = current;
-    setParams(current, { replace: true });
-  };
-  const setCatalogRequest = (patch: Partial<typeof initialCatalogRequest>) =>
-    updateSearch((current) => {
-      if (patch.search !== undefined) current.set('catalogSearch', patch.search);
-      if (patch.order !== undefined) current.set('catalogOrder', patch.order);
-      if (patch.page !== undefined) current.set('catalogPage', String(patch.page));
-      for (const [key, value] of Object.entries(patch.filters ?? {}))
-        current.set(`catalog-${key}`, value);
-    });
-  const combinations = useQuery({
-    queryKey: ['owner-minecraft-compatibility', catalogRequest],
+  const mappings = useQuery(mappingsQuery);
+  const modules = useQuery({
+    queryKey: ['owner-game-modules'],
+    queryFn: ({ signal }) =>
+      api<Array<{ id: string; manifest: GameManifest }>>('/v1/owner/game-modules', { signal }),
     staleTime: 60_000,
-    placeholderData: keepPreviousData,
+  });
+  const runtimes = modules.data?.find((m) => m.id === 'minecraft')?.manifest.runtimes ?? [];
+  const runtime =
+    runtimes.find((r) => r.id === params.get('runtime'))?.id ?? runtimes[0]?.id ?? 'vanilla';
+  const eligible =
+    mappings.data?.filter((m) => m.game_id === 'minecraft' && m.runtime_id === runtime) ?? [];
+  const mapping = eligible.find((m) => m.id === params.get('mapping')) ?? eligible[0];
+  const scope = `${runtime}:${mapping?.id ?? ''}`;
+  const page = Math.max(1, Number(params.get('catalogPage')) || 1),
+    search = params.get('catalogSearch') ?? '',
+    order = params.get('catalogOrder') ?? 'newest';
+  const releaseType = params.get('catalog-releaseType') ?? '',
+    availability = params.get('catalog-availability') ?? '';
+  const pendingSearch = useRef(new PendingCatalogSearch(location.key, params.toString()));
+  pendingSearch.current.reconcile(location.key, params.toString(), navigationKind);
+  const update = (patch: Record<string, string>, reset = false) => {
+    if (bulkBusy) return;
+    if (patch.combination) detailFocus.current = document.activeElement as HTMLElement | null;
+    setParams(pendingSearch.current.patch(patch, reset), { replace: true });
+  };
+  const query = {
+    runtime,
+    mappingId: mapping?.id ?? '',
+    page: String(page),
+    pageSize: '25',
+    search,
+    order,
+    releaseType,
+    availability,
+  };
+  type WorkspaceResponse = {
+    items: ReleaseGroup[];
+    total: number;
+    page: number;
+    pageSize: number;
+    metadataStatus: { lastSuccessAt: string | null; stale: boolean };
+  };
+  const catalog = useQuery<WorkspaceResponse>({
+    queryKey: ['owner-minecraft-compatibility', 'workspace', scope, query],
+    enabled: Boolean(mapping),
+    staleTime: 60_000,
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[2] === scope ? keepPreviousData(previous) : undefined,
     queryFn: ({ signal }) =>
       api<{
-        items: Combination[];
+        items: ReleaseGroup[];
         total: number;
         page: number;
         pageSize: number;
-        runtimes: string[];
         metadataStatus: { lastSuccessAt: string | null; stale: boolean };
       }>(
-        `/v1/owner/minecraft/compatibility?${new URLSearchParams({ view: 'summary', pageSize: '25', page: String(catalogRequest.page), search: catalogRequest.search, order: catalogRequest.order, ...Object.fromEntries(Object.entries(catalogRequest.filters).filter(([, value]) => value)) })}`,
+        `/v1/owner/minecraft/compatibility?${new URLSearchParams(Object.entries({ view: 'workspace', ...query }).filter(([, value]) => value !== ''))}`,
         { signal },
       ),
   });
-  const selected = params.get('combination') ?? '';
-  const setSelected = (id: string) =>
-    updateSearch((current) => {
-      current.set('combination', id);
-    });
-  const detail = useQuery({
-    queryKey: ['owner-minecraft-detail', selected],
-    enabled: Boolean(selected),
-    queryFn: ({ signal }) =>
-      api<Combination>(`/v1/owner/minecraft/compatibility/${selected}`, { signal }),
-  });
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ['owner-minecraft-compatibility'] });
-    if (selected) void detail.refetch();
-  };
-  return (
-    <div className="stack">
-      <p className="muted">{t('ownerIntegration.versionSupport')}</p>
-      <Section title={t('gameAdmin.combinations')}>
-        {combinations.isPending ? (
-          <Loading />
-        ) : combinations.error ? (
-          <ErrorNotice error={combinations.error} retry={() => void combinations.refetch()} />
-        ) : (
-          <CatalogBrowser
-            server={{
-              request: catalogRequest,
-              total: combinations.data?.total ?? 0,
-              pending: combinations.isFetching,
-              onChange: setCatalogRequest,
-            }}
-            items={(combinations.data?.items ?? []).map((choice) => ({
-              ...choice,
-              label: choice.combination.release,
-            }))}
-            label={t('gameAdmin.combinations')}
-            filters={[
-              {
-                id: 'runtime',
-                label: t('gameAdmin.runtime'),
-                value: (choice) => choice.combination.profile,
-                options: [...(combinations.data?.runtimes ?? [])]
-                  .sort()
-                  .map((value) => ({ value, label: value })),
-              },
-              {
-                id: 'releaseType',
-                label: t('catalog.releaseType'),
-                value: (choice) => choice.combination.releaseType ?? 'unknown',
-                options: ['release', 'snapshot', 'old_beta', 'old_alpha', 'unknown'].map(
-                  (value) => ({ value, label: t(`catalog.type.${value}`) }),
-                ),
-              },
-              {
-                id: 'availability',
-                label: t('gameAdmin.availability'),
-                value: (choice) => String(choice.enabled),
-                options: [
-                  { value: 'enabled', label: t('web.enabled') },
-                  { value: 'disabled', label: t('web.disabled') },
-                ],
-              },
-            ]}
-          >
-            {(visible) => (
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t('gameAdmin.version')}</th>
-                    <th>{t('catalog.releaseDate')}</th>
-                    <th>{t('gameAdmin.runtime')}</th>
-                    <th>{t('infra.providerNode')}</th>
-                    <th>{t('gameAdmin.java')}</th>
-                    <th>{t('gameAdmin.protocol')}</th>
-                    <th>{t('gameAdmin.installationSupport')}</th>
-                    <th>{t('gameAdmin.availability')}</th>
-                    <th>{t('web.actions')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((choice) => (
-                    <tr key={choice.id}>
-                      <td>{choice.combination.release}</td>
-                      <td>
-                        {choice.releaseTime ? (
-                          <Time value={choice.releaseTime} />
-                        ) : (
-                          t('web.unknown')
-                        )}
-                      </td>
-                      <td>{choice.combination.profile}</td>
-                      <td>
-                        {mappingLabel(
-                          mappings.data?.find((mapping) => mapping.id === choice.mappingId),
-                          false,
-                        )}
-                      </td>
-                      <td>{choice.combination.javaMajor}</td>
-                      <td>{choice.combination.protocolId ?? t('web.unknown')}</td>
-                      <td>
-                        {t(
-                          choice.capabilities?.installation
-                            ? 'gameAdmin.declaredSupported'
-                            : 'web.unavailable',
-                        )}
-                      </td>
-                      <td>{t(choice.enabled ? 'web.enabled' : 'web.disabled')}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => setSelected(choice.id)}
-                        >
-                          {t('web.details')}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </CatalogBrowser>
-        )}
-        {combinations.data?.metadataStatus && (
-          <div>
-            {!combinations.data.metadataStatus.lastSuccessAt ? (
-              <Notice>{t('catalog.metadataMissing')}</Notice>
-            ) : (
-              <>
-                {combinations.data.metadataStatus.stale && (
-                  <Notice>{t('catalog.metadataStale')}</Notice>
-                )}
-                <p className="muted">
-                  {t('catalog.metadataUpdated')}:{' '}
-                  <Time value={combinations.data.metadataStatus.lastSuccessAt} />
-                </p>
-              </>
-            )}
-          </div>
-        )}
-      </Section>
-      {selected &&
-        (detail.isPending ? (
-          <Loading />
-        ) : detail.error ? (
-          <ErrorNotice error={detail.error} retry={() => void detail.refetch()} />
-        ) : detail.data ? (
-          <CombinationDetail key={detail.data.id} choice={detail.data} refresh={refresh} />
-        ) : null)}
-      <details>
-        <summary>{t('gameAdmin.advancedRegistration')}</summary>
-        <RegisterCombination refresh={refresh} />
-      </details>
-    </div>
-  );
-}
-function CombinationDetail({ choice, refresh }: { choice: Combination; refresh: () => void }) {
-  const t = useT();
-  return (
-    <>
-      <Section title={`${choice.combination.release} · ${choice.combination.profile}`}>
-        <Details
-          values={[
-            [t('gameAdmin.choiceId'), choice.id],
-            [t('gameAdmin.mapping'), choice.mappingId],
-            [t('gameAdmin.family'), choice.combination.family],
-            [t('gameAdmin.build'), choice.combination.buildId ?? '—'],
-            [t('gameAdmin.loader'), choice.combination.loaderVersion ?? '—'],
-          ]}
-        />
-        {choice.capabilities && (
-          <Details
-            values={[
-              [
-                t('gameAdmin.authority'),
-                t(
-                  choice.supportAuthority === 'integration'
-                    ? 'gameAdmin.integrationAuthority'
-                    : 'gameAdmin.evidence',
-                ),
-              ],
-              ...(
-                [
-                  'installation',
-                  'directConnection',
-                  'gateway',
-                  'readiness',
-                  'playerIdle',
-                  'sleepWake',
-                  'playerManagement',
-                ] as const
-              ).map((capability): [string, string] => [
-                t(`gameAdmin.capability.${capability}`),
-                t(choice.capabilities?.[capability] ? 'gameUi.yes' : 'gameUi.no'),
-              ]),
-            ]}
-          />
-        )}
-        <ActionForm
-          onSubmit={async (data) => {
-            await api(`/v1/owner/minecraft/compatibility/${choice.id}/availability`, {
-              method: 'PUT',
-              body: { enabled: data.get('enabled') === 'on' },
-            });
-            refresh();
-          }}
-        >
-          <Check label={t('gameAdmin.offer')} name="enabled" defaultChecked={choice.enabled} />
-        </ActionForm>
-        <p className="muted">{t('gameAdmin.availabilityBoundary')}</p>
-      </Section>
-      <Section title={t('gameAdmin.evidence')}>
-        {choice.evidence.length ? (
-          choice.evidence.map((report) => (
-            <details key={report.runId}>
-              <summary>
-                <Time value={report.recordedAt} /> · {t(`gameAdmin.${report.kind}`)}
-              </summary>
-              <Details
-                values={[
-                  [t('gameAdmin.run'), report.runId],
-                  [
-                    t('gameAdmin.client'),
-                    report.client
-                      ? `${report.client.implementation} ${report.client.version}`
-                      : '—',
-                  ],
-                  [t('gameAdmin.server'), report.server?.uuid ?? '—'],
-                  [t('gameAdmin.digest'), report.evidenceSha256],
-                ]}
-              />
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t('gameAdmin.check')}</th>
-                      <th>{t('gameAdmin.result')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {checks.map((check) => (
-                      <tr key={check}>
-                        <td>{t(`gameAdmin.check.${check}`)}</td>
-                        <td>
-                          {t(
-                            report.checks[check] === true
-                              ? 'gameAdmin.passed'
-                              : report.checks[check] === false
-                                ? 'gameAdmin.failed'
-                                : 'web.unknown',
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          ))
-        ) : (
-          <Empty text={t('gameAdmin.noEvidence')} />
-        )}
-        <ActionForm
-          onSubmit={async (data) => {
-            const file = data.get('evidence');
-            if (!(file instanceof File) || file.size < 1 || file.size > 4 * 1024 * 1024)
-              throw new ApiError('validation_failed', 'gameAdmin.evidenceInvalid');
-            let raw: unknown;
-            try {
-              raw = JSON.parse(await file.text());
-            } catch {
-              throw new ApiError('validation_failed', 'gameAdmin.evidenceInvalid');
-            }
-            const envelope = z
-              .object({
-                report: z.record(z.string(), z.unknown()),
-                signature: z.string().regex(/^[a-f0-9]{64}$/),
-              })
-              .strict()
-              .safeParse(raw);
-            if (!envelope.success)
-              throw new ApiError('validation_failed', 'gameAdmin.evidenceInvalid');
-            await api(`/v1/owner/minecraft/compatibility/${choice.id}/evidence`, {
-              body: envelope.data,
-            });
-            refresh();
-          }}
-          submitLabel={t('gameAdmin.importEvidence')}
-        >
-          <Input
-            label={t('gameAdmin.signedReport')}
-            name="evidence"
-            type="file"
-            accept=".json"
-            required
-          />
-          <p className="muted">{t('gameAdmin.signatureBoundary')}</p>
-        </ActionForm>
-      </Section>
-    </>
-  );
-}
-export function MinecraftCatalogScan() {
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ['owner-minecraft-compatibility'] });
-    void queryClient.invalidateQueries({ queryKey: ['creation'] });
-  };
-  const t = useT();
-  const format = useFormat();
-  const mappingLabel = useMappingLabel();
-  const mappings = useQuery({
-    queryKey: ['runtime-mappings'],
-    queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
-  });
-  const eligible =
-    mappings.data?.filter((m) => m.game_id === 'minecraft' && m.runtime_id === 'vanilla') ?? [];
-  const [mappingId, setMappingId] = useState('');
-  const [all, setAll] = useState(false);
-  const [enableSupported, setEnableSupported] = useState(false);
-  const [batch, setBatch] = useState<CatalogBatch>();
-  const [measurement, setMeasurement] = useState<CatalogMeasurement>();
-  const [busy, setBusy] = useState(false);
-  const [cancelled, setCancelled] = useState(false);
-  const [failure, setFailure] = useState<unknown>();
-  const controller = useRef<AbortController | null>(null);
-  const mounted = useRef(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [visibleVariants, setVisibleVariants] = useState<Record<string, string[]>>({});
+  const [bulkBusy, setBulkBusy] = useState(false),
+    [bulkError, setBulkError] = useState<unknown>();
+  const [advanced, setAdvanced] = useState<'menu' | 'register' | 'protocol' | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Selection and scroll belong to the exact visible catalog scope.
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      controller.current?.abort();
+    setSelected(new Set());
+    setExpanded(new Set());
+    setVisibleVariants({});
+    setBulkError(undefined);
+    tableRef.current?.scrollTo({ top: 0 });
+  }, [scope, page, search, order, releaseType, availability]);
+  useEffect(() => {
+    if (advanced !== 'menu') return;
+    const close = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setAdvanced(null);
     };
-  }, []);
-  const selected = mappingId || (eligible.length === 1 ? eligible[0]?.id : '');
-  async function sync() {
-    if (!selected || controller.current) return;
-    const active = new AbortController();
-    controller.current = active;
-    setBusy(true);
-    setCancelled(false);
-    setFailure(undefined);
-    setMeasurement(undefined);
-    if (batch?.nextCursor === null) setBatch(undefined);
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [advanced]);
+  const selectedId = params.get('combination') ?? '';
+  useEffect(() => {
+    if (selectedId || !detailFocus.current) return;
+    const target = detailFocus.current;
+    detailFocus.current = null;
+    const frame = requestAnimationFrame(() => {
+      const fallback = document.querySelector<HTMLElement>('.minecraft-versions-search input');
+      (target.isConnected ? target : fallback)?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selectedId]);
+  const detail = useQuery({
+    queryKey: ['owner-minecraft-detail', selectedId],
+    enabled: Boolean(selectedId),
+    queryFn: ({ signal }) =>
+      api<Combination>(`/v1/owner/minecraft/compatibility/${selectedId}`, { signal }),
+  });
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['owner-minecraft-compatibility'] }),
+      queryClient.invalidateQueries({ queryKey: ['owner-minecraft-detail'] }),
+      queryClient.invalidateQueries({ queryKey: ['creation'] }),
+    ]);
+  };
+  const choose = (ids: string[], checked: boolean) => {
+    const next = new Set(selected);
+    for (const id of ids) {
+      if (checked) next.add(id);
+      else next.delete(id);
+    }
+    if (next.size > 500) {
+      setBulkError(new ApiError('validation_failed', 'versions.selectionLimit'));
+      return;
+    }
+    setSelected(next);
+    setBulkError(undefined);
+  };
+  async function bulk(enabled: boolean) {
+    if (!mapping || !selected.size || bulkBusy) return;
+    setBulkBusy(true);
+    setBulkError(undefined);
     try {
-      await syncCatalogPages({
-        previous: batch,
-        signal: active.signal,
-        request: (cursor, signal) =>
-          api<CatalogBatch>('/v1/owner/minecraft/catalog/sync', {
-            signal,
-            body: { mappingId: selected, all, enableSupported, cursor, limit: 20 },
-          }),
-        progress: (result, measured) => {
-          setBatch(result);
-          setMeasurement(measured);
-        },
+      await api('/v1/owner/minecraft/compatibility/availability', {
+        method: 'PUT',
+        body: { mappingId: mapping.id, ids: [...selected], enabled },
       });
+      setSelected(new Set());
+      await refresh();
     } catch (error) {
-      if (mounted.current) {
-        if (!active.signal.aborted) setFailure(error);
-        else setCancelled(true);
-      }
+      setBulkError(error);
     } finally {
-      controller.current = null;
-      if (mounted.current) {
-        setBusy(false);
-        refresh();
-      }
+      setBulkBusy(false);
     }
   }
+  const items = catalog.data?.items ?? [];
+  const ids = items.flatMap((group) =>
+    group.choice
+      ? [group.choice.id]
+      : expanded.has(group.release)
+        ? (visibleVariants[group.release] ?? [])
+        : [],
+  );
+  const busy = bulkBusy || catalog.isPlaceholderData;
+  const sort = (kind: 'name' | 'date') => {
+    const latest = pendingSearch.current.current().get('catalogOrder') ?? 'newest';
+    update(
+      {
+        catalogOrder:
+          kind === 'date'
+            ? latest === 'newest'
+              ? 'oldest'
+              : 'newest'
+            : latest === 'name-asc'
+              ? 'name-desc'
+              : 'name-asc',
+      },
+      true,
+    );
+  };
+  const pages = Math.max(1, Math.ceil((catalog.data?.total ?? 0) / 25));
   return (
-    <Section title={t('gameAdmin.syncCatalog')}>
-      <p className="muted">{t('ownerIntegration.scanNavigation')}</p>
-      {mappings.isPending ? (
-        <Loading />
-      ) : mappings.error ? (
-        <ErrorNotice error={mappings.error} />
-      ) : !eligible.length ? (
-        <Empty text={t('gameAdmin.noMapping')} />
-      ) : (
-        <div className="stack">
-          <Select
-            label={t('gameAdmin.mapping')}
-            value={selected}
-            disabled={busy}
-            onChange={(event) => {
-              setMappingId(event.target.value);
-              setBatch(undefined);
-              setCancelled(false);
-              setFailure(undefined);
+    <div className="minecraft-versions-workspace">
+      <fieldset className="integration-runtime-selector" aria-label={t('ownerIntegration.runtime')}>
+        {runtimes.map((r) => (
+          <button
+            type="button"
+            className="secondary"
+            key={r.id}
+            disabled={bulkBusy}
+            aria-pressed={runtime === r.id}
+            onClick={() => update({ runtime: r.id, mapping: '' }, true)}
+          >
+            {t(r.nameKey)}
+          </button>
+        ))}
+      </fieldset>
+      <div className="minecraft-versions-context">
+        <div className="minecraft-versions-mapping">
+          {eligible.length > 1 ? (
+            <Select
+              label={t('gameAdmin.mapping')}
+              disabled={bulkBusy}
+              value={mapping?.id ?? ''}
+              onChange={(e) => update({ mapping: e.target.value }, true)}
+            >
+              {eligible.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {mappingLabel(m, false)}
+                </option>
+              ))}
+            </Select>
+          ) : mapping ? (
+            <span>
+              <span className="muted">{t('gameAdmin.mapping')}</span>
+              <strong>{mappingLabel(mapping, false)}</strong>
+            </span>
+          ) : null}
+        </div>
+        {mapping?.enabled === false && (
+          <span id="minecraft-mapping-disabled" className="muted">
+            {t('versions.mappingDisabled')}
+          </span>
+        )}
+        <Tooltip content={t('versions.configureMapping')}>
+          <Link
+            className="minecraft-icon-button"
+            aria-label={t('versions.configureMapping')}
+            to={{
+              pathname: '/owner/integrations/minecraft/runtime',
+              search: `?runtime=${encodeURIComponent(runtime)}`,
             }}
           >
-            <option value="">{t('gameAdmin.mapping')}</option>
-            {eligible.map((mapping) => (
-              <option key={mapping.id} value={mapping.id}>
-                {mappingLabel(mapping)}
-              </option>
-            ))}
-          </Select>
-          <Check
-            label={t('gameAdmin.includeHistorical')}
-            checked={all}
-            disabled={busy}
-            onChange={(event) => {
-              setAll(event.target.checked);
-              setBatch(undefined);
-              setCancelled(false);
-              setFailure(undefined);
-            }}
+            <MinecraftAdminIcon kind="settings" />
+          </Link>
+        </Tooltip>
+      </div>
+      {mappings.error && (
+        <ErrorNotice error={mappings.error} retry={() => void mappings.refetch()} />
+      )}
+      {modules.error && <ErrorNotice error={modules.error} retry={() => void modules.refetch()} />}
+      <div className="minecraft-versions-toolbar">
+        <label className="minecraft-versions-search">
+          <span className="visually-hidden">{t('versions.search')}</span>
+          <input
+            disabled={bulkBusy}
+            type="search"
+            maxLength={200}
+            value={search}
+            placeholder={t('versions.search')}
+            onChange={(e) => update({ catalogSearch: e.target.value }, true)}
           />
-          <Check
-            label={t('gameAdmin.enableSupportedBatch')}
-            checked={enableSupported}
-            disabled={busy}
-            onChange={(event) => {
-              setEnableSupported(event.target.checked);
-              setBatch(undefined);
-              setCancelled(false);
-              setFailure(undefined);
-            }}
-          />
-          {failure !== undefined && <ErrorNotice error={failure} />}
-          {cancelled && <Notice>{t('gameAdmin.syncCancelled')}</Notice>}
-          <button type="button" disabled={busy || !selected} onClick={() => void sync()}>
-            {t(
-              busy
-                ? 'web.loading'
-                : batch?.nextCursor || cancelled || failure !== undefined
-                  ? 'gameAdmin.syncResume'
-                  : 'gameAdmin.syncCatalog',
-            )}
-          </button>
-          {busy && (
-            <button type="button" className="secondary" onClick={() => controller.current?.abort()}>
-              {t('web.cancel')}
+        </label>
+        <Select
+          label={t('catalog.releaseType')}
+          disabled={bulkBusy}
+          value={releaseType}
+          onChange={(e) => update({ 'catalog-releaseType': e.target.value }, true)}
+        >
+          <option value="">{t('versions.allTypes')}</option>
+          {['release', 'snapshot', 'old_beta', 'old_alpha', 'unknown'].map((type) => (
+            <option key={type} value={type}>
+              {t(`catalog.type.${type}`)}
+            </option>
+          ))}
+        </Select>
+        <Select
+          label={t('gameAdmin.availability')}
+          disabled={bulkBusy}
+          value={availability}
+          onChange={(e) => update({ 'catalog-availability': e.target.value }, true)}
+        >
+          <option value="">{t('versions.allAvailability')}</option>
+          <option value="enabled">{t('web.enabled')}</option>
+          <option value="disabled">{t('web.disabled')}</option>
+        </Select>
+        <span id="minecraft-catalog-scan-trigger" className="minecraft-scan-trigger" />
+        <div className="minecraft-versions-advanced" ref={menuRef}>
+          <Tooltip content={t('versions.advanced')}>
+            <button
+              type="button"
+              className="minecraft-icon-button"
+              aria-label={t('versions.advanced')}
+              aria-expanded={advanced === 'menu'}
+              onClick={() => setAdvanced(advanced === 'menu' ? null : 'menu')}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setAdvanced(null);
+                  e.stopPropagation();
+                }
+              }}
+            >
+              <MinecraftAdminIcon kind="more" />
             </button>
+          </Tooltip>
+          {advanced === 'menu' && (
+            <fieldset
+              className="minecraft-versions-menu"
+              aria-label={t('versions.advanced')}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  setAdvanced(null);
+                  menuRef.current?.querySelector('button')?.focus();
+                }
+              }}
+            >
+              <button type="button" onClick={() => setAdvanced('register')}>
+                {t('gameAdmin.advancedRegistration')}
+              </button>
+              <button type="button" onClick={() => setAdvanced('protocol')}>
+                {t('integrationConfig.protocolSource')}
+              </button>
+            </fieldset>
           )}
-          {(busy || batch) && (
-            <div className="stack">
-              <ScanProgress
-                label={t('gameAdmin.scanProgress')}
-                completed={batch ? (batch.nextCursor ?? batch.total) : undefined}
-                total={batch?.total}
-                status={
-                  batch
-                    ? t(
-                        busy
-                          ? 'gameAdmin.syncProgress'
-                          : batch.nextCursor === null
-                            ? 'gameAdmin.syncComplete'
-                            : 'gameAdmin.syncPartial',
-                        { count: batch.nextCursor ?? batch.total, total: batch.total },
-                      )
-                    : t('gameAdmin.scanPreparing')
-                }
-                estimate={
-                  busy
-                    ? measurement?.remainingSeconds != null
-                      ? t('gameAdmin.scanEstimate', {
-                          minutes: format.number(
-                            Math.max(1, Math.ceil(measurement.remainingSeconds / 60)),
-                            0,
-                          ),
-                        })
-                      : t('gameAdmin.scanEstimating')
-                    : undefined
-                }
-                logLabel={t('gameAdmin.scanLog')}
-              >
-                {batch && (
-                  <ul>
-                    {batch.items.map((item) => (
-                      <li key={item.version}>
-                        {item.version}:{' '}
-                        {t(
-                          item.status === 'registered' ? 'gameAdmin.registered' : 'web.unavailable',
+        </div>
+      </div>
+      <div id="minecraft-catalog-scan-progress" />
+      {bulkError !== undefined && <ErrorNotice error={bulkError} />}
+      {selected.size > 0 && (
+        <section
+          className="minecraft-versions-selection"
+          aria-label={t('versions.selectionActions')}
+        >
+          <strong>{t('versions.selected', { count: selected.size })}</strong>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => void bulk(true)}
+          >
+            {t('versions.enable')}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => void bulk(false)}
+          >
+            {t('versions.disable')}
+          </button>
+          <Tooltip content={t('versions.clearSelection')}>
+            <button
+              type="button"
+              className="minecraft-icon-button"
+              disabled={bulkBusy}
+              aria-label={t('versions.clearSelection')}
+              onClick={() => setSelected(new Set())}
+            >
+              <MinecraftAdminIcon kind="close" />
+            </button>
+          </Tooltip>
+          {bulkBusy && <span role="status">{t('web.loading')}</span>}
+        </section>
+      )}
+      {!mapping && !mappings.isPending ? (
+        <Empty text={t('gameAdmin.noMapping')} />
+      ) : catalog.isPending || mappings.isPending ? (
+        <Loading />
+      ) : catalog.error ? (
+        <ErrorNotice error={catalog.error} retry={() => void catalog.refetch()} />
+      ) : (
+        <>
+          <section
+            ref={tableRef}
+            className="minecraft-versions-table"
+            aria-label={t('gameAdmin.combinations')}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard users need to scroll the bounded catalog.
+            tabIndex={0}
+            aria-busy={catalog.isFetching}
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th className="minecraft-selection-cell">
+                    <input
+                      type="checkbox"
+                      aria-label={t('versions.selectPage')}
+                      checked={ids.length > 0 && ids.every((id) => selected.has(id))}
+                      disabled={busy || !ids.length}
+                      ref={(element) => {
+                        if (element)
+                          element.indeterminate =
+                            ids.some((id) => selected.has(id)) &&
+                            !ids.every((id) => selected.has(id));
+                      }}
+                      onChange={(e) => choose(ids, e.target.checked)}
+                    />
+                  </th>
+                  <th
+                    aria-sort={
+                      order === 'name-asc'
+                        ? 'ascending'
+                        : order === 'name-desc'
+                          ? 'descending'
+                          : 'none'
+                    }
+                  >
+                    <button type="button" disabled={bulkBusy} onClick={() => sort('name')}>
+                      {t('gameAdmin.version')}
+                      {order.startsWith('name-') && (
+                        <span aria-hidden="true">{order === 'name-asc' ? '↑' : '↓'}</span>
+                      )}
+                    </button>
+                  </th>
+                  <th
+                    aria-sort={
+                      order === 'newest' ? 'descending' : order === 'oldest' ? 'ascending' : 'none'
+                    }
+                  >
+                    <button type="button" disabled={bulkBusy} onClick={() => sort('date')}>
+                      {t('versions.published')}
+                      {(order === 'newest' || order === 'oldest') && (
+                        <span aria-hidden="true">{order === 'newest' ? '↓' : '↑'}</span>
+                      )}
+                    </button>
+                  </th>
+                  <th>{t('versions.java')}</th>
+                  <th>{t('versions.features')}</th>
+                  <th>{t('versions.creation')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.length ? (
+                  items.map((group) => (
+                    <Fragment key={group.release}>
+                      <tr
+                        data-release={group.release}
+                        data-expanded={expanded.has(group.release) || undefined}
+                      >
+                        <td className="minecraft-selection-cell">
+                          {group.choice && (
+                            <input
+                              type="checkbox"
+                              aria-label={t('versions.selectVersion', { version: group.release })}
+                              disabled={busy}
+                              checked={selected.has(group.choice.id)}
+                              onChange={(e) => {
+                                if (group.choice) choose([group.choice.id], e.target.checked);
+                              }}
+                            />
+                          )}
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="minecraft-version-name"
+                            aria-expanded={
+                              group.variantCount > 1 ? expanded.has(group.release) : undefined
+                            }
+                            onClick={() => {
+                              if (group.choice) update({ combination: group.choice.id });
+                              else
+                                setExpanded((old) => {
+                                  const next = new Set(old);
+                                  if (next.has(group.release)) next.delete(group.release);
+                                  else next.add(group.release);
+                                  return next;
+                                });
+                            }}
+                          >
+                            <span>
+                              {group.variantCount > 1 && <MinecraftAdminIcon kind="chevron" />}
+                              {group.release}
+                            </span>
+                            <small>{t(`catalog.type.${group.releaseType}`)}</small>
+                          </button>
+                        </td>
+                        <td>
+                          <ReleaseDate value={group.releaseTime} />
+                        </td>
+                        {group.choice ? (
+                          <>
+                            <td>{group.choice.combination.javaMajor}</td>
+                            <td>
+                              <FeatureIndicators choice={group.choice} />
+                            </td>
+                            <td>
+                              <CreationState choice={group.choice} />
+                            </td>
+                          </>
+                        ) : (
+                          <td colSpan={3} className="muted">
+                            {t('versions.variants', { count: group.variantCount })}
+                          </td>
                         )}
-                        {item.reason && <> — {t(`gameAdmin.catalogReason.${item.reason}`)}</>}
-                      </li>
-                    ))}
-                  </ul>
+                      </tr>
+                      {expanded.has(group.release) && mapping && (
+                        <VariantRows
+                          release={group.release}
+                          mappingId={mapping.id}
+                          runtime={runtime}
+                          availability={availability}
+                          releaseType={releaseType}
+                          onVisible={(ids) =>
+                            setVisibleVariants((old) => ({ ...old, [group.release]: ids }))
+                          }
+                          selected={selected}
+                          busy={busy}
+                          choose={choose}
+                          open={(id) => update({ combination: id })}
+                        />
+                      )}
+                    </Fragment>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="minecraft-empty">
+                      {t('web.empty')}
+                    </td>
+                  </tr>
                 )}
-              </ScanProgress>
-              {batch && <p>{t('gameAdmin.syncEvidence')}</p>}
-            </div>
+              </tbody>
+            </table>
+          </section>
+          <footer className="minecraft-versions-footer">
+            <span>{t('versions.count', { count: catalog.data?.total ?? 0 })}</span>
+            <nav aria-label={t('versions.pagination')}>
+              <button
+                type="button"
+                className="secondary"
+                disabled={bulkBusy || page <= 1 || catalog.isFetching}
+                onClick={() => update({ catalogPage: String(page - 1) })}
+              >
+                {t('web.previous')}
+              </button>
+              <span>{t('versions.page', { page, pages })}</span>
+              <button
+                type="button"
+                className="secondary"
+                disabled={bulkBusy || page >= pages || catalog.isFetching}
+                onClick={() => update({ catalogPage: String(page + 1) })}
+              >
+                {t('web.next')}
+              </button>
+            </nav>
+          </footer>
+        </>
+      )}
+      {catalog.data?.metadataStatus && (
+        <div className="minecraft-metadata-status">
+          {!catalog.data.metadataStatus.lastSuccessAt ? (
+            <Notice>{t('catalog.metadataMissing')}</Notice>
+          ) : catalog.data.metadataStatus.stale ? (
+            <Notice>{t('catalog.metadataStale')}</Notice>
+          ) : (
+            <span className="muted">
+              {t('catalog.metadataUpdated')}:{' '}
+              <Time value={catalog.data.metadataStatus.lastSuccessAt} />
+            </span>
           )}
         </div>
       )}
-    </Section>
-  );
-}
-function RegisterCombination({ refresh }: { refresh: () => void }) {
-  const t = useT();
-  const mappingLabel = useMappingLabel();
-  const mappings = useQuery({
-    queryKey: ['runtime-mappings'],
-    queryFn: ({ signal }) => api<Mapping[]>('/v1/owner/runtime-mappings', { signal }),
-  });
-  const [mappingId, setMappingId] = useState('');
-  const eligible = mappings.data?.filter((m) => m.game_id === 'minecraft') ?? [],
-    mapping = eligible.find((m) => m.id === mappingId);
-  const eggs = useQuery({
-    queryKey: ['runtime-eggs', mapping?.nest_id],
-    enabled: Boolean(mapping),
-    queryFn: ({ signal }) => api<Egg[]>(`/v1/owner/nests/${mapping?.nest_id}/eggs`, { signal }),
-  });
-  const egg = eggs.data?.find((egg) => egg.id === mapping?.egg_id),
-    variables = egg?.relationships?.variables?.data.map((v) => v.attributes.env_variable) ?? [];
-  const profile = mapping?.runtime_id;
-  async function register(data: FormData) {
-    if (!mapping || !egg || !variables.length)
-      throw new ApiError('integration_unavailable', 'gameAdmin.eggUnavailable');
-    const release = text(data, 'release'),
-      bindings = Object.fromEntries(
-        semantics.flatMap((semantic) => {
-          const value = text(data, `binding-${semantic}`);
-          return value ? [[semantic, value]] : [];
-        }),
-      );
-    const optional = (name: string) => text(data, name) || undefined;
-    await api('/v1/owner/minecraft/compatibility', {
-      body: {
-        mappingId,
-        runtime: {
-          release,
-          profile,
-          ...(data.has('buildId') ? { buildId: Number(data.get('buildId')) } : {}),
-          ...(optional('loaderVersion') ? { loaderVersion: optional('loaderVersion') } : {}),
-          ...(optional('installerVersion')
-            ? { installerVersion: optional('installerVersion') }
-            : {}),
-        },
-        binding: {
-          profile,
-          release,
-          ...(mapping.image_mode === 'integration'
-            ? {}
-            : {
-                image: mapping.docker_image,
-                imageJavaMajor: Number(data.get('imageJavaMajor')),
-              }),
-          declaredEggVariables: variables,
-          bindings,
-          fixedVariables: {},
-          installationKind: text(data, 'installationKind'),
-          artifactPaths: {
-            ...(optional('serverPath') ? { server: optional('serverPath') } : {}),
-            ...(optional('installerPath') ? { installer: optional('installerPath') } : {}),
-          },
-          supportedProperties: text(data, 'supportedProperties')
-            .split(/\r?\n/)
-            .map((v) => v.trim())
-            .filter(Boolean),
-        },
-      },
-    });
-    refresh();
-  }
-  return (
-    <Section title={t('gameAdmin.register')}>
-      {mappings.isPending ? (
-        <Loading />
-      ) : mappings.error ? (
-        <ErrorNotice error={mappings.error} />
-      ) : eligible.length === 0 ? (
-        <Empty text={t('gameAdmin.noMapping')} />
-      ) : (
-        <>
-          <Select
-            label={t('gameAdmin.mapping')}
-            value={mappingId}
-            onChange={(event) => setMappingId(event.target.value)}
-          >
-            <option value="">{t('gameUi.select')}</option>
-            {eligible.map((mapping) => (
-              <option key={mapping.id} value={mapping.id}>
-                {mappingLabel(mapping)}
-              </option>
-            ))}
-          </Select>
-          {mapping &&
-            (eggs.isPending ? (
-              <Loading />
-            ) : eggs.error ? (
-              <ErrorNotice error={eggs.error} />
-            ) : !egg ? (
-              <Notice>{t('gameAdmin.eggUnavailable')}</Notice>
-            ) : (
-              <ActionForm key={mappingId} onSubmit={register} submitLabel={t('gameAdmin.register')}>
-                <Details
-                  values={[
-                    [t('gameAdmin.runtime'), mapping.runtime_id],
-                    [t('gameAdmin.image'), mapping.docker_image],
-                    [t('gameAdmin.egg'), egg.name],
-                  ]}
-                />
-                <Input label={t('gameAdmin.version')} name="release" maxLength={96} required />
-                {(profile === 'paper' || profile === 'folia') && (
-                  <Input
-                    label={t('gameAdmin.build')}
-                    name="buildId"
-                    type="number"
-                    min={1}
-                    step={1}
-                    required
-                  />
+      {selectedId && (
+        <Dialog
+          open
+          title={detail.data?.combination.release ?? t('web.details')}
+          closeIcon
+          className="minecraft-version-drawer"
+          onClose={() => update({ combination: '' })}
+        >
+          {detail.isPending ? (
+            <Loading />
+          ) : detail.error ? (
+            <ErrorNotice error={detail.error} retry={() => void detail.refetch()} />
+          ) : (
+            detail.data && (
+              <CombinationDetail
+                key={detail.data.id}
+                choice={detail.data}
+                mappingLabel={mappingLabel(
+                  mappings.data?.find((m) => m.id === detail.data.mappingId),
+                  false,
                 )}
-                {(profile === 'fabric' || profile === 'forge') && (
-                  <Input
-                    label={t('gameAdmin.loader')}
-                    name="loaderVersion"
-                    maxLength={96}
-                    required
-                  />
-                )}
-                {profile === 'fabric' && (
-                  <Input
-                    label={t('gameAdmin.installerVersion')}
-                    name="installerVersion"
-                    maxLength={96}
-                    required
-                  />
-                )}
-                {mapping?.image_mode === 'integration' ? (
-                  <Notice>{t('infra.imageManaged')}</Notice>
-                ) : (
-                  <Input
-                    label={t('gameAdmin.java')}
-                    name="imageJavaMajor"
-                    type="number"
-                    min={8}
-                    max={100}
-                    step={1}
-                    required
-                  />
-                )}
-                <Select
-                  label={t('gameAdmin.installationKind')}
-                  name="installationKind"
-                  defaultValue={
-                    profile === 'fabric'
-                      ? 'fabric-installer'
-                      : profile === 'forge'
-                        ? 'forge-installer'
-                        : 'server-jar'
-                  }
-                >
-                  <option value="server-jar">{t('gameAdmin.serverJar')}</option>
-                  <option value="fabric-installer">Fabric</option>
-                  <option value="forge-installer">Forge</option>
-                </Select>
-                <Input
-                  label={t('gameAdmin.serverPath')}
-                  name="serverPath"
-                  maxLength={500}
-                  required={profile === 'vanilla' || profile === 'paper' || profile === 'folia'}
-                />
-                <Input label={t('gameAdmin.installerPath')} name="installerPath" maxLength={500} />
-                <details>
-                  <summary>{t('gameAdmin.variableBindings')}</summary>
-                  <div className="stack">
-                    {semantics.map((semantic) => (
-                      <Select
-                        key={semantic}
-                        label={t(`gameAdmin.binding.${semantic}`)}
-                        name={`binding-${semantic}`}
-                        required={semantic === 'release'}
-                      >
-                        <option value="">{t('gameAdmin.notBound')}</option>
-                        {variables.map((variable) => (
-                          <option key={variable} value={variable}>
-                            {variable}
-                          </option>
-                        ))}
-                      </Select>
-                    ))}
-                  </div>
-                </details>
-                <Textarea
-                  label={t('gameAdmin.propertyDeclaration')}
-                  name="supportedProperties"
-                  maxLength={100000}
-                />
-                <Notice>{t('gameAdmin.registrationBoundary')}</Notice>
-              </ActionForm>
-            ))}
-        </>
+                refresh={refresh}
+              />
+            )
+          )}
+        </Dialog>
       )}
-    </Section>
+      {(advanced === 'register' || advanced === 'protocol') && (
+        <Dialog
+          open
+          title={t(
+            advanced === 'register'
+              ? 'gameAdmin.advancedRegistration'
+              : 'integrationConfig.protocolSource',
+          )}
+          closeIcon
+          className="minecraft-advanced-dialog"
+          onClose={() => setAdvanced(null)}
+        >
+          {advanced === 'register' ? (
+            <RegisterCombination refresh={() => void refresh()} />
+          ) : (
+            <MinecraftProtocolSettings embedded />
+          )}
+        </Dialog>
+      )}
+    </div>
   );
 }
-
-function useMappingLabel() {
+function VariantRows({
+  release,
+  mappingId,
+  runtime,
+  availability,
+  releaseType,
+  onVisible,
+  selected,
+  busy,
+  choose,
+  open,
+}: {
+  release: string;
+  mappingId: string;
+  runtime: string;
+  availability: string;
+  releaseType: string;
+  onVisible: (ids: string[]) => void;
+  selected: Set<string>;
+  busy: boolean;
+  choose: (ids: string[], checked: boolean) => void;
+  open: (id: string) => void;
+}) {
   const t = useT();
-  const nodes = useQuery({
-    queryKey: ['owner-nodes'],
+  const [page, setPage] = useState(1);
+  const variants = useQuery({
+    queryKey: [
+      'owner-minecraft-compatibility',
+      'variants',
+      mappingId,
+      release,
+      availability,
+      releaseType,
+      page,
+    ],
+    staleTime: 60_000,
     queryFn: ({ signal }) =>
-      api<Array<{ id: string; pterodactyl_node_id: number }>>('/v1/owner/nodes', { signal }),
-    staleTime: 30_000,
+      api<{ items: Combination[]; total: number }>(
+        `/v1/owner/minecraft/compatibility?${new URLSearchParams(Object.entries({ view: 'summary', mappingId, runtime, release, availability, releaseType, page: String(page), pageSize: '25' }).filter(([, value]) => value !== ''))}`,
+        { signal },
+      ),
   });
-  const inventory = useQuery({
-    queryKey: ['owner-provider'],
-    queryFn: ({ signal }) =>
-      api<{ nodes: Array<{ id: number; name: string }> }>('/v1/owner/infrastructure', { signal }),
-    staleTime: 30_000,
-  });
-  return (mapping: Mapping | undefined, includeRuntime = true) => {
-    if (!mapping) return t('web.unavailable');
-    const id = nodes.data?.find((node) => node.id === mapping.node_id)?.pterodactyl_node_id;
-    const label = inventory.data?.nodes.find((node) => node.id === id)?.name;
-    return `${includeRuntime ? `${mapping.runtime_id} · ` : ''}${label ?? (id ? `${t('infra.providerNode')} ${id}` : mapping.id.slice(0, 8))}`;
-  };
+  const publishVisible = useRef(onVisible);
+  publishVisible.current = onVisible;
+  useEffect(() => {
+    publishVisible.current(variants.data?.items.map((choice) => choice.id) ?? []);
+  }, [variants.data]);
+  if (variants.isPending)
+    return (
+      <tr>
+        <td colSpan={6}>
+          <Loading />
+        </td>
+      </tr>
+    );
+  if (variants.error)
+    return (
+      <tr>
+        <td colSpan={6}>
+          <ErrorNotice error={variants.error} retry={() => void variants.refetch()} />
+        </td>
+      </tr>
+    );
+  return (
+    <>
+      {variants.data.items.map((choice) => (
+        <tr className="minecraft-variant-row" key={choice.id}>
+          <td>
+            <input
+              type="checkbox"
+              aria-label={t('versions.selectVariant', {
+                version: release,
+                variant:
+                  choice.combination.buildId ??
+                  choice.combination.loaderVersion ??
+                  choice.id.slice(0, 8),
+              })}
+              checked={selected.has(choice.id)}
+              disabled={busy}
+              onChange={(e) => choose([choice.id], e.target.checked)}
+            />
+          </td>
+          <td>
+            <button
+              type="button"
+              className="minecraft-version-name"
+              onClick={() => open(choice.id)}
+            >
+              <span>
+                {[choice.combination.buildId, choice.combination.loaderVersion]
+                  .filter(Boolean)
+                  .join(' · ') || choice.id.slice(0, 8)}
+              </span>
+            </button>
+          </td>
+          <td>
+            <ReleaseDate value={choice.releaseTime} />
+          </td>
+          <td>{choice.combination.javaMajor}</td>
+          <td>
+            <FeatureIndicators choice={choice} />
+          </td>
+          <td>
+            <CreationState choice={choice} />
+          </td>
+        </tr>
+      ))}
+      {variants.data.total > 25 && (
+        <tr>
+          <td colSpan={6}>
+            <div className="minecraft-variant-pagination">
+              <button
+                type="button"
+                className="secondary"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => p - 1)}
+              >
+                {t('web.previous')}
+              </button>
+              <span>
+                {t('versions.page', { page, pages: Math.ceil(variants.data.total / 25) })}
+              </span>
+              <button
+                type="button"
+                className="secondary"
+                disabled={page * 25 >= variants.data.total}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                {t('web.next')}
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
 }

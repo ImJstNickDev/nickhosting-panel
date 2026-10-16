@@ -188,7 +188,7 @@ function ResponseForm({
     </fieldset>
   );
 }
-export function MinecraftProtocolSettings() {
+export function MinecraftProtocolSettings({ embedded = false }: { embedded?: boolean }) {
   const t = useT(),
     settings = useSettings();
   if (settings.isPending) return <Loading />;
@@ -197,40 +197,45 @@ export function MinecraftProtocolSettings() {
     | { commit: string; sha256: string }
     | undefined;
   const locked = settings.data.config.lockedKeys.includes('minecraftProtocolSource');
-  return (
+  const form = (
+    <fieldset disabled={locked}>
+      {locked && <Notice>{t('owner.environmentLocked')}</Notice>}
+      <ActionForm
+        key={JSON.stringify(value)}
+        onSubmit={async (data) => {
+          const commit = String(data.get('commit') ?? '').trim(),
+            sha256 = String(data.get('sha256') ?? '').trim();
+          if (!commit && !sha256)
+            await api('/v1/owner/settings/minecraftProtocolSource', { method: 'DELETE' });
+          else
+            await api('/v1/owner/settings', {
+              method: 'PATCH',
+              body: { minecraftProtocolSource: { commit, sha256 } },
+            });
+          await settings.refetch();
+        }}
+      >
+        <Input
+          label={t('integrationConfig.commit')}
+          name="commit"
+          defaultValue={value?.commit ?? ''}
+          pattern="[a-f0-9]{40}"
+        />
+        <Input
+          label={t('integrationConfig.sha256')}
+          name="sha256"
+          defaultValue={value?.sha256 ?? ''}
+          pattern="[a-f0-9]{64}"
+        />
+      </ActionForm>
+    </fieldset>
+  );
+  return embedded ? (
+    form
+  ) : (
     <details>
       <summary>{t('integrationConfig.protocolSource')}</summary>
-      <fieldset disabled={locked}>
-        {locked && <Notice>{t('owner.environmentLocked')}</Notice>}
-        <ActionForm
-          key={JSON.stringify(value)}
-          onSubmit={async (data) => {
-            const commit = String(data.get('commit') ?? '').trim(),
-              sha256 = String(data.get('sha256') ?? '').trim();
-            if (!commit && !sha256)
-              await api('/v1/owner/settings/minecraftProtocolSource', { method: 'DELETE' });
-            else
-              await api('/v1/owner/settings', {
-                method: 'PATCH',
-                body: { minecraftProtocolSource: { commit, sha256 } },
-              });
-            await settings.refetch();
-          }}
-        >
-          <Input
-            label={t('integrationConfig.commit')}
-            name="commit"
-            defaultValue={value?.commit ?? ''}
-            pattern="[a-f0-9]{40}"
-          />
-          <Input
-            label={t('integrationConfig.sha256')}
-            name="sha256"
-            defaultValue={value?.sha256 ?? ''}
-            pattern="[a-f0-9]{64}"
-          />
-        </ActionForm>
-      </fieldset>
+      {form}
     </details>
   );
 }

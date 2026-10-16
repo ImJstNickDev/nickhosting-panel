@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import {
+  minecraftDigest,
+  minecraftManifest,
+  minecraftVerificationChecks,
+} from '@nickhosting/minecraft';
 import {
   importMinecraftEvidence,
   inspectMinecraftCombination,
@@ -86,7 +90,7 @@ async function eligibleChoice(attest = true) {
     .values({
       id: 'minecraft',
       version: '1.0.0',
-      manifest: {},
+      manifest: JSON.stringify(minecraftManifest),
     })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
@@ -407,6 +411,232 @@ describe('Minecraft backend API authorization and user projection', () => {
     expect((await app.request(`${endpoint}&page=bad`)).status).toBe(400);
     expect((await app.request(`${endpoint}&order=unsafe`)).status).toBe(400);
   });
+  it('groups release pages within one mapping and lazily pages every distinct configuration', async () => {
+    const sourceId = await eligibleChoice(false);
+    actor = fixture.owner;
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', sourceId)
+      .executeTakeFirstOrThrow();
+    const variants = Array.from({ length: 103 }, (_, index) => ({
+      id: randomUUID(),
+      mapping_id: source.mapping_id,
+      identity_digest: minecraftDigest({ sourceId, variant: index }),
+      mapping_digest: source.mapping_digest,
+      combination: JSON.stringify({ ...(source.combination as object), buildId: String(index) }),
+      resolved_runtime: '{}',
+      binding: JSON.stringify(source.binding),
+      enabled: index % 2 === 0,
+    }));
+    await fixture.db.insertInto('minecraft_combinations').values(variants).execute();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: randomUUID(),
+        mapping_id: source.mapping_id,
+        identity_digest: minecraftDigest({ sourceId, release: '1.20.4' }),
+        mapping_digest: source.mapping_digest,
+        combination: JSON.stringify({
+          ...(source.combination as object),
+          release: '1.20.4',
+          javaMajor: 17,
+        }),
+        resolved_runtime: '{}',
+        binding: JSON.stringify(source.binding),
+        enabled: true,
+      })
+      .execute();
+    const base = `/v1/owner/minecraft/compatibility?view=workspace&runtime=vanilla&mappingId=${fixture.mappingId}`;
+    const response = await app.request(`${base}&pageSize=1&order=name-desc`);
+    expect(response.status, await response.clone().text()).toBe(200);
+    const first = await response.json();
+    expect(first).toMatchObject({ total: 2, page: 1, pageSize: 1 });
+    expect(first.items[0]).toMatchObject({ release: '1.21.1', variantCount: 104 });
+    expect(first.items[0]).not.toHaveProperty('choice');
+    const second = await (await app.request(`${base}&pageSize=1&page=2&order=name-desc`)).json();
+    expect(second.items[0]).toMatchObject({
+      release: '1.20.4',
+      variantCount: 1,
+      choice: {
+        image: 'fixture/image:1',
+        creation: { state: 'available', reason: null },
+        capabilities: { installation: true },
+      },
+    });
+    const ids: string[] = [];
+    for (const page of [1, 2]) {
+      const result = await (
+        await app.request(
+          `/v1/owner/minecraft/compatibility?view=summary&mappingId=${fixture.mappingId}&release=1.21.1&pageSize=100&page=${page}`,
+        )
+      ).json();
+      expect(result.total).toBe(104);
+      ids.push(...result.items.map((item: { id: string }) => item.id));
+    }
+    expect(new Set(ids)).toEqual(new Set([sourceId, ...variants.map((row) => row.id)]));
+    expect(
+      (await (await app.request(`${base}&availability=disabled`)).json()).items[0].variantCount,
+    ).toBe(51);
+    expect((await (await app.request(`${base}&search=missing`)).json()).total).toBe(0);
+    expect(
+      (await app.request('/v1/owner/minecraft/compatibility?view=workspace&runtime=vanilla'))
+        .status,
+    ).toBe(400);
+    expect((await app.request(base.replace(fixture.mappingId, 'invalid'))).status).toBe(400);
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('reports ordinary creation eligibility independently from Owner switches and signed diagnostics', async () => {
+    const id = await eligibleChoice(false);
+    actor = fixture.owner;
+    const endpoint = `/v1/owner/minecraft/compatibility/${id}`;
+    const state = async () => (await (await app.request(endpoint)).json()).creation;
+    expect(await state()).toEqual({ state: 'available', reason: null });
+    expect((await (await app.request(endpoint)).json()).support).toBe('unverified');
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'private-testing', allowlist: [] })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect(await state()).toEqual({ state: 'private-testing', reason: null });
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'development' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'rollout-development' });
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'disabled-for-new-servers' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'rollout-disabled' });
+    await fixture.db
+      .updateTable('game_rollouts')
+      .set({ state: 'public' })
+      .where('integration_id', '=', 'minecraft')
+      .execute();
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: false })
+      .where('id', '=', id)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'choice-disabled' });
+    await fixture.db
+      .updateTable('minecraft_combinations')
+      .set({ enabled: true })
+      .where('id', '=', id)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ enabled: false })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'mapping-disabled' });
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ enabled: true })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({ enabled: false })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'node-disabled' });
+    await fixture.db
+      .updateTable('managed_nodes')
+      .set({ enabled: true })
+      .where('id', '=', fixture.nodeId)
+      .execute();
+    await fixture.db
+      .updateTable('runtime_egg_mappings')
+      .set({ startup: 'changed' })
+      .where('id', '=', fixture.mappingId)
+      .execute();
+    expect(await state()).toEqual({ state: 'blocked', reason: 'mapping-changed' });
+    expect(management).not.toHaveBeenCalled();
+  });
+  it('applies bulk availability atomically and rejects mixed scopes, duplicates and revoked Owners', async () => {
+    const id = await eligibleChoice(false);
+    actor = fixture.owner;
+    const source = await fixture.db
+      .selectFrom('minecraft_combinations')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirstOrThrow();
+    const other = randomUUID();
+    await fixture.db
+      .insertInto('minecraft_combinations')
+      .values({
+        id: other,
+        mapping_id: source.mapping_id,
+        identity_digest: minecraftDigest({ id, other }),
+        mapping_digest: source.mapping_digest,
+        combination: JSON.stringify({ ...(source.combination as object), buildId: 'other' }),
+        resolved_runtime: '{}',
+        binding: '{}',
+        enabled: true,
+      })
+      .execute();
+    const change = (value: unknown) =>
+      app.request('/v1/owner/minecraft/compatibility/availability', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(value),
+      });
+    const value = { mappingId: fixture.mappingId, ids: [id, other], enabled: false };
+    expect((await change({ ...value, ids: [id, randomUUID()] })).status).toBe(404);
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_combinations')
+          .select('enabled')
+          .where('id', '=', id)
+          .executeTakeFirstOrThrow()
+      ).enabled,
+    ).toBe(true);
+    expect((await change({ ...value, mappingId: randomUUID() })).status).toBe(404);
+    expect((await change({ ...value, ids: [id, id] })).status).toBe(400);
+    expect(
+      (await change({ ...value, ids: Array.from({ length: 501 }, () => randomUUID()) })).status,
+    ).toBe(400);
+    expect((await change(value)).status).toBe(204);
+    expect(
+      (
+        await fixture.db
+          .selectFrom('minecraft_combinations')
+          .select('enabled')
+          .where('id', 'in', value.ids)
+          .execute()
+      ).every((row) => row.enabled === false),
+    ).toBe(true);
+    expect((await change({ ...value, enabled: true })).status).toBe(204);
+    await fixture.db
+      .updateTable('user')
+      .set({ role: 'user' })
+      .where('id', '=', actor.actorUserId)
+      .execute();
+    try {
+      expect((await change(value)).status).toBe(403);
+      expect(
+        (
+          await fixture.db
+            .selectFrom('minecraft_combinations')
+            .select('enabled')
+            .where('id', '=', id)
+            .executeTakeFirstOrThrow()
+        ).enabled,
+      ).toBe(true);
+    } finally {
+      await fixture.db
+        .updateTable('user')
+        .set({ role: 'owner' })
+        .where('id', '=', actor.actorUserId)
+        .execute();
+    }
+    expect(management).not.toHaveBeenCalled();
+  });
   it('validates Owner catalog pagination after authorization and preserves empty legacy arrays', async () => {
     const endpoint = '/v1/owner/minecraft/compatibility';
     expect((await app.request(`${endpoint}?pageSize=101&after=bad`)).status).toBe(403);
@@ -436,6 +666,7 @@ describe('Minecraft backend API authorization and user projection', () => {
       ['POST', '/v1/owner/minecraft/catalog/sync'],
       ['POST', `/v1/owner/minecraft/compatibility/${id}/evidence`],
       ['PUT', `/v1/owner/minecraft/compatibility/${id}/availability`],
+      ['PUT', '/v1/owner/minecraft/compatibility/availability'],
     ] as const) {
       const result = await app.request(path, {
         method,

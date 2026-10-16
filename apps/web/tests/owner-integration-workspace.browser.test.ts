@@ -253,14 +253,19 @@ describe('Owner integration workspace (real components, isolated API responses)'
   it('keeps a running scan and catalog filters across tabs without fetching heavy pages twice', async () => {
     await page.goto(`${origin}owner/integrations/minecraft/versions?catalogSearch=26.1`);
     await check(page.getByRole('searchbox')).toHaveValue('26.1');
-    await page.getByRole('button', { name: 'Discover Vanilla versions', exact: true }).click();
+    await page.getByRole('button', { name: 'Detect versions', exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Detect versions', exact: true })
+      .click();
     await check.poll(() => syncCount).toBe(1);
     await page.getByRole('navigation').getByRole('link', { name: 'General', exact: true }).click();
     finishScan?.();
     await check.poll(() => syncCount).toBe(2);
     await page.getByRole('navigation').getByRole('link', { name: 'Versions', exact: true }).click();
     await check(page.getByRole('searchbox')).toHaveValue('26.1');
-    await check(page.getByText('26.2:', { exact: false })).toBeVisible();
+    await page.getByRole('button', { name: 'View scan log', exact: true }).click();
+    await check(page.getByText('26.2', { exact: true })).toBeVisible();
     expect(reads.filter((path) => path === '/v1/owner/runtime-mappings')).toHaveLength(1);
   });
   it('preserves rapid keyboard clears and independent filter changes', async () => {
@@ -272,10 +277,10 @@ describe('Owner integration workspace (real components, isolated API responses)'
     await search.press('Backspace');
     await page.getByLabel('Version type', { exact: true }).selectOption('release');
     await page.getByLabel('Version type', { exact: true }).selectOption('');
-    await page.getByLabel('Sort by', { exact: true }).selectOption('oldest');
+    await page.getByRole('button', { name: 'Published', exact: true }).click();
     await check.poll(() => new URL(page.url()).searchParams.get('catalogOrder')).toBe('oldest');
-    expect(new URL(page.url()).searchParams.get('catalogSearch')).toBe('');
-    expect(new URL(page.url()).searchParams.get('catalog-releaseType')).toBe('');
+    expect(new URL(page.url()).searchParams.get('catalogSearch') ?? '').toBe('');
+    expect(new URL(page.url()).searchParams.get('catalog-releaseType') ?? '').toBe('');
     await check(search).toHaveValue('');
     await check(page.getByLabel('Version type', { exact: true })).toHaveValue('');
   });

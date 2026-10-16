@@ -30,10 +30,7 @@ export function getGameFileIcon(gameId: string | undefined, name: string): strin
 
 // Owner executable contributions are bundled first-party imports. Metadata never imports code.
 import { lazy } from 'react';
-import {
-  MinecraftProtocolSettings,
-  MinecraftResponseSettings,
-} from './integration-game-settings.js';
+import { MinecraftResponseSettings } from './integration-game-settings.js';
 
 const MinecraftVersions = lazy(() =>
   import('./minecraft-admin.js').then((module) => ({ default: module.OwnerMinecraftPage })),
@@ -47,7 +44,6 @@ const ownerComponents = new Map([
     {
       Component: MinecraftVersions,
       Background: MinecraftScan,
-      Settings: MinecraftProtocolSettings,
     },
   ],
 ]);

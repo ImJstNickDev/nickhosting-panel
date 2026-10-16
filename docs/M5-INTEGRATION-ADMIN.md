@@ -156,3 +156,74 @@ findings. Reviewed screenshots:
 [desktop EN](screenshots/m5/runtime-mapping-desktop-en.png),
 [mobile IT](screenshots/m5/runtime-mapping-mobile-it.png),
 [mobile variables](screenshots/m5/runtime-mapping-mobile-it-variables.png).
+
+## Versions workspace refinement (2026-10-16)
+
+Versions shares the runtime context with Runtime and shows the selected association
+as node and egg. A single association is plain context; several associations use
+one selector. The catalog stays within a bounded scroll area, with search,
+release-type and Owner-enabled filters. Version/date headings control sorting;
+newest publication date is the default. Each release appears once, with multiple
+immutable configurations expanded only when needed. Selection operates on concrete
+visible configurations and updates availability through one bounded atomic API.
+
+The Creation column reports effective ordinary-user catalog eligibility. Owner
+intent, rollout, mapping validity and required evidence remain distinct. Declared
+Gateway/sleep features are concise indicators; the side drawer shows their full
+meaning, resolved Java/image, actionable blockers, recorded reports and technical
+identities. Reports and their import form are disclosures. An absent local report
+never relabels a compiled supported Vanilla release as unsupported. Capacity and
+live provider readiness still belong to creation/admission, not this static list.
+
+Detect versions opens a small releases/all-versions choice for Vanilla. Progress
+uses acknowledged batches and measured estimates; its log is optional and bounded.
+The coordinator remains alive across integration tabs without retaining the heavy
+catalog. Normal scans preserve Owner-disabled versions. Explicit Enable/Disable
+is separate. Advanced actions contain manual registration and protocol metadata
+configuration, loaded on demand. These changes do not introduce a new provider
+integration, database migration or background durable job.
+
+Independent technical/accessibility/content review found and corrected filtered
+variant leakage, pending bulk-context changes, discovery on disabled mappings,
+ambiguous declaration/evidence wording, feature-icon ARIA semantics and drawer
+focus restoration (including when its filtered origin row disappears). Reviewed
+real Firefox desktop EN and mobile IT screenshots show a bounded catalog and
+readable drawer without horizontal page overflow. Mobile table scrolling is
+contained; consolidating its filter layout further is optional polish.
+
+Validation boundaries remain explicit: browser API responses use isolated
+fixtures, and the real-handler journeys use disposable schemas plus simulated
+provider metadata. A pre-existing browser fixture sampled the real host's load,
+which caused a provisioning `resources_unavailable` failure during concurrent
+checks. The fixture now supplies deterministic virtual-host observations through
+the existing sampler while retaining real freshness, atomic admission and
+configured capacity-denial logic. No production observation/admission rule was
+changed. The initial failed browser run also caught the focus/ARIA defects above
+and an outdated scan-log text locator; those attempts are not reported as passes.
+
+Reviewed screenshots:
+[catalog desktop EN](screenshots/m5/versions-catalog-desktop-en.png),
+[catalog mobile IT](screenshots/m5/versions-catalog-mobile-it.png),
+[detail desktop EN](screenshots/m5/versions-detail-desktop-en.png),
+[detail mobile IT](screenshots/m5/versions-detail-mobile-it.png),
+[scan desktop EN](screenshots/m5/versions-scan-desktop-en.png).
+
+The development API, worker, Vite and ingress were inspected read-only after the
+changes: all healthy; HTTPS returned 200. No container restart or configuration
+change was needed. No test game server or external resource was created. This
+refinement needs no migration; the separately documented content migration 035
+approval and SFTPGo #18 release boundary are unchanged. Rollback: revert this source
+change and its API/UI projections together; existing registrations and availability
+remain in the database.
+
+Final focused validation:
+
+- Unit: `pnpm exec vitest run apps/web/src/features/catalog-sync.test.ts apps/web/src/features/game-ui.test.ts` — 17 passed; `minecraft-admin-navigation.test.ts` — 4 passed.
+- Database/API: `scripts/test-env.ts --m2` with `vitest.integration.config.ts`, `apps/api/src/minecraft.integration.test.ts` — 22 passed; `packages/server-management/src/minecraft-registry.integration.test.ts` — 8 passed. Ordinary creation authorization, grouped pagination, disabled/changed mapping reasons, bulk atomicity/bounds and revoked sessions are covered.
+- Browser: `vitest.browser.config.ts`, `minecraft-versions-workspace.browser.test.ts` and `owner-integration-workspace.browser.test.ts` — all 11 cases covered by passing focused runs, including scan resume, tab continuity, atomic bulk failures, detail focus and EN/IT mobile axe checks. Initial run: six passes/three failures; corrected follow-up: four passes; final focus follow-up: two passes. The additional filter regression also passes after the navigation correction.
+- Real-handler browser subset: `scripts/test-env.ts --m2` with `vanilla-catalog.browser.test.ts -t 'discovers declared|completes later|keeps a large|shows a recognized'` covers four cases across passing runs. The first post-fixture run passed three and exposed an intermittent clear-filter/sort race; a bounded pending-URL helper now preserves newer field changes across intermediate router commits. Four unit cases cover that race and browser Back/external navigation. Final ordered discovery/scan/catalog follow-up passes three cases; no unrelated installer/screens were rerun.
+- Shared fixture regression: `platform.browser.test.ts -t 'rejects insufficient physical capacity'` — one passed, 11 unrelated cases deselected. Real resource denial still works with virtual-host observations.
+- Root/web/browser TypeScript checks, production build and compiled English/Italian/pseudolocale parity pass (1,845 keys). Focused Biome has no errors; pre-existing warnings in the translation compiler remain. The existing document-library bundle-size advisory remains.
+
+These are focused runs, not a repeat of the historical M1–M5 matrix. No remaining
+must-fix findings from independent code, accessibility and screenshot/content review.

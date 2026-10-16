@@ -211,7 +211,6 @@ function IntegrationWorkspace({ module, section }: { module: Module; section: st
               </Suspense>
             </div>
           ))}
-        {active && <active.Settings />}
       </div>
     </Page>
   );

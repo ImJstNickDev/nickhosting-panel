@@ -3,6 +3,7 @@ import { compileMessageOrThrow } from '@lingui/message-utils/compileMessage';
 import { en, it } from '../packages/i18n/src/catalogs.js';
 import { contentSettingsWebMessages } from '../packages/i18n/src/content-settings-web.js';
 import { gameUiWebMessages } from '../packages/i18n/src/game-ui-web.js';
+import { minecraftAdminWebMessages } from '../packages/i18n/src/minecraft-admin-web.js';
 import { ownerInfraWebMessages } from '../packages/i18n/src/owner-infra-web.js';
 import { ownerIntegrationWebMessages } from '../packages/i18n/src/owner-integration-web.js';
 import { ownerWebMessages } from '../packages/i18n/src/owner-web.js';
@@ -22,6 +23,7 @@ for (const [key, pair] of Object.entries({
   ...serviceWebMessages,
   ...ownerWebMessages,
   ...ownerIntegrationWebMessages,
+  ...minecraftAdminWebMessages,
   ...gameUiWebMessages,
   ...ownerInfraWebMessages,
   ...viewerWebMessages,

@@ -23,6 +23,7 @@ import {
   type ManagementRuntime,
   minecraftCatalog,
   minecraftContentWipePreview,
+  minecraftOwnerCombinationDetail,
   operationSchema,
   ownerOnly,
   parse,
@@ -31,6 +32,7 @@ import {
   registerMinecraftCombination,
   requireMinecraftChoice,
   setMinecraftAvailability,
+  setMinecraftBulkAvailability,
   syncMinecraftCatalog,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
@@ -84,27 +86,13 @@ export function registerMinecraftRoutes(
       await syncMinecraftCatalog(db, (await management()).adapter, context, await body(c), env),
     );
   });
-  const detail = (choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>) => ({
-    id: choice.row.id,
-    mappingId: choice.row.mapping_id,
-    enabled: choice.row.enabled,
-    combination: choice.combination,
-    runtime: choice.row.resolved_runtime,
-    binding: choice.row.binding,
-    identityDigest: choice.row.identity_digest,
-    mappingDigest: choice.mappingDigest,
-    support: choice.support,
-    supportAuthority: choice.supportAuthority,
-    capabilities: choice.capabilities,
-    evidence: choice.evidence,
-  });
   app.get('/v1/owner/minecraft/compatibility', async (c) => {
     await owner(c);
     return c.json(await listMinecraftOwnerCombinations(db, c.req.query(), env));
   });
   app.get('/v1/owner/minecraft/compatibility/:id', async (c) => {
     await owner(c);
-    return c.json(detail(await inspectMinecraftCombination(db, c.req.param('id'), env)));
+    return c.json(await minecraftOwnerCombinationDetail(db, c.req.param('id'), env));
   });
   app.post('/v1/owner/minecraft/compatibility', async (c) => {
     const context = await owner(c);
@@ -118,6 +106,10 @@ export function registerMinecraftRoutes(
       ),
       201,
     );
+  });
+  app.put('/v1/owner/minecraft/compatibility/availability', async (c) => {
+    await setMinecraftBulkAvailability(db, await owner(c), await body(c), env);
+    return c.body(null, 204);
   });
   app.put('/v1/owner/minecraft/compatibility/:id/availability', async (c) => {
     await setMinecraftAvailability(db, await owner(c), c.req.param('id'), await body(c), env);

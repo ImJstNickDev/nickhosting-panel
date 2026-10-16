@@ -152,18 +152,23 @@ describe('Owner automatic Vanilla discovery', () => {
     provider?.dispose();
     await fixture?.close();
   });
-  async function discover(waitForCompletion = true) {
+  async function discover(waitForCompletion = true, all = false) {
     const response = owner.waitForResponse(
       (item) =>
         item.request().method() === 'POST' &&
         item.url().endsWith('/v1/owner/minecraft/catalog/sync'),
     );
-    await owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }).click();
+    await owner.getByRole('button', { name: 'Detect versions', exact: true }).click();
+    const dialog = owner.getByRole('dialog', { name: 'Detect versions', exact: true });
+    await dialog
+      .getByRole('button', { name: all ? 'All versions' : 'Releases only', exact: true })
+      .click();
+    await dialog.getByRole('button', { name: 'Detect versions', exact: true }).click();
     const result = await response;
     expect(result.status()).toBe(200);
     if (waitForCompletion)
       await browserExpect(
-        owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }),
+        owner.getByRole('button', { name: 'Detect versions', exact: true }),
       ).toBeEnabled();
     return result.json() as Promise<{
       items: { id?: string; status: string; version: string; reason?: string }[];
@@ -183,6 +188,7 @@ describe('Owner automatic Vanilla discovery', () => {
       status: 'unavailable',
       reason: 'minecraft_server_download_unavailable',
     });
+    await owner.getByRole('button', { name: 'View scan log', exact: true }).click();
     await browserExpect(
       owner.getByText('No dedicated-server download is available.', { exact: false }),
     ).toBeVisible();
@@ -208,16 +214,13 @@ describe('Owner automatic Vanilla discovery', () => {
         )
         .execute(),
     ).toEqual([]);
-    const directRow = owner
-      .getByRole('row')
-      .filter({ has: owner.getByRole('cell', { name: '1.21.11', exact: true }) });
-    await browserExpect(
-      directRow.getByRole('cell', { name: 'Supported by integration', exact: true }),
-    ).toBeVisible();
-    await directRow.getByRole('button', { name: 'View details', exact: true }).click();
-    await browserExpect(owner.getByText('Trusted integration', { exact: true })).toBeVisible();
-    await browserExpect(owner.getByText('Gateway connection', { exact: true })).toBeVisible();
-    await browserExpect(owner.getByText('Automatic sleep/wake', { exact: true })).toBeVisible();
+    const directRow = owner.locator('tr[data-release="1.21.11"]');
+    await browserExpect(directRow).toContainText('Available');
+    await directRow.getByRole('button').click();
+    const detail = owner.getByRole('dialog', { name: '1.21.11', exact: true });
+    await browserExpect(detail.getByText('Gateway connection', { exact: true })).toBeVisible();
+    await browserExpect(detail.getByText('Automatic sleep/wake', { exact: true })).toBeVisible();
+    await owner.keyboard.press('Escape');
     const choices = (await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')) as {
       version: string;
       capabilities: { installation: boolean; gateway: boolean; sleepWake: boolean };
@@ -237,14 +240,33 @@ describe('Owner automatic Vanilla discovery', () => {
         rows.map((row) => row.id),
       )
       .execute();
-    await owner
-      .getByRole('checkbox', {
-        name: 'Also enable previously disabled supported versions',
-        exact: true,
-      })
-      .check();
     await discover();
-    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(2);
+    expect(await journeyRequest(fixture, identities.user, '/v1/minecraft/choices')).toHaveLength(0);
+    // Explicit bulk reenable is separate from a normal scan.
+    await owner.getByRole('checkbox', { name: 'Select 1.21.11', exact: true }).check();
+    const group = owner.locator('tr[data-release="26.1"]');
+    if (await group.getByRole('checkbox').count()) await group.getByRole('checkbox').check();
+    else {
+      await group.getByRole('button').click();
+      const scanned = result.items.find((item) => item.version === '26.1')?.id;
+      if (!scanned) throw new Error('Missing scanned combination');
+      await owner
+        .locator('.minecraft-variant-row')
+        .filter({ has: owner.getByRole('button', { name: scanned.slice(0, 8), exact: true }) })
+        .getByRole('checkbox')
+        .check();
+    }
+    await owner.getByRole('button', { name: 'Enable', exact: true }).click();
+    await browserExpect(
+      owner.getByRole('region', { name: 'Selected versions', exact: true }),
+    ).toHaveCount(0);
+    // Exact desired rows may share a release with the legacy fixture binding.
+    const afterEnable = (await journeyRequest(
+      fixture,
+      identities.user,
+      '/v1/minecraft/choices',
+    )) as unknown[];
+    expect(afterEnable).toHaveLength(2);
     expect(provider.remoteCount()).toBe(1);
     await fixture.screenshot(owner, 'vanilla-declarations-owner-desktop-en');
     const accessibility = await new AxeBuilder({ page: owner })
@@ -487,14 +509,7 @@ describe('Owner automatic Vanilla discovery', () => {
     expect(requests.filter((url) => url === minecraftManifestUrl)).toHaveLength(1);
     expect(pageErrors).toEqual([]);
   });
-  it('completes later pages beyond a snapshot-only first page and restores explicitly enabled stable choices', async () => {
-    await fixture.database.db
-      .updateTable('minecraft_combinations')
-      .set({ enabled: false })
-      .execute();
-    await owner
-      .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
-      .check();
+  it('completes later pages beyond a snapshot-only first page and preserves enabled stable choices', async () => {
     let releasePage: () => void = () => {};
     const heldPage = new Promise<void>((resolve) => {
       releasePage = resolve;
@@ -503,7 +518,7 @@ describe('Owner automatic Vanilla discovery', () => {
       if (route.request().postDataJSON()?.cursor === 40) await heldPage;
       await route.continue();
     });
-    const scan = discover(false);
+    const scan = discover(false, true);
     try {
       await browserExpect(
         owner.getByRole('progressbar', { name: 'Version discovery progress' }),
@@ -515,7 +530,7 @@ describe('Owner automatic Vanilla discovery', () => {
     }
     const firstPage = await scan;
     await browserExpect(
-      owner.getByRole('button', { name: 'Discover Vanilla versions', exact: true }),
+      owner.getByRole('button', { name: 'Detect versions', exact: true }),
     ).toBeEnabled();
     await owner.unroute('**/v1/owner/minecraft/catalog/sync');
     expect(firstPage.items).toHaveLength(20);
@@ -533,11 +548,11 @@ describe('Owner automatic Vanilla discovery', () => {
   it('keeps a large Owner catalog bounded, filters it and orders releases by official dates', async () => {
     const region = owner.getByRole('region', { name: 'Runtime combinations', exact: true });
     await browserExpect(region.getByRole('row')).toHaveCount(26);
-    await browserExpect(region.getByRole('row').nth(1).getByRole('cell').first()).toHaveText(
-      '25w41a',
-    );
+    await browserExpect(
+      region.locator('tr[data-release]').first().locator('.minecraft-version-name > span'),
+    ).toHaveText('25w41a');
     const height = await region.evaluate((element) => element.getBoundingClientRect().height);
-    expect(height).toBeLessThanOrEqual(420);
+    expect(height).toBeLessThanOrEqual(700);
     expect(await region.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
       true,
     );
@@ -546,18 +561,18 @@ describe('Owner automatic Vanilla discovery', () => {
     await owner.getByRole('button', { name: 'Next', exact: true }).click();
     await browserExpect.poll(() => region.evaluate((element) => element.scrollTop)).toBe(0);
     await owner.getByLabel('Version type', { exact: true }).selectOption('release');
-    await browserExpect(region.getByRole('row')).toHaveCount(4);
+    await browserExpect(region.locator('tr[data-release]')).toHaveCount(2);
     await owner.getByLabel('Availability', { exact: true }).selectOption('enabled');
     await browserExpect(region.getByRole('row')).toHaveCount(3);
     await owner.getByLabel('Search versions', { exact: true }).fill('1.21');
     await browserExpect(region.getByRole('row')).toHaveCount(2);
     await owner.getByLabel('Search versions', { exact: true }).fill('');
     await owner.getByLabel('Version type', { exact: true }).selectOption('');
-    await owner.getByLabel('Sort by', { exact: true }).selectOption('oldest');
-    await browserExpect(region.getByRole('row').nth(1).getByRole('cell').first()).toHaveText(
-      '25w01a',
-    );
-    await owner.getByLabel('Sort by', { exact: true }).selectOption('newest');
+    await owner.getByRole('button', { name: 'Published', exact: true }).click();
+    await browserExpect(
+      region.locator('tr[data-release]').first().locator('.minecraft-version-name > span'),
+    ).toHaveText('25w01a');
+    await owner.getByRole('button', { name: 'Published', exact: true }).click();
     await owner.evaluate(() => window.scrollTo(0, 0));
     await fixture.screenshot(owner, 'catalog-browser-desktop-en');
     expect(
@@ -568,6 +583,8 @@ describe('Owner automatic Vanilla discovery', () => {
       ).violations,
     ).toEqual([]);
     const log = owner.getByRole('log', { name: 'Checked versions', exact: true });
+    if (!(await log.isVisible()))
+      await owner.getByRole('button', { name: 'View scan log', exact: true }).click();
     expect(await log.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
     expect(
       await log.evaluate((element) => element.getBoundingClientRect().height),
@@ -579,13 +596,6 @@ describe('Owner automatic Vanilla discovery', () => {
     await owner.setViewportSize({ width: 390, height: 844 });
     await owner.goto(`${fixture.origin}/owner/integrations/minecraft/versions`);
     await owner.getByLabel('Cerca versioni', { exact: true }).fill('25w');
-    await owner
-      .getByRole('checkbox', { name: 'Includi snapshot e versioni storiche', exact: true })
-      .check();
-    await owner.getByRole('button', { name: 'Scopri versioni Vanilla', exact: true }).click();
-    await browserExpect(
-      owner.getByRole('button', { name: 'Scopri versioni Vanilla', exact: true }),
-    ).toBeEnabled();
     await owner.evaluate(() => window.scrollTo(0, 0));
     await fixture.screenshot(owner, 'catalog-browser-mobile-it');
     expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
@@ -711,11 +721,10 @@ describe('Owner automatic Vanilla discovery', () => {
     const variable = egg.relationships?.variables?.data[0]?.attributes;
     if (!variable) throw new Error('Missing isolated egg variable');
     variable.env_variable = 'UNRECOGNIZED_VERSION';
-    // Scanning options intentionally survive tab navigation; test this error for stable releases.
-    await owner
-      .getByRole('checkbox', { name: 'Include snapshots and historical versions', exact: true })
-      .uncheck();
     const result = await discover();
+    const log = owner.getByRole('log', { name: 'Checked versions', exact: true });
+    if (!(await log.isVisible()))
+      await owner.getByRole('button', { name: 'View scan log', exact: true }).click();
     expect(
       result.items.filter((item) => item.reason === 'minecraft_egg_contract_unsupported'),
     ).toHaveLength(2);

@@ -16,7 +16,11 @@ import type {
   ServerFile,
 } from '@nickhosting/pterodactyl-adapter';
 import { PterodactylError } from '@nickhosting/pterodactyl-adapter';
-import { createManagedServer, createManagementRuntime } from '@nickhosting/server-management';
+import {
+  createManagedServer,
+  createManagementRuntime,
+  observeLocalHost,
+} from '@nickhosting/server-management';
 import {
   browserLevelDat,
   browserMinecraft,
@@ -791,6 +795,38 @@ export async function installBrowserFixtures(
       },
     },
   });
+  // This host exists only in the disposable schema, just like its provider and
+  // containers. Observe that virtual host instead of allowing concurrent compiler
+  // load on the test runner to reject an otherwise valid fixture installation.
+  // Keep the real observation schema/fingerprint/freshness and atomic admission.
+  const refreshFixtureObservations = async (connection = db) => {
+    await observeLocalHost(connection, hostId, observerId, {}, env, async () => ({
+      totalMemoryMiB: memoryLimit,
+      availableMemoryMiB: memoryLimit,
+      cpuCapacityPercent: cpuLimit,
+      cpuBusyPercent: 0,
+      availableDiskMiB: 1000000,
+      observedAt: new Date().toISOString(),
+    }));
+  };
+  management.refreshObservations = refreshFixtureObservations;
+  const installationAdmission = management.lifecycle.reserveInstallation;
+  const startPreparation = management.lifecycle.prepareStartAdmission;
+  const startAdmission = management.lifecycle.reserveStart;
+  if (!installationAdmission || !startPreparation || !startAdmission)
+    throw new Error('Browser fixture requires the real lifecycle admission hooks');
+  management.lifecycle.reserveInstallation = async (...args) => {
+    await refreshFixtureObservations(args[2]);
+    await installationAdmission(...args);
+  };
+  management.lifecycle.prepareStartAdmission = async (...args) => {
+    await refreshFixtureObservations(args[2]);
+    return startPreparation(...args);
+  };
+  management.lifecycle.reserveStart = async (...args) => {
+    await refreshFixtureObservations(args[3]);
+    await startAdmission(...args);
+  };
   // The provider fixture has no 20-second Panel cache. Use the existing isolated
   // lifecycle clock hook, not altered job outcomes or replaced production logic.
   Object.assign(management.lifecycle, { settleMs: 0 });

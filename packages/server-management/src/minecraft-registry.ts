@@ -359,20 +359,65 @@ function assertLoadedMinecraftChoice(
     ).canCreate
   )
     throw new DomainError('forbidden');
-  // A declaration does not authorize changing the frozen provider/runtime identity.
-  if (choice.row.mapping_digest !== choice.mappingDigest)
-    throw new DomainError('integration_unavailable');
-  assertMinecraftChoice({
-    combination: choice.combination,
-    enabled: choice.row.enabled && choice.mapping.enabled,
-    mappingDigest: choice.mappingDigest,
-    choiceDigest: choice.row.identity_digest,
-    evidence: choice.evidence,
-    privateTester:
-      context.sessionType === 'regular' &&
+  const reason = minecraftChoiceBlockReason(
+    choice,
+    context.sessionType === 'regular' &&
       rollout.state === 'private-testing' &&
       (context.role === 'owner' || rollout.allowlist.includes(context.subjectUserId)),
-  });
+  );
+  if (reason) throw new DomainError('integration_unavailable');
+}
+
+/** Shared static eligibility for both the real creation contract and Owner
+ * diagnostics. This neither probes the provider nor predicts capacity admission. */
+function minecraftChoiceBlockReason(
+  choice: ReturnType<typeof inspectLoadedCombination>,
+  privateTester: boolean,
+): 'choice-disabled' | 'mapping-disabled' | 'mapping-changed' | 'evidence-required' | null {
+  if (!choice.row.enabled) return 'choice-disabled';
+  if (!choice.mapping.enabled) return 'mapping-disabled';
+  if (choice.row.mapping_digest !== choice.mappingDigest) return 'mapping-changed';
+  try {
+    assertMinecraftChoice({
+      combination: choice.combination,
+      enabled: true,
+      mappingDigest: choice.mappingDigest,
+      choiceDigest: choice.row.identity_digest,
+      evidence: choice.evidence,
+      privateTester,
+    });
+    return null;
+  } catch (error) {
+    if (!(error instanceof DomainError) || error.code !== 'integration_unavailable') throw error;
+    return 'evidence-required';
+  }
+}
+
+type Rollout = Selectable<Database['game_rollouts']>;
+/** Ordinary-user catalog eligibility, including allowlisted private testing.
+ * Owner development access and per-user admission are intentionally separate. */
+function minecraftCreationState(
+  choice: ReturnType<typeof inspectLoadedCombination>,
+  rollout: Rollout | null | undefined,
+  nodeEnabled: boolean | null,
+) {
+  const privateTesting = rollout?.state === 'private-testing';
+  const reason = minecraftChoiceBlockReason(choice, privateTesting);
+  if (reason) return { state: 'blocked' as const, reason };
+  if (!nodeEnabled) return { state: 'blocked' as const, reason: 'node-disabled' as const };
+  if (!rollout) return { state: 'blocked' as const, reason: 'rollout-unregistered' as const };
+  if (rollout.state === 'development')
+    return { state: 'blocked' as const, reason: 'rollout-development' as const };
+  if (rollout.state === 'disabled-for-new-servers')
+    return { state: 'blocked' as const, reason: 'rollout-disabled' as const };
+  return {
+    state: privateTesting ? ('private-testing' as const) : ('available' as const),
+    reason: null,
+  };
+}
+function minecraftChoiceImage(choice: ReturnType<typeof inspectLoadedCombination>) {
+  const binding = choice.row.binding as Record<string, unknown>;
+  return typeof binding.image === 'string' ? binding.image : null;
 }
 
 export async function minecraftCatalog(db: DB, context: AuthContext, env: Environment = {}) {
@@ -451,6 +496,50 @@ export async function setMinecraftAvailability(
   });
 }
 
+/** Atomic bounded Owner update: a mixed/foreign/stale ID set changes nothing. */
+export async function setMinecraftBulkAvailability(
+  db: Kysely<Database>,
+  context: AuthContext,
+  input: unknown,
+  env: Environment = {},
+) {
+  ownerOnly(context);
+  const value = parse(
+    z
+      .object({
+        mappingId: z.uuid(),
+        ids: z
+          .array(z.uuid())
+          .min(1)
+          .max(500)
+          .refine((ids) => new Set(ids).size === ids.length),
+        enabled: z.boolean(),
+      })
+      .strict(),
+    input,
+  );
+  await db.transaction().execute(async (tx) => {
+    await lockResources(tx);
+    const current = await currentInteractiveContext(tx, context, env);
+    ownerOnly(current);
+    const rows = await tx
+      .selectFrom('minecraft_combinations as choice')
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'choice.mapping_id')
+      .select('choice.id')
+      .where('choice.mapping_id', '=', value.mappingId)
+      .where('mapping.game_id', '=', 'minecraft')
+      .where('choice.id', 'in', value.ids)
+      .execute();
+    if (rows.length !== value.ids.length) throw new DomainError('not_found');
+    await tx
+      .updateTable('minecraft_combinations')
+      .set({ enabled: value.enabled })
+      .where('id', 'in', value.ids)
+      .execute();
+    await recordAudit(tx, current, 'minecraft.availability.bulk-updated', value);
+  });
+}
+
 /** API accepts only an intact attestation from the separately keyed test runner. */
 export async function importMinecraftEvidence(
   db: Kysely<Database>,
@@ -519,6 +608,83 @@ const minecraftOwnerDetail = (choice: Awaited<ReturnType<typeof inspectMinecraft
   evidence: choice.evidence,
 });
 
+export async function minecraftOwnerCombinationDetail(db: DB, id: string, env: Environment = {}) {
+  const choice = await inspectMinecraftCombination(db, id, env);
+  const context = await db
+    .selectFrom('managed_nodes as node')
+    .leftJoin('game_rollouts as rollout', (join) =>
+      join.on('rollout.integration_id', '=', 'minecraft'),
+    )
+    .select(['node.enabled as nodeEnabled', sql<Rollout | null>`to_jsonb(rollout)`.as('rollout')])
+    .where('node.id', '=', choice.mapping.node_id)
+    .executeTakeFirst();
+  return {
+    ...minecraftOwnerDetail(choice),
+    mappingEnabled: choice.mapping.enabled,
+    image: minecraftChoiceImage(choice),
+    creation: minecraftCreationState(choice, context?.rollout, context?.nodeEnabled ?? false),
+  };
+}
+
+type OwnerSummaryRow = CombinationRow & {
+  releaseTime: Date | null;
+  mapping: Mapping;
+  nodeEnabled: boolean | null;
+  rollout: Rollout | null;
+};
+async function minecraftOwnerSummaries(db: DB, rows: readonly OwnerSummaryRow[], env: Environment) {
+  // Vanilla declarations require no reports to establish creation eligibility;
+  // only undeclared profiles load signatures, in one batch for the visible page.
+  const evidenceIds = rows
+    .filter(
+      (row) =>
+        !minecraftDeclaredCapabilities(minecraftCombinationSchema.parse(row.combination))
+          .installation,
+    )
+    .map((row) => row.id);
+  const reports = evidenceIds.length
+    ? await db
+        .selectFrom('minecraft_verification_evidence')
+        .selectAll()
+        .where('combination_id', 'in', evidenceIds)
+        .execute()
+    : [];
+  const byChoice = new Map<string, EvidenceRow[]>();
+  for (const report of reports) {
+    const existing = byChoice.get(report.combination_id) ?? [];
+    existing.push(report);
+    byChoice.set(report.combination_id, existing);
+  }
+  const digests = new Map<string, string>();
+  return rows.map((row) => {
+    let digest = digests.get(row.mapping_id);
+    if (!digest) {
+      digest = minecraftMappingDigest(row.mapping);
+      digests.set(row.mapping_id, digest);
+    }
+    const choice = inspectLoadedCombination(
+      row,
+      row.mapping,
+      byChoice.get(row.id) ?? [],
+      env,
+      digest,
+    );
+    return {
+      id: row.id,
+      mappingId: row.mapping_id,
+      enabled: row.enabled,
+      combination: choice.combination,
+      releaseTime: row.releaseTime?.toISOString() ?? null,
+      releaseTimeStatus: row.releaseTime ? ('available' as const) : ('unknown' as const),
+      supportAuthority: choice.supportAuthority,
+      capabilities: choice.capabilities,
+      mappingEnabled: row.mapping.enabled,
+      image: minecraftChoiceImage(choice),
+      creation: minecraftCreationState(choice, row.rollout, row.nodeEnabled),
+    };
+  });
+}
+
 export async function listMinecraftOwnerCombinations(
   db: DB,
   query: Record<string, string>,
@@ -533,11 +699,13 @@ export async function listMinecraftOwnerCombinations(
     releaseTime: value?.toISOString() ?? null,
     releaseTimeStatus: value ? ('available' as const) : ('unknown' as const),
   });
-  if (query.view === 'summary') {
+  if (query.view === 'summary' || query.view === 'workspace') {
     const page = parse(
       z
         .object({
-          view: z.literal('summary'),
+          view: z.enum(['summary', 'workspace']),
+          mappingId: z.uuid().optional(),
+          release: z.string().min(1).max(128).optional(),
           page: z.coerce.number().int().min(1).max(100000).default(1),
           pageSize: z.coerce.number().int().min(1).max(100).default(25),
           search: z.string().max(128).optional(),
@@ -551,6 +719,11 @@ export async function listMinecraftOwnerCombinations(
         .strict(),
       query,
     );
+    if (page.view === 'workspace' && (!page.mappingId || !page.runtime))
+      throw new DomainError('validation_failed');
+    if (page.mappingId) selection = selection.where('choice.mapping_id', '=', page.mappingId);
+    if (page.release)
+      selection = selection.where(sql<string>`choice.combination->>'release'`, '=', page.release);
     if (page.search)
       selection = selection.where(
         sql<boolean>`strpos(lower(concat(choice.combination->>'release', ' ', choice.combination->>'profile')), lower(${page.search})) > 0`,
@@ -565,6 +738,73 @@ export async function listMinecraftOwnerCombinations(
       );
     if (page.availability)
       selection = selection.where('choice.enabled', '=', page.availability === 'enabled');
+    const joined = selection
+      .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'choice.mapping_id')
+      .leftJoin('managed_nodes as node', 'node.id', 'mapping.node_id')
+      .leftJoin('game_rollouts as rollout', (join) =>
+        join.on('rollout.integration_id', '=', 'minecraft'),
+      );
+    const fields = [
+      'release.release_time as releaseTime',
+      sql<Mapping>`to_jsonb(mapping)`.as('mapping'),
+      'node.enabled as nodeEnabled',
+      sql<Rollout | null>`to_jsonb(rollout)`.as('rollout'),
+    ] as const;
+    // Natural numeric name order is deterministic across pages, unlike insertion order.
+    const naturalName = sql<string>`(select string_agg(case when part[1] ~ '^[0-9]+$' then lpad(part[1], 20, '0') else lower(part[1]) end, '' order by ordinal) from regexp_matches(choice.combination->>'release', '[0-9]+|[^0-9]+', 'g') with ordinality as parts(part, ordinal)) collate "C"`;
+    const direction = page.order === 'name-asc' || page.order === 'oldest' ? 'asc' : 'desc';
+    if (page.view === 'workspace') {
+      const count = await selection
+        .select(sql<string>`count(distinct choice.combination->>'release')`.as('total'))
+        .executeTakeFirstOrThrow();
+      let grouped = selection
+        .select([
+          sql<string>`choice.combination->>'release'`.as('release'),
+          sql<string>`min(coalesce(choice.combination->>'releaseType', 'unknown'))`.as(
+            'releaseType',
+          ),
+          'release.release_time as releaseTime',
+          sql<string>`count(*)`.as('variantCount'),
+          sql<string>`min(choice.id::text)`.as('singleId'),
+        ])
+        .groupBy([sql`choice.combination->>'release'`, 'release.release_time']);
+      if (page.order === 'newest' || page.order === 'oldest')
+        grouped = grouped.orderBy(
+          sql`release.release_time ${sql.raw(page.order === 'newest' ? 'desc' : 'asc')} nulls last`,
+        );
+      const groups = await grouped
+        .orderBy(sql`min(${naturalName})`, direction)
+        .orderBy(sql`choice.combination->>'release'`, 'asc')
+        .limit(page.pageSize)
+        .offset((page.page - 1) * page.pageSize)
+        .execute();
+      const singleIds = groups
+        .filter((group) => Number(group.variantCount) === 1)
+        .map((group) => group.singleId);
+      const rows = singleIds.length
+        ? await joined
+            .selectAll('choice')
+            .select(fields)
+            .where('choice.id', 'in', singleIds)
+            .execute()
+        : [];
+      const summaries = new Map(
+        (await minecraftOwnerSummaries(db, rows, env)).map((item) => [item.id, item]),
+      );
+      return {
+        items: groups.map((group) => ({
+          release: group.release,
+          releaseType: group.releaseType,
+          ...releaseTime(group.releaseTime),
+          variantCount: Number(group.variantCount),
+          ...(Number(group.variantCount) === 1 ? { choice: summaries.get(group.singleId) } : {}),
+        })),
+        total: Number(count.total),
+        page: page.page,
+        pageSize: page.pageSize,
+        metadataStatus: await getMinecraftMetadataStatus(db),
+      };
+    }
     const count = await selection
       .select((eb) => eb.fn.countAll<string>().as('total'))
       .executeTakeFirstOrThrow();
@@ -574,34 +814,19 @@ export async function listMinecraftOwnerCombinations(
       .distinct()
       .orderBy('runtime')
       .execute();
-    // Natural numeric name order is deterministic across pages, unlike insertion order.
-    const naturalName = sql<string>`(select string_agg(case when part[1] ~ '^[0-9]+$' then lpad(part[1], 20, '0') else lower(part[1]) end, '' order by ordinal) from regexp_matches(choice.combination->>'release', '[0-9]+|[^0-9]+', 'g') with ordinality as parts(part, ordinal)) collate "C"`;
-    let ordered = selection.selectAll('choice').select('release.release_time as releaseTime');
+    let ordered = joined.selectAll('choice').select(fields);
     if (page.order === 'newest' || page.order === 'oldest')
       ordered = ordered.orderBy(
         sql`release.release_time ${sql.raw(page.order === 'newest' ? 'desc' : 'asc')} nulls last`,
       );
-    ordered = ordered
-      .orderBy(naturalName, page.order === 'name-asc' || page.order === 'oldest' ? 'asc' : 'desc')
-      .orderBy('choice.id', 'asc');
     const rows = await ordered
+      .orderBy(naturalName, direction)
+      .orderBy('choice.id', 'asc')
       .limit(page.pageSize)
       .offset((page.page - 1) * page.pageSize)
       .execute();
-    const items = rows.map((row) => {
-      const combination = minecraftCombinationSchema.parse(row.combination);
-      return {
-        id: row.id,
-        mappingId: row.mapping_id,
-        enabled: row.enabled,
-        combination,
-        ...releaseTime(row.releaseTime),
-        supportAuthority: combination.profile === 'vanilla' ? 'integration' : 'signed-evidence',
-        capabilities: minecraftDeclaredCapabilities(combination),
-      };
-    });
     return {
-      items,
+      items: await minecraftOwnerSummaries(db, rows, env),
       total: Number(count.total),
       page: page.page,
       pageSize: page.pageSize,
@@ -609,6 +834,7 @@ export async function listMinecraftOwnerCombinations(
       metadataStatus: await getMinecraftMetadataStatus(db),
     };
   }
+
   const page = Object.keys(query).length
     ? parse(
         z
