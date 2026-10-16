@@ -59,6 +59,17 @@ discarded when leaving Settings; neither is persisted in browser storage. Assist
 sessions retain the existing restriction on personal account settings. Both tabs
 use the shared responsive forms, EN/IT catalog and keyboard-accessible navigation.
 
+Profile presents one compact surface: photo, display name and read-only @username
+at the top, followed by aligned name/language fields, the verified email state
+and linked-account rows. Save is disabled until values change. Email changes and
+adding an email login open inline only when requested; the current email remains
+visible until verification completes. Unlinking uses the shared confirmation
+dialog with Cancel focused first, and never offers removal of the last login
+method. Pending forms prevent repeat submission; failures retain editable drafts.
+Quiet icon actions have accessible names/tooltips. Mobile stacks the labeled
+fields, wraps long identity values and preserves keyboard focus without a second
+decorative input outline. Profile styling is scoped and does not alter Security.
+
 ### SFTP interface
 
 SFTP uses the Files/Console visual conventions: a compact connection summary,

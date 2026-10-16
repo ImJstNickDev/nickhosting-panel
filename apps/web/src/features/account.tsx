@@ -1,12 +1,14 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { NavLink, Outlet, useNavigate, useOutletContext, useSearchParams } from 'react-router';
 import { api, apiError, queryClient } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
-import { identityChanged, useSession, useWebConfig } from '../app/session.js';
+import { identityChanged, useSession, useWebConfig, type WebSession } from '../app/session.js';
+import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
   Check,
+  ConfirmDialog,
   Empty,
   ErrorNotice,
   Input,
@@ -18,8 +20,10 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { AccountIcon } from './account-icons.js';
 import { authClient } from './auth.js';
 import { ProfilePhoto } from './profile-photo.js';
+import './account-profile.css';
 
 async function refreshAccount() {
   await queryClient.invalidateQueries({ queryKey: ['session'] });
@@ -73,141 +77,299 @@ export function AccountPage() {
 
 export function AccountProfile() {
   const t = useT();
-  const config = useWebConfig();
-  const accounts = useLinkedAccounts();
   const session = useSession();
-  const { locale, setLocale } = useLocale();
   const profile = session.data?.subject;
+  const titleId = useId();
+  if (!profile) return null;
   return (
     <div className="account-profile">
-      <Section title={t('web.profile')}>
-        {profile && (
-          <ProfilePhoto key={profile.id} userId={profile.id} avatarUrl={profile.avatarUrl} />
-        )}
-        <ActionForm
-          onSubmit={async (data) => {
-            const nextLocale = text(data, 'locale') as 'en' | 'it';
-            await api('/api/auth/update-user', {
-              body: { name: text(data, 'name'), locale: nextLocale },
-            });
-            setLocale(nextLocale);
-            await refreshAccount();
-          }}
-        >
-          <Input
-            label={t('web.displayName')}
-            name="name"
-            defaultValue={profile?.name}
-            required
-            maxLength={100}
-          />
-          <Input
-            label={t('web.username')}
-            hint={t('web.usernameImmutable')}
-            name="username"
-            value={profile?.username ?? ''}
-            placeholder={t('web.unavailable')}
-            readOnly
-          />
-          <Select label={t('web.locale')} name="locale" defaultValue={profile?.locale ?? locale}>
-            <option value="en">English</option>
-            <option value="it">Italiano</option>
-          </Select>
-        </ActionForm>
-        <hr />
-        <ActionForm
-          submitLabel={t('web.changeEmail')}
-          success={t('web.checkEmail')}
-          onSubmit={async (data) => {
-            await api('/api/auth/change-email', {
-              body: {
-                newEmail: text(data, 'email'),
-                callbackURL: `${location.origin}/settings`,
-              },
-            });
-          }}
-        >
-          <Input
-            label={t('web.email')}
-            name="email"
-            type="email"
-            autoComplete="email"
-            defaultValue={profile?.email.endsWith('.invalid') ? '' : profile?.email}
-            required
-          />
-        </ActionForm>
-      </Section>
-      <Section title={t('web.linkedAccounts')}>
-        {accounts.isPending ? (
-          <Loading />
-        ) : accounts.error ? (
-          <ErrorNotice error={accounts.error} />
-        ) : (
-          <div className="stack">
-            {accounts.data?.map((account) => (
-              <div className="section-heading" key={account.id}>
-                <span>{account.providerId === 'credential' ? t('web.email') : 'Discord'}</span>
-                {accounts.data.length > 1 && (
-                  <ActionForm
-                    submitLabel={t('web.unlink')}
-                    onSubmit={async () => {
-                      await api('/api/auth/unlink-account', {
-                        body: { accountId: account.id },
-                      });
-                      await refreshAccount();
-                    }}
-                  >
-                    <Check name="confirm" required label={t('web.confirm')} />
-                  </ActionForm>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-        {accounts.isSuccess &&
-          config.data?.auth.discord &&
-          !accounts.data?.some((a) => a.providerId === 'discord') && (
-            <ActionForm
-              submitLabel={t('web.linkDiscord')}
-              success={false}
-              onSubmit={async () => {
-                const result = await api<{ url: string }>('/api/auth/link-social', {
-                  body: {
-                    provider: 'discord',
-                    callbackURL: `${location.origin}/settings`,
-                    errorCallbackURL: `${location.origin}/settings`,
-                  },
-                });
-                location.assign(result.url);
-              }}
-            >
-              <span />
-            </ActionForm>
+      <section className="account-profile-details" aria-labelledby={titleId}>
+        <h2 id={titleId} className="visually-hidden">
+          {t('web.profile')}
+        </h2>
+        <ProfilePhoto
+          key={`photo:${profile.id}`}
+          userId={profile.id}
+          avatarUrl={profile.avatarUrl}
+          displayName={profile.name}
+          username={profile.username}
+        />
+        <ProfileDetails key={`details:${profile.id}`} profile={profile} />
+      </section>
+      <ProfileEmail key={profile.id} profile={profile} />
+      <ProfileMethods />
+    </div>
+  );
+}
+
+function ProfileDetails({ profile }: { profile: WebSession['subject'] }) {
+  const t = useT();
+  const { locale, setLocale } = useLocale();
+  const [name, setName] = useState(profile.name);
+  const [language, setLanguage] = useState(profile.locale ?? locale);
+  const dirty = name !== profile.name || language !== (profile.locale ?? locale);
+  return (
+    <ActionForm
+      className="account-details-form"
+      submitDisabled={!dirty}
+      onSubmit={async (data) => {
+        const nextName = text(data, 'name');
+        const nextLocale = text(data, 'locale') as 'en' | 'it';
+        await api('/api/auth/update-user', { body: { name: nextName, locale: nextLocale } });
+        setName(nextName);
+        setLocale(nextLocale);
+        await refreshAccount();
+      }}
+    >
+      <Input
+        label={t('web.displayName')}
+        name="name"
+        value={name}
+        onChange={(event) => setName(event.currentTarget.value)}
+        autoComplete="name"
+        required
+        maxLength={100}
+      />
+      <Select
+        label={t('web.locale')}
+        name="locale"
+        value={language}
+        onChange={(event) => setLanguage(event.currentTarget.value as 'en' | 'it')}
+      >
+        <option value="en">English</option>
+        <option value="it">Italiano</option>
+      </Select>
+    </ActionForm>
+  );
+}
+
+function ProfileEmail({ profile }: { profile: WebSession['subject'] }) {
+  const t = useT();
+  const id = useId();
+  const [editing, setEditing] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const email = profile.email.endsWith('.invalid') ? '' : profile.email;
+  useEffect(() => {
+    if (editing) input.current?.focus();
+  }, [editing]);
+  function close() {
+    setEditing(false);
+    requestAnimationFrame(() => trigger.current?.focus());
+  }
+  return (
+    <section className="account-email-section" aria-labelledby={id}>
+      <div className="account-setting-row">
+        <h2 id={id}>{t('web.email')}</h2>
+        <div className="account-email-value">
+          <span>{email || t('web.accountNotSet')}</span>
+          {email && (
+            <span className={`account-email-state${profile.emailVerified ? ' verified' : ''}`}>
+              {profile.emailVerified && <AccountIcon name="check" />}
+              {t(profile.emailVerified ? 'web.accountEmailVerified' : 'web.accountEmailUnverified')}
+            </span>
           )}
-        {accounts.isSuccess && !accounts.data.some((a) => a.providerId === 'credential') && (
+        </div>
+        {email && !editing && (
+          <button
+            ref={trigger}
+            type="button"
+            className="account-quiet-action"
+            aria-expanded={false}
+            aria-controls={`${id}-edit`}
+            onClick={() => setEditing(true)}
+          >
+            <AccountIcon name="edit" />
+            {t('web.changeEmail')}
+          </button>
+        )}
+      </div>
+      {editing && (
+        <div id={`${id}-edit`} className="account-inline-edit">
           <ActionForm
-            submitLabel={t('web.linkEmail')}
-            success={t('web.linkEmailSent')}
+            submitLabel={t('web.changeEmail')}
+            success={t('web.checkEmail')}
+            onCancel={close}
             onSubmit={async (data) => {
-              await api('/v1/identity/link-email', {
-                body: { email: text(data, 'email'), password: String(data.get('password')) },
+              await api('/api/auth/change-email', {
+                body: { newEmail: text(data, 'email'), callbackURL: `${location.origin}/settings` },
               });
             }}
           >
-            <Input label={t('web.email')} name="email" type="email" autoComplete="email" required />
             <Input
-              label={t('web.newPassword')}
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              minLength={12}
-              maxLength={128}
+              ref={input}
+              label={t('web.email')}
+              name="email"
+              type="email"
+              autoComplete="email"
+              defaultValue={email}
               required
             />
           </ActionForm>
-        )}
-      </Section>
-    </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProfileMethods() {
+  const t = useT();
+  const config = useWebConfig();
+  const accounts = useLinkedAccounts();
+  const id = useId();
+  const [unlink, setUnlink] = useState<{ id: string; provider: string }>();
+  const [linkEmail, setLinkEmail] = useState(false);
+  const linkEmailInput = useRef<HTMLInputElement>(null);
+  const linkEmailTrigger = useRef<HTMLButtonElement>(null);
+  const methodsHeading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (linkEmail) linkEmailInput.current?.focus();
+  }, [linkEmail]);
+  const hasEmail = accounts.data?.some((account) => account.providerId === 'credential');
+  const hasDiscord = accounts.data?.some((account) => account.providerId === 'discord');
+  return (
+    <section className="account-methods" aria-labelledby={id}>
+      <h2 id={id} ref={methodsHeading} tabIndex={-1}>
+        {t('web.linkedAccounts')}
+      </h2>
+      {accounts.isPending ? (
+        <div className="account-method-loading" role="status" aria-label={t('web.loading')}>
+          <span />
+          <span />
+        </div>
+      ) : accounts.error ? (
+        <ErrorNotice error={accounts.error} retry={() => void accounts.refetch()} />
+      ) : (
+        <div className="account-method-list">
+          {accounts.data?.map((account) => {
+            const provider = account.providerId === 'credential' ? t('web.email') : 'Discord';
+            return (
+              <div className="account-method" key={account.id}>
+                <span
+                  className={`account-method-icon ${account.providerId === 'discord' ? 'discord' : ''}`}
+                >
+                  <AccountIcon name={account.providerId === 'credential' ? 'mail' : 'discord'} />
+                </span>
+                <span className="account-method-name">{provider}</span>
+                <span className="account-method-state">{t('web.accountConnected')}</span>
+                {accounts.data.length > 1 && (
+                  <Tooltip content={t('web.unlink')}>
+                    <button
+                      type="button"
+                      className="account-icon-action account-unlink"
+                      aria-label={t('web.accountUnlinkAction', { provider })}
+                      onClick={() => setUnlink({ id: account.id, provider })}
+                    >
+                      <AccountIcon name="unlink" />
+                    </button>
+                  </Tooltip>
+                )}
+              </div>
+            );
+          })}
+          {accounts.isSuccess && config.data?.auth.discord && !hasDiscord && (
+            <div className="account-method">
+              <span className="account-method-icon discord">
+                <AccountIcon name="discord" />
+              </span>
+              <span className="account-method-name">Discord</span>
+              <ActionForm
+                className="account-link-action"
+                submitLabel={t('web.linkDiscord')}
+                success={false}
+                onSubmit={async () => {
+                  const result = await api<{ url: string }>('/api/auth/link-social', {
+                    body: {
+                      provider: 'discord',
+                      callbackURL: `${location.origin}/settings`,
+                      errorCallbackURL: `${location.origin}/settings`,
+                    },
+                  });
+                  location.assign(result.url);
+                }}
+              >
+                <span className="visually-hidden">Discord</span>
+              </ActionForm>
+            </div>
+          )}
+          {accounts.isSuccess && !hasEmail && (
+            <>
+              <div className="account-method">
+                <span className="account-method-icon">
+                  <AccountIcon name="mail" />
+                </span>
+                <span className="account-method-name">{t('web.email')}</span>
+                {!linkEmail && (
+                  <button
+                    ref={linkEmailTrigger}
+                    type="button"
+                    className="account-quiet-action"
+                    onClick={() => setLinkEmail(true)}
+                  >
+                    {t('web.linkEmail')}
+                  </button>
+                )}
+              </div>
+              {linkEmail && (
+                <div className="account-inline-edit">
+                  <ActionForm
+                    submitLabel={t('web.linkEmail')}
+                    success={t('web.linkEmailSent')}
+                    onCancel={() => {
+                      setLinkEmail(false);
+                      requestAnimationFrame(() => linkEmailTrigger.current?.focus());
+                    }}
+                    onSubmit={async (data) => {
+                      await api('/v1/identity/link-email', {
+                        body: {
+                          email: text(data, 'email'),
+                          password: String(data.get('password')),
+                        },
+                      });
+                    }}
+                  >
+                    <Input
+                      ref={linkEmailInput}
+                      label={t('web.email')}
+                      name="email"
+                      type="email"
+                      autoComplete="email"
+                      required
+                    />
+                    <Input
+                      label={t('web.newPassword')}
+                      name="password"
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={12}
+                      maxLength={128}
+                      required
+                    />
+                  </ActionForm>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {config.error && <ErrorNotice error={config.error} retry={() => void config.refetch()} />}
+      <ConfirmDialog
+        open={Boolean(unlink)}
+        title={t('web.accountUnlinkTitle', { provider: unlink?.provider ?? '' })}
+        onClose={() => setUnlink(undefined)}
+        confirmLabel={t('web.unlink')}
+        destructive
+        onConfirm={async () => {
+          if (!unlink) return;
+          await api('/api/auth/unlink-account', { body: { accountId: unlink.id } });
+          await refreshAccount();
+          setUnlink(undefined);
+          requestAnimationFrame(() => methodsHeading.current?.focus());
+        }}
+      >
+        <p>{t('web.accountUnlinkHint', { provider: unlink?.provider ?? '' })}</p>
+      </ConfirmDialog>
+    </section>
   );
 }
 

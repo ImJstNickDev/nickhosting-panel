@@ -4,7 +4,9 @@ import { ApiError, api, apiError, queryClient } from '../api/client.js';
 import { useLocale, useT } from '../app/i18n.js';
 import type { WebSession } from '../app/session.js';
 import { ProfileAvatar } from '../components/profile-avatar.js';
+import { Tooltip } from '../components/tooltip.js';
 import { Dialog, ErrorNotice } from '../components/ui.js';
+import { AccountIcon } from './account-icons.js';
 import {
   constrainPhotoCrop,
   initialPhotoCrop,
@@ -68,7 +70,17 @@ async function refreshPhoto(userId: string, avatarUrl: string | null) {
   await queryClient.invalidateQueries({ queryKey: ['session'] });
 }
 
-export function ProfilePhoto({ userId, avatarUrl }: { userId: string; avatarUrl?: string | null }) {
+export function ProfilePhoto({
+  userId,
+  avatarUrl,
+  displayName,
+  username,
+}: {
+  userId: string;
+  avatarUrl?: string | null;
+  displayName?: string;
+  username?: string;
+}) {
   const t = useT();
   const { locale } = useLocale();
   const id = useId();
@@ -214,30 +226,43 @@ export function ProfilePhoto({ userId, avatarUrl }: { userId: string; avatarUrl?
           <ProfileAvatar avatarUrl={avatarUrl} />
         </span>
         <div className="profile-photo-details">
-          <span className="profile-photo-label">{t('web.profilePhoto')}</span>
-          <small id={`${id}-formats`}>{t('web.profilePhotoFormats')}</small>
-          <div className="profile-photo-actions">
+          <h3 className="profile-photo-name">{displayName ?? t('web.profilePhoto')}</h3>
+          {username && (
+            <p className="profile-photo-username">
+              <span className="visually-hidden">{t('web.username')}: </span>@{username}
+            </p>
+          )}
+          <small id={`${id}-formats`} className="visually-hidden">
+            {t('web.profilePhotoFormats')}
+          </small>
+        </div>
+        <div className="profile-photo-actions">
+          <Tooltip content={t('web.profilePhotoFormats')}>
             <button
               ref={trigger}
               type="button"
-              className="secondary"
+              className="account-quiet-action"
               disabled={pending}
               aria-describedby={`${id}-formats`}
               onClick={() => input.current?.click()}
             >
+              <AccountIcon name="camera" />
               {t('web.changePhoto')}
             </button>
-            {avatarUrl && (
+          </Tooltip>
+          {avatarUrl && (
+            <Tooltip content={t('web.removePhoto')}>
               <button
                 type="button"
-                className="profile-photo-remove"
+                className="account-icon-action profile-photo-remove"
                 disabled={pending}
+                aria-label={t('web.removePhoto')}
                 onClick={() => void remove()}
               >
-                {t('web.removePhoto')}
+                <AccountIcon name="remove" />
               </button>
-            )}
-          </div>
+            </Tooltip>
+          )}
         </div>
         <input
           ref={input}
@@ -254,16 +279,18 @@ export function ProfilePhoto({ userId, avatarUrl }: { userId: string; avatarUrl?
         />
       </div>
       {!draft && Boolean(error) && <ErrorNotice error={error} />}
-      {!draft && pending && (
-        <p className="profile-photo-status" role="status">
-          {t('web.pending')}
-        </p>
-      )}
-      {!pending && status && (
-        <p className="profile-photo-status" role="status">
-          {t(status)}
-        </p>
-      )}
+      <div className="profile-photo-feedback">
+        {!draft && pending && (
+          <p className="profile-photo-status" role="status">
+            {t('web.pending')}
+          </p>
+        )}
+        {!pending && status && (
+          <p className="profile-photo-status" role="status">
+            {t(status)}
+          </p>
+        )}
+      </div>
       {draft &&
         createPortal(
           <PhotoCropDialog

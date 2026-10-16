@@ -10510,3 +10510,62 @@ See [completed activation](M5-ENVIRONMENTS.md#profile-photo-activation-completed
 Independent activation review checked the scoped plan and final evidence. No
 remaining feature blocker; the Owner can upload their photo in Settings → Profile.
 No game test assets, provider writes, production changes or new release permission.
+
+### Profile settings visual and interaction refinement — 2026-10-16
+
+Profile now uses one compact surface with photo/name/@username at the top,
+aligned editable fields, an email summary and linked-login rows. Email changes
+and adding an email login open inline on request. Save stays disabled for
+unchanged values; pending requests disable repeat actions, and failures preserve
+the draft. Unlink uses the existing confirmation dialog with Cancel initially
+focused and retains the last-login-method protection. Existing authentication,
+photo, email verification and account-link endpoints are unchanged. Security
+keeps its own route and existing behavior. EN/IT copy and responsive layouts are
+included without new dependencies or backend changes.
+
+Focused validation (actual browser/application handlers, disposable database
+schemas, external OAuth/mail fixtures):
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/account-profile.browser.test.ts
+  apps/web/tests/profile-photo.browser.test.ts apps/web/tests/discord.browser.test.ts`:
+  initial run **14 passed, 3 failed**. Failures were ambiguous test selectors
+  matching the Email section and Discord's hidden form label, corrected to target
+  the intended controls. The targeted rerun of email changes in Chromium/Firefox
+  and explicit Discord linking/unlinking passed **3/3** (8 filtered out).
+  All 17 cases are therefore covered by passing results across these runs,
+  including all 6 existing photo regressions; this is not claimed as a second
+  complete run. The initial run also exposed duplicate sibling React keys in
+  the new profile header, corrected with distinct keys.
+- A final focused rerun of the unchanged/failed/pending profile-save case,
+  `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/account-profile.browser.test.ts
+  -t 'keeps unchanged profiles'`, passed **2/2** in Chromium/Firefox
+  (4 filtered out). It additionally checks the actual focus-border change,
+  absence of extra outline/shadow, Tab/Shift+Tab order and absence of React
+  key/hook warnings, and refreshes the desktop/mobile screenshots and axe checks.
+- Profile coverage includes real name/locale persistence, unchanged and pending
+  saves, simulated503 recovery, email cancellation and verification-pending
+  behavior, last-login protection, EN/IT and mobile overflow. Axe reported no
+  violations in the sampled Profile screens. Discord tests exercise actual
+  application linking/unlinking with fixture OAuth and mail delivery.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`,
+  `scripts/dev.sh pnpm build` and `scripts/dev.sh pnpm i18n:check`: passed
+  (1870 EN/IT keys and pseudolocale). The existing large-chunk build advisory
+  remains. Scoped Biome and whitespace checks passed.
+
+Independent source, accessibility and rendered desktop/mobile review identified
+an input focus-border override and low control-border contrast; both were fixed
+on the existing border, without adding a second outline. Final review found no
+remaining must-fix issue. The optional behavior of refreshing a clean form after
+an edit in another tab remains as before; it is not an account synchronization
+guarantee. Screenshots use fixture identities only:
+[Profile desktop EN](screenshots/m5/settings-profile-polish-desktop-en.png),
+[Profile mobile IT](screenshots/m5/settings-profile-polish-mobile-it.png).
+This focused accessibility review is not a complete WCAG audit.
+
+Only the existing dev source watcher is used. No container restart, migration,
+live account/provider mutation, production change or game test asset. Browser
+fixtures clean their disposable schemas; no persistent review data is reset.
+No historical full-suite rerun. Issue18 remains unchanged. Rollback: revert the
+UI commit; no database or infrastructure rollback is required.

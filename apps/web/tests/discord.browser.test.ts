@@ -207,7 +207,9 @@ describe('M5 browser Discord invitation and explicit bidirectional linking', () 
     await discord.authorize(member, fixture.origin, 'explicit-link');
     await member.goto(`${fixture.origin}/settings`);
     await linkedAccounts(member).getByRole('button', { name: 'Link Discord', exact: true }).click();
-    await browserExpect(linkedAccounts(member).getByText('Discord', { exact: true })).toBeVisible();
+    await browserExpect(
+      linkedAccounts(member).getByRole('button', { name: 'Unlink: Discord', exact: true }),
+    ).toBeVisible();
     await fixture.screenshot(member, 'account-discord-email-verified-desktop-en');
     expect(await currentUser(member)).toBe(userId);
     await discord.authorize(owner, fixture.origin, 'explicit-link');
@@ -235,15 +237,26 @@ describe('M5 browser Discord invitation and explicit bidirectional linking', () 
     expect(await currentUser(returning)).toBe(userId);
     await fixture.screenshot(member, 'account-discord-linked-desktop-en');
     const discordRow = linkedAccounts(member)
-      .locator('.section-heading')
+      .locator('.account-method')
       .filter({
         has: member.getByText('Discord', { exact: true }),
       });
-    await discordRow.getByLabel('Confirm', { exact: true }).check();
-    await discordRow.getByRole('button', { name: 'Unlink', exact: true }).click();
-    await browserExpect(linkedAccounts(member).getByText('Discord', { exact: true })).toHaveCount(
-      0,
-    );
+    await discordRow.getByRole('button', { name: 'Unlink: Discord', exact: true }).click();
+    const confirmation = member.getByRole('dialog', { name: 'Unlink Discord?', exact: true });
+    await browserExpect(
+      confirmation.getByRole('button', { name: 'Cancel', exact: true }),
+    ).toBeFocused();
+    await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(confirmation).not.toBeVisible();
+    await browserExpect(
+      discordRow.getByRole('button', { name: 'Unlink: Discord', exact: true }),
+    ).toBeVisible();
+    await discordRow.getByRole('button', { name: 'Unlink: Discord', exact: true }).click();
+    await confirmation.getByRole('button', { name: 'Unlink', exact: true }).click();
+    await browserExpect(confirmation).not.toBeVisible();
+    await browserExpect(
+      linkedAccounts(member).getByRole('button', { name: 'Link Discord', exact: true }),
+    ).toBeVisible();
     await browserExpect(linkedAccounts(member).getByText('Email', { exact: true })).toBeVisible();
     const accounts = await fixture.database.db
       .selectFrom('account')
@@ -271,6 +284,9 @@ describe('M5 browser Discord invitation and explicit bidirectional linking', () 
     const userId = await currentUser(member);
     expect(fixture.mails.some((mail) => mail.to.endsWith('.invalid'))).toBe(false);
     await member.goto(`${fixture.origin}/settings`);
+    await linkedAccounts(member)
+      .getByRole('button', { name: 'Add email and password', exact: true })
+      .click();
     const form = linkedAccounts(member)
       .locator('form')
       .filter({
