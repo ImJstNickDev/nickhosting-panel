@@ -88,6 +88,7 @@ export const webMessages: Record<string, readonly [string, string]> = {
   'web.clientKey': ['Client API key', 'Chiave API Client'],
   'web.finishSetup': ['Validate and finish setup', 'Verifica e completa la configurazione'],
   'web.security': ['Account security', 'Sicurezza dell’account'],
+  'web.securityTab': ['Security', 'Sicurezza'],
   'web.profile': ['Profile', 'Profilo'],
   'web.linkedAccounts': ['Linked accounts', 'Account collegati'],
   'web.linkDiscord': ['Link Discord', 'Collega Discord'],

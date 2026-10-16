@@ -42,6 +42,23 @@ defines permission, uncertainty, stream and configuration behavior. These
 implementation notes do not replace the acceptance standards below or claim the
 pending final consolidated review has passed.
 
+### Personal settings
+
+Personal Settings uses the same route-based tab navigation as server pages:
+Profile at `/settings` and Security at `/settings/security`. Profile contains name,
+read-only username, language, email and linked login methods; Security contains
+password, two-factor authentication, passkeys and sessions. Sidebar/account-menu
+links, Discord linking, email-link verification and email changes return to Profile.
+Reload and browser history preserve the selected tab.
+
+Sessions and passkeys load only when Security is opened. Both tabs reuse the same
+linked-account query (Security needs it to determine password availability). In-progress authenticator
+setup
+and recovery codes stay in the Settings layout's memory across tab changes and are
+discarded when leaving Settings; neither is persisted in browser storage. Assisted
+sessions retain the existing restriction on personal account settings. Both tabs
+use the shared responsive forms, EN/IT catalog and keyboard-accessible navigation.
+
 ### SFTP interface
 
 SFTP uses the Files/Console visual conventions: a compact connection summary,

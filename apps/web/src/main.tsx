@@ -14,7 +14,7 @@ import { LocaleProvider, useT } from './app/i18n.js';
 import { ServerGameSection, ServerIndex, ServerShell } from './app/server-shell.js';
 import { AuthCallback, Shell } from './app/shell.js';
 import { Page } from './components/ui.js';
-import { AccountPage } from './features/account.js';
+import { AccountPage, AccountProfile, AccountSecurity } from './features/account.js';
 import { ActivityPage, JobPage } from './features/activity.js';
 import { Invite, Login, Recovery, Setup } from './features/auth.js';
 import { AutomationPage } from './features/automation.js';
@@ -70,7 +70,10 @@ const router = createBrowserRouter(
         <Route path="/projects/:projectId" element={<ProjectPage />} />
         <Route path="/activity" element={<ActivityPage />} />
         <Route path="/activity/:jobId" element={<JobPage />} />
-        <Route path="/settings" element={<AccountPage />} />
+        <Route path="/settings" element={<AccountPage />}>
+          <Route index element={<AccountProfile />} />
+          <Route path="security" element={<AccountSecurity />} />
+        </Route>
         <Route path="/servers/:serverId" element={<ServerShell />}>
           <Route index element={<ServerIndex />} />
           <Route path="status" element={<ServerPage component={ServerOverview} />} />

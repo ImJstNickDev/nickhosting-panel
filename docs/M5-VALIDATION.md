@@ -10337,3 +10337,43 @@ The existing source watcher loaded the fix; no manual container restart, migrati
 game-file write or Pterodactyl/Wings change occurred. No disposable assets created.
 Issue18 remains unchanged. Rollback must keep validators compatible with existing
 16-character intents; reverting only their minimum would reproduce the failure.
+
+### Personal settings tabs — 2026-10-16
+
+Settings now separates Profile (`/settings`) from Security (`/settings/security`)
+using the server navigation style. As requested by the Owner, linked accounts stay
+in Profile alongside name, username, language and email. Security retains password,
+TOTP/recovery, passkeys and sessions. Existing identity handlers and permissions are
+unchanged. Session/passkey lists load only in Security; the account query is shared.
+The layout retains in-progress TOTP setup in memory across tab navigation only.
+
+Focused verification uses the actual application and authentication handlers with
+an isolated disposable PostgreSQL schema, a virtual WebAuthn authenticator, and the
+existing Discord provider fixture. Six selected account/linking browser journeys
+passed. Coverage includes keyboard tab navigation, direct Security reload, browser
+history, preserved authenticator setup, recovery login, EN/IT profile edits, both
+account-link directions, rejected account linking, and mobile reflow. Axe found no
+violations in the checked Profile/Security screens. Screenshots were recaptured
+after waiting for account lists and resetting scroll/focus; no product change was
+needed for capture artifacts. The targeted account subset passed again (four tests).
+
+The initial run stopped on stale registration fixtures using the old Name label
+and omitting the required Username; these test inputs now match the existing UI.
+The earlier layout run also predated the Owner's move of linked accounts to Profile.
+Neither failure is reported as a security pass. No full historical suite was run.
+
+Web typecheck, production build, scoped Biome, i18n completeness (1846 EN/IT keys
+plus pseudolocale), whitespace and indexed governance passed. Existing build
+chunk-size and scoped style/test lint warnings remain; no new lint errors.
+Independent source, accessibility and rendered-screen review found no must-fix
+findings. Reviewed fixture-only screenshots:
+[Profile desktop](screenshots/m5/settings-profile-desktop-en.png),
+[Profile mobile](screenshots/m5/settings-profile-mobile-it.png),
+[Security desktop](screenshots/m5/settings-security-desktop-en.png),
+[Security mobile](screenshots/m5/settings-security-mobile-it.png).
+
+The existing dev source watcher supplies the change; HTTPS for the Security route
+returned200. No container restart, migration, external-provider mutation, DNS
+change or game-server/test-asset creation was needed. Disposable browser schemas
+are closed by the existing harness. Issue18 and all production-release gates stay
+unchanged. Rollback: revert this UI commit; no data rollback is necessary.

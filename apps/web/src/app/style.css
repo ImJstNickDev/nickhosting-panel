@@ -465,6 +465,9 @@
     margin: 0;
     overflow-wrap: anywhere;
   }
+  .account-profile {
+    max-width: 44rem;
+  }
   .tabs {
     display: flex;
     gap: 0.25rem;

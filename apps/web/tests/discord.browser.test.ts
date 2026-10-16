@@ -169,7 +169,8 @@ describe('M5 browser Discord invitation and explicit bidirectional linking', () 
     const invitation = await invite(email);
     const member = await page();
     await member.goto(invitation.url);
-    await member.getByLabel('Name', { exact: true }).fill('Explicit Link');
+    await member.getByLabel('Display name', { exact: true }).fill('Explicit Link');
+    await member.getByLabel('Username', { exact: true }).fill('linkedmember');
     await member.getByLabel('Email', { exact: true }).fill(email);
     await member.getByLabel('Password', { exact: true }).fill(browserPassword);
     await member.getByRole('button', { name: 'Create account', exact: true }).click();

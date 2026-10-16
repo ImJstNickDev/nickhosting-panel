@@ -23,7 +23,8 @@ describe('M5 real browser identity and Owner setup', () => {
     await browserExpect(owner.getByRole('heading', { name: 'Set up NickHosting' })).toBeVisible();
     await fixture.screenshot(owner, 'setup-desktop-en');
     await owner.getByLabel('Setup token').fill(fixture.setupToken);
-    await owner.getByLabel('Name', { exact: true }).fill('Owner');
+    await owner.getByLabel('Display name', { exact: true }).fill('Owner');
+    await owner.getByLabel('Username', { exact: true }).fill('owner');
     await owner.getByLabel('Email', { exact: true }).fill('owner@browser.example.test');
     await owner.getByLabel('Password', { exact: true }).fill(browserPassword);
     await owner.getByRole('button', { name: 'Create Owner account' }).click();
@@ -76,7 +77,8 @@ describe('M5 real browser identity and Owner setup', () => {
     user.on('pageerror', (error) => pageErrors.push(error.message));
     await user.goto(invitation);
     await fixture.screenshot(user, 'invite-desktop-en');
-    await user.getByLabel('Name', { exact: true }).fill('Alex');
+    await user.getByLabel('Display name', { exact: true }).fill('Alex');
+    await user.getByLabel('Username', { exact: true }).fill('alex');
     await user.getByLabel('Email', { exact: true }).fill('member@browser.example.test');
     await user.getByLabel('Password', { exact: true }).fill(browserPassword);
     await user.getByRole('button', { name: 'Create account', exact: true }).click();
@@ -139,7 +141,47 @@ describe('M5 real browser identity and Owner setup', () => {
     );
   });
   it('enrolls TOTP and a real WebAuthn virtual authenticator, then signs in using recovery', async () => {
+    const securityRequests: string[] = [];
+    user.on('request', (request) => {
+      if (/\/api\/auth\/(list-sessions|passkey\/list-user-passkeys)$/.test(request.url()))
+        securityRequests.push(request.url());
+    });
     await user.goto(`${fixture.origin}/settings`);
+    const tabs = user.getByRole('navigation', { name: 'Settings', exact: true });
+    await browserExpect(tabs.getByRole('link', { name: 'Profile', exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await browserExpect(user.getByLabel('Display name', { exact: true })).toHaveValue('Alex');
+    await browserExpect(user.getByRole('heading', { name: 'Passkeys', exact: true })).toHaveCount(
+      0,
+    );
+    await browserExpect(
+      user.getByRole('heading', { name: 'Linked accounts', exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      user
+        .locator('section')
+        .filter({ has: user.getByRole('heading', { name: 'Linked accounts', exact: true }) })
+        .getByText('Email', { exact: true }),
+    ).toBeVisible();
+    await fixture.screenshot(user, 'settings-profile-desktop-en');
+    await user.setViewportSize({ width: 390, height: 844 });
+    await fixture.screenshot(user, 'settings-profile-mobile-en');
+    expect(securityRequests).toEqual([]);
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await tabs.getByRole('link', { name: 'Security', exact: true }).focus();
+    await user.keyboard.press('Enter');
+    await browserExpect(user).toHaveURL(`${fixture.origin}/settings/security`);
+    await user.reload();
+    await browserExpect(tabs.getByRole('link', { name: 'Security', exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await browserExpect(user.getByRole('heading', { name: 'Profile', exact: true })).toHaveCount(0);
+    await browserExpect(
+      user.getByRole('heading', { name: 'Linked accounts', exact: true }),
+    ).toHaveCount(0);
     const twoFactor = user.locator('section').filter({
       has: user.getByRole('heading', { name: 'Two-factor authentication', exact: true }),
     });
@@ -148,7 +190,12 @@ describe('M5 real browser identity and Owner setup', () => {
     const secret = await twoFactor.getByLabel('Authenticator setup key').inputValue();
     expect(secret).toMatch(/^[A-Z2-7]+$/);
     const recovery = (await twoFactor.locator('li code').allTextContents())[0];
-    expect(recovery).toBeTruthy();
+    if (!recovery) throw new Error('Missing recovery code fixture');
+    await tabs.getByRole('link', { name: 'Profile', exact: true }).click();
+    await browserExpect(twoFactor).toHaveCount(0);
+    await user.goBack();
+    await browserExpect(twoFactor.getByLabel('Authenticator setup key')).toHaveValue(secret);
+    await browserExpect(twoFactor.locator('li code').first()).toHaveText(recovery);
     await twoFactor.getByLabel('Authentication code').fill(totp(secret));
     await twoFactor.getByRole('button', { name: 'Verify', exact: true }).click();
     await browserExpect(twoFactor.getByText('Enabled', { exact: true })).toBeVisible();
@@ -175,7 +222,22 @@ describe('M5 real browser identity and Owner setup', () => {
       'Browser test passkey',
     );
     expect(await fixture.database.db.selectFrom('passkey').select('id').execute()).toHaveLength(1);
-    await fixture.screenshot(user, 'security-desktop-en');
+    await browserExpect(user.getByRole('button', { name: 'Revoke', exact: true })).toBeVisible();
+    await user.getByRole('heading', { name: 'Settings', exact: true }).focus();
+    await user.evaluate(() => window.scrollTo(0, 0));
+    await fixture.screenshot(user, 'settings-security-desktop-en');
+    await user.setViewportSize({ width: 390, height: 844 });
+    await user.getByRole('heading', { name: 'Settings', exact: true }).focus();
+    await user.evaluate(() => window.scrollTo(0, 0));
+    await fixture.screenshot(user, 'settings-security-mobile-en');
+    expect(
+      await user.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    const securityAxe = await new AxeBuilder({ page: user })
+      .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+      .analyze();
+    expect(securityAxe.violations.map((item) => item.id)).toEqual([]);
+    await user.setViewportSize({ width: 1440, height: 1000 });
     await user.getByRole('button', { name: 'Sign out', exact: true }).click();
     await browserExpect(user).toHaveURL(`${fixture.origin}/login`);
     await user.getByLabel('Email', { exact: true }).fill('member@browser.example.test');
@@ -189,7 +251,7 @@ describe('M5 real browser identity and Owner setup', () => {
     await user.getByLabel('Password', { exact: true }).fill(browserPassword);
     await user.getByRole('button', { name: 'Sign in', exact: true }).click();
     await user.getByRole('button', { name: 'Use a recovery code' }).click();
-    await user.getByLabel('Recovery code', { exact: true }).fill(recovery!);
+    await user.getByLabel('Recovery code', { exact: true }).fill(recovery);
     await user.getByRole('button', { name: 'Verify', exact: true }).click();
     await browserExpect(user.getByRole('heading', { name: 'Home', exact: true })).toBeVisible();
   });
@@ -198,14 +260,15 @@ describe('M5 real browser identity and Owner setup', () => {
     const profile = user
       .locator('section')
       .filter({ has: user.getByRole('heading', { name: 'Profile', exact: true }) });
-    await profile.getByLabel('Name', { exact: true }).fill('Alex Updated');
+    await profile.getByLabel('Display name', { exact: true }).fill('Alex Updated');
     await profile.getByLabel('Language', { exact: true }).selectOption('it');
     await profile.getByRole('button', { name: 'Save changes' }).click();
     await browserExpect(
       user.getByRole('heading', { name: 'Impostazioni', exact: true }),
     ).toBeVisible();
+    await fixture.screenshot(user, 'settings-profile-desktop-it');
     await user.setViewportSize({ width: 390, height: 844 });
-    await fixture.screenshot(user, 'account-mobile-it');
+    await fixture.screenshot(user, 'settings-profile-mobile-it');
     expect(
       await user.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
@@ -220,6 +283,29 @@ describe('M5 real browser identity and Owner setup', () => {
         nodes: item.nodes.map((node) => node.target),
       })),
     ).toEqual([]);
+    await user
+      .getByRole('navigation', { name: 'Impostazioni', exact: true })
+      .getByRole('link', { name: 'Sicurezza', exact: true })
+      .click();
+    await browserExpect(user.getByRole('heading', { name: 'Passkey', exact: true })).toBeVisible();
+    await browserExpect(user.getByRole('button', { name: 'Revoca', exact: true })).toBeVisible();
+    await browserExpect(
+      user
+        .locator('section')
+        .filter({ has: user.getByRole('heading', { name: 'Passkey', exact: true }) })
+        .getByLabel('Nome', { exact: true })
+        .first(),
+    ).toHaveValue('Browser test passkey');
+    await user.getByRole('heading', { name: 'Impostazioni', exact: true }).focus();
+    await user.evaluate(() => window.scrollTo(0, 0));
+    await fixture.screenshot(user, 'settings-security-mobile-it');
+    expect(
+      await user.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    await user.setViewportSize({ width: 1440, height: 1000 });
+    await user.getByRole('heading', { name: 'Impostazioni', exact: true }).focus();
+    await user.evaluate(() => window.scrollTo(0, 0));
+    await fixture.screenshot(user, 'settings-security-desktop-it');
     expect(pageErrors).toEqual([]);
   });
   it('recovers sign-in after parent-session expiry leaves an assisted-session cookie', async () => {
