@@ -10377,3 +10377,40 @@ returned200. No container restart, migration, external-provider mutation, DNS
 change or game-server/test-asset creation was needed. Disposable browser schemas
 are closed by the existing harness. Issue18 and all production-release gates stay
 unchanged. Rollback: revert this UI commit; no data rollback is necessary.
+
+
+### Desktop sidebar collapse — 2026-10-16
+
+The sidebar now collapses from 224 to 64 px using its header toggle. Stable icon
+positions, fading single-line labels and a 200 ms width transition keep the layout
+coherent. The browser remembers this display preference across reloads and area
+changes. Compact navigation has accessible names, active markers and shared
+tooltips. Reduced motion disables transitions. Mobile keeps its full-label menu;
+existing routes, authorization and topbar administration access are unchanged.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/sidebar.browser.test.ts`:
+  five passed. Actual application/auth handlers with isolated disposable schemas;
+  keyboard toggle/focus, reload persistence, ordinary/Owner navigation, active
+  links, tooltips, short-window scrolling, rapid toggles and mobile resize covered.
+  Axe and viewport-overflow checks passed on the sampled screens.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed; existing large
+  bundle warning remains.
+- Scoped Biome and `scripts/dev.sh pnpm i18n:check`: passed (1848 EN/IT keys plus
+  pseudolocale). Indexed governance and whitespace checks passed before commit.
+
+Independent source, accessibility and screenshot review found no must-fix issues.
+Reviewed real-browser fixture screenshots:
+[compact personal](screenshots/m5/sidebar-collapsed-personal-desktop-en.png),
+[compact Owner](screenshots/m5/sidebar-collapsed-owner-desktop-en.png),
+[expanded Owner](screenshots/m5/sidebar-expanded-owner-desktop-en.png),
+[Italian mobile](screenshots/m5/sidebar-open-mobile-it.png),
+[short desktop](screenshots/m5/sidebar-short-desktop-en.png).
+
+Only the existing dev source watcher is needed. No container restart, migration,
+production/provider mutation or game-server asset creation; the browser harness
+cleans its disposable schemas. No historical full-suite rerun. Issue18 remains
+unchanged. Rollback: revert this UI commit; no server data rollback is required.

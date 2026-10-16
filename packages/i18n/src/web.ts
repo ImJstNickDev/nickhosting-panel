@@ -19,6 +19,8 @@ export const webMessages: Record<string, readonly [string, string]> = {
   'web.createServer': ['Create server', 'Crea server'],
   'web.skip': ['Skip to content', 'Vai al contenuto'],
   'web.navigation': ['Navigation', 'Navigazione'],
+  'web.collapseNavigation': ['Collapse navigation', 'Comprimi navigazione'],
+  'web.expandNavigation': ['Expand navigation', 'Espandi navigazione'],
   'web.openMenu': ['Menu', 'Menu'],
   'web.locale': ['Language', 'Lingua'],
   'web.save': ['Save changes', 'Salva modifiche'],

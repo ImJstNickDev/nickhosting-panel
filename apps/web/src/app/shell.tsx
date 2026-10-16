@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { Link, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 import { api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
+import { Sidebar, type SidebarIconName, useSidebarCollapsed } from '../components/sidebar.js';
 import { Tooltip } from '../components/tooltip.js';
 import { ErrorNotice, Loading, Time } from '../components/ui.js';
 import { fileSaveScope } from '../features/file-background-save.js';
@@ -17,6 +18,7 @@ export function Shell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [collapsed, toggleSidebar] = useSidebarCollapsed();
   const [exitError, setExitError] = useState<unknown>();
   const { locale, setLocale } = useLocale();
   const setup = useQuery({
@@ -73,27 +75,27 @@ export function Shell() {
     !(readOnlyAdmin && ['/owner/audit', '/owner/settings'].includes(location.pathname))
   )
     return <Navigate to="/" replace />;
-  const navigation = ownerArea
+  const navigation: ReadonlyArray<readonly [string, string, SidebarIconName]> = ownerArea
     ? readOnlyAdmin
       ? [
-          ['/owner/audit', 'web.audit'],
-          ['/owner/settings', 'web.settings'],
+          ['/owner/audit', 'web.audit', 'audit'],
+          ['/owner/settings', 'web.settings', 'settings'],
         ]
       : [
-          ['/owner', 'web.overview'],
-          ['/owner/users', 'web.users'],
-          ['/owner/servers', 'web.servers'],
-          ['/owner/infrastructure', 'web.infrastructure'],
-          ['/owner/integrations', 'web.integrations'],
-          ['/owner/operations', 'web.operations'],
-          ['/owner/audit', 'web.audit'],
-          ['/owner/settings', 'web.settings'],
+          ['/owner', 'web.overview', 'overview'],
+          ['/owner/users', 'web.users', 'users'],
+          ['/owner/servers', 'web.servers', 'servers'],
+          ['/owner/infrastructure', 'web.infrastructure', 'infrastructure'],
+          ['/owner/integrations', 'web.integrations', 'integrations'],
+          ['/owner/operations', 'web.operations', 'operations'],
+          ['/owner/audit', 'web.audit', 'audit'],
+          ['/owner/settings', 'web.settings', 'settings'],
         ]
     : [
-        ['/', 'web.home'],
-        ['/servers', 'web.servers'],
-        ['/activity', 'web.activity'],
-        ['/settings', 'web.settings'],
+        ['/', 'web.home', 'home'],
+        ['/servers', 'web.servers', 'servers'],
+        ['/activity', 'web.activity', 'activity'],
+        ['/settings', 'web.settings', 'settings'],
       ];
   return (
     <>
@@ -112,23 +114,16 @@ export function Shell() {
         </div>
       )}
       {Boolean(exitError) && <ErrorNotice error={exitError} />}
-      <div className="shell">
-        <aside className={`sidebar${open ? ' open' : ''}`} id="primary-navigation">
-          <Link className="brand" to="/">
-            <span className="brand-mark">{config.data?.instanceName ?? 'NickHosting'}</span>
-          </Link>
-          <nav className="nav" aria-label={t('web.navigation')}>
-            {navigation.map(([to, key]) => (
-              <NavLink key={to} to={to!} end={to === '/' || to === '/owner'}>
-                {t(key!)}
-              </NavLink>
-            ))}
-          </nav>
-          <div className="sidebar-bottom">
-            {ownerArea && (ordinaryOwner || readOnlyAdmin) && <Link to="/">{t('web.home')}</Link>}
-            <small>{current.subject.name}</small>
-          </div>
-        </aside>
+      <div className="shell" data-sidebar-collapsed={collapsed || undefined}>
+        <Sidebar
+          open={open}
+          collapsed={collapsed}
+          onToggle={toggleSidebar}
+          instanceName={config.data?.instanceName ?? 'NickHosting'}
+          name={current.subject.name}
+          showHome={ownerArea && (ordinaryOwner || readOnlyAdmin)}
+          navigation={navigation.map(([to, key, icon]) => ({ to, label: t(key), icon }))}
+        />
         <div className="workspace">
           <header className="topbar">
             <button
