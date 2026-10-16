@@ -10697,3 +10697,25 @@ production-release boundaries remain unchanged.
 Final independent source/visual review: no remaining must-fix. Indexed governance
 passed: 1022 text files, 397 reviewed PNG assets, 849 relative links, four TOML
 files and 44 ignore cases. No historical full-suite rerun.
+
+## Password change confirmation — 2026-10-16
+
+Personal Security now requires Current password, New password and Repeat new
+password (EN/IT). Confirmation compares exact strings before the existing
+change-password request; a mismatch preserves the form and shows localized
+validation. The confirmation is never sent to the API. Existing minimum/maximum
+length, autocomplete, current-password authentication and other-session revocation
+remain unchanged. No API, schema, dependency or infrastructure change.
+
+`scripts/dev.sh pnpm test:browser apps/web/tests/account-password.browser.test.ts`:
+**2/2 passed** (Chromium EN/IT,23.12s), proving required confirmation, exact
+whitespace-sensitive matching with no premature API request, successful change
+through real handlers, current-session retention and revocation of other sessions.
+The initial two cases stopped during fixture preparation on its shared login
+rate-limit; resetting the isolated rate-limit table between cases fixed that test
+setup, with no production change. Web/source and browser-test typechecks, focused
+Biome,1895-key i18n and whitespace checks passed. Independent implementation and
+screenshot review found no issues. Reviewed [desktop EN](screenshots/m5/settings-password-confirmation-en.png)
+and [mobile IT](screenshots/m5/settings-password-confirmation-it.png). Disposable
+schemas cleaned; no live-account mutation or manual service restart. Rollback:
+revert this frontend change. No unrelated suite rerun.

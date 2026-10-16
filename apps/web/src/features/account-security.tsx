@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useOutletContext } from 'react-router';
-import { api, apiError } from '../api/client.js';
+import { ApiError, api, apiError } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { identityChanged, useSession } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -143,10 +143,13 @@ function PasswordSettings() {
             success={false}
             onCancel={close}
             onSubmit={async (data) => {
+              const newPassword = String(data.get('newPassword'));
+              if (newPassword !== String(data.get('repeatNewPassword')))
+                throw new ApiError('validation_failed', 'accountSecurity.passwordMismatch');
               await api('/api/auth/change-password', {
                 body: {
                   currentPassword: String(data.get('currentPassword')),
-                  newPassword: String(data.get('newPassword')),
+                  newPassword,
                   revokeOtherSessions: true,
                 },
               });
@@ -166,6 +169,15 @@ function PasswordSettings() {
               label={t('web.newPassword')}
               hint={t('web.passwordHint')}
               name="newPassword"
+              type="password"
+              autoComplete="new-password"
+              minLength={12}
+              maxLength={128}
+              required
+            />
+            <Input
+              label={t('accountSecurity.repeatNewPassword')}
+              name="repeatNewPassword"
               type="password"
               autoComplete="new-password"
               minLength={12}

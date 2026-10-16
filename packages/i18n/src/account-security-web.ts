@@ -1,4 +1,9 @@
 export const accountSecurityWebMessages: Record<string, readonly [string, string]> = {
+  'accountSecurity.repeatNewPassword': ['Repeat new password', 'Ripeti nuova password'],
+  'accountSecurity.passwordMismatch': [
+    'The new passwords do not match.',
+    'Le nuove password non coincidono.',
+  ],
   'accountSecurity.signInAgain': ['Sign in again', 'Accedi di nuovo'],
   'accountSecurity.passwordSessions': [
     'Changing your password signs out your other sessions.',
