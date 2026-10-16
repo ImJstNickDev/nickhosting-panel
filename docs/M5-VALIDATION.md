@@ -10472,7 +10472,7 @@ remaining must-fix findings. Reviewed fixture-only screenshots:
 This focused review is not a complete WCAG audit.
 
 Prepared in an isolated worktree so live development remains on its previous
-source/image. **Activation is pending specific Owner approval.** Read-only dev
+source/image. **At preparation, activation awaited specific Owner approval; it is now completed below.** Read-only dev
 inspection found migrations through 034 applied: the normal runner will apply
 existing 035 (generic content policy) and new 036 (photo table). Both are explicitly
 included in the [activation proposal](M5-ENVIRONMENTS.md#profile-photo-activation-proposal--2026-10-16).
@@ -10481,3 +10481,32 @@ was mutated. Disposable test schemas are cleaned by the harness; no game assets
 were created. Issue18 and production-release boundaries remain unchanged.
 Rollback retains additive schema/photo data and restores the prior application
 image/source; no database reset or automatic restoration of a backup.
+
+
+#### Profile photo approved activation evidence
+
+Owner approval was received and the exact feature `fad8e43` activated. The Docker
+`development` image built successfully; only API/worker were stopped/recreated.
+The verified private DB backup precedes transactional migrations 035/036, both
+applied successfully. Post-migration identity/secret/rollout fingerprints, managed
+server count and expected content-settings conversion matched their baselines.
+No data reset or real profile upload was performed by tooling.
+
+API/worker are healthy with zero automatic restarts, unchanged mounts/networks and
+no published ports. Vite remained running and connected via WSS. The targeted live
+Firefox smoke passed: HTTPS login 200, web config 200, unauthenticated photo 401,
+no browser JS errors or HTTP 5xx. This complements the earlier authenticated
+isolated tests; those suites were not needlessly repeated during deployment.
+
+The first inventory comparison flagged restart counters of three unrelated
+containers. Their preflight state already showed restart loops; identity/image/
+configuration comparisons were unchanged, and no command targeted them. This was
+an overly strict observation check, not a regression requiring infrastructure
+changes. Gateway and unused-provider unhealthy statuses also predate activation.
+The final evidence records these limits instead of claiming every host service is
+healthy. The migration container is absent; private recovery artifacts are retained.
+See [completed activation](M5-ENVIRONMENTS.md#profile-photo-activation-completed--2026-10-16).
+
+Independent activation review checked the scoped plan and final evidence. No
+remaining feature blocker; the Owner can upload their photo in Settings → Profile.
+No game test assets, provider writes, production changes or new release permission.

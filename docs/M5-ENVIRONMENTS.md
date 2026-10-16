@@ -1148,7 +1148,7 @@ Never reset the database or rewrite signed evidence to reverse the display ident
 
 ## Profile photo activation proposal — 2026-10-16
 
-Prepared and tested; not activated. The API adds a direct `pngjs` dependency and
+Prepared and tested before approval; completed activation is recorded below. The API adds a direct `pngjs` dependency and
 migration 036 for uploaded thumbnails, so source hot reload alone is insufficient.
 An isolated feature worktree keeps the running dev checkout unchanged until the
 Owner approves activation. Vite needs no new dependency or image; source HMR
@@ -1193,3 +1193,41 @@ with the same private configuration. The pre-photo application is compatible wit
 retaining these added tables/columns. Do not restore the database snapshot over
 subsequent data or delete uploaded photos as routine rollback; a data restore needs
 separate review. Approval is not inferred from earlier feature deployments.
+
+
+### Profile photo activation completed — 2026-10-16
+
+The Owner approved the scoped procedure and rollback. The live clean checkout was
+verified at `13d7938`, and reviewed feature `fad8e43` was built from its isolated
+worktree before stopping any service. All seven existing Compose overlays and
+three private environment files were retained. API/worker mounts, networks and
+published-port configuration matched the preflight plan.
+
+Only dev API/worker were stopped. A private, non-overwriting custom-format database
+backup was created and verified with `pg_restore --list`. The explicit temporary
+migration container applied exactly 035/036; all stored migration checksums matched
+the reviewed SQL. User/account/encrypted-secret/rollout fingerprints and managed
+server count were unchanged. Content settings matched precisely the 035 key
+conversion, preserving existing generic values.
+
+The live checkout fast-forwarded to `fad8e43`, then only API/worker were recreated
+with the new development image. Both are healthy with zero automatic restarts and
+no published host ports. Their mounts/networks and private configuration files
+remain unchanged. The temporary migration container was removed by `--rm`; the
+private backup and `nickhosting-dev-app:before-profile-photo` image are retained.
+Vite received the source through HMR; no Vite image update/restart was needed.
+
+A fresh Firefox session verified HTTPS login 200, safe web configuration 200,
+anonymous photo access 401 and the HMR WebSocket over WSS. No page JavaScript errors
+or HTTP 5xx responses were recorded. This read-only live smoke does not impersonate
+the Owner or upload a photo; authenticated upload/crop/removal evidence remains the
+six isolated Chromium/Firefox journeys, and the Owner can now use Profile directly.
+
+Other container identities/images/mounts/networks/ports were preserved. Three
+unrelated containers already in restart loops continued their existing automatic
+restarts; no operation targeted them. Dev Gateway and the unused sandbox provider
+already reported unhealthy at preflight and retain that status; they were not
+restarted or reconfigured for this feature. No Pterodactyl/Wings, DNS, real game
+files, production deployment or test-server creation/cleanup was involved. Issue18
+remains unchanged. No rollback was required; the scoped recovery plan above remains
+available without resetting the database.
