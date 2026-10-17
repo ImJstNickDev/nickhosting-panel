@@ -140,14 +140,7 @@ export function ServerSleepEditor({
       maximum,
     ) / 60;
   const [minutes, setMinutes] = useState(String(initialMinutes));
-  const initialAccess =
-    'ownerUserAccessOverride' in sleep ? (sleep.ownerUserAccessOverride ?? null) : null;
-  const [access, setAccess] = useState<SleepAccess | null>(initialAccess);
-  const [reset, setReset] = useState(0);
-  const dirty =
-    mode !== initialMode ||
-    (mode === 'custom' && Number(minutes) !== initialMinutes) ||
-    access !== initialAccess;
+  const dirty = mode !== initialMode || (mode === 'custom' && Number(minutes) !== initialMinutes);
   const inherited =
     sleep.inheritedSeconds === -1
       ? t('sleepTiming.disabled')
@@ -159,8 +152,6 @@ export function ServerSleepEditor({
       onCancel={() => {
         setMode(initialMode);
         setMinutes(String(initialMinutes));
-        setAccess(initialAccess);
-        setReset((value) => value + 1);
       }}
     >
       <input
@@ -199,7 +190,7 @@ export function ServerSleepEditor({
               const input = event.currentTarget;
               input.setCustomValidity(
                 input.value && Math.round(Number(input.value) * 60) < 1
-                  ? t('sleepTiming.invalid')
+                  ? t('automation.positiveIdleMinutes')
                   : '',
               );
               setMinutes(input.value);
@@ -218,18 +209,31 @@ export function ServerSleepEditor({
       {mode === 'inherit' && (
         <p className="sleep-wake-hint">{t('automation.inheritedValue', { value: inherited })}</p>
       )}
-      {owner && 'ownerUserAccessOverride' in sleep && (
-        <details className="sleep-wake-permissions">
-          <summary>{t('sleepTiming.userAccess')}</summary>
-          <SleepAccessField
-            key={reset}
-            name="sleepAccess"
-            value={sleep.ownerUserAccessOverride ?? null}
-            inherited={sleep.inheritedUserAccess ?? 'hidden'}
-            onChange={setAccess}
-          />
-        </details>
-      )}
+    </PolicyForm>
+  );
+}
+
+export function ServerSleepAccessEditor({
+  sleep,
+  onSubmit,
+}: {
+  sleep: Extract<NonNullable<SleepPolicy['idleTimeout']>, { ownerUserAccessOverride: unknown }>;
+  onSubmit: (data: FormData) => Promise<unknown>;
+}) {
+  const initialAccess = sleep.ownerUserAccessOverride ?? null;
+  const [access, setAccess] = useState<SleepAccess | null>(initialAccess);
+  return (
+    <PolicyForm
+      dirty={access !== initialAccess}
+      onSubmit={onSubmit}
+      onCancel={() => setAccess(initialAccess)}
+    >
+      <SleepAccessField
+        name="sleepAccess"
+        value={initialAccess}
+        inherited={sleep.inheritedUserAccess ?? 'hidden'}
+        onChange={setAccess}
+      />
     </PolicyForm>
   );
 }

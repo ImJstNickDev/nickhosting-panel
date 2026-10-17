@@ -5,11 +5,15 @@ import { api } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
 import { ActionForm, ErrorNotice, Notice, Select, text } from '../components/ui.js';
-import { ServerWakeSettings } from './auto-wake-policy.js';
+import { ServerWakeAccessSettings, ServerWakeSettings } from './auto-wake-policy.js';
 import { AutomationSwitch } from './automation-controls.js';
 import { SchedulesSection } from './automation-schedules.js';
 import { GatewayMessageEditor } from './gateway-message-editor.js';
-import { PolicyHeading, ServerSleepEditor } from './server-automation-controls.js';
+import {
+  PolicyHeading,
+  ServerSleepAccessEditor,
+  ServerSleepEditor,
+} from './server-automation-controls.js';
 import { platformPath, type SleepPolicy, serverPath, useServer } from './service-contracts.js';
 import { readSleepAccess, readSleepTimeout } from './sleep-timeout.js';
 import './automation.css';
@@ -197,7 +201,12 @@ function SleepAndWake({
             ) : sleep ? (
               editable && (
                 <ServerSleepEditor
-                  key={JSON.stringify(sleep)}
+                  key={JSON.stringify([
+                    sleep.overrideSeconds,
+                    sleep.inheritedSeconds,
+                    sleep.ownerBaselineSeconds,
+                    owner ? null : sleep.userAccess,
+                  ])}
                   sleep={sleep}
                   owner={owner}
                   onSubmit={async (form) => {
@@ -214,9 +223,6 @@ function SleepAndWake({
                         ...existing,
                         idleTimeoutInherited: timeout === null,
                         idleTimeoutSeconds: timeout === null || timeout === -1 ? null : timeout,
-                        ...(owner
-                          ? { idleTimeoutUserAccess: readSleepAccess(form, 'sleepAccess') }
-                          : {}),
                       },
                     });
                     await policy.refetch();
@@ -230,38 +236,87 @@ function SleepAndWake({
         </section>
         <ServerWakeSettings serverId={serverId} editable={editable} owner={owner} />
       </div>
-      {data.policy && editable && data.policyControlsEditable !== false && (
-        <details className="automation-policy automation-advanced sleep-wake-advanced">
-          <summary>{t('automation.gatewayOperation')}</summary>
-          <ActionForm
-            key={`${data.policy.enabled}-${data.policy.mode}`}
-            onSubmit={async (form) => {
-              await api(`${serverPath(serverId)}/gateway`, {
-                method: 'PUT',
-                body: {
-                  ...data.policy,
-                  enabled: form.get('enabled') === 'true',
-                  mode: text(form, 'mode'),
-                },
-              });
-              await policy.refetch();
-            }}
-          >
-            <Select
-              label={t('automation.gatewayOperation')}
-              className="automation-label-hidden"
-              name="enabled"
-              defaultValue={String(data.policy.enabled)}
-            >
-              <option value="true">{t('web.enabled')}</option>
-              <option value="false">{t('web.disabled')}</option>
-            </Select>
-            <Select label={t('service.automationMode')} name="mode" defaultValue={data.policy.mode}>
-              <option value="auto">{t('service.automatic')}</option>
-              <option value="manually_stopped">{t('service.manuallyStopped')}</option>
-              <option value="maintenance">{t('service.maintenance')}</option>
-            </Select>
-          </ActionForm>
+      {owner && editable && data.policy && (
+        <details className="sleep-wake-admin">
+          <summary>{t('automation.administration')}</summary>
+          <div className="sleep-wake-admin-content">
+            {data.policy && sleep && 'ownerUserAccessOverride' in sleep && (
+              <section
+                className="sleep-wake-admin-setting"
+                aria-label={t('automation.sleepAccess')}
+              >
+                <h4>{t('automation.sleepAccess')}</h4>
+                <ServerSleepAccessEditor
+                  key={JSON.stringify([sleep.ownerUserAccessOverride, sleep.inheritedUserAccess])}
+                  sleep={sleep}
+                  onSubmit={async (form) => {
+                    if (!data.policy) return;
+                    const {
+                      idleTimeoutSeconds: _seconds,
+                      idleTimeoutInherited: _inherited,
+                      ...existing
+                    } = data.policy;
+                    await api(`${serverPath(serverId)}/gateway`, {
+                      method: 'PUT',
+                      body: {
+                        ...existing,
+                        idleTimeoutUserAccess: readSleepAccess(form, 'sleepAccess'),
+                      },
+                    });
+                    await policy.refetch();
+                  }}
+                />
+              </section>
+            )}
+            <ServerWakeAccessSettings serverId={serverId} />
+            {data.policy && data.policyControlsEditable !== false && (
+              <section
+                className="sleep-wake-admin-setting sleep-wake-gateway"
+                aria-label={t('automation.gatewayOperation')}
+              >
+                <h4>{t('automation.gatewayOperation')}</h4>
+                <ActionForm
+                  key={`${data.policy.enabled}-${data.policy.mode}`}
+                  onSubmit={async (form) => {
+                    if (!data.policy) return;
+                    const {
+                      idleTimeoutSeconds: _seconds,
+                      idleTimeoutInherited: _inherited,
+                      ...existing
+                    } = data.policy;
+                    await api(`${serverPath(serverId)}/gateway`, {
+                      method: 'PUT',
+                      body: {
+                        ...existing,
+                        enabled: form.get('enabled') === 'true',
+                        mode: text(form, 'mode'),
+                      },
+                    });
+                    await policy.refetch();
+                  }}
+                >
+                  <Select
+                    label={t('automation.gatewayOperation')}
+                    className="automation-label-hidden"
+                    name="enabled"
+                    defaultValue={String(data.policy.enabled)}
+                  >
+                    <option value="true">{t('web.enabled')}</option>
+                    <option value="false">{t('web.disabled')}</option>
+                  </Select>
+                  <Select
+                    label={t('service.automationMode')}
+                    name="mode"
+                    defaultValue={data.policy.mode}
+                  >
+                    <option value="auto">{t('service.automatic')}</option>
+                    <option value="manually_stopped">{t('service.manuallyStopped')}</option>
+                    <option value="maintenance">{t('service.maintenance')}</option>
+                  </Select>
+                </ActionForm>
+              </section>
+            )}
+          </div>
         </details>
       )}
     </div>

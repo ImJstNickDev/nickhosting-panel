@@ -186,12 +186,22 @@ describe('Automation browser journeys', () => {
     await browserExpect(consent).toHaveAttribute('aria-checked', 'false');
     await expectKnob(false);
     await browserExpect(page.locator('.sleep-wake-status')).toHaveText('Paused');
+    await browserExpect(page.locator('.sleep-wake-admin')).toHaveCount(0);
+    await browserExpect(page.getByText('Gateway operation', { exact: true })).toHaveCount(0);
     const wake = page
       .locator('section')
       .filter({ has: page.getByRole('heading', { name: 'Wake on join', exact: true }) });
     await browserExpect(
       wake.getByRole('button', { name: 'Save changes', exact: true }),
     ).toHaveCount(0);
+    await wake.getByRole('button', { name: 'Disabled', exact: true }).click();
+    await browserExpect(wake.locator('.sleep-wake-hint')).toContainText(
+      'will not start the server',
+    );
+    await wake.getByRole('button', { name: 'Enabled', exact: true }).click();
+    await browserExpect(wake.locator('.sleep-wake-hint')).toContainText(
+      'can start the server when',
+    );
     await wake.getByRole('button', { name: 'Disabled', exact: true }).click();
     const savedWake = page.waitForResponse(
       (response) =>
@@ -213,6 +223,7 @@ describe('Automation browser journeys', () => {
     expect(stored).toEqual({ enabled: true, owner_idle_timeout_seconds: 60 });
     await fixture.screenshot(page, 'automation-sleep-desktop-en');
     await wake.getByRole('button', { name: 'Inherit', exact: true }).click();
+    await browserExpect(wake.locator('.sleep-wake-hint')).toContainText('Inherited: enabled.');
     const inheritedWake = page.waitForResponse(
       (response) =>
         response.url().endsWith('/auto-wake-policy') && response.request().method() === 'PUT',
@@ -235,6 +246,13 @@ describe('Automation browser journeys', () => {
     await browserExpect(minutes).toHaveValue('3');
     await page.keyboard.press('ArrowDown');
     await browserExpect(minutes).toHaveValue('2');
+    await minutes.fill('-1');
+    expect(
+      await minutes.evaluate((input) => (input as HTMLInputElement).validationMessage),
+    ).not.toContain('-1');
+    expect(await minutes.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(
+      false,
+    );
     await minutes.fill('0');
     expect(await minutes.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(
       false,
@@ -254,6 +272,19 @@ describe('Automation browser journeys', () => {
       `/v1/platform/servers/${provider.ids.serverId}/sleep-policy`,
     );
     expect(policy.idleTimeout.effectiveSeconds).toBe(30);
+    await minutes.fill('-1');
+    await sleep.getByRole('button', { name: 'Disabled', exact: true }).click();
+    const disabled = page.waitForResponse(
+      (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
+    );
+    await sleep.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await disabled).status()).toBe(200);
+    const disabledPolicy = await journeyRequest<{ idleTimeout: { effectiveSeconds: number } }>(
+      fixture,
+      page,
+      `/v1/platform/servers/${provider.ids.serverId}/sleep-policy`,
+    );
+    expect(disabledPolicy.idleTimeout.effectiveSeconds).toBe(-1);
     await sleep.getByRole('button', { name: 'Inherit', exact: true }).click();
     const restored = page.waitForResponse(
       (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
@@ -329,12 +360,60 @@ describe('Automation browser journeys', () => {
     await browserExpect(
       owner.getByRole('heading', { name: 'Sleep when idle', exact: true }),
     ).toBeVisible();
-    const accessDisclosures = owner.locator('.sleep-wake-permissions > summary');
-    await browserExpect(accessDisclosures).toHaveCount(2);
-    await accessDisclosures.first().click();
-    await accessDisclosures.last().click();
+    const admin = owner.locator('.sleep-wake-admin');
+    await admin.locator('summary').first().click();
     await browserExpect(owner.locator('select[name="sleepAccess"]')).toBeVisible();
     await browserExpect(owner.locator('select[name="access"]')).toBeVisible();
+    const ownerSleep = owner
+      .locator('.sleep-wake-policy')
+      .filter({ has: owner.getByRole('heading', { name: 'Sleep when idle', exact: true }) });
+    const ownerWake = owner
+      .locator('.sleep-wake-policy')
+      .filter({ has: owner.getByRole('heading', { name: 'Wake on join', exact: true }) });
+    await ownerSleep.getByRole('button', { name: 'Custom', exact: true }).click();
+    await ownerSleep.getByRole('spinbutton').fill('4');
+    await ownerWake.getByRole('button', { name: 'Disabled', exact: true }).click();
+    const sleepAccessForm = admin
+      .locator('form')
+      .filter({ has: owner.locator('select[name="sleepAccess"]') });
+    await sleepAccessForm.locator('select').selectOption('shorten-only');
+    const savedSleepAccess = owner.waitForResponse(
+      (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
+    );
+    await sleepAccessForm.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await savedSleepAccess).status()).toBe(200);
+    await browserExpect(ownerSleep.getByRole('spinbutton')).toHaveValue('4');
+    const wakeAccessForm = admin
+      .locator('form')
+      .filter({ has: owner.locator('select[name="access"]') });
+    await wakeAccessForm.locator('select').selectOption('disable-only');
+    const savedWakeAccess = owner.waitForResponse(
+      (response) =>
+        response.url().endsWith('/auto-wake-policy') && response.request().method() === 'PUT',
+    );
+    await wakeAccessForm.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await savedWakeAccess).status()).toBe(200);
+    await browserExpect(
+      ownerWake.getByRole('button', { name: 'Disabled', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    const ownerSettings = await fixture.database.db
+      .selectFrom('gateway_server_states')
+      .select([
+        'owner_idle_timeout_seconds',
+        'owner_auto_wake_override',
+        'owner_idle_timeout_user_access',
+        'owner_auto_wake_user_access',
+      ])
+      .where('server_id', '=', provider.ids.serverId)
+      .executeTakeFirstOrThrow();
+    expect(ownerSettings).toEqual({
+      owner_idle_timeout_seconds: 60,
+      owner_auto_wake_override: null,
+      owner_idle_timeout_user_access: 'shorten-only',
+      owner_auto_wake_user_access: 'disable-only',
+    });
+    await ownerSleep.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await ownerWake.getByRole('button', { name: 'Cancel', exact: true }).click();
     expect(
       (
         await new AxeBuilder({ page: owner })

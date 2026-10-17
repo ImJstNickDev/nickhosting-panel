@@ -11388,3 +11388,27 @@ handlers. Web app/test typecheck and changed-file Biome passed; independent revi
 found no must-fix. No live configuration, server data or infrastructure changed.
 The same focused regression also passed in Chromium (1 passed, 6 skipped).
 Indexed governance/tracked-content hygiene passed. No restart or migration needed.
+
+### 2026-10-17 — Separate server preferences from administration
+
+Moved sleep/wake user permissions and Gateway operation into one bottom Owner-only
+Administration disclosure. Normal preference writes omit access fields; separate
+permission writes preserve durations/wake overrides and unrelated unsaved drafts.
+Direct/unconfigured servers do not show an empty disclosure. Wake guidance follows
+Inherit/Enabled/Disabled immediately while saved effective values remain distinct.
+Server custom-duration validation no longer recommends -1: Disabled is its own
+control. Shared Owner hierarchy inputs retain their existing contracts.
+
+Targeted browser command (same isolated harness above) with
+`-t 'disables wake|steps idle timeout|edits sleep'`: **3 passed**, 4 unrelated skipped.
+Covers negative/zero rejection, Disabled after invalid input, contextual wake copy,
+Owner permission writes preserving stored values and unsaved drafts, ordinary-user
+admin absence, inheritance, EN desktop/IT mobile and scoped axe. Screenshots under
+`automation-sleep-*.png` refreshed. Initial typecheck caught the Owner-specific
+union field in the new permission component; narrowed its props to the Owner
+variant instead of weakening the data contract. No backend, migration, live setting
+or infrastructure changes; no new external test assets. Existing release gates,
+including SFTPGo #18, remain unchanged.
+Final web app/test typecheck, changed-file Biome and i18n checks passed; independent
+code and rendered UX review found no must-fix. Frontend changes use existing HMR;
+no restart was required. Rollback is a UI commit revert, with no data migration.

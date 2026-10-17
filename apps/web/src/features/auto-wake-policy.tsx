@@ -136,7 +136,11 @@ export function ServerWakeSettings({
         {policy.error && <ErrorNotice error={policy.error} />}
         {editable && (
           <ServerWakeEditor
-            key={JSON.stringify(value)}
+            key={JSON.stringify([
+              value.overrideEnabled,
+              value.inheritedEnabled,
+              owner ? null : value.userAccess,
+            ])}
             value={value}
             owner={owner}
             onSubmit={async (data) => {
@@ -144,14 +148,19 @@ export function ServerWakeSettings({
                 method: 'PUT',
                 body: {
                   overrideEnabled: readEnabled(data, 'wake'),
-                  ...(owner ? { userAccess: readAccess(data, 'access') } : {}),
                 },
               });
               await policy.refetch();
             }}
           />
         )}
-        <p className="sleep-wake-hint">{t('automation.wakeHint')}</p>
+        {!editable && (
+          <p className="sleep-wake-hint">
+            {t(
+              value.effectiveEnabled ? 'automation.wakeEnabledHint' : 'automation.wakeDisabledHint',
+            )}
+          </p>
+        )}
       </div>
     </section>
   );
@@ -169,19 +178,14 @@ function ServerWakeEditor({
   const [wake, setWake] = useState(
     value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled),
   );
-  const [access, setAccess] = useState<WakeAccess | null>(value.ownerUserAccessOverride ?? null);
-  const [reset, setReset] = useState(0);
   const dirty =
-    wake !== (value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled)) ||
-    access !== (value.ownerUserAccessOverride ?? null);
+    wake !== (value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled));
   return (
     <PolicyForm
       dirty={dirty}
       onSubmit={onSubmit}
       onCancel={() => {
         setWake(value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled));
-        setAccess(value.ownerUserAccessOverride ?? null);
-        setReset((value) => value + 1);
       }}
     >
       <input type="hidden" name="wake" value={wake} />
@@ -199,25 +203,69 @@ function ServerWakeEditor({
           { value: 'false', label: t('web.disabled') },
         ]}
       />
-      {wake === 'inherit' && (
-        <p className="sleep-wake-hint">
-          {t('automation.inheritedValue', {
-            value: t(value.inheritedEnabled ? 'web.enabled' : 'web.disabled'),
-          })}
-        </p>
-      )}
-      {owner && (
-        <details className="sleep-wake-permissions">
-          <summary>{t('sleepTiming.userAccess')}</summary>
-          <WakeAccessField
-            key={reset}
-            name="access"
-            value={value.ownerUserAccessOverride ?? null}
-            inherited={value.inheritedUserAccess ?? 'editable'}
-            onChange={setAccess}
-          />
-        </details>
-      )}
+      <p className="sleep-wake-hint">
+        {t(
+          wake === 'inherit'
+            ? value.inheritedEnabled
+              ? 'automation.wakeInheritEnabledHint'
+              : 'automation.wakeInheritDisabledHint'
+            : wake === 'true'
+              ? 'automation.wakeEnabledHint'
+              : 'automation.wakeDisabledHint',
+        )}
+      </p>
+    </PolicyForm>
+  );
+}
+export function ServerWakeAccessSettings({ serverId }: { serverId: string }) {
+  const t = useT();
+  const policy = useQuery({
+    queryKey: ['auto-wake-policy', serverId],
+    queryFn: () => api<WakePolicy | null>(`${platformPath(serverId)}/auto-wake-policy`),
+  });
+  if (!policy.data) return policy.error ? <ErrorNotice error={policy.error} /> : null;
+  return (
+    <section className="sleep-wake-admin-setting" aria-label={t('automation.wakeAccess')}>
+      <h4>{t('automation.wakeAccess')}</h4>
+      {policy.error && <ErrorNotice error={policy.error} />}
+      <ServerWakeAccessEditor
+        key={JSON.stringify([policy.data.ownerUserAccessOverride, policy.data.inheritedUserAccess])}
+        value={policy.data}
+        onSubmit={async (data) => {
+          await api(`${platformPath(serverId)}/auto-wake-policy`, {
+            method: 'PUT',
+            body: {
+              overrideEnabled: policy.data?.overrideEnabled,
+              userAccess: readAccess(data, 'access'),
+            },
+          });
+          await policy.refetch();
+        }}
+      />
+    </section>
+  );
+}
+function ServerWakeAccessEditor({
+  value,
+  onSubmit,
+}: {
+  value: WakePolicy;
+  onSubmit: (data: FormData) => Promise<unknown>;
+}) {
+  const initialAccess = value.ownerUserAccessOverride ?? null;
+  const [access, setAccess] = useState<WakeAccess | null>(initialAccess);
+  return (
+    <PolicyForm
+      dirty={access !== initialAccess}
+      onSubmit={onSubmit}
+      onCancel={() => setAccess(initialAccess)}
+    >
+      <WakeAccessField
+        name="access"
+        value={initialAccess}
+        inherited={value.inheritedUserAccess ?? 'editable'}
+        onChange={setAccess}
+      />
     </PolicyForm>
   );
 }

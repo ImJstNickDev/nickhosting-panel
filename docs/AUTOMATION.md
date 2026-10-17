@@ -85,7 +85,11 @@ and Disabled. Custom sleep starts from the inherited duration rather than
 implicitly disabling sleep. Save/Cancel appear only for changes; Cancel discards
 the draft and clears rejected-save errors. Operational-state refreshes do not
 reset an edited duration. Owner access controls and technical Gateway settings
-remain collapsed until needed. Automatic-start consent is a separate control;
+are grouped in the bottom Administration disclosure, absent for ordinary users.
+Permission saves preserve the configured durations/wake preference and unrelated
+unsaved drafts. Custom duration accepts positive values; Disabled is the separate
+control for turning sleep off. Wake guidance follows the draft choice and includes
+the inherited effective value. Automatic-start consent is a separate control;
 changing wake never implicitly changes sleep or that consent.
 
 ## Per-server Gateway messages

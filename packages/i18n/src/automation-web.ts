@@ -21,9 +21,28 @@ export const automationWebMessages: Record<string, readonly [string, string]> = 
   'automation.inheritedValue': ['Inherited: {value}', 'Valore ereditato: {value}'],
   'automation.fromSource': ['From {source}', 'Da {source}'],
   'automation.autoWake': ['Wake on join', 'Risveglio alla connessione'],
-  'automation.wakeHint': [
-    'A player joining can start the server. Sleep and schedules remain independent.',
-    'Un giocatore che si connette può avviare il server. Sospensione e pianificazioni restano indipendenti.',
+  'automation.positiveIdleMinutes': [
+    'Enter a positive duration. Choose Disabled to turn off automatic sleep.',
+    'Inserisci un tempo positivo. Scegli Disattivato per disattivare la sospensione automatica.',
+  ],
+  'automation.administration': ['Administration', 'Amministrazione'],
+  'automation.sleepAccess': ['Sleep permissions', 'Permessi di sospensione'],
+  'automation.wakeAccess': ['Wake permissions', 'Permessi di risveglio'],
+  'automation.wakeEnabledHint': [
+    'Player connections can start the server when automatic starts are allowed.',
+    'Le connessioni dei giocatori possono avviare il server quando gli avvii automatici sono consentiti.',
+  ],
+  'automation.wakeDisabledHint': [
+    'Player connections will not start the server. Sleep and schedules remain independent.',
+    'Le connessioni dei giocatori non avviano il server. Sospensione e pianificazioni restano indipendenti.',
+  ],
+  'automation.wakeInheritEnabledHint': [
+    'Inherited: enabled. Player connections can start the server when automatic starts are allowed.',
+    'Valore ereditato: attivo. Le connessioni dei giocatori possono avviare il server quando gli avvii automatici sono consentiti.',
+  ],
+  'automation.wakeInheritDisabledHint': [
+    'Inherited: disabled. Player connections will not start the server.',
+    'Valore ereditato: disattivato. Le connessioni dei giocatori non avviano il server.',
   ],
   'automation.autoSleep': ['Sleep when idle', 'Sospensione per inattività'],
   'automation.access.hidden': ['Hidden', 'Nascosto'],
