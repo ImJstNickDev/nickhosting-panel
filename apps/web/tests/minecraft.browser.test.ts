@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { browserHarness } from './harness.js';
 import { journeyRequest, prepareJourneyIdentities } from './journey-fixture.js';
-import { browserLevelDat, browserMinecraft } from './minecraft-fixture.js';
+import { browserMinecraft } from './minecraft-fixture.js';
 import { installBrowserFixtures } from './provider-fixture.js';
 
 async function archive(files: Record<string, Buffer>) {
@@ -151,71 +151,6 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
     ).toHaveCount(0);
     await fixture.screenshot(user, 'minecraft-properties-desktop-en');
     await accessible(user);
-  });
-
-  it('uploads, imports, selects and explicitly deletes a compatible world through durable jobs', async () => {
-    await user.goto(`${base}/worlds`);
-    let form = section('Import world');
-    // A draft in another form must survive the authoritative import refresh.
-    await section('Select world').getByLabel('World', { exact: true }).selectOption('world');
-    const bytes = await archive({
-      'source/level.dat': browserLevelDat(),
-      'source/data/browser.txt': Buffer.from('Isolated browser world'),
-    });
-    await upload(form.getByLabel('Verified upload', { exact: true }), 'world.zip', bytes, form);
-    await form.getByLabel('World folder', { exact: true }).fill('imported');
-    await operation(
-      () => form.getByRole('button', { name: 'Import world', exact: true }).click(),
-      async () => {
-        await browserExpect(user.getByRole('cell', { name: 'imported', exact: true })).toHaveCount(
-          0,
-        );
-      },
-    );
-    expect((await provider.files()).get('imported/data/browser.txt')?.toString()).toBe(
-      'Isolated browser world',
-    );
-    await browserExpect(user.getByRole('cell', { name: 'imported', exact: true })).toBeVisible();
-    form = section('Select world');
-    await browserExpect(form.getByLabel('World', { exact: true })).toHaveValue('world');
-    await form.getByLabel('World', { exact: true }).selectOption('imported');
-    await operation(() => form.getByRole('button', { name: 'Select', exact: true }).click());
-    expect((await provider.files()).get('server.properties')?.toString()).toContain(
-      'level-name=imported',
-    );
-    await browserExpect(
-      section('Select world')
-        .getByLabel('World', { exact: true })
-        .locator('option[value="imported"]'),
-    ).toHaveCount(1);
-    await browserExpect(
-      section('Select world').getByRole('button', { name: 'Select', exact: true }),
-    ).toBeEnabled();
-    await fixture.screenshot(user, 'minecraft-worlds-desktop-en');
-    await accessible(user);
-    await section('Select world').getByLabel('World', { exact: true }).selectOption('world');
-    await operation(() =>
-      section('Select world').getByRole('button', { name: 'Select', exact: true }).click(),
-    );
-    const remove = section('Delete world');
-    await remove.getByLabel('World', { exact: true }).selectOption('imported');
-    await remove.getByLabel('Confirm deletion', { exact: true }).check();
-    await remove.getByLabel('Create a verified backup first', { exact: true }).uncheck();
-    await remove.getByRole('button', { name: 'Delete world', exact: true }).click();
-    const dialog = user.getByRole('dialog');
-    await browserExpect(dialog).toContainText('This permanently deletes the selected world.');
-    expect((await provider.files()).has('imported/level.dat')).toBe(true);
-    await operation(() =>
-      dialog.getByRole('button', { name: 'Delete world', exact: true }).click(),
-    );
-    expect((await provider.files()).has('imported/level.dat')).toBe(false);
-    expect((await provider.files()).has('world/level.dat')).toBe(true);
-    await browserExpect(user.getByRole('cell', { name: 'imported', exact: true })).toHaveCount(0);
-    await browserExpect(
-      section('Select world')
-        .getByLabel('World', { exact: true })
-        .locator('option[value="imported"]'),
-    ).toHaveCount(0);
   });
 
   it('keeps Vanilla mod controls absent and verifies explicit modpack replacement with a backup', async () => {

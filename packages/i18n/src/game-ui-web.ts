@@ -120,6 +120,10 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
     'Arresta il server prima di modificare queste impostazioni.',
   ],
   'gameUi.resetChanges': ['Reset changes', 'Ripristina modifiche'],
+  'gameUi.operationFailed': [
+    'The operation failed. View details before trying again.',
+    'Operazione non riuscita. Controlla i dettagli prima di riprovare.',
+  ],
   'gameUi.saveFailed': [
     'Changes could not be saved. Your draft is preserved.',
     'Salvataggio non riuscito. Le modifiche sono conservate nella bozza.',

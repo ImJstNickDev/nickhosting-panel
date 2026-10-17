@@ -1228,3 +1228,20 @@ uncertain mutation states are distinct from zero players and success. English an
 Italian use the integration-owned `players-catalog.ts`. Mobile controls wrap;
 keyboard navigation, labelled switches and Cancel-first confirmations reuse the
 shared accessibility patterns.
+
+### Minecraft Worlds workspace — 2026-10-17
+
+Use one searchable world list, a configured-world marker and contextual icon
+controls for selection, ZIP download and deletion. Do not repeat full discovery
+for independent dropdowns. Import lives in a focused ZIP upload dialog with actual
+hash/upload progress, cancellation and a folder name. Existing-folder replacement
+requires a separate destructive confirmation and an explicit verified-backup
+choice; selecting an imported world remains a separate action. Keep all labels,
+errors, tooltips and keyboard names in the integration's EN/IT catalog.
+
+Distinguish no worlds, no search matches, unreadable metadata, unsupported
+compatibility and an unfinished installation. Disable deletion of the
+configured world and all operations that the current state/permissions cannot
+perform. Request acceptance does not mean import/switch/deletion has completed.
+Unknown submission outcomes retain a frozen idempotency key and payload for
+explicit receipt recovery, with no automatic replay under a new identity.

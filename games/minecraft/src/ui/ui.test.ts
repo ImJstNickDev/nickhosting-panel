@@ -471,3 +471,62 @@ describe('Minecraft Players UI contracts', () => {
     expect(client.request).not.toHaveBeenCalled();
   });
 });
+
+describe('Minecraft Worlds UI contracts', () => {
+  const snapshot = {
+    installed: true,
+    supported: true,
+    selectedWorld: 'adventure',
+    release: '26.1',
+    compatibility: 'available',
+    worlds: [{ name: 'adventure', status: 'verified' }],
+  };
+  it('loads one shared inventory with the selected world and no per-form scans', async () => {
+    const client = clientFixture();
+    client.request.mockResolvedValue(snapshot);
+    expect(
+      minecraftUiModule.descriptor.sections.find((section) => section.id === 'worlds'),
+    ).toMatchObject({
+      renderer: 'minecraft-worlds',
+      requiredPermissions: ['server:read'],
+      columns: [],
+      forms: [],
+    });
+    expect(await minecraftUiModule.handlers.worlds?.(client, { serverId, values: {} })).toEqual({
+      values: {},
+      rows: [],
+      metadata: { worlds: snapshot, installed: true },
+    });
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(client.request.mock.calls[0]?.[0]).toBe(`/v1/servers/${serverId}/minecraft/worlds`);
+  });
+  it('keeps unknown compatibility distinct from empty inventory', async () => {
+    const client = clientFixture();
+    client.request.mockResolvedValue({
+      ...snapshot,
+      compatibility: 'unavailable',
+      worlds: [{ name: 'adventure', status: 'unavailable' }],
+    });
+    expect(await createMinecraftUiController(client).worlds(serverId)).toMatchObject({
+      compatibility: 'unavailable',
+      selectedWorld: 'adventure',
+      worlds: [{ name: 'adventure', status: 'unavailable' }],
+    });
+  });
+  it('rejects unsafe world paths and implicit replacement before requesting a job', async () => {
+    const client = clientFixture();
+    const controller = createMinecraftUiController(client);
+    for (const command of [
+      { kind: 'world-select', world: '../world' },
+      { kind: 'world-remove', world: 'world', confirm: false, backupBefore: false },
+      {
+        kind: 'world-import',
+        targetWorld: 'world',
+        archiveRef: sourceId,
+        replace: { expectedDeletePaths: ['world'], backupBefore: true },
+      },
+    ])
+      await expect(controller.operate(serverId, 'world-test', command)).rejects.toThrow();
+    expect(client.request).not.toHaveBeenCalled();
+  });
+});

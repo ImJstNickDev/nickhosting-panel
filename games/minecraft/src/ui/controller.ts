@@ -189,9 +189,28 @@ const worldSchema = z
   .object({
     name: world,
     status: z.enum(['verified', 'incompatible', 'unavailable']),
-    validation: z.unknown().optional(),
+    validation: z
+      .object({
+        dataVersion: z.number().int().nonnegative(),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/),
+        uncompressedBytes: z.number().int().nonnegative(),
+        versionName: z.string().max(128).optional(),
+      })
+      .strip()
+      .optional(),
   })
   .strip();
+export const minecraftWorldsSchema = z
+  .object({
+    installed: z.boolean(),
+    supported: z.boolean(),
+    selectedWorld: z.string().max(1024).nullable(),
+    release: z.string().max(128),
+    compatibility: z.enum(['available', 'unavailable']),
+    worlds: z.array(worldSchema).max(1000),
+  })
+  .strip();
+export type MinecraftWorlds = z.infer<typeof minecraftWorldsSchema>;
 const jobSchema = z.object({ serverId: uuid, jobId: uuid }).strip();
 export type AcceptedMinecraftOperation = z.infer<typeof jobSchema>;
 const sourceSchema = z
@@ -340,10 +359,9 @@ export function createMinecraftUiController(client: GameUiClient) {
         );
     },
     async worlds(serverId: string, signal?: AbortSignal) {
-      return z
-        .array(worldSchema)
-        .max(1000)
-        .parse(await request(serverPath(serverId, '/worlds'), 'GET', undefined, signal));
+      return minecraftWorldsSchema.parse(
+        await request(serverPath(serverId, '/worlds'), 'GET', undefined, signal),
+      );
     },
     async wipePreview(serverId: string, signal?: AbortSignal) {
       return z

@@ -1,11 +1,16 @@
 import { useEffect, useRef } from 'react';
-import { Navigate, NavLink, Outlet, useLocation, useParams } from 'react-router';
+import { Navigate, NavLink, Outlet, useLocation, useMatch, useParams } from 'react-router';
+import { ApiError } from '../api/client.js';
 import { ErrorNotice, Loading } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
-import { gameUiRegistry } from '../features/integrations.js';
+import { gameUiRegistry, getGameSectionView } from '../features/integrations.js';
 import { type ServerInfo, useServer } from '../features/service-contracts.js';
 import './server-game.css';
 import { useT } from './i18n.js';
+
+function accessLost(error: unknown) {
+  return error instanceof ApiError && [401, 403, 404].includes(error.status);
+}
 
 function availableGameSections(server: ServerInfo) {
   const permissions = new Set(
@@ -30,6 +35,7 @@ function availableGameSections(server: ServerInfo) {
 export function ServerShell() {
   const location = useLocation(),
     tabsElement = useRef<HTMLElement>(null);
+  const gameRoute = useMatch('/servers/:serverId/game/:sectionId');
   const { serverId = '' } = useParams(),
     t = useT(),
     server = useServer(serverId);
@@ -39,7 +45,18 @@ export function ServerShell() {
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [location.pathname, server.data?.id]);
   if (server.isPending) return <Loading />;
-  if (server.error) return <ErrorNotice error={server.error} />;
+  const renderer =
+    server.data && gameRoute
+      ? gameUiRegistry
+          .get(server.data.gameId)
+          ?.descriptor.sections.find((section) => section.id === gameRoute.params.sectionId)
+          ?.renderer
+      : undefined;
+  // A transient background failure must not discard a custom view's request
+  // receipt. Its section boundary shows the error and blocks mutations.
+  if (server.error && (!server.data || !getGameSectionView(renderer) || accessLost(server.error)))
+    return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
+
   const value = server.data,
     base = `/servers/${serverId}`;
   const tabs: string[][] = [
@@ -92,7 +109,14 @@ export function ServerGameSection() {
     server = useServer(serverId),
     t = useT();
   if (server.isPending) return <Loading />;
-  if (server.error) return <ErrorNotice error={server.error} />;
+  const renderer =
+    server.data &&
+    gameUiRegistry
+      .get(server.data.gameId)
+      ?.descriptor.sections.find((section) => section.id === sectionId)?.renderer;
+  if (server.error && (!server.data || !getGameSectionView(renderer) || accessLost(server.error)))
+    return <ErrorNotice error={server.error} retry={() => void server.refetch()} />;
+
   const game = gameUiRegistry.get(server.data.gameId);
   const sections = availableGameSections(server.data);
   if (!sectionId && sections?.[0]) return <Navigate to={sections[0].id} replace />;

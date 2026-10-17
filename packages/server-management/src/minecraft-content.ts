@@ -22,7 +22,11 @@ import {
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import { minecraftCombinationSchema, minecraftDigest } from '@nickhosting/minecraft';
+import {
+  minecraftCombinationSchema,
+  minecraftDigest,
+  minecraftManifest,
+} from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
@@ -1913,11 +1917,12 @@ async function readWorldLevel(
   context: Pick<GameLifecycleContext, 'adapter' | 'server' | 'authorize'>,
   world: string,
   maxBytes = 8 * 1024 ** 2,
+  signal?: AbortSignal,
 ) {
   const response = await context.adapter.downloadFile(
     context.server.pterodactyl_identifier ?? '',
     `${minecraftWorldName(world)}/level.dat`,
-    { maxBytes, authorize: context.authorize },
+    { maxBytes, authorize: context.authorize, signal },
   );
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -1936,7 +1941,86 @@ async function readWorldLevel(
   }
   return Buffer.concat(chunks, size);
 }
-/** Called through ManagementRuntime.access after current managed identity and user authorization. */
+export interface MinecraftWorldSnapshot {
+  installed: boolean;
+  supported: boolean;
+  selectedWorld: string | null;
+  release: string;
+  compatibility: 'available' | 'unavailable';
+  worlds: Awaited<ReturnType<typeof discoverMinecraftWorlds>>;
+}
+/** Caller establishes authorization and managed identity through ManagementRuntime.fileReadAccess. */
+export async function inspectMinecraftWorlds(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  serverId: string,
+  authorize: () => Promise<void>,
+  env: Environment = {},
+  signal?: AbortSignal,
+): Promise<MinecraftWorldSnapshot> {
+  const profile = await db
+    .selectFrom('minecraft_server_profiles')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  const server = await db
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (!profile || !server) throw new DomainError('not_found');
+  if (!server.pterodactyl_identifier) throw new DomainError('conflict');
+  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
+  let expectedDataVersion: number | undefined;
+  try {
+    expectedDataVersion = worldDataVersion(choice);
+  } catch (error) {
+    if (!(error instanceof DomainError) || error.code !== 'integration_unavailable') throw error;
+  }
+  const snapshot: MinecraftWorldSnapshot = {
+    installed: profile.installed,
+    supported: minecraftManifest.capabilities.worlds,
+    selectedWorld: null,
+    release: choice.combination.release,
+    compatibility: expectedDataVersion === undefined ? 'unavailable' : 'available',
+    worlds: [],
+  };
+  if (!snapshot.installed || !snapshot.supported) return snapshot;
+  signal?.throwIfAborted();
+  const properties = parseMinecraftProperties(
+    Buffer.from(
+      await adapter.readFile(server.pterodactyl_identifier, 'server.properties', 1048576),
+    ).toString('utf8'),
+  );
+  // Preserve the observed value, including legacy names that managed mutations cannot accept.
+  snapshot.selectedWorld = properties['level-name'] ?? 'world';
+  snapshot.worlds = await discoverMinecraftWorlds(
+    {
+      listRoot: async () => {
+        signal?.throwIfAborted();
+        return (await adapter.listFiles(server.pterodactyl_identifier ?? '')).map((entry) => ({
+          name: entry.name,
+          isDirectory: !entry.is_file,
+          isSymlink: entry.is_symlink,
+        }));
+      },
+      readLevelDat: async (world, maxBytes) => {
+        signal?.throwIfAborted();
+        const entries = await adapter.listFiles(server.pterodactyl_identifier ?? '', world);
+        const level = entries.find((entry) => entry.name === 'level.dat');
+        if (!level) return undefined;
+        if (!level.is_file || level.is_symlink || level.size > maxBytes)
+          throw new DomainError('conflict');
+        return readWorldLevel({ adapter, server, authorize }, world, maxBytes, signal);
+      },
+    },
+    { expectedDataVersion, release: choice.combination.release, signal },
+  );
+  await authorize();
+  return snapshot;
+}
+/** Array contract retained for trusted integration scripts. */
 export async function listMinecraftWorlds(
   db: Kysely<Database>,
   adapter: PterodactylAdapter,
@@ -1944,37 +2028,7 @@ export async function listMinecraftWorlds(
   authorize: () => Promise<void>,
   env: Environment = {},
 ) {
-  const profile = await db
-    .selectFrom('minecraft_server_profiles')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .executeTakeFirstOrThrow();
-  const server = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('id', '=', serverId)
-    .where('deleted_at', 'is', null)
-    .executeTakeFirstOrThrow();
-  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-  return discoverMinecraftWorlds(
-    {
-      listRoot: async () =>
-        (await adapter.listFiles(server.pterodactyl_identifier ?? '')).map((entry) => ({
-          name: entry.name,
-          isDirectory: !entry.is_file,
-          isSymlink: entry.is_symlink,
-        })),
-      readLevelDat: async (world, maxBytes) => {
-        const entries = await adapter.listFiles(server.pterodactyl_identifier ?? '', world);
-        const level = entries.find((entry) => entry.name === 'level.dat');
-        if (!level) return undefined;
-        if (!level.is_file || level.is_symlink || level.size > maxBytes)
-          throw new DomainError('conflict');
-        return readWorldLevel({ adapter, server, authorize }, world, maxBytes);
-      },
-    },
-    { expectedDataVersion: worldDataVersion(choice), release: choice.combination.release },
-  );
+  return (await inspectMinecraftWorlds(db, adapter, serverId, authorize, env)).worlds;
 }
 async function applyWorldContent(
   context: GameLifecycleContext,

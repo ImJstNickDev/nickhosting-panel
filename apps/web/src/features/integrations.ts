@@ -106,8 +106,14 @@ const MinecraftPlayersSection = lazy(() =>
     default: module.MinecraftPlayersSection,
   })),
 );
+const MinecraftWorldsSection = lazy(() =>
+  import('../integrations/minecraft/worlds.js').then((module) => ({
+    default: module.MinecraftWorldsSection,
+  })),
+);
 const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
   ['minecraft-players', MinecraftPlayersSection],
+  ['minecraft-worlds', MinecraftWorldsSection],
 ]);
 export function getGameSectionView(renderer: string | undefined) {
   return renderer ? sectionViews.get(renderer) : undefined;

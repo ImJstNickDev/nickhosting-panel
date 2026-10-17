@@ -1453,3 +1453,27 @@ No database migration or Gateway packet change accompanies this UI extension.
 Standard managed-server authorization, lifecycle locks, provider identity and
 actor/subject audit apply. Typed commands appear in Activity through the existing
 console audit model. No new provider keys, database tables or deployment settings.
+
+### Minecraft Worlds inventory — 2026-10-17
+
+`GET /v1/servers/:id/minecraft/worlds` now returns an object instead of the old
+array: `{ installed, supported, selectedWorld, release, compatibility, worlds }`.
+`selectedWorld` is the observed `server.properties` value (default `world` when
+omitted); it can refer to a world not generated yet. `compatibility` is `available`
+or `unavailable`; a missing expected DataVersion does not erase the inventory.
+Each world retains `{ name, status, validation? }`, with `status` equal to
+`verified`, `incompatible` or `unavailable`, and bounded version metadata when
+readable. No arbitrary NBT or file content is exposed. The trusted script helper
+`listMinecraftWorlds` keeps its array return contract.
+
+Inventory uses `server:read`, current session/managed identity through the shared
+Fileman access helper, no-store responses and reauthorization during/following
+reads. At most two candidate readers run concurrently. Existing `world-import`,
+`world-select` and `world-remove` durable command contracts are unchanged and
+remain `server:manage`, stopped-server operations. The frontend checks expected
+eligibility but authoritative validation remains in the worker.
+
+Downloads use the existing `/v1/servers/:id/files/archive` endpoint with root `''`
+and the selected world directory; they retain file-transfer authorization and
+streaming bounds. This is not a new backup or consistency guarantee. No new
+settings, migrations, credentials or external API are required.

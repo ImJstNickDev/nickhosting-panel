@@ -18,8 +18,8 @@ import {
   enqueueServerOperation,
   importMinecraftEvidence,
   inspectMinecraftCombination,
+  inspectMinecraftWorlds,
   listMinecraftOwnerCombinations,
-  listMinecraftWorlds,
   type ManagementRuntime,
   minecraftCatalog,
   minecraftContentWipePreview,
@@ -446,16 +446,19 @@ export function registerMinecraftRoutes(
   app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
+    await authorizeServer(db, context, serverId);
+    const service = await management();
+    c.header('cache-control', 'no-store');
     return c.json(
-      await listMinecraftWorlds(
-        db,
-        (await management()).adapter,
-        serverId,
-        async () => {
-          await authorizeServer(db, await principal(c), serverId, 'server:manage');
-        },
-        env,
+      await service.fileReadAccess(context, serverId, async (_identifier, connection, current) =>
+        inspectMinecraftWorlds(
+          connection,
+          service.adapter,
+          serverId,
+          () => service.authorizeTransfer(current, serverId, false, connection),
+          env,
+          c.req.raw.signal,
+        ),
       ),
     );
   });

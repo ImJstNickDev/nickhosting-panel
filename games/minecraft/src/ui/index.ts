@@ -15,6 +15,7 @@ import {
   minecraftContentCapabilities,
 } from './controller.js';
 import { minecraftPlayersMessages } from './players-catalog.js';
+import { minecraftWorldsMessages } from './worlds-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
 export * from '../message-layout.js';
@@ -24,6 +25,7 @@ const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
   ...minecraftPlayersMessages,
+  ...minecraftWorldsMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
   'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
   'messages.source': ['Text codes', 'Codici di testo'],
@@ -423,74 +425,11 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       id: 'worlds',
       titleKey: k('sections.worlds'),
       loader: 'worlds',
-      requiredPermissions: ['server:manage'],
+      renderer: 'minecraft-worlds',
+      requiredPermissions: ['server:read'],
       requiredCapabilities: ['worlds'],
-      columns: [
-        { id: 'name', labelKey: k('fields.world') },
-        { id: 'status', labelKey: k('fields.status'), format: 'message' },
-      ],
-      forms: [
-        {
-          id: 'select-world',
-          titleKey: k('forms.selectWorld'),
-          fields: [
-            field('world', {
-              type: 'choice',
-              required: true,
-              source: { handler: 'world-choices' },
-            }),
-          ],
-          action: action('select', 'worlds'),
-        },
-        {
-          id: 'import-world',
-          titleKey: k('forms.importWorld'),
-          fields: [
-            field('archiveRef', {
-              type: 'archive',
-              accept: ['.zip'],
-              handler: 'upload-world',
-              required: true,
-            }),
-            field('targetWorld', {
-              type: 'text',
-              format: 'world-name',
-              maxLength: 64,
-              required: true,
-            }),
-            field('replaceExisting', { type: 'boolean' }),
-            field('replaceConsent', {
-              type: 'boolean',
-              mustBeTrue: true,
-              required: true,
-              when: [{ field: 'replaceExisting', operator: 'equals', values: [true] }],
-            }),
-            field('backupBefore', {
-              type: 'boolean',
-              required: true,
-              when: [{ field: 'replaceExisting', operator: 'equals', values: [true] }],
-            }),
-          ],
-          action: action('import', 'worlds'),
-        },
-        {
-          id: 'remove-world',
-          titleKey: k('forms.removeWorld'),
-          fields: [
-            field('world', {
-              type: 'choice',
-              required: true,
-              source: { handler: 'world-choices' },
-            }),
-            field('confirm', { type: 'boolean', required: true, mustBeTrue: true }),
-            field('backupBefore', { type: 'boolean', required: true }),
-          ],
-          action: action('delete', 'worlds', {
-            destructive: true,
-            confirmationKey: k('warnings.removeWorld'),
-          }),
-        },
-      ],
+      columns: [],
+      forms: [],
     },
     {
       id: 'content',
@@ -791,21 +730,13 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         context.signal,
       );
     },
-    worlds: async (client, context): Promise<UiSectionData> => ({
-      values: { backupBefore: true, confirm: false },
-      rows: (await createMinecraftUiController(client).worlds(server(context), context.signal)).map(
-        (world) => ({ ...world, status: k(`states.${world.status}`) }),
-      ),
-    }),
-    'world-choices': async (client, context) =>
-      (await createMinecraftUiController(client).worlds(server(context), context.signal)).map(
-        (w) => ({
-          value: w.name,
-          label: w.name,
-          disabled: w.status !== 'verified',
-          ...(w.status !== 'verified' ? { reasonKey: k(`states.${w.status}`) } : {}),
-        }),
-      ),
+    worlds: async (client, context): Promise<UiSectionData> => {
+      const worlds = await createMinecraftUiController(client).worlds(
+        server(context),
+        context.signal,
+      );
+      return { values: {}, rows: [], metadata: { worlds, installed: worlds.installed } };
+    },
     select: async (client, context) =>
       createMinecraftUiController(client).operate(
         server(context),

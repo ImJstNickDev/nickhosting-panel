@@ -11973,3 +11973,66 @@ no containers were restarted/rebuilt, no production configuration changed and no
 live test assets were created. Existing isolated services were reused and disposable
 schemas cleaned by the harness. No dependencies or migrations. Rollback is a source
 revert. SFTPGo issue18 remains an independent production-release gate.
+
+### 2026-10-17 — Minecraft Worlds
+
+Replaced three independent forms and repeated inventories with one integration-owned
+Worlds workspace: configured-world marker, observed version/compatibility, search,
+bounded pagination and contextual select/download/delete actions. ZIP import has
+streamed upload/hash progress and cancellation, explicit destination, case-collision
+handling, and a separate destructive replacement confirmation with optional verified
+backup. Imported worlds are not silently selected or started. All mutations retain
+the existing durable stopped-server jobs and exact compatibility checks.
+
+Inventory now uses the shared Fileman managed-identity cache through
+`fileReadAccess`, reads current `level-name` once and scans at most two candidates
+concurrently. It does not download region/chunk data. Missing version evidence no
+longer hides inventory or fabricates compatibility. The existing exact version and
+NBT-format limitations remain for mutation; legacy folders outside the managed-name
+rules can be shown as configured but are not listed as manageable worlds. ZIP
+export uses the existing file archive stream, not a new backup/snapshot mechanism.
+
+Review found a recovery-state lifetime bug: failed background reads unmounted a
+custom section and discarded its frozen unknown-submission key. The shared section
+and its server-shell ancestors now retain cached custom views for transient read
+errors, show the failure and block writes until refreshed. Access loss (401/403/404)
+still removes the protected view. Custom-section failed-job copy no longer promises
+a preserved form draft. Review also corrected wording for unlisted legacy folders.
+
+Validation and evidence boundaries:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/world.test.ts packages/server-management/src/minecraft-content-world.test.ts packages/server-management/src/minecraft-world-inventory.test.ts apps/api/src/minecraft-worlds.test.ts packages/server-management/src/minecraft-content.test.ts`: 52 passed across five files (17/1/5/3/26). Includes snapshot metadata, unavailable compatibility, permission/access boundary, final revocation, bounded concurrency, archive/NBT protections and unchanged content contracts.
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/ui/ui.test.ts packages/game-sdk/src/ui.test.ts`: 35 passed. Dedicated Worlds loader performs one request; selected-world metadata, unknown compatibility and invalid commands covered.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/minecraft-worlds.browser.test.ts`: first run 3/6 passed; test assumptions corrected for native archive POST/new window, durable failure notice rather than alert, and generic initial loading. Seven-case follow-up passed, then expanded eight-case suite passed. The first failed-refresh assertion could match an earlier alert; it was strengthened in the targeted follow-up rather than counted as adequate recovery evidence.
+- Browser tests use actual auth/API/job handlers, disposable PostgreSQL schemas and an in-memory provider filesystem/worker. Real browser native ZIP download is exercised. Network response loss/provider failures are explicit isolated injections. No real Minecraft files, worlds or server state were changed.
+- Desktop English and Italian 390px/320px layouts reviewed independently; scoped Axe checks reported zero violations. This is Chromium coverage, not a new Firefox run or complete accessibility audit.
+- `scripts/dev.sh pnpm typecheck` passed, followed by affected WebPanel/test typechecks. `scripts/dev.sh pnpm build` passed with the existing large-chunk warning. No new dependencies or migration.
+
+Dev ingress and Worlds module returned HTTP200; unauthenticated Worlds API returned
+HTTP401. No production mutation, container restart/rebuild, network change or live
+test asset. Existing isolated test services were reused; disposable schemas and
+temporary staging data cleaned by the harness. Rollback is a source revert. The
+prior array-returning trusted script helper is preserved; its separate provider
+fixture integration test was not rerun. SFTPGo issue18 remains unchanged. Worlds
+work does not begin Content, presets, runtime expansion or M6.
+
+Final recovery follow-up: three targeted journeys passed after tightening the
+selected-world screenshot wait; the two recovery/upload-cancel journeys then passed
+with explicit proof of inventory HTTP503 and server-poll HTTP503, disabled writes,
+successful reads, identical recovered POST payload/key, exactly one database job
+and one provider write. Cancellation waits until the network upload has actually
+started (the earlier case could cancel during hashing). Independent reviewer
+accepted the corrected source and stronger assertions with no remaining must-fix.
+A test-only Buffer/string setup mismatch was found by TypeScript and corrected to
+seed the in-memory provider fixture directly; the affected typecheck then passed.
+
+Final mobile-only recapture passed 1/1 (seven skipped), including Axe and overflow
+checks, after the import dialog's close icon was made quiet. Its first standalone
+attempt exposed a fixture `about:blank` localStorage dependency; navigation before
+locale setup fixed that test-only issue. Eight sanitized screenshots are tracked as
+`docs/screenshots/m5/minecraft-worlds-*.png`: desktop inventory, 320px Italian list,
+Italian import, replacement confirmation, readonly, uncertain, unavailable
+compatibility and active upload. Other explored states remain in private harness
+artifacts. Final i18n check passed with 2305 EN/IT/pseudolocale keys; scoped Biome and
+whitespace checks passed. Production build also emitted Rolldown plugin-timing
+information (12.70s successful build), not a runtime failure.

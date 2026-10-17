@@ -547,28 +547,32 @@ export function GameSections({
         refreshedOutcome.current !== `${operationState}:${effectState}`),
   );
   if (!module || !section) return <Empty text={t('gameUi.missingSection')} />;
+  const SectionView = getGameSectionView(section.renderer);
+  const refreshError = server.error ?? loaded.error;
+  const retryReads = () => {
+    void server.refetch();
+    void loaded.refetch();
+    if (operationId) void operation.refetch();
+  };
   if (server.isPending) return <Loading />;
-  if (server.error) return <ErrorNotice error={server.error} />;
+  if (server.error && !server.data) return <ErrorNotice error={server.error} retry={retryReads} />;
   if (!canReadSection) return <Notice>{t('gameUi.noPermission')}</Notice>;
   if (loaded.isPending) return <Loading />;
-  if (server.error || loaded.error)
-    return (
-      <ErrorNotice
-        error={server.error ?? loaded.error}
-        retry={() => {
-          void server.refetch();
-          void loaded.refetch();
-          if (operationId) void operation.refetch();
-        }}
-      />
-    );
+  // Retain custom view state (including frozen uncertain submission keys) when a
+  // background read fails. Stale data is visible, but mutations remain blocked.
+  if (
+    refreshError &&
+    (!SectionView ||
+      !server.data ||
+      !loaded.data ||
+      (refreshError instanceof ApiError && [401, 403, 404].includes(refreshError.status)))
+  )
+    return <ErrorNotice error={refreshError} retry={retryReads} />;
   if (!server.data || !loaded.data) return <Empty />;
 
-  if (!section.requiredPermissions.every((permission) => permissions.includes(permission)))
-    return <Notice>{t('gameUi.noPermission')}</Notice>;
-  const SectionView = getGameSectionView(section.renderer);
   return (
     <>
+      {Boolean(refreshError) && <ErrorNotice error={refreshError} retry={retryReads} />}
       {operation.error && (
         <ErrorNotice error={operation.error} retry={() => void operation.refetch()} />
       )}
@@ -577,7 +581,9 @@ export function GameSections({
           {t(
             ['uncertain', 'prepared'].includes(effectState ?? '')
               ? 'gameUi.saveUncertain'
-              : 'gameUi.saveFailed',
+              : SectionView
+                ? 'gameUi.operationFailed'
+                : 'gameUi.saveFailed',
           )}{' '}
           <Link to={`/activity/${operationId}`}>{t('web.viewActivity')}</Link>
         </Notice>
@@ -594,7 +600,9 @@ export function GameSections({
             serverName={server.data.name}
             runtimeState={server.data.runtimeState}
             canManage={server.data.permissions.manage === true}
-            pending={pendingOperation || Boolean(server.data.activeOperationId)}
+            pending={
+              pendingOperation || Boolean(server.data.activeOperationId) || Boolean(refreshError)
+            }
             onAccepted={(jobId) => {
               setOperationId(jobId);
               void server.refetch();
