@@ -11142,3 +11142,23 @@ container was restarted, and no test resource was created. Actual FileZilla uplo
 and native Activity event delivery still require the Owner's retry. This repair
 does not fix Blueprint installer traversal; that separate deployment blocker and
 SFTPGo issue #18 remain open.
+
+### Read-only broader Wings ownership audit — 2026-10-17
+
+The Owner requested inspection of the remaining servers before considering repair.
+Panel read-only inventory maps 28 server UUIDs to the configured Wings node. The
+previous 29-directory count included the technical `.sftp` directory: there are
+27 other server roots, not 28. All 27 remain 100:101 with mode 0755; the repaired
+server remains 988:988. Up to 100 metadata entries per server were sampled, showing
+the same ownership mismatch in every other server. This is not a complete recursive
+inventory: a separate extended scan reached its 120-second bound in a large BlueMap
+tree and exited explicitly incomplete. Neither scan read file contents.
+
+All 13 existing game containers declare 988:988, consistent with live Wings
+configuration. The one running game container has identity UID/GID 988:988 and no
+user-namespace remapping; read-only `test -w` fails for its root and server.properties.
+Thus this incident affects actual game-server write eligibility, not only user SFTP.
+No other server was repaired, stopped or restarted during the audit. The exact
+27-server proposed repair scope and private metadata evidence are retained locally;
+any further repair requires approval for those existing resources. The technical
+`.sftp` directory is excluded pending separate ownership assessment.
