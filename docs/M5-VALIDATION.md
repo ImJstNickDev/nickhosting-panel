@@ -11787,3 +11787,23 @@ HTTP503/ready=false (same pre-existing readiness result). Governance passed:
 1102 indexed text files,433 sanitized browser screenshots,925 relative links,
 4 TOML files and44 ignore cases. Final Chromium and Firefox runs each passed the
 two targeted journeys, with7 unrelated journeys skipped.
+
+
+### Development Vite import-cache recovery — 2026-10-17
+
+After the preceding change, the long-running dev Vite returned HTTP500 resolving
+`../message-layout.js` from the Minecraft UI entrypoint. The complete source bind
+and new TypeScript file were present/readable inside the container. A fresh Vite
+resolver and middleware-only transformation resolved the same import successfully;
+requesting the TypeScript module directly also returned200. Touching the existing
+sources did not clear the running resolver failure. The isolated browser tests had
+used a fresh Vite instance and therefore did not reproduce this dev-process state.
+
+With explicit operation-specific Owner approval, verified Compose identity and ran
+`docker restart --timeout 20 nickhosting-dev-vite-1` only. No image rebuild, code,
+network, configuration, database, API/Gateway or game-server mutation. Afterward the
+Minecraft UI entrypoint, shared layout module and editor each returned HTTP200
+JavaScript without the import error. The editor also returned200 via the external
+HTTPS development ingress; the existing container web health command passed.
+This records recovery from stale resolution, not a general Vite upstream fix.
+No unrelated test suites repeated and no new test assets created.
