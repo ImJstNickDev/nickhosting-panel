@@ -1389,3 +1389,47 @@ remove the dedicated secret only if this activation created it, revert the Activ
 application change and restore the tagged API/worker image with the same overlay
 chain. Retain the additive indexes, database contents and audit history. No database
 restore over newer data, broad cleanup or production mutation is authorized.
+
+### Unified Activity activation completed — 2026-10-17
+
+Owner approved the preceding exact plan at reviewed source
+`ccac6824d45674918fc0799b67bc70241234d163`. Activation completed without rollback.
+
+- Rechecked clean branch/HEAD, current Compose identities and complete overlay chain;
+  all applied migration checksums matched and only 038 was pending. Saved the prior
+  image as `nickhosting-dev-app:before-unified-activity`.
+- Built the API image, stopped only API/worker, saved a private non-overwriting
+  custom-format dev database dump (2,109,039 bytes) and verified its inventory.
+  Applied exactly `038_unified_activity.sql`; the temporary migration container
+  was removed normally. No restore or reset was performed.
+- Recreated only API/worker on image
+  `sha256:5d14e76c202683b95b193fc81f221a936be9b79004b823bc2ec39b9560ca43d7`.
+  Both are healthy with restart count 0. Mounts, networks, published ports and
+  environment values match the previous containers; no other container was replaced.
+- Stored the dedicated callback secret encrypted and installed exactly the two
+  named actions and one rule. Persisted readback matches generated configuration,
+  normalizing SFTPGo's omitted `skip_tls_verify:false` field only. Private payloads
+  and the creation/attempt ledger remain under the development application's
+  `sftp-activity-config` directory. No secret was printed or committed.
+- User-SFTP remains healthy in its original container without restart. From that
+  container, callback HTTP received 403 with a wrong secret and 200 with the real
+  secret; an unbound probe identity returned `ignored:true` and inserted no audit.
+  This proves internal DNS/TCP/HTTP/authentication, not a native filesystem event.
+- User accounts, settings, SFTP credential records and all prior encrypted secrets
+  retain matching fingerprints. A full managed-server comparison initially detected
+  changes; comparison against the saved dump isolated them to normal worker
+  `last_observed_at`/`updated_at` timestamps. Provider identities and other fields
+  are unchanged. Docker mount comparisons were normalized by destination because
+  Docker returned a different array order; contents were identical.
+- Fresh Firefox smoke: HTTPS 200, web configuration 200, anonymous Activity 401,
+  secure HMR WebSocket, zero page exceptions or HTTP 5xx. Read-only scoped Activity
+  query returned five records with pagination in 89 ms (single smoke, not a benchmark).
+  Inspected warnings were expected preflight 404 and rejected-authentication 403;
+  worker logs had no warnings/errors in the inspected activation interval.
+
+No real game files, SFTP users, Pterodactyl/Wings, DNS/NPM, mounts or host networking
+were changed. The pre-existing unhealthy dev Gateway was left untouched. The Owner
+can now upload/rename/delete a chosen test file through SFTP and inspect server
+Activity to verify native notifications. That filesystem-delivery test remains
+pending; no fake success records were inserted. The earlier isolated test results
+and SFTP transport/outage limitations remain unchanged.

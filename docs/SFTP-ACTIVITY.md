@@ -148,3 +148,13 @@ writes; verify its primary and auxiliary logins and confirm viewer operations do
 not appear. Local API fixtures cover authentication, duplicate and concurrent
 delivery, outcomes, virtual paths, ownership, auxiliary attribution, ignored viewer
 identities and absence of physical paths/secrets without production mutations.
+
+## Development activation status
+
+The Owner-approved development activation completed on 2026-10-17 for reviewed
+source `ccac682`: named actions/rule installed, protected secret configured,
+readback verified and authenticated callback reachable from the user-SFTP
+container. See the [activation evidence](M5-ENVIRONMENTS.md#unified-activity-activation-completed--2026-10-17).
+Native filesystem notification verification still requires an Owner-triggered
+SFTP operation. The approval/proposal section above remains the reusable deployment
+procedure; its existence does not authorize another environment.

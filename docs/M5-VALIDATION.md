@@ -11069,3 +11069,24 @@ has one bounded failure retry and no durable upstream outbox; outages can lose e
 
 Final tracked-content governance passed: 1,059 indexed text files, 413 review PNGs,
 888 relative links, four TOML files and44 ignore cases; secret scan remains heuristic.
+
+### Approved Activity activation smoke — 2026-10-17
+
+The exact development activation for source `ccac682` completed; see the
+[activation record](M5-ENVIRONMENTS.md#unified-activity-activation-completed--2026-10-17).
+Only migration 038 was applied and only API/worker were recreated. Private dump
+inventory, migration checksums, protected-data fingerprints and container topology
+were verified. SFTPGo's two new actions/rule match their generated configuration.
+
+A callback probe from the existing user-SFTP container verified real internal
+DNS/TCP/HTTP: wrong secret 403; correct secret 200 with an unbound username ignored
+and no audit insertion. No real filesystem operation was generated. Fresh Firefox
+verified HTTPS 200/config 200/protected Activity 401, WSS HMR and no exceptions/5xx.
+The real dev Activity query returned five rows with pagination in 89 ms. This is
+read-only operational evidence, not a load test or a native SFTP event-delivery pass.
+
+No historical suites were repeated for this activation. Earlier full-suite failures
+remain documented rather than silently reclassified. API/worker/SFTP are healthy;
+the unrelated unhealthy Gateway remains unchanged. No new game-server test assets
+were created; the one migration container was removed, while private backups and
+provenance were retained. SFTPGo #18 remains a separate production-release gate.
