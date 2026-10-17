@@ -25,6 +25,11 @@ describe('Automation browser journeys', () => {
       fixture.codec,
     );
     fixture.setManagement(provider.management);
+    // An installed integration can retain a manifest predating message support.
+    await fixture.database.pool.query(
+      "UPDATE game_integrations SET manifest = manifest #- '{capabilities,gatewayMessages}' WHERE id = $1",
+      ['minecraft'],
+    );
     await fixture.database.db
       .updateTable('managed_servers')
       .set({ connection_mode: 'gateway' })
@@ -407,7 +412,8 @@ describe('Automation browser journeys', () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
   });
   it('saves Gateway messages through actual handlers and renders accessible Italian mobile layout', async () => {
-    await page.goto(`${fixture.origin}${base()}/messages`);
+    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await page.getByRole('link', { name: 'Gateway messages', exact: true }).click();
     await page.getByLabel('Server list message', { exact: true }).fill('§a{server}');
     await page.getByLabel('Status', { exact: true }).selectOption('waking');
     await page.getByLabel('Join message', { exact: true }).fill('Starting soon');

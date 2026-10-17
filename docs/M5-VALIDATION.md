@@ -11348,3 +11348,26 @@ Reviewed browser captures:
 - [Owner controls expanded](screenshots/m5/automation-sleep-owner-en.png)
 - [Italian mobile](screenshots/m5/automation-sleep-mobile-it.png)
 - [Failed save with retained draft](screenshots/m5/automation-sleep-save-error-en.png)
+
+### 2026-10-17 — Gateway message tab on existing installations
+
+Read-only dev inspection found four Gateway-connected servers and a persisted
+Minecraft manifest without the optional `gatewayMessages` capability. The message
+handler already used the compiled integration, while server detail UI discovery
+used the older database snapshot. Server detail now resolves this one capability
+from the same trusted compiled module; other stored capabilities and permission
+checks remain unchanged. No manifest/configuration rewrite or game-server mutation.
+The API watcher loaded the source change normally.
+
+Regression: the automation browser fixture removes the persisted capability and
+enters the editor through the actual Gateway messages tab before exercising message
+save/reset. Targeted command uses the prior browser command with
+`-t 'saves Gateway messages'` (1 test, 5 unrelated tests skipped). Independent
+read-only review approved the narrowly scoped source alignment.
+The first new fixture run failed before collecting tests because the web package
+does not directly depend on Kysely; switched the fixture-only JSONB update to its
+existing isolated PostgreSQL pool, without adding dependencies.
+Final result: targeted browser regression **1/1 passed**, five unrelated skipped;
+root TypeScript check passed, web app/test typecheck passed after the fixture import
+correction, changed-file Biome passed. Dev API health remained healthy after its
+normal watcher reload. No manual restart or infrastructure mutation.
