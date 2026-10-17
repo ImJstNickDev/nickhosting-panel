@@ -1420,3 +1420,13 @@ Origin exemption; browser sessions cannot authorize it. Durable provider binding
 map primary/auxiliary credentials to the issuing NickHosting account. The scoped
 user-SFTP Event Manager rule must be explicitly activated; technical viewer accounts
 are ignored. See [transport and delivery limitations](SFTP-ACTIVITY.md).
+
+### Trusted Gateway message editor contribution — 2026-10-17
+
+`TrustedGameUiModule.gatewayMessageEditor?: string` selects a bounded compiled
+browser editor key. It is not part of API-supplied UI descriptors and cannot name
+an import URL. The shared form supplies definition/state, locale, draft overrides,
+read-only authority and change/reset callbacks. It owns the existing GET/PUT
+contract, revision, errors and save lifecycle. Minecraft registers its Vanilla
+26.1 preview; unknown keys or unsupported channel sets use the generic editor.
+No database migration or Gateway packet change accompanies this UI extension.

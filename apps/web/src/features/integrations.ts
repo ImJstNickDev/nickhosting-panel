@@ -28,9 +28,34 @@ export function getGameFileIcon(gameId: string | undefined, name: string): strin
   return icon ? module?.assets?.[icon.assetId] : undefined;
 }
 
+import type { GatewayMessageDefinition } from '@nickhosting/game-sdk';
 // Owner executable contributions are bundled first-party imports. Metadata never imports code.
 import { lazy } from 'react';
 import { MinecraftResponseSettings } from './integration-game-settings.js';
+
+const MinecraftGatewayEditor = lazy(() =>
+  import('../integrations/minecraft/gateway-editor.js').then((module) => ({
+    default: module.MinecraftGatewayEditor,
+  })),
+);
+const gatewayMessageEditors = new Map([
+  [
+    'minecraft-26.1',
+    {
+      Component: MinecraftGatewayEditor,
+      accepts: (definition: GatewayMessageDefinition) =>
+        definition.channels.every((channel) => ['motd', 'disconnect'].includes(channel.id)),
+    },
+  ],
+]);
+export function getGameGatewayMessageEditor(
+  gameId: string | undefined,
+  definition: GatewayMessageDefinition,
+) {
+  const key = gameId ? gameUiRegistry.get(gameId)?.gatewayMessageEditor : undefined;
+  const registered = key ? gatewayMessageEditors.get(key) : undefined;
+  return registered?.accepts(definition) ? registered.Component : undefined;
+}
 
 const MinecraftVersions = lazy(() =>
   import('./minecraft-admin.js').then((module) => ({ default: module.OwnerMinecraftPage })),

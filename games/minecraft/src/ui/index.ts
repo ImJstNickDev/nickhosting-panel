@@ -19,6 +19,17 @@ export * from './controller.js';
 const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
+  'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
+  'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
+  'messages.source': ['Text codes', 'Codici di testo'],
+  'messages.colors': ['Text color', 'Colore del testo'],
+  'messages.visual': ['Visual editor', 'Editor visuale'],
+  'messages.variables': ['Insert variable', 'Inserisci variabile'],
+  'messages.undo': ['Undo', 'Annulla modifica'],
+  'messages.redo': ['Redo', 'Ripeti modifica'],
+  'messages.inherited': ['Default', 'Predefinito'],
+  'messages.custom': ['Custom', 'Personalizzato'],
+  'messages.reference': ['Vanilla 26.1 preview', 'Anteprima Vanilla 26.1'],
   name: ['Minecraft', 'Minecraft'],
   'admin.versions': ['Versions', 'Versioni'],
   'installer.runtime': ['Choose a runtime', 'Scegli un runtime'],
@@ -543,8 +554,14 @@ export function minecraftPropertyValues(
 }
 export const minecraftUiModule = defineTrustedGameUiModule({
   descriptor: minecraftUiDescriptor,
+  gatewayMessageEditor: 'minecraft-26.1',
   catalogs: minecraftUiCatalogs,
   assets: {
+    gatewayFont: new URL('./assets/local-26.1/minecraft.woff', import.meta.url).href,
+    gatewayMenu: new URL('./assets/local-26.1/menu-background.png', import.meta.url).href,
+    gatewayServerIcon: new URL('./assets/local-26.1/server-icon.png', import.meta.url).href,
+    gatewayPing: new URL('./assets/local-26.1/ping.png', import.meta.url).href,
+    gatewayButton: new URL('./assets/local-26.1/button.png', import.meta.url).href,
     landscape: new URL('./assets/minecraft-landscape.svg', import.meta.url).href,
     properties: new URL('./assets/minecraft-properties.svg', import.meta.url).href,
   },

@@ -67,7 +67,7 @@ export function AutomationPage({ serverId }: { serverId: string }) {
       {section === 'schedules' ? (
         <SchedulesSection serverId={serverId} editable={editable} />
       ) : section === 'messages' ? (
-        <GatewayMessageEditor serverId={serverId} />
+        <GatewayMessageEditor serverId={serverId} gameId={server.data?.gameId} />
       ) : (
         <SleepAndWake serverId={serverId} editable={editable} owner={owner} />
       )}

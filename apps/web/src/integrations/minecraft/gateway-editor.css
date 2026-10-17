@@ -1,0 +1,292 @@
+.gateway-messages-custom {
+  max-width: 760px;
+}
+.mc-message-editor {
+  display: grid;
+  gap: 28px;
+  min-width: 0;
+  max-width: 760px;
+}
+.mc-message-section {
+  min-width: 0;
+}
+.mc-message-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 9px;
+  font-size: 0.875rem;
+  font-weight: 550;
+}
+.mc-message-inheritance {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.mc-message-heading-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+.mc-game-surface {
+  font-family: MinecraftPreview, monospace;
+  font-size: 18px;
+  line-height: 1;
+  color: #fff;
+  text-shadow: 2px 2px 0 #0009;
+  image-rendering: pixelated;
+  border: 1px solid #111;
+  overflow: hidden;
+}
+.mc-server-list {
+  padding: 20px 14px;
+  background-color: #191919;
+  background-size: 64px;
+  border-radius: 7px 7px 0 0;
+}
+.mc-server-entry {
+  display: flex;
+  gap: 10px;
+  padding: 9px;
+  min-height: 90px;
+  border: 1px solid #777;
+  background: #000a;
+}
+.mc-server-icon {
+  flex: 0 0 64px;
+  height: 64px;
+  background-color: #222;
+  background-position: center;
+  background-size: cover;
+}
+.mc-server-description {
+  flex: 1;
+  min-width: 0;
+}
+.mc-server-name {
+  margin-bottom: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.mc-server-signal {
+  width: 20px;
+  height: 16px;
+  flex: 0 0 20px;
+  background-size: 100% 100%;
+}
+.mc-disconnect {
+  position: relative;
+  isolation: isolate;
+  min-height: 300px;
+  display: grid;
+  place-items: center;
+  padding: 32px 25px;
+  background-color: #262a2e;
+  background-size: cover;
+  background-position: center;
+  border-radius: 7px 7px 0 0;
+}
+.mc-disconnect::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #0009;
+  backdrop-filter: blur(5px);
+  z-index: -1;
+}
+.mc-disconnect-content {
+  width: 100%;
+  display: grid;
+  justify-items: center;
+  gap: 20px;
+  text-align: center;
+}
+.mc-disconnect-title {
+  color: #fff;
+}
+.mc-game-button {
+  margin-top: 0;
+  width: min(100%, 400px);
+  min-height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  background-color: #777;
+  background-size: 100% 100%;
+  border: 2px solid #111;
+  box-shadow:
+    inset 2px 2px #bbb8,
+    inset -2px -2px #333a;
+}
+.mc-message-editor .gateway-rich-text {
+  min-height: 38px;
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  outline: none;
+  border: 0;
+  cursor: text;
+  caret-color: #fff;
+}
+.mc-message-editor .gateway-rich-text:focus-visible {
+  box-shadow: inset 0 -1px #ffffff50;
+}
+.mc-message-editor .gateway-rich-text-variable {
+  background: #ffffff15;
+  border-radius: 2px;
+}
+.mc-message-editor .mc-message-source {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  color: #fff;
+  background: #0004;
+  border: 1px solid #ffffff25;
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  text-shadow: none;
+  outline: none;
+}
+.mc-message-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 7px 7px;
+}
+.mc-editor-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  font-size: 16px;
+  cursor: pointer;
+}
+.mc-editor-icon:hover:not(:disabled),
+.mc-editor-icon[aria-expanded="true"],
+.mc-editor-icon[aria-pressed="true"] {
+  background: var(--surface-hover, #8882);
+}
+.mc-editor-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.mc-editor-icon b,
+.mc-editor-icon i,
+.mc-editor-icon u,
+.mc-editor-icon s {
+  font-family: Georgia, serif;
+}
+.mc-color-symbol {
+  border-bottom: 3px solid #55aa77;
+  line-height: 1.1;
+}
+.mc-clear-format {
+  font-size: 13px;
+}
+.mc-toolbar-divider {
+  height: 17px;
+  width: 1px;
+  background: var(--line);
+  margin: 0 5px;
+}
+.mc-message-menu-anchor {
+  position: relative;
+}
+.mc-color-palette,
+.mc-variable-menu {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 10;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+  box-shadow: 0 5px 20px #0003;
+}
+.mc-color-palette {
+  display: grid;
+  grid-template-columns: repeat(4, 26px);
+  gap: 6px;
+}
+.mc-color-swatch {
+  width: 26px;
+  height: 26px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid #8889;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mc-color-swatch:hover {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.mc-variable-menu {
+  left: auto;
+  right: 0;
+  min-width: 160px;
+  display: grid;
+  gap: 3px;
+}
+.mc-variable-menu button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 7px 10px;
+  text-align: start;
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.mc-variable-menu button:hover {
+  background: var(--surface-hover, #8882);
+}
+.mc-message-length {
+  margin-left: auto;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 540px) {
+  .mc-server-list {
+    padding: 12px 8px;
+  }
+  .mc-server-entry {
+    gap: 8px;
+    padding: 8px;
+  }
+  .mc-server-icon {
+    flex-basis: 40px;
+    height: 40px;
+  }
+  .mc-game-surface {
+    font-size: 14px;
+  }
+  .mc-disconnect {
+    padding: 25px 16px;
+    min-height: 260px;
+  }
+  .mc-message-toolbar {
+    padding: 5px 3px;
+  }
+  .mc-editor-icon {
+    width: 29px;
+  }
+  .mc-toolbar-divider {
+    margin: 0 2px;
+  }
+}

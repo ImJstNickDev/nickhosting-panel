@@ -11614,3 +11614,73 @@ schemas/resources were cleaned by their harnesses. Minecraft client/live evidenc
 was reused, not rerun or expanded. SFTPGo #18 remains a release gate. Rollback is a
 source revert with no DB migration; future non-Minecraft overrides must be exported
 before reverting to the old fixed-schema code (none were written to live state).
+
+## Minecraft inline Gateway message editor — 2026-10-17
+
+Scope: integration-owned Vanilla26.1 MOTD/disconnect editing previews; common
+save/revision/permission contracts unchanged. Reference and asset provenance:
+[Minecraft message editor](MINECRAFT-MESSAGE-EDITOR.md).
+
+Implemented bounded trusted editor registration with generic fallback, direct
+formatted-text editing, atomic variable insertion, selection-aware color/style
+changes, source mode, inherited reset and per-field undo/redo. Original Mojang
+assets/font are locally prepared and ignored; only the preparation code and
+sanitized screenshots are committed. No AI-generated image assets.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/gateway-rich-text-model.test.ts apps/web/src/features/gateway-message-preview.test.ts packages/game-sdk/src/ui.test.ts`:
+  **32 passed**, including selected mixed-format runs and registry retention.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/automation.browser.test.ts -t 'Gateway messages|Minecraft preview|isolated integration'`:
+  **3 Chromium journeys passed**, 6 unrelated journeys intentionally skipped.
+  Actual application handlers and disposable DB schemas; provider fixtures,
+  no live game-server mutation. EN desktop/IT mobile Axe checks had zero violations.
+- Same selected journeys with `NH_BROWSER=firefox`: save/layout and generic
+  fallback passed; the clipboard-fixture case initially failed. An isolated
+  Firefox experiment proved untrusted ClipboardEvent dispatch empties its
+  DataTransfer. The fixture now explicitly supplies clipboard data to the real
+  React handler. Targeted rerun `-t 'Minecraft preview'`: **1 passed**, 8 skipped.
+  This is three Firefox journeys passed across the initial run and targeted rerun,
+  not a claim of a new full-suite run.
+- `scripts/dev.sh pnpm typecheck`: passed root and WebPanel/application-test types.
+- `scripts/dev.sh pnpm build`: passed; existing large-chunk advisory remains.
+- Scoped Biome check and i18n compile: passed. English/Italian/pseudolocale catalogs
+  contain2,135 keys. Governance and whitespace checks passed.
+- Asset preparation: official client hash/size, output hashes, EN/IT glyph coverage,
+  font reload, deterministic rerun, invalid-jar rejection and gitignore verified.
+
+Failure history retained: the first browser pass exposed that trusted-module
+freezing omitted the new renderer key; fixed with a registry regression test.
+The next pass exposed old textarea selectors and an incorrect test variable label;
+updated to the new textbox roles and descriptor label. Independent source review
+identified prefix-only formatting of mixed-color selections; corrected with
+selected-run application and regression coverage. Word deletion handling was also
+completed before final browser checks. The Firefox fixture issue is described
+above. None of these failed attempts is counted as a passing run.
+
+Independent technical and rendered UX/content review completed with no remaining
+must-fix findings. Review suggested matching the state selector width to the
+previews; applied. Screenshots:
+
+- [Desktop EN](screenshots/m5/minecraft-message-editor-desktop-en.png)
+- [Mobile IT](screenshots/m5/minecraft-message-editor-mobile-it.png)
+
+Limitations: the browser approximates Minecraft glyph rasterization and omits the
+animated panorama. Legacy-client styling/resource packs are not emulated. IME
+composition is handled in code but physical-device IME testing is not claimed.
+Authentic assets are local, not a grant to redistribute the game resources.
+
+Development handoff: HTTPS frontend and its local font URL returned200; API,
+worker, Vite and ingress reported healthy. Changes use existing source mounts/HMR;
+no container restart, migration, game-server operation, DNS or infrastructure
+change was performed. The existing dev Gateway separately reported unhealthy:
+its authenticated readiness endpoint returned503 with controlAvailable=true and
+ready=false; it had more than1,450 consecutive failing15-second healthchecks,
+predating this UI task. Logs include backend_active_binding observations. This
+read-only finding is not diagnosed or repaired by the UI change and must not be
+reported as healthy Gateway validation. Historical test state preserved; no live
+test assets created or cleaned. SFTPGo#18 and production-release gates unchanged.
+
+Rollback: revert this UI/SDK contribution; stored message overrides remain in the
+same format and the generic editor can read them. Preserve local optional assets
+and existing development data. PR21 remains open and unmerged.

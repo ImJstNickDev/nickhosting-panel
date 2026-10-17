@@ -1162,3 +1162,12 @@ not declared. Minecraft formatting is metadata owned by its integration, not a
 special branch in the common editor. No arbitrary HTML/CSS or dynamic code loading
 is accepted. English/Italian real-handler browser evidence and an isolated
 non-Minecraft descriptor cover this boundary; see [Automation](AUTOMATION.md).
+
+### Minecraft message previews
+
+The Minecraft integration provides editable Vanilla 26.1 server-list and
+disconnection previews. Formatting and variable tools surround the text; source
+mode exposes the existing serialized template. The generic Gateway editor stays
+available to other integrations. See [reference, assets and editing
+behavior](MINECRAFT-MESSAGE-EDITOR.md). Controls use EN/IT, native keyboard focus
+and plain-text-only paste. Visual field history is local and bounded.

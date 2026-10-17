@@ -10,6 +10,24 @@ import {
   visibleFields,
 } from './ui.js';
 
+it('retains only a trusted bounded message-editor key across registry construction', () => {
+  const source = moduleFixture();
+  const registry = createTrustedGameUiRegistry([
+    { ...source, gatewayMessageEditor: 'fixture-26.1' },
+  ]);
+  expect(registry.get(source.descriptor.gameId)?.gatewayMessageEditor).toBe('fixture-26.1');
+  expect(() =>
+    defineTrustedGameUiModule({
+      ...source,
+      gatewayMessageEditor: 'https://example.test/editor.js',
+    }),
+  ).toThrow('game_ui_gateway_editor_invalid');
+  expect(
+    gameUiDescriptorSchema.safeParse({ ...source.descriptor, gatewayMessageEditor: 'fixture-26.1' })
+      .success,
+  ).toBe(false);
+});
+
 function fixture() {
   return gameUiDescriptorSchema.parse({
     gameId: 'fixture-arena',

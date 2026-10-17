@@ -581,14 +581,16 @@ describe('Automation browser journeys', () => {
   it('saves Gateway messages through actual handlers and renders accessible Italian mobile layout', async () => {
     await page.goto(`${fixture.origin}${base()}/sleep`);
     await page.getByRole('link', { name: 'Gateway messages', exact: true }).click();
-    await page.getByLabel('Server list message', { exact: true }).fill('§a{server}');
+    await page
+      .getByRole('textbox', { name: 'Server list message', exact: true })
+      .fill('§a{server}');
     await page.getByLabel('Status', { exact: true }).selectOption('waking');
-    await page.getByLabel('Join message', { exact: true }).fill('Starting soon');
+    await page.getByRole('textbox', { name: 'Join message', exact: true }).fill('Starting soon');
     await page.getByLabel('Status', { exact: true }).selectOption('sleeping');
-    await browserExpect(page.getByLabel('Server list message', { exact: true })).toHaveValue(
-      '§a{server}',
-    );
-    await browserExpect(page.locator('.gateway-preview').first()).toContainText('Survival');
+    await browserExpect(
+      page.getByRole('textbox', { name: 'Server list message', exact: true }),
+    ).toHaveText('Survival');
+    await browserExpect(page.locator('.mc-server-entry')).toContainText('Survival');
     const savedMessages = page.waitForResponse(
       (response) =>
         response.url().endsWith('/gateway-messages') && response.request().method() === 'PUT',
@@ -613,7 +615,7 @@ describe('Automation browser journeys', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${fixture.origin}${base()}/messages`);
     await browserExpect(
-      page.getByLabel('Messaggio nella lista server', { exact: true }),
+      page.getByRole('textbox', { name: 'Messaggio nella lista server', exact: true }),
     ).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -626,6 +628,76 @@ describe('Automation browser journeys', () => {
           .analyze()
       ).violations,
     ).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+  it('edits Minecraft preview text, preserves tokens and selection, and supports keyboard history', async () => {
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.goto(`${fixture.origin}${base()}/messages`);
+    const section = page.getByRole('region', { name: 'Server list message', exact: true });
+    const editor = section.getByRole('textbox', { name: 'Server list message', exact: true });
+    await editor.fill('Hello world');
+    await editor.press('Home');
+    await editor.press('Control+Shift+ArrowRight');
+    await section.getByRole('button', { name: 'Bold', exact: true }).click();
+    await browserExpect(editor.locator('span[style*="bold"]')).toContainText('Hello');
+    await editor.press('Control+z');
+    await browserExpect(editor).toHaveText('Hello world');
+    await browserExpect(editor.locator('span[style*="bold"]')).toHaveCount(0);
+    await editor.press('Control+y');
+    await browserExpect(editor.locator('span[style*="bold"]')).toContainText('Hello');
+    await section.getByRole('button', { name: 'Text codes', exact: true }).click();
+    const source = section.getByRole('textbox', { name: 'Server list message', exact: true });
+    await browserExpect(source).toHaveValue(/§lHello/);
+    await source.fill('§aCaffè {server}');
+    await section.getByRole('button', { name: 'Visual editor', exact: true }).click();
+    await browserExpect(editor).toHaveText('Caffè Survival');
+    await editor.press('Control+End');
+    await editor.press('Backspace');
+    await browserExpect(editor).toHaveText('Caffè ');
+    await editor.press('Control+z');
+    await browserExpect(editor).toHaveText('Caffè Survival');
+    // Plain-text clipboard content must never create HTML nodes or execute markup.
+    await editor.evaluate((element) => {
+      const data = new DataTransfer();
+      data.setData('text/plain', '<img src=x onerror=alert(1)>');
+      data.setData('text/html', '<img src=x onerror=alert(1)>');
+      // Firefox protects the DataTransfer on untrusted ClipboardEvent dispatch.
+      // Supply the test clipboard explicitly; the real browser handler still runs.
+      const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: { getData: (type: string) => data.getData(type) },
+      });
+      element.dispatchEvent(event);
+    });
+    await browserExpect(editor.locator('img')).toHaveCount(0);
+    await browserExpect(editor).toContainText('<img');
+    await section.getByRole('button', { name: 'Restore default', exact: true }).click();
+    await browserExpect(editor).not.toContainText('<img');
+    // Empty draft remains empty while editing, rather than immediately restoring the default.
+    await editor.fill('');
+    await browserExpect(editor).toHaveText('');
+    await editor.pressSequentially('New message');
+    await browserExpect(editor).toHaveText('New message');
+    await section.getByRole('button', { name: 'Text color', exact: true }).click();
+    await section.getByRole('button', { name: 'Green', exact: true }).click();
+    await editor.pressSequentially('!');
+    await browserExpect(editor).toHaveText('New message!');
+    await section.getByRole('button', { name: 'Insert variable', exact: true }).click();
+    await section.getByRole('button', { name: 'Server name', exact: true }).click();
+    await browserExpect(editor).toContainText('Survival');
+    const saveResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/gateway-messages') && response.request().method() === 'PUT',
+    );
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await saveResponse).status()).toBe(200);
+    const saved = await journeyRequest<{ overrides: Record<string, { motd?: string }> }>(
+      fixture,
+      page,
+      `/v1/servers/${provider.ids.serverId}/gateway-messages`,
+    );
+    expect(saved.overrides.sleeping?.motd).toContain('{server}');
     expect(errors).toEqual([]);
   });
   it('renders an isolated integration with a state-specific announcement channel and no Minecraft controls', async () => {
@@ -684,8 +756,12 @@ describe('Automation browser journeys', () => {
         '64',
       );
       await browserExpect(page.locator('.gateway-preview')).toHaveText('Try room A');
-      await browserExpect(page.getByLabel('Server list message', { exact: true })).toHaveCount(0);
-      await browserExpect(page.getByLabel('Join message', { exact: true })).toHaveCount(0);
+      await browserExpect(
+        page.getByRole('textbox', { name: 'Server list message', exact: true }),
+      ).toHaveCount(0);
+      await browserExpect(
+        page.getByRole('textbox', { name: 'Join message', exact: true }),
+      ).toHaveCount(0);
       await browserExpect(page.getByLabel('Formatting', { exact: true })).toHaveCount(0);
       await page.getByLabel('Announcement', { exact: true }).fill('Room: ');
       await page.getByRole('button', { name: 'Room', exact: true }).click();

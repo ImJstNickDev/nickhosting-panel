@@ -580,6 +580,8 @@ export interface TrustedGameUiModule {
   descriptor: GameUiDescriptor;
   catalogs: { en: Readonly<Record<string, string>>; it: Readonly<Record<string, string>> };
   handlers: Readonly<Record<string, GameUiHandler>>;
+  /** Optional bundled editor key. Resolved only by the application's trusted UI registry. */
+  gatewayMessageEditor?: string;
   /** Trusted code only: one authorized catalog, synchronous field projections. */
   creationCatalog?: {
     handlers: readonly string[];
@@ -595,6 +597,11 @@ export interface TrustedGameUiModule {
 /** Call only with imports compiled into the application. API JSON cannot register executable modules. */
 export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedGameUiModule {
   const descriptor = gameUiDescriptorSchema.parse(module.descriptor);
+  if (
+    module.gatewayMessageEditor !== undefined &&
+    !/^[a-z][a-z0-9.-]{0,63}$/.test(module.gatewayMessageEditor)
+  )
+    throw new Error('game_ui_gateway_editor_invalid');
   if (descriptor.artwork && !module.assets?.[descriptor.artwork.assetId])
     throw new Error('game_ui_asset_missing');
   for (const icon of descriptor.fileIcons ?? [])
@@ -657,6 +664,7 @@ export function defineTrustedGameUiModule(module: TrustedGameUiModule): TrustedG
     descriptor: deepFreeze(descriptor),
     catalogs: deepFreeze({ en: { ...module.catalogs.en }, it: { ...module.catalogs.it } }),
     handlers: Object.freeze({ ...module.handlers }),
+    ...(module.gatewayMessageEditor ? { gatewayMessageEditor: module.gatewayMessageEditor } : {}),
     assets: Object.freeze({ ...module.assets }),
     ...(module.creationCatalog
       ? {

@@ -161,3 +161,13 @@ Preserve the database and backup; do not restore over new review data or blindly
 replay uncertain jobs. A downgrade must account for daily/weekly timing and new
 occurrence metadata before reverting application code. Existing pre-change images
 are recovery artifacts, not permission for a destructive restore.
+
+### Integration-owned visual editors
+
+Minecraft supplies the [Vanilla 26.1 inline editor](MINECRAFT-MESSAGE-EDITOR.md)
+for MOTD and disconnect messages. A trusted UI module selects a bundled editor
+key; Core and Gateway remain unaware of its layout, textures or editing controls.
+Other integrations retain the generic editor unless they supply a registered
+contribution. The application still owns authorization, revision checking,
+inheritance and saving. Original Minecraft resources are optional local assets,
+not redistributed in this repository.
