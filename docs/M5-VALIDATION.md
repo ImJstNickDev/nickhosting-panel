@@ -11123,3 +11123,22 @@ prevent traversal of Wings data. Rechecking provider metadata alone is insuffici
 future deployment verification must include the mounted game-data owner and SFTP
 write eligibility. No live installer, filesystem or configuration modification was
 performed during this diagnosis.
+
+### Approved scoped SFTP ownership repair — 2026-10-17
+
+The Owner subsequently approved the proposed file ownership correction. Before
+execution, the live Panel and SFTP bind mounts were rechecked and the complete
+5,324-entry inventory matched the saved paths, device/inode identities, modes,
+link counts and owners. A filesystem-bounded `find` on the one approved server,
+restricted to owner 100 and group 101, applied GNU `chown --no-dereference
+--from=100:101 988:988`. The command completed successfully.
+
+Post-repair inventory confirms all 5,324 entries are now 988:988, with the same
+paths, inodes, modes, kinds and link counts. No content-writing command was run;
+ownership changes necessarily update ctime. Read-only `test -w` checks inside the
+existing SFTPGo process (988:988) now succeed for the server root and `server.jar`.
+Private before/after inventories are retained. No other volume was changed, no
+container was restarted, and no test resource was created. Actual FileZilla upload
+and native Activity event delivery still require the Owner's retry. This repair
+does not fix Blueprint installer traversal; that separate deployment blocker and
+SFTPGo issue #18 remain open.
