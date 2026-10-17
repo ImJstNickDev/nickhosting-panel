@@ -1,10 +1,9 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import type {
   getPlatformQuota,
   listPlatformActivity,
-  listPlatformProjects,
   listPlatformServers,
 } from '../../../../packages/server-management/src/platform-queries.js';
 import { api, idempotencyKey, queryClient } from '../api/client.js';
@@ -12,39 +11,24 @@ import type { Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
-  ActionForm,
   Badge,
-  Check,
   Details,
-  Dialog,
   Empty,
   ErrorNotice,
-  Input,
   Loading,
-  Notice,
-  number,
   Page,
   Section,
-  Select,
   Time,
-  text,
 } from '../components/ui.js';
 import { activityLabelKey } from './activity-labels.js';
 import { getGameArtwork } from './integrations.js';
-import {
-  platformPath,
-  type Resources,
-  type ServerInfo,
-  serverPath,
-  useServer,
-} from './service-contracts.js';
+import { type Resources, type ServerInfo, serverPath, useServer } from './service-contracts.js';
 import { useStorageUsage } from './use-storage-usage.js';
 import './home.css';
 
 export { ServersPage } from './server-browser.js';
 
 type ServerList = Result<typeof listPlatformServers>;
-type Projects = Result<typeof listPlatformProjects>;
 type Quota = Result<typeof getPlatformQuota>;
 type Activity = Result<typeof listPlatformActivity>;
 export function statusKey(state: string) {
@@ -579,220 +563,5 @@ export function ServerOverview({ serverId }: { serverId: string }) {
         ]}
       />
     </Section>
-  );
-}
-function ProjectChoice({ server }: { server: ServerInfo }) {
-  const t = useT(),
-    [search, setSearch] = useState(''),
-    [selected, setSelected] = useState(server.projectId ?? '');
-  const projects = useInfiniteQuery({
-    queryKey: ['projects', 'assignment', search],
-    initialPageParam: '',
-    queryFn: ({ pageParam }) =>
-      api<Projects>(
-        `/v1/platform/projects?${new URLSearchParams({ limit: '100', ...(search ? { q: search } : {}), ...(pageParam ? { cursor: pageParam } : {}) })}`,
-      ),
-    getNextPageParam: (page) => page.nextCursor ?? undefined,
-  });
-  const owned =
-    projects.data?.pages
-      .flatMap((page) => page.items)
-      .filter((project) => project.owner_id === server.ownerId) ?? [];
-  return (
-    <>
-      <Input
-        label={t('platform.projectSearch')}
-        type="search"
-        value={search}
-        onChange={(event) => setSearch(event.target.value)}
-      />
-      {projects.error && <ErrorNotice error={projects.error} />}
-      <Select
-        name="projectId"
-        label={t('platform.project')}
-        value={selected}
-        onChange={(event) => setSelected(event.target.value)}
-      >
-        <option value="">{t('platform.noProject')}</option>
-        {selected && !owned.some((project) => project.id === selected) && (
-          <option value={selected}>{t('platform.currentProject')}</option>
-        )}
-        {owned.map((project) => (
-          <option value={project.id} key={project.id}>
-            {project.name}
-          </option>
-        ))}
-      </Select>
-      {projects.hasNextPage && (
-        <button
-          className="secondary"
-          type="button"
-          disabled={projects.isFetchingNextPage}
-          onClick={() => void projects.fetchNextPage()}
-        >
-          {t('platform.moreProjects')}
-        </button>
-      )}
-      <small>{t('platform.sharingChange')}</small>
-    </>
-  );
-}
-export function ServerSettings({ serverId }: { serverId: string }) {
-  const t = useT(),
-    server = useServer(serverId),
-    request = useRequestOperation(serverId);
-  const [destructive, setDestructive] = useState<'reinstall' | 'wipe' | 'delete' | null>(null);
-  if (server.isPending) return <Loading />;
-  if (server.error) return <ErrorNotice error={server.error} />;
-  const data = server.data;
-  if (!data) return null;
-  if (!data.permissions.manage) return <Notice>{t('errors.forbidden')}</Notice>;
-  return (
-    <>
-      <Section title={t('platform.metadata')}>
-        <ActionForm
-          key={data.id}
-          onSubmit={async (form) => {
-            await api(platformPath(serverId), {
-              method: 'PATCH',
-              body: {
-                name: text(form, 'name'),
-                ...(data.permissions.sharing ? { projectId: text(form, 'projectId') || null } : {}),
-              },
-            });
-            await queryClient.invalidateQueries({ queryKey: ['server', serverId] });
-            await queryClient.invalidateQueries({ queryKey: ['servers'] });
-          }}
-        >
-          <Input
-            name="name"
-            label={t('web.name')}
-            defaultValue={data.name}
-            maxLength={100}
-            required
-          />
-          {data.permissions.sharing && <ProjectChoice server={data} />}
-          <small>{t('platform.immutableRuntime')}</small>
-        </ActionForm>
-      </Section>
-      <Section title={t('platform.sharing')}>
-        <p>{t('platform.sharingHint')}</p>
-        <Link to={data.projectId ? `/projects/${data.projectId}` : '/projects'}>
-          {t('web.projects')}
-        </Link>
-      </Section>
-      <Section title={t('platform.resources')}>
-        {!data.availableActions.configure ? (
-          <Notice>{t('platform.offlineRequired')}</Notice>
-        ) : (
-          <ActionForm
-            key={JSON.stringify(data.limits)}
-            submitLabel={t('web.save')}
-            success={false}
-            onSubmit={async (form) => {
-              await request({
-                action: 'configure',
-                limits: {
-                  ...data.limits,
-                  memory: number(form, 'memory'),
-                  cpu: number(form, 'cpu'),
-                  disk: data.limits.disk === 0 ? 0 : number(form, 'disk'),
-                },
-              });
-            }}
-          >
-            <Input
-              name="memory"
-              label={`${t('web.memory')} (MiB)`}
-              type="number"
-              min={32}
-              max={1048576}
-              step={1}
-              defaultValue={data.limits.memory}
-              required
-            />
-            <Input
-              name="cpu"
-              label={`${t('web.cpu')} (%)`}
-              hint={t('platform.cpuHint')}
-              type="number"
-              min={1}
-              max={100000}
-              step={1}
-              defaultValue={data.limits.cpu}
-              required
-            />
-            {data.limits.disk === 0 ? (
-              <p className="muted">{t('gameUi.sharedStorage')}</p>
-            ) : (
-              <Input
-                name="disk"
-                label={`${t('web.disk')} (MiB)`}
-                hint={t('platform.diskGrowOnly')}
-                type="number"
-                min={data.limits.disk}
-                max={1073741824}
-                step={1}
-                defaultValue={data.limits.disk}
-                required
-              />
-            )}
-          </ActionForm>
-        )}
-      </Section>
-      <Section title={t('platform.dangerZone')}>
-        <div className="actions">
-          {(['reinstall', 'wipe', 'delete'] as const).map((action) => (
-            <button
-              key={action}
-              type="button"
-              className="danger"
-              disabled={!data.availableActions.delete}
-              onClick={() => setDestructive(action)}
-            >
-              {t(action === 'delete' ? 'platform.deleteServer' : `platform.${action}`)}
-            </button>
-          ))}
-        </div>
-      </Section>
-      <Dialog
-        open={destructive !== null}
-        title={t(
-          destructive === 'delete'
-            ? 'platform.deleteServer'
-            : `platform.${destructive ?? 'reinstall'}`,
-        )}
-        onClose={() => setDestructive(null)}
-      >
-        {destructive && (
-          <ActionForm
-            key={destructive}
-            submitLabel={t('web.confirm')}
-            success={false}
-            onSubmit={async (form) => {
-              await request({
-                action: destructive,
-                confirm: true,
-                backupBefore: form.get('backupBefore') === 'on',
-              });
-              setDestructive(null);
-            }}
-          >
-            <p>
-              {t(
-                destructive === 'delete'
-                  ? 'platform.deleteServerWarning'
-                  : `platform.${destructive}Warning`,
-                { name: data.name },
-              )}
-            </p>
-            {data.capabilities?.backups && (
-              <Check name="backupBefore" label={t('platform.backupBefore')} />
-            )}
-            <Check label={t('platform.confirmConsequence')} required />
-          </ActionForm>
-        )}
-      </Dialog>
-    </>
   );
 }

@@ -100,6 +100,25 @@ returned user-agent, expose full details on demand and confirm revocation. No
 current-device claim is inferred without a matching session identity. Shared
 account queries and TOTP setup memory are reused between the two routes.
 
+### Server settings
+
+Server Settings groups existing operations into General, Resource limits and
+Maintenance. Name and project are independent partial writes: saving one does not
+submit or discard the other draft. Save/reset controls appear only for changed
+values; project search opens on request and the sharing link sits with its current
+project. Assignment controls remain limited to the server owner or regular Owner.
+Changing/removing a project explains its access consequences next to that draft.
+
+Resource limits remain visible when unavailable, with an operation-specific or
+state-specific explanation instead of hiding the entire form. CPU100% represents
+one core; shared-pool servers have no per-server disk field. Requests reuse durable
+jobs and their availability descriptors: accepted configuration is pending, not
+completed. Reinstall, wipe and delete have distinct compact rows and consequences.
+They reuse the Cancel-first shared confirmation and optional verified-backup request;
+there is no redundant acknowledgment checkbox. Failed-installation retry remains
+possible under the existing backend contract. EN/IT, keyboard access and mobile
+layouts use the same controls as the rest of the WebPanel.
+
 ### SFTP interface
 
 SFTP uses the Files/Console visual conventions: a compact connection summary,

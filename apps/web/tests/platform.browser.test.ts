@@ -375,6 +375,7 @@ describe('M5 real browser platform and Owner journeys', () => {
 
   it('organizes and shares a server, discovers real members and revokes project access', async () => {
     await journeyRequest(fixture, peer, '/api/auth/update-user', { name: 'Taylor', locale: 'en' });
+    await peer.goto(fixture.origin);
     await peer.evaluate(() => localStorage.setItem('nh.locale', 'en'));
     await peer.setViewportSize({ width: 1440, height: 1000 });
     await user.goto(`${fixture.origin}/projects`);
@@ -387,16 +388,29 @@ describe('M5 real browser platform and Owner journeys', () => {
     await user.goto(`${fixture.origin}/servers/${provider.ids.serverId}/settings`);
     const metadata = user
       .locator('section')
-      .filter({ has: user.getByRole('heading', { name: 'Name and project', exact: true }) });
-    await metadata.getByLabel('Name', { exact: true }).fill('Alex Survival');
-    await metadata.getByLabel('Project', { exact: true }).selectOption(projectId);
-    const saved = user.waitForResponse(
+      .filter({ has: user.getByRole('heading', { name: 'General', exact: true }) });
+    const nameForm = metadata.locator('form').filter({
+      has: user.getByLabel('Name', { exact: true }),
+    });
+    const projectForm = metadata.locator('form').filter({
+      has: user.getByLabel('Project', { exact: true }),
+    });
+    await nameForm.getByLabel('Name', { exact: true }).fill('Alex Survival');
+    const savedName = user.waitForResponse(
       (response) =>
         response.request().method() === 'PATCH' &&
         response.url().endsWith(`/v1/platform/servers/${provider.ids.serverId}`),
     );
-    await metadata.getByRole('button', { name: 'Save changes', exact: true }).click();
-    expect((await saved).status()).toBe(200);
+    await nameForm.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await savedName).status()).toBe(200);
+    await projectForm.getByLabel('Project', { exact: true }).selectOption(projectId);
+    const savedProject = user.waitForResponse(
+      (response) =>
+        response.request().method() === 'PATCH' &&
+        response.url().endsWith(`/v1/platform/servers/${provider.ids.serverId}`),
+    );
+    await projectForm.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await savedProject).status()).toBe(200);
     await user.goto(`${fixture.origin}/projects/${projectId}`);
     const add = user
       .locator('section')

@@ -35,7 +35,8 @@ import {
   OwnerUsersPage,
 } from './features/owner-users.js';
 import { ProjectPage, ProjectsPage } from './features/projects.js';
-import { HomePage, ServerOverview, ServerSettings, ServersPage } from './features/servers.js';
+import { ServerSettings } from './features/server-settings.js';
+import { HomePage, ServerOverview, ServersPage } from './features/servers.js';
 import './app/style.css';
 
 function ServerPage({ component: Component }: { component: ComponentType<{ serverId: string }> }) {

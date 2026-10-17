@@ -1,5 +1,42 @@
 /** Shared platform task copy. Game modules supply their own terminology. */
 export const platformWebMessages: Record<string, readonly [string, string]> = {
+  'serverSettings.general': ['General', 'Generale'],
+  'serverSettings.maintenance': ['Maintenance', 'Manutenzione'],
+  'serverSettings.reset': ['Reset changes', 'Ripristina valore'],
+  'serverSettings.manageSharing': ['Manage sharing', 'Gestisci condivisione'],
+  'serverSettings.projectAccess': [
+    'Project members will gain access. Members of the previous project will lose access.',
+    'I membri del progetto otterranno accesso. Quelli del progetto precedente lo perderanno.',
+  ],
+  'serverSettings.projectDetach': [
+    'Project members will lose access to this server.',
+    'I membri del progetto perderanno accesso a questo server.',
+  ],
+  'serverSettings.cpuUnit': ['100% = 1 CPU core', '100% = 1 core CPU'],
+  'serverSettings.waitOperation': [
+    'Available when the current operation finishes.',
+    'Disponibile al termine dell’operazione in corso.',
+  ],
+  'serverSettings.stopRequired': [
+    'Stop the server to make changes.',
+    'Arresta il server per apportare modifiche.',
+  ],
+  'serverSettings.temporarilyUnavailable': [
+    'Currently unavailable. Wait for transfers or resource reservations to clear.',
+    'Al momento non disponibile. Attendi il termine dei trasferimenti o il rilascio delle risorse prenotate.',
+  ],
+  'serverSettings.reinstallHint': [
+    'Run the installer again. Existing files may be replaced.',
+    'Esegue di nuovo l’installazione. I file esistenti potrebbero essere sostituiti.',
+  ],
+  'serverSettings.wipeHint': [
+    'Remove all files and start with a fresh installation.',
+    'Elimina tutti i file e reinstalla da zero.',
+  ],
+  'serverSettings.deleteHint': [
+    'Permanently remove the server and its data.',
+    'Elimina definitivamente il server e i suoi dati.',
+  ],
   'platform.memoryLimit': ['Memory limit', 'Limite memoria'],
   'platform.cpuLimit': ['CPU limit', 'Limite CPU'],
   'platform.diskLimit': ['Disk limit', 'Limite disco'],
@@ -129,16 +166,16 @@ export const platformWebMessages: Record<string, readonly [string, string]> = {
   'platform.wipe': ['Wipe files', 'Elimina tutti i file'],
   'platform.deleteServer': ['Delete server', 'Elimina server'],
   'platform.reinstallWarning': [
-    'Reinstall {name}? The provider installer may replace runtime files. This does not guarantee a clean filesystem or restore old data.',
-    'Reinstallare {name}? L’installer del provider può sostituire i file del runtime. Questo non garantisce un filesystem pulito né ripristina dati precedenti.',
+    'Reinstall {name}? The installer may replace existing files.',
+    'Reinstallare {name}? L’installazione può sostituire i file esistenti.',
   ],
   'platform.wipeWarning': [
     'Delete all files from {name} and reinstall? Worlds, configuration and other files will be lost.',
     'Eliminare tutti i file di {name} e reinstallare? Mondi, configurazione e altri file andranno persi.',
   ],
   'platform.deleteServerWarning': [
-    'Delete {name}? The server and its data will be removed. Project membership will not preserve access.',
-    'Eliminare {name}? Il server e i suoi dati verranno rimossi. L’appartenenza al progetto non manterrà l’accesso.',
+    'Delete {name}? The server and its data will be permanently removed.',
+    'Eliminare {name}? Il server e i suoi dati verranno rimossi definitivamente.',
   ],
   'platform.backupBefore': [
     'Require a completed backup before continuing',

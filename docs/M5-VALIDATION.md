@@ -11807,3 +11807,38 @@ JavaScript without the import error. The editor also returned200 via the externa
 HTTPS development ingress; the existing container web health command passed.
 This records recovery from stale resolution, not a general Vite upstream fix.
 No unrelated test suites repeated and no new test assets created.
+
+
+### Server Settings workspace — 2026-10-17
+
+Replaced the old four-section form with General, Resource limits and Maintenance,
+using the existing APIs and durable operation helper. Name/project partial writes
+are separate and retain the other draft. Save/reset only appear for changed values;
+project search opens on request and sharing is linked from the project field.
+Resource fields remain visible while unavailable, with accurate busy/offline context;
+shared disk omits the disk field. Configure acceptance is not claimed as completion.
+Reinstall/wipe/delete use distinct consequence rows and the shared Cancel-first
+confirmation with optional backup. Existing permissions, failed-installation retry,
+resource/admission rules and provider identities remain unchanged. No new API or
+migration. Name/project sit side by side on desktop and stack on mobile.
+
+Validation:
+
+- `scripts/dev.sh pnpm test:browser apps/web/tests/server-settings.browser.test.ts`: Chromium metadata journey passed; first resource assertion incorrectly expected old desired limits after API acceptance, which left a queued fixture job blocking the dependent destructive journey. Corrected the assertion to queued job/active operation/no completion claim; targeted resource/destructive rerun passed2/2. Desired limits are persisted on acceptance by the existing contract.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm test:browser apps/web/tests/server-settings.browser.test.ts`: final3/3 passed, including aligned resource input geometry. Real auth/handlers/disposable DB, simulated external provider. Independent name/project writes, draft retention, running readonly limits, durable pending configuration, explicit destructive acceptance and Cancel-first nonmutation. Accepted reinstall was not executed by the fixture worker.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/platform.browser.test.ts -t 'organizes and shares a server'`:1 passed,11 unrelated skipped. The standalone journey initially tried localStorage before visiting an origin; added initial navigation and reran successfully.
+- Browser Axe:0 violations on desktop, Italian390px mobile and confirmation. No page errors; mobile reflow fits viewport. Screenshots show those states and pending configuration in docs/screenshots/m5/server-settings-*.png.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed. Changed-source Biome passed. `scripts/dev.sh pnpm i18n:check`:2168 EN/IT/pseudolocale keys.
+- `scripts/dev.sh pnpm build`: passed. Existing large-chunk and plugin-timing notices remain; no dependency changes or unrelated bundle restructuring.
+
+Review/iteration: removed duplicate sibling keys, aligned CPU/memory inputs and
+moved CPU units below the fields, corrected project-detach wording, removed redundant
+confirmation copy and inspected desktop/mobile/confirmation screenshots. Independent
+contract/security and rendered UX/content review closed with no must-fix findings.
+
+Existing approved isolated services were reused; harness schemas cleaned on exit.
+No live server/provider writes, container restarts/rebuilds, infrastructure changes
+or new live test assets. Live dev Vite main/settings module transformations returned
+HTTP200 through the existing source mounts. Prior Gateway readiness finding and
+SFTPGo#18 release gate remain separate and unchanged. Rollback is this UI commit;
+no data migration or destructive rollback needed. PR21 remains OPEN/unmerged.
