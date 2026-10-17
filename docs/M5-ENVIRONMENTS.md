@@ -1291,3 +1291,42 @@ NickHosting requests/jobs, whose durable state must be retained.
 Read-only preflight observed the existing dev Gateway unhealthy before activation.
 This proposal does not claim Gateway/live resume verification or repair that
 separate health issue. API, worker, Vite and the remaining dev services were healthy.
+
+
+## Backup workflow activation completed — 2026-10-17
+
+The Owner approved the proposal above at source HEAD
+`814e26fc116e2a4e3da90aba5d78d82e3869cd98`. The exact procedure completed:
+API/worker were rebuilt and recreated with all three private environment files
+and seven existing Compose overlays. New shared image:
+`sha256:ab9f9f2495fa509463eab82b697634ec80adea0d76db0cf304be06ffa0e1a25a`.
+Only `037_backup_events.sql` was applied to the development database; its recorded
+checksum matches source. The temporary migration container was removed normally.
+
+Blueprint 1.5.0 was installed through its native installer, which completed at
+02:15:42 UTC and reloaded the native queue worker. Only its owned
+`2026_10_17_000004_nickhosting_backup_events` migration was added. The reviewed
+package hash matches the installed archive. Prior image/package, private extension
+configuration archive and a non-overwriting database dump remain available. The
+dump inventory was verified; no restore rehearsal or database reset was performed.
+
+Both dev services are healthy with zero restarts. Comparison of all 112 containers
+confirms that only API/worker were recreated; mounts, networks, published ports and
+environment fingerprints were preserved. Three unrelated pre-existing crash loops
+continued automatically; none was operated on. Dev users/accounts, encrypted
+secrets, settings, rollouts and managed-server identities match the preflight
+snapshot. Panel extension settings, technical accounts/keys and metadata of all
+28 provider servers also match. The pre-existing unhealthy dev Gateway was not
+restarted or repaired by this activation.
+
+Authenticated discovery reports 1.5.0 and `backupEvents: true`; anonymous discovery
+returns 401. A transient worker feed/reconciliation warning was recorded during
+startup; subsequent read-only health returned zero pending events and the shared
+feed recovered a fresh health timestamp. This proves discovery/feed health, not
+an actual backup completion callback. No game backup, restore, power command or
+file mutation was performed. Owner-triggered real backup/restore testing remains.
+
+Fresh Firefox smoke: public HTTPS and web configuration returned 200, anonymous
+protected-photo access returned 401, HMR used WSS, and there were no page exceptions
+or HTTP 5xx failures. No rollback was needed. The scoped rollback conditions above
+remain applicable, including draining new backup deliveries before downgrading.

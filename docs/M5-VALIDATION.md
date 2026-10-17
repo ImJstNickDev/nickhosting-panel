@@ -10962,3 +10962,31 @@ The final targeted selections (Node 24.21.0, equivalently via `scripts/dev.sh`):
 scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'event-driven backup lifecycle|backup recovery and restore safety|recovered rejected resume|retains resumed compute|retention deletes|compensating cleanup'
 scripts/dev.sh pnpm exec vitest run packages/server-management/src/backup-policy.test.ts packages/server-management/src/minecraft-backup.test.ts packages/server-management/src/schedules.test.ts packages/game-sdk/src/game-sdk.test.ts
 ```
+
+
+### Approved backup activation — 2026-10-17
+
+Activation of reviewed source `814e26fc116e2a4e3da90aba5d78d82e3869cd98`
+completed as recorded in [Environments](M5-ENVIRONMENTS.md#backup-workflow-activation-completed--2026-10-17).
+This adds deployment smoke evidence to the isolated results above; it does not
+replace them or claim a live backup/restore pass.
+
+Executed: full-environment `docker compose build api`, scoped `stop api worker`,
+private `pg_dump` and `pg_restore --list`, explicit `--profile tools run --rm
+--no-deps migrate`, native `blueprint -install nickhosting`, and scoped
+`up -d --no-deps --no-build --wait api worker`. Only database migration 037 and
+Blueprint's owned backup-event migration were added, with checksums verified.
+API/worker are healthy with zero restart counts. Data/configuration fingerprints
+and provider-server metadata remained unchanged. No game server was operated on.
+
+Read-only standard adapter discovery: 1.5.0, backup events supported; anonymous
+request denied with 401. Shared feed: zero pending events and a fresh health
+stamp after a preserved transient startup feed/reconciliation warning. Actual
+backup-event delivery was not generated for this activation. The previously
+unhealthy Gateway remains a separate unresolved operational finding.
+
+Real fresh Firefox smoke passed: HTTPS 200, web configuration 200, protected
+anonymous request 401, secure HMR WebSocket present, zero page errors/5xx.
+Independent activation review covers topology, migrations, preserved identities,
+artifact verification and smoke evidence. No full historical suite was repeated
+for this documentation/activation-only pass. No test server was created or removed.

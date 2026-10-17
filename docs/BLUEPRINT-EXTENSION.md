@@ -799,3 +799,14 @@ this version and applying its additive migration remain a separate activation.
 Reviewed 1.5.0 package SHA-256: `fd256f922bcd9b33355159a05d588fb91d54b1883e53c8fdee5c524e78a2b88f`.
 The non-overwriting build is `build/blueprint/1.5.0-reviewed/nickhosting.blueprint`.
 Package tests: 13 passed. This archive has not yet been installed.
+
+
+Activation follow-up (2026-10-17): the Owner subsequently approved and installed
+this exact reviewed 1.5.0 archive through the native Blueprint installer.
+Its owned migration completed and the native queue worker reloaded. Authenticated
+capability discovery confirms `backupEvents: true`; anonymous access is rejected.
+Existing extension settings, instance links, technical accounts/keys and provider
+server metadata were preserved. See the
+[activation record](M5-ENVIRONMENTS.md#backup-workflow-activation-completed--2026-10-17).
+No live game backup/restore was initiated; callback outcomes still need the Owner's
+interactive test. The earlier not-installed statement records the pre-approval state.
