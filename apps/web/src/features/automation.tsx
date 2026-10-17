@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { api } from '../api/client.js';
@@ -91,6 +91,12 @@ function SleepAndWake({
     queryFn: () => api<SleepPolicy>(`${platformPath(serverId)}/sleep-policy`),
     refetchInterval: 10000,
   });
+  const savePolicy = useMutation({
+    mutationFn: async (input: { body: unknown; headers?: Record<string, string> }) => {
+      await api(`${serverPath(serverId)}/gateway`, { method: 'PUT', ...input });
+      await policy.refetch();
+    },
+  });
   const consent = useQuery({
     queryKey: ['automation-consent', serverId],
     queryFn: () =>
@@ -177,14 +183,13 @@ function SleepAndWake({
             {!data.policy ? (
               data.proposedPolicy && editable ? (
                 <ActionForm
+                  disabled={savePolicy.isPending}
                   submitLabel={t('service.configureSleep')}
                   onSubmit={async () => {
-                    await api(`${serverPath(serverId)}/gateway`, {
-                      method: 'PUT',
+                    await savePolicy.mutateAsync({
                       body: data.proposedPolicy,
                       headers: { 'If-None-Match': '*' },
                     });
-                    await policy.refetch();
                   }}
                 >
                   <p>{t('service.configureSleepDescription')}</p>
@@ -201,6 +206,7 @@ function SleepAndWake({
             ) : sleep ? (
               editable && (
                 <ServerSleepEditor
+                  disabled={savePolicy.isPending}
                   key={JSON.stringify([
                     sleep.overrideSeconds,
                     sleep.inheritedSeconds,
@@ -217,15 +223,13 @@ function SleepAndWake({
                       idleTimeoutInherited: _inherited,
                       ...existing
                     } = data.policy;
-                    await api(`${serverPath(serverId)}/gateway`, {
-                      method: 'PUT',
+                    await savePolicy.mutateAsync({
                       body: {
                         ...existing,
                         idleTimeoutInherited: timeout === null,
                         idleTimeoutSeconds: timeout === null || timeout === -1 ? null : timeout,
                       },
                     });
-                    await policy.refetch();
                   }}
                 />
               )
@@ -247,6 +251,7 @@ function SleepAndWake({
               >
                 <h4>{t('automation.sleepAccess')}</h4>
                 <ServerSleepAccessEditor
+                  disabled={savePolicy.isPending}
                   key={JSON.stringify([sleep.ownerUserAccessOverride, sleep.inheritedUserAccess])}
                   sleep={sleep}
                   onSubmit={async (form) => {
@@ -256,14 +261,12 @@ function SleepAndWake({
                       idleTimeoutInherited: _inherited,
                       ...existing
                     } = data.policy;
-                    await api(`${serverPath(serverId)}/gateway`, {
-                      method: 'PUT',
+                    await savePolicy.mutateAsync({
                       body: {
                         ...existing,
                         idleTimeoutUserAccess: readSleepAccess(form, 'sleepAccess'),
                       },
                     });
-                    await policy.refetch();
                   }}
                 />
               </section>
@@ -276,6 +279,7 @@ function SleepAndWake({
               >
                 <h4>{t('automation.gatewayOperation')}</h4>
                 <ActionForm
+                  disabled={savePolicy.isPending}
                   key={`${data.policy.enabled}-${data.policy.mode}`}
                   onSubmit={async (form) => {
                     if (!data.policy) return;
@@ -284,15 +288,13 @@ function SleepAndWake({
                       idleTimeoutInherited: _inherited,
                       ...existing
                     } = data.policy;
-                    await api(`${serverPath(serverId)}/gateway`, {
-                      method: 'PUT',
+                    await savePolicy.mutateAsync({
                       body: {
                         ...existing,
                         enabled: form.get('enabled') === 'true',
                         mode: text(form, 'mode'),
                       },
                     });
-                    await policy.refetch();
                   }}
                 >
                   <Select

@@ -657,6 +657,10 @@
 .sleep-wake-policy .sleep-wake-form > fieldset {
   gap: 12px;
 }
+.sleep-wake-immediate {
+  display: grid;
+  gap: 12px;
+}
 .sleep-wake-form:not(.is-dirty) > .form-footer {
   display: none;
 }
@@ -664,7 +668,7 @@
   margin-top: 14px;
   justify-content: flex-end;
 }
-.sleep-wake-form > .form-footer button {
+.sleep-wake-form > .form-footer > button {
   min-height: 34px;
   padding: 7px 14px;
   font-size: 0.8rem;

@@ -11412,3 +11412,32 @@ including SFTPGo #18, remain unchanged.
 Final web app/test typecheck, changed-file Biome and i18n checks passed; independent
 code and rendered UX review found no must-fix. Frontend changes use existing HMR;
 no restart was required. Rollback is a UI commit revert, with no data migration.
+
+### 2026-10-17 — Immediate server sleep/wake choices
+
+Server wake and sleep mode choices now save on click. Only changed custom minutes
+show Save and a localized restore icon; restoring discards the numeric draft and
+clears errors. Mode selection remains on the last confirmed value after failures.
+Related Owner policy controls share pending state through save/refetch, preventing
+overlapping writes from undoing a just-selected preference. No API contract changed.
+
+Final targeted Chromium command: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts
+--m2 pnpm exec vitest run --config vitest.browser.config.ts
+apps/web/tests/automation.browser.test.ts -t 'disables wake|steps idle timeout|edits sleep'`
+— **3 passed**, 4 unrelated tests skipped. Includes immediate mode persistence,
+failed mode/numeric saves, restore, custom positive/fractional durations, Owner
+permissions and drafts, keyboard, EN desktop/IT mobile screenshots and axe checks.
+Initial run: 2 passed, 1 failed because the test awaited a write when Custom was
+already selected. The helper now respects the intentional no-op for the saved
+selection; the final run passed. Independent review also caught a stale mode-error
+alert after resetting numeric edits; corrected and covered before the final run.
+
+Web app/test typecheck, changed-file Biome and i18n completeness passed. Independent
+source and rendered UX review found no remaining must-fix. Updated screenshot
+artifacts use the real isolated browser/API harness with simulated external
+providers. No live server settings, infrastructure, migrations or new external
+resources were changed. Existing Vite HMR applies the frontend change. Rollback:
+revert this UI commit, without data migration. Production release gates unchanged.
+Firefox targeted regression with `NH_BROWSER=firefox` and
+`-t 'steps idle timeout'`: **1 passed**, 6 unrelated tests skipped. Indexed
+governance/tracked-content hygiene passed; full historical suites were not rerun.

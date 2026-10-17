@@ -77,6 +77,7 @@ export const automationWebMessages: Record<string, readonly [string, string]> = 
   'automation.state.unavailable': ['Temporarily unavailable', 'Temporaneamente non disponibile'],
   'automation.motd': ['Server list message', 'Messaggio nella lista server'],
   'automation.disconnect': ['Join message', 'Messaggio alla connessione'],
+  'automation.resetValue': ['Restore saved value', 'Ripristina valore salvato'],
   'automation.resetMessage': ['Restore default', 'Ripristina predefinito'],
   'automation.preview': ['Preview', 'Anteprima'],
   'automation.insert': ['Insert', 'Inserisci'],

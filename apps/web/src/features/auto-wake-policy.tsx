@@ -1,9 +1,14 @@
-import { useQuery } from '@tanstack/react-query';
+import { useIsMutating, useMutation, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '../api/client.js';
 import { useT } from '../app/i18n.js';
 import { ActionForm, ErrorNotice, Notice, Select } from '../components/ui.js';
-import { PolicyChoices, PolicyForm, PolicyHeading } from './server-automation-controls.js';
+import {
+  PolicyChoices,
+  PolicyForm,
+  PolicyHeading,
+  useImmediatePolicySave,
+} from './server-automation-controls.js';
 import { platformPath } from './service-contracts.js';
 import './automation.css';
 
@@ -98,6 +103,22 @@ const readEnabled = (data: FormData, name: string) =>
   data.get(name) === 'inherit' ? null : data.get(name) === 'true';
 const readAccess = (data: FormData, name: string) =>
   data.get(name) === 'inherit' ? null : data.get(name);
+function useServerWakePolicy(serverId: string) {
+  const policy = useQuery({
+    queryKey: ['auto-wake-policy', serverId],
+    queryFn: () => api<WakePolicy | null>(`${platformPath(serverId)}/auto-wake-policy`),
+  });
+  const mutationKey = ['save-auto-wake-policy', serverId];
+  const mutation = useMutation({
+    mutationKey,
+    mutationFn: async (body: { overrideEnabled: boolean | null; userAccess?: unknown }) => {
+      await api(`${platformPath(serverId)}/auto-wake-policy`, { method: 'PUT', body });
+      await policy.refetch();
+    },
+  });
+  const pending = useIsMutating({ mutationKey }) > 0;
+  return { policy, pending, save: mutation.mutateAsync };
+}
 export function ServerWakeSettings({
   serverId,
   editable,
@@ -108,10 +129,7 @@ export function ServerWakeSettings({
   owner: boolean;
 }) {
   const t = useT();
-  const policy = useQuery({
-    queryKey: ['auto-wake-policy', serverId],
-    queryFn: () => api<WakePolicy | null>(`${platformPath(serverId)}/auto-wake-policy`),
-  });
+  const { policy, pending, save } = useServerWakePolicy(serverId);
   if (policy.error && !policy.data) return <ErrorNotice error={policy.error} />;
   if (policy.isPending)
     return (
@@ -143,15 +161,8 @@ export function ServerWakeSettings({
             ])}
             value={value}
             owner={owner}
-            onSubmit={async (data) => {
-              await api(`${platformPath(serverId)}/auto-wake-policy`, {
-                method: 'PUT',
-                body: {
-                  overrideEnabled: readEnabled(data, 'wake'),
-                },
-              });
-              await policy.refetch();
-            }}
+            disabled={pending}
+            onSubmit={(data) => save({ overrideEnabled: readEnabled(data, 'wake') })}
           />
         )}
         {!editable && (
@@ -168,31 +179,32 @@ export function ServerWakeSettings({
 function ServerWakeEditor({
   value,
   owner,
+  disabled,
   onSubmit,
 }: {
   value: WakePolicy;
   owner: boolean;
+  disabled: boolean;
   onSubmit: (data: FormData) => Promise<unknown>;
 }) {
   const t = useT();
   const [wake, setWake] = useState(
     value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled),
   );
-  const dirty =
-    wake !== (value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled));
+  const immediate = useImmediatePolicySave(onSubmit);
   return (
-    <PolicyForm
-      dirty={dirty}
-      onSubmit={onSubmit}
-      onCancel={() => {
-        setWake(value.overrideEnabled === null ? 'inherit' : String(value.overrideEnabled));
-      }}
-    >
-      <input type="hidden" name="wake" value={wake} />
+    <div className="sleep-wake-immediate" aria-busy={immediate.pending || disabled}>
+      {Boolean(immediate.error) && <ErrorNotice error={immediate.error} />}
       <PolicyChoices
         label={t('automation.autoWake')}
         value={wake}
-        onChange={setWake}
+        disabled={immediate.pending || disabled}
+        onChange={async (next) => {
+          if (next === wake) return;
+          const data = new FormData();
+          data.set('wake', next);
+          if (await immediate.save(data)) setWake(next);
+        }}
         options={[
           { value: 'inherit', label: t('automation.inherit') },
           {
@@ -214,15 +226,12 @@ function ServerWakeEditor({
               : 'automation.wakeDisabledHint',
         )}
       </p>
-    </PolicyForm>
+    </div>
   );
 }
 export function ServerWakeAccessSettings({ serverId }: { serverId: string }) {
   const t = useT();
-  const policy = useQuery({
-    queryKey: ['auto-wake-policy', serverId],
-    queryFn: () => api<WakePolicy | null>(`${platformPath(serverId)}/auto-wake-policy`),
-  });
+  const { policy, pending, save } = useServerWakePolicy(serverId);
   if (!policy.data) return policy.error ? <ErrorNotice error={policy.error} /> : null;
   return (
     <section className="sleep-wake-admin-setting" aria-label={t('automation.wakeAccess')}>
@@ -231,25 +240,24 @@ export function ServerWakeAccessSettings({ serverId }: { serverId: string }) {
       <ServerWakeAccessEditor
         key={JSON.stringify([policy.data.ownerUserAccessOverride, policy.data.inheritedUserAccess])}
         value={policy.data}
-        onSubmit={async (data) => {
-          await api(`${platformPath(serverId)}/auto-wake-policy`, {
-            method: 'PUT',
-            body: {
-              overrideEnabled: policy.data?.overrideEnabled,
-              userAccess: readAccess(data, 'access'),
-            },
-          });
-          await policy.refetch();
-        }}
+        disabled={pending}
+        onSubmit={(data) =>
+          save({
+            overrideEnabled: policy.data?.overrideEnabled ?? null,
+            userAccess: readAccess(data, 'access'),
+          })
+        }
       />
     </section>
   );
 }
 function ServerWakeAccessEditor({
   value,
+  disabled,
   onSubmit,
 }: {
   value: WakePolicy;
+  disabled: boolean;
   onSubmit: (data: FormData) => Promise<unknown>;
 }) {
   const initialAccess = value.ownerUserAccessOverride ?? null;
@@ -257,6 +265,7 @@ function ServerWakeAccessEditor({
   return (
     <PolicyForm
       dirty={access !== initialAccess}
+      disabled={disabled}
       onSubmit={onSubmit}
       onCancel={() => setAccess(initialAccess)}
     >

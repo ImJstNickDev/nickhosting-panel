@@ -1,6 +1,7 @@
-import { type ReactNode, useId, useState } from 'react';
+import { type ReactNode, useId, useRef, useState } from 'react';
 import { useFormat, useT } from '../app/i18n.js';
-import { ActionForm, Input } from '../components/ui.js';
+import { Tooltip } from '../components/tooltip.js';
+import { ActionForm, ErrorNotice, Input } from '../components/ui.js';
 import type { SleepPolicy } from './service-contracts.js';
 import { type SleepAccess, SleepAccessField } from './sleep-timeout.js';
 
@@ -56,14 +57,16 @@ export function PolicyChoices({
   value,
   options,
   onChange,
+  disabled = false,
 }: {
+  disabled?: boolean;
   label: string;
   value: string;
   options: Array<{ value: string; label: string; disabled?: boolean }>;
   onChange: (value: string) => void;
 }) {
   return (
-    <fieldset className="sleep-wake-choices" aria-label={label}>
+    <fieldset className="sleep-wake-choices" aria-label={label} disabled={disabled}>
       {options.map((option) => (
         <button
           type="button"
@@ -84,34 +87,86 @@ export function PolicyForm({
   onSubmit,
   onCancel,
   children,
+  disabled = false,
 }: {
+  disabled?: boolean;
   dirty: boolean;
   onCancel: () => void;
   onSubmit: (data: FormData) => Promise<unknown>;
   children: ReactNode;
 }) {
+  const t = useT();
   const [reset, setReset] = useState(0);
   return (
     <ActionForm
       key={reset}
       className={`form sleep-wake-form${dirty ? ' is-dirty' : ''}`}
       submitDisabled={!dirty}
+      disabled={disabled}
       success={false}
       onSubmit={onSubmit}
-      onCancel={() => {
-        onCancel();
-        setReset((value) => value + 1);
-      }}
+      footerStart={
+        <Tooltip content={t('automation.resetValue')}>
+          <button
+            type="button"
+            className="automation-icon"
+            aria-label={t('automation.resetValue')}
+            onClick={() => {
+              onCancel();
+              setReset((value) => value + 1);
+            }}
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" />
+            </svg>
+          </button>
+        </Tooltip>
+      }
     >
       {children}
     </ActionForm>
   );
 }
+// Mode changes are discrete writes; keep selection truthful until the write completes.
+export function useImmediatePolicySave(onSubmit: (data: FormData) => Promise<unknown>) {
+  const active = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>();
+  async function save(data: FormData) {
+    if (active.current) return false;
+    active.current = true;
+    setPending(true);
+    setError(undefined);
+    try {
+      await onSubmit(data);
+      return true;
+    } catch (failure) {
+      setError(failure);
+      return false;
+    } finally {
+      active.current = false;
+      setPending(false);
+    }
+  }
+  return { pending, error, save, clearError: () => setError(undefined) };
+}
 export function ServerSleepEditor({
   sleep,
   owner,
+  disabled = false,
   onSubmit,
 }: {
+  disabled?: boolean;
   sleep: NonNullable<SleepPolicy['idleTimeout']>;
   owner: boolean;
   onSubmit: (data: FormData) => Promise<unknown>;
@@ -140,7 +195,8 @@ export function ServerSleepEditor({
       maximum,
     ) / 60;
   const [minutes, setMinutes] = useState(String(initialMinutes));
-  const dirty = mode !== initialMode || (mode === 'custom' && Number(minutes) !== initialMinutes);
+  const dirty = mode === 'custom' && Number(minutes) !== initialMinutes;
+  const immediate = useImmediatePolicySave(onSubmit);
   const inherited =
     sleep.inheritedSeconds === -1
       ? t('sleepTiming.disabled')
@@ -148,12 +204,18 @@ export function ServerSleepEditor({
   return (
     <PolicyForm
       dirty={dirty}
-      onSubmit={onSubmit}
+      disabled={immediate.pending || disabled}
+      onSubmit={(data) => {
+        immediate.clearError();
+        return onSubmit(data);
+      }}
       onCancel={() => {
+        immediate.clearError();
         setMode(initialMode);
         setMinutes(String(initialMinutes));
       }}
     >
+      {Boolean(immediate.error) && <ErrorNotice error={immediate.error} />}
       <input
         type="hidden"
         name="idleMinutesMode"
@@ -162,7 +224,16 @@ export function ServerSleepEditor({
       <PolicyChoices
         label={t('sleepTiming.setting')}
         value={mode}
-        onChange={setMode}
+        onChange={async (next) => {
+          if (next === mode) return;
+          const data = new FormData();
+          data.set('idleMinutesMode', next === 'inherit' ? 'inherit' : 'override');
+          data.set('idleMinutes', next === 'custom' ? String(initialMinutes) : '-1');
+          if (await immediate.save(data)) {
+            setMode(next);
+            setMinutes(String(initialMinutes));
+          }
+        }}
         options={[
           { value: 'inherit', label: t('automation.inherit') },
           { value: 'custom', label: t('automation.custom') },
@@ -215,8 +286,10 @@ export function ServerSleepEditor({
 
 export function ServerSleepAccessEditor({
   sleep,
+  disabled = false,
   onSubmit,
 }: {
+  disabled?: boolean;
   sleep: Extract<NonNullable<SleepPolicy['idleTimeout']>, { ownerUserAccessOverride: unknown }>;
   onSubmit: (data: FormData) => Promise<unknown>;
 }) {
@@ -225,6 +298,7 @@ export function ServerSleepAccessEditor({
   return (
     <PolicyForm
       dirty={access !== initialAccess}
+      disabled={disabled}
       onSubmit={onSubmit}
       onCancel={() => setAccess(initialAccess)}
     >
