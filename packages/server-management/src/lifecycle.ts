@@ -1249,7 +1249,7 @@ export async function processServerOperation(
     const backupResumeAllowed = async () => {
       const current = await db
         .selectFrom('managed_servers')
-        .select('intent')
+        .select(['intent', 'automatic_starts_paused'])
         .where('id', '=', server.id)
         .executeTakeFirstOrThrow();
       const gateway = await db
@@ -1266,7 +1266,11 @@ export async function processServerOperation(
               : null,
           wasRunning: operation.plan.backupWasRunning === true,
         },
-        { intent: current.intent, generation: gateway?.generation ?? null },
+        {
+          intent: current.intent,
+          generation: gateway?.generation ?? null,
+          automaticStartsPaused: current.automatic_starts_paused,
+        },
       );
     };
     const prepareStandaloneBackup = async (): Promise<boolean> => {

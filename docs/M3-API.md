@@ -41,7 +41,9 @@ value), Owner-only optional `idleTimeoutUserAccess` (null to inherit),
 `manually_stopped`). Changing policy does not start a server. The existing M2
 manual stop immediately revokes automatic-wake consent, even when another
 operation prevents enqueueing a stop. An explicit manual start can rearm manual
-suppression; maintenance requires an explicit policy change.
+suppression; maintenance requires an explicit policy change. The separate explicit
+`automatic_starts_paused` preference survives manual starts and idle sleep; it
+suppresses wake requests and `wakeEnabled` without suppressing online forwarding.
 
 Owner timeout resolution is **server override → runtime override → game override →
 global default**. Global `defaultIdleTimeoutSeconds` defaults to -1. Global/game/runtime

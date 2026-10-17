@@ -1485,3 +1485,23 @@ schedules/new manual occurrences must not be handed to an incompatible old worke
 Do not reset the database or restore over new review data. See
 [Automation](AUTOMATION.md). SFTPGo #18 and the separately documented Blueprint
 installer ownership problem remain unchanged release/deployment blockers.
+
+## 2026-10-17 — Independent automatic-start pause
+
+Migration `041_automatic_start_pause.sql` is applied to the existing development
+DB using the standard migration runner and advisory lock. It adds a per-server
+pause flag with conservative audit backfill; it does not reset accounts, modify
+provider records or rewrite lifecycle state. Updated API/worker source loads via
+the existing watcher. Future image-based deployments must include migration041
+and apply it before updated services serve requests.
+
+A separate, narrowly guarded development-state repair restored fresh observation
+for the reported running server whose old Paused action had incorrectly written
+manual-stop intent. The explicit pause stayed enabled; private before/after
+receipts are retained. No direct provider power command was issued. Restored
+idle tracking can perform the already configured automatic stop normally.
+
+Rollback: keep the additive schema and receipts. Prefer a forward correction;
+an older application does not honor the new pause flag, so do not roll back
+code on a live stack without an explicit plan to preserve automatic-start
+suppression. No production deployment was performed.

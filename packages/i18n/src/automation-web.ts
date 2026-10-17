@@ -58,8 +58,8 @@ export const automationWebMessages: Record<string, readonly [string, string]> = 
     'Pianificazioni e connessioni dei giocatori possono avviare il server, se configurate. Un arresto manuale sospende gli avvii automatici.',
   ],
   'automation.startsPausedHint': [
-    'Schedules and player connections cannot start the server. Start it manually or allow automatic starts again.',
-    'Pianificazioni e connessioni dei giocatori non possono avviare il server. Avvialo manualmente o autorizza di nuovo gli avvii automatici.',
+    'Schedules and player connections cannot start the server. Automatic sleep is controlled separately.',
+    'Pianificazioni e connessioni dei giocatori non possono avviare il server. La sospensione automatica si configura separatamente.',
   ],
   'automation.gatewayOperation': ['Gateway operation', 'Funzionamento Gateway'],
   'automation.messagesUnavailable': [

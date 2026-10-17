@@ -11441,3 +11441,56 @@ revert this UI commit, without data migration. Production release gates unchange
 Firefox targeted regression with `NH_BROWSER=firefox` and
 `-t 'steps idle timeout'`: **1 passed**, 6 unrelated tests skipped. Indexed
 governance/tracked-content hygiene passed; full historical suites were not rerun.
+
+### 2026-10-17 — Paused automatic starts no longer suppress idle sleep
+
+The consent endpoint previously reused manual-stop intent and cleared Gateway
+readiness/idle state. Migration041 separates explicit start pause from lifecycle
+intent. Pausing now preserves active forwarding, generation and the idle deadline.
+Gateway/scheduled starts, backup resumption and initial provision start check the
+pause before external effects. Idle/scheduled stops remain authorized; explicit
+pause survives confirmed sleep and manual start. Granting again remains blocked
+until unfinished work settles. Consent writes compare expectedAllowed and
+expectedIntent under the existing lock. UI guidance reflects independent sleep.
+
+Executed focused validation:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.integration.config.ts` with `gateway-orchestration`,
+  `schedules` (server-management and API), `gateway-provision` and `minecraft-queued`
+  integration files: **184 passed**, **45 failed**. All failures were the existing
+  Minecraft fixture's empty manifest rejected by connection validation, before
+  exercising the changed behavior. Replaced that fixture with the canonical
+  trusted Minecraft manifest, without relaxing validation; rerun of that file:
+  **45 passed**.
+- Same isolated integration command with `lifecycle`, `gateway-provision`,
+  `schedules` and `-t 'suppresses automatic resume|revokes the initial|revokes a queued|backfill'`:
+  **10 passed**, 312 unrelated skipped. Covers late initial-start revocation,
+  backup pause, direct/Gateway queued-start fences and conservative backfill.
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/backup-policy.test.ts`:
+  **2 passed**.
+- Isolated browser command with `apps/web/tests/automation.browser.test.ts`
+  and `-t 'disables wake'`: **1 passed**, 6 unrelated skipped. Existing real
+  handlers, simulated external provider, English screenshots refreshed.
+- Root `tsc --noEmit`, web app/test typecheck, changed-file Biome and i18n check
+  passed. Independent review found no remaining must-fix; private repair audit
+  cutoff was tightened before execution after review identified an ambiguity.
+
+Dev activation reused prior explicit automation migration approval: applied only
+migration041 to `nickhosting_dev`. A guarded repair of the reported legacy paused
+running server changed local lifecycle bookkeeping only, preserved pause and
+required new observations. Private before/after receipts retained. Read-only
+verification then showed running/ready/online, pause=true and a new idle interval.
+No direct start/stop command, provider configuration change, container restart,
+new game server or production deployment. No production-release gate changed.
+Rollback limitations are recorded in M5-ENVIRONMENTS; full historical suites were
+not rerun. Integration fixture schemas were cleaned by their harness.
+
+Live read-only follow-up confirmed the repaired running server began a fresh idle
+interval at **08:21:01.087 UTC**. The normal Gateway idle stop was queued at
+**08:22:01.559 UTC** (60.472s later) and confirmed succeeded at **08:22:05.446 UTC**.
+Final state: offline/sleeping, automatic_starts_paused=true, no active sleep job or
+error. This was the configured automatic effect after repair, not a manually issued
+provider stop. API/worker/Vite remained healthy; no restart was needed. The Gateway's
+pre-existing health failures for other unbound routes remain outside this fix.
+Indexed governance/tracked-content hygiene passed.

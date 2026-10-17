@@ -551,11 +551,8 @@ export async function prepareProvisionGatewayStart(
       .selectAll()
       .where('server_id', '=', serverId)
       .executeTakeFirstOrThrow();
-    if (state.wake_job_id === jobId) return;
     // A concurrent explicit manual stop/policy edit must not be overwritten by
     // the pending first start. Only our untouched initial policy grants this transition.
-    if (operation.plan.gatewayPolicyGeneration !== state.generation)
-      throw new DomainError('conflict');
     const server = await tx
       .selectFrom('managed_servers')
       .selectAll()
@@ -563,7 +560,11 @@ export async function prepareProvisionGatewayStart(
       .executeTakeFirstOrThrow();
     if (server.active_operation_id !== jobId) throw new DomainError('conflict');
     // A new provision starts manually_stopped. Maintenance is never cleared.
-    if (server.intent === 'maintenance') throw new DomainError('conflict');
+    if (server.intent === 'maintenance' || server.automatic_starts_paused)
+      throw new DomainError('conflict');
+    if (state.wake_job_id === jobId) return;
+    if (operation.plan.gatewayPolicyGeneration !== state.generation)
+      throw new DomainError('conflict');
     const generation = randomUUID();
     await tx
       .updateTable('gateway_server_states')
@@ -627,6 +628,7 @@ export async function assertProvisionGatewayStart(
       operation.plan.autoStart !== true ||
       server.active_operation_id !== jobId ||
       server.intent !== 'auto_wake_enabled' ||
+      server.automatic_starts_paused ||
       state.wake_job_id !== jobId ||
       state.state !== 'waking' ||
       state.generation !== operation.plan.gatewayInitialStartGeneration

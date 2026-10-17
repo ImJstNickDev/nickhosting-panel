@@ -19,6 +19,13 @@ describe('backup policy', () => {
   it('resumes only original running intent with unchanged consent', () => {
     const previous = { wasRunning: true, intent: 'auto_wake_enabled', generation: 'a' };
     expect(canResumeBackup(previous, { intent: 'auto_wake_enabled', generation: 'a' })).toBe(true);
+    expect(
+      canResumeBackup(previous, {
+        intent: 'auto_wake_enabled',
+        generation: 'a',
+        automaticStartsPaused: true,
+      }),
+    ).toBe(false);
     expect(canResumeBackup(previous, { intent: 'manually_stopped', generation: 'a' })).toBe(false);
     expect(canResumeBackup(previous, { intent: 'auto_wake_enabled', generation: 'b' })).toBe(false);
     expect(

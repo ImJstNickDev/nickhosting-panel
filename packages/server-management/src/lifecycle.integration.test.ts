@@ -3588,8 +3588,8 @@ describe('event-driven backup lifecycle', () => {
     });
   });
 
-  it('suppresses automatic resume after a manual stop and preserves backup success on admission failure', async () => {
-    for (const manualStop of [true, false]) {
+  it('suppresses automatic resume after a manual stop or explicit pause and preserves backup success on admission failure', async () => {
+    for (const reason of ['manual-stop', 'pause', 'admission']) {
       const f = await fixture('backup');
       f.setState('running');
       f.options.backupPolicy = async () => ({ offline: 'required' });
@@ -3605,10 +3605,12 @@ describe('event-driven backup lifecycle', () => {
         .where('id', '=', f.serverId)
         .execute();
       expect(await f.run()).toBe('waiting');
-      if (manualStop)
+      if (reason !== 'admission')
         await f.db
           .updateTable('managed_servers')
-          .set({ intent: 'manually_stopped' })
+          .set(
+            reason === 'pause' ? { automatic_starts_paused: true } : { intent: 'manually_stopped' },
+          )
           .where('id', '=', f.serverId)
           .execute();
       else
@@ -3620,7 +3622,7 @@ describe('event-driven backup lifecycle', () => {
       expect(f.adapter.power).not.toHaveBeenCalled();
       expect((await f.operation()).plan).toMatchObject({
         backupComplete: true,
-        backupResumeOutcome: manualStop ? 'suppressed' : 'failed',
+        backupResumeOutcome: reason === 'admission' ? 'failed' : 'suppressed',
       });
     }
   });

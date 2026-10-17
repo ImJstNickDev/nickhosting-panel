@@ -27,10 +27,11 @@ export function resolveBackupMode(
  * generation suppresses resumption even if intent was later re-enabled. */
 export function canResumeBackup(
   previous: { intent: string; generation: string | null; wasRunning: boolean },
-  current: { intent: string; generation: string | null },
+  current: { intent: string; generation: string | null; automaticStartsPaused?: boolean },
 ) {
   return (
     previous.wasRunning &&
+    !current.automaticStartsPaused &&
     !['manually_stopped', 'maintenance'].includes(current.intent) &&
     previous.intent === current.intent &&
     previous.generation === current.generation

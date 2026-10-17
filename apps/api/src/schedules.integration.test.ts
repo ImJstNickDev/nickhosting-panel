@@ -103,15 +103,20 @@ describe('schedule HTTP contracts with real authenticated sessions', () => {
         await request(
           consentUrl,
           'PUT',
-          { allowed: true, expectedIntent: 'manually_stopped' },
+          { allowed: true, expectedAllowed: false, expectedIntent: 'manually_stopped' },
           true,
           'https://untrusted.example',
         )
       ).status,
     ).toBe(403);
     expect(
-      (await request(consentUrl, 'PUT', { allowed: true, expectedIntent: 'manually_stopped' }))
-        .status,
+      (
+        await request(consentUrl, 'PUT', {
+          allowed: true,
+          expectedAllowed: false,
+          expectedIntent: 'manually_stopped',
+        })
+      ).status,
     ).toBe(200);
     expect((await (await request(consentUrl)).json()).allowed).toBe(true);
   });

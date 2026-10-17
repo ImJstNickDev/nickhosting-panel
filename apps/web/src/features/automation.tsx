@@ -148,7 +148,11 @@ function SleepAndWake({
                 onChange={async (allowed) => {
                   await api(`${serverPath(serverId)}/automation-consent`, {
                     method: 'PUT',
-                    body: { allowed, expectedIntent: consent.data?.expectedIntent },
+                    body: {
+                      allowed,
+                      expectedIntent: consent.data?.expectedIntent,
+                      expectedAllowed: consent.data?.allowed,
+                    },
                   });
                   await Promise.all([consent.refetch(), policy.refetch(), server.refetch()]);
                 }}

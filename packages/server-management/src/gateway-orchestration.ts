@@ -223,12 +223,10 @@ async function publicState(
     serverId: server.id,
     generation: state.generation,
     enabled: state.enabled,
-    wakeEnabled: resolveAutoWakeValues(
-      inputs.values,
-      inputs.mapping.game_id,
-      inputs.mapping.runtime_id,
-      state,
-    ).effectiveEnabled,
+    wakeEnabled:
+      !server.automatic_starts_paused &&
+      resolveAutoWakeValues(inputs.values, inputs.mapping.game_id, inputs.mapping.runtime_id, state)
+        .effectiveEnabled,
     protocolId: state.protocol_id,
     gameVersion: state.game_version,
     state: actual,
@@ -551,6 +549,7 @@ export async function requestGatewayWake(
       );
     if (
       value.intent === 'status' ||
+      server.automatic_starts_paused ||
       !state.enabled ||
       !resolveAutoWakeValues(
         wakeInputs.values,

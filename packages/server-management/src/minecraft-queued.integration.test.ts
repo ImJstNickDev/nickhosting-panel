@@ -1,7 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createLogger, type LogRecord, SecretCodec } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
-import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
+import {
+  minecraftDigest,
+  minecraftManifest,
+  minecraftVerificationChecks,
+} from '@nickhosting/minecraft';
 import type {
   ApplicationServer,
   ProvisionPlan,
@@ -111,7 +115,7 @@ beforeEach(async () => {
     .execute();
   await f.db
     .insertInto('game_integrations')
-    .values({ id: 'minecraft', version: '1.0.0', manifest: {} })
+    .values({ id: 'minecraft', version: '1.0.0', manifest: minecraftManifest })
     .onConflict((c) => c.column('id').doNothing())
     .execute();
   await f.db
@@ -561,7 +565,7 @@ describe('host-bound Minecraft runtime image evidence', () => {
         f.db,
         f.context,
         value.serverId,
-        { allowed: true, expectedIntent: consent.expectedIntent },
+        { allowed: true, expectedAllowed: consent.allowed, expectedIntent: consent.expectedIntent },
         env,
       );
       const at = new Date(Date.now() + 1000);
@@ -616,7 +620,11 @@ describe('host-bound Minecraft runtime image evidence', () => {
             f.db,
             f.context,
             value.serverId,
-            { allowed: false, expectedIntent: current.expectedIntent },
+            {
+              allowed: false,
+              expectedAllowed: current.allowed,
+              expectedIntent: current.expectedIntent,
+            },
             env,
           );
         } else {

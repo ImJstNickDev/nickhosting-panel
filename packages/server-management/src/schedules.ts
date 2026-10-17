@@ -65,6 +65,7 @@ type Schedule = Selectable<Database['server_schedules']>;
 
 export const automationConsentSchema = z.strictObject({
   allowed: z.boolean(),
+  expectedAllowed: z.boolean(),
   expectedIntent: z.enum(['manually_stopped', 'maintenance', 'auto_wake_enabled', 'sleeping']),
 });
 
@@ -118,8 +119,13 @@ async function consentState(db: Kysely<Database>, context: AuthContext, serverId
   };
 }
 
-/** Shared automatic-start consent, not a second protocol or scheduling policy.
- * A real enabled Gateway also uses this same manual-stop suppression. */
+function automaticStartsAllowed(server: Selectable<Database['managed_servers']>) {
+  return (
+    !server.automatic_starts_paused && !['manually_stopped', 'maintenance'].includes(server.intent)
+  );
+}
+
+/** Automatic-start consent is independent from idle-sleep lifecycle state. */
 export async function getAutomationConsent(
   db: Kysely<Database>,
   context: AuthContext,
@@ -127,7 +133,7 @@ export async function getAutomationConsent(
 ) {
   const { server, policy, grantBlockedReason } = await consentState(db, context, serverId);
   return {
-    allowed: !['manually_stopped', 'maintenance'].includes(server.intent),
+    allowed: automaticStartsAllowed(server),
     expectedIntent: server.intent,
     gatewayConfigured: Boolean(policy),
     gatewayEnabled: policy?.enabled ?? false,
@@ -137,7 +143,7 @@ export async function getAutomationConsent(
 
 /** Revocation is immediate, including during queued work. Granting again is
  * forbidden until all unfinished effects settle; no old session or queued job
- * gains a fresh consent. Existing Gateway generations/readiness are fenced. */
+ * gains a fresh consent. Pausing preserves current lifecycle work and readiness. */
 export async function setAutomationConsent(
   db: Kysely<Database>,
   previous: AuthContext,
@@ -150,7 +156,11 @@ export async function setAutomationConsent(
     await lockResources(tx);
     const context = await manager(tx, previous, serverId, env);
     const { server, policy, grantBlockedReason } = await consentState(tx, context, serverId);
-    if (server.intent !== value.expectedIntent) throw new DomainError('conflict');
+    if (
+      server.intent !== value.expectedIntent ||
+      automaticStartsAllowed(server) !== value.expectedAllowed
+    )
+      throw new DomainError('conflict');
     if (value.allowed && grantBlockedReason) throw new DomainError('conflict');
     if (value.allowed && policy?.enabled)
       await requireMinecraftGatewayProtocol(
@@ -163,31 +173,23 @@ export async function setAutomationConsent(
         env,
       );
     const now = new Date();
-    const intent = value.allowed
+    const rearm = value.allowed && server.intent === 'manually_stopped';
+    const intent = rearm
       ? server.runtime_state === 'offline'
         ? ('sleeping' as const)
         : ('auto_wake_enabled' as const)
-      : server.intent === 'maintenance'
-        ? ('maintenance' as const)
-        : ('manually_stopped' as const);
-    if (policy) {
-      const state = value.allowed
-        ? server.runtime_state === 'offline'
-          ? ('sleeping' as const)
-          : ('waking' as const)
-        : intent === 'maintenance'
-          ? ('maintenance' as const)
-          : ('manually_stopped' as const);
+      : server.intent;
+    if (policy && rearm) {
+      const state =
+        server.runtime_state === 'offline' ? ('sleeping' as const) : ('waking' as const);
       await tx
         .updateTable('gateway_server_states')
         .set({
           generation: randomUUID(),
           state,
-          // Revoked operations remain attributable to their jobs. They are not
-          // cancelled/reset here and retain all existing effect reservations.
-          ...(value.allowed
-            ? { wake_job_id: null, sleep_job_id: null, process_started_at: null }
-            : {}),
+          wake_job_id: null,
+          sleep_job_id: null,
+          process_started_at: null,
           readiness_observed_at: null,
           idle_since: null,
           last_observed_at: null,
@@ -204,9 +206,14 @@ export async function setAutomationConsent(
     }
     await tx
       .updateTable('managed_servers')
-      .set({ intent, readiness: 'unknown', updated_at: now })
+      .set({
+        automatic_starts_paused: !value.allowed,
+        ...(rearm ? { intent, readiness: 'unknown' as const } : {}),
+        updated_at: now,
+      })
       .where('id', '=', serverId)
       .execute();
+    if (server.automatic_starts_paused !== !value.allowed || rearm) await notifyGatewayChange(tx);
     await recordAudit(tx, context, 'server.automation_consent.updated', {
       serverId,
       allowed: value.allowed,
@@ -681,8 +688,7 @@ export async function authorizeScheduledEffect(
   const context = await creatorContext(db, job.actor_id);
   const server = await authorizeServer(db, context, serverId, 'server:manage');
   if (['start', 'restart'].includes(operation.action)) {
-    if (['manually_stopped', 'maintenance'].includes(server.intent))
-      throw new DomainError('forbidden');
+    if (!automaticStartsAllowed(server)) throw new DomainError('forbidden');
     const policy =
       server.connection_mode === 'gateway'
         ? await db
@@ -799,10 +805,7 @@ async function dispatchSchedule(
         const server = await authorizeServer(tx, context, schedule.server_id, 'server:manage');
         if (schedule.action === 'backup')
           await assertRetentionCapacity(tx, server.id, schedule.backup_options.retention);
-        if (
-          ['start', 'restart'].includes(schedule.action) &&
-          ['manually_stopped', 'maintenance'].includes(server.intent)
-        )
+        if (['start', 'restart'].includes(schedule.action) && !automaticStartsAllowed(server))
           reason = 'manual_stop_suppressed';
         else {
           const policy =

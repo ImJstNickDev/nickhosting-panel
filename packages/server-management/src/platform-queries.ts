@@ -338,6 +338,7 @@ async function describeServer(
         row.connection_mode === 'gateway' &&
         capabilities !== null &&
         capabilities.wake !== 'unsupported' &&
+        !row.automatic_starts_paused &&
         !['manually_stopped', 'maintenance'].includes(row.intent),
     ),
     capabilities,

@@ -59,6 +59,23 @@ values are retained without inventing historical identity.
 
 No console-command schedules or multi-operation chains are introduced.
 
+## Automatic-start consent
+
+Allow automatic starts is independent of idle sleep and running state. Paused
+persists as `managed_servers.automatic_starts_paused`: it blocks join wake,
+scheduled starts/restarts and automatic backup/provision resumption, but does not
+reset readiness, idle observations, Gateway generation or an ongoing stop. A
+running server keeps forwarding and may sleep at its configured idle deadline.
+Manual start is still allowed and preserves an explicit pause; use Allowed to
+clear that preference. Ordinary manual-stop suppression and maintenance remain
+separate lifecycle safeguards.
+
+Consent updates compare both `expectedIntent` and `expectedAllowed` under the
+existing transaction lock. Granting again is blocked while effects remain
+unfinished, so revoking a queued automatic start cannot later resurrect it.
+Migration041 adds the preference and conservatively preserves audit-supported
+legacy revocations; it never rewrites ambiguous runtime state or provider data.
+
 ## Independent wake and sleep policies
 
 `defaultAutoWakeEnabled` (default true), `autoWakeUserAccess` (default editable)

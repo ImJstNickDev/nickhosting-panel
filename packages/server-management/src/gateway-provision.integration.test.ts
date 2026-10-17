@@ -29,6 +29,7 @@ import {
   reconcileManagedServer,
 } from './lifecycle.js';
 import { createManagedServer } from './registry.js';
+import { getAutomationConsent, setAutomationConsent } from './schedules.js';
 import { managementFixture } from './test-fixtures.js';
 
 // Replace only the frozen registry container so isolated compiled fixture modules
@@ -517,6 +518,28 @@ describe('provision worker automatic routing and launch recovery', () => {
       state: 'manually_stopped',
       enabled: false,
     });
+  });
+  it('revokes the initial automatic start after durable preparation without disabling the Gateway', async () => {
+    const run = await lifecycleFixture(true);
+    run.options.checkpoint = async (point) => {
+      if (point !== 'prepared') return;
+      const consent = await getAutomationConsent(f.db, f.owner, run.serverId);
+      await setAutomationConsent(
+        f.db,
+        f.owner,
+        run.serverId,
+        {
+          allowed: false,
+          expectedAllowed: consent.allowed,
+          expectedIntent: consent.expectedIntent,
+        },
+        env,
+      );
+    };
+    expect(await processServerOperation(f.db, run.jobId, run.options)).toBe('failed');
+    expect(run.power).not.toHaveBeenCalled();
+    expect((await getAutomationConsent(f.db, f.owner, run.serverId)).allowed).toBe(false);
+    expect((await getGatewayState(f.db, run.serverId, { env })).enabled).toBe(true);
   });
   it('does not mark provisioning successful when routing activation fails', async () => {
     const run = await lifecycleFixture(false);

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { authSessionId } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
@@ -182,6 +183,224 @@ async function lifecycleFixture() {
 }
 
 describe('durable generic schedules', () => {
+  it.each([
+    { name: 'no consent audit', intent: 'manually_stopped', events: [], paused: false },
+    { name: 'latest explicit pause', intent: 'manually_stopped', events: [false], paused: true },
+    { name: 'later grant', intent: 'manually_stopped', events: [false, true], paused: false },
+    { name: 'later pause', intent: 'manually_stopped', events: [true, false], paused: true },
+    { name: 'running intent', intent: 'auto_wake_enabled', events: [false], paused: false },
+    {
+      name: 'tied contradictory audit',
+      intent: 'manually_stopped',
+      events: [true, false],
+      paused: false,
+      tied: true,
+    },
+  ] as const)(
+    'backfills pause conservatively for $name without repairing lifecycle',
+    async (scenario) => {
+      await allowStarts();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: scenario.intent, runtime_state: 'running', readiness: 'ready' })
+        .where('id', '=', serverId)
+        .execute();
+      for (const [index, allowed] of scenario.events.entries()) {
+        await f.db
+          .insertInto('audit_events')
+          .values({
+            id: randomUUID(),
+            action: 'server.automation_consent.updated',
+            actor_user_id: f.context.actorUserId,
+            subject_user_id: f.context.subjectUserId,
+            correlation_id: randomUUID(),
+            metadata: { serverId, allowed },
+            created_at: new Date(at.getTime() + ('tied' in scenario ? 0 : index * 1000)),
+          })
+          .execute();
+      }
+      const migration = await readFile(
+        new URL('../../database/migrations/041_automatic_start_pause.sql', import.meta.url),
+        'utf8',
+      );
+      // Reapply only in this suite's generated schema, then roll back the entire
+      // schema change so the migration ledger and later tests remain consistent.
+      const client = await database.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const before = await client.query('SELECT * FROM managed_servers WHERE id = $1', [
+          serverId,
+        ]);
+        const gateway = await client.query(
+          'SELECT * FROM gateway_server_states WHERE server_id = $1',
+          [serverId],
+        );
+        await client.query('ALTER TABLE managed_servers DROP COLUMN automatic_starts_paused');
+        await client.query(migration);
+        const after = await client.query('SELECT * FROM managed_servers WHERE id = $1', [serverId]);
+        expect(after.rows[0]).toEqual({
+          ...before.rows[0],
+          automatic_starts_paused: scenario.paused,
+        });
+        expect(
+          (
+            await client.query('SELECT * FROM gateway_server_states WHERE server_id = $1', [
+              serverId,
+            ])
+          ).rows,
+        ).toEqual(gateway.rows);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    },
+  );
+
+  it('pauses and resumes automatic starts without disturbing ready runtime or Gateway state', async () => {
+    await allowStarts();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ intent: 'auto_wake_enabled', runtime_state: 'running', readiness: 'ready' })
+      .where('id', '=', serverId)
+      .execute();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'online', readiness_observed_at: at, idle_since: at })
+      .where('server_id', '=', serverId)
+      .execute();
+    const policy = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    for (const allowed of [false, true]) {
+      expect(
+        await setAutomationConsent(f.db, f.context, serverId, {
+          allowed,
+          expectedAllowed: !allowed,
+          expectedIntent: 'auto_wake_enabled',
+        }),
+      ).toMatchObject({ allowed, expectedIntent: 'auto_wake_enabled' });
+      expect(
+        await f.db
+          .selectFrom('managed_servers')
+          .select(['intent', 'runtime_state', 'readiness', 'automatic_starts_paused'])
+          .where('id', '=', serverId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({
+        intent: 'auto_wake_enabled',
+        runtime_state: 'running',
+        readiness: 'ready',
+        automatic_starts_paused: !allowed,
+      });
+      expect(
+        await f.db
+          .selectFrom('gateway_server_states')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual(policy);
+    }
+  });
+
+  it('rejects missing or stale expected consent even when the lifecycle intent is unchanged', async () => {
+    await allowStarts();
+    const consent = await getAutomationConsent(f.db, f.context, serverId);
+    await expect(
+      setAutomationConsent(f.db, f.context, serverId, {
+        allowed: false,
+        expectedIntent: consent.expectedIntent,
+      }),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: false,
+      expectedAllowed: true,
+      expectedIntent: consent.expectedIntent,
+    });
+    await expect(
+      setAutomationConsent(f.db, f.context, serverId, {
+        allowed: true,
+        expectedAllowed: true,
+        expectedIntent: consent.expectedIntent,
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({
+      allowed: false,
+      expectedIntent: consent.expectedIntent,
+    });
+  });
+
+  it.each(['start', 'restart'])('skips a paused scheduled %s before admission', async (action) => {
+    await allowStarts();
+    const consent = await getAutomationConsent(f.db, f.context, serverId);
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: false,
+      expectedAllowed: true,
+      expectedIntent: consent.expectedIntent,
+    });
+    const schedule = await create({ action });
+    expect(await due()).toEqual({ dispatched: 0, skipped: 1 });
+    expect((await outcomes(schedule.id)).items[0]).toMatchObject({
+      reason: 'manual_stop_suppressed',
+      jobId: null,
+    });
+  });
+
+  it('preserves queued sleep work and authorizes scheduled stops while starts are paused', async () => {
+    await allowStarts();
+    const schedule = await create({ action: 'stop' });
+    expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+    const jobId = await jobOf(schedule.id);
+    const policy = await f.db
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    const consent = await getAutomationConsent(f.db, f.context, serverId);
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: false,
+      expectedAllowed: consent.allowed,
+      expectedIntent: consent.expectedIntent,
+    });
+    expect(
+      await f.db
+        .selectFrom('gateway_server_states')
+        .selectAll()
+        .where('server_id', '=', serverId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual(policy);
+    expect(policy.sleep_job_id).toBe(jobId);
+    await expect(authorizeQueuedEffect(f.db, jobId, serverId)).resolves.toMatchObject({
+      sessionType: 'regular',
+    });
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({
+      allowed: false,
+      expectedIntent: 'sleeping',
+    });
+    await expect(
+      setAutomationConsent(f.db, f.context, serverId, {
+        allowed: true,
+        expectedAllowed: false,
+        expectedIntent: 'sleeping',
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+  });
+
+  it('admits a scheduled stop after automatic starts have already been paused', async () => {
+    await allowStarts();
+    const consent = await getAutomationConsent(f.db, f.context, serverId);
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: false,
+      expectedAllowed: true,
+      expectedIntent: consent.expectedIntent,
+    });
+    const schedule = await create({ action: 'stop' });
+    expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+    await expect(
+      authorizeQueuedEffect(f.db, await jobOf(schedule.id), serverId),
+    ).resolves.toMatchObject({ sessionType: 'regular' });
+  });
+
   it('keeps direct scheduled starts independent of stale Gateway policy', async () => {
     await allowStarts();
     await f.db
@@ -202,6 +421,7 @@ describe('durable generic schedules', () => {
     const consent = await getAutomationConsent(f.db, f.context, serverId);
     await setAutomationConsent(f.db, f.context, serverId, {
       allowed: false,
+      expectedAllowed: consent.allowed,
       expectedIntent: consent.expectedIntent,
     });
     expect(
@@ -213,7 +433,8 @@ describe('durable generic schedules', () => {
     ).toEqual(before);
     await setAutomationConsent(f.db, f.context, serverId, {
       allowed: true,
-      expectedIntent: 'manually_stopped',
+      expectedAllowed: false,
+      expectedIntent: consent.expectedIntent,
     });
     const schedule = await create({ action: 'start' });
     expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
@@ -231,6 +452,7 @@ describe('durable generic schedules', () => {
     expect(
       await setAutomationConsent(f.db, f.context, serverId, {
         allowed: true,
+        expectedAllowed: false,
         expectedIntent: 'manually_stopped',
       }),
     ).toMatchObject({ allowed: true, gatewayConfigured: false, gatewayEnabled: false });
@@ -244,42 +466,56 @@ describe('durable generic schedules', () => {
     expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
   });
 
-  it('revokes a queued start and forbids rearm until the old job safely settles', async () => {
-    await setAutomationConsent(f.db, f.context, serverId, {
-      allowed: true,
-      expectedIntent: 'manually_stopped',
-    });
-    const schedule = await create({ action: 'start' });
-    await due();
-    const jobId = await jobOf(schedule.id);
-    const consent = await getAutomationConsent(f.db, f.context, serverId);
-    await setAutomationConsent(f.db, f.context, serverId, {
-      allowed: false,
-      expectedIntent: consent.expectedIntent,
-    });
-    await expect(authorizeQueuedEffect(f.db, jobId, serverId)).rejects.toMatchObject({
-      code: 'forbidden',
-    });
-    await expect(
-      setAutomationConsent(f.db, f.context, serverId, {
+  it.each(['gateway', 'direct'] as const)(
+    'revokes a queued %s start and forbids rearm until the old job safely settles',
+    async (connectionMode) => {
+      await f.db
+        .updateTable('managed_servers')
+        .set({ connection_mode: connectionMode })
+        .where('id', '=', serverId)
+        .execute();
+      if (connectionMode === 'gateway') await allowStarts();
+      const initialConsent = await getAutomationConsent(f.db, f.context, serverId);
+      await setAutomationConsent(f.db, f.context, serverId, {
         allowed: true,
-        expectedIntent: 'manually_stopped',
-      }),
-    ).rejects.toMatchObject({ code: 'conflict' });
-    const fixture = await lifecycleFixture();
-    expect(await fixture.process(jobId)).toBe('failed');
-    expect(fixture.power).not.toHaveBeenCalled();
-    expect(
-      (
-        await setAutomationConsent(f.db, f.context, serverId, {
+        expectedAllowed: initialConsent.allowed,
+        expectedIntent: initialConsent.expectedIntent,
+      });
+      const schedule = await create({ action: 'start' });
+      await due();
+      const jobId = await jobOf(schedule.id);
+      const consent = await getAutomationConsent(f.db, f.context, serverId);
+      await setAutomationConsent(f.db, f.context, serverId, {
+        allowed: false,
+        expectedAllowed: consent.allowed,
+        expectedIntent: consent.expectedIntent,
+      });
+      await expect(authorizeQueuedEffect(f.db, jobId, serverId)).rejects.toMatchObject({
+        code: 'forbidden',
+      });
+      await expect(
+        setAutomationConsent(f.db, f.context, serverId, {
           allowed: true,
-          expectedIntent: 'manually_stopped',
-        })
-      ).allowed,
-    ).toBe(true);
-    expect(await fixture.process(jobId)).toBe('duplicate');
-    expect(fixture.power).not.toHaveBeenCalled();
-  });
+          expectedAllowed: false,
+          expectedIntent: consent.expectedIntent,
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      const fixture = await lifecycleFixture();
+      expect(await fixture.process(jobId)).toBe('failed');
+      expect(fixture.power).not.toHaveBeenCalled();
+      expect(
+        (
+          await setAutomationConsent(f.db, f.context, serverId, {
+            allowed: true,
+            expectedAllowed: false,
+            expectedIntent: consent.expectedIntent,
+          })
+        ).allowed,
+      ).toBe(true);
+      expect(await fixture.process(jobId)).toBe('duplicate');
+      expect(fixture.power).not.toHaveBeenCalled();
+    },
+  );
 
   it('cannot use consent to enable a disabled Gateway or bypass maintenance/uploads', async () => {
     await allowStarts();
@@ -293,6 +529,7 @@ describe('durable generic schedules', () => {
       (
         await setAutomationConsent(f.db, f.context, serverId, {
           allowed: true,
+          expectedAllowed: before.allowed,
           expectedIntent: before.expectedIntent,
         })
       ).gatewayEnabled,
@@ -303,6 +540,7 @@ describe('durable generic schedules', () => {
     await expect(
       setAutomationConsent(f.db, f.context, serverId, {
         allowed: true,
+        expectedAllowed: current.allowed,
         expectedIntent: current.expectedIntent,
       }),
     ).rejects.toMatchObject({ code: 'conflict' });
@@ -315,6 +553,7 @@ describe('durable generic schedules', () => {
       (
         await setAutomationConsent(f.db, f.context, serverId, {
           allowed: false,
+          expectedAllowed: false,
           expectedIntent: 'maintenance',
         })
       ).expectedIntent,
@@ -322,6 +561,7 @@ describe('durable generic schedules', () => {
     await expect(
       setAutomationConsent(f.db, f.context, serverId, {
         allowed: true,
+        expectedAllowed: false,
         expectedIntent: 'maintenance',
       }),
     ).rejects.toMatchObject({ code: 'conflict' });
@@ -518,7 +758,7 @@ describe('durable generic schedules', () => {
     });
   });
 
-  it('fences manual-stop and refuses rearm while an older admitted start remains active', async () => {
+  it('fences paused starts and refuses rearm while an older admitted start remains active', async () => {
     await allowStarts();
     const schedule = await create({ action: 'start' });
     expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
@@ -529,12 +769,14 @@ describe('durable generic schedules', () => {
     const consent = await getAutomationConsent(f.db, f.context, serverId);
     await setAutomationConsent(f.db, f.context, serverId, {
       allowed: false,
+      expectedAllowed: consent.allowed,
       expectedIntent: consent.expectedIntent,
     });
     await expect(
       setAutomationConsent(f.db, f.context, serverId, {
         allowed: true,
-        expectedIntent: 'manually_stopped',
+        expectedAllowed: false,
+        expectedIntent: consent.expectedIntent,
       }),
     ).rejects.toMatchObject({ code: 'conflict' });
     await expect(authorizeQueuedEffect(f.db, jobId, serverId)).rejects.toMatchObject({

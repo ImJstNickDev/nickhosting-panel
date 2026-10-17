@@ -157,6 +157,7 @@ export interface ServerTables {
     runtime_state: Generated<'offline' | 'starting' | 'running' | 'stopping' | 'unknown'>;
     readiness: Generated<'unknown' | 'loading' | 'ready' | 'degraded'>;
     intent: Generated<'manually_stopped' | 'maintenance' | 'auto_wake_enabled' | 'sleeping'>;
+    automatic_starts_paused: Generated<boolean>;
     installation_state: Generated<'pending' | 'installing' | 'installed' | 'failed'>;
     active_operation_id: string | null;
     last_observed_at: Date | null;

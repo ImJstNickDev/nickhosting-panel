@@ -39,7 +39,13 @@ import {
 import { getPlatformSleepPolicy } from './platform-queries.js';
 import { enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect } from './runtime.js';
-import { createSchedule, deleteSchedule, runDueSchedules } from './schedules.js';
+import {
+  createSchedule,
+  deleteSchedule,
+  getAutomationConsent,
+  runDueSchedules,
+  setAutomationConsent,
+} from './schedules.js';
 import { getGameSleepPolicy, resolveIdleTimeout, setGameSleepPolicy } from './sleep-policy.js';
 import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
@@ -198,8 +204,8 @@ async function lifecycleFixture() {
   };
   return { lifecycle, process, power, stop, processStartedAt: () => processStart };
 }
-async function started() {
-  await configure();
+async function started(patch: Partial<GatewayPolicy> = {}) {
+  await configure(patch);
   const fixture = await lifecycleFixture();
   const state = await wake();
   expect(state.state).toBe('waking');
@@ -207,6 +213,14 @@ async function started() {
   advance(1000);
   expect(await fixture.process(state.wakeJobId ?? '')).toBe('succeeded');
   return { ...fixture, state };
+}
+async function consent(allowed: boolean) {
+  const current = await getAutomationConsent(f.db, f.context, serverId);
+  return setAutomationConsent(f.db, f.context, serverId, {
+    allowed,
+    expectedAllowed: current.allowed,
+    expectedIntent: current.expectedIntent,
+  });
 }
 async function report(
   fixture: Awaited<ReturnType<typeof started>>,
@@ -1429,6 +1443,76 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     ).toHaveLength(0);
     expect((await wake()).state).toBe('waking');
   });
+  it('keeps the 60-second idle interval while automatic starts are paused and preserves the pause after sleep and manual start', async () => {
+    const fixture = await started({ idleTimeoutSeconds: 60 });
+    const online = await report(fixture);
+    advance(10000);
+    await report(fixture);
+    const beforePause = await getGatewayState(f.db, serverId, options);
+    expect(await consent(false)).toMatchObject({ allowed: false });
+    expect(await getGatewayState(f.db, serverId, options)).toMatchObject({
+      state: 'online',
+      generation: beforePause.generation,
+      readinessObservedAt: beforePause.readinessObservedAt,
+      sleepEligibleAt: online.sleepEligibleAt,
+    });
+    for (let elapsed = 20; elapsed < 60; elapsed += 10) {
+      advance(10000);
+      expect(await report(fixture)).toMatchObject({ state: 'online', sleepJobId: null });
+    }
+    advance(10000);
+    const pending = await report(fixture);
+    expect(pending.sleepJobId).not.toBeNull();
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({ allowed: false });
+    expect(await row()).toMatchObject({ runtime_state: 'offline', automatic_starts_paused: true });
+    expect(await wake()).toMatchObject({ wakeJobId: null });
+    expect((await row()).active_operation_id).toBeNull();
+
+    const manual = await enqueueServerOperation(f.db, f.context, serverId, {
+      action: 'start',
+      idempotencyKey: randomUUID(),
+    });
+    expect(await fixture.process(manual.jobId)).toBe('waiting');
+    advance(1000);
+    expect(await fixture.process(manual.jobId)).toBe('succeeded');
+    expect(await row()).toMatchObject({ runtime_state: 'running', automatic_starts_paused: true });
+    expect(await getAutomationConsent(f.db, f.context, serverId)).toMatchObject({ allowed: false });
+    expect(fixture.power).toHaveBeenCalledTimes(2);
+  });
+  it('allows an already queued idle stop to finish when automatic starts are paused', async () => {
+    const fixture = await started();
+    await report(fixture);
+    advance(10000);
+    const pending = await report(fixture);
+    expect(pending.sleepJobId).not.toBeNull();
+    await consent(false);
+    expect(await getGatewayState(f.db, serverId, options)).toMatchObject({
+      generation: pending.generation,
+      sleepJobId: pending.sleepJobId,
+    });
+    expect(await fixture.process(pending.sleepJobId ?? '')).toBe('succeeded');
+    expect(fixture.stop).toHaveBeenCalledTimes(1);
+    expect(await row()).toMatchObject({ runtime_state: 'offline', automatic_starts_paused: true });
+    expect(await wake()).toMatchObject({ wakeJobId: null });
+  });
+  it('revokes a queued Gateway wake when automatic starts pause and cannot reallow it before settlement', async () => {
+    await configure();
+    const fixture = await lifecycleFixture();
+    const pending = await wake();
+    expect(pending.wakeJobId).not.toBeNull();
+    await consent(false);
+    await expect(authorizeQueuedEffect(f.db, pending.wakeJobId ?? '', serverId)).rejects.toThrow(
+      'forbidden',
+    );
+    await expect(consent(true)).rejects.toThrow('conflict');
+    expect(await fixture.process(pending.wakeJobId ?? '')).toBe('failed');
+    expect(fixture.power).not.toHaveBeenCalled();
+    expect(await consent(true)).toMatchObject({ allowed: true });
+    expect(await fixture.process(pending.wakeJobId ?? '')).toBe('duplicate');
+    expect(fixture.power).not.toHaveBeenCalled();
+  });
   it('commits the sleeping snapshot and notifies immediately when the confirmed stop finishes, without a reconciliation tick', async () => {
     clock = new Date(Date.now() - 11000);
     const fixture = await started();
@@ -1607,8 +1691,9 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
       expect(fixture.stop).not.toHaveBeenCalled();
     },
   );
-  async function rejectedSleep() {
+  async function rejectedSleep(paused = false) {
     const fixture = await started();
+    if (paused) await consent(false);
     await report(fixture);
     advance(10000);
     const pending = await report(fixture);
@@ -1685,49 +1770,54 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
       ).toHaveLength(1);
     },
   );
-  it('retires only a rejected pre-handoff sleep journal and establishes a new idle interval', async () => {
-    const { fixture, pending, operation } = await rejectedSleep();
-    const reservations = await f.db
-      .selectFrom('resource_reservations')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .execute();
-    expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
-      state: 'blocked',
-      sleepJobId: null,
-    });
-    advance(1);
-    const online = await report(fixture, { quiescenceUntil: undefined });
-    expect(online).toMatchObject({ state: 'online', sleepJobId: null });
-    expect(online.sleepEligibleAt).toBe(new Date(clock.getTime() + 10000).toISOString());
-    for (let i = 0; i < 2; i++) {
-      advance(1);
-      expect((await reconcileGatewayState(f.db, serverId, options)).state).toBe('online');
-      expect((await report(fixture, { quiescenceUntil: undefined })).state).toBe('online');
-    }
-    expect(
-      await f.db
-        .selectFrom('server_operations')
-        .selectAll()
-        .where('job_id', '=', pending.sleepJobId ?? '')
-        .executeTakeFirstOrThrow(),
-    ).toEqual(operation);
-    expect(
-      await f.db
+  it.each([false, true])(
+    'retires only a rejected pre-handoff sleep journal and establishes a new idle interval (automatic starts paused=%s)',
+    async (paused) => {
+      const { fixture, pending, operation } = await rejectedSleep(paused);
+      const reservations = await f.db
         .selectFrom('resource_reservations')
         .selectAll()
         .where('server_id', '=', serverId)
-        .execute(),
-    ).toEqual(reservations);
-    expect(
-      await f.db
-        .selectFrom('server_operations')
-        .select('job_id')
-        .where('server_id', '=', serverId)
-        .where('action', '=', 'stop')
-        .execute(),
-    ).toHaveLength(1);
-  });
+        .execute();
+      expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+        state: 'blocked',
+        sleepJobId: null,
+      });
+      advance(1);
+      const online = await report(fixture, { quiescenceUntil: undefined });
+      expect(online).toMatchObject({ state: 'online', sleepJobId: null });
+      expect(online.sleepEligibleAt).toBe(new Date(clock.getTime() + 10000).toISOString());
+      expect((await row()).automatic_starts_paused).toBe(paused);
+      expect((await getAutomationConsent(f.db, f.context, serverId)).allowed).toBe(!paused);
+      for (let i = 0; i < 2; i++) {
+        advance(1);
+        expect((await reconcileGatewayState(f.db, serverId, options)).state).toBe('online');
+        expect((await report(fixture, { quiescenceUntil: undefined })).state).toBe('online');
+      }
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .selectAll()
+          .where('job_id', '=', pending.sleepJobId ?? '')
+          .executeTakeFirstOrThrow(),
+      ).toEqual(operation);
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .selectAll()
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toEqual(reservations);
+      expect(
+        await f.db
+          .selectFrom('server_operations')
+          .select('job_id')
+          .where('server_id', '=', serverId)
+          .where('action', '=', 'stop')
+          .execute(),
+      ).toHaveLength(1);
+    },
+  );
   it.each([
     'prepared',
     'uncertain',

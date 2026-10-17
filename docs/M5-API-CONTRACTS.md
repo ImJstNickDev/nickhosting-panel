@@ -309,7 +309,7 @@ intent and occurrence history.
 | Method/path under `/v1/servers/:id` | Contract |
 | --- | --- |
 | `GET /automation-consent` | `allowed`, `expectedIntent`, Gateway configured/enabled flags and nullable `grantBlockedReason`. |
-| `PUT /automation-consent` | Strict `{allowed,expectedIntent}` with current regular manage authority. Does not implicitly start a server or deploy/enable a Gateway. |
+| `PUT /automation-consent` | Strict `{allowed,expectedIntent,expectedAllowed}` with current regular manage authority. The expected fields must match the latest GET. Pausing changes only automatic-start permission, preserving running readiness and idle sleep. Does not implicitly start a server or deploy/enable a Gateway. |
 | `GET /schedules` | Current schedules with revision, timing, zone, action, next run and timestamps. |
 | `POST /schedules` | `{name,action,timing,timeZone,enabled}`; 201 on durable creation. |
 | `PUT /schedules/:scheduleId` | Same fields plus current `revision`; stale updates conflict. |

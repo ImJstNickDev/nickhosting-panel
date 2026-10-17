@@ -18,7 +18,7 @@ versions. This restriction is enforced in descriptors, enqueue and execution.
 
 A temporary offline backup records prior running state and consent generation,
 stops normally, waits for the stopped receipt, creates the backup, then attempts
-normal admission/resumption. A manual stop or changed consent suppresses resume.
+normal admission/resumption. A manual stop, changed consent or explicit automatic-start pause suppresses resume.
 An already stopped server stays stopped. Successful backup and failed/suppressed
 resume are separate outcomes in Activity. Gateway process/readiness state is
 cleared for the temporary stop and rebuilt for the admitted resumed process.

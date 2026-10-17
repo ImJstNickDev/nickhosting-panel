@@ -159,12 +159,19 @@ export async function authorizeQueuedEffect(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (
+      server.automatic_starts_paused ||
       ['manually_stopped', 'maintenance'].includes(server.intent) ||
       server.intent !== operation.plan.backupPriorIntent ||
       (gateway?.generation ?? null) !== (operation.plan.backupGatewayGeneration ?? null)
     )
       throw new DomainError('forbidden');
   }
+  if (
+    operation.action === 'provision' &&
+    operation.phase === 'initial_start' &&
+    server.automatic_starts_paused
+  )
+    throw new DomainError('forbidden');
   const game = await trustedGameModules.resolve(db, serverId);
 
   if (operation.plan.gatewayAutomation !== undefined) {
@@ -189,7 +196,8 @@ export async function authorizeQueuedEffect(
       policy.generation !== marker.generation ||
       ['manually_stopped', 'maintenance'].includes(server.intent) ||
       (marker.kind === 'wake' &&
-        (operation.action !== 'start' ||
+        (server.automatic_starts_paused ||
+          operation.action !== 'start' ||
           policy.wake_job_id !== jobId ||
           policy.state !== 'waking')) ||
       (marker.kind === 'sleep' &&
