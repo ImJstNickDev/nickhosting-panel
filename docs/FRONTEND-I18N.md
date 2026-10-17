@@ -81,8 +81,21 @@ existing border without an extra decorative outline.
 Security uses compact action rows. Password and TOTP forms open on request;
 password changes still revoke other sessions, and TOTP retains the existing
 password/verification requirements. Passkeys support contextual naming and
-Cancel-first removal. Recovery codes remain in memory, with a copy action and
-visible clipboard failures. Session rows derive browser/OS labels only from the
+Cancel-first removal. TOTP enrollment is an inline three-step flow: confirm identity,
+scan a locally generated QR (or expand the manual key), then save recovery codes
+after a successful six-digit verification. Setup remains resumable across the
+Profile/Security tabs, including an in-flight request; it never issues a second
+enrollment merely because the user navigated. The partial OTP input is cleared on
+tab changes. Recovery codes offer local copy/download and Done discards them.
+Set up later hides the unverified draft; it does not enable TOTP or pretend to
+remove the server-side draft. Starting again after leaving Settings replaces the
+unverified draft through the existing endpoint. No password or secret enters
+browser storage, URLs, logs or query caches. Failed QR loading offers manual entry;
+clipboard failures remain visible. Focus follows the active step and validation.
+A failed non-authentication background session refresh preserves regular-session
+forms/recovery codes with a retry notice; authentication failures still exit the
+session. Actual successful TOTP mutations remain visible until an authoritative
+session refresh catches up. Session rows derive browser/OS labels only from the
 returned user-agent, expose full details on demand and confirm revocation. No
 current-device claim is inferred without a matching session identity. Shared
 account queries and TOTP setup memory are reused between the two routes.

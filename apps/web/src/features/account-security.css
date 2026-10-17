@@ -13,8 +13,7 @@
 }
 .account-security-heading,
 .account-security-actions,
-.account-security-item,
-.account-recovery-heading {
+.account-security-item {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -174,32 +173,6 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.account-recovery-codes {
-  margin: 20px 0 0 50px;
-  padding: 16px;
-  border: 1px solid #dbe4e9;
-  border-radius: 8px;
-  background: #f7fafb;
-}
-.account-recovery-heading {
-  justify-content: space-between;
-}
-.account-recovery-heading h3 {
-  font-size: 0.9rem;
-  margin: 0;
-}
-.account-recovery-codes ul {
-  list-style: none;
-  padding: 0;
-  margin: 16px 0 8px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
-}
-.account-recovery-codes code {
-  font-size: 0.85rem;
-  overflow-wrap: anywhere;
-}
 .account-security-signout > fieldset {
   display: none;
 }
@@ -229,9 +202,6 @@
   }
   .account-security-drawer {
     padding-left: 0;
-  }
-  .account-recovery-codes {
-    margin-left: 0;
   }
   .account-security-item-icon {
     display: none;

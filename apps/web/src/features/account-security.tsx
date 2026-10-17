@@ -1,9 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
-import { useNavigate, useOutletContext } from 'react-router';
+import { useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { ApiError, api, apiError } from '../api/client.js';
 import { useT } from '../app/i18n.js';
-import { identityChanged, useSession } from '../app/session.js';
+import { identityChanged } from '../app/session.js';
 import { Tooltip } from '../components/tooltip.js';
 import {
   ActionForm,
@@ -16,7 +16,9 @@ import {
   text,
 } from '../components/ui.js';
 import { AccountIcon as SecurityIcon } from './account-icons.js';
-import { refreshAccount, useLinkedAccounts, type useSecuritySetup } from './account-shared.js';
+import { SecurityDrawer, SecuritySection } from './account-security-section.js';
+import { refreshAccount, useLinkedAccounts } from './account-shared.js';
+import { TwoFactorSettings } from './account-two-factor.js';
 import { authClient } from './auth.js';
 import './account-security.css';
 
@@ -54,49 +56,6 @@ function browserLabel(agent: string | null | undefined) {
             ? 'Linux'
             : undefined;
   return browser ? [browser, system].filter(Boolean).join(' · ') : undefined;
-}
-
-function SecuritySection({
-  title,
-  icon,
-  status,
-  actions,
-  children,
-}: {
-  title: string;
-  icon: Parameters<typeof SecurityIcon>[0]['name'];
-  status?: ReactNode;
-  actions?: ReactNode;
-  children?: ReactNode;
-}) {
-  const id = useId();
-  return (
-    <section className="account-security-section" aria-labelledby={id}>
-      <div className="account-security-heading">
-        <span className="account-security-symbol">
-          <SecurityIcon name={icon} />
-        </span>
-        <div className="account-security-heading-text">
-          <h2 id={id}>{title}</h2>
-          {status}
-        </div>
-        {actions && <div className="account-security-actions">{actions}</div>}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function SecurityDrawer({ children }: { children: ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    ref.current?.querySelector<HTMLInputElement>('input:not([readonly])')?.focus();
-  }, []);
-  return (
-    <div ref={ref} className="account-security-drawer">
-      {children}
-    </div>
-  );
 }
 
 function PasswordSettings() {
@@ -380,227 +339,6 @@ function PasskeySettings() {
         </p>
       </ConfirmDialog>
     </SecuritySection>
-  );
-}
-
-function TwoFactorSettings({
-  hasPassword,
-  unavailable,
-}: {
-  hasPassword: boolean;
-  unavailable: boolean;
-}) {
-  const t = useT();
-  const profile = useSession().data?.subject;
-  const { codes, setCodes, totpURI, setTotpURI } =
-    useOutletContext<ReturnType<typeof useSecuritySetup>>();
-  const [action, setAction] = useState<'enable' | 'disable' | 'codes'>();
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<unknown>();
-  const heading = useRef<HTMLDivElement>(null);
-  const close = () => {
-    setAction(undefined);
-    requestAnimationFrame(() =>
-      heading.current?.querySelector<HTMLButtonElement>('button')?.focus(),
-    );
-  };
-  const passwordBody = (data: FormData) =>
-    hasPassword ? { password: String(data.get('password')) } : {};
-  return (
-    <div ref={heading}>
-      <SecuritySection
-        title={t('web.twoFactor')}
-        icon="shield"
-        status={
-          <span className={`account-security-state${profile?.twoFactorEnabled ? ' enabled' : ''}`}>
-            {profile?.twoFactorEnabled ? t('web.enabled') : t('web.disabled')}
-          </span>
-        }
-        actions={
-          !totpURI &&
-          !action &&
-          (profile?.twoFactorEnabled ? (
-            <>
-              <button
-                type="button"
-                className="account-security-action"
-                disabled={unavailable}
-                onClick={() => setAction('codes')}
-              >
-                {t('web.recoveryCodes')}
-              </button>
-              <Tooltip content={t('accountSecurity.disableTotp')}>
-                <button
-                  type="button"
-                  className="account-security-icon account-security-destructive"
-                  aria-label={t('accountSecurity.disableTotp')}
-                  disabled={unavailable}
-                  onClick={() => setAction('disable')}
-                >
-                  <SecurityIcon name="remove" />
-                </button>
-              </Tooltip>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="account-security-action"
-              disabled={unavailable}
-              onClick={() => setAction('enable')}
-            >
-              {t('web.enable')}
-            </button>
-          ))
-        }
-      >
-        {action && (
-          <SecurityDrawer>
-            <ActionForm
-              key={action}
-              success={false}
-              disabled={unavailable}
-              destructive={action === 'disable'}
-              submitLabel={t(
-                action === 'enable'
-                  ? 'web.enable'
-                  : action === 'disable'
-                    ? 'web.disable'
-                    : 'web.newRecoveryCodes',
-              )}
-              onCancel={close}
-              onSubmit={async (data) => {
-                if (action === 'enable') {
-                  const result = await api<{ totpURI: string; backupCodes: string[] }>(
-                    '/api/auth/two-factor/enable',
-                    { body: passwordBody(data) },
-                  );
-                  setTotpURI(result.totpURI);
-                  setCodes(result.backupCodes);
-                  setAction(undefined);
-                } else if (action === 'disable') {
-                  await api('/api/auth/two-factor/disable', { body: passwordBody(data) });
-                  setCodes([]);
-                  await refreshAccount();
-                  close();
-                } else {
-                  const result = await api<{ backupCodes: string[] }>(
-                    '/api/auth/two-factor/generate-backup-codes',
-                    { body: passwordBody(data) },
-                  );
-                  setCodes(result.backupCodes);
-                  close();
-                }
-                setCopied(false);
-                setCopyError(undefined);
-              }}
-            >
-              {action !== 'enable' && (
-                <p className="account-security-hint">
-                  {t(
-                    action === 'disable'
-                      ? 'accountSecurity.disableTotpHint'
-                      : 'accountSecurity.replaceCodesHint',
-                  )}
-                </p>
-              )}
-              {hasPassword && (
-                <Input
-                  label={t('web.currentPassword')}
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                />
-              )}
-            </ActionForm>
-          </SecurityDrawer>
-        )}
-        {totpURI && (
-          <SecurityDrawer>
-            <p className="account-security-hint">{t('web.authenticatorHelp')}</p>
-            <Input
-              label={t('web.authenticatorKey')}
-              value={new URL(totpURI).searchParams.get('secret') ?? ''}
-              readOnly
-              autoComplete="off"
-            />
-            <ActionForm
-              submitLabel={t('web.verify')}
-              success={false}
-              disabled={unavailable}
-              onSubmit={async (data) => {
-                await api('/api/auth/two-factor/verify-totp', {
-                  body: { code: text(data, 'code') },
-                });
-                setTotpURI(undefined);
-                await refreshAccount();
-                requestAnimationFrame(() =>
-                  heading.current?.querySelector<HTMLButtonElement>('button')?.focus(),
-                );
-              }}
-            >
-              <Input
-                label={t('web.code')}
-                name="code"
-                autoComplete="one-time-code"
-                inputMode="numeric"
-                required
-              />
-            </ActionForm>
-          </SecurityDrawer>
-        )}
-        {codes.length > 0 && (
-          <div className="account-recovery-codes">
-            <div className="account-recovery-heading">
-              <h3>{t('web.recoveryCodes')}</h3>
-              <Tooltip content={copied ? t('web.copied') : t('accountSecurity.copyCodes')}>
-                <button
-                  type="button"
-                  className="account-security-icon"
-                  aria-label={t('accountSecurity.copyCodes')}
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(codes.join('\n'));
-                      setCopied(true);
-                      setCopyError(undefined);
-                    } catch (error) {
-                      setCopyError(error);
-                    }
-                  }}
-                >
-                  <SecurityIcon name={copied ? 'check' : 'copy'} />
-                </button>
-              </Tooltip>
-            </div>
-            <p className="account-security-hint">{t('web.recoveryWarning')}</p>
-            <ul>
-              {codes.map((code) => (
-                <li key={code}>
-                  <code>{code}</code>
-                </li>
-              ))}
-            </ul>
-            {Boolean(copyError) && <ErrorNotice error={copyError} />}
-            <span className="visually-hidden" role="status">
-              {copied ? t('web.copied') : ''}
-            </span>
-            <button
-              type="button"
-              className="account-security-action"
-              onClick={() => {
-                setCodes([]);
-                setCopied(false);
-                requestAnimationFrame(() =>
-                  heading.current?.querySelector<HTMLButtonElement>('button')?.focus(),
-                );
-              }}
-            >
-              {t('web.close')}
-            </button>
-          </div>
-        )}
-      </SecuritySection>
-    </div>
   );
 }
 

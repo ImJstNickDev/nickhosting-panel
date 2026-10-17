@@ -24,10 +24,8 @@ export { AccountSecurity } from './account-security.js';
 export function AccountPage() {
   const t = useT();
   const session = useSession();
-  const [params] = useSearchParams();
-  const securitySetup = useSecuritySetup();
   if (session.isPending) return <Loading />;
-  if (session.error) return <ErrorNotice error={session.error} />;
+  if (session.error && !session.data) return <ErrorNotice error={session.error} />;
   if (session.data?.context.sessionType !== 'regular')
     return (
       <Page title={t('web.settings')}>
@@ -36,6 +34,13 @@ export function AccountPage() {
         </Notice>
       </Page>
     );
+  return <AccountSettingsLayout key={session.data.subject.id} />;
+}
+
+function AccountSettingsLayout() {
+  const t = useT();
+  const [params] = useSearchParams();
+  const securitySetup = useSecuritySetup();
   return (
     <div className="account-settings-page">
       <Page title={t('web.settings')}>

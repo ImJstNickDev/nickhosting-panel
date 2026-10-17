@@ -43,6 +43,7 @@
     "mermaid": "12.2.0",
     "papaparse": "5.7.0",
     "pdfjs-dist": "6.4.299",
+    "qrcode.react": "4.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-router": "8.4.0",

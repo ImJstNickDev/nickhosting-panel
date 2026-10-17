@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useEffectEvent, useState } from 'react';
 import { Link, Navigate, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router';
-import { api } from '../api/client.js';
+import { ApiError, api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
 import { Sidebar, type SidebarIconName, useSidebarCollapsed } from '../components/sidebar.js';
 import { Tooltip } from '../components/tooltip.js';
@@ -56,7 +56,13 @@ export function Shell() {
       </main>
     );
   if (setup.data && !setup.data.ownerClaimed) return <Navigate to="/setup" replace />;
-  if (session.error) {
+  // A failed background refresh must not discard in-memory forms/recovery codes.
+  // Authentication failures and support sessions still leave the authenticated shell.
+  const transientSessionFailure =
+    session.data?.context.sessionType === 'regular' &&
+    ((session.error instanceof ApiError && session.error.status >= 500) ||
+      session.error instanceof TypeError);
+  if (session.error && !transientSessionFailure) {
     if (isSignedOut(session.error)) return <Navigate to="/login" replace />;
     return (
       <main>
@@ -181,6 +187,9 @@ export function Shell() {
             </div>
           </header>
           <main id="content">
+            {session.error && transientSessionFailure && (
+              <ErrorNotice error={session.error} retry={() => void session.refetch()} />
+            )}
             <Outlet />
             <FileSaveNotices scope={fileSaveScope(current)} />
           </main>

@@ -4564,7 +4564,7 @@ Final browser/review evidence:
 - Final `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm build`, `scripts/dev.sh pnpm build:runtime`, `scripts/dev.sh pnpm i18n:check`, changed-file Biome and `git diff --check` passed. Whole-repository lint limitation remains the unrelated SVG noted above.
 - The initial browser ZIP attempt exposed an incorrect fixture: every listing generated a fresh modification timestamp. Fixture metadata now remains stable until file bytes change; production stale-file checks were retained. Extraction fixtures use their own scoped staging directory under test assets, cleaned after the suite. Upload tests now wait for availability rather than bypassing the disabled toolbar through the hidden input.
 - Independent backend, interaction and visual review: no remaining must-fix findings in the changed scope. Automated axe checks passed for desktop/mobile; keyboard menus, selection, editor save and dialog state were exercised. This is focused Files evidence, not a claim of full application WCAG certification.
-- Index governance passed:596 text files,146 review PNGs,492 relative links,4 TOML files and44 ignore cases. Secret scanning remains heuristic; screenshots were visually inspected and contain fixture data only.
+- Index governance passed:596 text files,146 review PNGs,492 relative links,4 TOML files and 44 ignore cases. Secret scanning remains heuristic; screenshots were visually inspected and contain fixture data only.
 
 Reviewed screenshots: [desktop list](screenshots/m5/file-manager-desktop-en.png),
 [desktop grid](screenshots/m5/file-manager-grid-desktop-en.png),
@@ -4843,7 +4843,7 @@ must-fix** after that correction. Final scoped Biome and catalog freshness check
 passed. Staged-content inspection confirmed exactly four new message keys in each
 of EN/IT/pseudo and only the intended source/test/docs/sanitized screenshots.
 Governance passed:603 indexed text files,151 review PNGs,501 relative links,
-4 TOML files and44 ignore cases; the secret scan remains heuristic. No persistent
+4 TOML files and 44 ignore cases; the secret scan remains heuristic. No persistent
 dev review data, live servers or existing infrastructure were changed.
 
 
@@ -5059,7 +5059,7 @@ Rollback: revert this change and rebuild only if using compiled artifacts. There
 are no migrations, new packages or persistent-state conversions to undo. PR#21
 remains open and unmerged; this does not declare all M5 acceptance complete.
 Final index governance passed:611 text files,163 review PNGs,514 relative links,
-4 TOML files and44 ignore cases. Screenshots were visually inspected for fixture
+4 TOML files and 44 ignore cases. Screenshots were visually inspected for fixture
 content before staging; automated secret scanning remains heuristic.
 
 ### 2026-10-12 — Files editor Tab indentation
@@ -5410,7 +5410,7 @@ Focused validation:
 - Prefix + `apps/web/tests/file-copy.browser.test.ts`: initial **7 passed,1 failed**. A30s source-folder lookup timed out immediately after navigation, before any copy request. Prefix + that file + `-t 'copies a nested-source'`: **1 passed**,7 skipped. Prefix + that file + `-t 'uses the copy tree|copies a nested-source'`: **2 passed**,6 skipped. The navigation timeout did not reproduce; added failure-only navigation diagnostics, no retries or unrelated source change. All eight scenarios passed across these runs, not a single clean eight-case run. Covers desktop/mobile tree/menu/keyboard, original preservation, exact mixed consent, fresh conflicts after Overwrite all, all-skipped/no POST, unsafe replacements, revoked upload availability, own in-flight claim and an actual copy followed by lost response without replay.
 - `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm --filter @nickhosting/web build` and `scripts/dev.sh pnpm i18n:check`: passed;1233 EN/IT/pseudolocale keys. The existing bundle-size advisory remains. No historical full-suite rerun.
 - Final changed-file Biome and `scripts/dev.sh pnpm exec tsc -p apps/web/tsconfig.tests.json --noEmit` passed, including the failure-only browser diagnostics. Applicable axe scans reported no violations in all three captured states. Independent source/API/UX review found no must-fix issue; screenshots were inspected for desktop/mobile layout and EN/IT content.
-- `git diff --cached --check` and `python3 scripts/check-governance.py`: passed;625 text files,180 PNGs,531 relative links,4 TOML files and44 ignore cases checked. The credential scan remains heuristic.
+- `git diff --cached --check` and `python3 scripts/check-governance.py`: passed;625 text files,180 PNGs,531 relative links,4 TOML files and 44 ignore cases checked. The credential scan remains heuristic.
 
 Reviewed screenshots: [EN desktop tree](screenshots/m5/file-copy-tree-desktop-en.png),
 [IT mobile tree](screenshots/m5/file-copy-tree-mobile-it.png),
@@ -5453,7 +5453,7 @@ Focused evidence (pinned Node24.21.0/pnpm10.33.0):
 - Final screenshot cases rerun with prefix + `-t 'cancels file 11|keeps queued files'`: **2 passed**. Applicable mobile axe scan has zero violations; desktop/mobile screenshots were inspected. Resetting screenshot scroll after focus removed a capture-only floating skip-link artifact, without product CSS changes. These are targeted final reruns, not one final five-case suite run.
 - `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm exec tsc -p apps/web/tsconfig.tests.json --noEmit`, `scripts/dev.sh pnpm i18n:check`: passed;1237 EN/IT/pseudolocale keys.
 - `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed with the existing bundle-size advisory. Scoped Biome checked all13 changed code/test files; diff checks passed. No historical full-suite rerun.
-- `git diff --cached --check` and `python3 scripts/check-governance.py`: passed;627 text files,182 PNGs,533 relative links,4 TOML files and44 ignore cases. The credential scan remains heuristic.
+- `git diff --cached --check` and `python3 scripts/check-governance.py`: passed;627 text files,182 PNGs,533 relative links,4 TOML files and 44 ignore cases. The credential scan remains heuristic.
 
 An initial backend invocation accidentally used the system Node20: two adapter
 cases failed because that unsupported runtime lacks `Promise.withResolvers`; its
@@ -7044,7 +7044,7 @@ Viewer transport benchmark and final narrow rerun:
 
 Publication checks: `git diff --cached --check` and
 `python3 scripts/check-governance.py` passed: 737 indexed text files,215 reviewed
-PNGs,604 relative links,4 TOML files and44 ignored-path cases. The secret scan is
+PNGs,604 relative links,4 TOML files and 44 ignored-path cases. The secret scan is
 heuristic; private ledgers, environments, SFTP state and benchmarks stay untracked.
 Final `pnpm lint` passed with39 pre-existing/advisory warnings and2 informational
 diagnostics; format check passed. Concurrent account-menu/sidebar edits in the
@@ -10719,3 +10719,78 @@ screenshot review found no issues. Reviewed [desktop EN](screenshots/m5/settings
 and [mobile IT](screenshots/m5/settings-password-confirmation-it.png). Disposable
 schemas cleaned; no live-account mutation or manual service restart. Rollback:
 revert this frontend change. No unrelated suite rerun.
+
+## Guided authenticator enrollment — 2026-10-17
+
+Security now separates identity confirmation, local QR/manual-key pairing and
+verified recovery-code storage. Existing Better Auth endpoints remain authoritative;
+no authentication API, schema, provider or gateway behavior changed. The optional
+QR library is lazy and locally encoded. An unavailable QR chunk offers manual
+entry. The six-digit text field supports leading zeros, paste and one-time-code
+autocomplete. Codes remain hidden until successful verification, then can be
+copied/downloaded locally. Done clears them from memory. No password/secret/code
+is placed in browser storage, URLs or query caches. See the updated
+[authentication contract](AUTH-AND-PERMISSIONS.md) and
+[dependency notices](M5-DEPENDENCIES.md#authenticator-qr-encoding).
+
+Settings owns the pending enrollment across Profile/Security navigation, preventing
+duplicate preparation or verification. Partial OTP text clears when changing tabs;
+URI/recovery data remain in identity-keyed layout memory until exit. Set up later
+hides an unverified draft without calling disable. Recovery regeneration and
+password-confirmed disable still use the existing handlers. A cached regular
+session survives a transient HTTP5xx/network refresh error with an explicit retry;
+this prevents losing codes immediately after successful activation. Actual auth
+failures, unavailable initial identity and support sessions retain the existing
+boundary. The verified mutation result remains accurate until a successful
+session read catches up; retries do not repeat verification.
+
+Validation (isolated PostgreSQL schemas, actual identity handlers, Chromium):
+
+- `scripts/dev.sh pnpm test:browser apps/web/tests/account-totp.browser.test.ts`:
+  **6/6 passed**, 45.47s. Covers password/cancel, shared in-flight state across tabs,
+  defer/resume, clearing on reload/layout exit, invalid and valid OTP, cookie
+  rotation, recovery copy/download/Done, regeneration/disable, QR import failure,
+  and successful activation followed by a failed session refresh and read-only retry.
+- Existing `apps/web/tests/account.browser.test.ts`: **7/7 passed** in the combined
+  targeted command, including actual recovery sign-in and virtual WebAuthn enrollment.
+  The first new-test run passed 3/4; the remaining test read recovery nodes before
+  tab navigation completed. A subsequent run passed 4/6; its two new scenarios used
+  ambiguous Home and incorrect retry-label selectors. Corrected those waits/selectors,
+  without changing authentication behavior, before the final 6/6 run.
+- Web/source and browser-test typechecks, focused Biome and 1916-key EN/IT/pseudo
+  completeness passed. Production build passed; existing large-chunk warnings remain.
+  Four pre-existing non-null-assertion lint warnings remain in the older account journey.
+  The QR chunk measures16.32 kB minified / 6.07 kB gzip, loaded only during setup.
+- A targeted recovery-test rerun after a clipboard-denial layout fix passed 1/1 (five unrelated cases skipped), 22.86s,
+  including mobile reflow/axe. Errors now sit outside the icon group and explain
+  manual copying; a failed retry clears the previous Copied indication.
+- Sampled axe WCAG2.2AA, keyboard/focus checks and desktop/mobile EN/IT reflow passed.
+  Independent source and rendered-screen review found no remaining must-fix.
+  This is not a full WCAG audit; physical-phone QR scanning and passwordless/OAuth
+  enrollment were not newly exercised. Their existing backend contract is unchanged.
+
+Sanitized, reviewed screenshots: [confirmation EN](screenshots/m5/settings-totp-password-desktop-en.png),
+[pairing EN](screenshots/m5/settings-totp-authenticator-desktop-en.png),
+[recovery EN](screenshots/m5/settings-totp-recovery-desktop-en.png),
+[confirmation IT](screenshots/m5/settings-totp-password-mobile-it.png),
+[manual pairing IT](screenshots/m5/settings-totp-authenticator-manual-mobile-it.png),
+[recovery IT](screenshots/m5/settings-totp-recovery-mobile-it.png),
+[incorrect code](screenshots/m5/settings-totp-incorrect-code-desktop-en.png),
+[pending request](screenshots/m5/settings-totp-loading-desktop-en.png).
+QRs, setup keys, OTP inputs, passwords and recovery codes are masked.
+
+Live read-only checks: Settings HTTPS and the new TOTP frontend module return 200.
+The existing Vite image lacks `qrcode.react`; its activation requires a separately
+approved Vite-only image update. Until then, the manual-key fallback remains usable.
+The running container is `nickhosting-dev-vite-1`, project `nickhosting-dev`, only
+`nickhosting-dev-edge`, with no published ports. Compose resolution preserves those
+boundaries. No real account was changed and no containers were rebuilt/restarted;
+no provider, infrastructure or persistent data mutation occurred. Test schemas are
+scoped and cleaned by the harness. PR21 remains open/unmerged; issue18 remains a
+separate release gate. No historical full-suite rerun. Rollback: revert this
+frontend/lockfile change; if activation is approved, retain the current Vite image
+and recreate only Vite from that image. No migration or data restoration is needed.
+
+Indexed governance passed: 1029 text files, 407 reviewed PNGs, 862 relative links,
+four TOML files and 44 ignore cases. The secret scan is heuristic. No unresolved
+implementation/review finding remains; Vite dependency activation is pending approval.

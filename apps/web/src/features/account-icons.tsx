@@ -25,6 +25,8 @@ const paths = {
       <path d="M8 21h8m-4-4v4" />
     </>
   ),
+  download: <path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" />,
+  chevron: <path d="m9 5 7 7-7 7" />,
   add: <path d="M12 5v14M5 12h14" />,
   exit: <path d="M9 4H4v16h5m5-13 5 5-5 5m-7-5h12" />,
   copy: (

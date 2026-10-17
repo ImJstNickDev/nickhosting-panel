@@ -87,3 +87,17 @@ The server validates the restricted PNG structure before using the
 [upstream decoder](https://github.com/pngjs/pngjs/tree/v7.0.0), rejecting animation,
 interlacing, oversized dimensions and malformed streams rather than processing
 arbitrary uploaded originals. Stored thumbnails exclude metadata.
+
+## Authenticator QR encoding
+
+`qrcode.react` 4.2.0 is pinned for the optional, lazy authenticator setup QR.
+It supports the installed React 19 peer and introduces no runtime dependency
+besides React. Its SVG encoder runs entirely in the browser; no QR service,
+remote image, account URI in a request, or camera permission is involved.
+The main build measured 16.32 kB minified / 6.07 kB gzip for this separate chunk.
+Manual secret entry remains available if the chunk cannot load.
+
+The unmodified wrapper is ISC, with an embedded MIT-licensed Project Nayuki QR
+Code generator. The generated main bundle notice includes ISC; distribute
+[THIRD-PARTY-QR-NOTICES.txt](../apps/web/public/THIRD-PARTY-QR-NOTICES.txt) as well,
+which preserves both complete upstream notices. No repository license change.
