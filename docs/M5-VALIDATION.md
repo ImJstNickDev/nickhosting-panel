@@ -10793,4 +10793,48 @@ and recreate only Vite from that image. No migration or data restoration is need
 
 Indexed governance passed: 1029 text files, 407 reviewed PNGs, 862 relative links,
 four TOML files and 44 ignore cases. The secret scan is heuristic. No unresolved
-implementation/review finding remains; Vite dependency activation is pending approval.
+implementation/review finding remained at that checkpoint; Vite dependency activation
+was pending approval. The subsequent approved activation is recorded below.
+
+### Approved Vite activation — 2026-10-17
+
+Owner authorized the exact Vite-only image update and scoped rollback. Verified
+clean branch `milestone/m5-webpanel` at source commit
+`984dcb86204ff154a5568590ca182c8314ba7a49`, matching running Vite identity,
+existing edge-only network and no published ports. Private dev interpolation files
+were preserved; the explicit base Compose file matches this service’s live config.
+
+Executed the approved commands:
+
+```bash
+docker image tag sha256:2460669093a603d7280be97aa927e2fd5d07b08d5774ab0fccda61828a1ee222 nickhosting-dev-app:before-totp-workflow
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local -f compose.dev.yaml build vite
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local -f compose.dev.yaml up -d --no-deps --wait vite
+```
+
+Build succeeded with the frozen lockfile. New image:
+`sha256:2826f15993d2904e0da636ef101b01774937896cef45ae0d5bfc1c800a22a350`.
+`nickhosting-dev-vite-1` is healthy, restart count 0; startup compiled all 1916
+EN/IT/pseudo keys and Vite reported ready in 854 ms. Installed QR dependency is
+4.2.0. The original image remains at the rollback tag. No rollback was necessary.
+
+Private before/after metadata proves only Vite was recreated: the other 11 dev
+containers retain their IDs, images, start times, restart counts, network
+attachments and published-port configuration. No extra/missing container.
+The warning about four existing optional dev containers outside the base Compose
+file was informational; none was removed or recreated. Vite retains only the
+existing dev-edge attachment and no published host port.
+
+A fresh, unauthenticated Chromium context verified HTTPS 200/login rendering,
+successful import of the live QR component and its new dependency, exact synthetic
+setup-URI propagation, and HTTP 200 for both bundled QR license notices. The HMR
+socket connected through the configured HTTPS origin using WSS. Zero browser
+page errors and zero mutation requests. This is dependency/transport smoke evidence;
+physical authenticator scanning and real Owner enrollment remain the Owner’s action.
+No historical suite was rerun because the source was already covered above.
+
+No real account, database, provider, game server, Gateway, NPM, DNS, certificate,
+production container or persistent storage was changed. Private activation evidence
+is retained locally; the browser context was closed. Independent activation review
+confirmed the exact Vite scope, rollback image, before/after snapshots and browser
+smoke evidence; no remaining activation blocker. PR21 remains open and unmerged.
