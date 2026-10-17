@@ -1,14 +1,20 @@
 .gateway-messages-custom {
-  max-width: 760px;
+  max-width: none;
+  container-type: inline-size;
+  container-name: gateway-editor;
 }
 .mc-message-editor {
   display: grid;
-  gap: 28px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
   min-width: 0;
-  max-width: 760px;
 }
 .mc-message-section {
   min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(360px, 1fr) auto;
+  container-type: inline-size;
+  container-name: minecraft-message;
 }
 .mc-message-heading {
   display: flex;
@@ -35,22 +41,78 @@
   color: #fff;
   text-shadow: 2px 2px 0 #0009;
   image-rendering: pixelated;
+  position: relative;
+  isolation: isolate;
   border: 1px solid #111;
   overflow: hidden;
 }
+.mc-panorama {
+  position: absolute;
+  inset: -12px;
+  z-index: -2;
+  background-color: #29332d;
+  background-size: cover;
+  background-position: center;
+  filter: blur(3px) brightness(0.78);
+  image-rendering: auto;
+  pointer-events: none;
+}
 .mc-server-list {
-  padding: 20px 14px;
-  background-color: #191919;
-  background-size: 64px;
   border-radius: 7px 7px 0 0;
+  display: grid;
+  grid-template-rows: 64px minmax(150px, 1fr) auto;
+}
+.mc-list-title {
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+  padding: 16px;
+}
+.mc-list-viewport {
+  position: relative;
+  min-height: 150px;
+  padding: 18px 22px 32px;
+  background-size: 64px;
+}
+.mc-list-separator {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background-size: 64px 4px;
+  pointer-events: none;
+}
+.mc-list-separator-top {
+  top: 0;
+}
+.mc-list-separator-bottom {
+  bottom: 0;
+}
+.mc-list-actions {
+  display: grid;
+  gap: 8px;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px 18px;
+}
+.mc-list-actions-primary,
+.mc-list-actions-secondary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.mc-list-actions-secondary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .mc-server-entry {
   display: flex;
   gap: 10px;
   padding: 9px;
   min-height: 90px;
-  border: 1px solid #777;
-  background: #000a;
+  position: relative;
+  border: 2px solid #ddd;
+  box-shadow: inset 0 0 0 1px #000;
+  background: #0009;
 }
 .mc-server-icon {
   flex: 0 0 64px;
@@ -69,6 +131,18 @@
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.mc-server-status {
+  display: flex;
+  align-items: start;
+  gap: 10px;
+}
+.mc-server-players {
+  color: #aaa;
+  white-space: nowrap;
+}
+.mc-server-players > span {
+  color: #555;
+}
 .mc-server-signal {
   width: 20px;
   height: 16px;
@@ -78,7 +152,7 @@
 .mc-disconnect {
   position: relative;
   isolation: isolate;
-  min-height: 300px;
+  min-height: 360px;
   display: grid;
   place-items: center;
   padding: 32px 25px;
@@ -91,8 +165,7 @@
   content: "";
   position: absolute;
   inset: 0;
-  background: #0009;
-  backdrop-filter: blur(5px);
+  background: #0004;
   z-index: -1;
 }
 .mc-disconnect-content {
@@ -107,17 +180,19 @@
 }
 .mc-game-button {
   margin-top: 0;
-  width: min(100%, 400px);
+  width: 100%;
   min-height: 40px;
   display: grid;
   place-items: center;
   padding: 8px;
   background-color: #777;
   background-size: 100% 100%;
-  border: 2px solid #111;
-  box-shadow:
-    inset 2px 2px #bbb8,
-    inset -2px -2px #333a;
+  border: 0;
+  user-select: none;
+  text-align: center;
+}
+.mc-disconnect-return {
+  width: min(100%, 400px);
 }
 .mc-message-editor .gateway-rich-text {
   min-height: 38px;
@@ -261,9 +336,44 @@
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
 }
-@media (max-width: 540px) {
+@container gateway-editor (max-width: 760px) {
+  .mc-message-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .mc-message-section {
+    grid-template-rows: auto minmax(260px, auto) auto;
+  }
+}
+@container minecraft-message (max-width: 540px) {
   .mc-server-list {
-    padding: 12px 8px;
+    grid-template-rows: 50px minmax(130px, 1fr) auto;
+  }
+  .mc-list-viewport {
+    padding: 14px 10px 24px;
+    min-height: 130px;
+  }
+  .mc-list-title {
+    min-height: 50px;
+  }
+  .mc-list-actions {
+    padding: 12px 10px;
+    gap: 5px;
+  }
+  .mc-list-actions-primary,
+  .mc-list-actions-secondary {
+    gap: 5px;
+  }
+  .mc-list-actions .mc-game-button {
+    font-size: 10px;
+    white-space: nowrap;
+    padding: 5px 2px;
+    min-height: 30px;
+  }
+  .mc-server-status {
+    gap: 5px;
+  }
+  .mc-server-players {
+    font-size: 12px;
   }
   .mc-server-entry {
     gap: 8px;

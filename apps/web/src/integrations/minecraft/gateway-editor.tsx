@@ -21,6 +21,18 @@ function prepareFont() {
 const assetStyle = (name: string): CSSProperties =>
   assets[name] ? { backgroundImage: `url(${JSON.stringify(assets[name])})` } : {};
 
+/** Static client chrome, outside the editable message and keyboard order. */
+function ClientButton({ children }: { children: ReactNode }) {
+  return (
+    <span className="mc-game-button" style={assetStyle('gatewayButton')}>
+      {children}
+    </span>
+  );
+}
+function Panorama() {
+  return <div className="mc-panorama" aria-hidden="true" style={assetStyle('gatewayPanorama')} />;
+}
+
 export function MinecraftGatewayEditor(props: GatewayMessageExtensionProps) {
   useEffect(prepareFont, []);
   return (
@@ -137,31 +149,61 @@ function MessageScreen({
         </div>
       </header>
       {field === 'motd' ? (
-        <div className="mc-server-list mc-game-surface" style={assetStyle('gatewayMenu')}>
-          <div className="mc-server-entry">
+        <div className="mc-server-list mc-game-surface">
+          <Panorama />
+          <div className="mc-list-title" aria-hidden="true">
+            {t('games.minecraft.messages.multiplayer')}
+          </div>
+          <div className="mc-list-viewport" style={assetStyle('gatewayListMenu')}>
             <div
+              className="mc-list-separator mc-list-separator-top"
               aria-hidden="true"
-              className="mc-server-icon"
-              style={assetStyle('gatewayServerIcon')}
+              style={assetStyle('gatewayHeader')}
             />
-            <div className="mc-server-description">
-              <div className="mc-server-name">{variables.server}</div>
-              {content}
+            <div className="mc-server-entry">
+              <div
+                aria-hidden="true"
+                className="mc-server-icon"
+                style={assetStyle('gatewayServerIcon')}
+              />
+              <div className="mc-server-description">
+                <div className="mc-server-name">{variables.server}</div>
+                {content}
+              </div>
+              <div className="mc-server-status" aria-hidden="true">
+                <span className="mc-server-players">
+                  —<span>/</span>—
+                </span>
+                <div className="mc-server-signal" style={assetStyle('gatewayPing')} />
+              </div>
             </div>
             <div
-              className="mc-server-signal"
+              className="mc-list-separator mc-list-separator-bottom"
               aria-hidden="true"
-              style={assetStyle('gatewayPing')}
+              style={assetStyle('gatewayFooter')}
             />
+          </div>
+          <div className="mc-list-actions" aria-hidden="true">
+            <div className="mc-list-actions-primary">
+              {(['join', 'direct', 'add'] as const).map((action) => (
+                <ClientButton key={action}>{t(`games.minecraft.messages.${action}`)}</ClientButton>
+              ))}
+            </div>
+            <div className="mc-list-actions-secondary">
+              {(['edit', 'delete', 'refresh', 'cancel'] as const).map((action) => (
+                <ClientButton key={action}>{t(`games.minecraft.messages.${action}`)}</ClientButton>
+              ))}
+            </div>
           </div>
         </div>
       ) : (
-        <div className="mc-disconnect mc-game-surface" style={assetStyle('gatewayMenu')}>
+        <div className="mc-disconnect mc-game-surface">
+          <Panorama />
           <div className="mc-disconnect-content">
             <div className="mc-disconnect-title">{t('games.minecraft.messages.disconnected')}</div>
             {content}
-            <div className="mc-game-button" aria-hidden="true" style={assetStyle('gatewayButton')}>
-              {t('games.minecraft.messages.back')}
+            <div className="mc-disconnect-return" aria-hidden="true">
+              <ClientButton>{t('games.minecraft.messages.back')}</ClientButton>
             </div>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect as browserExpect, type Locator, type Page } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -581,6 +582,28 @@ describe('Automation browser journeys', () => {
   it('saves Gateway messages through actual handlers and renders accessible Italian mobile layout', async () => {
     await page.goto(`${fixture.origin}${base()}/sleep`);
     await page.getByRole('link', { name: 'Gateway messages', exact: true }).click();
+    await browserExpect(page.locator('.mc-panorama')).toHaveCount(2);
+    // Original game assets are optional local resources, not committed fixtures.
+    if (
+      existsSync(
+        new URL('../../../games/minecraft/src/ui/assets/local-26.1/panorama.png', import.meta.url),
+      )
+    )
+      expect(
+        await page
+          .locator('.mc-panorama')
+          .first()
+          .evaluate(async (element) => {
+            const url =
+              getComputedStyle(element).backgroundImage.match(/^url\(["']?(.*?)["']?\)$/)?.[1];
+            if (!url) return false;
+            const image = new Image();
+            image.src = url;
+            await image.decode();
+            return image.naturalWidth >= 1024 && image.naturalHeight >= 1024;
+          }),
+      ).toBe(true);
+    await browserExpect(page.locator('.mc-list-actions .mc-game-button')).toHaveCount(7);
     await page
       .getByRole('textbox', { name: 'Server list message', exact: true })
       .fill('§a{server}');

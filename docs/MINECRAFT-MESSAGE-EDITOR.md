@@ -36,7 +36,8 @@ refreshed. Read-only access retains selection/copy but cannot change messages.
 
 The official 26.1 client was inspected with `javap`, specifically
 `ServerSelectionList.OnlineServerEntry`, `DisconnectedScreen`, `Screen` and
-`BitmapProvider.Definition`. No decompiled Minecraft source is committed.
+`BitmapProvider.Definition`; the complete multiplayer frame was checked against
+`JoinMultiplayerScreen`. No decompiled Minecraft source is committed.
 
 Client artifact:
 https://piston-data.mojang.com/v1/objects/191771837687b766537a8c4607cb6fad79c533a1/client.jar
@@ -49,8 +50,19 @@ vertical stack with10-pixel cell padding and a 200×20 return button. The web
 preview uses a readable enlarged scale and responsive sizing. Its return-button
 image is contextual, not a navigation action. The editor allows more than the
 client's two visible MOTD lines so long messages remain editable; client wrapping
-varies with screen size. The animated panorama is intentionally omitted; the
-actual menu overlay is used on a subdued background.
+varies with screen size. Both previews now use the authentic 26.1 panorama,
+blurred and darkened behind the text. It is a static forward cubemap face, not
+the continuously rotating 3D scene. The multiplayer preview includes the title,
+list overlay, separators, selection frame and both footer button rows. These
+buttons are noninteractive scenery, excluded from the keyboard/accessibility tree;
+player counts use unknown markers rather than invented live values.
+
+The client JAR contains one-pixel panorama placeholders. The real images come
+from Mojang's external asset index 30, SHA1
+`191104515165d806db18f954694a4407a1b0ccd9`; the forward face SHA1 is
+`4a8493454b4307e330501892058541ed0bf228da`. The first editor iteration missed
+these external resources and displayed only a dark overlay; that omission is
+corrected here.
 
 Unobfuscated executables do not change Minecraft's license:
 - https://www.minecraft.net/en-us/article/removing-obfuscation-in-java-edition
@@ -65,14 +77,20 @@ the operator is entitled to use. It is explicit, never a startup/build download:
 python3 -m venv .codex/local/minecraft-ui-font-tools
 .codex/local/minecraft-ui-font-tools/bin/pip install fonttools==4.61.1 Pillow==12.1.1
 .codex/local/minecraft-ui-font-tools/bin/python \
-  scripts/prepare-minecraft-ui-assets.py /path/to/26.1/client.jar
+  scripts/prepare-minecraft-ui-assets.py /path/to/26.1/client.jar \
+  --asset-index /path/to/assets/indexes/30.json \
+  --asset-objects /path/to/assets/objects
 ```
 
 The script pins the official jar size and SHA1, extracts only named resources,
 and writes source/output SHA256 provenance plus the original license notice to
 `games/minecraft/src/ui/assets/local-26.1/` (gitignored). It refuses symlinked or
 different existing outputs. It performs no network requests, provider actions or
-infrastructure changes. Identical reruns are safe.
+infrastructure changes. Identical reruns are safe. To extend an existing locally
+prepared set, add `--update-provenance`; it permits only an additive manifest
+update with the same previously recorded source/output hashes. Existing artwork
+cannot be replaced with this flag. Without the two asset-index arguments, only
+JAR-contained resources are prepared and the panorama remains unavailable.
 
 The font converts actual bitmap pixels from Vanilla's default providers into
 browser-readable WOFF contours, retaining variable advances and accented glyphs.
@@ -86,6 +104,10 @@ locally present resources and includes them in a build when present. **Preparing
 assets locally does not grant redistribution rights:** review that boundary before
 sharing a built artifact containing them. This change makes no new repository
 licensing decision and does not authorize production deployment.
+
+The two editors share an equal-height, side-by-side desktop layout. Narrow
+containers stack them vertically; client chrome adapts to each preview width
+independently of the browser viewport.
 
 ## Verification scope
 

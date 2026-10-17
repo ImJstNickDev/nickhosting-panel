@@ -11684,3 +11684,34 @@ test assets created or cleaned. SFTPGo#18 and production-release gates unchanged
 Rollback: revert this UI/SDK contribution; stored message overrides remain in the
 same format and the generic editor can read them. Preserve local optional assets
 and existing development data. PR21 remains open and unmerged.
+
+### Minecraft preview background/chrome correction — 2026-10-17
+
+Owner review correctly identified that the first preview lacked backgrounds and
+client chrome. The actual panorama is external asset-index content; the JAR's
+one-pixel placeholders are not the intended background. The local asset preparer
+now validates the official26.1 index and referenced objects, and extracts the
+static forward panorama plus authentic list overlay/separators. Existing local
+resources are preserved; explicit additive provenance updates cannot replace
+recorded artwork. No original game assets are committed.
+
+Both previews display the real panorama with blur/dimming. Multiplayer includes
+its title, framed row, unknown player-count markers, ping sprite, separator edges
+and decorative footer controls. These controls do not execute actions or add
+keyboard stops. The panorama is static, not a continuously rendering cubemap.
+The message editor/save/authentication paths are unchanged.
+
+Focused checks: Firefox ENdesktop/ITmobile save/layout journey passed with zero
+Axe violations and actual1024×1024 panorama decode verified; WebPanel/application-test
+typecheck passed. Independent source and screenshot review found no must-fix;
+mobile footer label wrapping was corrected. Chromium reruns of the same journey passed, including the final side-by-side
+desktop and stacked mobile layout, save and assets. Preparation checks passed deterministic
+rerun, invalid-index rejection, additive manifest upgrade and refusal to overwrite
+modified images or changed client provenance. Only the affected browser journey
+was run; eight unrelated automation journeys were skipped. No historical full
+suite rerun or live Minecraft mutation is claimed.
+
+Screenshots replace the earlier message-editor desktop/mobile captures after the
+correction. Production and dev infrastructure unchanged; source mounts/HMR apply
+the UI/resources. The separately reported Gateway readiness issue remains outside
+this UI correction and has not been declared resolved.
