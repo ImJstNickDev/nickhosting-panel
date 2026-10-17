@@ -1,47 +1,91 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
-import { Link } from 'react-router';
+import { useEffect, useRef } from 'react';
+import { Link, useLocation } from 'react-router';
 import { api } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
-import {
-  ActionForm,
-  Badge,
-  Check,
-  Details,
-  Dialog,
-  Empty,
-  ErrorNotice,
-  Input,
-  Loading,
-  Notice,
-  number,
-  Section,
-  Select,
-  Time,
-  text,
-} from '../components/ui.js';
-import {
-  type Outcomes,
-  platformPath,
-  type Schedules,
-  type SleepPolicy,
-  serverPath,
-  useServer,
-  useTransfers,
-} from './service-contracts.js';
+import { ActionForm, ErrorNotice, Notice, Select, Time, text } from '../components/ui.js';
+import { ServerWakeSettings } from './auto-wake-policy.js';
+import { AutomationSwitch } from './automation-controls.js';
+import { SchedulesSection } from './automation-schedules.js';
+import { GatewayMessageEditor } from './gateway-message-editor.js';
+import { platformPath, type SleepPolicy, serverPath, useServer } from './service-contracts.js';
 import {
   readSleepAccess,
   readSleepTimeout,
   SleepAccessField,
   SleepTimeoutField,
 } from './sleep-timeout.js';
+import './automation.css';
 
 export function AutomationPage({ serverId }: { serverId: string }) {
   const t = useT(),
-    format = useFormat(),
+    session = useSession(),
     server = useServer(serverId),
-    session = useSession();
+    location = useLocation();
+  const editable =
+    !!server.data?.permissions.manage && session.data?.context.sessionType === 'regular';
+  const owner = session.data?.context.role === 'owner';
+  const section = location.pathname.endsWith('/sleep')
+    ? 'sleep'
+    : location.pathname.endsWith('/messages')
+      ? 'messages'
+      : 'schedules';
+  const base = `/servers/${encodeURIComponent(serverId)}/automation`;
+  const tabs = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const nav = tabs.current;
+    const active = nav?.querySelector<HTMLElement>(`[data-section="${section}"]`);
+    if (nav && active) {
+      const bounds = nav.getBoundingClientRect(),
+        item = active.getBoundingClientRect();
+      if (item.right > bounds.right) nav.scrollLeft += item.right - bounds.right;
+      else if (item.left < bounds.left) nav.scrollLeft -= bounds.left - item.left;
+    }
+  }, [section]);
+  return (
+    <div className="automation-page">
+      <nav ref={tabs} className="automation-tabs" aria-label={t('web.automation')}>
+        {(['schedules', 'sleep', 'messages'] as const)
+          .filter(
+            (tab) =>
+              tab !== 'messages' ||
+              (server.data?.connectionMode === 'gateway' &&
+                server.data.capabilities?.gatewayMessages),
+          )
+          .map((tab) => (
+            <Link
+              key={tab}
+              data-section={tab}
+              to={tab === 'schedules' ? base : `${base}/${tab}`}
+              aria-current={section === tab ? 'page' : undefined}
+            >
+              {t(`automation.tab.${tab}`)}
+            </Link>
+          ))}
+      </nav>
+      {section === 'schedules' ? (
+        <SchedulesSection serverId={serverId} editable={editable} />
+      ) : section === 'messages' ? (
+        <GatewayMessageEditor serverId={serverId} />
+      ) : (
+        <SleepAndWake serverId={serverId} editable={editable} owner={owner} />
+      )}
+    </div>
+  );
+}
+function SleepAndWake({
+  serverId,
+  editable,
+  owner,
+}: {
+  serverId: string;
+  editable: boolean;
+  owner: boolean;
+}) {
+  const t = useT(),
+    format = useFormat(),
+    server = useServer(serverId);
   const policy = useQuery({
     queryKey: ['sleep-policy', serverId],
     queryFn: () => api<SleepPolicy>(`${platformPath(serverId)}/sleep-policy`),
@@ -50,539 +94,192 @@ export function AutomationPage({ serverId }: { serverId: string }) {
   const consent = useQuery({
     queryKey: ['automation-consent', serverId],
     queryFn: () =>
-      api<{
-        allowed: boolean;
-        expectedIntent: string;
-        gatewayConfigured: boolean;
-        gatewayEnabled: boolean;
-        grantBlockedReason: string | null;
-      }>(`${serverPath(serverId)}/automation-consent`),
+      api<{ allowed: boolean; expectedIntent: string; grantBlockedReason: string | null }>(
+        `${serverPath(serverId)}/automation-consent`,
+      ),
     refetchInterval: 10000,
   });
-  const editable =
-    server.data?.permissions.manage && session.data?.context.sessionType === 'regular';
-  const isOwner = session.data?.context.role === 'owner';
-  const sleepAccess = policy.data?.idleTimeout;
-  const restrictPolicyControls = policy.data?.policyControlsEditable === false;
+  const data = policy.data;
+  const sleep = data?.idleTimeout;
+  if (!data)
+    return policy.error ? (
+      <ErrorNotice error={policy.error} />
+    ) : (
+      <div
+        role="status"
+        className="automation-skeleton"
+        aria-busy="true"
+        aria-label={t('web.loading')}
+      />
+    );
   return (
-    <>
-      <Section title={t('service.startConsent')}>
-        {consent.isPending ? (
-          <Loading />
-        ) : consent.error ? (
-          <ErrorNotice error={consent.error} />
-        ) : editable ? (
-          <ActionForm
-            key={consent.data.expectedIntent}
-            onSubmit={async (data) => {
-              await api(`${serverPath(serverId)}/automation-consent`, {
-                method: 'PUT',
-                body: { allowed: data.has('allowed'), expectedIntent: consent.data.expectedIntent },
-              });
-              await Promise.all([consent.refetch(), policy.refetch(), server.refetch()]);
-            }}
-          >
-            <Check
-              name="allowed"
-              label={t('service.allowAutomaticStarts')}
-              defaultChecked={consent.data.allowed}
-              disabled={!consent.data.allowed && Boolean(consent.data.grantBlockedReason)}
-            />
-            <p className="muted">{t('service.consentDescription')}</p>
+    <div className="automation-policy-grid">
+      {policy.error && <ErrorNotice error={policy.error} />}
+      {data.state && (
+        <div className="automation-state">
+          <strong>{t(data.state.messageKey)}</strong>
+          <span>
+            {t('service.readyObserved')}: <Time value={data.state.readinessObservedAt} />
+          </span>
+        </div>
+      )}
+      <section className="automation-policy">
+        <h3>{t('automation.automaticStarts')}</h3>
+        {consent.error && <ErrorNotice error={consent.error} />}
+        {consent.data && (
+          <>
+            <div className="automation-row">
+              <span>{t('automation.startPermission')}</span>
+              <AutomationSwitch
+                label={t('automation.startPermission')}
+                checked={consent.data.allowed}
+                disabled={!editable || (!consent.data.allowed && !!consent.data.grantBlockedReason)}
+                onChange={async (allowed) => {
+                  await api(`${serverPath(serverId)}/automation-consent`, {
+                    method: 'PUT',
+                    body: { allowed, expectedIntent: consent.data?.expectedIntent },
+                  });
+                  await Promise.all([consent.refetch(), policy.refetch(), server.refetch()]);
+                }}
+              />
+            </div>
+            <p className="muted">{t('automation.startPermissionHint')}</p>
             {consent.data.grantBlockedReason && (
               <Notice>{t(`service.consent.${consent.data.grantBlockedReason}`)}</Notice>
             )}
-          </ActionForm>
-        ) : (
-          <Badge value={consent.data.allowed ? 'enabled' : 'disabled'} />
-        )}
-      </Section>
-      <Section title={t('web.sleep')}>
-        {policy.isPending ? (
-          <Loading />
-        ) : policy.error ? (
-          <ErrorNotice error={policy.error} />
-        ) : !policy.data.policy && policy.data.proposedPolicy && editable ? (
-          <ActionForm
-            submitLabel={t('service.configureSleep')}
-            onSubmit={async () => {
-              await api(`${serverPath(serverId)}/gateway`, {
-                method: 'PUT',
-                body: policy.data.proposedPolicy,
-                headers: { 'If-None-Match': '*' },
-              });
-              await Promise.all([policy.refetch(), consent.refetch(), server.refetch()]);
-            }}
-          >
-            <p>{t('service.configureSleepDescription')}</p>
-          </ActionForm>
-        ) : !policy.data.policy ? (
-          <Notice>
-            {t(
-              server.data?.connectionMode === 'direct'
-                ? 'service.directSleepUnavailable'
-                : 'service.sleepUnavailable',
-            )}
-          </Notice>
-        ) : (
-          <>
-            {policy.data.state && (
-              <Details
-                values={[
-                  [t('web.status'), t(policy.data.state.messageKey)],
-                  [
-                    t('service.readyObserved'),
-                    <Time key="ready" value={policy.data.state.readinessObservedAt} />,
-                  ],
-                  [
-                    t('service.startupEstimate'),
-                    policy.data.state.startupEstimate
-                      ? t('service.startupSeconds', {
-                          seconds: Math.ceil(policy.data.state.startupEstimate.p90Ms / 1000),
-                        })
-                      : t('service.estimateUnavailable'),
-                  ],
-                ]}
-              />
-            )}
-            {editable &&
-              (restrictPolicyControls && !sleepAccess ? (
-                <>
-                  <Check
-                    label={t('service.autoWake')}
-                    checked={policy.data.policy.enabled}
-                    disabled
-                  />
-                  <Notice>{t('sleepTiming.ownerControlled')}</Notice>
-                </>
-              ) : (
-                <ActionForm
-                  key={JSON.stringify(policy.data.policy)}
-                  onSubmit={async (data) => {
-                    const idleTimeout = sleepAccess
-                      ? readSleepTimeout(data, 'idleMinutes')
-                      : undefined;
-                    const {
-                      idleTimeoutSeconds: _seconds,
-                      idleTimeoutInherited: _inherited,
-                      ...existingPolicy
-                    } = policy.data!.policy!;
-                    await api(`${serverPath(serverId)}/gateway`, {
-                      method: 'PUT',
-                      body: {
-                        ...existingPolicy,
-                        enabled: restrictPolicyControls
-                          ? existingPolicy.enabled
-                          : data.has('enabled'),
-                        ...(idleTimeout === undefined
-                          ? {}
-                          : {
-                              idleTimeoutInherited: idleTimeout === null,
-                              idleTimeoutSeconds:
-                                idleTimeout === null || idleTimeout === -1 ? null : idleTimeout,
-                              ...(isOwner
-                                ? {
-                                    idleTimeoutUserAccess: readSleepAccess(
-                                      data,
-                                      'sleepServerAccess',
-                                    ),
-                                  }
-                                : {}),
-                            }),
-                        mode: restrictPolicyControls ? existingPolicy.mode : text(data, 'mode'),
-                      },
-                    });
-                    await policy.refetch();
-                    await server.refetch();
-                  }}
-                >
-                  <Check
-                    name="enabled"
-                    defaultChecked={policy.data.policy.enabled}
-                    label={t('service.autoWake')}
-                    disabled={restrictPolicyControls}
-                  />
-                  {sleepAccess && (
-                    <SleepTimeoutField
-                      name="idleMinutes"
-                      value={sleepAccess.overrideSeconds}
-                      inheritedSeconds={sleepAccess.inheritedSeconds}
-                      allowDisable={
-                        isOwner ||
-                        sleepAccess.userAccess !== 'shorten-only' ||
-                        sleepAccess.ownerBaselineSeconds === -1
-                      }
-                      maximumSeconds={
-                        !isOwner &&
-                        sleepAccess.userAccess === 'shorten-only' &&
-                        sleepAccess.ownerBaselineSeconds !== -1
-                          ? sleepAccess.ownerBaselineSeconds
-                          : 604800
-                      }
-                    />
-                  )}
-                  {isOwner && sleepAccess && 'ownerUserAccessOverride' in sleepAccess && (
-                    <SleepAccessField
-                      name="sleepServerAccess"
-                      value={sleepAccess.ownerUserAccessOverride ?? null}
-                      inherited={sleepAccess.inheritedUserAccess ?? 'hidden'}
-                    />
-                  )}
-                  {policy.data.idleTimeout && (
-                    <p className="muted">
-                      {t('sleepTiming.effective', {
-                        value:
-                          policy.data.idleTimeout.effectiveSeconds === -1
-                            ? t('sleepTiming.disabled')
-                            : t('sleepTiming.minutes', {
-                                minutes: format.number(
-                                  policy.data.idleTimeout.effectiveSeconds / 60,
-                                  3,
-                                ),
-                              }),
-                        source: t(`sleepTiming.source.${policy.data.idleTimeout.source}`),
-                      })}
-                    </p>
-                  )}
-                  <Select
-                    label={t('service.automationMode')}
-                    name="mode"
-                    disabled={restrictPolicyControls}
-                    defaultValue={policy.data.policy.mode}
-                  >
-                    <option value="auto">{t('service.automatic')}</option>
-                    <option value="manually_stopped">{t('service.manuallyStopped')}</option>
-                    <option value="maintenance">{t('service.maintenance')}</option>
-                  </Select>
-                  <p className="muted">
-                    {t(
-                      restrictPolicyControls
-                        ? 'sleepTiming.ownerControlled'
-                        : 'service.manualStopPolicy',
-                    )}
-                  </p>
-                </ActionForm>
-              ))}
           </>
         )}
-      </Section>
-      <SchedulesSection serverId={serverId} editable={Boolean(editable)} />
-    </>
-  );
-}
-function SchedulesSection({ serverId, editable }: { serverId: string; editable: boolean }) {
-  const t = useT();
-  const schedules = useQuery({
-    queryKey: ['schedules', serverId],
-    queryFn: () => api<Schedules>(`${serverPath(serverId)}/schedules`),
-    refetchInterval: 15000,
-  });
-  const [editing, setEditing] = useState<Schedules[number] | 'new'>(),
-    [outcomes, setOutcomes] = useState<Schedules[number]>();
-  const [deleting, setDeleting] = useState<Schedules[number]>();
-  return (
-    <Section
-      title={t('web.schedules')}
-      actions={
-        editable ? (
-          <button type="button" onClick={() => setEditing('new')}>
-            {t('service.addSchedule')}
-          </button>
-        ) : undefined
-      }
-    >
-      <p className="muted">{t('service.scheduleSemantics')}</p>
-      {schedules.isPending ? (
-        <Loading />
-      ) : schedules.error ? (
-        <ErrorNotice error={schedules.error} />
-      ) : !schedules.data.length ? (
-        <Empty text={t('service.noSchedules')} />
-      ) : (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>{t('web.name')}</th>
-                <th>{t('service.action')}</th>
-                <th>{t('web.status')}</th>
-                <th>{t('service.nextRun')}</th>
-                <th>{t('web.actions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {schedules.data.map((schedule) => (
-                <tr key={schedule.id}>
-                  <td>{schedule.name}</td>
-                  <td>{t(`service.action.${schedule.action}`)}</td>
-                  <td>
-                    <Badge value={schedule.enabled ? 'enabled' : 'disabled'} />
-                  </td>
-                  <td>
-                    <Time value={schedule.nextRunAt} />
-                  </td>
-                  <td>
-                    <div className="actions">
-                      <button
-                        type="button"
-                        className="secondary"
-                        onClick={() => setOutcomes(schedule)}
-                      >
-                        {t('service.outcomes')}
-                      </button>
-                      {editable && (
-                        <>
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => setEditing(schedule)}
-                          >
-                            {t('web.edit')}
-                          </button>
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => setDeleting(schedule)}
-                          >
-                            {t('web.delete')}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <Dialog
-        open={Boolean(editing)}
-        title={t(editing === 'new' ? 'service.addSchedule' : 'web.edit')}
-        onClose={() => setEditing(undefined)}
-      >
-        {editing && (
-          <ScheduleForm
-            key={editing === 'new' ? 'new' : editing.id}
-            serverId={serverId}
-            schedule={editing === 'new' ? undefined : editing}
-            onSaved={async () => {
-              setEditing(undefined);
-              await schedules.refetch();
-            }}
-          />
+      </section>
+      <ServerWakeSettings serverId={serverId} editable={editable} owner={owner} />
+      <section className="automation-policy">
+        <h3>{t('automation.autoSleep')}</h3>
+        {!data.policy ? (
+          data.proposedPolicy && editable ? (
+            <ActionForm
+              submitLabel={t('service.configureSleep')}
+              onSubmit={async () => {
+                await api(`${serverPath(serverId)}/gateway`, {
+                  method: 'PUT',
+                  body: data.proposedPolicy,
+                  headers: { 'If-None-Match': '*' },
+                });
+                await policy.refetch();
+              }}
+            >
+              <p>{t('service.configureSleepDescription')}</p>
+            </ActionForm>
+          ) : (
+            <Notice>
+              {t(
+                server.data?.connectionMode === 'direct'
+                  ? 'service.directSleepUnavailable'
+                  : 'service.sleepUnavailable',
+              )}
+            </Notice>
+          )
+        ) : sleep ? (
+          <>
+            <p className="automation-effective">
+              {t('sleepTiming.effective', {
+                value:
+                  sleep.effectiveSeconds === -1
+                    ? t('sleepTiming.disabled')
+                    : t('sleepTiming.minutes', {
+                        minutes: format.number(sleep.effectiveSeconds / 60, 3),
+                      }),
+                source: t(`sleepTiming.source.${sleep.source}`),
+              })}
+            </p>
+            {editable && (
+              <ActionForm
+                key={JSON.stringify([data.policy, sleep])}
+                onSubmit={async (form) => {
+                  if (!data.policy) return;
+                  const timeout = readSleepTimeout(form, 'idleMinutes');
+                  const {
+                    idleTimeoutSeconds: _seconds,
+                    idleTimeoutInherited: _inherited,
+                    ...existing
+                  } = data.policy;
+                  await api(`${serverPath(serverId)}/gateway`, {
+                    method: 'PUT',
+                    body: {
+                      ...existing,
+                      idleTimeoutInherited: timeout === null,
+                      idleTimeoutSeconds: timeout === null || timeout === -1 ? null : timeout,
+                      ...(owner
+                        ? { idleTimeoutUserAccess: readSleepAccess(form, 'sleepAccess') }
+                        : {}),
+                    },
+                  });
+                  await policy.refetch();
+                }}
+              >
+                <SleepTimeoutField
+                  name="idleMinutes"
+                  value={sleep.overrideSeconds}
+                  inheritedSeconds={sleep.inheritedSeconds}
+                  allowDisable={
+                    owner ||
+                    sleep.userAccess !== 'shorten-only' ||
+                    sleep.ownerBaselineSeconds === -1
+                  }
+                  maximumSeconds={
+                    !owner &&
+                    sleep.userAccess === 'shorten-only' &&
+                    sleep.ownerBaselineSeconds !== -1
+                      ? sleep.ownerBaselineSeconds
+                      : 604800
+                  }
+                />
+                {owner && 'ownerUserAccessOverride' in sleep && (
+                  <SleepAccessField
+                    name="sleepAccess"
+                    value={sleep.ownerUserAccessOverride ?? null}
+                    inherited={sleep.inheritedUserAccess ?? 'hidden'}
+                  />
+                )}
+              </ActionForm>
+            )}
+          </>
+        ) : (
+          <Notice>{t('sleepTiming.ownerControlled')}</Notice>
         )}
-      </Dialog>
-      <Dialog
-        open={Boolean(deleting)}
-        title={t('web.delete')}
-        onClose={() => setDeleting(undefined)}
-      >
-        {deleting && (
+      </section>
+      {data.policy && editable && data.policyControlsEditable !== false && (
+        <details className="automation-policy automation-advanced">
+          <summary>{t('automation.gatewayOperation')}</summary>
           <ActionForm
-            success={false}
-            submitLabel={t('web.delete')}
-            onSubmit={async () => {
-              await api(`${serverPath(serverId)}/schedules/${deleting.id}`, {
-                method: 'DELETE',
-                body: { revision: deleting.revision },
+            key={`${data.policy.enabled}-${data.policy.mode}`}
+            onSubmit={async (form) => {
+              await api(`${serverPath(serverId)}/gateway`, {
+                method: 'PUT',
+                body: {
+                  ...data.policy,
+                  enabled: form.get('enabled') === 'true',
+                  mode: text(form, 'mode'),
+                },
               });
-              setDeleting(undefined);
-              await schedules.refetch();
+              await policy.refetch();
             }}
           >
-            <p>{t('service.deleteScheduleWarning')}</p>
-            <Check label={t('web.confirm')} required />
+            <Select
+              label={t('automation.gatewayOperation')}
+              className="automation-label-hidden"
+              name="enabled"
+              defaultValue={String(data.policy.enabled)}
+            >
+              <option value="true">{t('web.enabled')}</option>
+              <option value="false">{t('web.disabled')}</option>
+            </Select>
+            <Select label={t('service.automationMode')} name="mode" defaultValue={data.policy.mode}>
+              <option value="auto">{t('service.automatic')}</option>
+              <option value="manually_stopped">{t('service.manuallyStopped')}</option>
+              <option value="maintenance">{t('service.maintenance')}</option>
+            </Select>
           </ActionForm>
-        )}
-      </Dialog>
-      <Dialog
-        open={Boolean(outcomes)}
-        title={outcomes?.name ?? t('service.outcomes')}
-        onClose={() => setOutcomes(undefined)}
-      >
-        {outcomes && <ScheduleOutcomes serverId={serverId} scheduleId={outcomes.id} />}
-      </Dialog>
-    </Section>
-  );
-}
-function localTime(iso: string) {
-  const date = new Date(iso);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-function ScheduleForm({
-  serverId,
-  schedule,
-  onSaved,
-}: {
-  serverId: string;
-  schedule?: Schedules[number];
-  onSaved: () => Promise<void>;
-}) {
-  const t = useT();
-  const [kind, setKind] = useState(schedule?.timing.kind ?? 'once');
-  const [action, setAction] = useState(schedule?.action ?? 'backup');
-  const [retention, setRetention] = useState(schedule?.retention?.enabled ?? false);
-  const transfers = useTransfers(serverId);
-  const backupPolicy = transfers.data?.backups.policy.offline ?? 'required';
-  const retentionMaximum = Math.max(0, (transfers.data?.backups.limit ?? 0) - 1);
-  const at = schedule
-    ? schedule.timing.kind === 'once'
-      ? schedule.timing.at
-      : schedule.timing.firstAt
-    : new Date(Date.now() + 3600000).toISOString();
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return (
-    <ActionForm
-      onSubmit={async (data) => {
-        const instant = new Date(text(data, 'at')).toISOString();
-        const body = {
-          name: text(data, 'name'),
-          action,
-          ...(action === 'backup'
-            ? {
-                backupOptions: { mode: text(data, 'backupMode') || 'auto' },
-                retention: {
-                  enabled: retention,
-                  keepLast: retention ? number(data, 'keepLast') : 7,
-                },
-              }
-            : {}),
-          enabled: data.has('enabled'),
-          timeZone: zone,
-          timing:
-            kind === 'once'
-              ? { kind, at: instant }
-              : { kind, firstAt: instant, everySeconds: number(data, 'minutes') * 60 },
-          ...(schedule ? { revision: schedule.revision } : {}),
-        };
-        await api(`${serverPath(serverId)}/schedules${schedule ? `/${schedule.id}` : ''}`, {
-          method: schedule ? 'PUT' : 'POST',
-          body,
-        });
-        await onSaved();
-      }}
-      success={false}
-    >
-      <Input
-        label={t('web.name')}
-        name="name"
-        defaultValue={schedule?.name}
-        required
-        maxLength={80}
-      />
-      <Select
-        label={t('service.action')}
-        name="action"
-        value={action}
-        onChange={(event) => setAction(event.target.value as Schedules[number]['action'])}
-      >
-        {['start', 'stop', 'restart', 'backup'].map((action) => (
-          <option key={action} value={action}>
-            {t(`service.action.${action}`)}
-          </option>
-        ))}
-      </Select>
-      {action === 'backup' && (
-        <>
-          <Select
-            label={t('backup.serverDuring')}
-            name="backupMode"
-            defaultValue={schedule?.backupOptions?.mode ?? 'auto'}
-          >
-            <option value="auto">{t('backup.integrationDefault')}</option>
-            <option value="offline">{t('backup.offline')}</option>
-            {backupPolicy !== 'required' && <option value="live">{t('backup.live')}</option>}
-          </Select>
-          <p className="muted">{t('backup.scheduleStopWarning')}</p>
-          <Check
-            checked={retention}
-            disabled={retentionMaximum < 1 && !retention}
-            onChange={(event) => setRetention(event.target.checked)}
-            label={t('backup.retention')}
-          />
-          {retention && (
-            <Input
-              label={t('backup.keepLast')}
-              name="keepLast"
-              type="number"
-              min={1}
-              max={retentionMaximum}
-              defaultValue={schedule?.retention?.keepLast ?? Math.min(7, retentionMaximum)}
-              required
-            />
-          )}
-          {retention && <p className="muted">{t('backup.retentionHelp')}</p>}
-        </>
+        </details>
       )}
-      <Select
-        label={t('service.repeat')}
-        value={kind}
-        onChange={(event) => setKind(event.target.value as 'once' | 'interval')}
-      >
-        <option value="once">{t('service.once')}</option>
-        <option value="interval">{t('service.interval')}</option>
-      </Select>
-      <Input
-        label={t('service.firstRun', { zone })}
-        type="datetime-local"
-        name="at"
-        defaultValue={localTime(at)}
-        required
-      />
-      {kind === 'interval' && (
-        <Input
-          label={t('service.intervalMinutes')}
-          name="minutes"
-          type="number"
-          min={5}
-          max={525600}
-          defaultValue={
-            schedule?.timing.kind === 'interval' ? schedule.timing.everySeconds / 60 : 60
-          }
-          required
-        />
-      )}
-      <Check name="enabled" defaultChecked={schedule?.enabled ?? true} label={t('web.enabled')} />
-      <p className="muted">{t('service.scheduledStopWarning')}</p>
-    </ActionForm>
-  );
-}
-function ScheduleOutcomes({ serverId, scheduleId }: { serverId: string; scheduleId: string }) {
-  const t = useT();
-  const [before, setBefore] = useState<string>();
-  const result = useQuery({
-    queryKey: ['schedule-outcomes', serverId, scheduleId, before],
-    queryFn: () =>
-      api<Outcomes>(
-        `${serverPath(serverId)}/schedules/${scheduleId}/outcomes${before ? `?before=${before}` : ''}`,
-      ),
-  });
-  if (result.isPending) return <Loading />;
-  if (result.error) return <ErrorNotice error={result.error} />;
-  return result.data.items.length ? (
-    <>
-      <div className="stack">
-        {result.data.items.map((item) => (
-          <div key={item.id}>
-            <Time value={item.dueAt} /> <Badge value={item.jobState ?? item.status} />
-            {item.reason && <p>{t(`errors.${item.reason}`)}</p>}
-            {item.jobId && <Link to={`/activity/${item.jobId}`}>{t('web.viewActivity')}</Link>}
-            {item.missedCount > 0 && <p>{t('service.missedRuns', { count: item.missedCount })}</p>}
-          </div>
-        ))}
-      </div>
-      {result.data.nextCursor && (
-        <button
-          className="secondary"
-          type="button"
-          onClick={() => setBefore(result.data.nextCursor!)}
-        >
-          {t('web.next')}
-        </button>
-      )}
-    </>
-  ) : (
-    <Empty />
+    </div>
   );
 }

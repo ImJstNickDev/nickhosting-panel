@@ -14,6 +14,7 @@ import {
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
+import { type GatewayPolicyContext, loadGatewayPolicyContext } from './gateway-policy-context.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
@@ -23,6 +24,7 @@ import {
   parse,
 } from './registry.js';
 import { resolveIdleTimeout } from './sleep-policy.js';
+import { resolveAutoWakeValues } from './wake-policy.js';
 
 type State = Selectable<Database['gateway_server_states']>;
 type Server = Selectable<Database['managed_servers']>;
@@ -44,6 +46,31 @@ function matchingSleepOperation(
     marker.generation === state.generation
   );
 }
+// Scheduled stops share terminal recovery, but never the idle/quiescence proof:
+// they are explicitly authorized operations, not player-idleness observations.
+function matchingScheduledStopOperation(
+  operation: Selectable<Database['server_operations']> | undefined,
+  serverId: string,
+  state: State,
+): operation is Selectable<Database['server_operations']> {
+  const marker = z
+    .object({
+      scheduleId: z.uuid(),
+      occurrenceId: z.uuid(),
+      revision: z.number().int().positive(),
+      gatewayGeneration: z.uuid(),
+      stopIntent: z.literal('sleeping'),
+    })
+    .safeParse(operation?.plan.scheduleAutomation);
+  return (
+    operation?.job_id === state.sleep_job_id &&
+    operation?.server_id === serverId &&
+    operation?.action === 'stop' &&
+    marker.success &&
+    marker.data.gatewayGeneration === state.generation
+  );
+}
+
 export interface GatewayOrchestrationOptions {
   env?: Environment;
   /** Trusted Core route/revision revalidation, inside the observation's global
@@ -90,6 +117,7 @@ export interface GatewayState {
   serverId: string;
   generation: string;
   enabled: boolean;
+  wakeEnabled: boolean;
   protocolId: string;
   gameVersion: string;
   state: GatewayServerState;
@@ -176,8 +204,10 @@ async function publicState(
   state: State,
   now: Date,
   env: Environment = {},
+  policyInputs?: GatewayPolicyContext,
 ): Promise<GatewayState> {
-  const idleTimeout = await resolveIdleTimeout(db, server.id, state, env);
+  const inputs = policyInputs ?? (await loadGatewayPolicyContext(db, server.id, env));
+  const idleTimeout = await resolveIdleTimeout(db, server.id, state, env, inputs);
   const samples = await db
     .selectFrom('gateway_startup_samples')
     .select('duration_ms')
@@ -193,6 +223,12 @@ async function publicState(
     serverId: server.id,
     generation: state.generation,
     enabled: state.enabled,
+    wakeEnabled: resolveAutoWakeValues(
+      inputs.values,
+      inputs.mapping.game_id,
+      inputs.mapping.runtime_id,
+      state,
+    ).effectiveEnabled,
     protocolId: state.protocol_id,
     gameVersion: state.game_version,
     state: actual,
@@ -504,6 +540,7 @@ export async function requestGatewayWake(
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options);
     if (value.generation !== state.generation) throw new DomainError('conflict');
+    const wakeInputs = await loadGatewayPolicyContext(tx, serverId, options.env);
     if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
       await requireMinecraftGatewayProtocol(
         tx,
@@ -515,12 +552,18 @@ export async function requestGatewayWake(
     if (
       value.intent === 'status' ||
       !state.enabled ||
+      !resolveAutoWakeValues(
+        wakeInputs.values,
+        wakeInputs.mapping.game_id,
+        wakeInputs.mapping.runtime_id,
+        state,
+      ).effectiveEnabled ||
       ['manually_stopped', 'maintenance'].includes(server.intent) ||
       state.state === 'waking' ||
       effectiveState(server, state, now) === 'online' ||
       (state.blocked_until && state.blocked_until > now)
     )
-      return publicState(tx, server, state, now, options.env);
+      return publicState(tx, server, state, now, options.env, wakeInputs);
     // An uncertain reservation or operation is never a new automatic start.
     const reservation = await tx
       .selectFrom('resource_reservations')
@@ -1060,7 +1103,8 @@ async function reconcileLocked(
         !server.active_operation_id &&
         reservation &&
         job.completed_at &&
-        matchingSleepOperation(operation, serverId, state) &&
+        (matchingSleepOperation(operation, serverId, state) ||
+          matchingScheduledStopOperation(operation, serverId, state)) &&
         operation.phase === 'failed' &&
         operation.effect_state === 'none' &&
         ((operation.plan.rejected === true && operation.plan.powerEffectPrepared === false) ||

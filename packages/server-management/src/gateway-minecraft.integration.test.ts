@@ -15,6 +15,7 @@ import {
   minecraftMappingDigest,
   signMinecraftEvidence,
 } from './minecraft-registry.js';
+import { createSchedule, runDueSchedules } from './schedules.js';
 import { managementFixture } from './test-fixtures.js';
 
 let database: Awaited<ReturnType<typeof createTestDatabase>>;
@@ -167,6 +168,46 @@ async function register() {
   );
 }
 describe('Minecraft declared-capability Gateway registration', () => {
+  it('publishes stopping presentation for an active scheduled stop without granting forwarding', async () => {
+    await register();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running', intent: 'auto_wake_enabled' })
+      .where('id', '=', serverId)
+      .execute();
+    const at = new Date(Date.now() + 1000);
+    await createSchedule(
+      f.db,
+      f.context,
+      serverId,
+      {
+        name: 'Stop for night',
+        action: 'stop',
+        timing: { kind: 'once', at: at.toISOString() },
+        timeZone: 'UTC',
+        enabled: true,
+      },
+      env,
+    );
+    expect(await runDueSchedules(f.db, env, { now: at })).toMatchObject({ dispatched: 1 });
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes).toHaveLength(1);
+    expect(snapshot.routes[0]).toMatchObject({ mode: 'blocked', presentation: { stopping: true } });
+    const server = await f.db
+      .selectFrom('managed_servers')
+      .select('active_operation_id')
+      .where('id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(server.active_operation_id).toBeTruthy();
+    // A nonterminal orphaned stop is not presentation authority for the server.
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', serverId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.stopping).toBeUndefined();
+  });
+
   it('mints declared service-only metadata for installed profiles without requiring signed evidence', async () => {
     await f.db
       .updateTable('game_rollouts')

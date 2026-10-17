@@ -227,6 +227,17 @@ const isGatewaySleep = (operation: Operation) => {
   );
 };
 
+const isScheduledStop = (operation: Operation) => {
+  const marker = operation.plan.scheduleAutomation;
+  return (
+    operation.action === 'stop' &&
+    typeof marker === 'object' &&
+    marker !== null &&
+    'stopIntent' in marker &&
+    ['sleeping', 'manually_stopped', 'maintenance'].includes(String(marker.stopIntent))
+  );
+};
+
 const isMissing = (error: unknown) =>
   error instanceof PterodactylError && error.reason === 'not_found';
 const installed = (remote: ApplicationServer) =>
@@ -645,7 +656,7 @@ export async function processServerOperation(
             .where('server_id', '=', server.id)
             .executeTakeFirst();
           if (compute || installation) return false;
-          if (!isGatewaySleep(operation))
+          if (!isGatewaySleep(operation) && !isScheduledStop(operation))
             await tx
               .updateTable('managed_servers')
               .set({ intent: 'manually_stopped' })
@@ -742,7 +753,9 @@ export async function processServerOperation(
                   runtime_state: 'offline' as const,
                   readiness: 'unknown' as const,
                   last_observed_at: nowOf(options),
-                  ...(!isGatewaySleep(operation) ? { intent: 'manually_stopped' as const } : {}),
+                  ...(!isGatewaySleep(operation) && !isScheduledStop(operation)
+                    ? { intent: 'manually_stopped' as const }
+                    : {}),
                 }
               : {}),
           })
@@ -817,7 +830,11 @@ export async function processServerOperation(
         return true;
       });
       if (!completed) return wait('already_stopped_reservation_changed', 'operation_uncertain');
-      if (success && confirmedStopped && isGatewaySleep(operation)) {
+      if (
+        success &&
+        confirmedStopped &&
+        (isGatewaySleep(operation) || isScheduledStop(operation))
+      ) {
         // Reuse the canonical durable transition now rather than waiting for a
         // worker tick. A crash/failure here is recovered by the same reconciler
         // and cannot undo the already committed confirmed stop.
@@ -2346,7 +2363,7 @@ export async function processServerOperation(
           // with trusted, host-bound Docker non-running evidence before persisting proof.
           if (operation.plan.stopConfirmed !== true)
             return wait('stop_terminal_unproven', 'operation_uncertain');
-          if (!isGatewaySleep(operation))
+          if (!isGatewaySleep(operation) && !isScheduledStop(operation))
             await db
               .updateTable('managed_servers')
               .set({ intent: 'manually_stopped' })

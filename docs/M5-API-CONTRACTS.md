@@ -314,18 +314,23 @@ intent and occurrence history.
 | `POST /schedules` | `{name,action,timing,timeZone,enabled}`; 201 on durable creation. |
 | `PUT /schedules/:scheduleId` | Same fields plus current `revision`; stale updates conflict. |
 | `DELETE /schedules/:scheduleId` | `{revision}`; soft deletion retains occurrence history, returns 204. |
+| `POST /schedules/preview` | `{timing,timeZone}` returns upcoming `nextRuns`. |
+| `POST /schedules/:scheduleId/run` | `{revision,idempotencyKey}` dispatches a separate authorized occurrence without changing recurrence. |
 | `GET /schedules/:scheduleId/outcomes` | Bounded cursor-paginated occurrence history and associated job/effect outcome. |
 
-Actions are `start`, `stop`, `restart`, `backup`. Timing is either
-`{kind:'once',at: ISO}` or `{kind:'interval',firstAt: ISO,everySeconds}` (300 through
-31,536,000 seconds). `timeZone` must be an IANA zone recognized by `Intl`; execution
-uses UTC instants and elapsed intervals, not a hidden DST/cron interpretation.
+Actions are `start`, `stop`, `restart`, `backup`. Timing supports
+`{kind:'once',at: ISO}`, `{kind:'interval',firstAt: ISO,everySeconds}` (300 through
+31,536,000 seconds), `{kind:'daily',localTime:'HH:mm'}` and
+`{kind:'weekly',localTime:'HH:mm',weekdays:[1,3,5]}` (ISO Monday=1).
+`timeZone` must be an IANA zone recognized by `Intl`. Daily/weekly timing resolves
+repeated local times earlier and timezone gaps forward; interval timing remains
+elapsed time. See [Automation](AUTOMATION.md) for precedence, recovery and UI.
 Missed interval runs collapse to the latest due occurrence; more than five minutes
 late is recorded as skipped. No capacity waiting queue or retrospective burst.
 
 Occurrence claim, admission, operation and outbox are one PostgreSQL transaction.
 Duplicate workers cannot dispatch the same occurrence twice. Before each **new**
-provider effect, the lifecycle authorizer rechecks creator identity/verification,
+provider effect, the lifecycle authorizer rechecks current authorizer identity/verification,
 current manage permission, schedule revision/enabled/deleted state, occurrence/job
 identity, regular actor=subject authority and manual-stop/Gateway generation.
 Unknown prepared effects continue conservative reconciliation, not blind replay.
@@ -334,10 +339,19 @@ Manual stop/maintenance suppress automatic starts. Granting automatic-start
 consent is explicit, compares the current intent and is blocked until unfinished
 operations, uploads, installation and uncertain reservations settle. Revocation
 is immediate and rotates existing Gateway generation/readiness without cancelling
-history or releasing resources prematurely. Scheduled stop also revokes future
-start consent even when an operation conflict prevents that stop dispatch. An
-Owner must deliberately permit automatic starts again; a schedule cannot grant
-itself consent.
+history or releasing resources prematurely. Scheduled stop preserves existing
+automatic-start consent, independently of autowake preferences; a conflicting
+stop does not revoke it. A schedule cannot clear manual-stop or maintenance
+suppression. Migration040 separates original creator and latest authorizer and
+adds manual occurrences/calendar timing without rewriting prior history.
+
+Migration039 adds independent autowake policy and revisioned per-state Gateway
+message overrides. GET/PUT `/v1/platform/servers/:id/auto-wake-policy` and
+`/v1/owner/integrations/:gameId/auto-wake-policy` expose the Owner hierarchy.
+GET/PUT `/v1/servers/:id/gateway-messages` reads defaults/capabilities and writes
+`{revision,overrides}` with regular manage authority, CSRF and audit. Optional
+`presentation` and `wakeEnabled` fields on leased SDK routes carry these settings
+without changing readiness or forwarding. See [Automation](AUTOMATION.md).
 
 ## Retry, recovery and reconciliation
 

@@ -595,6 +595,54 @@ describe('persistent Gateway fixture forwarding', () => {
     expect(results.every((bytes) => bytes.toString() === 'waking')).toBe(true);
     expect(f.control.requestWake).toHaveBeenCalledTimes(1);
   });
+  it('preserves established TCP and UDP forwarding across cosmetic presentation and wake preference updates', async () => {
+    const tcp = await tcpFixture();
+    const udp = await udpFixture();
+    const a = route(tcp.port);
+    const b = { ...route(udp.port, 'udp'), serverId: a.serverId, generation: a.generation };
+    const f = plane([a, b]);
+    const tcpConnections = vi.fn();
+    const udpSourcePorts: number[] = [];
+    tcp.server.on('connection', tcpConnections);
+    udp.socket.on('message', (_bytes, remote) => udpSourcePorts.push(remote.port));
+    await f.gateway.start();
+    const connection = connect(tcp.port, '127.0.0.1');
+    connection.on('error', () => {});
+    cleanups.push(async () => {
+      connection.destroy();
+    });
+    await once(connection, 'connect');
+    const echo = async (text: string) => {
+      const received = once(connection, 'data', { signal: AbortSignal.timeout(3000) });
+      connection.write(text);
+      expect((await received)[0].toString()).toBe(text);
+    };
+    const client = createSocket('udp4');
+    cleanups.push(async () => new Promise<void>((resolve) => client.close(() => resolve())));
+    await echo('before');
+    expect((await datagram(udp.port, 'before', client)).toString()).toBe('before');
+    await f.gateway.applySnapshot(
+      f.snapshot(
+        [a, b].map((r) => ({
+          ...r,
+          revision: 2,
+          wakeEnabled: false,
+          presentation: {
+            serverName: 'Changed name',
+            messages: { sleeping: { motd: 'Custom status', disconnect: 'Custom reason' } },
+          },
+        })),
+        2,
+      ),
+    );
+    expect(connection.destroyed).toBe(false);
+    await echo('after');
+    expect((await datagram(udp.port, 'after', client)).toString()).toBe('after');
+    expect(tcpConnections).toHaveBeenCalledTimes(1);
+    expect(udpSourcePorts).toHaveLength(2);
+    expect(udpSourcePorts[0]).toBe(udpSourcePorts[1]);
+    expect(f.control.requestWake).not.toHaveBeenCalled();
+  });
   it('preserves online opaque forwarding even when a stateful game parser would reject it', async () => {
     const backend = await tcpFixture();
     const createSession = vi.fn(() => {

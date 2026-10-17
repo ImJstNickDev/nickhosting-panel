@@ -11,6 +11,7 @@ import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { trustedGameModules } from './game-modules.js';
+import { type GatewayPolicyContext, loadGatewayPolicyContext } from './gateway-policy-context.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { ownerOnly, parse } from './registry.js';
 
@@ -32,14 +33,9 @@ export async function resolveIdleTimeout(
     owner_idle_timeout_user_access?: 'hidden' | 'editable' | 'shorten-only' | null;
   } | null,
   env: Environment = {},
+  inputs?: GatewayPolicyContext,
 ) {
-  const mapping = await db
-    .selectFrom('managed_servers as s')
-    .innerJoin('runtime_egg_mappings as m', 'm.id', 's.mapping_id')
-    .select(['m.game_id', 'm.runtime_id'])
-    .where('s.id', '=', serverId)
-    .executeTakeFirstOrThrow();
-  const { values } = await getSettings(db, env);
+  const { mapping, values } = inputs ?? (await loadGatewayPolicyContext(db, serverId, env));
   const game = values.gameIdleTimeouts[mapping.game_id];
   const runtime = game?.runtimeTimeouts[mapping.runtime_id];
   const inheritedSeconds = runtime ?? game?.gameTimeoutSeconds ?? values.defaultIdleTimeoutSeconds;

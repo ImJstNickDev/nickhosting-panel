@@ -86,6 +86,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       () => logger.log('warn', 'provider.feed_unavailable'),
     );
     let stopping = false;
+    let schedulesHealthy = true;
     const workerInstanceId = randomUUID();
     const heartbeat = async (state: 'running' | 'degraded' | 'stopped') => {
       try {
@@ -99,10 +100,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const poll = async () => {
       let successful = false;
       try {
-        const schedules = await pollSchedules(db, env, logger);
         await reconcileServers(db, management, logger, env);
         successful =
-          schedules !== null &&
+          schedulesHealthy &&
           runtime.worker.isRunning() &&
           (await runtime.queue.getBackend().client).status === 'ready';
       } catch {
@@ -115,6 +115,17 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           }, 5000);
       }
     };
+    let scheduleTimer: ReturnType<typeof setTimeout> | undefined;
+    let schedulePoll: Promise<void> | undefined;
+    const pollAutomation = async () => {
+      const result = await pollSchedules(db, env, logger);
+      schedulesHealthy = result !== null && !result.failures;
+      if (!stopping)
+        scheduleTimer = setTimeout(() => {
+          schedulePoll = pollAutomation();
+        }, 1000);
+    };
+    schedulePoll = pollAutomation();
     let metadataTimer: ReturnType<typeof setTimeout> | undefined;
     let metadataPoll: Promise<void> | undefined;
     const refreshMetadata = async () => {
@@ -133,9 +144,11 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         stopping = true;
         if (timer) clearTimeout(timer);
         if (metadataTimer) clearTimeout(metadataTimer);
+        if (scheduleTimer) clearTimeout(scheduleTimer);
         await Promise.all([
           reconciliation,
           metadataPoll,
+          schedulePoll,
           observations.close(),
           providerFeeds.close(),
           providerAccounts.close(),

@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, recordAudit, type ScheduleTiming } from '@nickhosting/database';
+import {
+  type Database,
+  notifyGatewayChange,
+  recordAudit,
+  type ScheduleTiming,
+} from '@nickhosting/database';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
@@ -9,10 +14,22 @@ import { backupOptionsSchema, backupRetentionSchema } from './backup-policy.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, enqueueLockedServerOperation, parse } from './registry.js';
+import { calendarOccurrence, firstScheduleRun, previewScheduleRuns } from './schedule-calendar.js';
 
 const id = z.uuid();
 const instant = z.iso.datetime({ offset: true });
+const localTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 export const scheduleTimingSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('daily'), localTime }),
+  z.strictObject({
+    kind: z.literal('weekly'),
+    localTime,
+    weekdays: z
+      .array(z.number().int().min(1).max(7))
+      .min(1)
+      .max(7)
+      .refine((values) => new Set(values).size === values.length),
+  }),
   z.strictObject({ kind: z.literal('once'), at: instant }),
   z.strictObject({
     kind: z.literal('interval'),
@@ -199,13 +216,16 @@ export async function setAutomationConsent(
   });
 }
 
-function firstRun(timing: ScheduleTiming) {
-  return new Date(timing.kind === 'once' ? timing.at : timing.firstAt);
-}
-
 /** Fixed elapsed intervals anchored to firstAt, not local wall-clock cron. DST
  * changes display only. Collapse missed intervals to the latest due instant. */
-export function scheduleOccurrence(timing: ScheduleTiming, next: Date, now: Date) {
+export function scheduleOccurrence(
+  timing: ScheduleTiming,
+  next: Date,
+  now: Date,
+  timeZone = 'UTC',
+) {
+  if (timing.kind === 'daily' || timing.kind === 'weekly')
+    return calendarOccurrence(timing, timeZone, next, now);
   const missed =
     timing.kind === 'interval'
       ? Math.max(0, Math.floor((now.getTime() - next.getTime()) / (timing.everySeconds * 1000)))
@@ -246,6 +266,8 @@ function publicSchedule(row: Schedule) {
     id: row.id,
     serverId: row.server_id,
     creatorId: row.creator_id,
+    authorizerId: row.authorizer_id,
+    status: row.next_run_at === null ? 'completed' : row.enabled ? 'active' : 'paused',
     name: row.name,
     action: row.action,
     timing: row.timing,
@@ -280,16 +302,50 @@ async function manager(
 
 export async function listSchedules(db: Kysely<Database>, context: AuthContext, serverId: string) {
   await authorizeServer(db, context, serverId);
-  return (
-    await db
-      .selectFrom('server_schedules')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .where('deleted_at', 'is', null)
-      .orderBy('created_at')
-      .orderBy('id')
-      .execute()
-  ).map(publicSchedule);
+  const rows = await db
+    .selectFrom('server_schedules as schedule')
+    .innerJoin('user as authorizer', 'authorizer.id', 'schedule.authorizer_id')
+    .innerJoin('user as creator', 'creator.id', 'schedule.creator_id')
+    .selectAll('schedule')
+    .select(['authorizer.name as authorizerName', 'creator.name as creatorName'])
+    .where('schedule.server_id', '=', serverId)
+    .where('schedule.deleted_at', 'is', null)
+    .orderBy('schedule.created_at')
+    .orderBy('schedule.id')
+    .execute();
+  const latest = rows.length
+    ? await db
+        .selectFrom('schedule_occurrences as occurrence')
+        .leftJoin('operation_jobs as job', 'job.id', 'occurrence.job_id')
+        .select([
+          'occurrence.schedule_id',
+          'occurrence.due_at as dueAt',
+          'occurrence.status',
+          'occurrence.reason',
+          'occurrence.job_id as jobId',
+          'job.state as jobState',
+          'job.error_code as errorCode',
+        ])
+        .distinctOn('occurrence.schedule_id')
+        .where(
+          'occurrence.schedule_id',
+          'in',
+          rows.map((row) => row.id),
+        )
+        .orderBy('occurrence.schedule_id')
+        .orderBy('occurrence.due_at', 'desc')
+        .orderBy('occurrence.id', 'desc')
+        .execute()
+    : [];
+  const latestBySchedule = new Map(
+    latest.map(({ schedule_id, ...outcome }) => [schedule_id, outcome]),
+  );
+  return rows.map((row) => ({
+    ...publicSchedule(row),
+    creatorName: row.creatorName,
+    authorizerName: row.authorizerName,
+    lastOutcome: latestBySchedule.get(row.id) ?? null,
+  }));
 }
 
 export async function createSchedule(
@@ -311,7 +367,7 @@ export async function createSchedule(
       .where('deleted_at', 'is', null)
       .executeTakeFirstOrThrow();
     if (Number(count.count) >= 100) throw new DomainError('rate_limited');
-    const next = firstRun(value.timing);
+    const next = firstScheduleRun(value.timing, value.timeZone);
     if (next <= new Date()) throw new DomainError('validation_failed');
     const row = await tx
       .insertInto('server_schedules')
@@ -319,6 +375,7 @@ export async function createSchedule(
         id: randomUUID(),
         server_id: serverId,
         creator_id: context.actorUserId,
+        authorizer_id: context.actorUserId,
         name: value.name,
         action: value.action,
         timing: JSON.stringify(value.timing),
@@ -370,20 +427,26 @@ export async function updateSchedule(
       .executeTakeFirst();
     if (!old) throw new DomainError('not_found');
     if (old.revision !== value.revision) throw new DomainError('conflict');
-    const changedTiming = !isDeepStrictEqual(old.timing, value.timing);
+    const changedTiming =
+      !isDeepStrictEqual(old.timing, value.timing) ||
+      ((value.timing.kind === 'daily' || value.timing.kind === 'weekly') &&
+        old.time_zone !== value.timeZone);
     const now = new Date();
-    let next = changedTiming ? firstRun(value.timing) : old.next_run_at;
+    let next = changedTiming
+      ? firstScheduleRun(value.timing, value.timeZone, now)
+      : old.next_run_at;
+    if (value.enabled && !next) throw new DomainError('validation_failed');
     if (changedTiming && next && next <= now) throw new DomainError('validation_failed');
     if (!old.enabled && value.enabled && next && next <= now) {
       // Re-enabling never replays the disabled window. A consumed one-shot needs
       // a new explicit future instant; an interval advances to its next slot.
       if (value.timing.kind === 'once') throw new DomainError('validation_failed');
-      next = scheduleOccurrence(value.timing, next, now).next;
+      next = scheduleOccurrence(value.timing, next, now, value.timeZone).next;
     }
     const row = await tx
       .updateTable('server_schedules')
       .set({
-        creator_id: context.actorUserId,
+        authorizer_id: context.actorUserId,
         name: value.name,
         action: value.action,
         timing: JSON.stringify(value.timing),
@@ -478,6 +541,8 @@ export async function listScheduleOutcomes(
     .select([
       'occurrence.id',
       'occurrence.revision',
+      'occurrence.trigger',
+      'occurrence.requester_id as requesterId',
       'occurrence.due_at as dueAt',
       'occurrence.action',
       'occurrence.status',
@@ -487,6 +552,7 @@ export async function listScheduleOutcomes(
       'job.state as jobState',
       'job.error_code as errorCode',
       'operation.phase',
+      'operation.plan',
       'operation.effect_state as effectState',
       'job.completed_at as completedAt',
     ])
@@ -511,7 +577,28 @@ export async function listScheduleOutcomes(
     .orderBy('occurrence.id', 'desc')
     .limit(query.limit + 1)
     .execute();
-  const items = found.slice(0, query.limit);
+  const items = found.slice(0, query.limit).map(({ plan, ...row }) => ({
+    ...row,
+    backupResult:
+      row.action === 'backup' && plan
+        ? {
+            state:
+              plan.backupComplete === true
+                ? 'succeeded'
+                : plan.backupFailed === true
+                  ? 'failed'
+                  : 'pending',
+            resume: ['pending', 'succeeded', 'failed', 'suppressed'].includes(
+              String(plan.backupResumeOutcome),
+            )
+              ? String(plan.backupResumeOutcome)
+              : null,
+            cleanupFailed:
+              typeof plan.backupCleanupError === 'string' && plan.backupCleanupComplete !== true,
+            retentionFailed: typeof plan.backupRetentionError === 'string',
+          }
+        : null,
+  }));
   return { items, nextCursor: found.length > query.limit ? (items.at(-1)?.id ?? null) : null };
 }
 
@@ -537,6 +624,8 @@ const markerSchema = z.strictObject({
   revision: z.number().int().positive(),
   gatewayGeneration: id.nullable(),
   retention: backupRetentionSchema.optional(),
+  stopIntent: z.enum(['sleeping', 'manually_stopped', 'maintenance']).optional(),
+  manual: z.boolean().optional(),
 });
 
 /** Called by the existing lifecycle authorizer before NEW provider effects.
@@ -575,28 +664,33 @@ export async function authorizeScheduledEffect(
     .where('id', '=', jobId)
     .executeTakeFirst();
   if (
-    !schedule?.enabled ||
+    !schedule ||
+    (!schedule.enabled && !marker.manual) ||
     schedule.deleted_at ||
     schedule.revision !== marker.revision ||
     !occurrence ||
     occurrence.revision !== marker.revision ||
     occurrence.action !== operation.action ||
     !job ||
-    job.actor_id !== schedule.creator_id ||
-    job.subject_id !== schedule.creator_id ||
+    occurrence.trigger !== (marker.manual ? 'manual' : 'scheduled') ||
+    job.actor_id !== (marker.manual ? occurrence.requester_id : schedule.authorizer_id) ||
+    job.subject_id !== job.actor_id ||
     job.support_session_id
   )
     throw new DomainError('forbidden');
-  const context = await creatorContext(db, schedule.creator_id);
+  const context = await creatorContext(db, job.actor_id);
   const server = await authorizeServer(db, context, serverId, 'server:manage');
   if (['start', 'restart'].includes(operation.action)) {
     if (['manually_stopped', 'maintenance'].includes(server.intent))
       throw new DomainError('forbidden');
-    const policy = await db
-      .selectFrom('gateway_server_states')
-      .select('generation')
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
+    const policy =
+      server.connection_mode === 'gateway'
+        ? await db
+            .selectFrom('gateway_server_states')
+            .select('generation')
+            .where('server_id', '=', serverId)
+            .executeTakeFirst()
+        : undefined;
     if ((policy?.generation ?? null) !== marker.gatewayGeneration)
       throw new DomainError('forbidden');
   }
@@ -608,7 +702,7 @@ export async function authorizeScheduledEffect(
 export async function runDueSchedules(
   db: Kysely<Database>,
   env: Environment = {},
-  options: { now?: Date; limit?: number } = {},
+  options: { now?: Date; limit?: number; onError?: (id: string, error: unknown) => void } = {},
 ) {
   const now = options.now ?? new Date();
   const limit = parse(z.number().int().min(1).max(100), options.limit ?? 25);
@@ -622,185 +716,269 @@ export async function runDueSchedules(
     .limit(limit)
     .execute();
   let dispatched = 0,
-    skipped = 0;
+    skipped = 0,
+    failures = 0;
   for (const candidate of candidates) {
-    const result = await db.transaction().execute(async (tx) => {
-      // Same lock order as CRUD/admission prevents schedule/server deadlocks.
-      await lockResources(tx);
-      const schedule = await tx
-        .selectFrom('server_schedules')
+    try {
+      const result = await dispatchSchedule(db, candidate.id, env, now);
+      if (result?.status === 'dispatched') dispatched += 1;
+      if (result?.status === 'skipped') skipped += 1;
+    } catch (error) {
+      // A malformed row or infrastructure error rolls back only this candidate.
+      // Preserve its due time for recovery and continue unrelated schedules.
+      options.onError?.(candidate.id, error);
+      failures += 1;
+    }
+  }
+  return { dispatched, skipped, ...(failures ? { failures } : {}) };
+}
+
+type ManualScheduleRequest = {
+  context: AuthContext;
+  serverId: string;
+  revision: number;
+  idempotencyKey: string;
+};
+async function dispatchSchedule(
+  db: Kysely<Database>,
+  scheduleId: string,
+  env: Environment,
+  now: Date,
+  request?: ManualScheduleRequest,
+) {
+  return db.transaction().execute(async (tx) => {
+    // Same lock order as CRUD/admission prevents schedule/server deadlocks.
+    await lockResources(tx);
+    const schedule = await tx
+      .selectFrom('server_schedules')
+      .selectAll()
+      .where('id', '=', scheduleId)
+      .forUpdate()
+      .executeTakeFirst();
+    const interactive = request ? await manager(tx, request.context, request.serverId, env) : null;
+    if (request && (!schedule || schedule.server_id !== request.serverId || schedule.deleted_at))
+      throw new DomainError('not_found');
+    if (request) {
+      const previous = await tx
+        .selectFrom('schedule_occurrences')
         .selectAll()
-        .where('id', '=', candidate.id)
-        .forUpdate()
+        .where('schedule_id', '=', scheduleId)
+        .where('requester_id', '=', request.context.actorUserId)
+        .where('request_key', '=', request.idempotencyKey)
         .executeTakeFirst();
-      if (
-        !schedule?.enabled ||
+      if (previous) {
+        if (previous.revision !== request.revision) throw new DomainError('conflict');
+        return {
+          occurrenceId: previous.id,
+          status: previous.status,
+          jobId: previous.job_id,
+          reason: previous.reason,
+        };
+      }
+      if (schedule?.revision !== request.revision) throw new DomainError('conflict');
+    }
+    if (
+      !request &&
+      (!schedule?.enabled ||
         schedule.deleted_at ||
         !schedule.next_run_at ||
-        schedule.next_run_at > now
-      )
-        return;
-      const occurrence = scheduleOccurrence(schedule.timing, schedule.next_run_at, now);
-      const occurrenceId = randomUUID();
-      let reason: string | null = occurrence.late ? 'schedule_late' : null;
-      let jobId: string | null = null;
-      await sql`savepoint schedule_admission`.execute(tx);
-      try {
-        if (!reason) {
-          const context = await creatorContext(tx, schedule.creator_id);
-          const server = await authorizeServer(tx, context, schedule.server_id, 'server:manage');
-          if (schedule.action === 'backup')
-            await assertRetentionCapacity(tx, server.id, schedule.backup_options.retention);
-          if (
-            ['start', 'restart'].includes(schedule.action) &&
-            ['manually_stopped', 'maintenance'].includes(server.intent)
-          )
-            reason = 'manual_stop_suppressed';
-          else {
-            const policy = await tx
-              .selectFrom('gateway_server_states')
-              .selectAll()
-              .where('server_id', '=', server.id)
-              .executeTakeFirst();
-            let generation = policy?.generation ?? null;
-            if (schedule.action === 'stop') {
-              // A scheduled stop is an explicit stop, not idle sleep. Revoke
-              // future starts even if another job prevents this stop dispatch.
-              await tx
-                .updateTable('managed_servers')
-                .set({ intent: 'manually_stopped' })
-                .where('id', '=', server.id)
-                .execute();
-              if (policy) {
-                generation = randomUUID();
-                await tx
-                  .updateTable('gateway_server_states')
-                  .set({
-                    generation,
-                    state: 'manually_stopped',
-                    readiness_observed_at: null,
-                    idle_since: null,
-                    updated_at: now,
-                  })
+        schedule.next_run_at > now)
+    )
+      return;
+    if (!schedule) return;
+    const occurrence = request
+      ? { due: now, missed: 0, next: schedule.next_run_at, late: false }
+      : scheduleOccurrence(schedule.timing, schedule.next_run_at as Date, now, schedule.time_zone);
+    const occurrenceId = randomUUID();
+    let reason: string | null = occurrence.late ? 'schedule_late' : null;
+    let jobId: string | null = null;
+    await sql`savepoint schedule_admission`.execute(tx);
+    try {
+      if (!reason) {
+        const context = interactive ?? (await creatorContext(tx, schedule.authorizer_id));
+        const server = await authorizeServer(tx, context, schedule.server_id, 'server:manage');
+        if (schedule.action === 'backup')
+          await assertRetentionCapacity(tx, server.id, schedule.backup_options.retention);
+        if (
+          ['start', 'restart'].includes(schedule.action) &&
+          ['manually_stopped', 'maintenance'].includes(server.intent)
+        )
+          reason = 'manual_stop_suppressed';
+        else {
+          const policy =
+            server.connection_mode === 'gateway'
+              ? await tx
+                  .selectFrom('gateway_server_states')
+                  .selectAll()
                   .where('server_id', '=', server.id)
-                  .execute();
-              }
-              await recordAudit(tx, context, 'schedule.stop_consent_revoked', {
-                serverId: server.id,
-                scheduleId: schedule.id,
-                occurrenceId,
-              });
-              // Preserve the revocation if admission/another operation refuses
-              // this occurrence. Never enqueue a waiting stop or replay it.
-              await sql`release savepoint schedule_admission`.execute(tx);
-              await sql`savepoint schedule_admission`.execute(tx);
-            }
-            const operation = await enqueueLockedServerOperation(
-              tx,
-              context,
-              server.id,
-              {
-                action: schedule.action,
-                idempotencyKey: `schedule_${occurrenceId}`,
-                ...(schedule.action === 'backup'
-                  ? scheduleBackupOptions(schedule.backup_options)
-                  : {}),
-              },
-              env,
-            );
-            jobId = operation.jobId;
-            if (policy && ['start', 'restart'].includes(schedule.action)) {
-              generation = randomUUID();
+                  .executeTakeFirst()
+              : undefined;
+          let generation = policy?.generation ?? null;
+          const operation = await enqueueLockedServerOperation(
+            tx,
+            context,
+            server.id,
+            {
+              action: schedule.action,
+              idempotencyKey: `schedule_${occurrenceId}`,
+              ...(schedule.action === 'backup'
+                ? scheduleBackupOptions(schedule.backup_options)
+                : {}),
+            },
+            env,
+          );
+          jobId = operation.jobId;
+          const stopIntent = ['manually_stopped', 'maintenance'].includes(server.intent)
+            ? (server.intent as 'manually_stopped' | 'maintenance')
+            : ('sleeping' as const);
+          if (schedule.action === 'stop') {
+            await tx
+              .updateTable('managed_servers')
+              .set({ intent: stopIntent, updated_at: now })
+              .where('id', '=', server.id)
+              .execute();
+            if (policy)
               await tx
                 .updateTable('gateway_server_states')
                 .set({
-                  generation,
-                  state: 'waking',
-                  wake_job_id: jobId,
-                  sleep_job_id: null,
-                  process_started_at: null,
-                  readiness_observed_at: null,
+                  sleep_job_id: jobId,
                   idle_since: null,
-                  startup_deadline_at: new Date(
-                    now.getTime() + policy.readiness_timeout_seconds * 1000,
-                  ),
-                  error_code: null,
+                  readiness_observed_at: null,
                   updated_at: now,
                 })
                 .where('server_id', '=', server.id)
                 .execute();
-              await tx
-                .updateTable('managed_servers')
-                .set({ intent: 'auto_wake_enabled', readiness: 'loading' })
-                .where('id', '=', server.id)
-                .execute();
-            }
-            const stored = await tx
-              .selectFrom('server_operations')
-              .select('plan')
-              .where('job_id', '=', jobId)
-              .executeTakeFirstOrThrow();
-            await tx
-              .updateTable('server_operations')
-              .set({
-                plan: JSON.stringify({
-                  ...stored.plan,
-                  scheduleAutomation: {
-                    scheduleId: schedule.id,
-                    ...(schedule.action === 'backup'
-                      ? {
-                          retention: backupRetentionSchema.parse(
-                            schedule.backup_options.retention ?? {},
-                          ),
-                        }
-                      : {}),
-                    occurrenceId,
-                    revision: schedule.revision,
-                    gatewayGeneration: generation,
-                  },
-                }),
-              })
-              .where('job_id', '=', jobId)
-              .execute();
-            await recordAudit(tx, context, 'schedule.dispatched', {
-              serverId: server.id,
-              scheduleId: schedule.id,
-              occurrenceId,
-              jobId,
-            });
           }
+          if (policy && ['start', 'restart'].includes(schedule.action)) {
+            generation = randomUUID();
+            await tx
+              .updateTable('gateway_server_states')
+              .set({
+                generation,
+                state: 'waking',
+                wake_job_id: jobId,
+                sleep_job_id: null,
+                process_started_at: null,
+                readiness_observed_at: null,
+                idle_since: null,
+                startup_deadline_at: new Date(
+                  now.getTime() + policy.readiness_timeout_seconds * 1000,
+                ),
+                error_code: null,
+                updated_at: now,
+              })
+              .where('server_id', '=', server.id)
+              .execute();
+            await tx
+              .updateTable('managed_servers')
+              .set({ intent: 'auto_wake_enabled', readiness: 'loading' })
+              .where('id', '=', server.id)
+              .execute();
+          }
+          if (policy && ['start', 'stop', 'restart'].includes(schedule.action))
+            await notifyGatewayChange(tx);
+          const stored = await tx
+            .selectFrom('server_operations')
+            .select('plan')
+            .where('job_id', '=', jobId)
+            .executeTakeFirstOrThrow();
+          await tx
+            .updateTable('server_operations')
+            .set({
+              plan: JSON.stringify({
+                ...stored.plan,
+                scheduleAutomation: {
+                  scheduleId: schedule.id,
+                  ...(request ? { manual: true } : {}),
+                  ...(schedule.action === 'stop' ? { stopIntent } : {}),
+                  ...(schedule.action === 'backup'
+                    ? {
+                        retention: backupRetentionSchema.parse(
+                          schedule.backup_options.retention ?? {},
+                        ),
+                      }
+                    : {}),
+                  occurrenceId,
+                  revision: schedule.revision,
+                  gatewayGeneration: generation,
+                },
+              }),
+            })
+            .where('job_id', '=', jobId)
+            .execute();
+          await recordAudit(tx, context, 'schedule.dispatched', {
+            serverId: server.id,
+            scheduleId: schedule.id,
+            occurrenceId,
+            jobId,
+          });
         }
-        await sql`release savepoint schedule_admission`.execute(tx);
-      } catch (error) {
-        await sql`rollback to savepoint schedule_admission`.execute(tx);
-        if (!(error instanceof DomainError)) throw error;
-        reason = error.code;
-        jobId = null;
       }
-      const status = jobId ? 'dispatched' : 'skipped';
-      await tx
-        .insertInto('schedule_occurrences')
-        .values({
-          id: occurrenceId,
-          schedule_id: schedule.id,
-          revision: schedule.revision,
-          due_at: occurrence.due,
-          action: schedule.action,
-          status,
-          reason,
-          missed_count: occurrence.missed,
-          job_id: jobId,
-        })
-        .execute();
+      await sql`release savepoint schedule_admission`.execute(tx);
+    } catch (error) {
+      await sql`rollback to savepoint schedule_admission`.execute(tx);
+      if (!(error instanceof DomainError)) throw error;
+      reason = error.code;
+      jobId = null;
+    }
+    const status = jobId ? 'dispatched' : 'skipped';
+    await tx
+      .insertInto('schedule_occurrences')
+      .values({
+        id: occurrenceId,
+        schedule_id: schedule.id,
+        revision: schedule.revision,
+        trigger: request ? 'manual' : 'scheduled',
+        request_key: request?.idempotencyKey ?? null,
+        requester_id: request?.context.actorUserId ?? null,
+        due_at: occurrence.due,
+        action: schedule.action,
+        status,
+        reason,
+        missed_count: occurrence.missed,
+        job_id: jobId,
+      })
+      .execute();
+    if (!request)
       await tx
         .updateTable('server_schedules')
         .set({ next_run_at: occurrence.next, updated_at: now })
         .where('id', '=', schedule.id)
         .execute();
-      return status;
-    });
-    if (result === 'dispatched') dispatched += 1;
-    if (result === 'skipped') skipped += 1;
-  }
-  return { dispatched, skipped };
+    return { occurrenceId, status, jobId, reason };
+  });
+}
+
+export async function runScheduleNow(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  scheduleId: string,
+  input: unknown,
+  env: Environment = {},
+) {
+  parse(id, scheduleId);
+  const value = parse(
+    z.strictObject({
+      revision: z.number().int().positive(),
+      idempotencyKey: z
+        .string()
+        .min(8)
+        .max(128)
+        .regex(/^[a-zA-Z0-9_-]+$/),
+    }),
+    input,
+  );
+  return dispatchSchedule(db, scheduleId, env, new Date(), { context, serverId, ...value });
+}
+
+export async function previewSchedule(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  input: unknown,
+) {
+  await authorizeServer(db, context, serverId);
+  const value = parse(scheduleSchema.pick({ timing: true, timeZone: true }), input);
+  return { nextRuns: previewScheduleRuns(value.timing, value.timeZone) };
 }

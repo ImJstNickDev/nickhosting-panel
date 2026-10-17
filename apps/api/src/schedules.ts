@@ -5,6 +5,8 @@ import {
   getAutomationConsent,
   listScheduleOutcomes,
   listSchedules,
+  previewSchedule,
+  runScheduleNow,
   setAutomationConsent,
   updateSchedule,
 } from '@nickhosting/server-management';
@@ -43,6 +45,22 @@ export function registerScheduleRoutes(
   );
   app.get('/v1/servers/:id/schedules', async (c) =>
     c.json(await listSchedules(db, await principal(c), c.req.param('id'))),
+  );
+  app.post('/v1/servers/:id/schedules/preview', async (c) =>
+    c.json(await previewSchedule(db, await principal(c), c.req.param('id'), await body(c))),
+  );
+  app.post('/v1/servers/:id/schedules/:scheduleId/run', async (c) =>
+    c.json(
+      await runScheduleNow(
+        db,
+        await principal(c, true),
+        c.req.param('id'),
+        c.req.param('scheduleId'),
+        await body(c),
+        env,
+      ),
+      202,
+    ),
   );
   app.post('/v1/servers/:id/schedules', async (c) =>
     c.json(

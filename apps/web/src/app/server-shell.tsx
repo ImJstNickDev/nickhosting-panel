@@ -50,7 +50,7 @@ export function ServerShell() {
         }}
       >
         {tabs.map(([slug, key]) => (
-          <NavLink key={slug} to={`${base}/${slug}`} end>
+          <NavLink key={slug} to={`${base}/${slug}`} end={slug !== 'automation'}>
             {key === 'SFTP' ? key : t(key!)}
           </NavLink>
         ))}

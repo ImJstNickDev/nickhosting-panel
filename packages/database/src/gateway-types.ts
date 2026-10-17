@@ -13,6 +13,10 @@ export interface GatewayTables {
     server_id: string;
     generation: string;
     enabled: boolean;
+    auto_wake_override: Generated<boolean | null>;
+    owner_auto_wake_override: Generated<boolean | null>;
+    owner_auto_wake_user_access: Generated<'hidden' | 'editable' | 'disable-only' | null>;
+    gateway_messages: Generated<Record<string, unknown>>;
     protocol_id: string;
     game_version: string;
     state: GatewayServerState;

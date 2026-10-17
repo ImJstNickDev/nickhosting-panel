@@ -294,6 +294,7 @@ export function createGatewayDataPlane(options: GatewayDataPlaneOptions) {
     if (!available) loggedRouteStates.delete(listener.route.id);
   };
   const wake = (route: GatewayRoute): Promise<GatewayMode> => {
+    if (route.wakeEnabled === false) return Promise.resolve(route.mode);
     if (!leased() || quiescence.has(route.serverId) || listeners.get(route.id)?.statusOnly)
       return Promise.resolve('blocked');
     const previous = wakeRequests.get(route.serverId);

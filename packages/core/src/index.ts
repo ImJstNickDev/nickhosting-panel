@@ -3,6 +3,7 @@ export * from './content-policy.js';
 export * from './dns-policy.js';
 export * from './errors.js';
 export * from './file-content.js';
+export * from './gateway-presentation.js';
 export * from './logging.js';
 export * from './minecraft-gateway-config.js';
 export * from './permissions.js';

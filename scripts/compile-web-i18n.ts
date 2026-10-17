@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { compileMessageOrThrow } from '@lingui/message-utils/compileMessage';
 import { accountSecurityWebMessages } from '../packages/i18n/src/account-security-web.js';
 import { activityWebMessages } from '../packages/i18n/src/activity-web.js';
+import { automationWebMessages } from '../packages/i18n/src/automation-web.js';
 import { backupsWebMessages } from '../packages/i18n/src/backups-web.js';
 import { en, it } from '../packages/i18n/src/catalogs.js';
 import { contentSettingsWebMessages } from '../packages/i18n/src/content-settings-web.js';
@@ -35,6 +36,7 @@ for (const [key, pair] of Object.entries({
   ...sftpWebMessages,
   ...backupsWebMessages,
   ...activityWebMessages,
+  ...automationWebMessages,
   ...usernameWebMessages,
 })) {
   if (!pair[0] || !pair[1]) throw new Error(`Missing translation: ${key}`);

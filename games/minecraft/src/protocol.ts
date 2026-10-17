@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type MinecraftGatewayResponses, minecraftGatewayResponsesSchema } from '@nickhosting/core';
+import {
+  gatewayMessageDefaults,
+  gatewayMessageState,
+  type MinecraftGatewayResponses,
+  minecraftGatewayResponsesSchema,
+  renderGatewayMessage,
+} from '@nickhosting/core';
 import type {
   GatewayProbeDiagnostic,
   GatewayProtocolAdapter,
@@ -52,23 +58,13 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 const maximumHandshakeBytes = 4096;
 const messages = {
   en: {
-    sleeping: 'Server sleeping. Join to start it.',
-    waking: 'Server starting. Please reconnect shortly.',
-    stopping: 'Server stopping. Please try again shortly.',
-    blocked: 'Server cannot start right now. Please try again later.',
-    maintenance: 'Server under maintenance. Please try again later.',
-    manually_stopped: 'Server stopped. Start it from the panel.',
+    ...gatewayMessageDefaults.en,
     online: 'Server becoming available. Please reconnect shortly.',
     incompatible: 'Use the Minecraft version selected for this server.',
     transfer: 'Transfers are not enabled. Connect to this server directly.',
   },
   it: {
-    sleeping: 'Server in sospensione. Connettiti per avviarlo.',
-    waking: 'Server in avvio. Riconnettiti tra poco.',
-    stopping: 'Server in spegnimento. Riprova tra poco.',
-    blocked: 'Impossibile avviare il server ora. Riprova più tardi.',
-    maintenance: 'Server in manutenzione. Riprova più tardi.',
-    manually_stopped: 'Server arrestato. Avvialo dal pannello.',
+    ...gatewayMessageDefaults.it,
     online: 'Server quasi disponibile. Riconnettiti tra poco.',
     incompatible: 'Usa la versione di Minecraft selezionata per questo server.',
     transfer: 'Trasferimenti non abilitati. Connettiti direttamente al server.',
@@ -517,8 +513,35 @@ export function createMinecraftProtocolAdapter(
         const catalog = messages[context.route.locale];
         const localized = (text: MinecraftGatewayResponses['motd']) =>
           text?.[mode]?.[context.route.locale];
+        const presentation = context.route.presentation;
+        const messageState = gatewayMessageState(mode, context.route.wakeEnabled, presentation);
+        const customMessage = (kind: 'motd' | 'disconnect') => {
+          const fallback = localized(responses[kind]) ?? catalog[mode];
+          if (!messageState) return fallback;
+          const override = presentation?.messages[messageState]?.[kind];
+          const configured = responses[kind];
+          const stateDefault =
+            configured && messageState in configured
+              ? (configured as Record<string, Partial<Record<'en' | 'it', string>>>)[
+                  messageState
+                ]?.[context.route.locale]
+              : undefined;
+          const base =
+            override ??
+            stateDefault ??
+            (messageState !== mode
+              ? gatewayMessageDefaults[context.route.locale][messageState]
+              : fallback);
+          return renderGatewayMessage(
+            base,
+            messageState,
+            context.route.locale,
+            presentation,
+            Date.now(),
+          );
+        };
         if (action === 'status') {
-          const motd = localized(responses.motd) ?? catalog[mode];
+          const motd = customMessage('motd');
           const announced =
             clientProtocol !== undefined && clientProtocol >= 0
               ? clientProtocol
@@ -546,10 +569,7 @@ export function createMinecraftProtocolAdapter(
         }
         if (action === 'login' || action === 'incompatible' || action === 'transfer') {
           diagnostic(action);
-          let text =
-            action === 'login'
-              ? (localized(responses.disconnect) ?? catalog[mode])
-              : catalog[action];
+          let text = action === 'login' ? customMessage('disconnect') : catalog[action];
           if (codec !== 'netty') {
             // Unversioned client handshakes use the already configured target as
             // a presentation hint; structured handshakes identify the client.
@@ -560,7 +580,11 @@ export function createMinecraftProtocolAdapter(
                 : clientProtocol <= 29)
             )
               text = (
-                action === 'login' ? (localized(responses.legacyDisconnect) ?? text) : text
+                action === 'login' &&
+                messageState === mode &&
+                !presentation?.messages[messageState]?.disconnect
+                  ? (localized(responses.legacyDisconnect) ?? text)
+                  : text
               ).replace(/\r\n|[\r\n]/g, responses.legacyLineSeparator ?? ' | ');
             return { bytes: legacyKickPacket(codec, text), close: true };
           }

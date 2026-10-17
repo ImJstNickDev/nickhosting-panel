@@ -19,6 +19,7 @@ import {
   Textarea,
   text,
 } from '../components/ui.js';
+import { IntegrationWakeSettings } from './auto-wake-policy.js';
 import { IntegrationContentPolicy } from './integration-content-policy.js';
 import { IntegrationRuntimeMappings } from './integration-runtime-mappings.js';
 import { getGameAdminSections, getGameArtwork, getGameConnectionAdmin } from './integrations.js';
@@ -189,6 +190,10 @@ function IntegrationWorkspace({ module, section }: { module: Module; section: st
             title={t('ownerIntegration.sleep')}
             actions={<Link to="/owner/settings#sleep">{t('ownerIntegration.globalSettings')}</Link>}
           >
+            <IntegrationWakeSettings
+              gameId={gameId}
+              initialRuntimeId={new URLSearchParams(location.search).get('runtime') ?? undefined}
+            />
             <IntegrationSleepSettings
               gameId={gameId}
               initialRuntimeId={new URLSearchParams(location.search).get('runtime') ?? undefined}

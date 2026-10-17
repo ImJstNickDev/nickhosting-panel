@@ -69,6 +69,7 @@ import {
 import { createStoragePolicyService } from './storage-policy.js';
 import { assertNoPendingUpload } from './upload-admission.js';
 import type { UploadTiming } from './upload-timing.js';
+import { assertAutoWakeAllowed } from './wake-policy.js';
 
 /** A queued operation retains attribution, never a permanently elevated authorization snapshot. */
 export async function authorizeQueuedEffect(
@@ -197,6 +198,7 @@ export async function authorizeQueuedEffect(
           server.intent !== 'sleeping'))
     )
       throw new DomainError('forbidden');
+    if (marker.kind === 'wake') await assertAutoWakeAllowed(db, serverId, policy, env);
     assertGatewaySleepFence(operation.plan, new Date(), true);
     // Recovered effects already handed off remain confirmable; new stops must
     // still satisfy the current inherited policy and retained positive idle proof.

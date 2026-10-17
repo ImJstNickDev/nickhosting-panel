@@ -364,4 +364,50 @@ describe('M5 additive platform HTTP contracts with actual identity/session handl
     ).toBe(403);
     expect((await request(owner, '/v1/owner/integrations/unknown/sleep-policy')).status).toBe(404);
   });
+  it('authorizes Gateway messages through actual sessions and rejects forged Origin writes', async () => {
+    const id = await f.server();
+    const configured = await request(
+      user,
+      `/v1/servers/${id}/gateway`,
+      {
+        enabled: true,
+        protocolId: 'fixture',
+        gameVersion: '1',
+        idleTimeoutSeconds: 10,
+        readinessTimeoutSeconds: 60,
+        readinessMaxAgeSeconds: 15,
+        estimateMaxAgeSeconds: 86400,
+        wakeRetrySeconds: 10,
+      },
+      'PUT',
+    );
+    expect(configured.status).toBe(200);
+    await f.db
+      .insertInto('game_integrations')
+      .values({ id: 'minecraft', version: '1.0.0', manifest: { ...f.manifest, id: 'minecraft' } })
+      .onConflict((c) => c.column('id').doNothing())
+      .execute();
+    await f.db
+      .updateTable('runtime_egg_mappings')
+      .set({ game_id: 'minecraft' })
+      .where('id', '=', f.mappingId)
+      .execute();
+    const path = `/v1/servers/${id}/gateway-messages`;
+    expect((await request(null, path)).status).toBe(401);
+    expect((await request(peer, path)).status).toBe(403);
+    const initial = await request(user, path);
+    expect(initial.status).toBe(200);
+    const value = await initial.json();
+    const body = {
+      revision: value.revision,
+      overrides: { sleeping: { motd: 'My server', disconnect: 'Please wait' } },
+    };
+    expect(
+      (await request(user, path, body, 'PUT', { origin: 'https://attacker.example.test' })).status,
+    ).toBe(403);
+    expect((await request(peer, path, body, 'PUT')).status).toBe(403);
+    expect((await request(user, path, body, 'PUT')).status).toBe(200);
+    expect((await request(user, path, body, 'PUT')).status).toBe(409);
+    expect(await (await request(user, path)).json()).toMatchObject({ overrides: body.overrides });
+  });
 });

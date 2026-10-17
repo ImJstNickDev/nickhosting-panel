@@ -3,13 +3,16 @@ import type { ColumnType, Generated } from 'kysely';
 export type ScheduleAction = 'start' | 'stop' | 'restart' | 'backup';
 export type ScheduleTiming =
   | { kind: 'once'; at: string }
-  | { kind: 'interval'; firstAt: string; everySeconds: number };
+  | { kind: 'interval'; firstAt: string; everySeconds: number }
+  | { kind: 'daily'; localTime: string }
+  | { kind: 'weekly'; localTime: string; weekdays: number[] };
 
 export interface ScheduleTables {
   server_schedules: {
     id: string;
     server_id: string;
     creator_id: string;
+    authorizer_id: string;
     name: string;
     action: ScheduleAction;
     timing: ColumnType<ScheduleTiming, string, string>;
@@ -26,6 +29,9 @@ export interface ScheduleTables {
     id: string;
     schedule_id: string;
     revision: number;
+    trigger: Generated<'scheduled' | 'manual'>;
+    request_key: string | null;
+    requester_id: string | null;
     due_at: Date;
     action: ScheduleAction;
     status: 'dispatched' | 'skipped';

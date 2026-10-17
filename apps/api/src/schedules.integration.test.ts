@@ -13,6 +13,7 @@ describe('schedule HTTP contracts with real authenticated sessions', () => {
   let app: ReturnType<typeof createApp>;
   let client: AuthClient;
   let serverId: string;
+  let createServer: () => Promise<string>;
   const origin = 'http://localhost:3999';
   const mails: IdentityMail[] = [];
   const at = new Date(Date.now() + 120_000);
@@ -44,6 +45,7 @@ describe('schedule HTTP contracts with real authenticated sessions', () => {
   beforeAll(async () => {
     database = await createTestDatabase();
     const f = await managementFixture(database.db);
+    createServer = () => f.server();
     await f.db.deleteFrom('provider_accounts').where('user_id', '=', f.owner.actorUserId).execute();
     await f.db.deleteFrom('user').where('id', '=', f.owner.actorUserId).execute();
     const bootstrapToken = randomBytes(32).toString('base64url');
@@ -154,6 +156,49 @@ describe('schedule HTTP contracts with real authenticated sessions', () => {
     expect((await request(`${url}/${schedule.id}`, 'DELETE', { revision: 3 })).status).toBe(204);
     expect(await (await request(url)).json()).toEqual([]);
     expect((await request(`${url}/${schedule.id}/outcomes`)).status).toBe(200);
+  });
+
+  it('previews local-calendar runs and explicitly dispatches a paused schedule with idempotency', async () => {
+    const isolatedServer = await createServer();
+    const url = `/v1/servers/${isolatedServer}/schedules`;
+    const timing = { kind: 'weekly', localTime: '03:00', weekdays: [1, 3, 5] };
+    const preview = await request(`${url}/preview`, 'POST', { timing, timeZone: 'Europe/Rome' });
+    expect(preview.status).toBe(200);
+    expect((await preview.json()).nextRuns).toHaveLength(5);
+    expect(
+      (await request(`${url}/preview`, 'POST', { timing, timeZone: 'Europe/Rome' }, false)).status,
+    ).toBe(401);
+    expect(
+      (
+        await request(`${url}/preview`, 'POST', {
+          timing: { ...timing, weekdays: [] },
+          timeZone: 'Europe/Rome',
+        })
+      ).status,
+    ).toBe(400);
+    const created = await request(url, 'POST', { ...input, timing, enabled: false });
+    expect(created.status).toBe(201);
+    const schedule = await created.json();
+    const body = { revision: 1, idempotencyKey: 'http_manual_request' };
+    expect(
+      (await request(`${url}/${schedule.id}/run`, 'POST', body, true, 'https://untrusted.example'))
+        .status,
+    ).toBe(403);
+    const result = await request(`${url}/${schedule.id}/run`, 'POST', body);
+    expect(result.status).toBe(202);
+    const dispatched = await result.json();
+    expect(dispatched).toMatchObject({ status: 'dispatched', reason: null });
+    expect(await (await request(`${url}/${schedule.id}/run`, 'POST', body)).json()).toEqual(
+      dispatched,
+    );
+    const listing = await (await request(url)).json();
+    expect(listing[0]).toMatchObject({
+      nextRunAt: schedule.nextRunAt,
+      enabled: false,
+      authorizerName: 'Owner',
+      lastOutcome: { jobId: dispatched.jobId },
+    });
+    expect((await (await request(`${url}/${schedule.id}/outcomes`)).json()).items).toHaveLength(1);
   });
 
   it('rejects a revoked real session on subsequent schedule mutations', async () => {

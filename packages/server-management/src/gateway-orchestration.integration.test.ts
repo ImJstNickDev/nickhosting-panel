@@ -39,6 +39,7 @@ import {
 import { getPlatformSleepPolicy } from './platform-queries.js';
 import { enqueueServerOperation } from './registry.js';
 import { authorizeQueuedEffect } from './runtime.js';
+import { createSchedule, deleteSchedule, runDueSchedules } from './schedules.js';
 import { getGameSleepPolicy, resolveIdleTimeout, setGameSleepPolicy } from './sleep-policy.js';
 import { managementFixture, pendingUploadFixture } from './test-fixtures.js';
 
@@ -1636,6 +1637,54 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     expect(operation.effect_started_at).not.toBeNull();
     return { fixture, pending, operation };
   }
+  it.each([false, true])(
+    'retires a revoked scheduled stop only under its exact generation (changed=%s)',
+    async (changed) => {
+      const fixture = await started();
+      await report(fixture);
+      const at = new Date(clock.getTime() + 1000);
+      const schedule = await createSchedule(f.db, f.context, serverId, {
+        name: 'Scheduled stop',
+        action: 'stop',
+        timing: { kind: 'once', at: at.toISOString() },
+        timeZone: 'UTC',
+        enabled: true,
+      });
+      advance(1000);
+      expect(await runDueSchedules(f.db, {}, { now: clock })).toMatchObject({ dispatched: 1 });
+      const pending = await getGatewayState(f.db, serverId, options);
+      expect(pending.sleepJobId).toBeTruthy();
+      await deleteSchedule(f.db, f.context, serverId, schedule.id, { revision: schedule.revision });
+      expect(await fixture.process(pending.sleepJobId ?? '')).toBe('failed');
+      expect(fixture.stop).not.toHaveBeenCalled();
+      if (changed) {
+        await f.db
+          .updateTable('gateway_server_states')
+          .set({ generation: randomUUID() })
+          .where('server_id', '=', serverId)
+          .execute();
+      }
+      expect(await reconcileGatewayState(f.db, serverId, options)).toMatchObject({
+        state: 'blocked',
+        sleepJobId: changed ? pending.sleepJobId : null,
+      });
+      if (!changed) {
+        advance(1);
+        expect(await report(fixture, { quiescenceUntil: undefined })).toMatchObject({
+          state: 'online',
+          sleepJobId: null,
+        });
+      }
+      expect((await row()).runtime_state).toBe('running');
+      expect(
+        await f.db
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', serverId)
+          .execute(),
+      ).toHaveLength(1);
+    },
+  );
   it('retires only a rejected pre-handoff sleep journal and establishes a new idle interval', async () => {
     const { fixture, pending, operation } = await rejectedSleep();
     const reservations = await f.db

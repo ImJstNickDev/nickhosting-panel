@@ -1433,3 +1433,55 @@ can now upload/rename/delete a chosen test file through SFTP and inspect server
 Activity to verify native notifications. That filesystem-delivery test remains
 pending; no fake success records were inserted. The earlier isolated test results
 and SFTP transport/outage limitations remain unchanged.
+
+## Automation activation — 2026-10-17
+
+The Owner approved required development migrations/restarts for Automation.
+Verified the exact `nickhosting-dev` API/worker/Gateway identities, current mounts,
+networks and published ports. All 38 existing migration checksums matched; only
+039/040 were pending. Preserved the old API/worker image as
+`nickhosting-dev-app:before-automation` and private container inspection records.
+
+Built the dev API image using the existing full Compose overlay chain and all
+three private interpolation files. Stopped only API/worker, saved a non-overwriting
+private custom-format development database dump (2,136,980 bytes), and verified
+its inventory. Explicit tools-profile migration applied exactly
+`039_gateway_automation_preferences.sql` and `040_schedule_calendar.sql`.
+The one-off migration container exited and was removed normally. Recreated only
+API/worker; restarted the existing dev Gateway under the same authorization.
+Vite uses existing source/catalog hot reload; no frontend image rebuild required.
+
+All 40 applied checksums match source. API and worker are healthy; HTTPS returns200.
+Mounts, network memberships and published ports match pre-activation records.
+No schedules were created in the live dev database by verification. No game power,
+file, backup, Blueprint installation, Wings/Panel configuration, DNS or NPM
+operation was performed. The backup and private records remain ignored.
+
+Gateway was unhealthy before activation. Its initialization transiently failed
+while API source was reloading, then recovered; the exact transient cause was not
+logged. Read-only investigation shows Core communication working and three of
+four routes listening. One stopped server has no retained backend-reachability
+proof, so its listener is correctly withheld with `backend_active_binding`.
+It needs its ordinary first manual startup to establish that proof. No startup
+was performed and global Gateway health must not be reported green. Other stopped
+routes retain their existing fake listeners. This operational prerequisite is
+separate from Automation's isolated tests.
+
+Lifecycle commands used:
+
+```sh
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local config --quiet
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local stop -t 20 api worker
+# Verified private pg_dump; no restore/reset.
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local up -d --no-deps --wait api worker
+docker restart --time 20 nickhosting-dev-gateway-1
+```
+
+Rollback requires inspecting/draining or reconciling current operations before
+reverting application code/images. Additive columns can be retained; calendar
+schedules/new manual occurrences must not be handed to an incompatible old worker.
+Do not reset the database or restore over new review data. See
+[Automation](AUTOMATION.md). SFTPGo #18 and the separately documented Blueprint
+installer ownership problem remain unchanged release/deployment blockers.

@@ -211,11 +211,16 @@ hard reloads retain the separate browser unload warning.
 
 Migration 014 adds PostgreSQL schedules and occurrences. Due work commits its
 claim, admitted lifecycle intent and outbox atomically; Redis remains delivery.
-Each new scheduled provider effect rechecks current creator permission, revision,
+Each new scheduled provider effect rechecks current authorizer permission, revision,
 occurrence identity and automatic-start consent/Gateway generation. Missed runs
 collapse or skip rather than queue; capacity refusal is immediate. Manual stops
 and explicit consent revocation suppress future automatic starts. Changing consent
 does not reset unknown effects, release reservations or silently enable a Gateway.
+Migrations 039/040 add independent autowake policy and per-state Gateway
+presentation, local-time calendar recurrence and idempotent manual schedule runs.
+Scheduled stops preserve preexisting automatic-start consent; manual stops retain
+suppression. The one-second bounded scheduler is separate from provider
+reconciliation. See [Automation](AUTOMATION.md) for contracts and recovery.
 
 Migration 015 adds bounded service heartbeat observations. Owner health separates
 API/DB success, Redis probe, worker polling progress, authenticated Gateway contact,

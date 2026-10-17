@@ -190,7 +190,7 @@ function ActivityDetails({ item }: { item: Item }) {
             {entries.map((entry) => (
               <li key={string(entry.id) || `${string(entry.path)}:${string(entry.target)}`}>
                 <span>{string(entry.path) || string(entry.target)}</span>
-                {entry.target && entry.path && <span>→ {string(entry.target)}</span>}
+                {Boolean(entry.target && entry.path) && <span>→ {string(entry.target)}</span>}
                 {typeof entry.state === 'string' && (
                   <span className="muted">
                     {t(
@@ -456,7 +456,7 @@ export function ActivityTimeline({ serverId }: { serverId?: string }) {
                                   <small className="activity-count">{meta.count}</small>
                                 )}
                               </span>
-                              {(meta.path || meta.root || meta.command) && (
+                              {Boolean(meta.path || meta.root || meta.command) && (
                                 <small>
                                   {string(meta.command) || string(meta.path) || string(meta.root)}
                                   {meta.target ? ` → ${string(meta.target)}` : ''}

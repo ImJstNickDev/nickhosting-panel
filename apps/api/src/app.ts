@@ -34,6 +34,7 @@ import { z } from 'zod';
 import { registerFileViewerRoutes } from './file-viewers.js';
 import { availableGameCatalog, registerGameModuleRoutes } from './game-modules.js';
 import { registerGatewayRoutes } from './gateway.js';
+import { registerGatewayMessageRoutes } from './gateway-messages.js';
 import { registerHealthRoutes } from './health.js';
 import { registerMinecraftRoutes } from './minecraft.js';
 import { registerMinecraftSourceRoutes } from './minecraft-sources.js';
@@ -526,6 +527,16 @@ export function createApp(options: Options) {
   registerWebSessionRoutes(app, { db, env, codec: options.codec, principal, body });
   registerProfilePhotoRoutes(app, { db, principal });
   registerHealthRoutes(app, {
+    db,
+    env,
+    principal,
+    management:
+      options.management ??
+      (async () => {
+        throw new DomainError('integration_unavailable');
+      }),
+  });
+  registerGatewayMessageRoutes(app, {
     db,
     env,
     principal,

@@ -1,6 +1,7 @@
 import { DomainError } from '@nickhosting/core';
 import {
   deletePlatformProject,
+  getGameAutoWakePolicy,
   getGameContentPolicy,
   getGameDomainPolicy,
   getGameSleepPolicy,
@@ -12,6 +13,7 @@ import {
   getPlatformSleepPolicy,
   getPlatformTransfers,
   getPlatformUser,
+  getServerAutoWakePolicy,
   listPlatformActivity,
   listPlatformAudit,
   listPlatformGames,
@@ -21,9 +23,11 @@ import {
   listPlatformUsers,
   lookupProjectCollaborator,
   retryPlatformJob,
+  setGameAutoWakePolicy,
   setGameContentPolicy,
   setGameDomainPolicy,
   setGameSleepPolicy,
+  setServerAutoWakePolicy,
   updatePlatformProject,
   updatePlatformServer,
 } from '@nickhosting/server-management';
@@ -74,6 +78,28 @@ export function registerPlatformRoutes(
     const context = await principal(c, true);
     return c.json(await (await management()).storagePolicy.refresh(context, c.req.param('id')));
   });
+  app.get('/v1/owner/integrations/:gameId/auto-wake-policy', async (c) =>
+    c.json(await getGameAutoWakePolicy(db, await principal(c, true), c.req.param('gameId'), env)),
+  );
+  app.put('/v1/owner/integrations/:gameId/auto-wake-policy', async (c) =>
+    c.json(
+      await setGameAutoWakePolicy(
+        db,
+        await principal(c, true),
+        c.req.param('gameId'),
+        await body(c),
+        env,
+      ),
+    ),
+  );
+  app.get('/v1/platform/servers/:id/auto-wake-policy', async (c) =>
+    c.json(await getServerAutoWakePolicy(db, await principal(c), c.req.param('id'), env)),
+  );
+  app.put('/v1/platform/servers/:id/auto-wake-policy', async (c) =>
+    c.json(
+      await setServerAutoWakePolicy(db, await principal(c), c.req.param('id'), await body(c), env),
+    ),
+  );
   app.get('/v1/owner/integrations/:gameId/sleep-policy', async (c) =>
     c.json(await getGameSleepPolicy(db, await principal(c, true), c.req.param('gameId'), env)),
   );

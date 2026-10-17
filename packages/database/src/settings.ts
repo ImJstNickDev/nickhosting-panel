@@ -14,6 +14,7 @@ import { evaluateGameAccess, gameManifestSchema, gameRolloutSchema } from '@nick
 import { type Kysely, sql, type Transaction } from 'kysely';
 import type { PoolClient } from 'pg';
 import type { Database } from './index.js';
+import { notifyGatewayChange } from './job-notifications.js';
 import { assertStoragePolicyIdle } from './storage-policy.js';
 
 type DB = Kysely<Database> | Transaction<Database>;
@@ -143,6 +144,12 @@ export async function updateSettings(
       // Generic settings writes share the specialized editor's idle fence.
       await tx.updateTable('gateway_server_states').set({ idle_since: null }).execute();
     }
+    if (
+      'gameAutoWakePolicies' in patch ||
+      'defaultAutoWakeEnabled' in patch ||
+      'autoWakeUserAccess' in patch
+    )
+      await notifyGatewayChange(tx);
     await recordAudit(tx, context, 'settings.updated', { fields: Object.keys(patch) });
     return resolved;
   });

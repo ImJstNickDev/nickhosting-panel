@@ -18,7 +18,9 @@ import {
   getAutomationConsent,
   listScheduleOutcomes,
   listSchedules,
+  previewSchedule,
   runDueSchedules,
+  runScheduleNow,
   setAutomationConsent,
   updateSchedule,
 } from './schedules.js';
@@ -142,6 +144,20 @@ async function lifecycleFixture() {
       }),
     ),
     power,
+    stopWithConfirmation: vi.fn(
+      async (
+        _applicationId: number,
+        _identifier: string,
+        callbacks: Parameters<PterodactylAdapter['stopWithConfirmation']>[2],
+      ) => {
+        expect(await callbacks.authorize()).toBe(true);
+        await callbacks.beforePower?.();
+        state = 'offline';
+        processStart = null;
+        await callbacks.onConfirmed();
+        return { confirmed: true };
+      },
+    ),
   } as unknown as PterodactylAdapter;
   const options: LifecycleOptions = {
     adapter,
@@ -152,6 +168,7 @@ async function lifecycleFixture() {
     },
     reserveStart: (id, jobId, action, db) => reserveStart(db, id, jobId, action),
     observeProcessStart: async () => processStart,
+    confirmAlreadyStopped: async () => state === 'offline',
   };
   const process = async (jobId: string) => {
     await f.db
@@ -388,7 +405,13 @@ describe('durable generic schedules', () => {
       'CREATE TRIGGER fail_schedule_fixture BEFORE INSERT ON schedule_occurrences FOR EACH ROW EXECUTE FUNCTION fail_schedule_fixture()',
     );
     try {
-      await expect(due()).rejects.toThrow('isolated rollback fixture');
+      const onError = vi.fn();
+      expect(await runDueSchedules(f.db, {}, { now: at, onError })).toEqual({
+        dispatched: 0,
+        skipped: 0,
+        failures: 1,
+      });
+      expect(onError).toHaveBeenCalledOnce();
     } finally {
       await database.pool.query('DROP TRIGGER fail_schedule_fixture ON schedule_occurrences');
     }
@@ -519,7 +542,7 @@ describe('durable generic schedules', () => {
     });
   });
 
-  it('scheduled stop suppresses future scheduled starts until an explicit rearm', async () => {
+  it('scheduled stop preserves consent for later starts', async () => {
     await allowStarts();
     const schedule = await create({ action: 'stop' });
     expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
@@ -534,7 +557,7 @@ describe('durable generic schedules', () => {
           .where('id', '=', serverId)
           .executeTakeFirstOrThrow()
       ).intent,
-    ).toBe('manually_stopped');
+    ).toBe('sleeping');
     expect(
       (
         await f.db
@@ -543,13 +566,13 @@ describe('durable generic schedules', () => {
           .where('server_id', '=', serverId)
           .executeTakeFirstOrThrow()
       ).state,
-    ).toBe('manually_stopped');
+    ).toBe('sleeping');
     const next = await create({ action: 'start' });
     expect(await due()).toEqual({ dispatched: 0, skipped: 1 });
-    expect((await outcomes(next.id)).items[0]?.reason).toBe('manual_stop_suppressed');
+    expect((await outcomes(next.id)).items[0]?.reason).toBe('conflict');
   });
 
-  it('scheduled stop revokes a queued wake even when the stop itself conflicts', async () => {
+  it('a conflicting scheduled stop does not revoke an already admitted start', async () => {
     await allowStarts();
     const start = await create({ action: 'start' });
     expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
@@ -557,8 +580,8 @@ describe('durable generic schedules', () => {
     const stop = await create({ action: 'stop' });
     expect(await due()).toEqual({ dispatched: 0, skipped: 1 });
     expect((await outcomes(stop.id)).items[0]?.reason).toBe('conflict');
-    await expect(authorizeQueuedEffect(f.db, startJob, serverId)).rejects.toMatchObject({
-      code: 'forbidden',
+    await expect(authorizeQueuedEffect(f.db, startJob, serverId)).resolves.toMatchObject({
+      sessionType: 'regular',
     });
     expect(
       (
@@ -568,7 +591,7 @@ describe('durable generic schedules', () => {
           .where('id', '=', serverId)
           .executeTakeFirstOrThrow()
       ).intent,
-    ).toBe('manually_stopped');
+    ).toBe('auto_wake_enabled');
   });
 
   it('reauthorizes after prepared intent and prevents any provider call after disable', async () => {
@@ -694,4 +717,165 @@ it('requires a spare provider slot before enabling post-success retention', asyn
   await expect(
     create({ retention: { enabled: true, keepLast: mapping.feature_limits.backups } }),
   ).rejects.toMatchObject({ code: 'validation_failed' });
+});
+
+it('requires a new future time to reactivate a consumed one-shot', async () => {
+  const schedule = await create();
+  await due();
+  expect((await listSchedules(f.db, f.context, serverId))[0]?.status).toBe('completed');
+  await updateSchedule(f.db, f.context, serverId, schedule.id, {
+    ...input({ enabled: false }),
+    revision: 1,
+  });
+  await expect(
+    updateSchedule(f.db, f.context, serverId, schedule.id, { ...input(), revision: 2 }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
+});
+
+it('runs a paused schedule explicitly once without consuming its next recurrence', async () => {
+  const schedule = await create({ enabled: false, timing: { kind: 'daily', localTime: '04:00' } });
+  const body = { revision: 1, idempotencyKey: 'manual_fixture_request' };
+  const [one, two] = await Promise.all([
+    runScheduleNow(f.db, f.context, serverId, schedule.id, body),
+    runScheduleNow(f.db, f.context, serverId, schedule.id, body),
+  ]);
+  expect(one).toEqual(two);
+  expect(one?.status).toBe('dispatched');
+  const after = (await listSchedules(f.db, f.context, serverId))[0];
+  expect(after?.nextRunAt).toEqual(schedule.nextRunAt);
+  expect(after?.enabled).toBe(false);
+  expect(after?.lastOutcome?.jobId).toBe(one?.jobId);
+  expect((await outcomes(schedule.id)).items).toHaveLength(1);
+  expect((await outcomes(schedule.id)).items[0]).toMatchObject({
+    trigger: 'manual',
+    requesterId: f.context.actorUserId,
+  });
+  await expect(authorizeQueuedEffect(f.db, one?.jobId as string, serverId)).resolves.toMatchObject({
+    sessionType: 'regular',
+  });
+  await expect(
+    runScheduleNow(f.db, f.context, serverId, schedule.id, { ...body, revision: 2 }),
+  ).rejects.toMatchObject({ code: 'conflict' });
+});
+
+it('preview has server access scope and remains read-only', async () => {
+  const result = await previewSchedule(f.db, f.context, serverId, {
+    timing: { kind: 'weekly', localTime: '03:00', weekdays: [1, 4] },
+    timeZone: 'Europe/Rome',
+  });
+  expect(result.nextRuns).toHaveLength(5);
+  expect(await listSchedules(f.db, f.context, serverId)).toEqual([]);
+  const other = await managementFixture(f.db, { interactive: true });
+  await expect(
+    previewSchedule(f.db, other.context, serverId, {
+      timing: { kind: 'daily', localTime: '03:00' },
+      timeZone: 'UTC',
+    }),
+  ).rejects.toMatchObject({ code: 'forbidden' });
+});
+
+it('keeps original creator separate from the manager authorizing an edit', async () => {
+  const schedule = await create();
+  const actor = await managementFixture(f.db, { interactive: true });
+  const projectId = randomUUID();
+  await f.db
+    .insertInto('projects')
+    .values({ id: projectId, owner_id: f.context.actorUserId, name: 'delegated calendar' })
+    .execute();
+  await f.db
+    .insertInto('project_members')
+    .values({ project_id: projectId, user_id: actor.context.actorUserId, role: 'manager' })
+    .execute();
+  await f.db
+    .updateTable('managed_servers')
+    .set({ project_id: projectId })
+    .where('id', '=', serverId)
+    .execute();
+  const changed = await updateSchedule(f.db, actor.context, serverId, schedule.id, {
+    ...input(),
+    revision: 1,
+  });
+  expect(changed.creatorId).toBe(f.context.actorUserId);
+  expect(changed.authorizerId).toBe(actor.context.actorUserId);
+  expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+  const job = await f.db
+    .selectFrom('operation_jobs')
+    .select('actor_id')
+    .where('id', '=', await jobOf(schedule.id))
+    .executeTakeFirstOrThrow();
+  expect(job.actor_id).toBe(actor.context.actorUserId);
+});
+
+it('a failing candidate rolls back alone and does not block a different server', async () => {
+  const broken = await create();
+  const other = await f.server();
+  const good = await createSchedule(f.db, f.context, other, input());
+  await database.pool.query(
+    `CREATE FUNCTION fail_one_schedule_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.schedule_id = '${broken.id}'::uuid THEN RAISE EXCEPTION 'isolated candidate'; END IF; RETURN NEW; END $$`,
+  );
+  await database.pool.query(
+    'CREATE TRIGGER fail_one_schedule_fixture BEFORE INSERT ON schedule_occurrences FOR EACH ROW EXECUTE FUNCTION fail_one_schedule_fixture()',
+  );
+  try {
+    expect(await due()).toEqual({ dispatched: 1, skipped: 0, failures: 1 });
+    expect((await outcomes(broken.id)).items).toEqual([]);
+    expect((await listScheduleOutcomes(f.db, f.context, other, good.id)).items[0]?.status).toBe(
+      'dispatched',
+    );
+  } finally {
+    await database.pool.query('DROP TRIGGER fail_one_schedule_fixture ON schedule_occurrences');
+  }
+});
+
+it('history separates a completed backup from failed resumption and retention', async () => {
+  const schedule = await create();
+  await due();
+  await f.db
+    .updateTable('server_operations')
+    .set({
+      plan: JSON.stringify({
+        backupComplete: true,
+        backupResumeOutcome: 'failed',
+        backupRetentionError: 'provider_unavailable',
+      }),
+    })
+    .where('job_id', '=', await jobOf(schedule.id))
+    .execute();
+  expect((await outcomes(schedule.id)).items[0]?.backupResult).toEqual({
+    state: 'succeeded',
+    resume: 'failed',
+    cleanupFailed: false,
+    retentionFailed: true,
+  });
+});
+
+it('confirmed scheduled shutdown returns to sleeping and allows the next admitted start', async () => {
+  await allowStarts();
+  const fixture = await lifecycleFixture();
+  const start = await create({ action: 'start' });
+  expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+  const startJob = await jobOf(start.id);
+  expect(await fixture.process(startJob)).toBe('waiting');
+  expect(await fixture.process(startJob)).toBe('succeeded');
+  const stop = await create({ action: 'stop' });
+  expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+  expect(await fixture.process(await jobOf(stop.id))).toBe('succeeded');
+  const server = await f.db
+    .selectFrom('managed_servers')
+    .select(['intent', 'runtime_state'])
+    .where('id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  expect(server).toEqual({ intent: 'sleeping', runtime_state: 'offline' });
+  const gateway = await f.db
+    .selectFrom('gateway_server_states')
+    .select(['state', 'sleep_job_id'])
+    .where('server_id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  expect(gateway).toEqual({ state: 'sleeping', sleep_job_id: null });
+  await f.observe();
+  const next = await create({ action: 'start' });
+  expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+  await expect(authorizeQueuedEffect(f.db, await jobOf(next.id), serverId)).resolves.toMatchObject({
+    sessionType: 'regular',
+  });
 });

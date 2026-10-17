@@ -627,3 +627,44 @@ describe('actual socket Minecraft status probes against isolated protocol fixtur
     });
   });
 });
+
+describe('per-server Gateway presentation', () => {
+  it('uses independent MOTD and disconnect overrides with placeholders and formatting', () => {
+    const ctx = context();
+    const presentation = {
+      serverName: 'Demo',
+      messages: { sleeping: { motd: '§a{server} sleeping', disconnect: 'Join later: {server}' } },
+    };
+    const status = session({ ...ctx, route: { ...ctx.route, presentation } });
+    status.classify(handshake());
+    status.classify(frameMinecraftPacket(0));
+    expect(componentText(decodeJson(status.response('sleeping').bytes).description)).toBe(
+      'Demo sleeping',
+    );
+    const login = session({ ...ctx, route: { ...ctx.route, presentation } });
+    login.classify(handshake(766, 2));
+    login.classify(loginStart());
+    expect(componentText(decodeJson(login.response('sleeping').bytes))).toBe('Join later: Demo');
+  });
+  it('explains disabled automatic wake rather than inviting a join to start', () => {
+    const ctx = context('1.20.5', 'it');
+    const status = session({ ...ctx, route: { ...ctx.route, wakeEnabled: false } });
+    status.classify(handshake());
+    status.classify(frameMinecraftPacket(0));
+    expect(componentText(decodeJson(status.response('sleeping').bytes).description)).toBe(
+      'Server spento. Avvialo dal pannello.',
+    );
+  });
+  it('renders capacity errors separately from generic blocking', () => {
+    const ctx = context();
+    const presentation = {
+      serverName: 'Demo',
+      messages: { capacity_denied: { disconnect: 'Capacity custom' } },
+      blockedReason: 'capacity_denied' as const,
+    };
+    const login = session({ ...ctx, route: { ...ctx.route, presentation } });
+    login.classify(handshake(766, 2));
+    login.classify(loginStart());
+    expect(componentText(decodeJson(login.response('blocked').bytes))).toBe('Capacity custom');
+  });
+});

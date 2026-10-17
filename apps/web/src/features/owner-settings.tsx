@@ -17,6 +17,7 @@ import {
   Select,
   Textarea,
 } from '../components/ui.js';
+import { GlobalWakeSettings } from './auto-wake-policy.js';
 import { domainSettingKeys, OwnerDomains } from './owner-domains.js';
 import { OwnerStoragePolicy } from './owner-storage-policy.js';
 import { GlobalSleepSettings } from './sleep-timeout.js';
@@ -106,6 +107,14 @@ export function OwnerSettingsPage() {
           }}
         />
       </Section>
+      <Section title={t('automation.autoWake')}>
+        <GlobalWakeSettings
+          values={value.config.values}
+          lockedKeys={value.config.lockedKeys}
+          editable={editable}
+          onSaved={() => settings.refetch()}
+        />
+      </Section>
       <Section title={t('storagePolicy.title')}>
         {editable ? (
           <OwnerStoragePolicy
@@ -163,6 +172,9 @@ export function OwnerSettingsPage() {
                     'defaultIdleTimeoutSeconds',
                     'idleTimeoutUserAccess',
                     'gameIdleTimeouts',
+                    'defaultAutoWakeEnabled',
+                    'autoWakeUserAccess',
+                    'gameAutoWakePolicies',
                     'storagePolicy',
                     'defaultUserStorageMiB',
                     'defaultServerStorageMiB',

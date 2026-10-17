@@ -5,6 +5,7 @@ import {
   createBrowserRouter,
   createRoutesFromElements,
   Link,
+  Navigate,
   Route,
   RouterProvider,
   useParams,
@@ -82,7 +83,8 @@ const router = createBrowserRouter(
           <Route path="sftp" element={<ServerPage component={SftpPage} />} />
           <Route path="backups" element={<ServerPage component={BackupsPage} />} />
           <Route path="network" element={<ServerPage component={NetworkPage} />} />
-          <Route path="automation" element={<ServerPage component={AutomationPage} />} />
+          <Route path="schedules" element={<Navigate to="../automation" replace />} />
+          <Route path="automation/*" element={<ServerPage component={AutomationPage} />} />
           <Route path="activity" element={<ServerPage component={ActivityPage} />} />
           <Route path="settings" element={<ServerPage component={ServerSettings} />} />
           <Route path="game/:sectionId" element={<ServerGameSection />} />

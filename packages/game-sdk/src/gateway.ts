@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import { minecraftGatewayResponsesSchema } from '@nickhosting/core';
+import { gatewayPresentationSchema, minecraftGatewayResponsesSchema } from '@nickhosting/core';
 import { z } from 'zod';
 
 const ipAddress = z
@@ -104,6 +104,8 @@ export const gatewayRouteSchema = z
       .strict()
       .optional(),
     mode: gatewayModeSchema,
+    wakeEnabled: z.boolean().optional(),
+    presentation: gatewayPresentationSchema.optional(),
     locale: z.enum(['en', 'it']),
   })
   .strict()

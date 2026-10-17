@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { type AuthContext, assertPermission, DomainError } from '@nickhosting/core';
+import {
+  type AuthContext,
+  assertPermission,
+  DomainError,
+  gatewayMessageOverridesSchema,
+} from '@nickhosting/core';
 import { type Database, getSettings, recordAudit } from '@nickhosting/database';
 import {
   type GatewayMinecraftProtocol,
@@ -340,6 +345,10 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .selectAll('route')
       .select([
         'server.node_id',
+        'server.name as server_name',
+        'policy.gateway_messages',
+        'policy.startup_deadline_at',
+        'policy.readiness_timeout_seconds',
         'server.runtime_state',
         'server.active_operation_id',
         'mapping.game_id',
@@ -367,7 +376,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
     const serverIds = [
       ...new Set(
         rows
-          .filter((row) => row.runtime_state === 'offline' && row.active_operation_id === null)
+          .filter((row) => row.runtime_state === 'offline' || row.active_operation_id !== null)
           .map((row) => row.server_id),
       ),
     ];
@@ -483,6 +492,39 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
           ...(minecraft ? { minecraft } : {}),
         },
         mode: state.state,
+        wakeEnabled: state.wakeEnabled,
+        ...(minecraft
+          ? {
+              presentation: {
+                serverName: row.server_name,
+                ...(operation?.action === 'stop' &&
+                row.active_operation_id === operation.job_id &&
+                ['queued', 'running', 'uncertain'].includes(operation.state)
+                  ? { stopping: true }
+                  : {}),
+                messages: gatewayMessageOverridesSchema.parse(row.gateway_messages ?? {}),
+                ...(state.errorCode === 'resources_unavailable'
+                  ? { blockedReason: 'capacity_denied' as const }
+                  : state.errorCode === 'integration_unavailable'
+                    ? { blockedReason: 'unavailable' as const }
+                    : {}),
+                ...(state.state === 'waking' &&
+                state.startupEstimate &&
+                row.startup_deadline_at &&
+                row.readiness_timeout_seconds
+                  ? {
+                      estimatedStartupSeconds: Math.min(
+                        86400,
+                        Math.ceil(state.startupEstimate.p90Ms / 1000),
+                      ),
+                      startupBeganAt: new Date(
+                        row.startup_deadline_at.getTime() - row.readiness_timeout_seconds * 1000,
+                      ).toISOString(),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         locale: row.locale === 'it' ? ('it' as const) : ('en' as const),
       };
       const hash = digest(payload),

@@ -11196,3 +11196,116 @@ The Blueprint installer traversal cause remains unresolved: further native exten
 installations remain blocked pending a separately reviewed solution. SFTPGo #18 is
 unchanged. Write eligibility does not itself prove an application-level save or
 successful SFTP transfer; those require normal user operations.
+
+## Automation, schedules and per-state Gateway messages — 2026-10-17
+
+Scope and contracts: [Automation](AUTOMATION.md). Independent bounded agents owned
+calendar/dispatch, wake policy and frontend respectively; the coordinator integrated
+Gateway presentation, lifecycle finalization, activation and documentation.
+Independent technical review covered permission/revision checks, queued-effect
+revocation, generation fences and retained connections. A separate rendered
+UX/accessibility/content review covered desktop EN and mobile IT.
+
+Implemented daily/weekly IANA-zone recurrence and preview, idempotent Run now,
+creator/authorizer separation, completed one-shot handling, independent bounded
+scheduler polling, richer history, compact schedule controls and backup navigation.
+Autowake resolves independently from autosleep through global/integration/runtime/
+server settings, with hidden/editable/disable-only access. Per-state MOTD and login
+disconnect overrides support formatting, bounded placeholders, defaults/reset and
+preview; they do not grant permission or alter readiness/forwarding.
+
+Review found and corrected: failed scheduled stops retaining `sleep_job_id`, active
+stop presentation excluded by the snapshot batch, derived stopping messages ignoring
+Owner defaults, non-existent `ready` state naming, preview/runtime `{state}` mismatch,
+paused next-run display, disable-only UI/backend disagreement, and misleading
+completed-versus-success labels. Regression coverage exercises current authenticated
+handlers, forged Origin rejection, foreign-server denial and stale revisions.
+
+Targeted validation (not the full historical M1–M5 matrix):
+
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/wake-policy.test.ts packages/server-management/src/schedule-calendar.test.ts packages/server-management/src/schedules.test.ts packages/core/src/gateway-presentation.test.ts games/minecraft/src/protocol.test.ts apps/game-gateway/src/data-plane.test.ts` — **213 passed**.
+- Calendar/schedule/worker import unit selection — **11 passed**.
+- Isolated schedule database and HTTP suites — **30 passed**, including confirmed
+  scheduled stop → sleeping → next scheduled start and per-candidate failure isolation.
+- Wake policy plus existing Gateway orchestration integration suites — **95 passed**;
+  shared-input follow-up **3 passed**; subsequent stop recovery selection **14 passed**.
+- Message backend integration — **3 passed** (revision/reset, authorization/direct
+  mode/support denial, Owner defaults and environment precedence).
+- Actual authenticated message HTTP regression — **1 passed** (7 unrelated tests
+  skipped); active scheduled-stop Minecraft snapshot regression — **1 passed**.
+- Cosmetic snapshot update TCP/UDP forwarding regression — **1 passed**, also included
+  in the final full data-plane unit suite above.
+- `scripts/dev.sh pnpm typecheck` — passed. `scripts/dev.sh pnpm build` — passed;
+  existing large lazy viewer chunk warning remains.
+
+Integration commands use `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm
+exec vitest run --config vitest.integration.config.ts ...`, discovering the existing
+isolated test stack without creating containers. Failed intermediate attempts were
+test setup/type issues (coalesced protocol frames not consumed separately, missing
+fixture integration FK, incomplete bilingual defaults, readonly route assignment,
+and unbound HTTP fixture contexts); corrected targeted reruns passed. They are not
+reported as successful initial runs.
+
+Development activation and exact commands are recorded in
+[M5 environments](M5-ENVIRONMENTS.md#automation-activation--2026-10-17): verified
+private backup, migrations039/040, API/worker recreation and Gateway restart only.
+No production resources, Pterodactyl/Wings settings, game-server commands or files
+were changed. Live dev has no schedules; execution tests use isolated DB/provider
+fixtures. No new real game servers were created and none needed cleanup.
+
+Live Gateway has three listening routes and one stopped server without its initial
+reachability proof; it remains globally unhealthy until that normal first startup.
+No readiness proof was fabricated. A live scheduled backup/stop/wake or custom MOTD
+round trip with a Minecraft client was not performed. Protocol/TCP fixtures are
+not new real-client compatibility certifications. SFTPGo #18 remains a separate
+production-release gate; native Blueprint installs retain their ownership blocker.
+
+Browser validation: `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec
+vitest run --config vitest.browser.config.ts apps/web/tests/automation.browser.test.ts`
+— **5/5 passed** against actual application handlers, isolated PostgreSQL and fixture
+providers. Covered calendar CRUD/preview, duplicate/toggle/delete, keyboard dialogs,
+Owner global/game/runtime writes, ordinary-user disable-only enforcement, wake/sleep
+independence and message persistence/reset. After final history/UI changes the
+**two affected tests passed** (three deliberately skipped), adding explicit Run now,
+retained-table503 and loading assertions. Earlier browser fixture/selector failures
+were corrected; no complete historical browser matrix was repeated.
+
+Axe reported no violations in the scoped tested views; keyboard/dialog and mobile
+reflow checks passed. This is targeted accessibility evidence, not a blanket WCAG
+certification. Independent rendered review requested and verified corrections for
+paused scheduling, selected mobile navigation, duplicate labels and dialog actions.
+The coordinator also inspected desktop schedules/messages and the mobile calendar.
+
+Sanitized real-browser captures:
+
+- [Schedules](screenshots/m5/automation-schedules-desktop-en.png)
+- [Sleep/wake](screenshots/m5/automation-sleep-desktop-en.png)
+- [Messages EN](screenshots/m5/automation-messages-desktop-en.png)
+- [Messages mobile IT](screenshots/m5/automation-messages-mobile-it.png)
+- [Calendar mobile](screenshots/m5/automation-schedule-mobile-en.png)
+- [Owner runtime policy](screenshots/m5/automation-owner-runtime-en.png)
+- [Loading](screenshots/m5/automation-loading-en.png)
+- [Error with retained data](screenshots/m5/automation-refresh-error-en.png)
+
+The existing Blueprint addon was not modified or reinstalled. The dev Gateway was
+restarted a second time after the final shared-message-default consolidation;
+no other service scope, mount or data was changed. The ordinary first-start
+prerequisite described above remains, so no all-routes-ready claim is made.
+
+Final checks: production build passed on the final UI; typecheck passed; full
+Biome lint passed with 31 warnings and two informational notices (no errors);
+format check passed; i18n check compiled/verified 2,131 keys across English,
+Italian and pseudolocale. Indexed governance/tracked-content hygiene passed over
+1,080 text files, 421 review PNGs, 906 relative links and 44 ignore cases.
+After consolidating duplicate protocol default messages into the shared catalogue,
+the 40 affected core/protocol tests passed again. No full historical matrix or
+live Minecraft scenario was repeated. API/worker/Vite remain healthy and public
+HTTPS returns200; Gateway control is available with three listening routes and
+the documented fourth-route first-start prerequisite. No new live test assets.
+
+Final UX review also caught a reintroduced Run-now success banner (contrary to the
+Owner's compact-history preference) and an error screenshot using a nonexistent
+fixture translation key. Removed the banner, retained inline outcomes, corrected
+the fixture to the real `integration_unavailable` envelope, and verified localized
+failure/retry. The two affected browser tests passed again (three skipped), and
+the error screenshot was refreshed. These changes do not alter provider execution.

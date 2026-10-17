@@ -108,6 +108,7 @@ const capabilitySchema = z
     worlds: z.boolean(),
     idleDetection: z.boolean(),
     gracefulStop: z.boolean(),
+    gatewayMessages: z.boolean().optional(),
     readiness: z.boolean(),
     wake: z.enum(['unsupported', 'manual', 'verified-protocol']),
   })

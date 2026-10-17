@@ -39,6 +39,19 @@ const origin = (protocols: string[]) =>
       return protocols.includes(url.protocol) && url.origin === value;
     });
 
+export const autoWakeUserAccessSchema = z.enum(['hidden', 'editable', 'disable-only']);
+export const gameAutoWakePolicySchema = z.strictObject({
+  gameEnabled: z.boolean().nullable(),
+  runtimeEnabled: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), z.boolean()),
+  userAccess: autoWakeUserAccessSchema.nullable().default(null),
+  runtimeUserAccess: z
+    .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), autoWakeUserAccessSchema)
+    .default({}),
+});
+export const gameAutoWakePoliciesSchema = z.record(
+  z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+  gameAutoWakePolicySchema,
+);
 export const gameIdleTimeoutSchema = z.union([z.literal(-1), z.number().int().min(1).max(604800)]);
 export const idleTimeoutUserAccessSchema = z.enum(['hidden', 'editable', 'shorten-only']);
 export const gameIdleTimeoutsSchema = z
@@ -187,6 +200,9 @@ export const platformConfigSchema = z
       .refine((v) => posix.normalize(v) === v && !/[\0-\x20?#]/.test(v))
       .optional(),
     gameIdleTimeouts: gameIdleTimeoutsSchema,
+    gameAutoWakePolicies: gameAutoWakePoliciesSchema,
+    defaultAutoWakeEnabled: z.boolean(),
+    autoWakeUserAccess: autoWakeUserAccessSchema,
     defaultIdleTimeoutSeconds: gameIdleTimeoutSchema,
     idleTimeoutUserAccess: idleTimeoutUserAccessSchema,
     gatewayEnabled: z.boolean(),
@@ -234,6 +250,9 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   sftpAuxiliaryLimit: 3,
   sftpCredentialTtlSeconds: 3600,
   gameIdleTimeouts: {},
+  gameAutoWakePolicies: {},
+  defaultAutoWakeEnabled: true,
+  autoWakeUserAccess: 'editable',
   dnsDomains: [],
   dnsGamePolicies: {},
   dnsBlockedTerms: [],
@@ -338,6 +357,9 @@ export const configEnvironmentKeys = {
   minecraftGatewayResponses: 'NH_MINECRAFT_GATEWAY_RESPONSES',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
   gameIdleTimeouts: 'NH_GAME_IDLE_TIMEOUTS',
+  gameAutoWakePolicies: 'NH_GAME_AUTO_WAKE_POLICIES',
+  defaultAutoWakeEnabled: 'NH_DEFAULT_AUTO_WAKE_ENABLED',
+  autoWakeUserAccess: 'NH_AUTO_WAKE_USER_ACCESS',
   defaultIdleTimeoutSeconds: 'NH_DEFAULT_IDLE_TIMEOUT_SECONDS',
   idleTimeoutUserAccess: 'NH_IDLE_TIMEOUT_USER_ACCESS',
   gatewayEnabled: 'NH_GATEWAY_ENABLED',
@@ -417,6 +439,7 @@ export function resolveConfig(
       key === 'pterodactylUploadOrigins' ||
       [
         'gameIdleTimeouts',
+        'gameAutoWakePolicies',
         'gameContentPolicies',
         'dnsDomains',
         'dnsGamePolicies',
@@ -444,7 +467,11 @@ export function resolveConfig(
     } else if (numericKeys.has(key)) {
       if (!/^(0|[1-9]\d*)$/.test(value)) invalid([key]);
       merged[key] = Number(value);
-    } else if (key === 'smtpSecure' || key === 'gatewayEnabled') {
+    } else if (
+      key === 'smtpSecure' ||
+      key === 'gatewayEnabled' ||
+      key === 'defaultAutoWakeEnabled'
+    ) {
       if (!['true', 'false', '1', '0'].includes(value)) invalid([key]);
       merged[key] = value === 'true' || value === '1';
     } else {

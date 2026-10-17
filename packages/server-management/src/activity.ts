@@ -85,6 +85,8 @@ const auditCategories: Record<string, (typeof activityCategories)[number]> = {
   'server.dns.updated': 'settings',
   'server.dns.deleted': 'settings',
   'gateway.policy.updated': 'settings',
+  'gateway.messages.updated': 'settings',
+  'server.auto_wake_policy.updated': 'settings',
   'gateway.route.configured': 'settings',
   'gateway.consent.revoked': 'settings',
   'schedule.created': 'settings',

@@ -18,6 +18,7 @@ export const minecraftManifest = gameManifestSchema.parse({
     worlds: true,
     idleDetection: true,
     gracefulStop: true,
+    gatewayMessages: true,
     readiness: true,
     wake: 'manual',
   },

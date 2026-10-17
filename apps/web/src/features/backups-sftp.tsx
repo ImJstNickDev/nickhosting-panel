@@ -308,7 +308,7 @@ function BackupWorkspace({ serverId }: { serverId: string }) {
             <Tooltip content={t('web.schedules')}>
               <Link
                 className="backup-icon"
-                to={`/servers/${encodeURIComponent(serverId)}/schedules`}
+                to={`/servers/${encodeURIComponent(serverId)}/automation?action=backup`}
                 aria-label={t('web.schedules')}
               >
                 <Icon name="calendar" />
