@@ -9,6 +9,7 @@ import { type Database, getSettings, recordAudit, secretStatus } from '@nickhost
 import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
+import { listUnifiedActivity } from './activity.js';
 import { checkedObservation, type DB, type Environment, lockResources } from './admission.js';
 import { resolveHostOverride } from './configuration.js';
 import { trustedGameModules } from './game-modules.js';
@@ -826,13 +827,6 @@ export async function getPlatformUser(
   return { ...user, quota: await getPlatformQuota(db, context, userId, env) };
 }
 
-const activitySchema = pageSchema
-  .extend({
-    serverId: z.uuid().optional(),
-    state: z.enum(['queued', 'running', 'succeeded', 'failed']).optional(),
-    action: z.string().max(100).optional(),
-  })
-  .strict();
 function activityQuery(db: DB, context: AuthContext) {
   assertAuthContext(context);
   let query = db
@@ -876,29 +870,7 @@ function activityQuery(db: DB, context: AuthContext) {
   ]);
 }
 export async function listPlatformActivity(db: DB, context: AuthContext, input: unknown = {}) {
-  const value = parse(activitySchema, input),
-    after = cursor(value.cursor, true);
-  let query = activityQuery(db, context);
-  if (value.serverId) {
-    await scopedServer(db, context, value.serverId);
-    query = query.where('operation.server_id', '=', value.serverId);
-  }
-  if (value.state) query = query.where('job.state', '=', value.state);
-  if (value.action) query = query.where(sql<boolean>`operation.action = ${value.action}`);
-  if (after)
-    query = query.where(
-      sql<boolean>`(date_trunc('milliseconds',job.created_at),job.id) < (${new Date(after.at)},${after.id})`,
-    );
-  const result = page(
-    await query
-      .orderBy(sql`date_trunc('milliseconds',job.created_at)`, 'desc')
-      .orderBy('job.id', 'desc')
-      .limit(value.limit + 1)
-      .execute(),
-    value.limit,
-    (r) => ({ at: r.createdAt, id: r.id }),
-  );
-  return { ...result, items: result.items.map((r) => ({ ...r, messageKey: `jobs.${r.state}` })) };
+  return listUnifiedActivity(db, context, input);
 }
 async function retryEligibility(db: DB, jobId: string) {
   const row = await db

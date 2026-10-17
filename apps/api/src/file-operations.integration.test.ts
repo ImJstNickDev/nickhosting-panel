@@ -330,6 +330,26 @@ describe('file operation handlers with isolated authoritative database', () => {
       expect(response.status).toBe(409);
       expect(await response.json()).toEqual({ code: 'operation_uncertain' });
       expect(mutation).toHaveBeenCalledTimes(2);
+      const events = await f.db
+        .selectFrom('audit_events')
+        .select(['action', 'metadata'])
+        .where(sql<string>`metadata->>'serverId'`, '=', serverId)
+        .execute();
+      const requested = events.find((event) => event.action === 'server.files.requested');
+      const incomplete = events.find((event) => event.action === 'server.files.incomplete');
+      expect(requested?.metadata).toMatchObject({
+        action,
+        count: 2001,
+        source: 'panel',
+        outcome: 'requested',
+      });
+      expect(incomplete?.metadata).toMatchObject({
+        operationId: requested?.metadata.operationId,
+        completed: 1000,
+        count: 2001,
+        outcome: 'partial',
+      });
+      expect(incomplete?.metadata.entries).toHaveLength(100);
     },
   );
   it('accepts copying 101 roots while enforcing the existing complete-tree budget', async () => {
@@ -388,7 +408,11 @@ describe('file operation handlers with isolated authoritative database', () => {
       .where('action', '=', 'server.files.requested')
       .execute();
     expect(audit).toContainEqual({
-      metadata: { serverId, action: 'rename', overwrite: ['target/a.txt'] },
+      metadata: expect.objectContaining({
+        serverId,
+        action: 'rename',
+        overwrite: ['target/a.txt'],
+      }),
     });
   });
 
@@ -631,7 +655,12 @@ describe('file operation handlers with isolated authoritative database', () => {
         .where('action', '=', 'server.files.requested')
         .execute(),
     ).toContainEqual({
-      metadata: { serverId, action: 'copy', count: 2, overwrite: ['target/a.txt'] },
+      metadata: expect.objectContaining({
+        serverId,
+        action: 'copy',
+        count: 2,
+        overwrite: ['target/a.txt'],
+      }),
     });
   });
   it('refuses unapproved, folder and out-of-scope copy replacements before any writes', async () => {
@@ -782,7 +811,17 @@ describe('file operation handlers with isolated authoritative database', () => {
         .where('action', '=', 'server.files.incomplete')
         .execute(),
     ).toContainEqual({
-      metadata: { serverId, action: 'copy', completed: 1, outcome: 'partial_or_uncertain' },
+      metadata: expect.objectContaining({
+        serverId,
+        action: 'copy',
+        completed: 1,
+        outcome: 'partial',
+        operationId: expect.any(String),
+        entries: [
+          { path: 'source/a.txt', target: 'target/a.txt' },
+          { path: 'source/b.txt', target: 'target/b.txt' },
+        ],
+      }),
     });
     expect(
       await f.db

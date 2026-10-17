@@ -433,6 +433,7 @@ const secretLabels: Record<string, readonly [string, string]> = {
   discordClientSecret: ['Discord client secret', 'Segreto client Discord'],
   smtpPassword: ['SMTP password', 'Password SMTP'],
   sftpgoApiKey: ['SFTPGo API key', 'Chiave API SFTPGo'],
+  sftpgoEventSecret: ['SFTP activity webhook secret', 'Segreto webhook attività SFTP'],
   viewerSftpgoApiKey: ['File viewer SFTPGo API key', 'Chiave API SFTPGo per i visualizzatori'],
   cloudflareApiToken: ['Cloudflare API token', 'Token API Cloudflare'],
   gatewayControlToken: ['Gateway control token', 'Token controllo Gateway'],

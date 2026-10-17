@@ -29,6 +29,7 @@ import {
   Time,
   text,
 } from '../components/ui.js';
+import { activityLabelKey } from './activity-labels.js';
 import { getGameArtwork } from './integrations.js';
 import {
   platformPath,
@@ -462,13 +463,24 @@ export function HomePage() {
           <ul className="home-activity-list">
             {activity.data.items.map((job) => (
               <li key={job.id}>
-                <Link to={`/activity/${job.id}`}>
+                <Link
+                  to={
+                    job.kind === 'audit'
+                      ? job.serverId
+                        ? `/servers/${job.serverId}/activity`
+                        : '/activity'
+                      : `/activity/${job.id}`
+                  }
+                >
                   <span>{job.serverName ?? t('platform.operation')}</span>
-                  <span className="muted">
-                    {t(job.action ? `platform.${job.action}` : 'platform.operation')}
-                  </span>
+                  <span className="muted">{t(activityLabelKey(job))}</span>
                 </Link>
-                <Badge value={job.effectState === 'uncertain' ? 'uncertain' : job.state} />
+                <Badge
+                  value={job.effectState === 'uncertain' ? 'uncertain' : job.state}
+                  label={t(
+                    `activity.state.${job.effectState === 'uncertain' ? 'uncertain' : job.state}`,
+                  )}
+                />
                 <Time value={job.updatedAt} />
               </li>
             ))}

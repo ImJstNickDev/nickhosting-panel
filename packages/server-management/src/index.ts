@@ -1,3 +1,4 @@
+export * from './activity.js';
 export * from './admission.js';
 export * from './allocation-pool.js';
 export * from './backup-policy.js';

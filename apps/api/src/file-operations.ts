@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { lstat, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -818,12 +819,24 @@ export function registerFileOperationRoutes(
                   entries.reduce((sum, entry) => sum + (entry.directory ? 0 : entry.size), 0),
               );
               let completed = 0;
+              let dispatched = false;
+              const metadata = {
+                serverId,
+                operationId: randomUUID(),
+                source: 'panel',
+                action: 'copy',
+                root: input.root,
+                target: input.destination,
+                count: entries.length,
+                entries: entries
+                  .slice(0, 100)
+                  .map((entry) => ({ path: entry.source, target: entry.path })),
+                overwrite: [...approvedTargets].slice(0, 100),
+              };
               await timing.measure('copy.auditRequested', () =>
                 recordAudit(connection, current, 'server.files.requested', {
-                  serverId,
-                  action: 'copy',
-                  count: entries.length,
-                  overwrite: [...approvedTargets],
+                  ...metadata,
+                  outcome: 'requested',
                 }),
               );
               try {
@@ -846,9 +859,10 @@ export function registerFileOperationRoutes(
                   // Wings authoritatively opens sources and confines writes; never relist
                   // the same ancestors for each stage or each file.
                   if (entry.directory)
-                    await timing.measure('copy.createDirectory', () =>
-                      service.adapter.createDirectory(id, root, name),
-                    );
+                    await timing.measure('copy.createDirectory', () => {
+                      dispatched = true;
+                      return service.adapter.createDirectory(id, root, name);
+                    });
                   else {
                     const claim = await timing.measure('copy.reserveIngestion', () =>
                       reserveUploadIngestion(connection, current, serverId, entry.size, env),
@@ -875,8 +889,9 @@ export function registerFileOperationRoutes(
                           download.contentLength !== entry.size
                         )
                           throw new DomainError('conflict');
-                        await timing.measure('copy.uploadStream', () =>
-                          service.adapter.uploadFile(id, entry.path, {
+                        await timing.measure('copy.uploadStream', () => {
+                          dispatched = true;
+                          return service.adapter.uploadFile(id, entry.path, {
                             body: download.body,
                             contentLength: entry.size,
                             maxBytes: entry.size,
@@ -891,8 +906,8 @@ export function registerFileOperationRoutes(
                                   trace.enabled ? timing : undefined,
                                 ),
                               ),
-                          }),
-                        );
+                          });
+                        });
                       } finally {
                         await timing.measure('copy.downloadCleanup', () =>
                           download.body.cancel().catch(() => {}),
@@ -907,8 +922,8 @@ export function registerFileOperationRoutes(
                 }
                 await timing.measure('copy.auditCompleted', () =>
                   recordAudit(connection, current, 'server.files.completed', {
-                    serverId,
-                    action: 'copy',
+                    ...metadata,
+                    outcome: 'succeeded',
                     completed,
                   }),
                 );
@@ -916,10 +931,9 @@ export function registerFileOperationRoutes(
               } catch (error) {
                 await timing.measure('copy.auditIncomplete', () =>
                   recordAudit(connection, current, 'server.files.incomplete', {
-                    serverId,
-                    action: 'copy',
+                    ...metadata,
                     completed,
-                    outcome: 'partial_or_uncertain',
+                    outcome: completed > 0 ? 'partial' : dispatched ? 'uncertain' : 'failed',
                   }),
                 );
                 throw new DomainError('operation_uncertain', 409, {
@@ -1043,16 +1057,29 @@ export function registerFileOperationRoutes(
           )
             throw new DomainError('conflict');
           let completed = 0;
-          await recordAudit(connection, current, 'server.files.requested', {
+          let dispatched = false;
+          const metadata = {
             serverId,
+            operationId: randomUUID(),
+            source: 'panel',
             action: 'extract',
+            path: pathJoin(root, name),
+            target: destination,
             count: files.length,
+            entries: files
+              .slice(0, 100)
+              .map((file) => ({ path: file.path, target: pathJoin(destination, file.path) })),
+          };
+          await recordAudit(connection, current, 'server.files.requested', {
+            ...metadata,
+            outcome: 'requested',
           });
           try {
             if (root) {
               const currentRoot = await inspectFilePath(service.adapter, id, root);
               if (!currentRoot || currentRoot.is_file) throw new DomainError('conflict');
             }
+            dispatched = true;
             await service.adapter.createDirectory(id, root, input.destination);
             const directories = new Set([destination]);
             for (const file of files) {
@@ -1112,17 +1139,16 @@ export function registerFileOperationRoutes(
               completed++;
             }
             await recordAudit(connection, current, 'server.files.completed', {
-              serverId,
-              action: 'extract',
+              ...metadata,
               completed,
+              outcome: 'succeeded',
             });
             return c.json({ completed, destination });
           } catch {
             await recordAudit(connection, current, 'server.files.incomplete', {
-              serverId,
-              action: 'extract',
+              ...metadata,
               completed,
-              outcome: 'partial_or_uncertain',
+              outcome: completed > 0 ? 'partial' : dispatched ? 'uncertain' : 'failed',
             });
             throw new DomainError('operation_uncertain', 409, {
               completed,

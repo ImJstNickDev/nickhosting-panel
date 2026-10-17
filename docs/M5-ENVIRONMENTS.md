@@ -1330,3 +1330,62 @@ Fresh Firefox smoke: public HTTPS and web configuration returned 200, anonymous
 protected-photo access returned 401, HMR used WSS, and there were no page exceptions
 or HTTP 5xx failures. No rollback was needed. The scoped rollback conditions above
 remain applicable, including draining new backup deliveries before downgrading.
+
+## Unified Activity activation proposal — 2026-10-17
+
+Implementation: [Activity](ACTIVITY.md) and [SFTP transport](SFTP-ACTIVITY.md).
+This is a **pending proposal**, not an activation record. Source HMR already covers
+the WebPanel and application handlers; no frontend image/dependency change is needed.
+
+Read-only preflight verified `nickhosting-dev-api-1`, `nickhosting-dev-worker-1`,
+`nickhosting-dev-vite-1` and `nickhosting-dev-sftpgo-users-1` healthy. The API and
+user-SFTP service share `nickhosting-dev-data`. The existing Gateway is unhealthy,
+as before this work; Activity does not change it. The three proposed Event Manager
+names below returned 404; the dedicated event secret is absent. The configured
+user-SFTP instance exists and its management origin is `http://sftpgo-users:8080`.
+
+Operation-specific approval would authorize:
+
+1. Tag the current API/worker image, build only `api`, stop only dev API/worker,
+   save a private non-overwriting dev `pg_dump` and verify its inventory. Apply
+   **migration 038 only** with the explicit migration tool (verify applied checksums
+   and that 038 is the sole pending migration before execution; four additive indexes;
+   no table data rewrite), then recreate only API/worker. Index creation can briefly
+   lock writes, which is why the application processes are stopped. Preserve every
+   current overlay, network, mount, account, secret and job.
+2. Generate a dedicated random event secret and store it encrypted through the
+   existing `storeSecret` contract as `sftpgoEventSecret`. Do not reuse the SFTP API
+   key or reveal either secret in logs. Prepare the three JSON objects using
+   `deploy/sftp-activity-config.ts`, with the configured instance UUID and callback
+   **`http://api:3001/v1/provider-events/sftpgo`** on the existing internal network.
+3. On the existing **user-SFTP** service only, POST the two actions
+   `nickhosting-activity-http-v1` / `nickhosting-activity-retry-v1` and then the rule
+   `nickhosting-activity-v1` through `/api/v2/eventactions` and `/api/v2/eventrules`.
+   The exact generated configuration and rollback endpoints are documented in
+   [SFTP Activity](SFTP-ACTIVITY.md#exact-activation-proposal--requires-owner-approval).
+   Abort on a name collision. No service restart, users, mounts, ports, filesystem
+   permissions or game-file mutations are part of installing these rules.
+4. Verify health, index/migration checksums, unchanged topology and authenticated
+   callback connectivity. Do not create artificial file operations on a live game
+   server. The Owner can upload/rename a file through their SFTP client afterward
+   to verify native event delivery in Activity. This live test is not yet claimed.
+
+Commands for the reviewed application activation:
+
+```bash
+docker image tag sha256:ab9f9f2495fa509463eab82b697634ec80adea0d76db0cf304be06ffa0e1a25a nickhosting-dev-app:before-unified-activity
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local stop api worker
+# Private non-overwriting dev pg_dump and pg_restore --list verification.
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local up -d --no-deps --no-build --wait api worker
+```
+
+Risks: a brief API/worker interruption, bounded background notification traffic,
+missed SFTP notifications if both HTTP attempts fail. The transport has no durable
+outbox; it does not guarantee a complete audit history during outages. Rollback:
+remove only the three newly created SFTP objects in rule-before-actions order,
+remove the dedicated secret only if this activation created it, revert the Activity
+application change and restore the tagged API/worker image with the same overlay
+chain. Retain the additive indexes, database contents and audit history. No database
+restore over newer data, broad cleanup or production mutation is authorized.

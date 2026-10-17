@@ -369,6 +369,49 @@ describe('bounded durable upload batches', () => {
     await expect(read(batch.id)).rejects.toMatchObject({ code: 'conflict' });
   });
 
+  it('timestamps a batch snapshot after acquiring its row lock, not at transaction start', async () => {
+    const uploaded = file('locked');
+    const batch = await prepare([uploaded]);
+    const blocker = await database.pool.connect();
+    let active: ReturnType<typeof entry> | undefined;
+    let releasedAt: Date | undefined;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM upload_ingestion_claims WHERE id=$1 FOR UPDATE', [
+        batch.id,
+      ]);
+      const pid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]
+        ?.pid;
+      active = entry(batch.id, uploaded);
+      await vi.waitFor(async () => {
+        const waiting = await database.pool.query<{ count: string }>(
+          'SELECT count(*) FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+          [pid],
+        );
+        expect(Number(waiting.rows[0]?.count)).toBe(1);
+      });
+      releasedAt = (await blocker.query<{ at: Date }>('SELECT clock_timestamp() AS at')).rows[0]
+        ?.at;
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+    if (!active || !releasedAt) throw new Error('Missing isolated lock observation');
+    const started = await active;
+    try {
+      const event = await f.db
+        .selectFrom('audit_events')
+        .select('created_at')
+        .where('action', '=', 'server.upload.started')
+        .where(sql<string>`metadata->>'operationId'`, '=', batch.id)
+        .executeTakeFirstOrThrow();
+      expect(event.created_at.getTime()).toBeGreaterThanOrEqual(releasedAt.getTime());
+      await started.lease.rejectBeforeDispatch();
+    } finally {
+      await started.release();
+    }
+  });
+
   it('commits both completion audit events with settlement and rolls everything back on audit failure', async () => {
     const uploaded = file('a');
     const batch = await prepare([uploaded]);
@@ -399,15 +442,31 @@ describe('bounded durable upload batches', () => {
     expect((await active.lease.complete()).closed).toBe(true);
     const audits = await completionAudits();
     expect(audits).toHaveLength(2);
-    expect(audits.find((audit) => audit.action === 'server.upload.confirmed')?.metadata).toEqual({
+    expect(
+      audits.find((audit) => audit.action === 'server.upload.confirmed')?.metadata,
+    ).toMatchObject({
       claimId: batch.id,
+      operationId: batch.id,
+      source: 'panel',
+      action: 'upload',
       serverId,
       closed: true,
+      outcome: 'succeeded',
+      count: 1,
+      completed: 1,
+      entry: { id: uploaded.id, path: uploaded.path, state: 'complete', bytes: uploaded.bytes },
     });
-    expect(audits.find((audit) => audit.action === 'server.files.uploaded')?.metadata).toEqual({
+    expect(
+      audits.find((audit) => audit.action === 'server.files.uploaded')?.metadata,
+    ).toMatchObject({
       serverId,
+      operationId: batch.id,
+      outcome: 'succeeded',
+      path: uploaded.path,
       bytes: uploaded.bytes,
     });
+    expect(JSON.stringify(audits)).not.toContain(bindingHash);
+    expect(JSON.stringify(audits)).not.toContain(f.context[authSessionId]);
     expect(
       audits.every(
         (audit) =>
@@ -520,7 +579,34 @@ describe('bounded durable upload batches', () => {
     ]);
     const third = await entry(batch.id, files[2]);
     await first.lease.complete();
+    const intermediate = await f.db
+      .selectFrom('audit_events')
+      .select('metadata')
+      .where('action', '=', 'server.upload.confirmed')
+      .where(sql<string>`metadata->>'operationId'`, '=', batch.id)
+      .executeTakeFirstOrThrow();
+    expect(intermediate.metadata).toMatchObject({
+      count: 3,
+      completed: 1,
+      entry: { path: files[0].path, state: 'complete' },
+    });
+    expect(intermediate.metadata).not.toHaveProperty('entries');
     expect((await third.lease.rejectBeforeDispatch()).closed).toBe(true);
+    const activity = await f.db
+      .selectFrom('audit_events')
+      .select('metadata')
+      .where('action', '=', 'server.upload.not_dispatched')
+      .where(sql<string>`metadata->>'operationId'`, '=', batch.id)
+      .executeTakeFirstOrThrow();
+    expect(activity.metadata).toMatchObject({
+      outcome: 'partial',
+      count: 3,
+      completed: 1,
+      cancelled: 1,
+      failed: 1,
+      uncertain: 0,
+      entry: { path: files[2].path, state: 'failed' },
+    });
   });
 
   it('retains uncertain writes and their full budget while another slot can finish siblings', async () => {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId, DomainError } from '@nickhosting/core';
-import { type Database, recordAudit } from '@nickhosting/database';
+import type { Database } from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { lockResources } from './admission.js';
@@ -10,7 +10,7 @@ import { createUploadTiming, type UploadTiming } from './upload-timing.js';
 
 type Claim = Selectable<Database['upload_ingestion_claims']>;
 type Batch = NonNullable<Claim['scope']['batch']>;
-export type UploadBatchFile = Omit<Batch['files'][number], 'state'>;
+export type UploadBatchFile = Omit<Batch['files'][number], 'state' | 'auditOutcome'>;
 export const uploadBatchMaxFiles = 500;
 const fileSchema = z.strictObject({
   id: z.string().min(1).max(128),
@@ -65,6 +65,78 @@ function view(claim: Claim, closed: boolean) {
     closed,
   };
 }
+/** Bounded activity detail; session/binding hashes and upload contents never leave the claim. */
+function batchActivity(claim: Claim, closed: boolean, entryId?: string) {
+  const batch = claim.scope.batch;
+  if (!batch) throw new DomainError('conflict');
+  const completed = batch.files.filter((file) => file.state === 'complete').length;
+  const cancelled = batch.files.filter(
+    (file) => file.state === 'cancelled' && file.auditOutcome !== 'failed',
+  ).length;
+  const uncertain = batch.files.filter((file) => file.state === 'uncertain').length;
+  const rejected = batch.rejected?.length ?? 0;
+  const failed = rejected + batch.files.filter((file) => file.auditOutcome === 'failed').length;
+  const outcome =
+    uncertain > 0
+      ? completed > 0
+        ? 'partial'
+        : 'uncertain'
+      : !closed
+        ? 'requested'
+        : completed === batch.files.length && failed === 0
+          ? 'succeeded'
+          : completed > 0
+            ? 'partial'
+            : cancelled > 0
+              ? 'cancelled'
+              : 'failed';
+  const details = (file: Batch['files'][number]) => ({
+    id: file.id,
+    path: file.path,
+    state: file.auditOutcome ?? file.state,
+    bytes: file.bytes,
+  });
+  const entry = batch.files.find((file) => file.id === entryId);
+  return {
+    claimId: claim.id,
+    operationId: claim.id,
+    batchId: claim.id,
+    serverId: claim.server_id,
+    source: 'panel',
+    action: 'upload',
+    closed,
+    count: batch.files.length + rejected,
+    completed,
+    cancelled,
+    uncertain,
+    failed,
+    outcome,
+    // Intermediate settlements keep only the changed entry, avoiding repeated manifests.
+    ...(closed || entryId === undefined ? { entries: batch.files.slice(0, 100).map(details) } : {}),
+    ...(entry ? { entry: details(entry), path: entry.path } : {}),
+  };
+}
+async function recordBatchAudit(
+  tx: Transaction<Database>,
+  context: AuthContext,
+  events: Array<{ action: string; metadata: Record<string, unknown> }>,
+) {
+  // now() is transaction start, which can precede waiting on the claim lock.
+  // Timestamp this locked snapshot at insertion so later serialized snapshots win.
+  await tx
+    .insertInto('audit_events')
+    .values(
+      events.map((event) => ({
+        id: randomUUID(),
+        actor_user_id: context.actorUserId,
+        subject_user_id: context.subjectUserId,
+        correlation_id: context.support?.id ?? randomUUID(),
+        created_at: sql<Date>`clock_timestamp()`,
+        ...event,
+      })),
+    )
+    .execute();
+}
 type TimingPhase = 'admission' | 'settlement' | 'settlementRelease';
 async function persist(
   tx: Transaction<Database>,
@@ -110,6 +182,7 @@ async function mutate(
   phase: TimingPhase = 'settlement',
   lockMode: 'global' | 'claim' = 'global',
   uploadedBytes?: number,
+  entryId?: string,
 ) {
   const timing = trace ?? createUploadTiming(false);
   const needsGlobalRelease = Symbol('upload batch final release');
@@ -147,28 +220,19 @@ async function mutate(
           });
           const result = await persist(tx, claim, true, timing, step);
           await timing.measure(`${step}.audit`, async () => {
-            const metadata = { claimId: claim.id, serverId, closed: result.closed };
-            if (uploadedBytes === undefined) {
-              await recordAudit(tx, context, action, metadata);
-              return;
-            }
-            // Keep the operational and file-activity events, but commit them
-            // atomically with the completed claim in one INSERT.
-            await tx
-              .insertInto('audit_events')
-              .values(
-                [
-                  { action, metadata },
-                  { action: 'server.files.uploaded', metadata: { serverId, bytes: uploadedBytes } },
-                ].map((event) => ({
-                  id: randomUUID(),
-                  actor_user_id: context.actorUserId,
-                  subject_user_id: context.subjectUserId,
-                  correlation_id: context.support?.id ?? randomUUID(),
-                  ...event,
-                })),
-              )
-              .execute();
+            const metadata = batchActivity(claim, result.closed, entryId);
+            // Keep both events atomic with claim settlement in the existing single INSERT.
+            await recordBatchAudit(tx, context, [
+              { action, metadata },
+              ...(uploadedBytes === undefined
+                ? []
+                : [
+                    {
+                      action: 'server.files.uploaded',
+                      metadata: { ...metadata, bytes: uploadedBytes },
+                    },
+                  ]),
+            ]);
           });
           return result;
         } finally {
@@ -274,13 +338,17 @@ export async function createUploadBatch(
       files: value.files.map((file) => ({ ...file, state: 'queued' })),
     };
     const result = await persist(tx, claim, false);
-    await recordAudit(tx, context, 'server.upload.batch_prepared', {
-      claimId,
-      serverId,
-      files: value.files.length,
-      declaredBytes: total,
-      concurrency: value.concurrency,
-    });
+    await recordBatchAudit(tx, context, [
+      {
+        action: 'server.upload.batch_prepared',
+        metadata: {
+          ...batchActivity(claim, false),
+          files: value.files.length,
+          declaredBytes: total,
+          concurrency: value.concurrency,
+        },
+      },
+    ]);
     return result;
   });
 }
@@ -348,6 +416,8 @@ export async function claimUploadBatchEntry(
       timing,
       'admission',
       'claim',
+      undefined,
+      value.id,
     );
   } catch (error) {
     await unlock();
@@ -367,11 +437,14 @@ export async function claimUploadBatchEntry(
         const file = batch.files.find((file) => file.id === value.id);
         if (file?.state !== 'active') throw new DomainError('conflict');
         file.state = state;
+        if (state === 'cancelled')
+          file.auditOutcome = action === 'server.upload.not_dispatched' ? 'failed' : 'cancelled';
       },
       timing,
       'settlement',
       'claim',
       state === 'complete' ? value.bytes : undefined,
+      value.id,
     );
     settled = true;
     return result;
@@ -410,6 +483,11 @@ export async function cancelUploadBatchEntry(
       if (!file) throw new DomainError('conflict');
       if (file.state === 'queued') file.state = 'cancelled';
     },
+    undefined,
+    'settlement',
+    'global',
+    undefined,
+    entryId,
   );
 }
 

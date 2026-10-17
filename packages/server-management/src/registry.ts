@@ -1158,10 +1158,12 @@ export async function setProjectMember(
     if (!project) throw new DomainError('not_found');
     assertPermission(context, 'server:manage', { ownerUserId: project.owner_id });
     if (value.userId === project.owner_id) throw new DomainError('conflict');
-    if (
-      !(await tx.selectFrom('user').select('id').where('id', '=', value.userId).executeTakeFirst())
-    )
-      throw new DomainError('not_found');
+    const member = await tx
+      .selectFrom('user')
+      .select(['id', 'name', 'username'])
+      .where('id', '=', value.userId)
+      .executeTakeFirst();
+    if (!member) throw new DomainError('not_found');
     if (value.role)
       await tx
         .insertInto('project_members')
@@ -1177,6 +1179,17 @@ export async function setProjectMember(
         .where('user_id', '=', value.userId)
         .execute();
     await recordAudit(tx, context, 'project.member.updated', { projectId, ...value });
+    // Snapshot the servers affected now: moving a server to another project later
+    // must neither import unrelated history nor lose this access change.
+    await sql`insert into audit_events (id, actor_user_id, subject_user_id, action, correlation_id, metadata, created_at)
+      select gen_random_uuid(), ${context.actorUserId}, ${context.subjectUserId}, 'server.member.updated',
+        ${context.support?.id ?? randomUUID()}, jsonb_build_object(
+          'serverId', server.id, 'operationId', ${randomUUID()}::text, 'source', 'panel', 'outcome', 'succeeded',
+          'memberName', ${member.name}::text, 'memberUsername', ${member.username}::text, 'role', ${value.role ?? 'removed'}::text
+        ), clock_timestamp()
+      from managed_servers server where server.project_id = ${projectId} and server.deleted_at is null`.execute(
+      tx,
+    );
   });
 }
 

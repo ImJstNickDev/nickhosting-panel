@@ -1,10 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import type {
-  getPlatformJob,
-  listPlatformActivity,
-} from '../../../../packages/server-management/src/platform-queries.js';
+import type { getPlatformJob } from '../../../../packages/server-management/src/platform-queries.js';
 import { ApiError, api, idempotencyKey, queryClient } from '../api/client.js';
 import type { Result } from '../api/contracts.js';
 import { useFormat, useT } from '../app/i18n.js';
@@ -20,14 +17,11 @@ import {
   Notice,
   Page,
   Section,
-  Select,
   Textarea,
   Time,
   text,
 } from '../components/ui.js';
-import { CursorControls, TableRegion } from './servers.js';
 
-type Activity = Result<typeof listPlatformActivity>;
 type Job = Result<typeof getPlatformJob>;
 function acknowledgedFailure(job: Pick<Job, 'state' | 'phase'>) {
   return job.state === 'failed' && job.phase === 'owner_resolved_failed';
@@ -39,130 +33,8 @@ function actionKey(action: string | null) {
       : `platform.${action}`
     : 'platform.operation';
 }
-export function ActivityPage({ serverId }: { serverId?: string } = {}) {
-  const t = useT(),
-    [state, setState] = useState(''),
-    [action, setAction] = useState(''),
-    [cursors, setCursors] = useState<string[]>([]);
-  const params = new URLSearchParams({
-    limit: '30',
-    ...(serverId ? { serverId } : {}),
-    ...(state ? { state } : {}),
-    ...(action ? { action } : {}),
-    ...(cursors.length ? { cursor: cursors.at(-1) ?? '' } : {}),
-  });
-  const activity = useQuery({
-    queryKey: ['activity', params.toString()],
-    queryFn: () => api<Activity>(`/v1/platform/activity?${params}`),
-    refetchInterval: 10000,
-  });
-  return (
-    <Page title={t('web.activity')}>
-      <div className="toolbar">
-        <Select
-          label={t('web.status')}
-          value={state}
-          onChange={(event) => {
-            setState(event.target.value);
-            setCursors([]);
-          }}
-        >
-          <option value="">{t('web.all')}</option>
-          {['queued', 'running', 'succeeded', 'failed'].map((value) => (
-            <option value={value} key={value}>
-              {t(`web.${value}`)}
-            </option>
-          ))}
-        </Select>
-        <Select
-          label={t('platform.action')}
-          value={action}
-          onChange={(event) => {
-            setAction(event.target.value);
-            setCursors([]);
-          }}
-        >
-          <option value="">{t('web.all')}</option>
-          {[
-            'provision',
-            'start',
-            'stop',
-            'restart',
-            'backup',
-            'restore',
-            'configure',
-            'reinstall',
-            'wipe',
-            'delete',
-            'minecraft-content',
-          ].map((value) => (
-            <option value={value} key={value}>
-              {t(actionKey(value))}
-            </option>
-          ))}
-        </Select>
-      </div>
-      {activity.isPending ? (
-        <Loading />
-      ) : activity.error ? (
-        <ErrorNotice error={activity.error} retry={() => void activity.refetch()} />
-      ) : !activity.data?.items.length ? (
-        <Empty text={t('platform.noActivity')} />
-      ) : (
-        <Section>
-          <TableRegion label={t('web.activity')}>
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">{t('platform.operation')}</th>
-                  <th scope="col">{t('web.servers')}</th>
-                  <th scope="col">{t('web.status')}</th>
-                  <th scope="col">{t('web.updated')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activity.data.items.map((job) => (
-                  <tr key={job.id}>
-                    <th scope="row">
-                      <Link to={`/activity/${job.id}`}>{t(actionKey(job.action))}</Link>
-                    </th>
-                    <td>
-                      {job.serverId ? (
-                        <Link to={`/servers/${job.serverId}`}>{job.serverName}</Link>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    <td>
-                      <Badge
-                        value={
-                          acknowledgedFailure(job)
-                            ? 'failed'
-                            : job.effectState === 'uncertain'
-                              ? 'uncertain'
-                              : job.state
-                        }
-                      />
-                    </td>
-                    <td>
-                      <Time value={job.updatedAt} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </TableRegion>
-        </Section>
-      )}
-      <CursorControls
-        next={activity.data?.nextCursor}
-        previous={cursors.length > 0}
-        onNext={(next) => setCursors([...cursors, next])}
-        onPrevious={() => setCursors(cursors.slice(0, -1))}
-      />
-    </Page>
-  );
-}
+
+export { ActivityTimeline as ActivityPage } from './activity-timeline.js';
 export function JobPage({ jobId: explicitId }: { jobId?: string } = {}) {
   const params = useParams(),
     jobId = explicitId ?? params.jobId ?? params.id ?? '',

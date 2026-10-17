@@ -50,6 +50,8 @@ export interface UploadScope {
       bytes: number;
       overwrite: boolean;
       state: 'queued' | 'active' | 'complete' | 'cancelled' | 'uncertain';
+      /** Distinguish rejected dispatch from user cancellation without changing claim lifecycle. */
+      auditOutcome?: 'failed' | 'cancelled';
     }>;
   };
 }

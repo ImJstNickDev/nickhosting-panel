@@ -23,6 +23,7 @@ import {
   lockResources,
   reconcileManagedServer,
 } from '@nickhosting/server-management';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthClient } from '../../../packages/auth/src/test-fixtures.js';
 import { createDownloadProxy } from '../../../packages/pterodactyl-adapter/src/downloads.js';
@@ -1080,7 +1081,46 @@ describe('M2 Hono API with real invitation, password and session authentication'
       .where('action', 'in', ['server.files.requested', 'server.console.command'])
       .execute();
     expect(audits.some((audit) => audit.actor_user_id === peerId)).toBe(true);
-    expect(JSON.stringify(audits)).not.toMatch(/private-content|private-command/);
+    expect(JSON.stringify(audits)).not.toContain('private-content');
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        action: 'server.console.command',
+        metadata: expect.objectContaining({
+          command: 'private-command',
+          source: 'panel',
+          outcome: 'requested',
+          operationId: expect.any(String),
+        }),
+      }),
+    );
+  });
+  it('records acknowledged backup deletion and uncertain provider failure as separate operations', async () => {
+    const serverId = await f.server();
+    const route = `/v1/servers/${serverId}/backups/${backupId}`;
+    expect((await request(user, route, { confirm: true }, { method: 'DELETE' })).status).toBe(204);
+    deleteBackup.mockRejectedValueOnce(new DomainError('integration_unavailable'));
+    expect((await request(user, route, { confirm: true }, { method: 'DELETE' })).status).toBe(503);
+    const events = await f.db
+      .selectFrom('audit_events')
+      .select(['action', 'metadata'])
+      .where(sql<string>`metadata->>'serverId'`, '=', serverId)
+      .where('action', 'in', [
+        'server.backup.delete_requested',
+        'server.backup.deleted',
+        'server.backup.delete_incomplete',
+      ])
+      .execute();
+    expect(events).toHaveLength(4);
+    const ids = new Set(events.map((event) => event.metadata.operationId));
+    expect(ids.size).toBe(2);
+    for (const operationId of ids)
+      expect(events.filter((event) => event.metadata.operationId === operationId)).toHaveLength(2);
+    expect(
+      events.find((event) => event.action === 'server.backup.deleted')?.metadata,
+    ).toMatchObject({ outcome: 'succeeded', backupId });
+    expect(
+      events.find((event) => event.action === 'server.backup.delete_incomplete')?.metadata,
+    ).toMatchObject({ outcome: 'uncertain', backupId });
   });
   it('scopes backup labels and protection to server managers without changing provider names', async () => {
     const server = await f.server();
@@ -3455,6 +3495,28 @@ describe('M2 Hono API with real invitation, password and session authentication'
         (await request(user, `/v1/servers/${serverId}/console`, { command: 'say fixture' })).status,
       ).toBe(503);
       expect(sendCommand).toHaveBeenCalledOnce();
+      const commandEvents = await f.db
+        .selectFrom('audit_events')
+        .select(['action', 'metadata'])
+        .where('action', 'in', [
+          'server.console.command',
+          'server.console.dispatched',
+          'server.console.failed',
+        ])
+        .where(sql<string>`metadata->>'serverId'`, '=', serverId)
+        .execute();
+      const uncertain = commandEvents.filter((event) => event.metadata.command === 'say fixture');
+      expect(uncertain).toHaveLength(2);
+      expect(new Set(uncertain.map((event) => event.metadata.operationId)).size).toBe(1);
+      expect(uncertain).toContainEqual(
+        expect.objectContaining({
+          action: 'server.console.failed',
+          metadata: expect.objectContaining({ outcome: 'uncertain', source: 'panel' }),
+        }),
+      );
+      expect(
+        commandEvents.filter((event) => event.action === 'server.console.dispatched'),
+      ).toHaveLength(2);
       // Current ownership is still checked before any send, including through a retained socket.
       await f.db
         .updateTable('managed_servers')

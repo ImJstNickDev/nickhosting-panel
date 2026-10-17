@@ -10990,3 +10990,82 @@ anonymous request 401, secure HMR WebSocket present, zero page errors/5xx.
 Independent activation review covers topology, migrations, preserved identities,
 artifact verification and smoke evidence. No full historical suite was repeated
 for this documentation/activation-only pass. No test server was created or removed.
+
+### Unified server Activity and SFTP transport — 2026-10-17
+
+Implemented [Activity](ACTIVITY.md) and [SFTP events](SFTP-ACTIVITY.md): scoped
+jobs/audit timeline, actor/subject identity, grouped file batches, command text
+without console output, server-anchored membership history and authenticated
+asynchronous SFTP callbacks. No extra provider calls were added to file/console
+mutations. New migration038 adds indexes only; it is **not yet applied to dev**.
+
+Final focused evidence (Node24 through `scripts/dev.sh`):
+
+| Check | Result |
+| --- | --- |
+| `pnpm typecheck` | Pass: Core, WebPanel and browser-test types |
+| `pnpm build` | Pass; existing lazy document/media chunk-size warnings remain |
+| `pnpm i18n:check` | Pass: 2,053 EN/IT/pseudolocale keys |
+| `pnpm exec biome check <changed TS/TSX/CSS/JSON files>` | Pass; 8 existing warnings and 1 info in the catalog compiler, no errors |
+| SFTP event/config unit suite | 4/4 pass |
+| File/editor focused unit suites | 156/156 pass; latest editor-only follow-up 68/68 pass |
+| File-operation + upload-batch isolated integration | 56/56 pass; timestamp-order suite 16/16 pass, final compact-snapshot targeted follow-up 2/2 pass |
+| Actual API console/permission/backup-delete targeted integration | 3/3 pass (80 unrelated tests skipped) |
+| Activity + existing platform-query integration | 42/42 pass before final regressions; final Activity-only suite 9/9 pass |
+| Final combined SFTP receiver + Activity integration | **38/38 pass** (29 + 9), 22.10s |
+| Unified Activity real browser suite | **3/3 pass**, 27.95s; desktop English/mobile Italian, keyboard disclosure/focus, SFTP action filter, actor/search, grouped details, skeleton and refresh/retry |
+| Automated browser accessibility | No violations in tested WCAG2/2.1/2.2 A/AA axe rules; not a blanket WCAG certification |
+
+Commands for final contract and browser runs:
+
+```sh
+scripts/dev.sh pnpm exec vitest run apps/api/src/sftp-events.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/sftp-events.integration.test.ts packages/server-management/src/activity.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/activity.browser.test.ts
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm build
+scripts/dev.sh pnpm i18n:check
+```
+
+Performance fixture: 3,072 large audit snapshots / 96 logical groups, limit5:
+EXPLAIN verifies 6 page candidates and 12 indexed first/latest snapshot reads,
+without sorting full JSON history. Final shared isolated-DB execution was
+1,257.625ms (earlier run877.28ms). This is a query-plan stress check, not a claim
+of production latency or a broad benchmark. Outcome/content filters still inspect
+latest matching snapshots; pagination does not make all filtering constant-cost.
+
+Preserved failed attempts: the first broader API suite run had 11 passes and
+71 cascading failures, with downstream storage-admission conflicts; a subsequent run failed
+Owner setup with HTTP500 before all82 tests. The final targeted API tests passed,
+and the first named failure (Owner2000-allocation pool) subsequently passed alone
+(1pass/82skipped). The original cause was not established, so the full API suite
+is **not claimed passing** and these failures are not classified as pre-existing. An initial unit run
+under shell-default Node20 failed archive cases; supported Node24 rerun passed156.
+The initial browser run found a missing refresh translation/test selector; fixed
+and rerun. Review found stale upload item states, missing SFTP short-action
+filtering, search focus styling and misleading error-plus-empty presentation;
+all were fixed with targeted coverage. No full historical M1–M5 suite was rerun.
+
+Independent backend/security and UX/content reviews report no remaining must-fix
+findings in this scope. Reviewed actual rendered screenshots:
+
+- [Desktop EN](screenshots/m5/activity-unified-desktop-en.png)
+- [Mobile IT and SFTP details](screenshots/m5/activity-unified-mobile-it.png)
+- [Initial loading](screenshots/m5/activity-unified-loading-en.png)
+- [Failed refresh preserving records](screenshots/m5/activity-unified-refresh-error-en.png)
+
+Evidence boundary: real application handlers and isolated PostgreSQL; browser
+providers use existing fixtures, not production mutations. SFTP receiver tests use
+authenticated payloads matching pinned2.7.6 templates, not native live filesystem
+notifications. Existing isolated test containers were reused without lifecycle
+changes; transient test schemas were cleaned by their harness. No game server,
+file, SFTP account, port, network or production provider was mutated. Native
+SFTP Event Manager delivery remains pending the exact approval in
+[M5 environments](M5-ENVIRONMENTS.md#unified-activity-activation-proposal--2026-10-17).
+Read-only live preflight found the three new names absent and API/worker/Vite/user
+SFTP healthy; the pre-existing unhealthy Gateway is unrelated and was not changed.
+Issue18 and all production release boundaries remain unchanged. The SFTP transport
+has one bounded failure retry and no durable upstream outbox; outages can lose events.
+
+Final tracked-content governance passed: 1,059 indexed text files, 413 review PNGs,
+888 relative links, four TOML files and44 ignore cases; secret scan remains heuristic.

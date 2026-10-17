@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { readArchiveFile, visitArchive } from '@nickhosting/content-providers';
 import { createLogger, DomainError, SecretCodec } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type Database, recordAudit } from '@nickhosting/database';
 import {
   type PterodactylAdapter,
   PterodactylError,
@@ -652,6 +652,7 @@ describe('editor revisions', () => {
   );
   it('reads a revision and rejects a changed provider file before writing', async () => {
     const f = appFixture();
+    vi.mocked(recordAudit).mockClear();
     const response = await f.app.request('/v1/servers/abc/files/editor?path=a.txt');
     const loaded = await response.json();
     expect(loaded).toEqual({ content: 'one', revision: fileRevision(Buffer.from('one')) });
@@ -663,6 +664,10 @@ describe('editor revisions', () => {
     });
     expect(write.status).toBe(409);
     expect(f.adapter.writeFile).not.toHaveBeenCalled();
+    expect(vi.mocked(recordAudit).mock.calls.at(-1)?.[3]).toMatchObject({
+      outcome: 'failed',
+      path: 'a.txt',
+    });
   });
   it('new-file null revision cannot overwrite an existing file', async () => {
     const f = appFixture();
@@ -673,6 +678,30 @@ describe('editor revisions', () => {
     });
     expect(response.status).toBe(409);
     expect(f.adapter.writeFile).not.toHaveBeenCalled();
+  });
+  it('records uncertain editor writes without contents or an invented success', async () => {
+    const f = appFixture();
+    vi.mocked(recordAudit).mockClear();
+    vi.mocked(f.adapter.writeFile).mockRejectedValueOnce(new Error('provider private detail'));
+    const response = await f.app.request('/v1/servers/abc/files/editor', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: 'a.txt',
+        content: 'private editor content',
+        expectedRevision: fileRevision(Buffer.from('one')),
+      }),
+    });
+    expect(response.status).toBe(500);
+    const calls = vi.mocked(recordAudit).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.[3]).toMatchObject({ path: 'a.txt', action: 'edit', outcome: 'requested' });
+    expect(calls[1]?.[3]).toMatchObject({
+      operationId: calls[0]?.[3]?.operationId,
+      outcome: 'uncertain',
+    });
+    expect(JSON.stringify(calls)).not.toMatch(/private editor content|provider private detail/);
+    expect(f.adapter.readFile).toHaveBeenCalledTimes(1);
   });
   it('saves matching revisions and returns the verified new revision', async () => {
     const f = appFixture();
@@ -687,6 +716,11 @@ describe('editor revisions', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ revision: fileRevision(Buffer.from('new')) });
+    expect(vi.mocked(recordAudit).mock.calls.at(-1)?.[3]).toMatchObject({
+      path: 'a.txt',
+      outcome: 'succeeded',
+      completed: 1,
+    });
   });
   it('shares nested directory preflight between real Minecraft and generic guards, retaining read/write/read verification', async () => {
     const f = appFixture();

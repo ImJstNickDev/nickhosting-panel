@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
   DomainError,
@@ -269,33 +269,58 @@ export function registerFileBrowsingRoutes(
         const submitted = Buffer.from(input.content);
         if (decodeEditableText(submitted) !== input.content)
           throw new DomainError('file_not_editable');
-        const entry = await inspectFilePath(
-          { listFiles: (_id, directory = '') => listFiles(directory) },
-          id,
-          target,
-        );
-        if (entry && !entry.is_file) throw new DomainError('conflict');
-        if (entry) requireEditableFile(entry);
-        let before: string | null = null;
-        if (entry) {
-          const previous = await service.adapter.readFile(id, target, editorMaxBytes);
-          // A binary file renamed to .txt remains non-editable, even with a matching revision.
-          decodeEditableText(previous);
-          before = fileRevision(previous);
-        }
-        if (before !== input.expectedRevision) throw new DomainError('conflict');
-        await recordAudit(connection, current, 'server.files.requested', {
+        const metadata = {
           serverId: c.req.param('id'),
+          operationId: randomUUID(),
+          source: 'panel',
           action: 'edit',
+          path: target,
+          count: 1,
+        };
+        await recordAudit(connection, current, 'server.files.requested', {
+          ...metadata,
+          outcome: 'requested',
         });
-        // NickHosting writes serialize through access(); Wings offers no external atomic CAS.
-        await service.authorizeTransfer(current, c.req.param('id'), true, connection);
-        await service.adapter.writeFile(id, target, input.content);
-        await service.authorizeTransfer(current, c.req.param('id'), true, connection);
-        const expected = fileRevision(Buffer.from(input.content));
-        const actual = fileRevision(await service.adapter.readFile(id, target, editorMaxBytes));
-        if (actual !== expected) throw new DomainError('conflict');
-        return expected;
+        let dispatched = false;
+        try {
+          const entry = await inspectFilePath(
+            { listFiles: (_id, directory = '') => listFiles(directory) },
+            id,
+            target,
+          );
+          if (entry && !entry.is_file) throw new DomainError('conflict');
+          if (entry) requireEditableFile(entry);
+          let before: string | null = null;
+          if (entry) {
+            const previous = await service.adapter.readFile(id, target, editorMaxBytes);
+            // A binary file renamed to .txt remains non-editable, even with a matching revision.
+            decodeEditableText(previous);
+            before = fileRevision(previous);
+          }
+          if (before !== input.expectedRevision) throw new DomainError('conflict');
+
+          // NickHosting writes serialize through access(); Wings offers no external atomic CAS.
+          await service.authorizeTransfer(current, c.req.param('id'), true, connection);
+          dispatched = true;
+          await service.adapter.writeFile(id, target, input.content);
+          await service.authorizeTransfer(current, c.req.param('id'), true, connection);
+          const expected = fileRevision(Buffer.from(input.content));
+          const actual = fileRevision(await service.adapter.readFile(id, target, editorMaxBytes));
+          if (actual !== expected) throw new DomainError('conflict');
+          await recordAudit(connection, current, 'server.files.completed', {
+            ...metadata,
+            outcome: 'succeeded',
+            completed: 1,
+          });
+          return expected;
+        } catch (error) {
+          await recordAudit(connection, current, 'server.files.incomplete', {
+            ...metadata,
+            outcome: dispatched ? 'uncertain' : 'failed',
+            completed: 0,
+          });
+          throw error;
+        }
       },
     );
     return c.json({ revision });

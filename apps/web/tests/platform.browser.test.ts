@@ -367,6 +367,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     }
     await user.goto(`${fixture.origin}/activity`);
     await user.getByLabel('Status', { exact: true }).selectOption('succeeded');
+    await user.getByRole('button', { name: 'More filters', exact: true }).click();
     await user.getByLabel('Action', { exact: true }).selectOption('stop');
     await browserExpect(user.getByRole('row').filter({ hasText: 'Survival' })).toHaveCount(1);
     await accessible(user);
@@ -728,9 +729,7 @@ describe('M5 real browser platform and Owner journeys', () => {
     await fixture.screenshot(owner, 'activity-acknowledged-failure-desktop-en');
     await accessible(owner);
     await owner.goto(`${fixture.origin}/activity`);
-    const row = owner.locator('tr').filter({
-      has: owner.locator(`a[href="/activity/${queued.jobId}"]`),
-    });
+    const row = owner.locator(`tr[data-job-id="${queued.jobId}"]`);
     await browserExpect(row.getByText('Failed', { exact: true })).toBeVisible();
     await browserExpect(row.getByText('Outcome not confirmed', { exact: true })).toHaveCount(0);
   });

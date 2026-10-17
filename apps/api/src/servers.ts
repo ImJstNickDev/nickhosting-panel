@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import { type AuthContext, type createLogger, DomainError } from '@nickhosting/core';
 import { type createDatabase, recordAudit } from '@nickhosting/database';
@@ -574,14 +575,29 @@ export function registerServerRoutes(
         )
           throw new DomainError('validation_failed', 413);
         await service.authorizeTransfer(current, serverId, true, connection);
-        await recordAudit(connection, current, 'server.files.requested', {
+        const metadata = {
           serverId,
+          operationId: randomUUID(),
+          source: 'panel',
           action: 'upload',
+          path,
+          count: 1,
           bytes: contentLength,
+        };
+        await recordAudit(connection, current, 'server.files.requested', {
+          ...metadata,
+          outcome: 'requested',
         });
         const claim = await measure('admissionMs', () =>
           reserveUploadIngestion(connection, current, serverId, contentLength, env),
-        );
+        ).catch(async (error: unknown) => {
+          await recordAudit(connection, current, 'server.files.incomplete', {
+            ...metadata,
+            outcome: 'failed',
+            completed: 0,
+          });
+          throw error;
+        });
         try {
           await measure('providerMs', () =>
             service.adapter.uploadFile(id, path, {
@@ -602,13 +618,23 @@ export function registerServerRoutes(
         } catch (error) {
           if (isUploadNotDispatched(error)) await claim.rejectBeforeDispatch();
           else if (isUploadCancelled(error)) await claim.cancelConfirmed();
+          await recordAudit(connection, current, 'server.files.incomplete', {
+            ...metadata,
+            completed: 0,
+            outcome: isUploadNotDispatched(error)
+              ? 'failed'
+              : isUploadCancelled(error)
+                ? 'cancelled'
+                : 'uncertain',
+          });
           throw error;
         } finally {
           await claim.unlock();
         }
         await recordAudit(connection, current, 'server.files.uploaded', {
-          serverId,
-          bytes: contentLength,
+          ...metadata,
+          outcome: 'succeeded',
+          completed: 1,
         });
       });
       outcome = 'succeeded';
@@ -717,66 +743,106 @@ export function registerServerRoutes(
                 directories ? { providerIdentifier: id, listFiles: directories.list } : undefined,
               ),
             );
+            const metadata = {
+              operationId: randomUUID(),
+              source: 'panel',
+              serverId: c.req.param('id'),
+              action: input.action,
+              count:
+                input.action === 'delete' || input.action === 'rename' ? input.files.length : 1,
+              ...(input.action === 'write' ? { path: input.path } : { root: input.root }),
+              entries:
+                input.action === 'rename'
+                  ? input.files.slice(0, 100).map(({ from, to }) => ({
+                      path: [input.root, from].filter(Boolean).join('/'),
+                      target: [input.root, to].filter(Boolean).join('/'),
+                    }))
+                  : paths.slice(0, 100).map((path) => ({ path })),
+              ...(input.action === 'rename'
+                ? { overwrite: (input.overwrite ?? []).slice(0, 100) }
+                : {}),
+            };
             await timing.measure('files.auditRequested', () =>
               recordAudit(connection, current, 'server.files.requested', {
-                serverId: c.req.param('id'),
-                action: input.action,
-                ...(input.action === 'rename' ? { overwrite: input.overwrite ?? [] } : {}),
+                ...metadata,
+                outcome: 'requested',
               }),
             );
-            if (input.action === 'write')
-              await timing.measure('files.write', () =>
-                service.adapter.writeFile(id, input.path, input.content),
-              );
-            else if (input.action === 'mkdir')
-              await timing.measure('files.mkdir', () =>
-                service.adapter.createDirectory(id, input.root, input.name),
-              );
-            else if (input.action === 'delete')
-              await applyFileChunks(
-                input.files,
-                () =>
-                  timing.measure('files.authorize', () =>
-                    service.authorizeCleanupTransfer(
-                      current,
-                      c.req.param('id'),
-                      connection,
-                      trace.enabled ? timing : undefined,
-                    ),
-                  ),
-                (files) =>
-                  timing.measure('files.delete', () =>
-                    service.adapter.deleteFiles(id, input.root, files),
-                  ),
-              );
-            else if (directories) {
-              await timing.measure('files.movePlan', () =>
-                validateFileMoves(
-                  { listFiles: (_identifier, path = '') => directories.list(path) },
-                  id,
-                  input.root,
+            let dispatched = false;
+            let completed = 0;
+            try {
+              if (input.action === 'write')
+                await timing.measure('files.write', () => {
+                  dispatched = true;
+                  return service.adapter.writeFile(id, input.path, input.content);
+                });
+              else if (input.action === 'mkdir')
+                await timing.measure('files.mkdir', () => {
+                  dispatched = true;
+                  return service.adapter.createDirectory(id, input.root, input.name);
+                });
+              else if (input.action === 'delete')
+                await applyFileChunks(
                   input.files,
-                  input.overwrite,
-                  trace.enabled ? timing : undefined,
-                ),
-              );
-              await applyFileChunks(
-                input.files,
-                () =>
-                  timing.measure('files.authorize', () =>
-                    service.authorizeTransfer(
-                      current,
-                      c.req.param('id'),
-                      true,
-                      connection,
-                      trace.enabled ? timing : undefined,
+                  () =>
+                    timing.measure('files.authorize', () =>
+                      service.authorizeCleanupTransfer(
+                        current,
+                        c.req.param('id'),
+                        connection,
+                        trace.enabled ? timing : undefined,
+                      ),
                     ),
+                  (files) =>
+                    timing.measure('files.delete', async () => {
+                      dispatched = true;
+                      await service.adapter.deleteFiles(id, input.root, files);
+                      completed += files.length;
+                    }),
+                );
+              else if (directories) {
+                await timing.measure('files.movePlan', () =>
+                  validateFileMoves(
+                    { listFiles: (_identifier, path = '') => directories.list(path) },
+                    id,
+                    input.root,
+                    input.files,
+                    input.overwrite,
+                    trace.enabled ? timing : undefined,
                   ),
-                (files) =>
-                  timing.measure('files.rename', () =>
-                    service.adapter.renameFiles(id, input.root, files),
-                  ),
-              );
+                );
+                await applyFileChunks(
+                  input.files,
+                  () =>
+                    timing.measure('files.authorize', () =>
+                      service.authorizeTransfer(
+                        current,
+                        c.req.param('id'),
+                        true,
+                        connection,
+                        trace.enabled ? timing : undefined,
+                      ),
+                    ),
+                  (files) =>
+                    timing.measure('files.rename', async () => {
+                      dispatched = true;
+                      await service.adapter.renameFiles(id, input.root, files);
+                      completed += files.length;
+                    }),
+                );
+              }
+              await recordAudit(connection, current, 'server.files.completed', {
+                ...metadata,
+                completed: metadata.count,
+                outcome: 'succeeded',
+              });
+            } catch (error) {
+              await recordAudit(connection, current, 'server.files.incomplete', {
+                ...metadata,
+                completed,
+                outcome: completed > 0 ? 'partial' : dispatched ? 'uncertain' : 'failed',
+              });
+              throw error;
             }
           },
           trace.enabled ? timing : undefined,
@@ -905,11 +971,30 @@ export function registerServerRoutes(
       service = await management();
     parse(z.object({ confirm: z.literal(true) }).strict(), await body(c));
     await service.cleanupAccess(context, c.req.param('id'), async (id, connection, current) => {
-      await recordAudit(connection, current, 'server.backup.delete_requested', {
+      const metadata = {
         serverId: c.req.param('id'),
         backupId: c.req.param('backupId'),
+        operationId: randomUUID(),
+        source: 'panel',
+        action: 'backup_delete',
+      };
+      await recordAudit(connection, current, 'server.backup.delete_requested', {
+        ...metadata,
+        outcome: 'requested',
       });
-      await service.adapter.deleteBackup(id, c.req.param('backupId'));
+      try {
+        await service.adapter.deleteBackup(id, c.req.param('backupId'));
+        await recordAudit(connection, current, 'server.backup.deleted', {
+          ...metadata,
+          outcome: 'succeeded',
+        });
+      } catch (error) {
+        await recordAudit(connection, current, 'server.backup.delete_incomplete', {
+          ...metadata,
+          outcome: 'uncertain',
+        });
+        throw error;
+      }
     });
     return c.body(null, 204);
   });
@@ -943,18 +1028,45 @@ export function registerServerRoutes(
       c.req.param('id'),
       true,
       async (id, connection, current, server) => {
-        await recordAudit(connection, current, 'server.console.command', {
+        const metadata = {
           serverId: c.req.param('id'),
+          operationId: randomUUID(),
+          source: 'panel',
+          command: input.command,
+        };
+        await recordAudit(connection, current, 'server.console.command', {
+          ...metadata,
+          outcome: 'requested',
         });
-        const relay = commandRelays.find(
-          current,
-          c.req.param('id'),
-          JSON.stringify([id, server.pterodactyl_id, server.pterodactyl_uuid, server.external_id]),
-          await service.consoleBindingForServer(c.req.param('id')),
-        );
-        // Choose transport before dispatch. A WS error may follow a sent frame: never replay it.
-        if (relay) await relay.sendCommand(input.command);
-        else await service.adapter.sendCommand(id, input.command);
+        let dispatched = false;
+        try {
+          const relay = commandRelays.find(
+            current,
+            c.req.param('id'),
+            JSON.stringify([
+              id,
+              server.pterodactyl_id,
+              server.pterodactyl_uuid,
+              server.external_id,
+            ]),
+            await service.consoleBindingForServer(c.req.param('id')),
+          );
+          // Choose transport before dispatch. A WS error may follow a sent frame: never replay it.
+          dispatched = true;
+          if (relay) await relay.sendCommand(input.command);
+          else await service.adapter.sendCommand(id, input.command);
+          // Provider acknowledgement confirms dispatch, never game-side execution.
+          await recordAudit(connection, current, 'server.console.dispatched', {
+            ...metadata,
+            outcome: 'dispatched',
+          });
+        } catch (error) {
+          await recordAudit(connection, current, 'server.console.failed', {
+            ...metadata,
+            outcome: dispatched ? 'uncertain' : 'failed',
+          });
+          throw error;
+        }
       },
     );
     return c.body(null, 204);

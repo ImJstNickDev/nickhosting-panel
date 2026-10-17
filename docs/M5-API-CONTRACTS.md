@@ -68,7 +68,7 @@ text; server/project/job identities are UUIDs. Invalid cursors are domain errors
 | `DELETE /v1/platform/projects/:id` | `{confirm:true}` with project-owner or regular-Owner authority; returns detached-server count. Deletes grouping/memberships, retains servers and their owner/resource charges. |
 | `POST /v1/platform/projects/:id/collaborator` | Exact verified-email lookup, available only to the project owner or regular platform Owner; `{user: safeProfile|null}`. No ordinary global account directory. |
 | `GET /v1/platform/quotas` | Effective subject's current quota, commitments, measurements and override state. Home `storageUsage={bytes,expiresAt}` uses a 30-second display lifetime, independently of strict admission freshness. Complete valid totals expire at the oldest contributing sample plus 30 seconds; missing, future, expired or unsafe totals return null fields. Empty inventories return zero with no expiry. Clients honor `expiresAt` without displaying a timestamp. Worker cadence and safety checks are unchanged. |
-| `GET /v1/platform/activity` | Paginated `state`, `action`, `serverId` filters; current server/project scope. |
+| `GET /v1/platform/activity` | Unified jobs/audit timeline; cursor, `state`, `action`, `serverId`, `category`, `source`, `actorId`, `q`, `from`/`to` filters; current server/project scope. See [Activity](ACTIVITY.md). |
 | `GET /v1/platform/jobs/:id` | Scoped operation detail, current effect/phase, up to 200 associated events, `retry`, `ownerRecovery`. |
 | `POST /v1/platform/jobs/:id/retry` | `{idempotencyKey}`; returns 202 for an authorized safe new operation intent. Never resets the historical job. |
 | `GET /v1/platform/owner/users` | Regular Owner; paginated search/role filtering of NickHosting identities. |
@@ -1381,3 +1381,20 @@ capabilities and are fetched only with detail. No new migration is required.
 protected backups, local names, SSE invalidations, scheduling/retention and separate
 backup/resumption outcomes. Core retains the existing adapter and durable operation
 boundary; Blueprint 1.5.0 supplies committed native completion receipts.
+
+
+### Unified Activity and SFTP callbacks
+
+Activity preserves existing job fields and adds `kind`, nullable `jobId`, category,
+source, outcome, actor/subject display identities and explicitly selected metadata.
+Only job rows have an operation-detail link. Batch/operation snapshots become one
+row, with stable chronology and current outcome. Console command text is restricted
+to server managers; output, credentials, file contents and signed URLs are excluded.
+Date query boundaries are ISO instants; the UI converts the user's local dates.
+
+`POST /v1/provider-events/sftpgo` is a machine-only callback with a dedicated Bearer
+secret, strict bounded payload and stable duplicate handling. It is the sole new
+Origin exemption; browser sessions cannot authorize it. Durable provider bindings
+map primary/auxiliary credentials to the issuing NickHosting account. The scoped
+user-SFTP Event Manager rule must be explicitly activated; technical viewer accounts
+are ignored. See [transport and delivery limitations](SFTP-ACTIVITY.md).

@@ -42,6 +42,7 @@ import { registerProfilePhotoRoutes } from './profile-photo.js';
 import { PROVIDER_EVENTS_PATH, receiveProviderEvent } from './provider-events.js';
 import { registerScheduleRoutes } from './schedules.js';
 import { registerServerRoutes } from './servers.js';
+import { receiveSftpEvent, SFTP_EVENTS_PATH } from './sftp-events.js';
 import { registerWebSessionRoutes, supportToken } from './web-session.js';
 
 type Store = ReturnType<typeof createDatabase>;
@@ -185,7 +186,8 @@ export function createApp(options: Options) {
       // Dedicated machine endpoints authenticate their own scoped bearer secret.
       // This exception grants no browser/session authority or generic CSRF bypass.
       if (/^\/internal\/gateway\/[0-9a-f-]{36}\/[a-z-]+$/.test(c.req.path)) return next();
-      if (c.req.method === 'POST' && c.req.path === PROVIDER_EVENTS_PATH) return next();
+      if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
+        return next();
       const origin = c.req.header('origin');
       if (!origin || !(await origins()).includes(origin)) throw new DomainError('forbidden');
     }
@@ -268,6 +270,19 @@ export function createApp(options: Options) {
       }),
     );
   });
+  app.post(SFTP_EVENTS_PATH, async (c) => {
+    if (!c.req.header('content-type')?.startsWith('application/json'))
+      throw new DomainError('validation_failed');
+    return c.json(
+      await receiveSftpEvent({
+        db,
+        codec: options.codec,
+        env,
+        raw: await c.req.text(),
+        headers: c.req.raw.headers,
+      }),
+    );
+  });
   app.get('/healthz', (c) => c.json({ status: 'ok' }));
   app.get('/readyz', async (c) => {
     try {
@@ -285,7 +300,8 @@ export function createApp(options: Options) {
     await next();
   });
   app.use('/v1/*', async (c, next) => {
-    if (c.req.method === 'POST' && c.req.path === PROVIDER_EVENTS_PATH) return next();
+    if (c.req.method === 'POST' && [PROVIDER_EVENTS_PATH, SFTP_EVENTS_PATH].includes(c.req.path))
+      return next();
     const identity = await options.identity();
     c.set('identity', identity);
     await next();
