@@ -11162,3 +11162,37 @@ No other server was repaired, stopped or restarted during the audit. The exact
 27-server proposed repair scope and private metadata evidence are retained locally;
 any further repair requires approval for those existing resources. The technical
 `.sftp` directory is excluded pending separate ownership assessment.
+
+### Approved repair of the other 27 Wings servers — 2026-10-17
+
+The Owner explicitly approved the exact 27-server scope from the preceding audit.
+Before mutation, the private runner rechecked Panel IDs/UUIDs/node assignments,
+the current Panel container and volume bind, and Wings' configured UID/GID 988:988.
+The already repaired server and technical `.sftp` directory were excluded.
+
+A one-off private Python script traversed the approved roots using no-follow file
+and directory descriptors. It changed only 100:101 to 988:988, checking inode,
+owner and mode immediately before each change and verifying resulting ownership
+and unchanged numeric mode afterward. Symlinks, multiply linked regular files,
+special modes and extended attributes were excluded from mutation. Before each
+batch, the host persisted and fsynced a compressed original-metadata journal;
+mutation required its explicit acknowledgment. Independent review identified and
+resolved root-replacement binding, traversal-error reporting and journal-directory
+fsync issues before execution. No remaining review must-fix findings were reported.
+
+Results: 3,404,734 entries repaired; nine already-correct entries left unchanged;
+no mutation errors or candidate skips. A separate complete recursive read-only
+verification found all 3,404,743 entries under the 27 roots owned by 988:988, with
+no remaining 100:101 ownership. The compressed journal passes its integrity check
+and matches all 3,404,734 applied entries. Original metadata and verification
+results remain private and ignored. Ownership updates necessarily change ctime.
+
+The previously affected running game container now passes write-eligibility checks
+for its root and server.properties. Inspected container IDs, configured users and
+server mount bindings are unchanged. No game power commands, service restarts,
+file-content writes, chmod, new test assets, or configuration changes were made.
+No application suites were repeated for this metadata-only infrastructure repair.
+The Blueprint installer traversal cause remains unresolved: further native extension
+installations remain blocked pending a separately reviewed solution. SFTPGo #18 is
+unchanged. Write eligibility does not itself prove an application-level save or
+successful SFTP transfer; those require normal user operations.
