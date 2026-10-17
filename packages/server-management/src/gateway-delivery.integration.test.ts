@@ -4,6 +4,7 @@ import { createLogger } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { createJobTransport, dispatchOutbox, startJobWorker } from '@nickhosting/jobs';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
+import { sql } from 'kysely';
 import { describe, expect, it, vi } from 'vitest';
 import { reserveStart } from './admission.js';
 import {
@@ -169,6 +170,49 @@ async function cleanup(options: Parameters<typeof createJobTransport>[0]) {
 }
 
 describe('M3 durable wake recovery through real isolated Redis delivery', () => {
+  it('promptly recovers a real server-lock deferral without repeating its power effect', async () => {
+    const f = await fixture();
+    let worker: Awaited<ReturnType<typeof startJobWorker>> | undefined;
+    const deliveries: string[] = [];
+    try {
+      await f.db.connection().execute(async (connection) => {
+        await sql`select pg_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${f.serverId}`}, 0))`.execute(
+          connection,
+        );
+        try {
+          const processor = createLifecycleProcessor(f.db, f.lifecycle);
+          worker = await startJobWorker({
+            db: f.db,
+            ...f.transport,
+            processor: async (id) => {
+              const result = await processor(id);
+              deliveries.push(result);
+              return result;
+            },
+            pollIntervalMs: 50,
+            recoveryIntervalMs: 30_000,
+          });
+          await eventually(async () => deliveries.includes('deferred'));
+          expect(f.power).not.toHaveBeenCalled();
+        } finally {
+          await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${f.serverId}`}, 0))`.execute(
+            connection,
+          );
+        }
+      });
+      // The fixture deadline is 12s, deliberately less than the 30s recovery interval.
+      await eventually(async () => (await f.job()).state === 'succeeded');
+      expect(f.power).toHaveBeenCalledTimes(1);
+      expect(deliveries).toContain('succeeded');
+      expect(
+        await f.db.selectFrom('job_outbox').selectAll().where('job_id', '=', f.jobId).execute(),
+      ).toHaveLength(0);
+    } finally {
+      await worker?.close();
+      await cleanup(f.transport);
+      await f.isolated.destroy();
+    }
+  });
   it('retains one admitted wake during client disconnection and resumes through fresh delivery', async () => {
     const f = await fixture(),
       unavailable = createJobTransport(f.transport);

@@ -72,3 +72,78 @@ supply protocol-native status/join responses and verified graceful-save semantic
 Public deployment, additional node-probe services, permissions, network/socket
 mounts and real ingress remain subject to operation-specific Owner approval.
 M2's temporary SFTPGo exception and issue #18 are unchanged.
+
+## 2026-10-11 amendment — Status continuity during backend recreation
+
+The v2 reachability proof identifies stable provider identity, allocation/binding
+shape and namespace/topology, rather than a replaceable Docker container ID.
+Wings may recreate that container during a normal start. An already-owned
+`waking` or `sleeping` listener may retain its status-only responder across an
+absent backend container or temporarily absent effective bindings. It requires
+the same consent generation/public endpoint, previously validated backend metadata,
+an unchanged current v2 proof, fresh complete provider/topology/socket/collision
+checks and a successful nonce challenge at the backend node. Retained metadata
+is bounded, process-local and conveys no permission independently of those checks.
+
+This exception cannot bootstrap a listener, authorize forwarding, validate an
+online backend, cover contradictory bindings/identity, or survive unknown topology
+or an aggregate validation timeout. Forwarding still requires complete current
+backend proof and game readiness. Restart loses retained metadata and keeps the
+existing bootstrap rules. Fixed diagnostic reason codes distinguish recreation,
+binding conflicts, topology/proof failures and validation timeouts without leaking
+provider payloads or credentials. A single validation pass may share its fresh
+Core context with the node challenge; it is not reused across validation passes.
+
+
+## 2026-10-11 amendment — Early release after exact completed sleep
+
+The original deadline-only local fence remains the fallback. A negotiated Core
+snapshot may additionally acknowledge the exact durable completed sleep operation.
+Only succeeded, confirmed, terminal stop with offline state, no active operation
+and no reservation supplies this proof. Gateway matches the original generation,
+promised deadline, observation time and complete unchanged route identities, and
+requires a new fully validated post-completion snapshot before releasing early.
+A generic sleeping response or expired/lost report cannot substitute for proof.
+
+This removes unnecessary remaining lease wait after a stop has conclusively
+finished while preserving the promise during any unresolved stop. Route revision
+checks under Core's resource lock continue rejecting delayed old idle reports.
+Restart still drains the maximum old lease because local fence context is lost;
+this change does not introduce multi-active-Gateway support. Feature negotiation
+allows Core-first deployment with older strict Gateway clients. See the exact
+[M3 control contract](../M3-API.md) and targeted M5 regression evidence.
+
+## 2026-10-11 amendment — Event-prompted readiness within the original lease
+
+Trusted protocol modules may declare `startupHint: provider_running`. Core then
+relays a bounded, sanitized live Wings status event for the exact waking
+route/generation/job. It never replays console history or treats a `Done` line,
+a running container, or the event alone as permission to forward. A hint prompts
+a real protocol observation; polling remains the fallback when events are lost.
+
+An already-bound waking route may reuse its original successful full topology
+validation only while that evidence remains fresh and had observed the running
+container with complete effective bindings. It still probes the actual backend.
+Missing, changed or expired evidence follows the full validation path. Listener
+creation and lease renewal always retain their complete checks.
+
+After independently verifying the current managed process and committing positive
+readiness, Core may return a negotiated snapshot receipt. Gateway can apply only
+the waking-to-online transition for the exact probed server and all its unchanged
+roles, endpoints, generation and wake job. Other servers must be unchanged; newer
+route authority, local quiescence, stale samples or expired leases reject this
+shortcut. Its expiry is capped at the original captured/committed lease, including
+closure of existing streams at that deadline. It does not renew listener authority
+or omit the next full safety refresh. Legacy clients retain the 204/refresh path.
+
+Core retains image/egg/process verification: durable start confirmation stores no
+configuration fingerprint sufficient to substitute for those proofs. Its initial
+host-gated Docker epoch read now overlaps provider identity/module discovery,
+with all branches settled before returning. No JAR or Mojang download is added.
+
+
+## 2026-10-11 amendment — Declared provider readiness
+
+[ADR 0016](0016-provider-readiness.md) supersedes the requirement to repeat a
+game-protocol readiness probe after authenticated live provider-running for the
+compiled Minecraft integration. Original decisions and test history remain above.

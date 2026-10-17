@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DomainError } from '@nickhosting/core';
+import { authSessionId, createLogger, DomainError, type LogRecord } from '@nickhosting/core';
 import { createDatabase, type Database } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { commandDigest, enqueueCommand } from '@nickhosting/jobs';
@@ -188,10 +188,11 @@ async function fixture(
       async (
         _applicationId: number,
         _identifier: string,
-        input: { authorize: () => Promise<boolean>; onConfirmed: () => Promise<void> },
+        input: Parameters<PterodactylAdapter['stopWithConfirmation']>[2],
       ) => {
         if (!(await input.authorize()))
           throw new PterodactylError('permission_denied', 'client', 'rejected');
+        await input.beforePower?.();
         state = 'offline';
         await input.onConfirmed();
         return { confirmed: true };
@@ -300,6 +301,7 @@ async function fixture(
   await db
     .insertInto('managed_servers')
     .values({
+      provider_user_id: 1,
       id: serverId,
       owner_id: ownerId,
       project_id: null,
@@ -385,6 +387,7 @@ async function fixture(
     authorizeEffect: async () => {},
     now: () => clock,
     reserveStart,
+    backupPolicy: async () => ({ offline: 'none' }),
     reserveInstallation: async (_serverId, _jobId, connection) => {
       await connection
         .insertInto('installation_reservations')
@@ -424,7 +427,7 @@ async function fixture(
     setUptime(value: number) {
       uptime = value;
     },
-    tick(ms = 22_000) {
+    tick(ms = ['backup', 'restore'].includes(action) ? 62_000 : 22_000) {
       clock = new Date(clock.getTime() + ms);
     },
     run() {
@@ -647,6 +650,504 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
     expect((await f.server()).readiness).toBe('loading');
   });
+  it.each(['start', 'restart'] as const)(
+    'performs one final full authorization for ordinary %s after local intent checks',
+    async (action) => {
+      const f = await fixture(action);
+      if (action === 'restart') f.setState('running');
+      const intent = vi.fn(async () => {}),
+        effect = vi.fn(async () => {});
+      f.options.authorizeIntent = intent;
+      f.options.authorizeEffect = effect;
+      expect(await f.run()).toBe('waiting');
+      expect(intent).toHaveBeenCalledTimes(2);
+      expect(effect).toHaveBeenCalledTimes(1);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(action === 'start' ? 1 : 2);
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['restart'] as const)(
+    'shares exactly the fresh post-preparation provider identity with final %s authorization',
+    async (action) => {
+      const f = await fixture(action);
+      f.options.authorizeIntent = async () => {};
+      f.options.checkpoint = async (point) => {
+        if (point === 'prepared') {
+          expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+          f.remote.container.image = 'fixture/changed:2';
+        }
+      };
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+        expect((await context?.providerServer)?.container.image).toBe('fixture/changed:2');
+        throw new DomainError('configuration_invalid');
+      };
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.operation()).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, powerEffectPrepared: false },
+      });
+    },
+  );
+  it.each(['none', 'identity', 'authorization'] as const)(
+    'overlaps final identity and authorization but awaits both proofs before power: rejection=%s',
+    async (rejection) => {
+      const f = await fixture('restart');
+      f.options.authorizeIntent = async () => {};
+      let identityStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        identityStarted = resolve;
+      });
+      let releaseIdentity!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseIdentity = resolve;
+      });
+      f.options.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+          identityStarted();
+          await released;
+          return rejection === 'identity' ? { ...f.remote, uuid: randomUUID() } : f.remote;
+        });
+      };
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        await started;
+        expect(context?.providerServer).toBeInstanceOf(Promise);
+        expect(f.adapter.power).not.toHaveBeenCalled();
+        releaseIdentity();
+        if (rejection === 'authorization') throw new DomainError('forbidden');
+        // Generic consumers may ignore context. Lifecycle must still await identity.
+      };
+      expect(await f.run()).toBe(rejection === 'none' ? 'waiting' : 'failed');
+      expect(f.adapter.power).toHaveBeenCalledTimes(rejection === 'none' ? 1 : 0);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      if (rejection !== 'none')
+        expect(await f.operation()).toMatchObject({
+          effect_state: 'none',
+          plan: { rejected: true, powerEffectPrepared: false },
+        });
+    },
+  );
+  it('runs one final local guard after the shared slow proof, without nested full authorization', async () => {
+    const f = await fixture('restart');
+    let proofSettled = false;
+    let finalGuards = 0;
+    f.options.authorizeIntent = async () => {
+      if (proofSettled) finalGuards++;
+    };
+    const authorizeEffect = vi.fn(async (_jobId, _serverId, _db, context) => {
+      expect(context.deferFinalIntentCheck).toBe(true);
+      await context.providerServer;
+      proofSettled = true;
+    });
+    f.options.authorizeEffect = authorizeEffect;
+    expect(await f.run()).toBe('waiting');
+    expect(authorizeEffect).toHaveBeenCalledTimes(1);
+    expect(finalGuards).toBe(1);
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])(
+    'rejects authority revoked during final identity after early authorization: local guard=%s',
+    async (localGuard) => {
+      const f = await fixture('restart');
+      let revoked = false;
+      let releaseIdentity!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseIdentity = resolve;
+      });
+      let prepared = false;
+      f.options.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        prepared = true;
+        f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+          await released;
+          revoked = true;
+          return f.remote;
+        });
+      };
+      const guard = async () => {
+        if (revoked) throw new DomainError('forbidden');
+      };
+      if (localGuard) f.options.authorizeIntent = guard;
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        if (prepared && context?.providerServer instanceof Promise)
+          expect(context.deferFinalIntentCheck).toBe(localGuard ? true : undefined);
+        await guard();
+        if (prepared) releaseIdentity();
+        // Intentionally does not await the supplied provider promise.
+      };
+      expect(await f.run()).toBe('failed');
+      expect(revoked).toBe(true);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.operation()).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, rejectionCode: 'forbidden' },
+      });
+    },
+  );
+  it.each(['limits', 'suspended', 'installation'] as const)(
+    'rejects %s drift after durable preparation against the same final snapshot',
+    async (change) => {
+      const f = await fixture('restart');
+      f.options.authorizeIntent = async () => {};
+      f.options.checkpoint = async (point) => {
+        if (point !== 'prepared') return;
+        if (change === 'limits') f.remote.limits.memory = 4096;
+        if (change === 'suspended') f.remote.suspended = true;
+        if (change === 'installation') f.remote.status = 'installing';
+      };
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(await f.operation()).toMatchObject({
+        effect_state: 'none',
+        plan: { rejected: true, powerEffectPrepared: false },
+      });
+    },
+  );
+  it('rejects provider identity drift after durable power preparation without uncertain effects', async () => {
+    const f = await fixture('restart');
+    f.options.authorizeIntent = async () => {};
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') f.remote.uuid = randomUUID();
+    };
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.operation()).toMatchObject({
+      effect_state: 'none',
+      plan: { rejected: true, rejectionCode: 'provenance_mismatch' },
+    });
+  });
+  it.each(['stop', 'restart'] as const)(
+    'overlaps initial identity and resource reads for planned %s without publishing unverified telemetry',
+    async (action) => {
+      const f = await fixture(action);
+      let startedResources!: () => void;
+      const resourceRead = new Promise<void>((resolve) => {
+        startedResources = resolve;
+      });
+      f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+        await resourceRead;
+        return { ...f.remote, uuid: randomUUID() };
+      });
+      const original = f.adapter.getResources.getMockImplementation();
+      f.adapter.getResources.mockImplementationOnce(async () => {
+        startedResources();
+        if (!original) throw new Error('Missing fixture resource reader');
+        return original();
+      });
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.getResources).toHaveBeenCalledTimes(1);
+      expect((await f.server()).last_observed_at).toBeNull();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
+  it('sends clean Start with one limits read, no state preflight or runtime validation', async () => {
+    const f = await fixture('start');
+    f.remote.suspended = true;
+    f.remote.status = 'installing';
+    f.remote.container.image = 'fixture/provider-owned:2';
+    const guard = vi.fn(async (_jobId, _serverId, _db, context) => {
+      if (context) expect(context.startAdmissionValidated).toBe(true);
+    });
+    f.options.authorizeEffect = guard;
+    f.options.authorizeIntent = async () => {};
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledExactlyOnceWith(f.remote.identifier, 'start');
+    expect((await f.operation()).plan.previousUptime).toBeNull();
+    expect((await f.server()).last_observed_at).toBeNull();
+    expect(guard).toHaveBeenCalledTimes(1);
+  });
+  it('sends clean Start using trusted feed limits without a provider limits read', async () => {
+    const f = await fixture('start');
+    f.options.cachedStartLimits = async () => f.remote.limits;
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledExactlyOnceWith(f.remote.identifier, 'start');
+  });
+  it('falls back to provider limits when the change feed is unavailable', async () => {
+    const f = await fixture('start');
+    f.options.cachedStartLimits = async () => null;
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+  });
+  it('rejects changed feed limits before reserving or sending Start', async () => {
+    const f = await fixture('start');
+    f.options.cachedStartLimits = async () => ({
+      ...f.remote.limits,
+      memory: f.remote.limits.memory + 1,
+    });
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it.each(['id', 'identifier', 'uuid', 'node'] as const)(
+    'rejects a limits snapshot for another power target: %s',
+    async (key) => {
+      const f = await fixture('start');
+      if (key === 'id' || key === 'node') f.remote[key]++;
+      else f.remote[key] = randomUUID();
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['memory', 'cpu', 'disk', 'swap', 'io'] as const)(
+    'rejects clean Start when actual %s differs from reserved limits',
+    async (key) => {
+      const f = await fixture('start');
+      f.remote.limits[key] += 1;
+      expect(await f.run()).toBe('failed');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+    },
+  );
+  it('never replays clean Start after a crash at durable preparation', async () => {
+    const f = await fixture('start');
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') throw new Error('simulated worker exit');
+    };
+    expect(await f.run()).toBe('waiting');
+    expect(await f.operation()).toMatchObject({ phase: 'power', effect_state: 'prepared' });
+    f.options.checkpoint = undefined;
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.reservation()).toBeDefined();
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+  });
+  it('does not replay clean Start after a lost response and retains recovery identity checks', async () => {
+    const f = await fixture('start');
+    f.adapter.power.mockImplementationOnce(async () => {
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).effect_state).toBe('uncertain');
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    f.remote.uuid = randomUUID();
+    f.tick();
+    await f.run();
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+  });
+  it('overlaps start admission sampling with provider reads and reserves only after identity', async () => {
+    const f = await fixture('start');
+    const sampling = Promise.withResolvers<void>();
+    let identityValidated = false;
+    f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+      await sampling.promise;
+      identityValidated = true;
+      return f.remote;
+    });
+    const reserve = f.options.reserveStart;
+    const commitAdmission = vi.fn(async () => {
+      expect(identityValidated).toBe(true);
+      await reserve?.(f.serverId, f.jobId, 'start', f.db);
+    });
+    f.options.prepareStartAdmission = async () => {
+      sampling.resolve();
+      return commitAdmission;
+    };
+    f.options.reserveStart = vi.fn(async () => {
+      throw new Error('Prepared admission must replace sequential sampling');
+    });
+    expect(await f.run()).toBe('waiting');
+    expect(commitAdmission).toHaveBeenCalledTimes(1);
+    expect(f.options.reserveStart).not.toHaveBeenCalled();
+    expect(f.adapter.power).toHaveBeenCalledOnce();
+  });
+  it.each(['provider', 'sampling', 'limits'] as const)(
+    'settles start sampling and rejects before reservation or power on %s failure',
+    async (failure) => {
+      const f = await fixture('start');
+      const identityStarted = Promise.withResolvers<void>();
+      const samplingFinished = Promise.withResolvers<void>();
+      const commitAdmission = vi.fn(async () => {});
+      f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+        identityStarted.resolve();
+        await samplingFinished.promise;
+        if (failure === 'provider')
+          throw new PterodactylError('unavailable', 'application', 'unknown');
+        if (failure === 'limits')
+          return { ...f.remote, limits: { ...f.remote.limits, memory: 9999 } };
+        return f.remote;
+      });
+      f.options.prepareStartAdmission = async () => {
+        await identityStarted.promise;
+        samplingFinished.resolve();
+        if (failure === 'sampling') throw new DomainError('configuration_invalid');
+        return commitAdmission;
+      };
+      expect(await f.run()).toBe(failure === 'provider' ? 'waiting' : 'failed');
+      expect(commitAdmission).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects ordinary power if full authority changes after preparation', async () => {
+    const f = await fixture('start');
+    f.options.authorizeIntent = async () => {};
+    let prepared = false;
+    f.options.checkpoint = async (point) => {
+      if (point === 'prepared') prepared = true;
+    };
+    f.options.authorizeEffect = async () => {
+      if (prepared) throw new DomainError('forbidden');
+    };
+    expect(await f.run()).toBe('failed');
+    expect(prepared).toBe(true);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(await f.operation()).toMatchObject({
+      effect_state: 'none',
+      plan: { rejected: true, powerEffectPrepared: false },
+    });
+  });
+  it('uses local stop-console reauthorization and shares metadata while retaining a fresh final identity check', async () => {
+    const f = await fixture('stop');
+    f.setState('running');
+    const intent = vi.fn(async () => {}),
+      effect = vi.fn(async () => {});
+    f.options.authorizeIntent = intent;
+    f.options.authorizeEffect = effect;
+    f.adapter.stopWithConfirmation.mockImplementationOnce(async (id, identifier, callbacks) => {
+      expect(callbacks.verifiedServer).toMatchObject({ id, identifier, uuid: f.remote.uuid });
+      const reads = f.adapter.getApplicationServer.mock.calls.length;
+      for (let i = 0; i < 3; i++) expect(await callbacks.authorize()).toBe(true);
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(reads);
+      await callbacks.beforePower?.();
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(reads + 1);
+      f.setState('offline');
+      await callbacks.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('waiting');
+    expect(intent).toHaveBeenCalledTimes(5);
+    expect(effect).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+  });
+  it.each(['none', 'identity', 'host', 'revoked'] as const)(
+    'overlaps stop identity/host proofs and rechecks local authority after both: %s',
+    async (failure) => {
+      const f = await fixture('stop');
+      f.setState('running');
+      const identityStarted = Promise.withResolvers<void>();
+      const hostStarted = Promise.withResolvers<void>();
+      const hostReleased = Promise.withResolvers<void>();
+      let revoked = false;
+      let preparing = false;
+      let powerSent = false;
+      f.options.authorizeIntent = async () => {
+        if (revoked) throw new DomainError('forbidden');
+      };
+      f.options.verifyObservationHost = async () => {
+        hostStarted.resolve();
+        await identityStarted.promise;
+        hostReleased.resolve();
+        if (failure === 'host') throw new DomainError('configuration_invalid');
+      };
+      f.options.authorizeEffect = async (_jobId, _serverId, _db, context) => {
+        if (!preparing) return;
+        expect(context?.providerServer).toBeInstanceOf(Promise);
+        expect(powerSent).toBe(false);
+        // Deliberately ignore provider proof like an injected generic authorizer.
+      };
+      f.adapter.stopWithConfirmation.mockImplementationOnce(async (_id, _identifier, input) => {
+        preparing = true;
+        f.adapter.getApplicationServer.mockImplementationOnce(async () => {
+          identityStarted.resolve();
+          await hostStarted.promise;
+          await hostReleased.promise;
+          if (failure === 'revoked') revoked = true;
+          return failure === 'identity' ? { ...f.remote, uuid: randomUUID() } : f.remote;
+        });
+        await input.beforePower?.();
+        powerSent = true;
+        f.setState('offline');
+        await input.onConfirmed();
+        return { confirmed: true };
+      });
+      expect(await f.run()).toBe(failure === 'none' ? 'waiting' : 'failed');
+      expect(powerSent).toBe(failure === 'none');
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(2);
+      if (failure !== 'none') expect((await f.server()).runtime_state).toBe('running');
+    },
+  );
+  it.each(['identity', 'permission'] as const)(
+    'rejects stop when %s changes during console setup',
+    async (change) => {
+      const f = await fixture('stop');
+      f.setState('running');
+      f.options.authorizeIntent = async () => {};
+      let setup = false;
+      f.options.authorizeEffect = async () => {
+        if (setup && change === 'permission') throw new DomainError('forbidden');
+      };
+      let sentPower = false;
+      f.adapter.stopWithConfirmation.mockImplementationOnce(async (_id, _identifier, callbacks) => {
+        setup = true;
+        if (change === 'identity') f.remote.uuid = randomUUID();
+        await callbacks.beforePower?.();
+        sentPower = true;
+        return { confirmed: false };
+      });
+      expect(await f.run()).toBe('failed');
+      expect(setup).toBe(true);
+      expect(sentPower).toBe(false);
+      expect((await f.server()).runtime_state).toBe('running');
+    },
+  );
+  it.each([false, true])(
+    'records bounded operation timings without changing effects when the logger throws=%s',
+    async (throws) => {
+      const f = await fixture('start');
+      const logs: LogRecord[] = [];
+      f.options.logger = createLogger((record) => {
+        logs.push(record);
+        if (throws) throw new Error('isolated logging failure');
+      });
+      const results = await Promise.all(Array.from({ length: 3 }, () => f.run()));
+      expect(results).toContain('waiting');
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      const stages = logs.filter((r) => r.event === 'servers.operation_stage');
+      expect(stages.map((r) => (r.data as Record<string, unknown>).stage)).toEqual(
+        expect.arrayContaining([
+          'server_lock',
+          'provider_identity',
+          'provider_resources',
+          'authorization',
+          'provider_effect',
+        ]),
+      );
+      for (const record of stages) {
+        expect(record.data).toMatchObject({
+          jobId: f.jobId,
+          serverId: f.serverId,
+          action: 'start',
+          durationMs: expect.any(Number),
+        });
+        expect(Object.keys(record.data as object).sort()).toEqual([
+          'action',
+          'durationMs',
+          'jobId',
+          'outcome',
+          'serverId',
+          'stage',
+        ]);
+      }
+      expect(
+        logs.some(
+          (r) =>
+            r.event === 'servers.operation_deferred' &&
+            (r.data as Record<string, unknown>).reason === 'server_lock_busy',
+        ),
+      ).toBe(true);
+    },
+  );
   it('serializes duplicate deliveries around an external power call', async () => {
     const f = await fixture('start');
     const results = await Promise.all(Array.from({ length: 10 }, () => f.run()));
@@ -739,14 +1240,14 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     f.tick();
     expect(await processServerOperation(f.db, started.jobId, f.options)).toBe('succeeded');
     const qualifiedStop = await enqueue('stop');
-    expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('waiting');
-    f.tick();
     expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('succeeded');
+    f.tick();
+    expect(await processServerOperation(f.db, qualifiedStop.jobId, f.options)).toBe('duplicate');
     expect(await f.reservation()).toBeUndefined();
     const repeatedStop = await enqueue('stop');
     expect(await processServerOperation(f.db, repeatedStop.jobId, f.options)).toBe('succeeded');
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
-    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
+    expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(3);
     const deleted = await enqueue('delete');
     expect(await processServerOperation(f.db, deleted.jobId, f.options)).toBe('waiting');
     f.tick();
@@ -855,6 +1356,224 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.run()).toBe('waiting');
     expect((await f.operation()).plan.waitReason).toBe('restart_outcome_unknown');
     expect(await f.reservation()).toBeDefined();
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
+  it.each(['start', 'restart', 'provision'] as const)(
+    'confirms %s from fresh process proof before the Panel resource cache expires',
+    async (action) => {
+      const f = await fixture(action, action === 'provision' ? { autoStart: true } : {});
+      const baseline = new Date(f.now().getTime() - 100_000).toISOString();
+      let proof: string | null = action === 'restart' ? baseline : null;
+      f.options.observeProcessStart = async () => proof;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing durable power intent');
+      expect((await f.operation()).phase).toBe(action === 'provision' ? 'initial_start' : 'power');
+      proof = new Date(effect.getTime() + 500).toISOString();
+      f.setState('offline'); // Panel still serves its pre-start resources cache.
+      f.adapter.getResources.mockClear();
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      expect((await f.reservation())?.state).toBe('running');
+      expect(await f.server()).toMatchObject({
+        runtime_state: 'running',
+        readiness: 'unknown',
+        active_operation_id: null,
+      });
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    ['start', 'offline'],
+    ['start', 'starting'],
+    ['restart', 'offline'],
+    ['restart', 'starting'],
+    ['provision', 'offline'],
+    ['provision', 'starting'],
+  ] as const)(
+    'preserves freshly confirmed %s through a cached %s reconciliation sample',
+    async (action, cached) => {
+      const f = await fixture(action, { autoStart: true });
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'auto_wake_enabled' })
+        .where('id', '=', f.serverId)
+        .execute();
+      let epoch: string | null = null;
+      f.options.observeProcessStart = vi.fn(async () => epoch);
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing power effect');
+      epoch = new Date(effect.getTime() + 500).toISOString();
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      f.options.observeReconciliationProcessStart = vi.fn(async () => epoch);
+      vi.mocked(f.options.observeProcessStart).mockClear();
+      await f.db
+        .updateTable('managed_servers')
+        .set({ readiness: 'ready' })
+        .where('id', '=', f.serverId)
+        .execute();
+      f.setState(cached);
+      expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+      expect(await f.server()).toMatchObject({ runtime_state: 'running', readiness: 'ready' });
+      expect(await f.reservation()).toMatchObject({ state: 'running' });
+      expect(f.options.observeProcessStart).not.toHaveBeenCalled();
+      expect(f.options.observeReconciliationProcessStart).toHaveBeenCalledTimes(1);
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    'null',
+    'unavailable',
+    'different_epoch',
+    'malformed',
+    'missing_receipt',
+    'future_receipt',
+    'pre_effect_receipt',
+    'failed_job',
+    'manual_stop',
+    'missing_reservation',
+    'external_stop',
+    'identity_mismatch',
+  ] as const)(
+    'does not promote a cached offline reconciliation sample with %s',
+    async (condition) => {
+      const f = await fixture('start');
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'auto_wake_enabled' })
+        .where('id', '=', f.serverId)
+        .execute();
+      let epoch: string | null = null;
+      f.options.observeProcessStart = async () => epoch;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing power effect');
+      epoch = new Date(effect.getTime() + 500).toISOString();
+      f.tick(3000);
+      expect(await f.run()).toBe('succeeded');
+      f.options.observeReconciliationProcessStart = vi.fn(async () => {
+        if (condition === 'null') return null;
+        if (condition === 'unavailable') throw new Error('isolated unavailable observer');
+        if (condition === 'different_epoch') return new Date(effect.getTime() + 1000).toISOString();
+        if (condition === 'malformed') return 'invalid';
+        if (condition === 'identity_mismatch') throw new DomainError('provenance_mismatch');
+        return epoch;
+      });
+      if (['missing_receipt', 'future_receipt', 'pre_effect_receipt'].includes(condition)) {
+        const plan = (await f.operation()).plan;
+        await f.db
+          .updateTable('server_operations')
+          .set({
+            plan: JSON.stringify({
+              ...plan,
+              startProcessStartedAt:
+                condition === 'missing_receipt'
+                  ? null
+                  : condition === 'pre_effect_receipt'
+                    ? effect.toISOString()
+                    : new Date(f.now().getTime() + 1000).toISOString(),
+            }),
+          })
+          .where('job_id', '=', f.jobId)
+          .execute();
+      }
+      if (condition === 'failed_job')
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'failed' })
+          .where('id', '=', f.jobId)
+          .execute();
+      if (condition === 'manual_stop')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ intent: 'manually_stopped' })
+          .where('id', '=', f.serverId)
+          .execute();
+      if (condition === 'missing_reservation')
+        await f.db
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', f.serverId)
+          .execute();
+      if (condition === 'external_stop')
+        f.options.observeExternalStop = async () => ({
+          containerId: 'a'.repeat(64),
+          startedAt: epoch ?? '',
+          finishedAt: new Date(effect.getTime() + 2000).toISOString(),
+          activityId: 'owner-kill',
+          activityAt: new Date(effect.getTime() + 1500).toISOString(),
+          action: 'kill',
+        });
+      f.setState('offline');
+      if (condition === 'identity_mismatch') {
+        await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toMatchObject({
+          code: 'provenance_mismatch',
+        });
+      } else {
+        expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+        expect((await f.server()).runtime_state).toBe('offline');
+        if (condition === 'missing_reservation' || condition === 'external_stop')
+          expect(await f.reservation()).toBeUndefined();
+        else expect(await f.reservation()).toMatchObject({ state: 'uncertain' });
+      }
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['null', 'unavailable', 'before_intent', 'equal_intent', 'future', 'malformed'] as const)(
+    'does not complete start using cached running state when physical proof is %s',
+    async (kind) => {
+      const f = await fixture('start');
+      f.options.observeProcessStart = async () => null;
+      expect(await f.run()).toBe('waiting');
+      const effect = (await f.operation()).effect_started_at;
+      if (!effect) throw new Error('missing durable power intent');
+      f.tick();
+      f.setState('running');
+      f.options.observeProcessStart = async () => {
+        if (kind === 'null') return null;
+        if (kind === 'unavailable') throw new Error('isolated unavailable observer');
+        if (kind === 'malformed') return 'invalid';
+        if (kind === 'equal_intent') return effect.toISOString();
+        if (kind === 'before_intent') return new Date(effect.getTime() - 1).toISOString();
+        return new Date(f.now().getTime() + 1).toISOString();
+      };
+      expect(await f.run()).toBe('waiting');
+      expect((await f.operation()).plan.waitReason).toBe('start_terminal_unproven');
+      expect((await f.reservation())?.state).toBe('starting');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['start', 'restart'] as const)(
+    'keeps %s process confirmation polls bounded instead of growing to ten seconds',
+    async (action) => {
+      const f = await fixture(action);
+      f.options.observeProcessStart = async () => null;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        expect(await f.run()).toBe('waiting');
+        const job = await f.db
+          .selectFrom('operation_jobs')
+          .select('next_attempt_at')
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow();
+        const delay = job.next_attempt_at.getTime() - f.now().getTime();
+        expect(delay).toBeGreaterThanOrEqual(2000);
+        expect(delay).toBeLessThan(2500);
+        f.tick(3000);
+      }
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+      expect(await f.reservation()).toBeDefined();
+    },
+  );
+  it('keeps the resource-cache safety window when no physical observer is available', async () => {
+    const f = await fixture('start');
+    expect(await f.run()).toBe('waiting');
+    f.tick(3000);
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.waitReason).toBe('resource_cache_expiry');
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
     expect(f.adapter.power).toHaveBeenCalledTimes(1);
   });
   it('confirms a fast restart from a new physical process despite missing the cached uptime reset', async () => {
@@ -1180,6 +1899,20 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).limits.memory).toBe(256);
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it.each(['replaced', 'deleted'] as const)(
+    'does not request prompt delivery retries for an inactive %s operation',
+    async (reason) => {
+      const f = await fixture('start');
+      await f.db
+        .updateTable('managed_servers')
+        .set(reason === 'deleted' ? { deleted_at: f.now() } : { active_operation_id: null })
+        .where('id', '=', f.serverId)
+        .execute();
+      expect(await f.run()).toBe('inactive');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_started_at).toBeNull();
+    },
+  );
   it('reconciles only registered servers and conservatively accounts external starts', async () => {
     const f = await fixture('start');
     await f.db
@@ -1509,6 +2242,111 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     ).toHaveLength(1);
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it.each(['revoked', 'expired', 'demoted'] as const)(
+    'rejects Owner resolution when the bound session is %s during provider proof',
+    async (change) => {
+      const f = await fixture('configure', {
+        build: {
+          memory: 256,
+          cpu: 10,
+          disk: 64,
+          swap: 0,
+          io: 500,
+          allocation: providerSequence + 1,
+          feature_limits: { databases: 0, allocations: 1, backups: 1 },
+        },
+      });
+      f.adapter.updateBuild.mockImplementation(async () => {
+        throw new PterodactylError('unavailable', 'application', 'unknown');
+      });
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      expect(await f.run()).toBe('waiting');
+      await f.prepareReservation();
+      await f.db
+        .updateTable('server_operations')
+        .set({ effect_started_at: new Date(Date.now() - 121_000) })
+        .where('job_id', '=', f.jobId)
+        .execute();
+      await f.db.updateTable('user').set({ role: 'owner' }).where('id', '=', f.ownerId).execute();
+      const sessionId = randomUUID();
+      await f.db
+        .insertInto('session')
+        .values({
+          id: sessionId,
+          token: randomUUID(),
+          userId: f.ownerId,
+          expiresAt: new Date(Date.now() + 60_000),
+        })
+        .execute();
+      const before = {
+        operation: await f.operation(),
+        reservation: await f.reservation(),
+        server: await f.server(),
+      };
+      const resources = await f.adapter.getResources();
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      f.adapter.getResources.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return resources;
+      });
+      const pending = resolveUncertainOperation(
+        f.db,
+        f.options.adapter,
+        {
+          actorUserId: f.ownerId,
+          subjectUserId: f.ownerId,
+          role: 'owner',
+          sessionType: 'regular',
+          ownerElevation: false,
+          [authSessionId]: sessionId,
+        },
+        f.serverId,
+        { jobId: f.jobId, confirm: true, reason: 'Isolated current Owner authorization test' },
+      ).then(
+        (result) => result,
+        (error: unknown) => error,
+      );
+      try {
+        await entered.promise;
+        if (change === 'revoked')
+          await f.db.deleteFrom('session').where('id', '=', sessionId).execute();
+        else if (change === 'expired')
+          await f.db
+            .updateTable('session')
+            .set({ expiresAt: new Date(0) })
+            .where('id', '=', sessionId)
+            .execute();
+        else
+          await f.db
+            .updateTable('user')
+            .set({ role: 'user' })
+            .where('id', '=', f.ownerId)
+            .execute();
+      } finally {
+        release.resolve();
+      }
+      const outcome = await pending;
+      await f.db.updateTable('user').set({ role: 'user' }).where('id', '=', f.ownerId).execute();
+      expect(outcome).toMatchObject({
+        code: change === 'demoted' ? 'forbidden' : 'unauthenticated',
+      });
+      expect(await f.operation()).toEqual(before.operation);
+      expect(await f.reservation()).toEqual(before.reservation);
+      expect(await f.server()).toEqual(before.server);
+      expect(
+        await f.db
+          .selectFrom('audit_events')
+          .select('id')
+          .where('action', '=', 'server.operation.owner_resolution')
+          .where('actor_user_id', '=', f.ownerId)
+          .execute(),
+      ).toHaveLength(0);
+      expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
+    },
+  );
   it('tracks retries per effect so a multi-batch wipe cannot exhaust the job retry constraint', async () => {
     const f = await fixture('wipe');
     f.setFiles(Array.from({ length: 3500 }, (_, index) => `fixture-${index}`));
@@ -1588,6 +2426,102 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect((await f.server()).limits).toMatchObject({ memory: 128, disk: 64 });
     expect(f.adapter.updateBuild).toHaveBeenCalledTimes(1);
   });
+  it.each(['start', 'restart', 'provision'] as const)(
+    'reconciles an interactive external stop after a proven %s epoch',
+    async (action) => {
+      const f = await fixture(action, { autoStart: true });
+      expect(await f.run()).toBe('waiting');
+      const effectAt = (await f.operation()).effect_started_at?.getTime() ?? 0;
+      f.tick(3000);
+      f.setState('offline');
+      const receipt = {
+        containerId: 'a'.repeat(64),
+        startedAt: new Date(effectAt + 500).toISOString(),
+        finishedAt: new Date(effectAt + 2500).toISOString(),
+        activityId: 'owner-stop',
+        activityAt: new Date(effectAt + 2000).toISOString(),
+        action: 'kill' as const,
+      };
+      f.options.observeExternalStop = vi.fn(async () => receipt);
+      expect(await f.run()).toBe('failed');
+      expect(await f.reservation()).toBeUndefined();
+      expect(await f.server()).toMatchObject({
+        active_operation_id: null,
+        intent: 'manually_stopped',
+        runtime_state: 'offline',
+      });
+      expect((await f.operation()).plan.externalStopConfirmed).toEqual(receipt);
+      expect((await f.operation()).plan.waitReason).toBeNull();
+      f.setState('running'); // stale provider resource cache after terminal completion
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect(await f.reservation()).toBeUndefined();
+      expect((await f.server()).runtime_state).toBe('offline');
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['missing', 'previous-epoch', 'pre-effect-stop'] as const)(
+    'retains pending start capacity without a correlated terminal stop: %s',
+    async (condition) => {
+      const f = await fixture('start');
+      f.adapter.power.mockImplementation(async () => {});
+      expect(await f.run()).toBe('waiting');
+      const at = (await f.operation()).effect_started_at?.getTime() ?? 0;
+      f.tick();
+      f.options.observeExternalStop = vi.fn(async () =>
+        condition === 'missing'
+          ? null
+          : {
+              containerId: 'a'.repeat(64),
+              startedAt: new Date(
+                at + (condition === 'previous-epoch' ? -1000 : 500),
+              ).toISOString(),
+              finishedAt: new Date(at + 2000).toISOString(),
+              activityId: 'old-stop',
+              activityAt: new Date(
+                at + (condition === 'pre-effect-stop' ? -1000 : 1000),
+              ).toISOString(),
+              action: 'stop' as const,
+            },
+      );
+      expect(await f.run()).toBe('waiting');
+      expect(await f.reservation()).toBeDefined();
+      expect(f.adapter.power).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('releases an already online reservation only for a corroborated interactive external stop', async () => {
+    const f = await fixture('start');
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    f.setState('offline');
+    f.options.observeExternalStop = vi.fn(async () => {
+      throw new DomainError('forbidden');
+    });
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect((await f.server()).runtime_state).toBe('offline');
+    expect(await f.reservation()).toMatchObject({ state: 'uncertain' });
+    const at = f.now().getTime();
+    f.options.observeExternalStop = vi.fn(async () => ({
+      containerId: 'a'.repeat(64),
+      startedAt: new Date(at - 10000).toISOString(),
+      finishedAt: new Date(at - 500).toISOString(),
+      activityId: 'external-stop',
+      activityAt: new Date(at - 1000).toISOString(),
+      action: 'stop' as const,
+    }));
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.server()).toMatchObject({
+      intent: 'manually_stopped',
+      runtime_state: 'offline',
+      readiness: 'unknown',
+    });
+    f.setState('running');
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeUndefined();
+    expect((await f.server()).runtime_state).toBe('offline');
+    expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  });
   it('retains accepted start reservations through a long offline preboot and does not replay power', async () => {
     for (const action of ['start', 'provision'] as const) {
       const f = await fixture(action, { autoStart: true });
@@ -1651,6 +2585,113 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.reservation()).toBeUndefined();
     expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
     expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('completes an observed stop immediately despite cached running resources', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.verifyObservationHost = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = vi.fn(async (_id, _db, context) => {
+      expect(context?.providerServer).toBeInstanceOf(Promise);
+      expect(context?.observerPreflight).toBeInstanceOf(Promise);
+      expect((await context?.providerServer)?.uuid).toBe(f.remote.uuid);
+      await context?.observerPreflight;
+      return true;
+    });
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      // Ordered provider/Docker confirmation arrived; the resources cache has not changed.
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.server()).toMatchObject({
+      runtime_state: 'offline',
+      readiness: 'unknown',
+      active_operation_id: null,
+      intent: 'manually_stopped',
+    });
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('does not recreate stopped capacity from a stale running reconciliation sample', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('succeeded');
+    f.tick(1000);
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    expect(await f.server()).toMatchObject({ runtime_state: 'offline', readiness: 'unknown' });
+    expect(await f.reservation()).toBeUndefined();
+    expect(
+      await f.db
+        .selectFrom('server_events')
+        .select('message_key')
+        .where('server_id', '=', f.serverId)
+        .where('message_key', '=', 'servers.reconciliation.external_start')
+        .execute(),
+    ).toEqual([]);
+    // An actual new process must defeat even a recent stop receipt.
+    f.options.confirmAlreadyStopped = vi.fn(async () => false);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.server()).toMatchObject({ runtime_state: 'running' });
+    expect(await f.reservation()).toBeDefined();
+  });
+  it('does not suppress a current observation using an expired stop receipt', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      return { confirmed: true };
+    });
+    expect(await f.run()).toBe('succeeded');
+    f.tick();
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.reservation()).toBeDefined();
+  });
+  it.each(['running', 'unavailable', 'identity'] as const)(
+    'retains stop capacity if the fresh confirmation is %s',
+    async (failure) => {
+      const f = await fixture('stop');
+      await f.prepareReservation();
+      f.setState('running');
+      f.options.confirmAlreadyStopped = vi.fn(async () => {
+        if (failure === 'unavailable') throw new Error('observer unavailable');
+        return false;
+      });
+      const original = f.adapter.stopWithConfirmation.getMockImplementation();
+      f.adapter.stopWithConfirmation.mockImplementation(async (...args) => {
+        const result = await original?.(...args);
+        if (failure === 'identity') f.remote.uuid = randomUUID();
+        return result ?? { confirmed: false };
+      });
+      expect(await f.run()).toBe(failure === 'identity' ? 'failed' : 'waiting');
+      expect(await f.reservation()).toBeDefined();
+      expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+      expect(f.adapter.power).not.toHaveBeenCalled();
+    },
+  );
+  it('recovers a confirmed stop before cache expiry without sending another stop', async () => {
+    const f = await fixture('stop');
+    await f.prepareReservation();
+    f.setState('running');
+    f.adapter.stopWithConfirmation.mockImplementation(async (_id, _identifier, input) => {
+      await input.onConfirmed();
+      throw new PterodactylError('unavailable', 'client', 'unknown');
+    });
+    expect(await f.run()).toBe('waiting');
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    f.tick(3000);
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
   });
   it('recovers persisted stop proof after worker loss before the provider helper returned', async () => {
     const f = await fixture('stop');
@@ -1795,6 +2836,110 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await noPower.installationReservation()).toBeUndefined();
     expect(noPower.adapter.createServer).not.toHaveBeenCalled();
   });
+  const outputReceipt = {
+    integrationId: 'fixture',
+    combinationId: 'fixture-combination',
+    mappingDigest: 'fixture-mapping',
+    imageDigest: `sha256:${'a'.repeat(64)}`,
+    files: [{ path: 'server.jar', sha256: 'b'.repeat(64), size: 100 }],
+  };
+  it('recovers a missed first-install event from verified outputs without replay or automatic power', async () => {
+    const f = await fixture('provision');
+    f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+    expect(await f.run()).toBe('waiting');
+    expect(await f.installationReservation()).toBeDefined();
+    f.tick();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn(async () => outputReceipt);
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan.installationProof).toMatchObject({
+      method: 'required_outputs_verified',
+      operationId: f.jobId,
+      providerUuid: f.remote.uuid,
+      ...outputReceipt,
+    });
+    expect(await f.installationReservation()).toBeUndefined();
+    expect(f.options.confirmInitialInstallationStopped).toHaveBeenCalledTimes(2);
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.reinstall).not.toHaveBeenCalled();
+    expect(await f.run()).toBe('duplicate');
+    expect(f.options.verifyInitialInstallation).toHaveBeenCalledTimes(1);
+  });
+  it('resumes after a crash following the durable output receipt without repeating creation or proof', async () => {
+    const f = await fixture('provision');
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn(async () => outputReceipt);
+    f.options.configureGameProvision = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('crash'))
+      .mockResolvedValue(true);
+    expect(await f.run()).toBe('waiting');
+    expect((await f.operation()).plan.installationProof).toMatchObject({
+      method: 'required_outputs_verified',
+    });
+    expect(await f.installationReservation()).toBeUndefined();
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.verifyInitialInstallation).toHaveBeenCalledTimes(1);
+    expect(f.adapter.createServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.confirmInstallation).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it.each([
+    'installer',
+    'game',
+    'identity',
+    'outputs',
+    'revocation',
+    'status',
+    'creation-time',
+  ] as const)(
+    'retains first-install admission when recovery fails %s verification',
+    async (failure) => {
+      const f = await fixture('provision');
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      expect(await f.run()).toBe('waiting');
+      f.tick();
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => failure !== 'installer');
+      f.options.verifyInitialInstallation = vi.fn(async () => {
+        if (failure === 'outputs') throw new DomainError('conflict');
+        if (failure === 'revocation')
+          f.options.authorizeEffect = async () => {
+            throw new DomainError('forbidden');
+          };
+        if (failure === 'status') f.remote.status = 'installing';
+        return outputReceipt;
+      });
+      if (failure === 'game') f.setState('running');
+      if (failure === 'identity') f.remote.uuid = randomUUID();
+      if (failure === 'creation-time') f.remote.created_at = '2000-01-01T00:00:00Z';
+      expect(await f.run()).toBe(
+        ['identity', 'outputs', 'revocation'].includes(failure) ? 'failed' : 'waiting',
+      );
+      expect((await f.operation()).plan.installConfirmed).toBeUndefined();
+      expect(await f.installationReservation()).toBeDefined();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect(f.adapter.reinstall).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['reinstall', 'wipe'] as const)(
+    'never substitutes initial output proof for %s completion',
+    async (action) => {
+      const f = await fixture(action);
+      f.adapter.confirmInstallation.mockResolvedValue({ confirmed: false });
+      f.adapter.reinstallWithConfirmation.mockResolvedValue({ confirmed: false });
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+      f.options.verifyInitialInstallation = vi.fn(async () => outputReceipt);
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await f.run();
+        f.tick();
+      }
+      expect(f.options.verifyInitialInstallation).not.toHaveBeenCalled();
+      expect((await f.operation()).plan.installConfirmed).toBeUndefined();
+      expect(await f.installationReservation()).toBeDefined();
+    },
+  );
   it('does not infer installation completion after a daemon reset clears Panel status', async () => {
     for (const action of ['provision', 'reinstall', 'wipe'] as const) {
       const f = await fixture(action, { autoStart: true });
@@ -1857,4 +3002,898 @@ describe('durable provider lifecycle with real PostgreSQL', () => {
     expect(await f.reservation()).toBeUndefined();
     expect((await f.server()).pterodactyl_id).toBe(f.remote.id);
   });
+});
+
+/** These gates model slow external I/O, never a production provider or clock sleep. */
+function reconciliationGate<T>() {
+  const entered = Promise.withResolvers<void>();
+  const result = Promise.withResolvers<T>();
+  return { entered, result };
+}
+
+describe('unlocked reconciliation collection and atomic stale-result fencing', () => {
+  async function idleFixture() {
+    const f = await fixture('start');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', f.serverId)
+      .execute();
+    return f;
+  }
+  async function history(f: Awaited<ReturnType<typeof fixture>>) {
+    return {
+      server: await f.server(),
+      reservation: await f.reservation(),
+      installation: await f.installationReservation(),
+      metrics: await f.db
+        .selectFrom('server_metrics')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute(),
+      events: await f.db
+        .selectFrom('server_events')
+        .selectAll()
+        .where('server_id', '=', f.serverId)
+        .execute(),
+    };
+  }
+  async function heldResources(f: Awaited<ReturnType<typeof fixture>>) {
+    const sample = await f.adapter.getResources();
+    const gate = reconciliationGate<Resources>();
+    f.adapter.getResources.mockImplementationOnce(async () => {
+      gate.entered.resolve();
+      return gate.result.promise;
+    });
+    const observation = reconcileManagedServer(f.db, f.serverId, f.options);
+    await gate.entered.promise;
+    return { sample, gate, observation };
+  }
+  it('leaves the server operation lock free during provider collection and preserves freshness on failure', async () => {
+    const f = await idleFixture();
+    const before = await history(f);
+    f.remote.status = 'install_failed';
+    const held = await heldResources(f);
+    await f.db.connection().execute(async (connection) => {
+      const acquired = await sql<{
+        acquired: boolean;
+      }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ${`:nickhosting:server:${f.serverId}`},0)) as acquired`.execute(
+        connection,
+      );
+      expect(acquired.rows[0]?.acquired).toBe(true);
+      await sql`select pg_advisory_unlock(hashtextextended(current_schema() || ${`:nickhosting:server:${f.serverId}`},0))`.execute(
+        connection,
+      );
+    });
+    expect(await history(f)).toEqual(before);
+    const rejected = expect(held.observation).rejects.toThrow('fixture read failure');
+    held.gate.result.reject(new Error('fixture read failure'));
+    await rejected;
+    expect(await history(f)).toEqual(before);
+  });
+  it('rejects a completed ABA lifecycle even when all server values and JS timestamps are unchanged', async () => {
+    const f = await idleFixture();
+    const before = await history(f);
+    f.remote.status = 'install_failed';
+    const held = await heldResources(f);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: f.jobId })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null })
+      .where('id', '=', f.serverId)
+      .execute();
+    expect(await f.server()).toEqual(before.server);
+    held.gate.result.resolve({ ...held.sample, current_state: 'running' });
+    expect(await held.observation).toBe('deferred');
+    expect(await history(f)).toEqual(before);
+  });
+  it('discards an older observation after a newer observation and readiness update', async () => {
+    const f = await idleFixture();
+    const held = await heldResources(f);
+    f.setState('running');
+    f.tick(1);
+    expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ readiness: 'ready' })
+      .where('id', '=', f.serverId)
+      .execute();
+    const newer = await history(f);
+    held.gate.result.resolve(held.sample);
+    expect(await held.observation).toBe('deferred');
+    expect(await history(f)).toEqual(newer);
+  });
+  it.each([
+    'identity',
+    'node',
+    'host',
+    'allocation',
+    'deleted',
+    'power_receipt',
+    'reservation',
+  ] as const)('discards every old effect after intervening %s changes', async (change) => {
+    const f = await idleFixture();
+    const held = await heldResources(f);
+    if (change === 'identity')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ pterodactyl_uuid: randomUUID() })
+        .where('id', '=', f.serverId)
+        .execute();
+    if (change === 'node')
+      await f.db
+        .updateTable('managed_nodes')
+        .set({ pterodactyl_node_id: f.remote.node + 10000 })
+        .where('id', '=', f.nodeId)
+        .execute();
+    if (change === 'host')
+      await f.db
+        .updateTable('physical_hosts')
+        .set({ observer_id: 'replacement' })
+        .where('id', '=', f.hostId)
+        .execute();
+    if (change === 'allocation')
+      await f.db
+        .updateTable('server_allocations')
+        .set({ protocols: ['tcp', 'udp'] })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    if (change === 'deleted')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ deleted_at: f.now() })
+        .where('id', '=', f.serverId)
+        .execute();
+    if (change === 'power_receipt')
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ startConfirmed: true }) })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    if (change === 'reservation') await f.prepareReservation();
+    const changed = await history(f);
+    held.gate.result.resolve({ ...held.sample, current_state: 'running' });
+    expect(await held.observation).toBe('deferred');
+    expect(await history(f)).toEqual(changed);
+  });
+  it('does not release a new reservation when a late external-stop receipt arrives', async () => {
+    const f = await idleFixture();
+    await f.prepareReservation();
+    const gate = reconciliationGate<import('./lifecycle.js').ExternalStopReceipt | null>();
+    f.options.observeExternalStop = async () => {
+      gate.entered.resolve();
+      return gate.result.promise;
+    };
+    const pending = reconcileManagedServer(f.db, f.serverId, f.options);
+    await gate.entered.promise;
+    await f.db
+      .updateTable('resource_reservations')
+      .set({ operation_id: randomUUID(), state: 'starting' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    const newer = await history(f);
+    gate.result.resolve({
+      containerId: 'fixture',
+      startedAt: new Date(f.now().getTime() - 10000).toISOString(),
+      finishedAt: f.now().toISOString(),
+      activityId: 'fixture',
+      activityAt: f.now().toISOString(),
+      action: 'kill',
+    });
+    expect(await pending).toBe('deferred');
+    expect(await history(f)).toEqual(newer);
+  });
+  it('rolls back installation, observation, metrics and reservations together if atomic apply fails', async () => {
+    const f = await idleFixture();
+    const before = await history(f);
+    f.remote.status = 'install_failed';
+    f.setState('running');
+    // Database CHECK failure during the final reservation insertion, after observation.
+    await f.db
+      .updateTable('managed_servers')
+      .set({ limits: JSON.stringify({ ...f.remote.limits, cpu: -1 }) })
+      .where('id', '=', f.serverId)
+      .execute();
+    const invalid = await history(f);
+    await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toBeDefined();
+    expect(await history(f)).toEqual(invalid);
+    expect((await f.server()).last_observed_at).toEqual(before.server.last_observed_at);
+  });
+});
+
+describe('terminal failed installation reservation recovery', () => {
+  async function failedInstallation(action: 'provision' | 'reinstall' = 'provision') {
+    const f = await fixture('reinstall');
+    await f.db
+      .updateTable('managed_servers')
+      .set({
+        active_operation_id: null,
+        installation_state: 'installing',
+        runtime_state: 'offline',
+        intent: 'manually_stopped',
+      })
+      .where('id', '=', f.serverId)
+      .execute();
+    await f.db
+      .updateTable('server_operations')
+      .set({
+        action,
+        phase: 'failed',
+        effect_state: 'confirmed',
+        plan: JSON.stringify({ installationEffectPrepared: true }),
+      })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    await f.db
+      .updateTable('operation_jobs')
+      .set({
+        state: 'failed',
+        completed_at: f.now(),
+        error_code: 'conflict',
+      })
+      .where('id', '=', f.jobId)
+      .execute();
+    await f.db
+      .insertInto('installation_reservations')
+      .values({
+        server_id: f.serverId,
+        physical_host_id: f.hostId,
+        operation_id: f.jobId,
+        memory_mib: 1178,
+        cpu_percent: 100,
+      })
+      .execute();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn();
+    return f;
+  }
+  function retry(f: Awaited<ReturnType<typeof fixture>>) {
+    return enqueueServerOperation(
+      f.db,
+      {
+        actorUserId: f.ownerId,
+        subjectUserId: f.ownerId,
+        role: 'user',
+        sessionType: 'regular',
+        ownerElevation: false,
+      },
+      f.serverId,
+      { action: 'reinstall', confirm: true, idempotencyKey: randomUUID() },
+    );
+  }
+  it.each(['provision', 'reinstall'] as const)(
+    'releases only the stopped failed %s reservation and allows an explicit reinstall',
+    async (action) => {
+      const f = await failedInstallation(action);
+      await expect(retry(f)).rejects.toMatchObject({ code: 'operation_uncertain' });
+      expect(await reconcileManagedServer(f.db, f.serverId, f.options)).toBe('observed');
+      expect(await f.installationReservation()).toBeUndefined();
+      expect(await f.server()).toMatchObject({
+        installation_state: 'failed',
+        active_operation_id: null,
+      });
+      expect((await f.operation()).phase).toBe('failed');
+      expect(f.options.verifyInitialInstallation).not.toHaveBeenCalled();
+      expect(f.adapter.reinstall).not.toHaveBeenCalled();
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      const queued = await retry(f);
+      expect((await f.server()).active_operation_id).toBe(queued.jobId);
+      expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['install_failed', 'reinstall_failed'])(
+    'recovers stopped %s even when the provider installed flag is false',
+    async (status) => {
+      const f = await failedInstallation();
+      f.remote.status = status;
+      f.remote.container.installed = false;
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect(await f.installationReservation()).toBeUndefined();
+      expect((await f.server()).installation_state).toBe('failed');
+    },
+  );
+  it.each([
+    'provider-installing',
+    'provider-pending',
+    'server-running',
+    'observer-false',
+    'no-observer',
+    'job-running',
+    'operation-not-failed',
+    'foreign-job',
+    'job-queued',
+    'active-operation',
+    'confirmed-install',
+  ] as const)('retains the reservation when %s', async (reason) => {
+    const f = await failedInstallation();
+    if (reason === 'provider-installing') f.remote.status = 'installing';
+    if (reason === 'provider-pending') f.remote.container.installed = false;
+    if (reason === 'server-running') f.setState('running');
+    if (reason === 'observer-false')
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => false);
+    if (reason === 'no-observer') f.options.confirmInitialInstallationStopped = undefined;
+    if (reason === 'job-running')
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'running', completed_at: null })
+        .where('id', '=', f.jobId)
+        .execute();
+    if (reason === 'operation-not-failed')
+      await f.db
+        .updateTable('server_operations')
+        .set({ phase: 'installation' })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    if (reason === 'foreign-job') {
+      const foreign = await failedInstallation();
+      await f.db
+        .updateTable('installation_reservations')
+        .set({ operation_id: foreign.jobId })
+        .where('server_id', '=', f.serverId)
+        .execute();
+    }
+    if (reason === 'job-queued')
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ state: 'queued', completed_at: null })
+        .where('id', '=', f.jobId)
+        .execute();
+    if (reason === 'active-operation')
+      await f.db
+        .updateTable('managed_servers')
+        .set({ active_operation_id: f.jobId })
+        .where('id', '=', f.serverId)
+        .execute();
+    if (reason === 'confirmed-install')
+      await f.db
+        .updateTable('server_operations')
+        .set({ plan: JSON.stringify({ installConfirmed: true }) })
+        .where('job_id', '=', f.jobId)
+        .execute();
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(await f.installationReservation()).toBeDefined();
+    await expect(retry(f)).rejects.toMatchObject({
+      code: reason === 'active-operation' ? 'conflict' : 'operation_uncertain',
+    });
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+  it.each(['integration_unavailable', 'configuration_invalid', 'provenance_mismatch'] as const)(
+    'preserves and surfaces observer %s without releasing capacity',
+    async (code) => {
+      const f = await failedInstallation();
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+        throw new DomainError(code);
+      });
+      await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toMatchObject({
+        code,
+      });
+      expect(await f.installationReservation()).toBeDefined();
+      await expect(retry(f)).rejects.toMatchObject({ code: 'operation_uncertain' });
+    },
+  );
+  it.each(['provider-installing', 'server-running'] as const)(
+    'retains capacity when %s changes during observer proof',
+    async (change) => {
+      const f = await failedInstallation();
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+        if (change === 'provider-installing') f.remote.status = 'installing';
+        else f.setState('running');
+        return true;
+      });
+      await reconcileManagedServer(f.db, f.serverId, f.options);
+      expect(await f.installationReservation()).toBeDefined();
+    },
+  );
+  it.each(['active-operation', 'operation-aba', 'job', 'reservation'] as const)(
+    'defers stale recovery when %s changes during proof',
+    async (change) => {
+      const f = await failedInstallation();
+      const gate = reconciliationGate<boolean>();
+      // The failed reservation owner need not be the latest power operation.
+      // Its revision must independently fence recovery.
+      if (change === 'job') {
+        const newer = await fixture('stop');
+        await f.db
+          .updateTable('server_operations')
+          .set({
+            server_id: f.serverId,
+            updated_at: new Date(f.now().getTime() + 1000),
+          })
+          .where('job_id', '=', newer.jobId)
+          .execute();
+      }
+      f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+        gate.entered.resolve();
+        return gate.result.promise;
+      });
+      const result = reconcileManagedServer(f.db, f.serverId, f.options);
+      await gate.entered.promise;
+      if (change === 'active-operation' || change === 'operation-aba') {
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: f.jobId })
+          .where('id', '=', f.serverId)
+          .execute();
+        if (change === 'operation-aba')
+          await f.db
+            .updateTable('managed_servers')
+            .set({ active_operation_id: null })
+            .where('id', '=', f.serverId)
+            .execute();
+      } else if (change === 'job') {
+        await f.db
+          .updateTable('operation_jobs')
+          .set({ error_code: 'forbidden' })
+          .where('id', '=', f.jobId)
+          .execute();
+      } else {
+        await f.db
+          .updateTable('installation_reservations')
+          .set({ memory_mib: 2000 })
+          .where('server_id', '=', f.serverId)
+          .execute();
+      }
+      gate.result.resolve(true);
+      expect(await result).toBe('deferred');
+      expect(await f.installationReservation()).toBeDefined();
+      expect((await f.server()).installation_state).toBe('installing');
+    },
+  );
+  it('does not call the installer observer for ordinary servers without an orphan', async () => {
+    const f = await fixture('start');
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: null, installation_state: 'installed' })
+      .where('id', '=', f.serverId)
+      .execute();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    await reconcileManagedServer(f.db, f.serverId, f.options);
+    expect(f.options.confirmInitialInstallationStopped).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.adapter.getResources).toHaveBeenCalledTimes(1);
+  });
+  it('marks a newly failed incomplete installation failed without releasing unproven capacity', async () => {
+    const f = await fixture('provision');
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => true);
+    f.options.verifyInitialInstallation = vi.fn(async () => {
+      throw new DomainError('conflict');
+    });
+    expect(await f.run()).toBe('failed');
+    expect(await f.server()).toMatchObject({
+      installation_state: 'failed',
+      active_operation_id: null,
+    });
+    expect(await f.installationReservation()).toBeDefined();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.reinstallWithConfirmation).not.toHaveBeenCalled();
+  });
+  it('preserves confirmed installation when a later provisioning step fails', async () => {
+    const f = await fixture('provision', { autoStart: true });
+    f.options.configureGameProvision = vi.fn(async () => {
+      throw new DomainError('forbidden');
+    });
+    expect(await f.run()).toBe('failed');
+    expect((await f.operation()).plan.installConfirmed).toBe(true);
+    expect((await f.server()).installation_state).toBe('installed');
+    expect(await f.installationReservation()).toBeUndefined();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('retains capacity when the final provider recheck is unavailable', async () => {
+    const f = await failedInstallation();
+    f.options.confirmInitialInstallationStopped = vi.fn(async () => {
+      f.adapter.getApplicationServer.mockRejectedValueOnce(
+        new PterodactylError('unavailable', 'application', 'unknown'),
+      );
+      return true;
+    });
+    await expect(reconcileManagedServer(f.db, f.serverId, f.options)).rejects.toBeInstanceOf(
+      PterodactylError,
+    );
+    expect(await f.installationReservation()).toBeDefined();
+    expect((await f.server()).installation_state).toBe('installing');
+  });
+});
+
+describe('event-driven backup lifecycle', () => {
+  it('passes backup options and completes from durable event without provider polling', async () => {
+    const f = await fixture('backup', {
+      backupOptions: {
+        name: 'Before update',
+        ignored: '*.log\ncache/**',
+        isLocked: true,
+        mode: 'live',
+      },
+    });
+    f.options.backupEventsEnabled = async () => true;
+    let completion: Awaited<ReturnType<NonNullable<LifecycleOptions['readBackupCompletion']>>> =
+      null;
+    f.options.readBackupCompletion = async () => completion;
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.createBackup).toHaveBeenCalledWith(f.remote.identifier, {
+      name: `nickhosting-operation-${f.jobId}`,
+      ignored: '*.log\ncache/**',
+      is_locked: true,
+    });
+    expect(f.adapter.getBackup).not.toHaveBeenCalled();
+    const job = await f.db
+      .selectFrom('operation_jobs')
+      .select('next_attempt_at')
+      .where('id', '=', f.jobId)
+      .executeTakeFirstOrThrow();
+    expect(job.next_attempt_at.getTime() - f.now().getTime()).toBeGreaterThanOrEqual(60_000);
+    const id = String((await f.operation()).plan.backupId);
+    expect(
+      await f.db
+        .selectFrom('backup_labels')
+        .select('name')
+        .where('backup_id', '=', id)
+        .executeTakeFirst(),
+    ).toEqual({ name: 'Before update' });
+    completion = {
+      eventId: randomUUID(),
+      occurredAt: f.now().toISOString(),
+      backup: {
+        uuid: id,
+        isSuccessful: true,
+        checksum: 'sha256:fixture',
+        completedAt: f.now().toISOString(),
+      },
+    };
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ next_attempt_at: f.now() })
+      .where('id', '=', f.jobId)
+      .execute();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.getBackup).not.toHaveBeenCalled();
+  });
+
+  it('temporarily stops, cleans up and resumes only after admission', async () => {
+    const f = await fixture('backup');
+    f.setState('running');
+    f.options.backupPolicy = async () => ({ offline: 'required' });
+    f.options.confirmAlreadyStopped = async () =>
+      (await f.adapter.getResources()).current_state === 'offline';
+    f.options.observeProcessStart = async () =>
+      (await f.adapter.getResources()).current_state === 'running'
+        ? new Date(f.now().getTime() - 1_000).toISOString()
+        : null;
+    f.options.prepareBackup = vi.fn(async () => {});
+    f.options.cleanupBackup = vi.fn(async () => {});
+    await f.db
+      .updateTable('managed_servers')
+      .set({ intent: 'auto_wake_enabled' })
+      .where('id', '=', f.serverId)
+      .execute();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.options.prepareBackup).toHaveBeenCalledTimes(1);
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.options.reserveStart).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).toHaveBeenCalledWith(f.remote.identifier, 'start');
+    const started = new Date(f.now().getTime() + 1).toISOString();
+    f.options.observeProcessStart = async () => started;
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.cleanupBackup).toHaveBeenCalledTimes(1);
+    expect((await f.operation()).plan).toMatchObject({
+      backupComplete: true,
+      backupResumeOutcome: 'succeeded',
+    });
+  });
+
+  it('suppresses automatic resume after a manual stop or explicit pause and preserves backup success on admission failure', async () => {
+    for (const reason of ['manual-stop', 'pause', 'admission']) {
+      const f = await fixture('backup');
+      f.setState('running');
+      f.options.backupPolicy = async () => ({ offline: 'required' });
+      f.options.confirmAlreadyStopped = async () =>
+        (await f.adapter.getResources()).current_state === 'offline';
+      f.options.observeProcessStart = async () =>
+        (await f.adapter.getResources()).current_state === 'running'
+          ? new Date(f.now().getTime() - 1_000).toISOString()
+          : null;
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'auto_wake_enabled' })
+        .where('id', '=', f.serverId)
+        .execute();
+      expect(await f.run()).toBe('waiting');
+      if (reason !== 'admission')
+        await f.db
+          .updateTable('managed_servers')
+          .set(
+            reason === 'pause' ? { automatic_starts_paused: true } : { intent: 'manually_stopped' },
+          )
+          .where('id', '=', f.serverId)
+          .execute();
+      else
+        f.options.reserveStart = async () => {
+          throw new DomainError('resources_unavailable');
+        };
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect((await f.operation()).plan).toMatchObject({
+        backupComplete: true,
+        backupResumeOutcome: reason === 'admission' ? 'failed' : 'suppressed',
+      });
+    }
+  });
+
+  it('rejects a required-offline live override before stopping or creating a backup', async () => {
+    const f = await fixture('backup', { backupOptions: { mode: 'live' } });
+    f.options.backupPolicy = async () => ({ offline: 'required' });
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.createBackup).not.toHaveBeenCalled();
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+  });
+});
+
+describe('backup recovery and restore safety', () => {
+  it('cleans up a durably rejected backup after worker recovery', async () => {
+    const f = await fixture('backup', {
+      backupMode: 'live',
+      backupPreparationStarted: true,
+      backupPrepared: true,
+      rejected: true,
+      rejectionCode: 'integration_unavailable',
+    });
+    f.options.cleanupBackup = vi.fn(async () => {});
+    expect(await f.run()).toBe('failed');
+    expect(f.options.cleanupBackup).toHaveBeenCalledTimes(1);
+    expect(f.adapter.createBackup).not.toHaveBeenCalled();
+  });
+  it('keeps successful snapshot outcome when rejected resume is recovered', async () => {
+    const f = await fixture('backup', {
+      backupComplete: true,
+      rejected: true,
+      rejectionCode: 'resources_unavailable',
+    });
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'backup_resume', effect_state: 'none' })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan).toMatchObject({
+      backupComplete: true,
+      backupResumeOutcome: 'failed',
+      backupResumeError: 'resources_unavailable',
+    });
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('creates optional safety backup without replacing the requested restore target', async () => {
+    const id = randomUUID();
+    const f = await fixture('restore', { restoreBackupId: id, backupBefore: true, truncate: true });
+    f.backups.push({
+      uuid: id,
+      name: 'original',
+      is_successful: true,
+      is_locked: false,
+      ignored_files: [],
+      checksum: 'sha256:original',
+      bytes: 100,
+      created_at: f.now().toISOString(),
+      completed_at: f.now().toISOString(),
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.restoreBackup).toHaveBeenCalledWith(f.remote.identifier, id, true);
+    expect((await f.operation()).plan.backupId).not.toBe(id);
+    expect((await f.operation()).plan.restoreBackupId).toBe(id);
+  });
+});
+
+it('retention deletes only successful same-schedule backups and preserves provider protection', async () => {
+  const scheduleId = randomUUID();
+  const f = await fixture('backup', {
+    scheduleAutomation: { scheduleId, retention: { enabled: true, keepLast: 1 } },
+  });
+  const template = await f.db
+    .selectFrom('operation_jobs')
+    .selectAll()
+    .where('id', '=', f.jobId)
+    .executeTakeFirstOrThrow();
+  const eligible: string[] = [];
+  for (const [isLocked, sameSchedule] of [
+    [false, true],
+    [true, true],
+    [false, false],
+  ] as const) {
+    const backupId = randomUUID(),
+      oldJob = randomUUID();
+    f.backups.push({
+      uuid: backupId,
+      name: `old-${oldJob}`,
+      is_successful: true,
+      is_locked: isLocked,
+      ignored_files: [],
+      checksum: 'sha256:fixture',
+      bytes: 100,
+      created_at: f.now().toISOString(),
+      completed_at: f.now().toISOString(),
+    });
+    await f.db
+      .insertInto('operation_jobs')
+      .values({
+        ...template,
+        command: JSON.stringify(template.command),
+        policy_snapshot: JSON.stringify(template.policy_snapshot),
+        id: oldJob,
+        idempotency_key: oldJob,
+        state: 'succeeded',
+        completed_at: f.now(),
+      })
+      .execute();
+    await f.db
+      .insertInto('server_operations')
+      .values({
+        job_id: oldJob,
+        server_id: f.serverId,
+        action: 'backup',
+        phase: 'complete',
+        plan: JSON.stringify({
+          backupComplete: true,
+          backupId,
+          scheduleAutomation: { scheduleId: sameSchedule ? scheduleId : randomUUID() },
+        }),
+        effect_started_at: null,
+        lease_until: null,
+        lease_token: null,
+      })
+      .execute();
+    if (!isLocked && sameSchedule) eligible.push(backupId);
+  }
+  const deleteBackup = vi.fn(async () => {});
+  f.options.adapter = { ...f.options.adapter, deleteBackup };
+  expect(await f.run()).toBe('waiting');
+  f.tick();
+  expect(await f.run()).toBe('succeeded');
+  expect(deleteBackup.mock.calls).toEqual(eligible.map((id) => [f.remote.identifier, id]));
+  expect((await f.operation()).plan.backupRetentionComplete).toBe(true);
+});
+
+it('stops a physically running server even when Panel still caches offline after start', async () => {
+  const f = await fixture('backup');
+  f.setState('offline');
+  f.options.backupPolicy = async () => ({ offline: 'required' });
+  let physicallyRunning = true;
+  f.options.confirmAlreadyStopped = async () => !physicallyRunning;
+  f.options.observeProcessStart = async () =>
+    physicallyRunning ? new Date(f.now().getTime() - 1_000).toISOString() : null;
+  f.adapter.stopWithConfirmation.mockImplementationOnce(async (_id, _identifier, options) => {
+    await options.beforePower?.();
+    physicallyRunning = false;
+    await options.onConfirmed();
+    return { confirmed: true };
+  });
+  expect(await f.run()).toBe('waiting');
+  expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+  expect(f.adapter.createBackup).toHaveBeenCalledTimes(1);
+  expect((await f.operation()).plan.backupWasRunning).toBe(true);
+});
+
+it('allows only compensating cleanup after creator authorization is withdrawn', async () => {
+  const f = await fixture('backup', { backupOptions: { mode: 'live' } });
+  f.options.prepareBackup = vi.fn(async () => {});
+  f.options.cleanupBackup = vi.fn(async (context) => {
+    await context.authorize();
+  });
+  expect(await f.run()).toBe('waiting');
+  f.options.authorizeEffect = async () => {
+    throw new DomainError('forbidden');
+  };
+  f.tick();
+  expect(await f.run()).toBe('succeeded');
+  expect(f.options.cleanupBackup).toHaveBeenCalledTimes(1);
+  expect(f.adapter.power).not.toHaveBeenCalled();
+});
+
+it('terminates a recovered rejected resume even when the backup itself also failed', async () => {
+  const f = await fixture('backup', {
+    backupFailed: true,
+    rejected: true,
+    rejectionCode: 'forbidden',
+  });
+  await f.db
+    .updateTable('server_operations')
+    .set({ phase: 'backup_resume', effect_state: 'none' })
+    .where('job_id', '=', f.jobId)
+    .execute();
+  expect(await f.run()).toBe('failed');
+  expect((await f.operation()).plan).toMatchObject({
+    backupResumeOutcome: 'failed',
+    backupResumeError: 'forbidden',
+  });
+  expect(f.adapter.power).not.toHaveBeenCalled();
+});
+
+it('consumes an exact restore terminal event without polling activity after the effect', async () => {
+  const id = randomUUID();
+  const f = await fixture('restore', { restoreBackupId: id, truncate: true });
+  f.options.settleMs = 0;
+  f.options.backupEventsEnabled = async () => true;
+  let completion: Awaited<ReturnType<NonNullable<LifecycleOptions['readBackupCompletion']>>> = null;
+  f.options.readBackupCompletion = async () => completion;
+  f.backups.push({
+    uuid: id,
+    name: 'original',
+    is_successful: true,
+    is_locked: false,
+    ignored_files: [],
+    checksum: 'sha256:original',
+    bytes: 100,
+    created_at: f.now().toISOString(),
+    completed_at: f.now().toISOString(),
+  });
+  f.adapter.restoreBackup.mockImplementation(async () => {
+    completion = {
+      eventId: randomUUID(),
+      occurredAt: f.now().toISOString(),
+      backup: {
+        uuid: id,
+        isSuccessful: true,
+        checksum: 'sha256:original',
+        completedAt: f.now().toISOString(),
+      },
+    };
+  });
+  expect(await f.run()).toBe('waiting');
+  f.tick();
+  expect(await f.run()).toBe('waiting');
+  const pending = await f.db
+    .selectFrom('operation_jobs')
+    .select('next_attempt_at')
+    .where('id', '=', f.jobId)
+    .executeTakeFirstOrThrow();
+  expect(pending.next_attempt_at).toEqual(f.now());
+  expect(await f.run()).toBe('succeeded');
+  expect(f.adapter.listBackupActivity).toHaveBeenCalledTimes(1);
+});
+
+it('retains resumed compute after a rejected backup create without inheriting its rejection', async () => {
+  const f = await fixture('backup');
+  f.setState('running');
+  await f.db
+    .updateTable('managed_servers')
+    .set({ intent: 'auto_wake_enabled' })
+    .where('id', '=', f.serverId)
+    .execute();
+  f.options.backupPolicy = async () => ({ offline: 'required' });
+  f.options.confirmAlreadyStopped = async () =>
+    (await f.adapter.getResources()).current_state === 'offline';
+  f.options.observeProcessStart = async () =>
+    (await f.adapter.getResources()).current_state === 'running'
+      ? new Date(f.now().getTime() - 1_000).toISOString()
+      : null;
+  f.adapter.createBackup.mockRejectedValue(
+    new PterodactylError('invalid_request', 'client', 'rejected'),
+  );
+  expect(await f.run()).toBe('waiting');
+  expect((await f.operation()).plan).toMatchObject({
+    backupFailed: true,
+    rejected: false,
+    backupResumeOutcome: 'pending',
+  });
+  f.tick();
+  expect(await f.run()).toBe('failed');
+  expect((await f.operation()).plan.backupResumeOutcome).toBe('succeeded');
+  expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  expect(
+    await f.db
+      .selectFrom('resource_reservations')
+      .select('state')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirst(),
+  ).toEqual({ state: 'running' });
 });

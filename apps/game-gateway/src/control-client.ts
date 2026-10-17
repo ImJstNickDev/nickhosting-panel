@@ -34,6 +34,15 @@ export class GatewayRouteRevisionStaleError extends Error {
   }
 }
 
+/** An authenticated provider cooldown is unavailable evidence, not a collision.
+ * It never grants a new route, extends a lease or authorizes an external retry. */
+export class GatewayProviderRateLimitedError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super('gateway_provider_rate_limited');
+    this.name = 'GatewayProviderRateLimitedError';
+  }
+}
+
 export function createGatewayControlClient(
   options: GatewayControlClientOptions,
 ): GatewayControlClient {
@@ -62,14 +71,22 @@ export function createGatewayControlClient(
   const prefix = `${base.pathname.replace(/\/$/, '')}/internal/gateway/${options.gatewayId}`;
   const controllers = new Set<AbortController>();
   let closed = false;
-  const request = async (action: string, body?: unknown) => {
+  const request = async (
+    action: string,
+    body?: unknown,
+    signal?: AbortSignal,
+    timeoutMs = options.requestTimeoutMs,
+  ) => {
     if (closed) throw new DomainError('integration_unavailable');
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(action)) throw new DomainError('validation_failed');
     const url = new URL(base);
     url.pathname = `${prefix}/${action}`;
     const controller = new AbortController();
     controllers.add(controller);
-    const timer = setTimeout(() => controller.abort(), options.requestTimeoutMs);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const timer = setTimeout(abort, timeoutMs);
     timer.unref();
     let response: Response | undefined;
     try {
@@ -78,6 +95,15 @@ export function createGatewayControlClient(
         headers: {
           Authorization: `Bearer ${options.token}`,
           Accept: 'application/json',
+          ...(action === 'snapshot'
+            ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1,presentation-variables-v1' }
+            : {}),
+          ...(action === 'observations'
+            ? { 'X-NickHosting-Gateway-Features': 'readiness-receipt-v1,presentation-variables-v1' }
+            : {}),
+          ...(action === 'sleep-completion'
+            ? { 'X-NickHosting-Gateway-Features': 'presentation-variables-v1' }
+            : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -105,6 +131,34 @@ export function createGatewayControlClient(
       }
       const parsed: unknown = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8'));
       if (!response.ok) {
+        const cooldown = z
+          .object({
+            error: z.object({
+              code: z.literal('integration_unavailable'),
+              messageKey: z.literal('errors.integration_unavailable'),
+              details: z
+                .object({
+                  gatewayControlReason: z.literal('provider_rate_limited'),
+                  retryAfterMs: z.number().int().min(1).max(300000),
+                })
+                .strict(),
+            }),
+          })
+          .safeParse(parsed);
+        if (
+          response.status === 503 &&
+          [
+            'snapshot',
+            'inventory',
+            'context',
+            'proof-read',
+            'proof-write',
+            'observations',
+          ].includes(action) &&
+          cooldown.success
+        )
+          throw new GatewayProviderRateLimitedError(cooldown.data.error.details.retryAfterMs);
+
         const precondition = z
           .object({
             error: z.object({
@@ -138,10 +192,15 @@ export function createGatewayControlClient(
       return parsed;
     } catch (error) {
       if (response?.body && !response.body.locked) await response.body.cancel().catch(() => {});
-      if (error instanceof GatewayRouteRevisionStaleError) throw error;
+      if (
+        error instanceof GatewayRouteRevisionStaleError ||
+        error instanceof GatewayProviderRateLimitedError
+      )
+        throw error;
       throw new DomainError('integration_unavailable');
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       controllers.delete(controller);
     }
   };
@@ -157,6 +216,23 @@ export function createGatewayControlClient(
         throw new DomainError('integration_unavailable');
       return parsed.data;
     },
+    async waitForSleep(input, signal) {
+      const value = z
+        .object({
+          routeId: z.uuid(),
+          generation: z.uuid(),
+          quiescenceUntil: z.iso.datetime({ offset: true }),
+        })
+        .strict()
+        .safeParse(input);
+      if (!value.success) throw new DomainError('validation_failed');
+      const receipt = await request('sleep-completion', value.data, signal, 21000);
+      if (receipt === undefined) return;
+      const parsed = gatewaySnapshotSchema.safeParse(receipt);
+      if (!parsed.success || parsed.data.gatewayId !== options.gatewayId)
+        throw new DomainError('integration_unavailable');
+      return parsed.data;
+    },
     async requestWake(input) {
       const value = gatewayWakeRequestSchema.safeParse(input);
       if (!value.success) throw new DomainError('validation_failed');
@@ -167,7 +243,12 @@ export function createGatewayControlClient(
     async reportObservation(input) {
       const value = gatewayObservationSchema.safeParse(input);
       if (!value.success) throw new DomainError('validation_failed');
-      await request('observations', value.data);
+      const receipt = await request('observations', value.data);
+      if (receipt === undefined) return;
+      const parsed = gatewaySnapshotSchema.safeParse(receipt);
+      if (!parsed.success || parsed.data.gatewayId !== options.gatewayId)
+        throw new DomainError('integration_unavailable');
+      return parsed.data;
     },
   };
 }

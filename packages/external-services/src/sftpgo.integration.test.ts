@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Client, type SFTPWrapper } from 'ssh2';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -144,6 +144,32 @@ describe.skipIf(!enabled)('isolated SFTPGo real filesystem and protocol', () => 
     for (const directory of directories) await rm(directory, { recursive: true });
   });
 
+  it('supports a named persistent primary with a 16-character password and stable rotation', async () => {
+    const password = generateSftpPassword();
+    expect(password).toHaveLength(16);
+    const ref = await adapter.ensureCredential({
+      serverId: serverA,
+      externalServerUuid: serverA,
+      credentialId: randomUUID(),
+      username: `fixture-${serverA.slice(0, 8)}`,
+      password,
+      expiresAt: 0,
+      quotaBytes: 0,
+    });
+    refs.push(ref);
+    const first = await connect(ref, password);
+    expect(await read(first.sftp, '/owned.txt')).toBe('server A fixture');
+    first.client.end();
+    const replacement = generateSftpPassword();
+    const rotated = await adapter.rotateCredential(ref, { password: replacement, expiresAt: 0 });
+    expect(rotated.username).toBe(ref.username);
+    expect(rotated.expiresAt).toBe(0);
+    await expect(connect(ref, password)).rejects.toThrow();
+    const second = await connect(rotated, replacement);
+    expect(await read(second.sftp, '/owned.txt')).toBe('server A fixture');
+    second.client.end();
+  });
+
   it('reads/writes only the selected server, denying traversal and pre-existing symlink escapes', async () => {
     const a = await connect(refA, passwordA);
     const b = await connect(refB, passwordB);
@@ -172,6 +198,40 @@ describe.skipIf(!enabled)('isolated SFTPGo real filesystem and protocol', () => 
     );
     a.client.end();
     b.client.end();
+  });
+
+  it('reconciles finite and unlimited quotas without resetting the password or other account limits', async () => {
+    const originalExpiry = refA.expiresAt;
+    refA = await adapter.updateQuota(refA, 0);
+    expect(refA).toMatchObject({ quotaBytes: 0, expiresAt: originalExpiry });
+    const current = await connect(refA, passwordA);
+    try {
+      // More than the original 1 MiB quota, still a tiny isolated test-owned file.
+      await write(current.sftp, '/quota-test.bin', 'x'.repeat(2 * 1_048_576));
+      const actualBytes = (await stat(join(localRoot, serverA, 'quota-test.bin'))).size;
+      await expect(adapter.updateQuota(refA, 1_048_576, actualBytes)).rejects.toMatchObject({
+        code: 'resources_unavailable',
+      });
+      await new Promise<void>((resolvePromise, reject) =>
+        current.sftp.unlink('/quota-test.bin', (error) =>
+          error ? reject(error) : resolvePromise(),
+        ),
+      );
+    } finally {
+      current.client.end();
+    }
+    refA = await adapter.updateQuota(
+      refA,
+      1_048_576,
+      (await stat(join(localRoot, serverA, 'owned.txt'))).size,
+    );
+    expect(refA.expiresAt).toBe(originalExpiry);
+    const restored = await connect(refA, passwordA);
+    try {
+      expect(await read(restored.sftp, '/owned.txt')).toBe('server A fixture');
+    } finally {
+      restored.client.end();
+    }
   });
 
   it('measures retained SSH access after the explicit connection deletion API', async () => {

@@ -6,6 +6,8 @@
 - Discord OAuth login; no forced linkage to a pre-existing account by matching email.
 - For either registration origin, later **explicitly link** the other method to the same NickHosting identity. Accounts created through Discord can add verified email + password.
 - Optional passkeys and optional TOTP with recovery codes; do not require either for ordinary users.
+- TOTP setup prepares an unverified secret using the existing password/passwordless contract. A local QR/manual key is followed by six-digit verification; only successful verification enables TOTP and rotates the session cookie. Ignore the verification response’s stale user/token payload and refresh the authoritative session. Recovery codes are revealed after verification and retained only in identity-scoped Settings memory until Done/exit. Copy/download is local; no third-party QR service or secret persistence. Regeneration explicitly replaces old codes; disable remains password-confirmed where applicable. A transient regular-session refresh failure must not discard a just-issued recovery screen or trigger another verification request.
+- Personal Security lists every unexpired, unrevoked session, including sessions whose browser is closed. Listing and revocation require a valid regular session, not a recent login. The browser receives session IDs and metadata, never bearer tokens; revocation remains authoritative in Better Auth. New passkey enrollment retains the five-minute fresh-login requirement. A freshness rejection offers the existing sign-in flow and returns to Security after authentication, including configured second-factor verification.
 - On linking conflicts, make user authenticate to the existing target account or contact Owner; never silently merge accounts.
 - Preserve identity and resources if the user changes primary email or Discord display name.
 
@@ -56,3 +58,19 @@ Secure/HttpOnly/SameSite cookies, CSRF protections as appropriate, password/rese
 - User cannot access another user's server or job by changing an ID.
 - Owner assisted session succeeds only for that session and expires; ordinary target session retains original permissions.
 - One-time setup race yields exactly one Owner and cannot be re-run remotely.
+
+## Provider technical identities (M5)
+
+[ADR 0015](decisions/0015-provider-technical-accounts.md) separates NickHosting
+identity from Pterodactyl credentials. Invite-authorized registration atomically
+enqueues a non-admin provider account; an independent worker provisions it and
+stores its Client key encrypted. Provider usernames alone use `nh-`. NickHosting
+profiles and roles are unchanged. The provider account has no Panel browser,
+password-reset or mail experience. Owner/operator actions remain authorized by
+NickHosting and select the managed resource owner's provider credential.
+
+Application API configuration remains required. A shared Client key is no longer
+part of first-run setup or advertised Owner settings. Pending or failed enrollment
+makes provider operations unavailable without changing invitation/session rules
+or falling back to an administrator key. Existing server ownership changes require
+an explicit verified migration; registration does not import Panel servers.

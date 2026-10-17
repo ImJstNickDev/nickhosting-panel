@@ -6,6 +6,8 @@ export interface BackendAllocationPool {
     allocationId: number;
     address: string;
     backendAddress?: string;
+    delivery?: 'backend' | 'direct';
+    directEndpoint?: { hostname: string; port: number };
     port: number;
   }>;
   loopbackRemap?: {
@@ -33,6 +35,25 @@ export interface UploadScope {
   pterodactylServerUuid: string;
   externalId: string;
   policy: UploadPolicy;
+  /** Bounded multi-file reservation; absent on legacy single-file claims. */
+  batch?: {
+    actorUserId: string;
+    subjectUserId: string;
+    sessionId: string;
+    bindingHash: string;
+    manifestHash?: string;
+    rejected?: Array<{ id: string; code: 'file_exists' | 'conflict' }>;
+    concurrency: number;
+    files: Array<{
+      id: string;
+      path: string;
+      bytes: number;
+      overwrite: boolean;
+      state: 'queued' | 'active' | 'complete' | 'cancelled' | 'uncertain';
+      /** Distinguish rejected dispatch from user cancellation without changing claim lifecycle. */
+      auditOutcome?: 'failed' | 'cancelled';
+    }>;
+  };
 }
 export interface ServerLimits {
   memory: number;
@@ -43,6 +64,7 @@ export interface ServerLimits {
   threads?: string;
 }
 export interface HostSnapshot {
+  sourceFingerprint?: string;
   totalMemoryMiB: number;
   availableMemoryMiB: number;
   cpuCapacityPercent: number;
@@ -101,6 +123,7 @@ export interface ServerTables {
     node_id: string;
     nest_id: number;
     egg_id: number;
+    image_mode: Generated<'static' | 'integration'>;
     docker_image: string;
     startup: string;
     environment: Json<Record<string, string>>;
@@ -119,6 +142,7 @@ export interface ServerTables {
   project_members: { project_id: string; user_id: string; role: 'manager' | 'operator' | 'viewer' };
   managed_servers: {
     id: string;
+    provider_user_id: Generated<number | null>;
     owner_id: string;
     project_id: string | null;
     mapping_id: string;
@@ -129,9 +153,11 @@ export interface ServerTables {
     pterodactyl_uuid: string | null;
     pterodactyl_identifier: string | null;
     limits: Json<ServerLimits>;
+    connection_mode: Generated<'gateway' | 'direct'>;
     runtime_state: Generated<'offline' | 'starting' | 'running' | 'stopping' | 'unknown'>;
     readiness: Generated<'unknown' | 'loading' | 'ready' | 'degraded'>;
     intent: Generated<'manually_stopped' | 'maintenance' | 'auto_wake_enabled' | 'sleeping'>;
+    automatic_starts_paused: Generated<boolean>;
     installation_state: Generated<'pending' | 'installing' | 'installed' | 'failed'>;
     active_operation_id: string | null;
     last_observed_at: Date | null;
@@ -146,6 +172,11 @@ export interface ServerTables {
     pterodactyl_allocation_id: number;
     address: string;
     backend_address: string;
+    direct_endpoint: ColumnType<
+      { hostname: string; port: number } | null,
+      string | null | undefined,
+      string | null
+    >;
     port: number;
     role: string;
     protocols: ('tcp' | 'udp')[];
@@ -226,6 +257,7 @@ export interface ServerTables {
     memory_bytes: string;
     cpu_percent: number;
     disk_bytes: string;
+    backup_bytes: Generated<string | null>;
     network_rx_bytes: string;
     network_tx_bytes: string;
   };
@@ -244,11 +276,41 @@ export interface ServerTables {
     id: string;
     server_id: string;
     actor_id: string;
+    kind: Generated<'primary' | 'auxiliary'>;
+    label: Generated<string | null>;
+    primary_username: Generated<string | null>;
     envelope: Json<unknown>;
     provider_ref: Json<unknown> | null;
-    expires_at: Date;
+    expires_at: Date | null;
     state: 'pending' | 'active' | 'revoking' | 'revoked' | 'uncertain';
     created_at: Generated<Date>;
+  };
+  server_dns_preferences: {
+    server_id: string;
+    domain_id: string | null;
+    subdomain: string | null;
+    assignment_id: string | null;
+    enabled: Generated<boolean>;
+    updated_at: Generated<Date>;
+  };
+  shared_dns_hosts: {
+    id: string;
+    scope_key: string;
+    hostname: string;
+    ownership_token: string;
+    plan: Json<unknown>;
+    ledger: Json<unknown>;
+    state: 'pending' | 'active' | 'uncertain';
+    updated_at: Generated<Date>;
+  };
+  dns_hostname_reservations: {
+    wizard_user_id: Generated<string | null>;
+    wizard_game_id: Generated<string | null>;
+    wizard_domain_id: Generated<string | null>;
+    wizard_subdomain: Generated<string | null>;
+    hostname: string;
+    owner_id: string;
+    release_after: Date | null;
   };
   dns_assignments: {
     id: string;

@@ -1,0 +1,404 @@
+.account-settings-page {
+  width: 100%;
+  max-width: 54rem;
+  margin: 0 auto;
+  min-width: 0;
+}
+.account-profile {
+  width: 100%;
+  max-width: none;
+}
+.account-profile :where(input:not([type="radio"]), select) {
+  border-color: #8494a0;
+  border-radius: 6px;
+  background-color: #fcfdfd;
+  min-height: 40px;
+}
+.account-profile :where(input:not([type="radio"]), select):focus {
+  border-color: var(--field-focus);
+}
+.account-profile :where(button) {
+  border-radius: 7px;
+  font-size: 0.88rem;
+  transition:
+    background-color 140ms,
+    color 140ms;
+}
+.account-profile button:disabled {
+  cursor: default;
+}
+.account-profile button:hover {
+  filter: none;
+}
+.profile-name-trigger {
+  padding: 0;
+  min-height: 40px;
+  max-width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  gap: 12px;
+}
+.profile-name-trigger > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.profile-name-trigger svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: #708391;
+  transition: color 140ms;
+}
+.profile-name-trigger:where(:hover) svg {
+  color: var(--blue);
+}
+.profile-name-editor {
+  min-width: 0;
+}
+.profile-name-editor form {
+  position: relative;
+  max-width: 420px;
+}
+.profile-name-editor input {
+  font-size: 1.75rem;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  padding: 1px 30px 1px 0;
+  min-height: 40px;
+  border: 0;
+  border-bottom: 1px solid #8494a0;
+  border-radius: 0;
+  background: transparent;
+}
+.profile-name-editor .notice {
+  margin-top: 10px;
+  font-size: 0.85rem;
+}
+.profile-name-saving {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+}
+.settings-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #b9c7d0;
+  border-top-color: #36556a;
+  border-radius: 50%;
+  animation: settings-spin 700ms linear infinite;
+}
+@keyframes settings-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.account-language-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0 24px;
+}
+.account-language {
+  display: block;
+}
+.account-language legend {
+  float: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  font-size: 0.9rem;
+  font-weight: 550;
+  padding: 0;
+}
+.account-language :where(legend) svg {
+  width: 18px;
+  height: 18px;
+  color: #587082;
+}
+.account-language-options {
+  display: flex;
+  width: fit-content;
+  margin-left: auto;
+  padding: 3px;
+  gap: 3px;
+  background: #e8ecee;
+  border-radius: 9px;
+}
+.account-language-options label {
+  position: relative;
+  cursor: pointer;
+}
+.account-language-options input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.account-language-options :where(label) > span {
+  display: block;
+  padding: 6px 18px;
+  min-height: 34px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #536372;
+  transition:
+    background 150ms,
+    color 150ms;
+}
+.account-language-options :where(input:checked) + span {
+  color: #223e50;
+  background: white;
+  box-shadow: 0 1px 3px #223e5014;
+}
+.account-language-options :where(input:focus-visible) + span {
+  outline: 2px solid var(--field-focus);
+  outline-offset: 1px;
+}
+.account-language-options :where(input:not(:checked):not(:disabled)) + span:where(:hover) {
+  color: #223e50;
+  background: #f5f7f8;
+}
+.account-language:disabled label {
+  cursor: wait;
+}
+.account-language-progress {
+  display: flex;
+}
+.account-language-row > .notice {
+  grid-column: 1 / -1;
+}
+.account-access-surface {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.account-email-section,
+.account-methods {
+  padding: 22px 24px;
+}
+.account-methods {
+  border-top: 1px solid #e4e8eb;
+}
+.account-setting-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  align-items: center;
+}
+.account-email-icon {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  display: grid;
+  place-items: center;
+  color: #516c7f;
+}
+.account-setting-row h2 {
+  grid-column: 2;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+.account-email-value {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  font-size: 0.95rem;
+}
+.account-email-value > span:first-child {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.account-setting-row > button {
+  grid-column: 3;
+  grid-row: 1 / 3;
+}
+.account-email-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: #765724;
+  white-space: nowrap;
+}
+.account-email-state.verified {
+  color: #336c51;
+}
+.account-email-state svg {
+  width: 14px;
+  height: 14px;
+}
+.account-quiet-action,
+.account-link-action button[type="submit"] {
+  min-height: 36px;
+  padding: 7px 9px;
+  background: transparent;
+  border: 0;
+  color: #344b5c;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.account-quiet-action:hover:not(:disabled),
+.account-link-action button[type="submit"]:hover:not(:disabled) {
+  background: #edf2f5;
+  color: #164cb1;
+}
+.account-quiet-action svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+}
+.account-icon-action {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.account-icon-action:hover:not(:disabled) {
+  background: #edf2f5;
+}
+.account-unlink:hover:not(:disabled),
+.profile-photo-remove:hover:not(:disabled) {
+  color: #a12c2c;
+  background: #fbefee;
+}
+.account-methods > h2 {
+  font-size: 0.85rem;
+  font-weight: 550;
+  margin-bottom: 12px;
+}
+.account-method {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+}
+.account-method + .account-method {
+  border-top: 1px solid #edf0f2;
+}
+.account-method-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  color: #455f72;
+  flex-shrink: 0;
+}
+.account-method-icon.discord {
+  color: #5e56ab;
+}
+.account-method-name {
+  font-weight: 500;
+  font-size: 0.9rem;
+  flex: 1;
+}
+.account-method-state {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.account-link-action > fieldset {
+  display: none;
+}
+.account-link-action:has(.notice) {
+  flex: 1;
+  min-width: 0;
+}
+.account-link-action .notice {
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+}
+.account-inline-edit {
+  padding: 16px 0 0 48px;
+}
+.account-inline-edit .field label {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.account-inline-edit .form-footer {
+  gap: 8px;
+}
+.account-inline-edit .form-footer [role="status"] {
+  flex-basis: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.account-method-loading {
+  display: grid;
+  gap: 14px;
+  min-height: 54px;
+}
+.account-method-loading span {
+  width: 60%;
+  height: 12px;
+  background: #edf0f2;
+  border-radius: 5px;
+}
+.account-method-loading span + span {
+  width: 35%;
+}
+@media (max-width: 600px) {
+  .profile-name-editor input {
+    font-size: 1.4rem;
+  }
+  .account-email-section,
+  .account-methods {
+    padding: 18px 16px;
+  }
+  .account-language-row {
+    padding-bottom: 20px;
+  }
+  .account-language-options label > span {
+    padding-inline: 12px;
+  }
+  .account-setting-row {
+    gap: 2px 8px;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+  }
+  .account-inline-edit {
+    padding: 16px 0 0;
+  }
+  .account-method {
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-block: 4px;
+  }
+  .account-method > .account-quiet-action {
+    white-space: normal;
+    max-width: 60%;
+    text-align: right;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .account-profile button,
+  .account-language-options label > span {
+    transition: none;
+  }
+  .settings-spinner {
+    animation: none;
+  }
+}

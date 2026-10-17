@@ -1237,7 +1237,7 @@ export async function runMinecraftLiveScenario(options: {
       );
       const environment = validateMinecraftRuntimeMapping(prepared.runtime, binding);
       const input = {
-        gameId: 'minecraft-java',
+        gameId: 'minecraft',
         runtimeId: profile.request.profile,
         nodeId: scenario.nodeId,
         nestId: profile.nestId,

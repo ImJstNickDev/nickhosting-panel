@@ -76,6 +76,8 @@ export function createDownloadProxy(options: TransportOptions & { downloadOrigin
       );
       if (!response.ok || !response.body) {
         await response.body?.cancel();
+        if (response.status === 404)
+          throw new PterodactylError('not_found', 'client', 'rejected', 404);
         throw guard.failure();
       }
       const encoding = response.headers.get('content-encoding');

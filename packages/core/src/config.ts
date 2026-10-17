@@ -1,5 +1,11 @@
 import { posix } from 'node:path';
 import { z } from 'zod';
+import {
+  gameContentPoliciesSchema,
+  legacyContentEnvironmentKeys,
+  normalizeLegacyContentSettings,
+} from './content-policy.js';
+import { dnsBlockedTermsSchema, dnsDomainsSchema, dnsGamePoliciesSchema } from './dns-policy.js';
 import { DomainError } from './errors.js';
 import {
   defaultGatewayDataPolicy,
@@ -8,6 +14,7 @@ import {
   gatewayNodeProbesSchema,
   gatewayObserverSchema,
 } from './gateway-config.js';
+import { minecraftGatewayResponsesSchema } from './minecraft-gateway-config.js';
 
 const httpUrl = z
   .string()
@@ -31,6 +38,46 @@ const origin = (protocols: string[]) =>
       const url = new URL(value);
       return protocols.includes(url.protocol) && url.origin === value;
     });
+
+export const autoWakeUserAccessSchema = z.enum(['hidden', 'editable', 'disable-only']);
+export const gameAutoWakePolicySchema = z.strictObject({
+  gameEnabled: z.boolean().nullable(),
+  runtimeEnabled: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), z.boolean()),
+  userAccess: autoWakeUserAccessSchema.nullable().default(null),
+  runtimeUserAccess: z
+    .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), autoWakeUserAccessSchema)
+    .default({}),
+});
+export const gameAutoWakePoliciesSchema = z.record(
+  z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+  gameAutoWakePolicySchema,
+);
+export const gameIdleTimeoutSchema = z.union([z.literal(-1), z.number().int().min(1).max(604800)]);
+export const idleTimeoutUserAccessSchema = z.enum(['hidden', 'editable', 'shorten-only']);
+export const gameIdleTimeoutsSchema = z
+  .record(
+    z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+    z.strictObject({
+      gameTimeoutSeconds: gameIdleTimeoutSchema.nullable(),
+      userAccess: idleTimeoutUserAccessSchema.nullable().default(null),
+      runtimeUserAccess: z
+        .record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), idleTimeoutUserAccessSchema)
+        .default({}),
+      runtimeTimeouts: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), gameIdleTimeoutSchema),
+    }),
+  )
+  .transform((policies, context) => {
+    // Environment overrides can outlive the database migration. Accept exactly
+    // this historical integration key while exposing only the canonical identity.
+    const legacy = policies['minecraft-java'];
+    if (!legacy) return policies;
+    if (policies.minecraft) {
+      context.addIssue({ code: 'custom', message: 'Conflicting Minecraft integration identities' });
+      return z.NEVER;
+    }
+    const { 'minecraft-java': _legacy, ...current } = policies;
+    return { ...current, minecraft: legacy };
+  });
 
 export const platformConfigSchema = z
   .object({
@@ -57,6 +104,7 @@ export const platformConfigSchema = z
     pterodactylWebSocketOrigins: z.array(origin(['ws:', 'wss:'])).max(50),
     pterodactylDownloadOrigins: z.array(origin(['http:', 'https:'])).max(50),
     pterodactylUploadOrigins: z.array(origin(['http:', 'https:'])).max(50),
+    uploadConcurrency: z.number().int().min(1).max(6),
     registrationInviteTtlSeconds: z.number().int().min(60).max(31_536_000),
     supportIdleTtlSeconds: z.number().int().min(60).max(900),
     supportAbsoluteTtlSeconds: z.number().int().min(60).max(3600),
@@ -71,6 +119,7 @@ export const platformConfigSchema = z
     storagePolicy: z.enum(['GLOBAL_POOL', 'PER_USER_BUDGET']),
     defaultUserMemoryMiB: z.number().int().min(1).max(1048576),
     defaultUserCpuPercent: z.number().int().min(1).max(100000),
+    defaultServerStorageMiB: z.number().int().min(16).max(1073741824),
     defaultUserStorageMiB: z.number().int().min(1).max(1073741824),
     maxServersPerUser: z.number().int().min(1).max(10000).nullable(),
     maxConcurrentProvisionsPerUser: z.number().int().min(1).max(100),
@@ -78,7 +127,26 @@ export const platformConfigSchema = z
     sftpgoBaseUrl: httpUrl.optional(),
     sftpgoDataRoot: z.string().startsWith('/').optional(),
     sftpgoInstanceId: z.uuid().optional(),
+    fileViewers: z
+      .strictObject({
+        managementUrl: httpUrl,
+        dataRoot: z.string().regex(/^\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+$/),
+        instanceId: z.uuid(),
+        host: z.union([z.hostname(), z.ipv4(), z.ipv6()]),
+        port: z.number().int().min(1).max(65535).default(2022),
+        hostFingerprint: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}=?$/),
+        cacheRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+        cacheBytes: z.number().int().min(1048576).max(107374182400).default(1073741824),
+        maxSnapshotBytes: z.number().int().min(1048576).max(10737418240).default(268435456),
+        maxConnections: z.number().int().min(1).max(64).default(16),
+      })
+      .optional(),
+    // Public SSH endpoint is explicitly configured, never inferred from the
+    // private SFTPGo HTTP management URL or the Wings filesystem mapping.
+    sftpPublicHostname: z.union([z.hostname(), z.ipv4(), z.ipv6()]).optional(),
+    sftpPublicPort: z.number().int().min(1).max(65535).optional(),
     dnsInstanceId: z.uuid().optional(),
+    sftpAuxiliaryLimit: z.number().int().min(0).max(32),
     sftpCredentialTtlSeconds: z.number().int().min(60).max(86400),
     cloudflareZoneId: z
       .string()
@@ -86,22 +154,38 @@ export const platformConfigSchema = z
       .optional(),
     dnsBaseDomain: z.string().min(1).max(253).optional(),
     dnsTarget: z.string().min(1).max(253).optional(),
+    dnsDomains: dnsDomainsSchema,
+    dnsDefaultDomainId: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,63}$/)
+      .optional(),
+    dnsGamePolicies: dnsGamePoliciesSchema,
+    dnsBlockedTerms: dnsBlockedTermsSchema,
+    dnsNameReuseDelaySeconds: z.number().int().min(0).max(2592000),
+    dnsAvailabilityCacheSeconds: z.number().int().min(0).max(300),
+    dnsAvailabilityRequestsPerMinute: z.number().int().min(2).max(200),
+    dnsAvailabilityConcurrency: z.number().int().min(1).max(8),
     staticGameHostname: z.string().min(1).max(253).optional(),
-    minecraftMetadataUserAgent: z
+    contentMetadataUserAgent: z
       .string()
       .min(10)
       .max(256)
       .refine((value) => !/[\r\n]/.test(value))
       .optional(),
-    minecraftSourceRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
-    minecraftSourceGlobalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    minecraftSourceUserBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    minecraftSourceConcurrent: z.number().int().min(1).max(100),
-    minecraftSourceUserConcurrent: z.number().int().min(1).max(20),
-    minecraftSourceFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    minecraftSourceFreePercent: z.number().min(0).max(95),
-    minecraftContentRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
-    minecraftDownloadOrigins: z.array(origin(['https:'])).max(100),
+    fileOperationsFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    fileOperationsFreePercent: z.number().min(0).max(95),
+    fileOperationsRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    gameContentPolicies: gameContentPoliciesSchema,
+    contentSourceRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    contentSourceGlobalBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    contentSourceUserBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    contentSourceConcurrent: z.number().int().min(1).max(100),
+    contentSourceUserConcurrent: z.number().int().min(1).max(20),
+    contentSourceFreeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    contentSourceFreePercent: z.number().min(0).max(95),
+    contentWorkRoot: z.string().regex(/^\.\/mountdata\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/),
+    contentDownloadOrigins: z.array(origin(['https:'])).max(100),
+    minecraftGatewayResponses: minecraftGatewayResponsesSchema.optional(),
     minecraftProtocolSource: z
       .object({
         commit: z.string().regex(/^[a-f0-9]{40}$/),
@@ -115,6 +199,12 @@ export const platformConfigSchema = z
       .max(100)
       .refine((v) => posix.normalize(v) === v && !/[\0-\x20?#]/.test(v))
       .optional(),
+    gameIdleTimeouts: gameIdleTimeoutsSchema,
+    gameAutoWakePolicies: gameAutoWakePoliciesSchema,
+    defaultAutoWakeEnabled: z.boolean(),
+    autoWakeUserAccess: autoWakeUserAccessSchema,
+    defaultIdleTimeoutSeconds: gameIdleTimeoutSchema,
+    idleTimeoutUserAccess: idleTimeoutUserAccessSchema,
     gatewayEnabled: z.boolean(),
     gatewayId: z.uuid().optional(),
     gatewayPhysicalHostId: z.uuid().optional(),
@@ -127,7 +217,10 @@ export const platformConfigSchema = z
   })
   .strict();
 
-export const platformConfigPatchSchema = platformConfigSchema.partial();
+export const platformConfigPatchSchema = z.preprocess(
+  normalizeLegacyContentSettings,
+  platformConfigSchema.partial(),
+);
 export type PlatformConfig = z.infer<typeof platformConfigSchema>;
 export type PlatformConfigKey = keyof PlatformConfig;
 export type ConfigSource = 'default' | 'database' | 'environment';
@@ -138,6 +231,7 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   pterodactylWebSocketOrigins: [],
   pterodactylDownloadOrigins: [],
   pterodactylUploadOrigins: [],
+  uploadConcurrency: 2,
   registrationInviteTtlSeconds: 86_400,
   supportIdleTtlSeconds: 300,
   supportAbsoluteTtlSeconds: 900,
@@ -149,23 +243,45 @@ export const defaultPlatformConfig: Readonly<PlatformConfig> = Object.freeze({
   defaultUserMemoryMiB: 16384,
   defaultUserCpuPercent: 400,
   defaultUserStorageMiB: 32768,
+  defaultServerStorageMiB: 4096,
   maxServersPerUser: null,
   maxConcurrentProvisionsPerUser: 4,
-  observationMaxAgeSeconds: 15,
+  observationMaxAgeSeconds: 4,
+  sftpAuxiliaryLimit: 3,
   sftpCredentialTtlSeconds: 3600,
+  gameIdleTimeouts: {},
+  gameAutoWakePolicies: {},
+  defaultAutoWakeEnabled: true,
+  autoWakeUserAccess: 'editable',
+  dnsDomains: [],
+  dnsGamePolicies: {},
+  dnsBlockedTerms: [],
+  dnsNameReuseDelaySeconds: 0,
+  dnsAvailabilityCacheSeconds: 30,
+  dnsAvailabilityRequestsPerMinute: 60,
+  dnsAvailabilityConcurrency: 2,
+  defaultIdleTimeoutSeconds: -1,
+  idleTimeoutUserAccess: 'hidden',
   gatewayEnabled: false,
   gatewayLeaseSeconds: 15,
   gatewayNodeProbes: {},
   gatewayDataPolicy: defaultGatewayDataPolicy,
-  minecraftContentRoot: './mountdata/minecraft-content',
-  minecraftSourceRoot: './mountdata/minecraft-sources',
-  minecraftSourceGlobalBytes: 20 * 1024 ** 3,
-  minecraftSourceUserBytes: 5 * 1024 ** 3,
-  minecraftSourceConcurrent: 4,
-  minecraftSourceUserConcurrent: 2,
-  minecraftSourceFreeBytes: 512 * 1024 ** 2,
-  minecraftSourceFreePercent: 10,
-  minecraftDownloadOrigins: [
+  contentMetadataUserAgent:
+    'NickHostingPanel/0.1 (+https://github.com/ImJstNickDev/nickhosting-panel)',
+  fileOperationsFreeBytes: 512 * 1024 ** 2,
+  fileOperationsFreePercent: 0,
+  fileOperationsRoot: './mountdata/file-operations',
+  // Keep historical storage locations: existing files and in-flight jobs must not move.
+  gameContentPolicies: {},
+  contentWorkRoot: './mountdata/minecraft-content',
+  contentSourceRoot: './mountdata/minecraft-sources',
+  contentSourceGlobalBytes: 20 * 1024 ** 3,
+  contentSourceUserBytes: 5 * 1024 ** 3,
+  contentSourceConcurrent: 4,
+  contentSourceUserConcurrent: 2,
+  contentSourceFreeBytes: 512 * 1024 ** 2,
+  contentSourceFreePercent: 10,
+  contentDownloadOrigins: [
     'https://cdn.modrinth.com',
     'https://edge.forgecdn.net',
     'https://mediafilez.forgecdn.net',
@@ -182,6 +298,7 @@ export const configEnvironmentKeys = {
   pterodactylWebSocketOrigins: 'NH_PTERODACTYL_WEBSOCKET_ORIGINS',
   pterodactylDownloadOrigins: 'NH_PTERODACTYL_DOWNLOAD_ORIGINS',
   pterodactylUploadOrigins: 'NH_PTERODACTYL_UPLOAD_ORIGINS',
+  uploadConcurrency: 'NH_UPLOAD_CONCURRENCY',
   registrationInviteTtlSeconds: 'NH_INVITE_TTL_SECONDS',
   supportIdleTtlSeconds: 'NH_SUPPORT_IDLE_TTL_SECONDS',
   supportAbsoluteTtlSeconds: 'NH_SUPPORT_ABSOLUTE_TTL_SECONDS',
@@ -197,30 +314,54 @@ export const configEnvironmentKeys = {
   defaultUserMemoryMiB: 'NH_DEFAULT_USER_MEMORY_MIB',
   defaultUserCpuPercent: 'NH_DEFAULT_USER_CPU_PERCENT',
   defaultUserStorageMiB: 'NH_DEFAULT_USER_STORAGE_MIB',
+  defaultServerStorageMiB: 'NH_DEFAULT_SERVER_STORAGE_MIB',
   maxServersPerUser: 'NH_MAX_SERVERS_PER_USER',
   maxConcurrentProvisionsPerUser: 'NH_MAX_CONCURRENT_PROVISIONS_PER_USER',
   observationMaxAgeSeconds: 'NH_OBSERVATION_MAX_AGE_SECONDS',
   sftpgoBaseUrl: 'NH_SFTPGO_BASE_URL',
   sftpgoDataRoot: 'NH_SFTPGO_DATA_ROOT',
   sftpgoInstanceId: 'NH_SFTPGO_INSTANCE_ID',
+  fileViewers: 'NH_FILE_VIEWERS',
+  sftpPublicHostname: 'NH_SFTP_PUBLIC_HOSTNAME',
+  sftpPublicPort: 'NH_SFTP_PUBLIC_PORT',
+  sftpAuxiliaryLimit: 'NH_SFTP_AUXILIARY_LIMIT',
   sftpCredentialTtlSeconds: 'NH_SFTP_CREDENTIAL_TTL_SECONDS',
   cloudflareZoneId: 'NH_CLOUDFLARE_ZONE_ID',
   dnsInstanceId: 'NH_DNS_INSTANCE_ID',
   dnsBaseDomain: 'NH_DNS_BASE_DOMAIN',
   dnsTarget: 'NH_DNS_TARGET',
+  dnsDomains: 'NH_DNS_DOMAINS',
+  dnsDefaultDomainId: 'NH_DNS_DEFAULT_DOMAIN_ID',
+  dnsGamePolicies: 'NH_DNS_GAME_POLICIES',
+  dnsBlockedTerms: 'NH_DNS_BLOCKED_TERMS',
+  dnsNameReuseDelaySeconds: 'NH_DNS_NAME_REUSE_DELAY_SECONDS',
+  dnsAvailabilityCacheSeconds: 'NH_DNS_AVAILABILITY_CACHE_SECONDS',
+  dnsAvailabilityRequestsPerMinute: 'NH_DNS_AVAILABILITY_REQUESTS_PER_MINUTE',
+  dnsAvailabilityConcurrency: 'NH_DNS_AVAILABILITY_CONCURRENCY',
   staticGameHostname: 'NH_STATIC_GAME_HOSTNAME',
-  minecraftMetadataUserAgent: 'NH_MINECRAFT_METADATA_USER_AGENT',
-  minecraftContentRoot: 'NH_MINECRAFT_CONTENT_ROOT',
-  minecraftSourceRoot: 'NH_MINECRAFT_SOURCE_ROOT',
-  minecraftSourceGlobalBytes: 'NH_MINECRAFT_SOURCE_GLOBAL_BYTES',
-  minecraftSourceUserBytes: 'NH_MINECRAFT_SOURCE_USER_BYTES',
-  minecraftSourceConcurrent: 'NH_MINECRAFT_SOURCE_CONCURRENT',
-  minecraftSourceUserConcurrent: 'NH_MINECRAFT_SOURCE_USER_CONCURRENT',
-  minecraftSourceFreeBytes: 'NH_MINECRAFT_SOURCE_FREE_BYTES',
-  minecraftSourceFreePercent: 'NH_MINECRAFT_SOURCE_FREE_PERCENT',
-  minecraftDownloadOrigins: 'NH_MINECRAFT_DOWNLOAD_ORIGINS',
+  gameContentPolicies: 'NH_GAME_CONTENT_POLICIES',
+  contentMetadataUserAgent: 'NH_CONTENT_METADATA_USER_AGENT',
+  fileOperationsFreeBytes: 'NH_FILE_OPERATIONS_FREE_BYTES',
+  fileOperationsFreePercent: 'NH_FILE_OPERATIONS_FREE_PERCENT',
+  fileOperationsRoot: 'NH_FILE_OPERATIONS_ROOT',
+  contentWorkRoot: 'NH_CONTENT_WORK_ROOT',
+  contentSourceRoot: 'NH_CONTENT_SOURCE_ROOT',
+  contentSourceGlobalBytes: 'NH_CONTENT_SOURCE_GLOBAL_BYTES',
+  contentSourceUserBytes: 'NH_CONTENT_SOURCE_USER_BYTES',
+  contentSourceConcurrent: 'NH_CONTENT_SOURCE_CONCURRENT',
+  contentSourceUserConcurrent: 'NH_CONTENT_SOURCE_USER_CONCURRENT',
+  contentSourceFreeBytes: 'NH_CONTENT_SOURCE_FREE_BYTES',
+  contentSourceFreePercent: 'NH_CONTENT_SOURCE_FREE_PERCENT',
+  contentDownloadOrigins: 'NH_CONTENT_DOWNLOAD_ORIGINS',
   minecraftProtocolSource: 'NH_MINECRAFT_PROTOCOL_SOURCE',
+  minecraftGatewayResponses: 'NH_MINECRAFT_GATEWAY_RESPONSES',
   gatewayDiagnosticsSocket: 'NH_GATEWAY_DIAGNOSTICS_SOCKET',
+  gameIdleTimeouts: 'NH_GAME_IDLE_TIMEOUTS',
+  gameAutoWakePolicies: 'NH_GAME_AUTO_WAKE_POLICIES',
+  defaultAutoWakeEnabled: 'NH_DEFAULT_AUTO_WAKE_ENABLED',
+  autoWakeUserAccess: 'NH_AUTO_WAKE_USER_ACCESS',
+  defaultIdleTimeoutSeconds: 'NH_DEFAULT_IDLE_TIMEOUT_SECONDS',
+  idleTimeoutUserAccess: 'NH_IDLE_TIMEOUT_USER_ACCESS',
   gatewayEnabled: 'NH_GATEWAY_ENABLED',
   gatewayId: 'NH_GATEWAY_ID',
   gatewayPhysicalHostId: 'NH_GATEWAY_PHYSICAL_HOST_ID',
@@ -233,6 +374,11 @@ export const configEnvironmentKeys = {
 } as const satisfies Record<PlatformConfigKey, string>;
 
 const numericKeys = new Set<PlatformConfigKey>([
+  'dnsNameReuseDelaySeconds',
+  'dnsAvailabilityCacheSeconds',
+  'dnsAvailabilityRequestsPerMinute',
+  'dnsAvailabilityConcurrency',
+  'uploadConcurrency',
   'registrationInviteTtlSeconds',
   'supportIdleTtlSeconds',
   'supportAbsoluteTtlSeconds',
@@ -241,17 +387,20 @@ const numericKeys = new Set<PlatformConfigKey>([
   'defaultUserMemoryMiB',
   'defaultUserCpuPercent',
   'defaultUserStorageMiB',
+  'defaultServerStorageMiB',
   'maxServersPerUser',
   'maxConcurrentProvisionsPerUser',
   'observationMaxAgeSeconds',
+  'sftpAuxiliaryLimit',
   'sftpCredentialTtlSeconds',
+  'sftpPublicPort',
   'gatewayLeaseSeconds',
-  'minecraftSourceGlobalBytes',
-  'minecraftSourceUserBytes',
-  'minecraftSourceConcurrent',
-  'minecraftSourceUserConcurrent',
-  'minecraftSourceFreeBytes',
-  'minecraftSourceFreePercent',
+  'contentSourceGlobalBytes',
+  'contentSourceUserBytes',
+  'contentSourceConcurrent',
+  'contentSourceUserConcurrent',
+  'contentSourceFreeBytes',
+  'contentSourceFreePercent',
 ]);
 
 function invalid(fields: string[]): never {
@@ -280,7 +429,8 @@ export function resolveConfig(
       merged[key] = owner.data[key];
       sources[key] = 'database';
     }
-    const value = env[configEnvironmentKeys[key]];
+    const alias = legacyContentEnvironmentKeys[key as keyof typeof legacyContentEnvironmentKeys];
+    const value = env[configEnvironmentKeys[key]] ?? (alias ? env[alias] : undefined);
     if (value === undefined) continue;
     if (value.trim() === '') invalid([key]);
     if (
@@ -288,12 +438,20 @@ export function resolveConfig(
       key === 'pterodactylDownloadOrigins' ||
       key === 'pterodactylUploadOrigins' ||
       [
+        'gameIdleTimeouts',
+        'gameAutoWakePolicies',
+        'gameContentPolicies',
+        'dnsDomains',
+        'dnsGamePolicies',
+        'dnsBlockedTerms',
+        'fileViewers',
         'gatewayNetworkPolicy',
         'gatewayObserver',
         'gatewayNodeProbes',
         'gatewayDataPolicy',
-        'minecraftDownloadOrigins',
+        'contentDownloadOrigins',
         'minecraftProtocolSource',
+        'minecraftGatewayResponses',
       ].includes(key)
     ) {
       try {
@@ -301,12 +459,19 @@ export function resolveConfig(
       } catch {
         invalid([key]);
       }
+    } else if (key === 'defaultIdleTimeoutSeconds') {
+      if (!/^(-1|[1-9]\d*)$/.test(value)) invalid([key]);
+      merged[key] = Number(value);
     } else if (key === 'maxServersPerUser' && value === 'null') {
       merged[key] = null;
     } else if (numericKeys.has(key)) {
       if (!/^(0|[1-9]\d*)$/.test(value)) invalid([key]);
       merged[key] = Number(value);
-    } else if (key === 'smtpSecure' || key === 'gatewayEnabled') {
+    } else if (
+      key === 'smtpSecure' ||
+      key === 'gatewayEnabled' ||
+      key === 'defaultAutoWakeEnabled'
+    ) {
       if (!['true', 'false', '1', '0'].includes(value)) invalid([key]);
       merged[key] = value === 'true' || value === '1';
     } else {

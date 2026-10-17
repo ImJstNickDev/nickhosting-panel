@@ -1,0 +1,203 @@
+.storage-policy {
+  display: grid;
+  gap: 0.85rem;
+}
+.storage-policy p {
+  margin: 0;
+}
+.storage-current {
+  display: flex;
+  gap: 0.65rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+.storage-current > span {
+  color: var(--muted);
+}
+.storage-target {
+  display: flex;
+  gap: 0.8rem;
+  align-items: end;
+  flex-wrap: wrap;
+}
+.storage-policy .field {
+  margin: 0;
+  min-width: 0;
+}
+.storage-field-help {
+  display: flex;
+  gap: 0.35rem;
+  align-items: end;
+  min-width: 0;
+}
+.storage-field-help > .field {
+  flex: 1;
+}
+.storage-target > .field,
+.storage-target > .storage-field-help {
+  flex: 1 1 15rem;
+  max-width: 25rem;
+}
+.storage-info {
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  margin-bottom: 8px;
+}
+.storage-info > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-family: Georgia, serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1;
+}
+.storage-info:hover {
+  background: #edf0f1;
+  filter: none;
+}
+.storage-review {
+  display: grid;
+  gap: 0.65rem;
+}
+.storage-review-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.7rem;
+}
+.storage-review-heading h3,
+.storage-user h4 {
+  margin: 0;
+}
+.storage-review-heading .storage-info {
+  margin: 0;
+}
+.storage-check-state {
+  margin-left: auto;
+  font-size: 0.85rem;
+}
+.storage-user {
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+.storage-user-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, 0.8fr) minmax(13rem, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  background: #f8f9f8;
+}
+.storage-user-name,
+.storage-user-total {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.storage-user-total {
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.storage-user-heading .field label,
+.storage-server .field label {
+  font-size: 0.83rem;
+}
+.storage-row-warning {
+  padding: 0.45rem 0.85rem;
+  font-size: 0.85rem;
+}
+.storage-server {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, 0.8fr) minmax(13rem, 1fr);
+  align-items: start;
+  gap: 0.5rem 0.75rem;
+  padding: 0.7rem 0.85rem;
+  border-top: 1px solid var(--line);
+}
+.storage-server-name,
+.storage-server-measurement,
+.storage-server-allocation {
+  display: grid;
+  gap: 0.15rem;
+  align-content: start;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.storage-server > p {
+  grid-column: 1 / -1;
+  font-size: 0.85rem;
+}
+.storage-server-measurement {
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.storage-measured {
+  font-size: 0.76rem;
+}
+.storage-blocker {
+  color: #9f2424;
+}
+.storage-review-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.storage-cleanup-actions {
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+  gap: 0.6rem;
+}
+@media (max-width: 850px) {
+  .storage-user-heading,
+  .storage-server {
+    grid-template-columns: minmax(0, 1fr) minmax(11rem, 1fr);
+  }
+  .storage-user-heading > .storage-field-help,
+  .storage-server-allocation {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}
+@media (max-width: 540px) {
+  .storage-user-heading,
+  .storage-server {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .storage-user-heading > .storage-field-help,
+  .storage-server-allocation {
+    grid-column: auto;
+    grid-row: auto;
+  }
+  .storage-target > .field,
+  .storage-target > .storage-field-help {
+    max-width: none;
+  }
+  .storage-user-total {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+  .storage-review-actions > button {
+    flex: 1;
+  }
+}

@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createGatewayControlClient, GatewayRouteRevisionStaleError } from './control-client.js';
+import {
+  createGatewayControlClient,
+  GatewayProviderRateLimitedError,
+  GatewayRouteRevisionStaleError,
+} from './control-client.js';
 
 const gatewayId = randomUUID();
 const token = 'a'.repeat(43);
@@ -22,6 +26,100 @@ const snapshot = {
 };
 
 describe('authenticated bounded Gateway control client', () => {
+  it('waits for a bounded sleep completion and accepts empty fallback without altering ordinary timeout', async () => {
+    const request = {
+      routeId: randomUUID(),
+      generation: randomUUID(),
+      quiescenceUntil: new Date(Date.now() + 5000).toISOString(),
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    expect(await client.waitForSleep?.(request, new AbortController().signal)).toBeUndefined();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('/sleep-completion');
+    expect(
+      new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('X-NickHosting-Gateway-Features'),
+    ).toBe('presentation-variables-v1');
+    client.close();
+  });
+  it('aborts a pending sleep completion on caller cancellation', async () => {
+    const begun = Promise.withResolvers<void>();
+    const fetcher = vi.fn<typeof fetch>(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+          begun.resolve();
+        }),
+    );
+    const client = createGatewayControlClient({ ...settings, fetcher });
+    const abort = new AbortController();
+    const result = client.waitForSleep?.(
+      {
+        routeId: randomUUID(),
+        generation: randomUUID(),
+        quiescenceUntil: new Date(Date.now() + 5000).toISOString(),
+      },
+      abort.signal,
+    );
+    const rejected = expect(result).rejects.toThrow('integration_unavailable');
+    await begun.promise;
+    abort.abort();
+    await rejected;
+    client.close();
+  });
+
+  it.each(['snapshot', 'inventory', 'context', 'proof-read', 'proof-write', 'observations'])(
+    'recognizes explicit provider cooldown for %s',
+    async (action) => {
+      const client = createGatewayControlClient({
+        ...settings,
+        fetcher: vi.fn(async () =>
+          Response.json(
+            {
+              error: {
+                code: 'integration_unavailable',
+                messageKey: 'errors.integration_unavailable',
+                details: { gatewayControlReason: 'provider_rate_limited', retryAfterMs: 1500 },
+              },
+            },
+            { status: 503 },
+          ),
+        ),
+      });
+      await expect(client.requestJson(action)).rejects.toMatchObject({
+        name: 'GatewayProviderRateLimitedError',
+        retryAfterMs: 1500,
+      });
+    },
+  );
+  it.each([
+    { action: 'inventory', status: 500, reason: 'provider_rate_limited', delay: 1000 },
+    { action: 'inventory', status: 503, reason: 'collision', delay: 1000 },
+    { action: 'inventory', status: 503, reason: 'provider_rate_limited', delay: 300001 },
+    { action: 'inventory', status: 503, reason: 'provider_rate_limited', delay: 0 },
+    { action: 'wake', status: 503, reason: 'provider_rate_limited', delay: 1000 },
+  ])('does not trust unrelated cooldown $action/$status/$reason/$delay', async (input) => {
+    const client = createGatewayControlClient({
+      ...settings,
+      fetcher: vi.fn(async () =>
+        Response.json(
+          {
+            error: {
+              code: 'integration_unavailable',
+              messageKey: 'errors.integration_unavailable',
+              details: { gatewayControlReason: input.reason, retryAfterMs: input.delay },
+            },
+          },
+          { status: input.status },
+        ),
+      ),
+    });
+    await expect(client.requestJson(input.action)).rejects.not.toBeInstanceOf(
+      GatewayProviderRateLimitedError,
+    );
+    await expect(client.requestJson(input.action)).rejects.toThrow(/^integration_unavailable$/);
+  });
   it.each(['context', 'proof-read', 'proof-write'])(
     'recognizes only authenticated explicit revision preconditions for %s',
     async (action) => {
@@ -133,7 +231,10 @@ describe('authenticated bounded Gateway control client', () => {
     );
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-NickHosting-Gateway-Features': 'completed-sleep-v1,presentation-variables-v1',
+      },
       redirect: 'error',
     });
     expect(fetcher.mock.calls[1]?.[1]).toMatchObject({
@@ -141,6 +242,16 @@ describe('authenticated bounded Gateway control client', () => {
       body: JSON.stringify(wake),
     });
     expect(fetcher.mock.calls[2]?.[1]).toMatchObject({ body: JSON.stringify(observation) });
+    expect(
+      new Headers(fetcher.mock.calls[1]?.[1]?.headers).has('X-NickHosting-Gateway-Features'),
+    ).toBe(false);
+    expect(
+      new Headers(fetcher.mock.calls[2]?.[1]?.headers).get('X-NickHosting-Gateway-Features'),
+    ).toBe('readiness-receipt-v1,presentation-variables-v1');
+    fetcher.mockResolvedValueOnce(Response.json(snapshot));
+    expect(await client.reportObservation(observation)).toEqual(snapshot);
+    fetcher.mockResolvedValueOnce(Response.json({ ...snapshot, gatewayId: randomUUID() }));
+    await expect(client.reportObservation(observation)).rejects.toThrow('integration_unavailable');
   });
   it.each([
     'http://core.example.test',

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type AuthContext, authSessionId, SecretCodec } from '@nickhosting/core';
+import { type AuthContext, authSessionId, createLogger, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
@@ -131,6 +131,233 @@ describe('management runtime execution-time authorization', () => {
     await correct.lifecycle.authorizeEffect(queued.job, queued.server, f.db);
     expect(observer.preflight).toHaveBeenCalledTimes(1);
   });
+  it.each([false, true])(
+    'keeps standalone final authorization, delegates it only to the lifecycle guard: %s',
+    async (defer) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('server_operations')
+        .set({ action: 'start' })
+        .where('job_id', '=', queued.job)
+        .execute();
+      const stages: string[] = [];
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: {
+          preflight: async () => {},
+          stopped: async () => true,
+          processStartedAt: async () => null,
+        },
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+        logger: createLogger((event) => {
+          if (event.event === 'server.runtime_stage')
+            stages.push(String((event.data as { stage?: string } | undefined)?.stage));
+        }),
+      });
+      await runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db, {
+        ...(defer ? { deferFinalIntentCheck: true } : {}),
+      });
+      expect(stages.filter((stage) => stage === 'authorize_effect.authorization')).toHaveLength(1);
+      expect(
+        stages.filter((stage) => stage === 'authorize_effect.final_authorization'),
+      ).toHaveLength(defer ? 0 : 1);
+    },
+  );
+  async function preparedStart(context: AuthContext = f.context, serverId?: string) {
+    const queued = await stop(context, serverId);
+    await f.db
+      .updateTable('server_operations')
+      .set({ action: 'start', phase: 'power', effect_state: 'prepared' })
+      .where('job_id', '=', queued.job)
+      .execute();
+    await f.db
+      .insertInto('resource_reservations')
+      .values({
+        server_id: queued.server,
+        owner_id: f.context.subjectUserId,
+        physical_host_id: f.hostId,
+        memory_mib: 128,
+        physical_memory_mib: 148,
+        cpu_percent: 10,
+        operation_id: queued.job,
+        state: 'starting',
+      })
+      .execute();
+    return queued;
+  }
+  it('authorizes admitted Start handoff locally without repeated observer or provider calls', async () => {
+    const queued = await preparedStart();
+    const preflight = vi.fn(async () => {
+      throw new Error('unexpected observer call');
+    });
+    const getApplicationServer = vi.fn(async (): Promise<ApplicationServer> => {
+      throw new Error('unexpected provider call');
+    });
+    const getResources = vi.fn(async () => {
+      throw new Error('unexpected resources call');
+    });
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: { ...f.adapter, getApplicationServer, getResources },
+      containerObserver: { preflight, stopped: async () => true },
+    });
+    await runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db, {
+      startAdmissionValidated: true,
+    });
+    expect(preflight).not.toHaveBeenCalled();
+    expect(getApplicationServer).not.toHaveBeenCalled();
+    expect(getResources).not.toHaveBeenCalled();
+  });
+  it.each(['absent', 'wrong-job', 'wrong-state', 'nonstart', 'unprepared', 'inactive'] as const)(
+    'rejects admitted Start handoff with %s durable admission',
+    async (reason) => {
+      const queued = await preparedStart();
+      if (reason === 'absent')
+        await f.db
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', queued.server)
+          .execute();
+      if (reason === 'wrong-job') {
+        const other = await f.db
+          .selectFrom('operation_jobs')
+          .select('id')
+          .where('id', '!=', queued.job)
+          .executeTakeFirstOrThrow();
+        await f.db
+          .updateTable('resource_reservations')
+          .set({ operation_id: other.id })
+          .where('server_id', '=', queued.server)
+          .execute();
+      }
+      if (reason === 'wrong-state')
+        await f.db
+          .updateTable('resource_reservations')
+          .set({ state: 'running' })
+          .where('server_id', '=', queued.server)
+          .execute();
+      if (reason === 'nonstart')
+        await f.db
+          .updateTable('server_operations')
+          .set({ action: 'stop' })
+          .where('job_id', '=', queued.job)
+          .execute();
+      if (reason === 'unprepared')
+        await f.db
+          .updateTable('server_operations')
+          .set({ effect_state: 'none' })
+          .where('job_id', '=', queued.job)
+          .execute();
+      if (reason === 'inactive')
+        await f.db
+          .updateTable('managed_servers')
+          .set({ active_operation_id: null })
+          .where('id', '=', queued.server)
+          .execute();
+      const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+      await expect(
+        runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db, {
+          startAdmissionValidated: true,
+        }),
+      ).rejects.toThrow('conflict');
+    },
+  );
+  it('rejects admitted Start handoff after project permission is revoked', async () => {
+    const peer = await managementFixture(f.db);
+    const project = await createProject(f.db, f.context, { name: 'Start permission test' });
+    const server = await f.server({ projectId: project.id });
+    await setProjectMember(f.db, f.context, project.id, {
+      userId: peer.context.subjectUserId,
+      role: 'operator',
+    });
+    const queued = await preparedStart(peer.context, server);
+    const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    await runtime.lifecycle.authorizeEffect(queued.job, server, f.db, {
+      startAdmissionValidated: true,
+    });
+    await setProjectMember(f.db, f.context, project.id, {
+      userId: peer.context.subjectUserId,
+      role: 'viewer',
+    });
+    await expect(
+      runtime.lifecycle.authorizeEffect(queued.job, server, f.db, {
+        startAdmissionValidated: true,
+      }),
+    ).rejects.toThrow('forbidden');
+  });
+  it('binds internal console reuse to the exact injected provider instance', async () => {
+    const first = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    const same = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    const changed = await createManagementRuntime({ db: f.db, codec, adapter: { ...f.adapter } });
+    expect(first.consoleProviderBinding).toBe(same.consoleProviderBinding);
+    expect(changed.consoleProviderBinding).not.toBe(first.consoleProviderBinding);
+  });
+  it('invalidates console base binding on provider changes and ignores obsolete global Client credentials', async () => {
+    const env = {
+      NH_PTERODACTYL_BASE_URL: 'https://provider.example.test',
+      NH_PTERODACTYL_APPLICATION_KEY: 'fixture-application',
+      NH_PTERODACTYL_CLIENT_KEY: 'fixture-client',
+    };
+    const binding = async (patch = {}) =>
+      (await createManagementRuntime({ db: f.db, codec, env: { ...env, ...patch } }))
+        .consoleProviderBinding;
+    const initial = await binding();
+    expect(await binding()).toBe(initial);
+    for (const patch of [
+      { NH_PTERODACTYL_BASE_URL: 'https://other.example.test' },
+      { NH_PTERODACTYL_APPLICATION_KEY: 'rotated-application' },
+      { NH_PTERODACTYL_WEBSOCKET_ORIGINS: '["wss://other.example.test"]' },
+    ])
+      expect(await binding(patch)).not.toBe(initial);
+    expect(await binding({ NH_PTERODACTYL_CLIENT_KEY: 'ignored-legacy' })).toBe(initial);
+    expect(initial).not.toContain('fixture');
+  });
+  it('fences console reuse when the managed owner Client credential rotates', async () => {
+    const serverId = await f.server();
+    const account = await f.db
+      .selectFrom('provider_accounts')
+      .selectAll()
+      .where('user_id', '=', f.context.subjectUserId)
+      .executeTakeFirstOrThrow();
+    const seal = (operationId: string, token: string) =>
+      codec.encrypt(
+        token,
+        `provider-client:${account.instance_id}:${account.user_id}:${operationId}`,
+      );
+    await f.db
+      .updateTable('provider_accounts')
+      .set({ key_envelope: seal(account.key_operation_id, 'isolated-client-a') })
+      .where('user_id', '=', account.user_id)
+      .execute();
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      env: { NH_PTERODACTYL_APPLICATION_KEY: 'fixture-application' },
+    });
+    const first = await runtime.consoleBindingForServer(serverId);
+    expect(await runtime.consoleBindingForServer(serverId)).toBe(first);
+    const operation = randomUUID();
+    await f.db
+      .updateTable('provider_accounts')
+      .set({
+        key_operation_id: operation,
+        key_identifier: 'rotated',
+        key_envelope: seal(operation, 'isolated-client-b'),
+      })
+      .where('user_id', '=', account.user_id)
+      .execute();
+    expect(await runtime.consoleBindingForServer(serverId)).not.toBe(first);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ provider_user_id: 999 })
+      .where('id', '=', serverId)
+      .execute();
+    await expect(runtime.consoleBindingForServer(serverId)).rejects.toThrow(
+      'integration_unavailable',
+    );
+  });
   it('binds restart process evidence to the host and current provider identity', async () => {
     const serverId = await f.server();
     const server = await f.db
@@ -196,8 +423,251 @@ describe('management runtime execution-time authorization', () => {
     await expect(correct.lifecycle.observeProcessStart(serverId, f.db)).rejects.toThrow(
       'provenance_mismatch',
     );
+    // A speculative read of this registered container cannot authorize a
+    // mismatched provider identity, even when its Docker epoch is available.
+    expect(observer.processStartedAt).toHaveBeenCalledWith(server.pterodactyl_uuid);
+  });
+  it('provider-ready refresh reads only the current host-bound managed process epoch', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    const provider = vi.fn(async () => {
+      throw new Error('must not repeat provider verification');
+    });
+    Object.assign(f.adapter, { getApplicationServer: provider });
+    const epoch = new Date().toISOString();
+    const observer = {
+      preflight: vi.fn(async () => {}),
+      stopped: vi.fn(async () => false),
+      processStartedAt: vi.fn(async (): Promise<string | null> => epoch),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    expect(await runtime.lifecycle.observeProviderProcessStart(serverId, f.db)).toBe(epoch);
+    expect(observer.processStartedAt).toHaveBeenCalledWith(remote.uuid);
+    expect(provider).not.toHaveBeenCalled();
+    observer.processStartedAt.mockResolvedValue(null);
+    expect(await runtime.lifecycle.observeProviderProcessStart(serverId, f.db)).toBeNull();
+    const wrong = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'wrong-host' },
+    });
+    observer.processStartedAt.mockClear();
+    await expect(wrong.lifecycle.observeProviderProcessStart(serverId, f.db)).rejects.toThrow(
+      'configuration_invalid',
+    );
+    expect(observer.processStartedAt).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+  });
+  it('overlaps the host-bound process read with provider verification without granting early evidence', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    let finishPreflight!: () => void;
+    const preflight = new Promise<void>((resolve) => {
+      finishPreflight = resolve;
+    });
+    let finishProvider!: (value: ApplicationServer) => void;
+    const provider = new Promise<ApplicationServer>((resolve) => {
+      finishProvider = resolve;
+    });
+    const readProvider = vi.fn(() => provider);
+    Object.assign(f.adapter, { getApplicationServer: readProvider });
+    const stamp = new Date(Date.now() - 1000).toISOString();
+    const observer = {
+      preflight: vi.fn(() => preflight),
+      stopped: vi.fn(async () => true),
+      processStartedAt: vi.fn(async () => stamp),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    let settled = false;
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db).then((value) => {
+      settled = true;
+      return value;
+    });
+    try {
+      await vi.waitFor(() => {
+        expect(observer.preflight).toHaveBeenCalledOnce();
+        expect(readProvider).toHaveBeenCalledOnce();
+      });
+      expect(observer.processStartedAt).not.toHaveBeenCalled();
+      finishPreflight();
+      await vi.waitFor(() => expect(observer.processStartedAt).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
+    } finally {
+      finishPreflight();
+      finishProvider(remote);
+    }
+    await expect(observation).resolves.toBe(stamp);
+    expect(observer.processStartedAt).toHaveBeenCalledOnce();
+  });
+  it('settles outstanding provider reads after a failed host preflight without observing the process', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    let finishProvider!: (value: ApplicationServer) => void;
+    const provider = new Promise<ApplicationServer>((resolve) => {
+      finishProvider = resolve;
+    });
+    const readProvider = vi.fn(() => provider);
+    Object.assign(f.adapter, { getApplicationServer: readProvider });
+    const observer = {
+      preflight: vi.fn(async () => {
+        throw new Error('preflight failed');
+      }),
+      stopped: vi.fn(async () => true),
+      processStartedAt: vi.fn(async () => new Date().toISOString()),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    let settled = false;
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db).catch((error) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await vi.waitFor(() => expect(observer.preflight).toHaveBeenCalledOnce());
+      await delay(10);
+      expect(readProvider).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      expect(observer.processStartedAt).not.toHaveBeenCalled();
+    } finally {
+      finishProvider(remote);
+    }
+    expect(await observation).toEqual(new Error('preflight failed'));
     expect(observer.processStartedAt).not.toHaveBeenCalled();
   });
+  it('settles an outstanding process read before rejecting a mismatched provider identity', async () => {
+    const serverId = await f.server();
+    const remote = await providerIdentity(serverId);
+    remote.external_id = 'foreign-server';
+    Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+    let finishProcess!: (value: string | null) => void;
+    const pendingProcess = new Promise<string | null>((resolve) => {
+      finishProcess = resolve;
+    });
+    const observer = {
+      preflight: vi.fn(async () => {}),
+      stopped: vi.fn(async () => true),
+      processStartedAt: vi.fn(() => pendingProcess),
+    };
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: observer,
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    let settled = false;
+    const observation = runtime.lifecycle.observeProcessStart(serverId, f.db).catch((error) => {
+      settled = true;
+      return error;
+    });
+    try {
+      await vi.waitFor(() => expect(observer.processStartedAt).toHaveBeenCalledOnce());
+      await delay(10);
+      expect(settled).toBe(false);
+    } finally {
+      finishProcess(new Date().toISOString());
+    }
+    expect(await observation).toMatchObject({ code: 'provenance_mismatch' });
+  });
+  it.each([
+    'valid',
+    'absent',
+    'api',
+    'later-start',
+    'tied-start',
+    'old',
+    'replaced',
+    'foreign',
+  ] as const)(
+    'corroborates an interactive external stop with exact terminal evidence: %s',
+    async (condition) => {
+      const serverId = await f.server();
+      const remote = await providerIdentity(serverId);
+      Object.assign(f.adapter, { getApplicationServer: vi.fn(async () => remote) });
+      const at = Math.floor(Date.now() / 1000) * 1000 - 2000;
+      const terminal = {
+        containerId: 'a'.repeat(64),
+        startedAt: new Date(at - 10000).toISOString(),
+        finishedAt: new Date(at + 500).toISOString(),
+      };
+      const stopEvent = {
+        id: 'stop-receipt',
+        event: 'server:power.kill',
+        timestamp: new Date(at).toISOString(),
+        is_api: false,
+      };
+      const events =
+        condition === 'absent'
+          ? []
+          : [
+              {
+                ...stopEvent,
+                ...(condition === 'api' ? { is_api: true } : {}),
+                ...(condition === 'old' ? { timestamp: new Date(at - 20000).toISOString() } : {}),
+              },
+            ];
+      if (condition === 'later-start' || condition === 'tied-start')
+        events.unshift({
+          ...stopEvent,
+          id: 'new-start',
+          event: 'server:power.start',
+          is_api: true,
+          timestamp: new Date(at + (condition === 'later-start' ? 1000 : 0)).toISOString(),
+        });
+      const activity = vi.fn(async () => events);
+      Object.assign(f.adapter, { listPowerActivity: activity });
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => true),
+        terminalProcess: vi.fn(async () => terminal),
+      };
+      if (condition === 'replaced')
+        observer.terminalProcess
+          .mockResolvedValueOnce(terminal)
+          .mockResolvedValue({ ...terminal, containerId: 'b'.repeat(64) });
+      if (condition === 'foreign') remote.external_id = 'foreign';
+      const management = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      if (condition === 'foreign') {
+        await expect(management.lifecycle.observeExternalStop(serverId, f.db)).rejects.toThrow(
+          'provenance_mismatch',
+        );
+        expect(activity).not.toHaveBeenCalled();
+      } else if (condition === 'valid') {
+        await expect(management.lifecycle.observeExternalStop(serverId, f.db)).resolves.toEqual({
+          ...terminal,
+          activityId: stopEvent.id,
+          activityAt: stopEvent.timestamp,
+          action: 'kill',
+        });
+      } else
+        await expect(management.lifecycle.observeExternalStop(serverId, f.db)).resolves.toBeNull();
+    },
+  );
   it('refuses new lifecycle effects when the physical observer is absent or unavailable', async () => {
     const queued = await stop();
     const absent = await createManagementRuntime({
@@ -283,6 +753,30 @@ describe('management runtime execution-time authorization', () => {
     });
     expect(await correct.lifecycle.confirmAlreadyStopped(serverId, f.db)).toBe(true);
     expect(observer.stopped).toHaveBeenCalledWith(server.pterodactyl_uuid, 'server');
+    observer.preflight.mockClear();
+    vi.mocked(f.adapter.getApplicationServer).mockClear();
+    const sharedProofs = {
+      providerServer: Promise.resolve(remote),
+      observerPreflight: Promise.resolve(),
+    };
+    expect(await correct.lifecycle.confirmAlreadyStopped(serverId, f.db, sharedProofs)).toBe(true);
+    expect(observer.preflight).not.toHaveBeenCalled();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    expect(
+      await correct.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+        providerServer: Promise.resolve(remote),
+      }),
+    ).toBe(true);
+    expect(observer.preflight).toHaveBeenCalledOnce();
+    expect(f.adapter.getApplicationServer).not.toHaveBeenCalled();
+    observer.stopped.mockClear();
+    await expect(
+      correct.lifecycle.confirmAlreadyStopped(serverId, f.db, {
+        ...sharedProofs,
+        providerServer: Promise.resolve({ ...remote, uuid: randomUUID() }),
+      }),
+    ).rejects.toThrow('provenance_mismatch');
+    expect(observer.stopped).not.toHaveBeenCalled();
     observer.stopped.mockResolvedValue(false);
     expect(await correct.lifecycle.confirmAlreadyStopped(serverId, f.db)).toBe(false);
     observer.stopped.mockRejectedValue(new Error('isolated observer unavailable'));
@@ -297,6 +791,57 @@ describe('management runtime execution-time authorization', () => {
     expect(observer.stopped).not.toHaveBeenCalled();
   });
 
+  it('awaits a generic game provider proof before the final revocable authority check', async () => {
+    const server = await f.server();
+    const job = await enqueueServerOperation(f.db, f.owner, server, {
+      action: 'start',
+      idempotencyKey: randomUUID(),
+    });
+    const remote = await providerIdentity(server);
+    const provider = Promise.withResolvers<ApplicationServer>();
+    const authorized = Promise.withResolvers<void>();
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: { preflight: async () => {}, stopped: async () => true },
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+      logger: createLogger((record) => {
+        if (
+          record.event === 'server.runtime_stage' &&
+          (record.data as { stage?: string } | undefined)?.stage ===
+            'authorize_effect.authorization'
+        )
+          authorized.resolve();
+      }),
+    });
+    let completed = false;
+    const proof = runtime.lifecycle.authorizeEffect(job.jobId, server, f.db, {
+      providerServer: provider.promise,
+    });
+    const outcome = proof.then(
+      () => {
+        completed = true;
+      },
+      () => {
+        completed = true;
+      },
+    );
+    try {
+      await authorized.promise;
+      await delay(10);
+      expect(completed).toBe(false);
+      await f.db
+        .updateTable('user')
+        .set({ role: 'user' })
+        .where('id', '=', f.owner.actorUserId)
+        .execute();
+    } finally {
+      provider.resolve(remote);
+      await outcome;
+    }
+    await expect(proof).rejects.toThrow('forbidden');
+  });
   it('reloads the current role instead of trusting a queued Owner snapshot', async () => {
     const queued = await stop(f.owner);
     expect((await authorizeQueuedEffect(f.db, queued.job, queued.server)).role).toBe('owner');
@@ -458,7 +1003,7 @@ describe('management runtime execution-time authorization', () => {
         ),
       );
       expect(contenders).toEqual(
-        Array.from({ length: 12 }, () => expect.objectContaining({ code: 'conflict' })),
+        Array.from({ length: 12 }, () => expect.objectContaining({ code: 'operation_busy' })),
       );
       expect(effect).not.toHaveBeenCalled();
       await expect(runtime.access(context, serverId, false, async () => 'read')).resolves.toBe(
@@ -654,6 +1199,111 @@ describe('management runtime execution-time authorization', () => {
       );
     },
   );
+  it('allows a file mutation while reconciliation waits for the provider', async () => {
+    const serverId = await f.server(),
+      sessionId = randomUUID();
+    await database.pool.query(
+      'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
+      [sessionId, randomUUID(), f.context.actorUserId],
+    );
+    const remote = { ...(await providerIdentity(serverId)), container: { installed: true } };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    Object.assign(f.adapter, {
+      getApplicationServer: vi.fn(async () => remote),
+      getResources: vi.fn(async () => {
+        entered.resolve();
+        await release.promise;
+        return {
+          current_state: 'offline',
+          is_suspended: false,
+          resources: {
+            memory_bytes: 0,
+            cpu_absolute: 0,
+            disk_bytes: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            uptime: 0,
+          },
+        };
+      }),
+    });
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      reconcileExternal: async () => ({ recovered: 0, failed: 0 }),
+    });
+    const collecting = runtime.reconcile();
+    const removeFiles = vi.fn(async () => {});
+    try {
+      await entered.promise;
+      await runtime.access(
+        { ...f.context, [authSessionId]: sessionId },
+        serverId,
+        true,
+        removeFiles,
+      );
+      expect(removeFiles).toHaveBeenCalledOnce();
+      const row = await f.db
+        .selectFrom('managed_servers')
+        .select('last_observed_at')
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(row.last_observed_at).toBeNull();
+    } finally {
+      release.resolve();
+      await collecting;
+    }
+    expect(await collecting).toMatchObject({ observed: 1, deferred: [], unavailable: [] });
+    expect(removeFiles).toHaveBeenCalledOnce();
+  });
+  it('reports lock-deferred reconciliation separately from confirmed observations', async () => {
+    const serverId = await f.server();
+    const remote = { ...(await providerIdentity(serverId)), container: { installed: true } };
+    Object.assign(f.adapter, {
+      getApplicationServer: vi.fn(async () => remote),
+      getResources: vi.fn(async () => ({
+        current_state: 'offline',
+        is_suspended: false,
+        resources: {
+          memory_bytes: 0,
+          cpu_absolute: 0,
+          disk_bytes: 0,
+          network_rx_bytes: 0,
+          network_tx_bytes: 0,
+          uptime: 0,
+        },
+      })),
+    });
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      reconcileExternal: async () => ({ recovered: 0, failed: 0 }),
+    });
+    const holder = await database.pool.connect();
+    try {
+      await holder.query('SELECT pg_advisory_lock(hashtextextended(current_schema() || $1,0))', [
+        `:nickhosting:server:${serverId}`,
+      ]);
+      expect(await runtime.reconcile()).toEqual({
+        observed: 0,
+        deferred: [serverId],
+        unavailable: [],
+        external: { recovered: 0, failed: 0 },
+      });
+      const row = await f.db
+        .selectFrom('managed_servers')
+        .select('last_observed_at')
+        .where('id', '=', serverId)
+        .executeTakeFirstOrThrow();
+      expect(row.last_observed_at).toBeNull();
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock_all()');
+      holder.release();
+    }
+  });
   it('reports partial external recovery failures to the caller', async () => {
     const reconcileExternal = vi.fn(async () => ({ recovered: 2, failed: 1 }));
     const runtime = await createManagementRuntime({
@@ -664,10 +1314,77 @@ describe('management runtime execution-time authorization', () => {
     });
     expect(await runtime.reconcile()).toEqual({
       observed: 0,
+      deferred: [],
       unavailable: [],
       external: { recovered: 2, failed: 1 },
     });
     expect(reconcileExternal).toHaveBeenCalledOnce();
+  });
+  it.each(['node-disabled', 'sample-removed'] as const)(
+    'defers start reservation and rechecks atomic admission after preparation: %s',
+    async (change) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('physical_hosts')
+        .set({ local_disk_path: process.cwd() })
+        .where('id', '=', f.hostId)
+        .execute();
+      await f.db.deleteFrom('host_observations').execute();
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: { preflight: async () => {}, stopped: async () => true },
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      const reserve = await runtime.lifecycle.prepareStartAdmission?.(
+        queued.server,
+        queued.job,
+        f.db,
+      );
+      expect(reserve).toBeTypeOf('function');
+      expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+      const sample = await f.db
+        .selectFrom('host_observations')
+        .selectAll()
+        .where('host_id', '=', f.hostId)
+        .executeTakeFirstOrThrow();
+      expect(sample.observer_id).toBe('isolated-observer');
+      expect(Number(sample.snapshot.availableMemoryMiB)).toBeGreaterThan(0);
+      if (change === 'node-disabled')
+        await f.db
+          .updateTable('managed_nodes')
+          .set({ enabled: false })
+          .where('id', '=', f.nodeId)
+          .execute();
+      else await f.db.deleteFrom('host_observations').where('host_id', '=', f.hostId).execute();
+      await expect(reserve?.()).rejects.toThrow();
+      expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
+    },
+  );
+  it('does not prepare a start reservation when the host observer preflight fails', async () => {
+    const queued = await stop();
+    await f.db
+      .updateTable('physical_hosts')
+      .set({ local_disk_path: process.cwd() })
+      .where('id', '=', f.hostId)
+      .execute();
+    const runtime = await createManagementRuntime({
+      db: f.db,
+      codec,
+      adapter: f.adapter,
+      containerObserver: {
+        preflight: async () => {
+          throw new Error('isolated observer unavailable');
+        },
+        stopped: async () => true,
+      },
+      env: { NH_OBSERVER_ID: 'isolated-observer' },
+    });
+    await expect(
+      runtime.lifecycle.prepareStartAdmission?.(queued.server, queued.job, f.db),
+    ).rejects.toThrow('isolated observer unavailable');
+    expect(await f.db.selectFrom('resource_reservations').selectAll().execute()).toEqual([]);
   });
   it('resolves the explicit enabled host override before selecting local observations', async () => {
     await f.db

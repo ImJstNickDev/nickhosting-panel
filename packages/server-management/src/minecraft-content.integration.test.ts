@@ -11,14 +11,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
 import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/generated-launcher.js';
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
+import * as contentDisk from '../../content-providers/src/disk.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
+  assertMinecraftLaunchInputs,
   configureMinecraftProvision,
   type MinecraftContentOptions,
   type MinecraftPreparedContent,
   prepareMinecraftContentPlan,
+  prepareMinecraftCreationConfig,
   processMinecraftContent,
+  verifyMinecraftInitialInstallation,
   verifyMinecraftPendingContent,
   verifyMinecraftRestore,
 } from './minecraft-content.js';
@@ -34,6 +38,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     database = await createTestDatabase();
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await database?.destroy();
   });
   async function launcherJar(
@@ -244,12 +249,12 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     const combinationId = randomUUID();
     await f.db
       .insertInto('game_integrations')
-      .values({ id: 'minecraft-java', version: 'fixture', manifest: {} })
+      .values({ id: 'minecraft', version: 'fixture', manifest: {} })
       .onConflict((conflict) => conflict.column('id').doNothing())
       .execute();
     await f.db
       .updateTable('runtime_egg_mappings')
-      .set({ game_id: 'minecraft-java', runtime_id: profile, docker_image: image, startup })
+      .set({ game_id: 'minecraft', runtime_id: profile, docker_image: image, startup })
       .where('id', '=', f.mappingId)
       .execute();
     const mapping = await f.db
@@ -826,11 +831,29 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     expect(await f.f.db.selectFrom('minecraft_staging_claims').selectAll().execute()).toEqual([]);
   });
 
-  it.each([true, false])(
-    'consented replacement (old files: %s) verifies removals and selection and safely retries the same job',
-    async (oldContent) => {
+  it.each([
+    { oldContent: true, disk: 64 },
+    { oldContent: false, disk: 64 },
+    { oldContent: true, disk: 0 },
+  ])(
+    'consented replacement $oldContent with disk=$disk verifies removals and retries safely',
+    async ({ oldContent, disk }) => {
+      // Tiny isolated fixtures need the absolute safety margin, not 10% of
+      // a shared multi-terabyte host. Production's 10% default is unchanged.
+      const checkDisk = contentDisk.assertContentDiskSpace;
+      vi.spyOn(contentDisk, 'assertContentDiskSpace').mockImplementation(
+        (directory, bytes, policy) =>
+          checkDisk(directory, bytes, { ...policy, minimumFreePercent: 1 }),
+      );
+
       const selected = { provider: 'modrinth' as const, projectId: 'packA', versionId: 'versionA' };
       const f = await installedPackFixture(selected);
+      f.context.server.limits = { ...f.context.server.limits, disk };
+      await f.f.db
+        .updateTable('managed_servers')
+        .set({ limits: JSON.stringify(f.context.server.limits) })
+        .where('id', '=', f.serverId)
+        .execute();
       const root = `./mountdata/test-assets/m4-replacement-${randomUUID()}`;
       const target = { provider: 'modrinth' as const, projectId: 'packB', versionId: 'versionB' };
       const env = {
@@ -940,7 +963,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
           resources: {
             memory_bytes: 0,
             cpu_absolute: 0,
-            disk_bytes: 100,
+            disk_bytes: disk === 0 ? 8 * 1024 ** 3 : 100,
             network_rx_bytes: 0,
             network_tx_bytes: 0,
             uptime: 0,
@@ -1082,6 +1105,125 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     await expect(verifyMinecraftRestore(unbound.context, unbound.options)).rejects.toMatchObject({
       code: 'configuration_invalid',
     });
+  });
+
+  it('attests initial Vanilla outputs without writing configuration or claiming script success', async () => {
+    const { f, serverId, files, context, options, operation } = await minecraftFixture();
+    operation.action = 'provision';
+    operation.phase = 'installation';
+    const write = vi.spyOn(context.adapter, 'writeFile');
+    const receipt = await verifyMinecraftInitialInstallation(context, options);
+    expect(receipt).toMatchObject({
+      integrationId: 'minecraft',
+      files: [{ path: 'server.jar', size: files.get('server.jar')?.length }],
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(
+      (
+        await f.db
+          .selectFrom('minecraft_server_profiles')
+          .select('installed')
+          .where('server_id', '=', serverId)
+          .executeTakeFirstOrThrow()
+      ).installed,
+    ).toBe(false);
+    operation.action = 'reinstall';
+    expect(await verifyMinecraftInitialInstallation(context, options)).toBeNull();
+    operation.action = 'wipe';
+    expect(await verifyMinecraftInitialInstallation(context, options)).toBeNull();
+  });
+  it.each(['hash', 'image', 'authorization', 'launch'] as const)(
+    'rejects initial Vanilla recovery with invalid %s evidence',
+    async (failure) => {
+      const { files, context, options, operation } = await minecraftFixture();
+      operation.action = 'provision';
+      operation.phase = 'installation';
+      if (failure === 'hash') files.set('server.jar', Buffer.from('corrupted'));
+      if (failure === 'image') options.observedImageDigest = async () => 'invalid-image-digest';
+      if (failure === 'authorization')
+        context.authorize = async () => {
+          throw new Error('revoked');
+        };
+      if (failure === 'launch') {
+        const get = context.adapter.getApplicationServer;
+        context.adapter.getApplicationServer = async (id) => ({
+          ...(await get(id)),
+          container: { image: 'foreign', startup_command: 'foreign', installed: true },
+        });
+      }
+      await expect(verifyMinecraftInitialInstallation(context, options)).rejects.toThrow();
+    },
+  );
+  it('verifies a declaration-backed Vanilla installation without signatures and still rejects changed artifacts', async () => {
+    const { f, serverId, files, context, options } = await minecraftFixture();
+    await f.db.deleteFrom('minecraft_verification_evidence').execute();
+    options.env = {};
+    expect(await configureMinecraftProvision(context, options)).toBe(true);
+    const profile = await f.db
+      .selectFrom('minecraft_server_profiles')
+      .select(['installed', 'installed_manifest'])
+      .where('server_id', '=', serverId)
+      .executeTakeFirstOrThrow();
+    expect(profile.installed).toBe(true);
+    expect(profile.installed_manifest).toEqual([
+      {
+        path: 'server.jar',
+        size: files.get('server.jar')?.length,
+        sha256: createHash('sha256')
+          .update(files.get('server.jar') ?? '')
+          .digest('hex'),
+      },
+    ]);
+    files.set('server.jar', Buffer.from('changed runtime jar'));
+    await expect(assertMinecraftLaunchInputs(context, options)).rejects.toThrow('conflict');
+  });
+
+  it('applies declared modern whitelist configuration before a first generated properties file', async () => {
+    const { f, serverId, files, context, options } = await minecraftFixture();
+    await f.db.deleteFrom('minecraft_verification_evidence').execute();
+    options.env = {};
+    files.delete('server.properties');
+    await f.db
+      .updateTable('minecraft_server_profiles')
+      .set({
+        configuration: JSON.stringify({ eula: true, properties: { 'white-list': true } }),
+      })
+      .where('server_id', '=', serverId)
+      .execute();
+    expect(await configureMinecraftProvision(context, options)).toBe(true);
+    expect(files.get('server.properties')?.toString()).toContain('white-list=true');
+  });
+  it('rejects unsupported legacy player management before any installation effects', async () => {
+    const { f, combinationId, files, options } = await minecraftFixture();
+    const choice = await f.db
+      .selectFrom('minecraft_combinations')
+      .select('combination')
+      .where('id', '=', combinationId)
+      .executeTakeFirstOrThrow();
+    await f.db
+      .updateTable('minecraft_combinations')
+      .set({
+        combination: JSON.stringify({
+          ...(choice.combination as object),
+          release: '1.6.4',
+          family: 'legacy',
+        }),
+      })
+      .where('id', '=', combinationId)
+      .execute();
+    const before = [...files.entries()];
+    for (const configuration of [
+      { eula: true, operators: ['Player'] },
+      { eula: true, whitelist: ['Player'] },
+      { eula: true, properties: { 'white-list': true } },
+    ])
+      await expect(
+        prepareMinecraftCreationConfig(f.db, combinationId, configuration, options),
+      ).rejects.toThrow('integration_unavailable');
+    expect([...files.entries()]).toEqual(before);
+    await expect(
+      prepareMinecraftCreationConfig(f.db, combinationId, { eula: true }, options),
+    ).resolves.toMatchObject({ configuration: { eula: true } });
   });
 
   it('fences initial security configuration before the first write and clears it only after a complete retry', async () => {

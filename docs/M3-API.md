@@ -6,6 +6,18 @@ Satisfactory and their protocol compatibility belong to M4/M6. See
 and [validation](M3-VALIDATION.md). M1 identity and M2 lifecycle/admission remain
 authoritative; no new user identity, provider key or resource scheduler is introduced.
 
+## M5 automatic provisioning integration
+
+The existing server creation API now records automatic route intent for eligible
+trusted-module Gateway servers. It requires a single Owner-configured Gateway bind
+address on the mapped node, reserves same-number public ports atomically with
+backend claims, and activates registrations after verified game installation.
+The worker uses shared internal route validation, not an impersonated Owner API
+session. No new public provisioning endpoint or database migration is required.
+See [automatic registration](GAME-GATEWAY.md#automatic-registration-during-creation).
+The Owner route API below remains available for explicit administration and legacy
+servers; new eligible creations no longer need a separate manual route request.
+
 ## Interactive Core APIs
 
 Normal Better Auth sessions, existing resource authorization and mutation-origin
@@ -17,20 +29,94 @@ Gateway routes. Sessions and roles are refreshed after database lock waits.
 | `GET /v1/owner/gateway/routes` | Regular Owner; explicit registered route metadata only. |
 | `PUT /v1/owner/gateway/routes` | Regular Owner; `{id?,serverId,allocationId,publicAddress,publicPort,transport,enabled?}`. A new route requires an installed managed server, its stable claim, allowed transport, configured physical host and Owner pool's declared public address. Existing identity is immutable; use `id` to enable/disable. Active operations prevent changes. |
 | `GET /v1/servers/:id/gateway` | Existing `server:read` authorization; current state, consent generation, job IDs, process/readiness timestamps, message key and optional measured startup estimate. |
-| `PUT /v1/servers/:id/gateway` | Regular session with `server:manage`; complete policy below. Creates a new consent generation and audit event. |
+| `PUT /v1/servers/:id/gateway` | Regular session with `server:manage`; policy below. Operational changes create a new consent generation; timeout-only edits preserve it. All edits are audited and enforce the Owner's user-control policy. |
 
-Policy fields: `enabled`, `protocolId`, `gameVersion`, `idleTimeoutSeconds`
-(nullable, disabling automatic sleep), `readinessTimeoutSeconds` (1–86400),
+Policy fields: `enabled`, `protocolId`, `gameVersion`, optional `idleTimeoutSeconds`
+(nullable, disabling automatic sleep for an explicit server override), optional
+`idleTimeoutInherited` (inherit game/runtime defaults rather than use the server
+value), Owner-only optional `idleTimeoutUserAccess` (null to inherit),
+`readinessTimeoutSeconds` (1–86400),
 `readinessMaxAgeSeconds` (1–300), `estimateMaxAgeSeconds` (60–2592000),
 `wakeRetrySeconds` (1–300), and optional `mode` (`auto`, `maintenance`,
 `manually_stopped`). Changing policy does not start a server. The existing M2
 manual stop immediately revokes automatic-wake consent, even when another
 operation prevents enqueueing a stop. An explicit manual start can rearm manual
-suppression; maintenance requires an explicit policy change.
+suppression; maintenance requires an explicit policy change. The separate explicit
+`automatic_starts_paused` preference survives manual starts and idle sleep; it
+suppresses wake requests and `wakeEnabled` without suppressing online forwarding.
+
+Owner timeout resolution is **server override → runtime override → game override →
+global default**. Global `defaultIdleTimeoutSeconds` defaults to -1. Global/game/runtime
+settings use seconds (`-1` disables, positive values up to 604800); absent runtime
+overrides and a null game value inherit. The server policy retains legacy nullable
+disabled representation; the WebPanel translates a -1 minute input into that value.
+UI inputs are minutes with an explicit inheritance choice. Disabling idle sleep
+does not disable Gateway forwarding or intentional-join wake. Migration 020 adds
+the inheritance flag; 021 separates Owner baselines/access from user preferences,
+preserving old explicit timeouts (including disabled) as Owner policy. Newly
+initialized policies inherit while leaving wake disabled and manual-stop protection
+intact.
+
+`idleTimeoutUserAccess` defaults to `hidden`; game `userAccess`, runtime
+`runtimeUserAccess`, and Owner per-server `idleTimeoutUserAccess` can override it.
+Modes are `hidden`, `editable`, `shorten-only`. User preferences are separate from
+the Owner baseline. Hidden ignores user preferences and refuses their edits.
+Shorten-only refuses a higher timeout or disabled preference against a finite Owner
+baseline, and clamps a formerly valid preference when the Owner later tightens it.
+With an Owner-disabled baseline, a finite user timeout is earlier and allowed.
+Limited users cannot bypass a finite Owner timeout by changing operational fields
+through the policy endpoint. Existing explicit manual-stop/maintenance and automatic
+start consent remain independent safety controls, not forced always-on behavior.
+
+Regular Owners read/write a game's defaults with
+`GET/PUT /v1/owner/integrations/:gameId/sleep-policy`. Writes contain
+`{gameTimeoutSeconds, runtimeTimeouts, userAccess?, runtimeUserAccess?}`; runtime keys must belong to the trusted
+integration. These settings are stored separately from compiled manifests and
+rollout configuration. `gameIdleTimeouts` follows normal defaults → Owner settings
+→ `NH_GAME_IDLE_TIMEOUTS` precedence; environment overrides lock Owner edits. Global
+values use existing Owner settings GET/PATCH and `NH_DEFAULT_IDLE_TIMEOUT_SECONDS`
+and `NH_IDLE_TIMEOUT_USER_ACCESS` overrides.
+Per-server `/v1/platform/servers/:id/sleep-policy` also returns `idleTimeout` with
+`overrideSeconds` (null means inherit; -1 means disabled), `effectiveSeconds`,
+`source` (`server`, `runtime`, `game`, `default` for global) and `inheritedSeconds`.
+Owner reads include the Owner baseline/access override separately; ordinary reads
+show only the permitted preference. Hidden ordinary reads return `idleTimeout:null`
+and omit timeout configuration fields from the returned policy/proposal.
+`policyControlsEditable` separately governs operational controls so hiding a timer
+does not accidentally disable wake when the Owner timeout is disabled. Operational
+state and upcoming sleep deadlines remain truthful; hiding a setting is not a claim
+that its effect is secret.
+
+Timeout-only changes preserve generation, readiness and in-flight wake jobs. User
+saves do not reset idle time; repeatedly saving cannot postpone an Owner limit.
+
+Resolved timeouts govern both Gateway sleep eligibility and the final idle
+observation. Queued automatic stops revalidate current policy before external
+effects, so disabling sleep or raising its timeout cannot silently execute an old
+stop. Fresh zero-player observations, quiescence, authorization, manual suppression
+and resource/identity fences still apply; missing player counts never mean zero.
+
+While an automatic stop is active, observations cannot promote the route back to
+`online`. Fresh affirmative zero-player observations for the same process and
+exact sleep operation retain its existing idle proof only while its original
+quiescence fence and current sleep policy remain valid. Unknown activity, changed
+process identity or an observation gap invalidates that proof. New reports never
+extend the stop's recorded fence.
+
+A failed sleep operation remains blocked when its external outcome is uncertain.
+Core can retire its sleep reference only when the durable journal conclusively
+records that power was never prepared or was rejected before handoff, with no
+acknowledged effect, while the
+same managed server is still running with its reservation and no active operation.
+The failed operation/history and reservation are preserved. Fresh readiness and a
+new full idle interval are then required; the failed stop is not replayed. This
+prevents readiness reports and reconciliation from alternating between online and
+blocked around the same failed operation.
 
 State is `sleeping`, `waking`, `online`, `blocked`, `maintenance` or
-`manually_stopped`. `online` requires fresh game-protocol readiness correlated
-with the exact running Docker process, not just a Panel running status. State
+`manually_stopped`. `online` requires readiness correlated with the exact admitted
+process. Compiled Minecraft accepts authenticated live provider-running receipts
+under ADR 0016; other integrations retain fresh game-protocol readiness. State
 includes `sleepEligibleAt` only when an enabled idle window is progressing.
 English/Italian `gateway.states.*` message keys are provided.
 
@@ -95,6 +181,23 @@ A client cannot supply the Docker process timestamp. Ordinary idle reports measu
 the window; only a bounded, validated forwarding fence can authorize automatic
 stop after the window expires. See ADR 0012 for timeout/restart behavior.
 
+The Owner-approved M5 policy (2026-10-10) removes runtime artifact transfers from
+ordinary start/stop and Gateway process observation. Installed-state, current
+provider identity/configuration, image and exact process epoch remain verified;
+installation/content/restore workflows retain their artifact verification. There is
+no process-epoch JAR cache or cold-start hash download. Manual out-of-band JAR edits
+are not detected by an ordinary startup hash. See [M4 contracts](M4-API.md).
+
+A protocol adapter may return a coherent `observe()` sample containing readiness,
+idle and player count. The safety validator returns that same authenticated backend
+sample to the data plane, avoiding separate readiness/idle exchanges. Unknown
+player count never establishes idle. Successful poll cycles subtract elapsed work
+from the configured period, with a 100 ms minimum yield and no overlap; failed
+cycles retain their full cooldown. A positive waking observation requests a fresh,
+fully validated snapshot immediately. Aggregate diagnostics expose last/maximum
+observation duration, probe/report duration and last snapshot duration. They do not
+claim that polling detects transitions instantaneously.
+
 ## Configuration and deployment prerequisites
 
 Settings resolve defaults < Owner database values < explicit environment values.
@@ -141,8 +244,17 @@ or reporting idle evidence, covering an old process's maximum lease and skew.
 
 A first-ever backend needs one explicit admitted/manual start and protocol proof
 before a sleeping listener can be established. Later sleeping restarts require
-the same container/network/binding proof and a fresh nonce challenge to a persistent
-responder on the effective backend IP. `startNodeProbe` is an explicit helper,
+the same durable provider/network/binding proof and a fresh nonce challenge to a
+persistent responder on the effective backend IP. Reachability proof v2 tolerates
+Wings replacing Docker's ephemeral container ID, while binding the provider node UUID
+and retaining exact managed/provider/allocation identities, Docker daemon, namespace,
+network and configured ports. Every use still checks the fresh uniquely identified
+container, topology and collisions; online forwarding still requires a running backend
+and successful game protocol probe. Missing or ambiguous containers fail closed.
+Legacy v1 proofs remain valid only for their original container; only a successful
+new backend probe can establish v2, never a metadata-only conversion. An old Gateway
+binary cannot consume v2 proofs, so rollback requires compatible validation and fresh
+reachability evidence rather than assuming a seamless return to v1. `startNodeProbe` is an explicit helper,
 never an automatic listener. Its deployment needs its own reviewed endpoint and
 Owner approval; M3's responder exists only in the approved isolated fixture.
 
@@ -174,3 +286,307 @@ uncertain operation/reservation records; do not drop migrations with active jobs
 reverse a provider effect blindly or delete production data. Revert the milestone
 only after the existing M2 worker can safely recover pending operations. The
 isolated fixture has separate approved, provenance-verified `down` cleanup.
+
+### Explicit development responder launcher (M5)
+
+`apps/game-gateway/src/node-probe-main.ts` runs the existing bounded TCP nonce
+protocol as a separately approved service. It requires `NH_NODE_PROBE_ADDRESS`
+(exact RFC1918/ULA private backend IP, no wildcard/loopback/hostname/scoped address)
+and `NH_NODE_PROBE_PORT` (1024–65535). `--health` performs a nonce round trip without
+opening a second listener; SIGTERM/SIGINT close current sockets and the listener.
+No provider/database credentials are required. This proves endpoint reachability,
+not game readiness, player idleness or external connectivity. The development
+Compose live overlay is unapplied until its specific approval; see
+[M5 environments](M5-ENVIRONMENTS.md#mixed-directgateway-allocation-pools-and-next-activation-proposal).
+
+
+Gateway polling avoids duplicate inspections within the same proof bootstrap:
+non-online listener validation can establish a missing proof from its already fresh
+inspection only when the exact owned backend is running and passes a real protocol
+probe. The independent node challenge, topology age fences and another fresh check
+immediately before binding remain. Allocation inventory is restricted to the Owner's
+configured node policy without repeating the remote node-list call; the validator
+still obtains a fresh node inventory and checks node UUIDs. No TTL inventory cache
+or relaxation of ownership/collision checks is introduced.
+
+### Phase timing diagnostics (M5)
+
+Structured logs correlate an intentional join with the durable operation and the
+listener's effective state. They contain identifiers/timestamps/durations, not
+player data, packets, request bodies, provider URLs or credentials:
+
+| Event | Meaning |
+|---|---|
+| Gateway `gateway.wake_requested` / `gateway.wake_completed` | Actual issued control request, its request ID and returned operation ID; duration includes the Core request. Coalesced joins emit at most one additional event per shared request. |
+| API `gateway.wake_stage` / `gateway.wake_completed` | Route validation, management configuration, host sampling, admission/enqueue. `wakeRequestId` matches the Gateway request ID; `requestId` is the independent HTTP request ID. `jobId` links worker records. Timing starts after service authentication. |
+| Worker `jobs.delivery_started` / `jobs.delivery_processed` | BullMQ publication timestamp, delivery age and processor duration. Age includes transport/waiting time and depends on wall clocks; it is not the whole API-to-power duration. |
+| `servers.operation_stage` / `servers.operation_deferred` | Server-lock acquisition, provider identity/resources, authorization, process observation and external-effect duration; explicit busy-lock/not-due/inactive reason. |
+| `server.runtime_stage` | Job-scoped host-observer preflight, runtime-image checks, host sampling, atomic admission and final authorization. |
+| API `gateway.observation_state_changed` | Snapshot mode versus resulting state, probe-start `observedAt`, post-commit `completedAt`, and validation/configuration/process/commit durations. This comparison is diagnostic, not another state authority. |
+| `gateway.route_transition` | Effective response mode and forwarding changes after validated application or lease/safety failure. Ordinary lease renewals are deduplicated. |
+| `gateway.quiescence_started` / `gateway.quiescence_released` | Original deadline, remaining interval, clock skew and successful fresh-fetch/release timing. |
+
+Phase durations are monotonic; event timestamps use UTC wall time. Nested spans
+are inclusive: for example `provider_effect` can contain stop confirmation and
+runtime authorization subphases. **Do not sum overlapping spans.** Persisted
+`ready_at` is the observation-pass start, not the Core commit or forwarding time.
+A route-transition log records listener state, not proof of when a Minecraft client
+refreshes or displays its MOTD. Logs are transition/job scoped, not one record per
+packet or unchanged idle probe. Diagnostic sink failures do not alter the measured
+operation or relax its authorization.
+
+Under the original deadline-only contract, confirmed stop does not cancel an outstanding quiescence promise (the terminal acknowledgement amendment below adds an exact-proof exception). The Gateway
+retains it until a successful snapshot fetch starts after the original deadline
+plus clock-skew allowance and has an issue timestamp at/after the deadline. This
+may leave a stopped backend answering “Server stopping” for the remaining lease
+interval plus polling/validation time. These diagnostics expose that interval;
+this instrumentation does not shorten it or permit an early wake.
+
+### Final handoff and waiting-listener continuity (2026-10-11)
+
+Ordinary start/restart performs one complete runtime-image/launch check at the
+final power handoff, after durable preparation. Admission still takes a fresh
+host sample and reserves resources atomically. Intermediate authorization checks
+use current local permissions/policy; provisioning hooks may additionally read
+egg metadata. These changes introduce no cross-operation proof cache.
+
+An internal stop relay reuses its attempt's verified Application server identity
+and UUID instead of fetching Application/Client identities again during setup.
+Its intermediate checks still enforce current permissions. After socket setup,
+the lifecycle rechecks current provider identity and full authorization before
+power; automatic sleep also rechecks local authority/idle/fence after persisting
+handoff. Ordered terminal signals, physical stop proof and reservation release
+rules remain unchanged. Browser console authorization is unchanged.
+
+`servers.stop_stage` provides bounded durations for observer preflight, server/egg
+metadata, console setup, final handoff, power request and terminal confirmation.
+Those durations are nested inside the existing provider-effect span. Gateway
+`gateway.safety_failure` adds fixed reason codes including `validation_timeout`;
+raw errors and credentials are excluded. Existing status-only responders may
+survive verified backend recreation under the narrow renewal rules in
+[ADR 0012](decisions/0012-gateway-leases-and-sleep.md); unknown safety/timeout still
+withdraws the listener. This does not promise uninterrupted responses under all
+provider/control-plane failures.
+
+The Docker observer may discard an observation and retry it once when a complete
+container inventory demonstrably changes during inspection. An inspect command
+may qualify only if its failure exclusively identifies requested container IDs
+that a fresh list confirms disappeared; malformed output, network changes,
+permissions and other command failures do not qualify. All sibling inspection
+results must settle before classifying the failure. The retry rereads the complete
+namespace, daemon, container/network inventories and socket tables within the
+original 15-second observation budget. Partial results never authorize a listener,
+and this retry does not extend a route lease or change aggregate timeout closure.
+Observer diagnostic reasons distinguish command, parse, namespace, socket,
+inventory and deadline failures without exposing Docker stderr.
+
+### 2026-10-11 — Start/stop critical-path consolidation
+
+Planned power operations fetch provider identity and resource telemetry concurrently,
+settling both before persisting telemetry or advancing admission. A failed managed
+identity cannot publish telemetry. Start/restart/initial-start obtain their final
+provider identity after durable preparation, then share that same fresh proof with
+runtime checks. Independent egg metadata and observer work may overlap the provider
+read; every branch settles before power. Current provider limits, installation and
+suspension are revalidated against the admitted local server. Current permissions
+are rechecked after the parallel barrier, including generic lifecycle callers.
+
+The final runtime proof shares only its own observer preflight. There is no
+cross-operation identity/image cache, and standalone runtime checks retain their
+full host/provider proof. Worker admission samples only the server's physical host
+and overlaps sampling with host preflight, retaining the 250 ms CPU window and
+atomic reservation rules. Revocable local policy is still rechecked after slow
+provider/image checks. Installation and restore artifact verification is unchanged;
+ordinary power operations do not download the JAR.
+
+Stop may reuse the current attempt's initial verified metadata to prepare the
+internal console. It still checks fresh provider identity and full authority after
+the console handshake, immediately before power. Intermediate local permission
+checks remain; duplicate full pre-handshake checks are removed where the final
+handoff supplies them. Terminal process proof, original sleep fence, reservation
+release and uncertain-effect recovery remain unchanged. This optimization does
+not shorten the Gateway's post-stop quiescence deadline or its readiness pipeline.
+
+New durable outbox records emit a schema-scoped PostgreSQL notification inside
+their transaction; PostgreSQL delivers it only after commit. The worker immediately
+runs its existing dispatcher on receipt, coalescing hints while dispatch is active.
+The 500 ms fallback poll and repeated durable recovery still work without hints.
+LISTEN uses one dedicated database connection, bounded setup and reconnection;
+a stalled hint connection never blocks authoritative polling. No migration or new
+service is required. Notifications contain no job or user payload, do not grant
+permission, and never substitute for a committed job.
+
+### 2026-10-11 — Provider request coordination and rate-limit recovery
+
+Core API and worker each own a process-scoped Pterodactyl transport coordinator.
+It survives per-request management runtime creation, while settings and credentials
+still resolve normally. Provider URL, credential scope and credential digest
+isolate request state. Concurrent identical bounded JSON GETs share one in-flight
+request and independently parse/validate their results; completed responses and
+raw transfers are not cached. Mutations are never combined or automatically
+retried, and invalidate pending reads before/after dispatch. Application and Client
+cooldowns remain separate. Coordination is not an account-wide, cross-process
+request budget and cannot guarantee that rate limits are never reached.
+
+A 429 records a bounded `Retry-After` delay (seconds or HTTP date, 1–300 seconds;
+60 seconds when absent/invalid). Calls during that cooldown fail as known rejected
+without another provider request. There is no sleeping mutation retry or replay of
+an uncertain external effect. Only authenticated Gateway errors expose the narrow
+503 payload `error.details = { gatewayControlReason: "provider_rate_limited",
+retryAfterMs }`, plus `Retry-After`. Ordinary browser errors remain sanitized.
+
+The Gateway distinguishes that explicit response from an actual failed collision,
+identity or topology check. It discards the candidate snapshot and pauses provider
+retries. Existing listeners retain only their previously committed lease; no new
+listener, extension, positive readiness or candidate authority is granted. Normal
+lease expiry still closes them, and a prolonged provider outage can still interrupt
+connections. Unknown errors and actual safety failures retain fail-closed behavior.
+
+Backend probes may reuse provider inventory from the exact route/context's last
+successful listener validation, only within `maximumObservationAgeMs` measured
+from the original inventory acquisition start. Backend probes still resolve Core
+context and inspect Docker/sockets and game readiness afresh. Revision, generation,
+context changes, expiration or failed listener renewal prevent reuse. Each listener
+bind/renewal fetches fresh provider inventory. This removes the repeated provider
+reads between nearby snapshot validation and backend observation without caching
+permission or treating a configured address as reachability proof.
+
+
+## 2026-10-11 — Confirmed sleep acknowledgement and readiness refresh
+
+Authenticated snapshot clients advertise
+`X-NickHosting-Gateway-Features: completed-sleep-v1` to receive optional per-route
+`completedSleep: {jobId,generation,quiescenceUntil,completedAt}`. Core strips this
+additive field for legacy strict decoders; canonical route/snapshot revisions
+remain the same. New clients work with old Core by retaining deadline fallback.
+Do not change the negotiated feature set during one Gateway process lifetime.
+
+Core derives the acknowledgement from the latest durable server operation, using
+one batched query for offline servers without an active operation. It requires a
+succeeded, complete, confirmed sleep stop, valid stop-confirmation/completion
+timestamps, the current generation, and no resource reservation. A newer failed,
+pending or unrelated operation prevents reuse of an older success. The exact
+original sleep deadline is preserved; no migration or provider request is added.
+
+After normal full snapshot safety validation, the Gateway may release its local
+fence early only if all original roles still exist with unchanged identity,
+endpoints and protocol, increased route revisions, sleeping mode and identical
+completion evidence. Generation and deadline must match the locally retained
+fence; completion must follow its observation, precede snapshot issuance and
+precede fetch start by at least the configured conservative clock-skew margin. Generic sleeping
+state, missing/partial evidence, changed topology, stale fetches, failed jobs or
+lost responses do not release early. The original post-deadline fallback, lease
+expiry and startup drain remain. This permits a new admitted wake after confirmed
+stop; it does not authorize forwarding to an offline backend.
+
+After a successful readiness report the Gateway settles an older in-flight
+snapshot refresh, then requests fresh authority instead of accidentally joining
+a pre-commit fetch. Provider cooldown and full route validation still apply.
+Core process observations run independent host, provider identity and compiled
+module prerequisites concurrently, settling all branches on failure. The same
+observation's completed host preflight is reused in Minecraft image verification;
+the before/image/after process-incarnation fence remains. No cross-observation
+identity cache or JAR download is introduced. Live latency is measured separately
+from these regression tests.
+
+### Event-prompted readiness and bounded receipts (M5, 2026-10-11)
+
+The following describes the original hint-only contract. The later provider
+readiness amendment below supersedes it for explicitly opted-in integrations.
+
+- Trusted `GatewayProtocolAdapter.startupHint = provider_running` opts into hints.
+  `POST /internal/gateway/:gatewayId/startup-events` takes the exact `routeId`,
+  `routeRevision`, `generation`, `wakeJobId`. Existing Gateway service authentication
+  and managed-provider identity checks apply. One sanitized SSE `startup` event
+  echoes only those fields after a live running status and fresh local authority
+  check. No raw console, history, commands or provider credentials are exposed.
+  Maximum subscription is 60 seconds, bounded write is five seconds/1 KiB; one
+  subscription per server and at most 128 per Core process. Reconnect is bounded
+  and polling remains authoritative. Neither channel failure nor a hint grants play.
+- Observation clients negotiate `X-NickHosting-Gateway-Features:
+  readiness-receipt-v1`. A committed waking-to-online positive observation may return
+  a snapshot (200); other observations and legacy clients retain 204. Receipt
+  parsing is strict. All original roles/endpoints/generation/job must match, all
+  other server routes must be unchanged, and route revisions must advance.
+- Gateway applies receipts serially with ordinary refreshes, only with positive
+  fresh all-role protocol evidence and no local stop fence. It caps expiry at the
+  original observed and committed leases and rearms stream expiration accordingly.
+  It cannot open a new listener, renew authority, bypass an expired lease, or
+  overwrite a replacement route. Rejected/legacy receipts use full refresh.
+- Optional `GatewaySafety.probeLeasedBackend` reuses only original fresh full
+  validation that observed running/container bindings; actual protocol probing
+  remains required. Missing/changed/stale grants use `validateBackend`. Full
+  opening/renewal safety is unchanged. Core independently confirms current process.
+- `gateway.startup_hint` and `gateway.route_transition` with reason
+  `readiness_receipt` distinguish the event and forwarding commit for live timing.
+
+Startup subscriptions additionally negotiate `startup-keepalive-v1`. Core sends
+only a canonical `event: keepalive` / `data: {}` immediately and every ten seconds,
+so its existing HTTP idle timeout does not truncate long game startups. The
+client consumes keepalives without resetting its absolute deadline/byte budget
+or invoking readiness. Core retains the sixty-second lifetime, bounded two-event
+writer and five-second write deadline. Legacy startup clients receive no heartbeat.
+Sanitized `gateway_startup_channel_connected` / `gateway_startup_channel_closed`
+diagnostics distinguish channel establishment and closure from actual game readiness.
+
+
+### Event-driven sleep completion (M5, 2026-10-11)
+
+`POST /internal/gateway/:gatewayId/sleep-completion` accepts the strict body
+`{routeId,generation,quiescenceUntil}` under existing Gateway service authentication.
+It subscribes before reading the durable snapshot, waits at most 20 seconds and no
+later than the original quiescence deadline, and returns a matching snapshot (200)
+or no receipt (204). Credentials are rechecked around delivery. Revocation, changed
+route/generation, disconnect and listener failure do not grant a receipt.
+
+One lazy PostgreSQL LISTEN connection serves at most 128 waiting requests per API
+instance. Empty-payload notifications are scoped to the database/schema and delivered
+only after commit; no provider requests, credentials or server identifiers are sent
+in the notification. The final subscriber disconnect closes the connection. After a
+confirmed sleep-stop job commits, the worker invokes the existing reconciler at once;
+that reconciler notifies when canonical sleeping state commits. A crash between those
+commits is recovered by the normal worker reconciler.
+
+Gateway attempts one wait per local sleep fence. It applies the result serially with
+snapshot changes only when every original role, generation, endpoint and protocol
+still matches, all roles carry the same exact durable completion proof, and unrelated
+routes are unchanged. A newer unapplied candidate prevents this shortcut. Only an
+existing listener can change from online/blocked to sleeping; the receipt opens no
+socket and grants no backend forwarding. Expiry is capped at the original committed
+lease and fence deadline. This exact completion receipt requires no additional
+post-completion clock-skew delay; ordinary prefetched snapshots retain their existing
+conservative checks. Missing, timed-out or rejected receipts use normal refresh and
+reconciliation. `gateway.route_transition` and `gateway.quiescence_released` record
+`sleep_completion_receipt` for subsequent live timing verification.
+
+
+### Compiled provider readiness (Owner amendment, 2026-10-11)
+
+`GatewayProtocolAdapter.readinessSource = provider_running` and the matching
+trusted Core module opt Minecraft into authenticated Wings readiness. The startup
+client negotiates `provider-readiness-v1` alongside `startup-keepalive-v1`. A
+`startup` event may then include paired `observedAt` and `readinessSnapshot` fields.
+Core emits them only after a live running event is committed against the exact
+successful, confirmed admitted job, process record, reservation, provider identity,
+route revision and generation. Current live status is rechecked after asynchronous
+validation and immediately before the write. No browser setting or console replay
+can mint this authority. Missing job proof returns the legacy hint.
+
+The client parses a strict snapshot, caps total input at 1 MiB and keepalives at
+8 KiB, and retains its absolute deadline. Core's writer is bounded to two queued
+events/1 MiB and five seconds; the subscription remains at most sixty seconds.
+The receipt uses existing serialized all-route application and original lease,
+endpoint and generation fences. It cannot open or renew a listener.
+
+Online Minecraft player samples no longer repeat a full backend inspection or
+revoke readiness merely because one status exchange fails. Unknown players
+prevent idle stop. Core confirms the host-bound Docker process epoch without a
+Panel/image/egg read on each sample; external stops and changed epochs still
+invalidate the observation. Initial reachability proof and full listener renewal
+checks remain mandatory. An online renewal with matching network proof, live
+bindings and declared provider readiness needs no additional Minecraft ping.
+
+An active startup stream suppresses redundant waking probes. Event loss or stream
+failure returns to the existing protocol fallback; an otherwise silent stream may
+hold that fallback until its sixty-second deadline. This is outage recovery, not
+a guaranteed event-delivery latency. See [ADR 0016](decisions/0016-provider-readiness.md).

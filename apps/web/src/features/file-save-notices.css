@@ -1,0 +1,37 @@
+.file-save-notices {
+  position: fixed;
+  inset-block-end: 1rem;
+  inset-inline-end: 1rem;
+  z-index: 30;
+  display: grid;
+  gap: 0.5rem;
+  max-width: min(28rem, calc(100vw - 2rem));
+  max-height: 35dvh;
+  overflow-y: auto;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.file-save-notice {
+  font-size: 0.875rem;
+}
+.file-save-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+.file-save-summary a {
+  overflow-wrap: anywhere;
+}
+.file-save-summary button {
+  padding: 0.25rem 0.5rem;
+  font-size: inherit;
+}
+.file-save-notice > .notice {
+  margin-block: 0.5rem 0;
+}
+.file-save-notice > .notice p {
+  margin: 0;
+}

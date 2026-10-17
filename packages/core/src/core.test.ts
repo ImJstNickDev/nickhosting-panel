@@ -18,6 +18,89 @@ import {
 } from './index.js';
 
 describe('typed configuration', () => {
+  it('normalizes historical Minecraft sleep settings and rejects ambiguous overrides', () => {
+    const policy = { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } };
+    expect(
+      resolveConfig({ gameIdleTimeouts: { 'minecraft-java': policy } }).values.gameIdleTimeouts,
+    ).toMatchObject({ minecraft: policy });
+    const result = resolveConfig(
+      {},
+      {
+        NH_GAME_IDLE_TIMEOUTS: JSON.stringify({ 'minecraft-java': policy }),
+      },
+    );
+    expect(result.values.gameIdleTimeouts).not.toHaveProperty('minecraft-java');
+    expect(result.values.gameIdleTimeouts.minecraft).toMatchObject(policy);
+    expect(result.sources.gameIdleTimeouts).toBe('environment');
+    expect(() =>
+      resolveConfig(
+        {},
+        {
+          NH_GAME_IDLE_TIMEOUTS: JSON.stringify({ 'minecraft-java': policy, minecraft: policy }),
+        },
+      ),
+    ).toThrow('configuration_invalid');
+  });
+  it('bounds concurrent uploads and honors Owner/environment precedence', () => {
+    expect(resolveConfig().values.uploadConcurrency).toBe(2);
+    expect(resolveConfig({ uploadConcurrency: 3 }).values.uploadConcurrency).toBe(3);
+    const result = resolveConfig({ uploadConcurrency: 3 }, { NH_UPLOAD_CONCURRENCY: '6' });
+    expect(result.values.uploadConcurrency).toBe(6);
+    expect(result.sources.uploadConcurrency).toBe('environment');
+    expect(() => assertConfigWritable({ uploadConcurrency: 2 }, result)).toThrow('conflict');
+    for (const value of [0, 7, 1.5, -1])
+      expect(() => resolveConfig({ uploadConcurrency: value })).toThrow('configuration_invalid');
+    for (const value of ['0', '7', '1.5', '-1', '', 'true'])
+      expect(() => resolveConfig({}, { NH_UPLOAD_CONCURRENCY: value })).toThrow(
+        'configuration_invalid',
+      );
+  });
+  it('resolves inherited idle defaults with environment precedence and rejects invalid timeouts', () => {
+    expect(resolveConfig().values.gameIdleTimeouts).toEqual({});
+    expect(resolveConfig().values.defaultIdleTimeoutSeconds).toBe(-1);
+    expect(resolveConfig().values.idleTimeoutUserAccess).toBe('hidden');
+    expect(
+      resolveConfig(
+        {},
+        { NH_DEFAULT_IDLE_TIMEOUT_SECONDS: '600', NH_IDLE_TIMEOUT_USER_ACCESS: 'shorten-only' },
+      ).values,
+    ).toMatchObject({ defaultIdleTimeoutSeconds: 600, idleTimeoutUserAccess: 'shorten-only' });
+    const stored = {
+      minecraft: { gameTimeoutSeconds: 600, runtimeTimeouts: { vanilla: 120 } },
+    };
+    const environment = { minecraft: { gameTimeoutSeconds: -1, runtimeTimeouts: {} } };
+    expect(resolveConfig({ gameIdleTimeouts: stored }).values.gameIdleTimeouts).toMatchObject(
+      stored,
+    );
+    const resolved = resolveConfig(
+      { gameIdleTimeouts: stored },
+      { NH_GAME_IDLE_TIMEOUTS: JSON.stringify(environment) },
+    );
+    expect(resolved.values.gameIdleTimeouts).toMatchObject(environment);
+    expect(() => assertConfigWritable({ gameIdleTimeouts: stored }, resolved)).toThrow('conflict');
+    for (const invalid of [0, -2, 604801, 1.5])
+      expect(() =>
+        resolveConfig({
+          gameIdleTimeouts: { test: { gameTimeoutSeconds: invalid, runtimeTimeouts: {} } },
+        }),
+      ).toThrow('configuration_invalid');
+  });
+  it('supplies a public metadata client identity while preserving Owner and environment overrides', () => {
+    expect(resolveConfig().values.contentMetadataUserAgent).toContain(
+      'https://github.com/ImJstNickDev/nickhosting-panel',
+    );
+    const owner = 'OwnerClient/1.0 (+https://example.test)';
+    const env = 'EnvironmentClient/1.0 (+https://example.test)';
+    expect(
+      resolveConfig({ minecraftMetadataUserAgent: owner }).values.contentMetadataUserAgent,
+    ).toBe(owner);
+    expect(
+      resolveConfig(
+        { minecraftMetadataUserAgent: owner },
+        { NH_MINECRAFT_METADATA_USER_AGENT: env },
+      ).values.contentMetadataUserAgent,
+    ).toBe(env);
+  });
   it('disables total count limits by default while preserving independent pending-work safeguards', () => {
     expect(resolveConfig().values.maxServersPerUser).toBeNull();
     expect(resolveConfig().values.maxConcurrentProvisionsPerUser).toBe(4);
@@ -277,6 +360,8 @@ describe('structured error and logging safety', () => {
     expect(redact(data)).toEqual({ self: '[Circular]' });
     const records: LogRecord[] = [];
     const logger = createLogger((record) => records.push(record), { now: () => new Date(0) });
+    expect(logger.isEnabled('debug')).toBe(false);
+    expect(logger.isEnabled('info')).toBe(true);
     logger.log('debug', 'event.debug');
     logger.log('warn', 'auth.failure', { token: 'private' });
     expect(records).toEqual([
@@ -288,6 +373,22 @@ describe('structured error and logging safety', () => {
       },
     ]);
     expect(() => logger.log('info', 'user-supplied token value')).toThrow();
+  });
+  it('exposes the effective configured level before collecting diagnostic payloads', () => {
+    for (const level of ['debug', 'info', 'warn', 'error'] as const) {
+      const records: LogRecord[] = [];
+      const logger = createLogger((entry) => records.push(entry), { level });
+      let measurements = 0;
+      if (logger.isEnabled('debug')) {
+        measurements++;
+        logger.log('debug', 'server.files_upload', { durationMs: 1, token: 'private' });
+      }
+      logger.log('error', 'request.failed', { code: 'conflict' });
+      expect(measurements).toBe(level === 'debug' ? 1 : 0);
+      expect(records.filter((entry) => entry.level === 'debug')).toHaveLength(measurements);
+      expect(records.at(-1)?.event).toBe('request.failed');
+      expect(JSON.stringify(records)).not.toContain('private');
+    }
   });
 });
 

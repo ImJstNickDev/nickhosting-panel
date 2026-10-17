@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { isAbsolute, resolve } from 'node:path';
@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { createGatewayControlClient } from './control-client.js';
 import { createGatewayDataPlane } from './data-plane.js';
 import { probeNodeEndpoint } from './node-probe.js';
+import { watchGatewayStartup } from './startup-client.js';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 const fingerprint = (value: unknown) =>
@@ -49,7 +50,8 @@ async function loadProtocols(env: Environment): Promise<GatewayProtocolAdapter[]
         !['supports', 'classify', 'response', 'probeReadiness'].every(
           (key) => typeof protocol[key] === 'function',
         ) ||
-        (protocol.probeIdle !== undefined && typeof protocol.probeIdle !== 'function')
+        (protocol.probeIdle !== undefined && typeof protocol.probeIdle !== 'function') ||
+        (protocol.observe !== undefined && typeof protocol.observe !== 'function')
       )
         throw new DomainError('configuration_invalid');
       protocols.push(protocol);
@@ -68,6 +70,12 @@ export async function createGatewayRuntime(
   const bootstrap = resolveConfig({}, env).values;
   if (!bootstrap.gatewayId || !bootstrap.gatewayCoreUrl || !env.NH_GATEWAY_CONTROL_TOKEN)
     throw new DomainError('configuration_invalid');
+  const startupOptions = {
+    gatewayId: bootstrap.gatewayId,
+    baseUrl: bootstrap.gatewayCoreUrl,
+    token: env.NH_GATEWAY_CONTROL_TOKEN,
+    fetcher: dependencies.fetcher,
+  };
   const client = createGatewayControlClient({
     gatewayId: bootstrap.gatewayId,
     baseUrl: bootstrap.gatewayCoreUrl,
@@ -97,6 +105,9 @@ export async function createGatewayRuntime(
       serverRoutes.set(result.providerServerId, route.id);
       return result;
     };
+    const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
+      level: settings.logLevel,
+    });
     const policy = settings.gatewayDataPolicy;
     const probe = async (
       route: Parameters<typeof createGatewaySafetyValidator>[0]['probeBackend'] extends (
@@ -104,6 +115,7 @@ export async function createGatewayRuntime(
       ) => unknown
         ? T
         : never,
+      validationId?: string,
     ) => {
       const handler = protocols.find(
         (p) => p.id === route.protocol?.handlerId && p.supports(route),
@@ -111,11 +123,31 @@ export async function createGatewayRuntime(
       if (!handler) return false;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), policy.probeTimeoutMs);
+      const probeId = randomUUID();
+      const probeContext = {
+        route,
+        signal: controller.signal,
+        ...(route.mode === 'waking'
+          ? {
+              onProbeDiagnostic: (
+                event: import('@nickhosting/game-sdk').GatewayProbeDiagnostic,
+              ) => {
+                logger.log('info', 'gateway.protocol_stage', {
+                  routeId: route.id,
+                  generation: route.generation,
+                  probeId,
+                  validationId,
+                  ...event,
+                });
+              },
+            }
+          : {}),
+      };
       try {
         return await Promise.race([
-          handler
-            .probeReadiness({ route, signal: controller.signal })
-            .then((r) => r.ready === true),
+          handler.observe
+            ? handler.observe(probeContext)
+            : handler.probeReadiness(probeContext).then((r) => r.ready === true),
           new Promise<false>((resolve) =>
             controller.signal.addEventListener('abort', () => resolve(false), { once: true }),
           ),
@@ -130,6 +162,14 @@ export async function createGatewayRuntime(
     const safety = createGatewaySafetyValidator({
       policy: networkPolicy,
       observer,
+      onTiming: (event) => logger.log('info', 'gateway.safety_stage', event),
+      providerReady: (route) =>
+        protocols.some(
+          (p) =>
+            p.id === route.protocol?.handlerId &&
+            p.supports(route) &&
+            p.readinessSource === 'provider_running',
+        ),
       provider: {
         listNodes: async () =>
           z
@@ -165,8 +205,10 @@ export async function createGatewayRuntime(
         });
       },
       probeBackend: probe,
-      probeNode: async (route) => {
-        const identity = await context(route),
+      probeNode: async (route, validatedContext) => {
+        // The validator already resolved this exact route immediately before
+        // its fresh inspection; avoid a duplicate Core request in the same pass.
+        const identity = validatedContext ?? (await context(route)),
           target = settings.gatewayNodeProbes[String(identity.providerNodeId)];
         return target
           ? probeNodeEndpoint(
@@ -180,9 +222,6 @@ export async function createGatewayRuntime(
     });
     const initial = fingerprint(owner);
     let changed = false;
-    const logger = createLogger((record) => process.stdout.write(`${JSON.stringify(record)}\n`), {
-      level: settings.logLevel,
-    });
     const gateway = createGatewayDataPlane({
       gatewayId: bootstrap.gatewayId,
       protocols,
@@ -190,6 +229,18 @@ export async function createGatewayRuntime(
       logger,
       control: {
         ...client,
+        watchStartup: (request, onHint, signal) =>
+          watchGatewayStartup(
+            startupOptions,
+            request,
+            (event) =>
+              onHint(
+                event.readinessSnapshot && event.observedAt
+                  ? { snapshot: event.readinessSnapshot, observedAt: event.observedAt }
+                  : undefined,
+              ),
+            signal,
+          ),
         async fetchSnapshot() {
           const current = await client.requestJson('configuration');
           if (fingerprint(current) !== initial) {

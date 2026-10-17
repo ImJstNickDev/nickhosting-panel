@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import {
+  minecraftLegacyGatewaySupported,
+  minecraftLegacyStatusVariant,
+} from './protocol-profiles.js';
 
 export const minecraftProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -171,7 +175,58 @@ export function minecraftSupport(
   return 'unverified';
 }
 
-/** Owner availability and test evidence are deliberately independent authorities. */
+export const minecraftCapabilityDeclaration = {
+  id: 'minecraft/vanilla',
+  version: 2,
+} as const;
+
+export function minecraftGatewaySupported(
+  combination: Pick<
+    MinecraftCombination,
+    'release' | 'releaseType' | 'family' | 'profile' | 'protocolId'
+  >,
+): boolean {
+  return (
+    combination.profile === 'vanilla' &&
+    combination.protocolId !== null &&
+    (combination.family === 'netty' ||
+      (combination.family === 'legacy' && minecraftLegacyGatewaySupported(combination.release)))
+  );
+}
+
+/** Families describe responder support; backend status availability separately
+ * controls automatic sleep. No per-installation evidence checkbox grants support. */
+export function minecraftDeclaredCapabilities(combination: MinecraftCombination) {
+  const installation = combination.profile === 'vanilla';
+  const gateway = minecraftGatewaySupported(combination);
+  const playerIdle =
+    gateway &&
+    (combination.family === 'netty' || !!minecraftLegacyStatusVariant(combination.release));
+  // UUID-based ops/whitelist JSON files were introduced in 1.7.6. Opaque
+  // snapshots cannot be ordered safely and retain manual provider management.
+  const parts = combination.release.split('.').map(Number);
+  const playerManagement =
+    installation &&
+    combination.releaseType === 'release' &&
+    /^\d+\.\d+(?:\.\d+)?$/.test(combination.release) &&
+    ((parts[0] ?? 0) > 1 ||
+      ((parts[0] ?? 0) === 1 &&
+        ((parts[1] ?? 0) > 7 || ((parts[1] ?? 0) === 7 && (parts[2] ?? 0) >= 6))));
+  return {
+    installation,
+    directConnection: installation,
+    playerManagement,
+    gateway,
+    readiness: gateway,
+    playerIdle,
+    wake: gateway,
+    sleepWake: playerIdle,
+  };
+}
+
+/** Owner availability remains authoritative; signed reports describe diagnostic
+ * evidence and do not gate compiled Vanilla installation support. Other profiles
+ * retain their existing private-testing/evidence policy until declared supported. */
 export function assertMinecraftChoice(
   input: {
     combination: MinecraftCombination;
@@ -183,6 +238,8 @@ export function assertMinecraftChoice(
   },
   now = new Date(),
 ): void {
+  if (!input.enabled) throw new DomainError('integration_unavailable');
+  if (minecraftDeclaredCapabilities(input.combination).installation) return;
   const support = minecraftSupport(
     input.combination,
     input.mappingDigest,
@@ -190,10 +247,7 @@ export function assertMinecraftChoice(
     input.evidence,
     now,
   );
-  if (
-    !input.enabled ||
-    (support !== 'verified' && !(input.privateTester && support === 'experimental'))
-  )
+  if (support !== 'verified' && !(input.privateTester && support === 'experimental'))
     throw new DomainError('integration_unavailable');
 }
 
@@ -202,7 +256,9 @@ export function publicMinecraftChoice(id: string, combination: MinecraftCombinat
   return {
     id,
     version: combination.release,
+    releaseType: combination.releaseType,
     runtime: combination.profile,
+    capabilities: minecraftDeclaredCapabilities(combination),
     ...(combination.buildId ? { build: combination.buildId } : {}),
     ...(combination.loaderVersion ? { loaderVersion: combination.loaderVersion } : {}),
   };

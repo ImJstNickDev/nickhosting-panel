@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
 import type { ContainerObserver } from './container-observer.js';
@@ -17,6 +18,7 @@ export class PterodactylError extends DomainError {
     readonly scope: CredentialScope,
     readonly outcome: RemoteOutcome,
     readonly upstreamStatus?: number,
+    readonly retryAfterMs?: number,
   ) {
     super('integration_unavailable', 503, {
       provider: 'pterodactyl',
@@ -24,12 +26,14 @@ export class PterodactylError extends DomainError {
       scope,
       outcome,
       upstreamStatus,
+      retryAfterMs,
     });
     this.name = 'PterodactylError';
   }
 }
 export interface TransportOptions {
   containerObserver?: ContainerObserver;
+  coordinator?: ReturnType<typeof createTransportCoordinator>;
   baseURL: string;
   applicationKey: string;
   clientKey?: string;
@@ -91,11 +95,16 @@ export function relativePath(value: string, allowRoot = false): string {
   }
   return `/${value}`;
 }
+export class ResponseTooLargeError extends Error {
+  constructor() {
+    super('response_too_large');
+  }
+}
 export async function readBounded(response: Response, maxBytes: number): Promise<Uint8Array> {
   const length = Number(response.headers.get('content-length'));
   if (Number.isFinite(length) && length > maxBytes) {
     await response.body?.cancel();
-    throw new Error('response_too_large');
+    throw new ResponseTooLargeError();
   }
   const reader = response.body?.getReader();
   if (!reader) return new Uint8Array();
@@ -106,13 +115,53 @@ export async function readBounded(response: Response, maxBytes: number): Promise
       const { done, value } = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > maxBytes) throw new Error('response_too_large');
+      if (size > maxBytes) throw new ResponseTooLargeError();
       chunks.push(value);
     }
     return Buffer.concat(chunks);
   } finally {
     await reader.cancel();
   }
+}
+interface RequestScope {
+  activeRequests: number;
+  cooldownUntil: number;
+  pendingJson: Map<string, Promise<string>>;
+}
+/** Share between adapters for one application process. It stores no plaintext credentials. */
+export function createTransportCoordinator() {
+  const scopes = new Map<string, RequestScope>();
+  return {
+    scope(identity: string, credentialScope: CredentialScope): RequestScope {
+      const existing = scopes.get(identity);
+      if (existing) return existing;
+      if (scopes.size >= 1024) {
+        for (const [key, state] of scopes) {
+          if (
+            state.cooldownUntil <= Date.now() &&
+            state.pendingJson.size === 0 &&
+            state.activeRequests === 0
+          ) {
+            scopes.delete(key);
+            break;
+          }
+        }
+      }
+      const state: RequestScope = { activeRequests: 0, cooldownUntil: 0, pendingJson: new Map() };
+      // Saturation never discards an in-flight request or bypasses an active cooldown.
+      if (scopes.size >= 1024)
+        throw new PterodactylError('unavailable', credentialScope, 'rejected');
+      scopes.set(identity, state);
+      return state;
+    },
+  };
+}
+/** A provider cannot make local callers wait indefinitely or supply arbitrary error text. */
+function retryDelay(value: string | null, now: number): number {
+  let duration = Number.NaN;
+  if (value !== null && /^\d+$/.test(value.trim())) duration = Number(value) * 1000;
+  else if (value !== null && /^[A-Za-z]{3}, /.test(value)) duration = Date.parse(value) - now;
+  return Number.isFinite(duration) ? Math.min(300_000, Math.max(1000, duration)) : 60_000;
 }
 export function createTransport(options: TransportOptions) {
   const base = validatedBaseURL(options.baseURL);
@@ -122,6 +171,14 @@ export function createTransport(options: TransportOptions) {
       throw new DomainError('validation_failed');
   }
   const fetcher = options.fetcher ?? fetch;
+  const coordinator = options.coordinator ?? createTransportCoordinator();
+  function state(scope: CredentialScope) {
+    const credential = scope === 'application' ? options.applicationKey : options.clientKey;
+    const identity = createHash('sha256')
+      .update(JSON.stringify([base.href, scope, credential]))
+      .digest('hex');
+    return coordinator.scope(identity, scope);
+  }
   async function request(
     scope: CredentialScope,
     path: string,
@@ -131,8 +188,23 @@ export function createTransport(options: TransportOptions) {
   ): Promise<Response> {
     const key = scope === 'application' ? options.applicationKey : options.clientKey;
     if (!key) throw new PterodactylError('credential_missing', scope, 'rejected');
+    const requestScope = state(scope);
+    const remaining = requestScope.cooldownUntil - Date.now();
+    if (remaining > 0)
+      throw new PterodactylError('rate_limited', scope, 'rejected', 429, remaining);
     const mutating = method !== 'GET';
+    const invalidatedReads = mutating
+      ? [
+          requestScope.pendingJson,
+          ...(options.clientKey
+            ? [state(scope === 'application' ? 'client' : 'application').pendingJson]
+            : []),
+        ]
+      : [];
+    // A final identity read after a mutation must not join a pre-mutation observation.
+    for (const reads of invalidatedReads) reads.clear();
     let response: Response;
+    requestScope.activeRequests++;
     try {
       response = await fetcher(new URL(`api/${scope}/${path}`, base), {
         method,
@@ -149,10 +221,20 @@ export function createTransport(options: TransportOptions) {
       });
     } catch {
       throw new PterodactylError('unavailable', scope, mutating ? 'unknown' : 'rejected');
+    } finally {
+      requestScope.activeRequests--;
+      for (const reads of invalidatedReads) reads.clear();
     }
     if (!response.ok) {
-      await response.body?.cancel();
       const status = response.status;
+      const retryAfterMs =
+        status === 429 ? retryDelay(response.headers.get('retry-after'), Date.now()) : undefined;
+      if (retryAfterMs !== undefined)
+        requestScope.cooldownUntil = Math.max(
+          requestScope.cooldownUntil,
+          Date.now() + retryAfterMs,
+        );
+      await response.body?.cancel();
       const reason =
         status === 401 || status === 403
           ? 'permission_denied'
@@ -168,6 +250,7 @@ export function createTransport(options: TransportOptions) {
         scope,
         mutating && (status >= 500 || status === 408) ? 'unknown' : 'rejected',
         status,
+        retryAfterMs,
       );
     }
     return response;
@@ -178,12 +261,40 @@ export function createTransport(options: TransportOptions) {
     schema: z.ZodType<T>,
     method = 'GET',
     body?: unknown,
+    coalesce = true,
   ): Promise<T> {
-    const response = await request(scope, path, method, body);
+    async function readJson(): Promise<string> {
+      // Request errors preserve rate-limit metadata and mutation uncertainty.
+      const response = await request(scope, path, method, body);
+      try {
+        return Buffer.from(await readBounded(response, 4 * 1024 * 1024)).toString('utf8');
+      } catch {
+        throw new PterodactylError(
+          'invalid_response',
+          scope,
+          method === 'GET' ? 'rejected' : 'unknown',
+        );
+      }
+    }
+    let text: string;
+    if (coalesce && method === 'GET' && body === undefined) {
+      const pendingJson = state(scope).pendingJson;
+      const identity = path;
+      let pending = pendingJson.get(identity);
+      if (!pending) {
+        pending = readJson();
+        if (pendingJson.size < 1024) pendingJson.set(identity, pending);
+        const current = pending;
+        const clear = () => {
+          if (pendingJson.get(identity) === current) pendingJson.delete(identity);
+        };
+        void pending.then(clear, clear);
+      }
+      text = await pending;
+    } else text = await readJson();
     try {
-      return schema.parse(
-        JSON.parse(Buffer.from(await readBounded(response, 4 * 1024 * 1024)).toString('utf8')),
-      );
+      // Each caller owns its parsed object and schema validation, including coalesced reads.
+      return schema.parse(JSON.parse(text));
     } catch {
       throw new PterodactylError(
         'invalid_response',
@@ -208,8 +319,10 @@ export function createTransport(options: TransportOptions) {
     schema: z.ZodType<T>,
     method = 'GET',
     body?: unknown,
+    coalesce = true,
   ): Promise<T> {
-    return (await json(scope, path, z.object({ attributes: schema }), method, body)).attributes;
+    return (await json(scope, path, z.object({ attributes: schema }), method, body, coalesce))
+      .attributes;
   }
   async function list<T>(scope: CredentialScope, path: string, schema: z.ZodType<T>): Promise<T[]> {
     const entries: T[] = [];

@@ -1,0 +1,75 @@
+.file-path-popup {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  z-index: 600;
+  border: 1px solid #d4dce3;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 4px 14px #14293e18;
+  padding: 4px;
+}
+
+.file-path-options {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.file-path-popup .file-path-option {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 36px;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #243547;
+  text-align: left;
+  font-weight: 400;
+}
+
+.file-path-popup .file-path-option:hover,
+.file-path-popup .file-path-option[aria-selected="true"] {
+  background: #e9f0f6;
+}
+
+.file-path-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.file-path-option svg {
+  flex: 0 0 19px;
+  width: 19px;
+  height: 19px;
+  color: #74879b;
+}
+
+.file-path-option svg[data-folder="true"] {
+  color: #a87920;
+}
+
+.file-path-popup p {
+  margin: 0;
+  padding: 9px;
+  color: #657486;
+  font-size: 0.875rem;
+}
+
+@media (pointer: coarse) {
+  .file-path-popup .file-path-option {
+    min-height: 44px;
+  }
+}
+
+@media (forced-colors: active) {
+  .file-path-option[aria-selected="true"] {
+    outline: 1px solid Highlight;
+    outline-offset: -2px;
+  }
+}

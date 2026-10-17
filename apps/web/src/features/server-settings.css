@@ -1,0 +1,315 @@
+.server-settings {
+  display: grid;
+  gap: 30px;
+  max-width: 1080px;
+  min-width: 0;
+  margin-inline: auto;
+}
+.server-settings-section > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.server-settings-section h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.server-settings-surface {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.server-settings-row {
+  padding: 22px 24px;
+}
+.server-settings-row + .server-settings-row {
+  border-top: 1px solid var(--line);
+}
+.server-settings-form {
+  display: grid;
+  grid-template-columns: minmax(0, 520px) auto;
+  align-items: start;
+  gap: 16px 24px;
+}
+.server-settings-form > fieldset,
+.server-settings-resources > fieldset {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.server-settings-form .field,
+.server-settings-resource-fields .field {
+  margin: 0;
+  min-width: 0;
+}
+.server-settings-form .field > label,
+.server-settings-resource-fields .field > label {
+  font-size: 0.83rem;
+}
+.server-settings .form-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.server-settings-form > .form-footer {
+  padding-top: 26px;
+}
+.server-settings .form-footer-start {
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.server-settings-form:not(.is-dirty) > .form-footer,
+.server-settings-resources:not(.is-dirty) > .form-footer {
+  display: none;
+}
+.server-settings-form > div:has(> .notice),
+.server-settings-form > div[tabindex] {
+  grid-column: 1 / -1;
+}
+.server-settings input,
+.server-settings select {
+  min-height: 40px;
+  background: var(--surface);
+}
+.server-settings input:focus,
+.server-settings select:focus {
+  box-shadow: none;
+}
+.server-settings input:disabled {
+  color: var(--muted);
+  background: #f5f7f8;
+  opacity: 1;
+}
+.server-settings-project {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.server-settings-project .field {
+  flex: 1;
+}
+.server-settings .server-settings-icon {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  width: 36px;
+  min-width: 36px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+}
+.server-settings .server-settings-icon:hover:not(:disabled) {
+  background: #edf1f5;
+  color: var(--text);
+}
+.server-settings-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+.server-settings-link svg {
+  width: 16px;
+  height: 16px;
+}
+.server-settings-hint,
+.server-settings-availability,
+.server-settings-maintenance p {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 0;
+}
+.server-settings-availability {
+  text-align: right;
+  max-width: 34rem;
+}
+.server-settings-text {
+  width: fit-content;
+  background: none;
+  color: var(--blue);
+  border: 0;
+  padding: 4px 0;
+  font-size: 0.82rem;
+}
+.server-settings-resource-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 24px;
+}
+.server-settings-resource-fields .field {
+  display: grid;
+  grid-template-rows: auto 40px auto;
+  align-content: start;
+  gap: 6px;
+}
+.server-settings-resource-fields input {
+  grid-row: 2;
+}
+.server-settings-resource-fields small {
+  grid-row: 3;
+  font-size: 0.75rem;
+}
+.server-settings-resources.is-dirty > .form-footer {
+  margin-top: 16px;
+}
+.server-settings-maintenance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.server-settings-action-name {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.server-settings-action-icon {
+  color: var(--muted);
+  display: flex;
+  flex: none;
+}
+.server-settings-maintenance h3 {
+  font-size: 0.88rem;
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.server-settings-maintenance > button {
+  flex: none;
+  min-width: 128px;
+  min-height: 38px;
+  font-size: 0.82rem;
+}
+.server-settings-maintenance > .secondary {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--text);
+}
+.server-settings-delete .server-settings-action-icon,
+.server-settings-delete h3 {
+  color: #ad2525;
+}
+.server-settings-destructive {
+  color: #ad2525;
+  background: transparent;
+  border: 1px solid #e6baba;
+}
+.server-settings-destructive:hover:not(:disabled) {
+  background: #fbe9e9;
+}
+.server-settings-backup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  font-size: 0.84rem;
+  padding: 12px 0;
+  cursor: pointer;
+}
+.server-settings-backup input[type="checkbox"] {
+  appearance: none;
+  width: 36px;
+  min-width: 36px;
+  height: 22px;
+  min-height: 22px;
+  padding: 2px;
+  border: 1px solid #77828d;
+  border-radius: 12px;
+  background: #77828d;
+  margin: 0;
+  cursor: pointer;
+}
+.server-settings-backup input::before {
+  content: "";
+  display: block;
+  width: 16px;
+  height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 150ms ease;
+}
+.server-settings-backup input:checked {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.server-settings-backup input:checked::before {
+  transform: translateX(14px);
+}
+.server-settings-general .server-settings-surface {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.server-settings-general .server-settings-row + .server-settings-row {
+  border-top: 0;
+  border-left: 1px solid var(--line);
+}
+.server-settings-general .server-settings-form {
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+}
+.server-settings-general .server-settings-form > .form-footer {
+  padding-top: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .server-settings-backup input::before {
+    transition: none;
+  }
+}
+@media (max-width: 720px) {
+  .server-settings {
+    gap: 24px;
+  }
+  .server-settings-row {
+    padding: 18px;
+  }
+  .server-settings-form {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .server-settings-form > .form-footer {
+    padding-top: 0;
+  }
+  .server-settings-section > header {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .server-settings-availability {
+    text-align: left;
+  }
+  .server-settings-resource-fields {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .server-settings-maintenance {
+    align-items: start;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .server-settings-maintenance > button {
+    margin-left: 36px;
+  }
+  .server-settings-general .server-settings-surface {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .server-settings-general .server-settings-row + .server-settings-row {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}

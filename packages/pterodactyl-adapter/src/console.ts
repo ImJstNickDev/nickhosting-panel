@@ -33,6 +33,8 @@ export interface ConsoleRelayOptions {
   /** The API must recheck the current NickHosting session/server authorization. */
   authorize(): Promise<boolean>;
   canSendCommands?: boolean;
+  /** Separate current write permission, in addition to stream read authorization. */
+  authorizeCommand?(): Promise<boolean>;
   signal?: AbortSignal;
   maxDurationMs?: number;
 }
@@ -220,7 +222,11 @@ export async function createConsoleRelay(
         return;
       }
       if (!authenticated) return;
-      if (event.event === 'console output' || event.event === 'install output') {
+      if (
+        event.event === 'console output' ||
+        event.event === 'install output' ||
+        event.event === 'daemon message'
+      ) {
         let line = parseInput(z.string().max(32768), event.args[0]);
         for (const secret of hidden) line = line.replaceAll(secret, '[redacted]');
         emit({ type: 'console', data: line });
@@ -259,6 +265,8 @@ export async function createConsoleRelay(
         command,
       );
       await assertAuthorized();
+      if (input.authorizeCommand && !(await input.authorizeCommand()))
+        throw new DomainError('forbidden');
       send('send command', [value]);
     },
     async requestLogs() {

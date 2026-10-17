@@ -7,7 +7,7 @@
 - `apps/worker`: BullMQ consumers, install/provisioning/backup jobs, reconciliation and game integration handlers.
 - `apps/game-gateway`: standalone long-running Node/TypeScript process bound only to configured public game endpoints of NickHosting-managed servers; TCP+UDP routing and protocol-specific behavior.
 - `packages/database`: PostgreSQL migrations and typed data access.
-- `packages/auth`, `packages/core`, `packages/pterodactyl-adapter`, `packages/game-sdk`, `packages/ui`, `packages/i18n`, `packages/content-providers`.
+- `packages/auth`, `packages/core`, `packages/pterodactyl-adapter`, `packages/game-sdk`, `packages/i18n`, `packages/content-providers`; shared browser primitives currently live in `apps/web/src/components`.
 - `games/minecraft` and the planned M6 `games/satisfactory`: first-party, versioned integrations, backend + capability-driven UI contributions and protocol handlers.
 - Supporting services: PostgreSQL, Redis/BullMQ, SFTPGo (for per-server external SFTP), Pterodactyl/Wings (existing; outside repository).
 
@@ -58,22 +58,22 @@ Use stable NickHosting UUIDs in APIs and store separate external Pterodactyl IDs
 ## API/application boundaries
 
 - **Web ↔ API**: authenticated typed HTTP routes; SSE/WebSocket or equivalent subscription for job and telemetry updates; streaming console through a controlled gateway, never a privileged Pterodactyl token leaked to browser.
-- **API ↔ worker**: durable job command + `jobId`, idempotency key, actor, target, policy snapshot and progress events. Commit changes to PostgreSQL atomically where needed; Redis transport can redeliver.
+- **API ↔ worker**: durable job command + `jobId`, idempotency key, actor, target, policy snapshot and progress events. Commit changes to PostgreSQL atomically where needed; Redis transport can redeliver. New outbox records send transaction-scoped PostgreSQL notifications to wake the dispatcher after commit; schema-scoped hints accelerate delivery while durable polling/recovery remains authoritative. The listener uses one dedicated pooled connection and cannot block dispatch when unavailable.
 - **Core ↔ game SDK**: declared capabilities and typed commands; a plugin requests infrastructure actions only through core services, never bypasses authorization or quota admission.
 - **Gateway ↔ Core**: authenticated control messages for server route/mode and wake request. Hot path packet forwarding must not require a PostgreSQL/API round-trip per packet.
 - **SFTPGo ↔ NickHosting**: provision ephemeral/revocable per-server credentials and enforce access to an explicitly mapped single server directory; normal user identity remains NickHosting-only.
 
-## Minimal initial DB entities
+## Conceptual schema baseline (M0)
 
-`users`, Better Auth tables, `invitations`, `projects` (implicit personal project supported), `project_members`, `servers`, `server_runtime_profiles`, `server_allocations`, `nodes`, `resource_policies`, `resource_reservations`, `operation_jobs`, `job_steps`, `activity_events`, `game_integrations`, `game_rollouts`, `runtime_egg_mappings`, `gateway_endpoints`, `dns_assignments`, `external_sftp_credentials`, `support_sessions`, `audit_events`, `platform_settings`, `encrypted_secrets`, `test_asset_provenance`. Normalized schema and constraints to be finalized in M1/M2.
+`users`, Better Auth tables, `invitations`, `projects` (implicit personal project supported), `project_members`, `servers`, `server_runtime_profiles`, `server_allocations`, `nodes`, `resource_policies`, `resource_reservations`, `operation_jobs`, `job_steps`, `activity_events`, `game_integrations`, `game_rollouts`, `runtime_egg_mappings`, `gateway_endpoints`, `dns_assignments`, `external_sftp_credentials`, `support_sessions`, `audit_events`, `platform_settings`, `encrypted_secrets`, `test_asset_provenance`. This was the initial conceptual list; implemented names and constraints are authoritative in `packages/database/migrations`, not this sketch. M1–M4 migrations and their API contracts record the resulting model.
 
 Never store raw game console output, auth secrets, Cloudflare tokens or SFTP passwords in ordinary audit metadata. Database migrations are permitted; **do not seed users or an Owner**.
 
 ## Key workflows
 
-**First creation:** parse plugin manifest → wizard plan → validate runtime/egg mapping → check disk/ports/nodes → reserve durable resources/allocations → idempotent Pterodactyl create → register server/endpoint/credentials → configure game → attempt first start via admission → complete/persist failure with meaningful status. If first start has no RAM, server remains created/offline.
+**First creation:** parse plugin manifest → wizard plan → validate runtime/egg mapping → check disk/ports/nodes → reserve durable resources/allocations and automatic Gateway route intent for supported modules → idempotent Pterodactyl create → verify identity/installation → configure game → activate pinned routes and initialize protocol policy → attempt first start via admission → complete/persist failure with meaningful status. If first start has no RAM, server remains created/offline.
 
-**Start/wake:** inspect desired vs actual state → atomic budget + capacity admission → reserve RAM/CPU → BullMQ job → Pterodactyl power API → game-specific readiness probe → mark online/route gateway → release on confirmed final stop or failed startup. Restart retains reservation.
+**Start/wake:** inspect desired vs actual state → atomic budget + capacity admission → reserve RAM/CPU → BullMQ job → Pterodactyl power API → trusted integration readiness (authenticated provider-running for Minecraft, protocol fallback otherwise; ADR 0016) → mark online/route gateway → release on confirmed final stop or failed startup. Restart retains reservation.
 
 **Sleep:** game idle observer meets policy → graceful save/stop → Wings confirms process stopped → release reservation → gateway marks sleeping; wake only on game-specific intentional join.
 
@@ -81,9 +81,13 @@ Never store raw game console output, auth secrets, Cloudflare tokens or SFTP pas
 
 **Modpack replacement:** verified user permission + explicit wipe consent → optional successful pre-wipe backup → stop → install/wipe via game integration → readiness/recovery. Do not claim rollback exists unless verified.
 
-## Main technical risks to validate early
+## Early validation questions and deployment constraints
 
-1. Pterodactyl 1.x calculates node usage from the **configured** RAM and disk across all servers including stopped ones; NickHosting models RAM admission from *active reservations*. An explicit node/allocation choice avoids some automatic-deployment checks but is **not proven to bypass every server creation/update capacity check**; validate exact installed Panel/Wings version via isolated test servers. See `RESOURCE-AND-OPERATIONS.md`.
+The original capacity/topology questions below drove M2/M3. Their scoped results
+are in [M2 validation](M2-VALIDATION.md) and [M3 validation](M3-VALIDATION.md);
+they do not authorize a production deployment or certify a different topology.
+
+1. Pterodactyl 1.x calculates node usage from the **configured** RAM and disk across all servers including stopped ones; NickHosting models RAM admission from *active reservations*. The initial question was whether explicit node/allocation selection bypassed the relevant automatic-deployment checks. M2 records installed-version source/API and controlled-server evidence; preserve that distinction rather than claiming every future creation/update path bypasses capacity checks. See `RESOURCE-AND-OPERATIONS.md`.
 2. Using Pterodactyl privileged keys to obtain console/Wings tokens could leak authority. Build a least-capability backend relay or other verified design.
 3. Shared port number with distinct bound IP addresses works in principle; binding/routing on this actual Docker network requires read-only discovery then Owner-approved deployment changes. Provider allocation and effective backend addresses are separate (including explicitly verified Wings loopback remapping). M3 must prove Gateway-namespace reachability and validate every public listener against existing direct Pterodactyl allocations and actual host/Docker bindings before binding; [ADR 0005](decisions/0005-permanent-gateway.md) defines the collision gate.
 4. SFTPGo mapping onto real Wings volumes may require host mounts/permissions changes; do not implement changes on the host automatically.
@@ -91,7 +95,7 @@ Never store raw game console output, auth secrets, Cloudflare tokens or SFTP pas
 
 ## Technology selection
 
-Node.js (current supported LTS, verify compatibility), TypeScript, pnpm workspaces, React + Vite + TanStack Router/Query as appropriate, Hono, Better Auth, PostgreSQL, Redis + BullMQ, game gateway TCP/UDP. UI primitives may use accessible libraries but visual system must be bespoke. Select ORM after evaluating migration ergonomics, Better Auth adapter compatibility and transaction support. Follow existing conventions after M0 rather than overbuilding an abstraction hierarchy.
+Implemented choices are Node.js 24 LTS, TypeScript, pnpm workspaces, React + Vite, React Router, TanStack Query, Lingui, Hono, Better Auth, Kysely/PostgreSQL and Redis/BullMQ, with the separate TCP/UDP Game Gateway. Exact compatible versions are pinned in the root and WebPanel manifests/lockfile. Shared browser primitives use semantic native controls with a bespoke visual system. Keep migrations explicit and continue existing transaction/adapter conventions rather than introducing a parallel platform.
 
 ## Implemented M3 boundaries
 
@@ -147,3 +151,168 @@ The signed compatibility registry is Owner-only; public discovery contains simpl
 eligible release/runtime choices. [M4 APIs](M4-API.md) and
 [ADR 0013](decisions/0013-minecraft-evidence-and-content.md) describe the contracts.
 Actual compatibility claims are limited to [recorded validation](M4-VALIDATION.md).
+
+
+## Implemented M5 application and common contracts
+
+The [M5 API contract](M5-API-CONTRACTS.md) defines the additive browser queries and
+[acceptance checklist](M5-COMMON-INTEGRATION.md) maps each former gap to source/tests.
+`apps/web` owns a same-origin React shell and common services. It uses existing
+Better Auth flows and M2/M3/M4 jobs, with typed server/project/quota/Activity queries
+under `/v1/platform`. Existing API list shapes and clients remain compatible. Regular platform operators
+retain a scoped audit/read-only-settings area, matching their existing permissions
+without acquiring Owner administration or write authority.
+
+The common query layer filters current managed-server/project scope before
+pagination, uses safe metadata updates and keeps runtime/provider identity
+immutable. Permission hints and UI availability are not authorization. The
+handler still applies current session/project authority, provider identity,
+resource admission, game evidence and operation locks. Capacity-denied initial
+start is a separate durable outcome of successful creation. Quota DTOs distinguish
+active commitments from measured use and unavailable/stale samples.
+
+A trusted backend game registry dispatches launch/content/file/restore validation
+using a compiled integration and matching managed runtime identity. Minecraft's
+M4 image, artifact, signed evidence and process-epoch fences remain in its module.
+A separate browser-safe SDK entrypoint declares fields, conditional choices,
+management sections, ports/connection modes, translated labels and handler IDs.
+Only statically imported first-party modules supply executable handlers or bundled
+artwork. API JSON and Owner configuration cannot load code or certify support.
+The common shell contains no per-screen Minecraft dispatch branches; Minecraft
+contributes its own typed module, catalogs and management operations. Isolated SDK
+fixtures exercise extension behavior without becoming public game choices.
+
+Browser support mode transports the existing parent-bound grant through an
+HttpOnly SameSite cookie. The same middleware supplies actor/subject authority to
+ordinary API calls and native binary downloads. Header clients remain supported;
+conflicting header/cookie tokens fail. Regular-only administration and account
+security remain excluded. Exit clears a stale cookie without claiming revocation
+of an unauthenticated grant, and the actor/subject distinction stays visible.
+No privileged provider URL/token is delivered to the browser.
+
+The file editor is bounded separately from streaming binary transfers. Browser
+and API share a pure text-file eligibility policy; the API validates actual bytes
+on reads and writes. The inline editor replaces the listing while retaining the
+breadcrumb and revision-protected draft. Trusted integration-owned file icons are
+decorative assets and cannot enable binary editing or bypass authorization. Browser
+uploads use Blob/XHR and native downloads avoid whole-file JavaScript buffering;
+existing upload admission and live authorization remain authoritative. Console
+SSE and displayed history have independent memory bounds. Telemetry carries real
+units/timestamps; missing values remain missing. Job receipt never means success,
+and an uncertain remote effect is not retried as a new side effect. Owner
+acknowledgement uses the existing remote identity/stopped-state proof and records
+failure without inventing rollback.
+
+The existing React Router route tree is mounted through its data router to use
+the supported [navigation blocker](https://reactrouter.com/api/hooks/useBlocker)
+for unsaved editor drafts and pending writes, including browser Back/Forward.
+This introduces no route loaders, new authentication path or server-side routing;
+hard reloads retain the separate browser unload warning.
+
+Migration 014 adds PostgreSQL schedules and occurrences. Due work commits its
+claim, admitted lifecycle intent and outbox atomically; Redis remains delivery.
+Each new scheduled provider effect rechecks current authorizer permission, revision,
+occurrence identity and automatic-start consent/Gateway generation. Missed runs
+collapse or skip rather than queue; capacity refusal is immediate. Manual stops
+and explicit consent revocation suppress future automatic starts. Changing consent
+does not reset unknown effects, release reservations or silently enable a Gateway.
+Migrations 039/040 add independent autowake policy and per-state Gateway
+presentation, local-time calendar recurrence and idempotent manual schedule runs.
+Scheduled stops preserve preexisting automatic-start consent; manual stops retain
+suppression. The one-second bounded scheduler is separate from provider
+reconciliation. See [Automation](AUTOMATION.md) for contracts and recovery.
+
+Migration 015 adds bounded service heartbeat observations. Owner health separates
+API/DB success, Redis probe, worker polling progress, authenticated Gateway contact,
+provider read scopes and host observation freshness. Contact cannot establish
+listener safety or playable readiness; those still require M3 topology, leases and
+game proofs. Health/discovery reads do not reconfigure infrastructure. Owner settings
+use the same typed schema and source precedence as Core, with environment locks and
+write-only secrets. SFTP client host/port are explicitly configured and separate
+from the private service API URL.
+
+M5 browser evidence uses a real Hono application, migrated disposable PostgreSQL
+schemas and real authentication/job handlers with stateful external adapters.
+Synthetic Minecraft signatures/artifacts identify themselves as browser fixtures;
+only retained M4 real-server evidence establishes Vanilla compatibility. No M5
+fixture deploys the production Gateway, mutates a pre-existing server, writes real
+DNS or resolves SFTPGo issue #18. Full source validation and independent rendered
+UX/accessibility review are required before milestone acceptance.
+
+### Runtime images (M5)
+
+Container image policy is declared by trusted integration runtime descriptors.
+Owner mappings choose a static override or integration-managed selection; the SDK
+provides generic fixed/range/requirement matching and integrations supply version
+semantics/metadata. Resolved images are bound to compatibility evidence and durable
+provision plans. Existing static evidence and server identities remain unchanged.
+See [integration-owned image selection](GAME-INTEGRATIONS.md#integration-owned-container-image-selection).
+
+### Individual provider credentials
+
+[ADR 0015](decisions/0015-provider-technical-accounts.md) introduces durable
+per-user Pterodactyl technical identities. Invite/Owner creation enqueues work
+transactionally; an independent worker provisions native accounts and encrypted
+Client credentials through Blueprint. Application authority stays centralized.
+The existing adapter routes Client requests by managed-resource owner after
+NickHosting actor authorization. No frontend credential, shared Client fallback
+or automatic foreign-server import is introduced. Existing server ownership
+changes require a scoped, audited handoff; Gateway reachability proof remains
+bound to its current provider identity.
+
+### Shared file viewers (M5)
+
+Fileman owns filesystem controllers and one shared presentation layer for real
+and virtual directories. Its lazy ViewerEngine owns viewer selection, personal
+defaults and shared read access. Atlas renders the actual Fileman components with
+an archive-backed data source. The trusted Game SDK supports complete lazy views
+and scoped, typed presentation contributions (hide/replace/decorate/add to named
+surfaces); no DOM monkey-patching or remote executable modules. Shared controllers
+remain authoritative for I/O and permissions. Builtin views cover text, images, browser-playable media, archive
+virtual folders and read-only JSON/SQLite. Trusted game modules use validated SDK
+viewer descriptors; they do not replace common file authorization or transports.
+A server-side SFTP broker reuses the managed-server access proof, pinned pooled
+connections and local revocation watches. Parser indexes and temporary snapshots
+have explicit memory/disk/session budgets; ordinary directory caching remains
+separate. Existing edits/uploads/extraction use the existing Wings operation path.
+See [ADR 0017](decisions/0017-shared-file-viewers.md),
+[format evidence and limitations](M5-VIEWER-FORMATS.md) and the
+[approval-required deployment proposal](M5-VIEWER-DEPLOYMENT.md).
+
+### Minecraft integration identity and wire families
+
+The integration is `minecraft`; its Java TCP handler remains `minecraft-java`.
+Migration031 preserves runtime mappings, jobs and signed historical evidence while
+renaming mutable integration references. Modern/legacy codecs and the known target
+release supply responder behavior without per-client remote lookup. Backend
+installation availability is separate: supporting an Alpha wire format does not
+make an Alpha egg/runtime available. See [ADR0018](decisions/0018-minecraft-identity-and-protocol-families.md)
+and [multiprotocol behavior/evidence](MINECRAFT-MULTIPROTOCOL.md).
+
+### Integration-defined addresses (M5)
+
+The Game SDK declares personal generated/custom, shared configurable/fixed, or
+legacy static-host modes. Core resolves Owner domain eligibility and owns durable
+hostname reservations, server preferences and shared-host intents. Shared DNS has
+integration/domain lifetime; deleting one server cannot remove a shared host.
+Provisioning and periodic recovery reuse the existing external-service worker and
+Cloudflare adapter, with no second DNS queue or per-game provider implementation.
+The Connection tab, creation wizard and Console share authoritative address
+contracts; see [primary address API](M5-API-CONTRACTS.md#primary-server-addresses-and-owner-domain-policies)
+and [SDK DNS policy](GAME-INTEGRATIONS.md#dnsconnection-strategy).
+
+### Owner integration settings and shared content admission
+
+The Owner integration workspace reuses shared runtime, rollout, domain and sleep
+contracts and statically registered Game SDK administration contributions. Each
+concept has one editor; Infrastructure links to the integration's runtime mappings.
+Game-scoped domain/content updates merge under the settings lock instead of
+rewriting other integrations' maps from a stale browser snapshot.
+
+Content source/staging admission is shared Core infrastructure. PostgreSQL
+aggregates reservations across integrations under the existing resource lock;
+per-integration overrides restrict that common budget. Existing Minecraft ledgers
+retain their durable identities and paths with an explicit `game_id` column.
+Minecraft catalog/protocol/runtime behavior stays in its integration. See
+[Owner workspace](GAME-INTEGRATIONS.md#owner-administration-workspace) and
+[configuration migration](CONFIGURATION-AND-DEPLOYMENT.md#shared-content-limits-and-integration-overrides-2026-10-16).

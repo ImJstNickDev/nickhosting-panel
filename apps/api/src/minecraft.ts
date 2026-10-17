@@ -4,8 +4,10 @@ import { type createDatabase, getSettings, registerGame } from '@nickhosting/dat
 import {
   createMinecraftIdentityProvider,
   minecraftAvatarUrl,
+  minecraftEditablePropertyKeys,
   minecraftManifest,
   minecraftWizard,
+  parseMinecraftProperties,
   verifyMinecraftPlayer,
 } from '@nickhosting/minecraft';
 import {
@@ -16,10 +18,12 @@ import {
   enqueueServerOperation,
   importMinecraftEvidence,
   inspectMinecraftCombination,
-  listMinecraftWorlds,
+  inspectMinecraftWorlds,
+  listMinecraftOwnerCombinations,
   type ManagementRuntime,
   minecraftCatalog,
   minecraftContentWipePreview,
+  minecraftOwnerCombinationDetail,
   operationSchema,
   ownerOnly,
   parse,
@@ -28,11 +32,14 @@ import {
   registerMinecraftCombination,
   requireMinecraftChoice,
   setMinecraftAvailability,
+  setMinecraftBulkAvailability,
+  syncMinecraftCatalog,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import type { Variables } from './app.js';
+import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
 
 type C = Context<{ Variables: Variables }>;
 // Public choices carry all runtime-selection authority; an Owner-only mapping
@@ -50,6 +57,7 @@ export function registerMinecraftRoutes(
     management: () => Promise<ManagementRuntime>;
   },
 ) {
+  registerMinecraftPlayerRoutes(app, options);
   const { db, env, principal, body, management } = options;
   const owner = async (c: C) => {
     const context = await principal(c, true);
@@ -71,34 +79,22 @@ export function registerMinecraftRoutes(
         .strict(),
       await body(c),
     );
-    await registerGame(db, context, minecraftManifest, { gameId: 'minecraft-java', ...rollout });
+    await registerGame(db, context, minecraftManifest, { gameId: 'minecraft', ...rollout });
     return c.body(null, 204);
+  });
+  app.post('/v1/owner/minecraft/catalog/sync', async (c) => {
+    const context = await owner(c);
+    return c.json(
+      await syncMinecraftCatalog(db, (await management()).adapter, context, await body(c), env),
+    );
   });
   app.get('/v1/owner/minecraft/compatibility', async (c) => {
     await owner(c);
-    const rows = await db
-      .selectFrom('minecraft_combinations')
-      .select('id')
-      .orderBy('created_at', 'desc')
-      .limit(1000)
-      .execute();
-    const result = [];
-    for (const row of rows) {
-      const choice = await inspectMinecraftCombination(db, row.id, env);
-      result.push({
-        id: row.id,
-        mappingId: choice.row.mapping_id,
-        enabled: choice.row.enabled,
-        combination: choice.combination,
-        runtime: choice.row.resolved_runtime,
-        binding: choice.row.binding,
-        identityDigest: choice.row.identity_digest,
-        mappingDigest: choice.mappingDigest,
-        support: choice.support,
-        evidence: choice.evidence,
-      });
-    }
-    return c.json(result);
+    return c.json(await listMinecraftOwnerCombinations(db, c.req.query(), env));
+  });
+  app.get('/v1/owner/minecraft/compatibility/:id', async (c) => {
+    await owner(c);
+    return c.json(await minecraftOwnerCombinationDetail(db, c.req.param('id'), env));
   });
   app.post('/v1/owner/minecraft/compatibility', async (c) => {
     const context = await owner(c);
@@ -112,6 +108,10 @@ export function registerMinecraftRoutes(
       ),
       201,
     );
+  });
+  app.put('/v1/owner/minecraft/compatibility/availability', async (c) => {
+    await setMinecraftBulkAvailability(db, await owner(c), await body(c), env);
+    return c.body(null, 204);
   });
   app.put('/v1/owner/minecraft/compatibility/:id/availability', async (c) => {
     await setMinecraftAvailability(db, await owner(c), c.req.param('id'), await body(c), env);
@@ -132,7 +132,7 @@ export function registerMinecraftRoutes(
           id: choice.id,
           release: choice.version,
           runtime: choice.runtime,
-          nameKey: `games.minecraft-java.runtimes.${choice.runtime}`,
+          nameKey: `games.minecraft.runtimes.${choice.runtime}`,
         })),
       ),
     );
@@ -143,7 +143,7 @@ export function registerMinecraftRoutes(
     const player = await verifyMinecraftPlayer(
       c.req.param('name'),
       createMinecraftIdentityProvider({
-        userAgent: settings.values.minecraftMetadataUserAgent ?? '',
+        userAgent: settings.values.contentMetadataUserAgent ?? '',
       }),
     );
     return c.json({
@@ -339,7 +339,7 @@ export function registerMinecraftRoutes(
           id: choice.id,
           release: choice.version,
           runtime: choice.runtime,
-          nameKey: `games.minecraft-java.runtimes.${choice.runtime}`,
+          nameKey: `games.minecraft.runtimes.${choice.runtime}`,
         })),
         {
           provider: plan.format === 'curseforge' ? 'curseforge' : 'modrinth',
@@ -364,6 +364,10 @@ export function registerMinecraftRoutes(
       input.minecraft.configuration,
       content,
     );
+    // Content preparation can involve remote work; sample immediately before admission.
+    // The first server cannot depend on worker reconciliation having sampled this host.
+    await service.refreshStorage(db, { mappingId: choice.row.mapping_id });
+    await service.refreshObservations();
     return c.json(
       await createManagedServer(
         db,
@@ -442,22 +446,26 @@ export function registerMinecraftRoutes(
   app.get('/v1/servers/:id/minecraft/worlds', async (c) => {
     const context = await principal(c),
       serverId = c.req.param('id');
-    await authorizeServer(db, context, serverId, 'server:manage');
+    await authorizeServer(db, context, serverId);
+    const service = await management();
+    c.header('cache-control', 'no-store');
     return c.json(
-      await listMinecraftWorlds(
-        db,
-        (await management()).adapter,
-        serverId,
-        async () => {
-          await authorizeServer(db, await principal(c), serverId, 'server:manage');
-        },
-        env,
+      await service.fileReadAccess(context, serverId, async (_identifier, connection, current) =>
+        inspectMinecraftWorlds(
+          connection,
+          service.adapter,
+          serverId,
+          () => service.authorizeTransfer(current, serverId, false, connection),
+          env,
+          c.req.raw.signal,
+        ),
       ),
     );
   });
   app.get('/v1/servers/:id/minecraft', async (c) => {
     const serverId = c.req.param('id');
-    await authorizeServer(db, await principal(c), serverId);
+    const context = await principal(c);
+    await authorizeServer(db, context, serverId);
     const profile = await db
       .selectFrom('minecraft_server_profiles')
       .selectAll()
@@ -465,6 +473,22 @@ export function registerMinecraftRoutes(
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
     const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
+    const service = await management();
+    const effectiveProperties = await service.access(
+      context,
+      serverId,
+      false,
+      async (identifier) => {
+        const properties = parseMinecraftProperties(
+          Buffer.from(
+            await service.adapter.readFile(identifier, 'server.properties', 1048576),
+          ).toString('utf8'),
+        );
+        return Object.fromEntries(
+          Object.entries(properties).filter(([key]) => minecraftEditablePropertyKeys.includes(key)),
+        );
+      },
+    );
     const content = await db
       .selectFrom('minecraft_content_items')
       .select(['path', 'artifact', 'installed_at'])
@@ -474,6 +498,8 @@ export function registerMinecraftRoutes(
       choiceId: profile.combination_id,
       version: choice.combination.release,
       runtime: choice.combination.profile,
+      supportedProperties: Object.keys(effectiveProperties),
+      effectiveProperties,
       installed: profile.installed,
       configuration: profile.configuration,
       content,

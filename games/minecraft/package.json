@@ -2,7 +2,10 @@
   "name": "@nickhosting/minecraft",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ui": "./src/ui/index.ts"
+  },
   "dependencies": {
     "@nickhosting/core": "workspace:*",
     "@nickhosting/game-sdk": "workspace:*",

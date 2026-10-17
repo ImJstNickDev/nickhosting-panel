@@ -1,5 +1,18 @@
+import { deleteDnsRow, reconcileAutomaticDns, releaseServerDnsClaims, runDns } from './dns.js';
+
+export {
+  assignServerDns,
+  deleteServerDns,
+  getGameConnectionAvailability,
+  getGameConnectionOptions,
+  getServerConnectionOptions,
+  listServerDns,
+  previewServerDns,
+  reserveGameConnection,
+  updateServerDns,
+} from './dns.js';
+
 import { createHash, randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
 import {
   type AuthContext,
   assertAuthContext,
@@ -7,59 +20,56 @@ import {
   type PlatformConfig,
   type SecretCodec,
 } from '@nickhosting/core';
-import { type Database, getSecret, getSettings, recordAudit } from '@nickhosting/database';
 import {
-  CloudflareDnsProvider,
-  type ConnectionPlan,
-  type DnsOwnership,
+  assertStoragePolicyIdle,
+  type Database,
+  getSecret,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
+import {
+  type CloudflareDnsProvider,
   generateSftpPassword,
-  type OwnedDnsRecord,
-  planConnection,
   type SftpCredentialRef,
   type SftpCredentialRequest,
   SftpGoAdapter,
 } from '@nickhosting/external-services';
-import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
-import type { Environment } from './admission.js';
+import { type Environment, lockResources } from './admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, parse } from './registry.js';
+import { serverStorageLimitBytes } from './storage-capacity.js';
 
 type SftpRow = Selectable<Database['external_sftp_credentials']>;
-type DnsRow = Selectable<Database['dns_assignments']>;
 type SftpProvider = Pick<
   SftpGoAdapter,
-  'ensureCredential' | 'inspectCredential' | 'rotateCredential' | 'revokeCredential'
+  'ensureCredential' | 'inspectCredential' | 'rotateCredential' | 'revokeCredential' | 'updateQuota'
 >;
-type DnsProvider = Pick<CloudflareDnsProvider, 'plan' | 'apply' | 'inspectOwned'>;
+type DnsProvider = Pick<CloudflareDnsProvider, 'plan' | 'apply' | 'inspectOwned'> &
+  Partial<Pick<CloudflareDnsProvider, 'hasRecordsAtName'>>;
 export interface ExternalServiceOptions {
   codec: SecretCodec;
   env?: Environment;
   /** The runtime corroborates the registered server against the Pterodactyl adapter before new access. */
   verifyServer: (db: Kysely<Database>, serverId: string) => Promise<void>;
+  /** Fresh corroborated Wings usage; SFTPGo counters omit game/unlimited writes. */
+  readServerDiskUsage?: (db: Kysely<Database>, serverId: string) => Promise<number>;
   sftpFactory?: (config: PlatformConfig, apiKey: string) => SftpProvider;
   dnsFactory?: (config: PlatformConfig, apiToken: string) => DnsProvider;
   now?: () => Date;
 }
-interface CredentialIntent {
+type CredentialAuthority =
+  | { context: AuthContext; service?: never }
+  | { context?: never; service: { kind: 'personal-primary'; subjectUserId: string } };
+type CredentialIntent = CredentialAuthority & {
   version: 1;
-  context: AuthContext;
   request: SftpCredentialRequest;
   scope: string;
   action: 'create' | 'rotate' | 'revoke';
   rotationId?: string;
   delivered: boolean;
-}
-interface DnsIntent {
-  version: 1;
-  context: AuthContext;
-  zoneId: string;
-  instanceId: string;
-  scope: string;
-  connection: ConnectionPlan;
-  action: 'apply' | 'delete';
-}
+};
 const now = (options: ExternalServiceOptions) => options.now?.() ?? new Date();
 const fingerprint = (value: unknown) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -78,7 +88,68 @@ async function currentContext(db: Kysely<Database>, previous: AuthContext): Prom
   if (!user) throw new DomainError('forbidden');
   return { ...previous, role: user.role };
 }
-async function locked<T>(
+const credentialActor = (authority: CredentialAuthority) =>
+  authority.context ? authority.context.actorUserId : authority.service.subjectUserId;
+
+/** Background personal access has a subject, never a fabricated browser session.
+ * Match server:manage exactly; project ownership alone does not grant membership. */
+async function authorizeCredential(
+  db: Kysely<Database>,
+  authority: CredentialAuthority,
+  serverId: string,
+) {
+  if (authority.context)
+    return authorizeServer(
+      db,
+      await currentContext(db, authority.context),
+      serverId,
+      'server:manage',
+    );
+  const actorId = authority.service.subjectUserId;
+  const server = await db
+    .selectFrom('managed_servers as server')
+    .innerJoin('user as actor', (join) => join.on('actor.id', '=', actorId))
+    .selectAll('server')
+    .where('server.id', '=', serverId)
+    .where('server.deleted_at', 'is', null)
+    .where((eb) =>
+      eb.or([
+        eb('actor.id', '=', eb.ref('server.owner_id')),
+        eb('actor.role', '=', 'owner'),
+        eb.exists(
+          eb
+            .selectFrom('project_members')
+            .select('user_id')
+            .whereRef('project_id', '=', 'server.project_id')
+            .where('user_id', '=', actorId)
+            .where('role', '=', 'manager'),
+        ),
+      ]),
+    )
+    .executeTakeFirst();
+  if (!server) throw new DomainError('forbidden');
+  return server;
+}
+async function credentialAudit(
+  db: Kysely<Database>,
+  authority: CredentialAuthority,
+  action: string,
+  metadata: Record<string, unknown>,
+) {
+  if (authority.context) return recordAudit(db, authority.context, action, metadata);
+  await db
+    .insertInto('audit_events')
+    .values({
+      id: randomUUID(),
+      actor_user_id: null,
+      subject_user_id: authority.service.subjectUserId,
+      action,
+      correlation_id: randomUUID(),
+      metadata: { ...metadata, source: 'personal-primary-reconciliation' },
+    })
+    .execute();
+}
+export async function locked<T>(
   db: Kysely<Database>,
   serverId: string,
   work: (connection: Kysely<Database>) => Promise<T>,
@@ -101,7 +172,7 @@ async function locked<T>(
     }
   });
 }
-async function dnsLocked<T>(db: Kysely<Database>, work: () => Promise<T>): Promise<T> {
+export async function dnsLocked<T>(db: Kysely<Database>, work: () => Promise<T>): Promise<T> {
   const result = await sql<{
     acquired: boolean;
   }>`select pg_try_advisory_lock(hashtextextended(current_schema() || ':external:dns',0)) as acquired`.execute(
@@ -134,19 +205,6 @@ async function sftpProvider(db: Kysely<Database>, options: ExternalServiceOption
       }),
   };
 }
-async function dnsProvider(db: Kysely<Database>, options: ExternalServiceOptions) {
-  const { values: config } = await getSettings(db, options.env);
-  const key = await getSecret(db, options.codec, 'cloudflareApiToken', options.env);
-  if (!config.cloudflareZoneId || !config.dnsInstanceId || !key)
-    throw new DomainError('configuration_invalid');
-  return {
-    config,
-    scope: fingerprint([config.cloudflareZoneId, config.dnsInstanceId]),
-    provider:
-      options.dnsFactory?.(config, key) ??
-      new CloudflareDnsProvider({ instanceId: config.dnsInstanceId, apiToken: key }),
-  };
-}
 function credentialIntent(row: SftpRow, options: ExternalServiceOptions): CredentialIntent {
   try {
     const value = JSON.parse(
@@ -156,7 +214,14 @@ function credentialIntent(row: SftpRow, options: ExternalServiceOptions): Creden
       value.version !== 1 ||
       value.request.credentialId !== row.id ||
       value.request.serverId !== row.server_id ||
-      value.context.actorUserId !== row.actor_id
+      (value.context
+        ? value.service !== undefined || value.context.actorUserId !== row.actor_id
+        : value.service?.kind !== 'personal-primary' ||
+          value.service.subjectUserId !== row.actor_id ||
+          row.kind !== 'primary') ||
+      (row.kind === 'primary'
+        ? value.request.username !== row.primary_username || value.request.expiresAt !== 0
+        : value.request.expiresAt === 0)
     )
       throw new Error();
     return value;
@@ -168,10 +233,12 @@ const publicCredential = (row: SftpRow) => ({
   id: row.id,
   serverId: row.server_id,
   actorId: row.actor_id,
+  kind: row.kind,
+  label: row.label,
   state: row.state,
   expiresAt: row.expires_at,
   createdAt: row.created_at,
-  username: (row.provider_ref as SftpCredentialRef | null)?.username ?? null,
+  username: (row.provider_ref as SftpCredentialRef | null)?.username ?? row.primary_username,
 });
 async function saveIntent(
   db: Kysely<Database>,
@@ -187,7 +254,7 @@ async function saveIntent(
         options.codec.encrypt(JSON.stringify(intent), credentialContext(row.id)),
       ),
       state,
-      expires_at: new Date(intent.request.expiresAt),
+      expires_at: intent.request.expiresAt === 0 ? null : new Date(intent.request.expiresAt),
     })
     .where('id', '=', row.id)
     .execute();
@@ -200,18 +267,13 @@ async function runCredential(
   const intent = credentialIntent(row, options);
   const { provider, scope } = await sftpProvider(db, options);
   if (scope !== intent.scope) throw new DomainError('configuration_invalid');
-  if (intent.request.expiresAt <= now(options).getTime()) {
+  if (intent.request.expiresAt !== 0 && intent.request.expiresAt <= now(options).getTime()) {
     intent.action = 'revoke';
     await saveIntent(db, row, intent, options, 'revoking');
   }
   if (intent.action !== 'revoke') {
     try {
-      await authorizeServer(
-        db,
-        await currentContext(db, intent.context),
-        row.server_id,
-        'server:manage',
-      );
+      await authorizeCredential(db, intent, row.server_id);
     } catch (error) {
       // Revocation is driven only by an authoritative permission denial. A database
       // outage or corrupt encrypted intent must not masquerade as removed access.
@@ -223,11 +285,19 @@ async function runCredential(
       intent.action = 'revoke';
       await db.transaction().execute(async (tx) => {
         await saveIntent(tx, row, intent, options, 'revoking');
-        await recordAudit(tx, intent.context, 'server.sftp.access_revoked', {
+        await credentialAudit(tx, intent, 'server.sftp.access_revoked', {
           serverId: row.server_id,
           credentialId: row.id,
           reason: 'issuer_permission_removed',
         });
+      });
+    }
+    // A storage transition fences issuance and rotation, but cannot defer
+    // removing credentials after an authoritative loss of permission.
+    if (intent.action !== 'revoke') {
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await assertStoragePolicyIdle(tx);
       });
     }
   }
@@ -247,9 +317,16 @@ async function runCredential(
       intent.delivered = true;
       await saveIntent(db, row, intent, options, 'revoked');
     } else {
-      const context = await currentContext(db, intent.context);
-      await authorizeServer(db, context, row.server_id, 'server:manage');
+      const server = await authorizeCredential(db, intent, row.server_id);
+      if (
+        server.active_operation_id ||
+        server.pterodactyl_uuid !== intent.request.externalServerUuid
+      )
+        throw new DomainError('conflict');
       await options.verifyServer(db, row.server_id);
+      const fresh = await authorizeCredential(db, intent, row.server_id);
+      if (fresh.active_operation_id || fresh.pterodactyl_uuid !== intent.request.externalServerUuid)
+        throw new DomainError('conflict');
       if (intent.action === 'create') ref = await provider.ensureCredential(intent.request);
       else {
         if (!ref) throw new DomainError('conflict');
@@ -287,7 +364,7 @@ async function deliverCredential(
   const intent = credentialIntent(row, options);
   const result = publicCredential(row);
   if (intent.delivered || row.state !== 'active') return { ...result, password: undefined };
-  if (row.expires_at <= now(options)) throw new DomainError('conflict');
+  if (row.expires_at && row.expires_at <= now(options)) throw new DomainError('conflict');
   if (row.actor_id !== context.actorUserId) throw new DomainError('forbidden');
   await authorizeServer(
     db,
@@ -297,7 +374,8 @@ async function deliverCredential(
   );
   const password = intent.request.password;
   intent.delivered = true;
-  // Do not decrypt for GET. Commit delivery before returning; lost HTTP responses require rotation.
+  // Do not decrypt for GET. Commit delivery before returning; explicit password
+  // retrieval can recover a lost response without changing delivery idempotency.
   await saveIntent(db, row, intent, options, 'active');
   return { ...result, password };
 }
@@ -309,73 +387,159 @@ export async function createSftpCredential(
   options: ExternalServiceOptions,
 ) {
   regular(context);
-  const { credentialId } = parse(z.object({ credentialId: z.uuid() }).strict(), input);
+  const { credentialId, kind, label } = parse(
+    z
+      .object({
+        credentialId: z.uuid(),
+        kind: z.enum(['primary', 'auxiliary']).default('auxiliary'),
+        label: z.string().trim().min(1).max(80).optional(),
+      })
+      .strict(),
+    input,
+  );
+  if (kind === 'primary' && label !== undefined) throw new DomainError('validation_failed');
   return locked(db, serverId, async (connection) => {
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-    const server = await authorizeServer(connection, verified, serverId, 'server:manage');
-    if (!server.pterodactyl_uuid || server.deleted_at || server.active_operation_id)
-      throw new DomainError('conflict');
-    let row = await connection
+    const row = await ensureCredential(
+      connection,
+      { context: verified },
+      serverId,
+      { credentialId, kind, label },
+      options,
+    );
+    return deliverCredential(connection, row, verified, options);
+  });
+}
+/** Shared durable issuance; caller holds the per-server advisory lock. */
+async function ensureCredential(
+  connection: Kysely<Database>,
+  authority: CredentialAuthority,
+  serverId: string,
+  input: { credentialId: string; kind: 'primary' | 'auxiliary'; label?: string },
+  options: ExternalServiceOptions,
+) {
+  const { credentialId, kind, label } = input;
+  const actorId = credentialActor(authority);
+  const server = await authorizeCredential(connection, authority, serverId);
+  if (!server.pterodactyl_uuid || server.deleted_at || server.active_operation_id)
+    throw new DomainError('conflict');
+  await connection.transaction().execute(async (tx) => {
+    await lockResources(tx);
+    await assertStoragePolicyIdle(tx);
+  });
+  let row = await connection
+    .selectFrom('external_sftp_credentials')
+    .selectAll()
+    .where('id', '=', credentialId)
+    .executeTakeFirst();
+  if (
+    row &&
+    (row.server_id !== serverId ||
+      row.actor_id !== actorId ||
+      row.kind !== kind ||
+      row.label !== (label ?? null) ||
+      row.state === 'revoked' ||
+      row.state === 'revoking')
+  )
+    throw new DomainError('conflict');
+  if (!row && kind === 'primary') {
+    row = await connection
       .selectFrom('external_sftp_credentials')
       .selectAll()
-      .where('id', '=', credentialId)
+      .where('server_id', '=', serverId)
+      .where('actor_id', '=', actorId)
+      .where('kind', '=', 'primary')
+      .where('state', '!=', 'revoked')
       .executeTakeFirst();
-    if (
-      row &&
-      (row.server_id !== serverId ||
-        row.actor_id !== context.actorUserId ||
-        row.state === 'revoked' ||
-        row.state === 'revoking')
-    )
+    if (row?.state === 'revoking') throw new DomainError('conflict');
+  }
+  if (!row) {
+    const { config, scope } = await sftpProvider(connection, options);
+    const existing = await connection
+      .selectFrom('external_sftp_credentials')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .where('actor_id', '=', actorId)
+      .where('kind', '=', 'auxiliary')
+      .where('state', '!=', 'revoked')
+      .execute();
+    if (kind === 'auxiliary' && existing.length >= config.sftpAuxiliaryLimit)
       throw new DomainError('conflict');
-    if (!row) {
-      const existing = await connection
+    let username: string | undefined;
+    if (kind === 'primary') {
+      const user = await connection
+        .selectFrom('user')
+        .select('username')
+        .where('id', '=', actorId)
+        .executeTakeFirstOrThrow();
+      username = `${user.username}-${serverId.slice(0, 8)}`;
+      const collision = await connection
         .selectFrom('external_sftp_credentials')
         .select('id')
-        .where('server_id', '=', serverId)
+        .where('primary_username', '=', username)
         .where('state', '!=', 'revoked')
-        .execute();
-      if (existing.length >= 8) throw new DomainError('conflict');
-      const { config, scope } = await sftpProvider(connection, options);
-      const expiresAt = now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
-      const intent: CredentialIntent = {
-        version: 1,
-        context: verified,
-        scope,
-        action: 'create',
-        delivered: false,
-        request: {
-          serverId,
-          externalServerUuid: server.pterodactyl_uuid,
-          credentialId,
-          password: generateSftpPassword(),
-          expiresAt,
-          quotaBytes: server.limits.disk * 1_048_576,
-        },
-      };
-      row = await connection.transaction().execute(async (tx) => {
+        .executeTakeFirst();
+      if (collision) throw new DomainError('conflict');
+    }
+    const expiresAt =
+      kind === 'primary' ? 0 : now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
+    const intent: CredentialIntent = {
+      version: 1,
+      ...authority,
+      scope,
+      action: 'create',
+      delivered: false,
+      request: {
+        serverId,
+        externalServerUuid: server.pterodactyl_uuid,
+        credentialId,
+        ...(username ? { username } : {}),
+        password: generateSftpPassword(),
+        expiresAt,
+        quotaBytes: serverStorageLimitBytes(server.limits.disk) ?? 0,
+      },
+    };
+    row = await connection
+      .transaction()
+      .execute(async (tx) => {
+        await lockResources(tx);
+        await assertStoragePolicyIdle(tx);
         const inserted = await tx
           .insertInto('external_sftp_credentials')
           .values({
             id: credentialId,
             server_id: serverId,
-            actor_id: context.actorUserId,
+            actor_id: actorId,
+            kind,
+            label: label ?? null,
+            primary_username: username ?? null,
             envelope: JSON.stringify(
               options.codec.encrypt(JSON.stringify(intent), credentialContext(credentialId)),
             ),
             provider_ref: null,
-            expires_at: new Date(expiresAt),
+            expires_at: expiresAt === 0 ? null : new Date(expiresAt),
             state: 'pending',
           })
           .returningAll()
           .executeTakeFirstOrThrow();
-        await recordAudit(tx, verified, 'server.sftp.issued', { serverId, credentialId });
+        await credentialAudit(tx, authority, 'server.sftp.issued', { serverId, credentialId });
         return inserted;
+      })
+      .catch((error: unknown) => {
+        // Different servers can share the truncated UUID portion. The unique
+        // reservation prevents concurrent creation from claiming the same login.
+        if (
+          typeof error === 'object' &&
+          error !== null &&
+          'code' in error &&
+          error.code === '23505'
+        )
+          throw new DomainError('conflict');
+        throw error;
       });
-    }
-    if (row.state !== 'active') row = await runCredential(connection, row, options);
-    return deliverCredential(connection, row, verified, options);
-  });
+  }
+  if (row.state !== 'active') row = await runCredential(connection, row, options);
+  return row;
 }
 export async function listSftpCredentials(
   db: Kysely<Database>,
@@ -388,10 +552,54 @@ export async function listSftpCredentials(
       .selectFrom('external_sftp_credentials')
       .selectAll()
       .where('server_id', '=', serverId)
+      .where('actor_id', '=', context.actorUserId)
+      .orderBy('kind', 'desc')
       .orderBy('created_at', 'desc')
       .limit(100)
       .execute()
   ).map(publicCredential);
+}
+/** Explicit issuer-only disclosure of the retained encrypted password. */
+export async function revealSftpCredential(
+  db: Kysely<Database>,
+  context: AuthContext,
+  serverId: string,
+  credentialId: string,
+  input: unknown,
+  options: ExternalServiceOptions,
+) {
+  regular(context);
+  parse(z.uuid(), credentialId);
+  parse(z.object({}).strict(), input);
+  return locked(db, serverId, async (connection) => {
+    const verified = await currentInteractiveContext(connection, context, options.env ?? {});
+    await authorizeServer(connection, verified, serverId, 'server:manage');
+    const row = await connection
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('id', '=', credentialId)
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (!row) throw new DomainError('not_found');
+    if (row.actor_id !== verified.actorUserId) throw new DomainError('forbidden');
+    if (row.state !== 'active' || (row.expires_at && row.expires_at <= now(options)))
+      throw new DomainError('conflict');
+    const intent = credentialIntent(row, options);
+    if (
+      !['create', 'rotate'].includes(intent.action) ||
+      typeof intent.request.password !== 'string' ||
+      !intent.request.password ||
+      !Number.isSafeInteger(intent.request.expiresAt) ||
+      intent.request.expiresAt < 0 ||
+      intent.request.expiresAt !== (row.expires_at?.getTime() ?? 0)
+    )
+      throw new DomainError('secret_invalid');
+    await recordAudit(connection, verified, 'server.sftp.password_revealed', {
+      serverId,
+      credentialId,
+    });
+    return { ...publicCredential(row), password: intent.request.password };
+  });
 }
 export async function rotateSftpCredential(
   db: Kysely<Database>,
@@ -408,6 +616,10 @@ export async function rotateSftpCredential(
     const verified = await currentInteractiveContext(connection, context, options.env ?? {});
     const server = await authorizeServer(connection, verified, serverId, 'server:manage');
     if (server.active_operation_id) throw new DomainError('conflict');
+    await connection.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      await assertStoragePolicyIdle(tx);
+    });
     let row = await connection
       .selectFrom('external_sftp_credentials')
       .selectAll()
@@ -425,9 +637,14 @@ export async function rotateSftpCredential(
       intent.rotationId = rotationId;
       intent.delivered = false;
       intent.request.password = generateSftpPassword();
-      intent.request.expiresAt = now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
+      intent.request.expiresAt =
+        row.kind === 'primary'
+          ? 0
+          : now(options).getTime() + config.sftpCredentialTtlSeconds * 1000;
       const previous = row;
       await connection.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await assertStoragePolicyIdle(tx);
         await saveIntent(tx, previous, intent, options, 'pending');
         await recordAudit(tx, verified, 'server.sftp.rotated', {
           serverId,
@@ -445,6 +662,75 @@ export async function rotateSftpCredential(
     return deliverCredential(connection, row, verified, options);
   });
 }
+/** Called after authoritative Wings readback by the storage-policy transition.
+ * Keeps credential identity and one-time delivery state; never creates or rotates users.
+ */
+export async function reconcileServerStorageQuota(
+  db: Kysely<Database>,
+  serverId: string,
+  diskMiB: number,
+  options: ExternalServiceOptions,
+  locks: { assumeServerLock?: boolean } = {},
+): Promise<{ reconciled: number }> {
+  const quotaBytes = serverStorageLimitBytes(diskMiB) ?? 0;
+  parse(z.uuid(), serverId);
+  const reconcile = async (connection: Kysely<Database>) => {
+    const rows = await connection
+      .selectFrom('external_sftp_credentials')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .where('state', '!=', 'revoked')
+      .execute();
+    if (!rows.length) return { reconciled: 0 };
+    const server = await connection
+      .selectFrom('managed_servers')
+      .selectAll()
+      .where('id', '=', serverId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    if (!server?.pterodactyl_uuid) throw new DomainError('not_found');
+    await options.verifyServer(connection, serverId);
+    const { provider, scope } = await sftpProvider(connection, options);
+    let reconciled = 0;
+    for (const row of rows) {
+      const intent = credentialIntent(row, options);
+      if (intent.scope !== scope || intent.request.externalServerUuid !== server.pterodactyl_uuid)
+        throw new DomainError('configuration_invalid');
+      let ref = row.provider_ref as SftpCredentialRef | null;
+      if (!ref) ref = await provider.inspectCredential(intent.request);
+      if (ref) {
+        if (
+          ref.serverId !== serverId ||
+          ref.externalServerUuid !== server.pterodactyl_uuid ||
+          ref.credentialId !== row.id
+        )
+          throw new DomainError('conflict');
+        if (quotaBytes > 0 && !options.readServerDiskUsage)
+          throw new DomainError('configuration_invalid');
+        const usedBytes =
+          quotaBytes > 0 ? await options.readServerDiskUsage?.(connection, serverId) : undefined;
+        ref = await provider.updateQuota(ref, quotaBytes, usedBytes);
+      } else if (row.state === 'active') {
+        throw new DomainError('conflict');
+      }
+      // A pending creation with no provider user receives the new quota in its
+      // existing encrypted intent. Its worker may create it after the policy commits.
+      intent.request.quotaBytes = quotaBytes;
+      await connection.transaction().execute(async (tx) => {
+        await saveIntent(tx, row, intent, options, row.state);
+        await tx
+          .updateTable('external_sftp_credentials')
+          .set({ provider_ref: ref ? JSON.stringify(ref) : null })
+          .where('id', '=', row.id)
+          .execute();
+      });
+      reconciled++;
+    }
+    return { reconciled };
+  };
+  return locks.assumeServerLock ? reconcile(db) : locked(db, serverId, reconcile);
+}
+
 async function revokeRow(db: Kysely<Database>, row: SftpRow, options: ExternalServiceOptions) {
   if (row.state === 'revoked') return row;
   const intent = credentialIntent(row, options);
@@ -478,413 +764,13 @@ export async function revokeSftpCredential(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!row) throw new DomainError('not_found');
+    if (row.actor_id !== context.actorUserId || row.kind === 'primary')
+      throw new DomainError('forbidden');
     await recordAudit(connection, verified, 'server.sftp.revoked', { serverId, credentialId });
     return publicCredential(await revokeRow(connection, row, options));
   });
 }
 
-const dnsRequest = z
-  .object({
-    subdomain: z
-      .string()
-      .regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/)
-      .optional(),
-    portRole: z
-      .string()
-      .regex(/^[a-z][a-z0-9-]{0,63}$/)
-      .optional(),
-  })
-  .strict();
-async function connectionPlan(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  const request = parse(dnsRequest, input);
-  const server = await authorizeServer(db, context, serverId, 'server:manage');
-  const mapping = await db
-    .selectFrom('runtime_egg_mappings')
-    .select('game_id')
-    .where('id', '=', server.mapping_id)
-    .executeTakeFirstOrThrow();
-  const game = await db
-    .selectFrom('game_integrations')
-    .select('manifest')
-    .where('id', '=', mapping.game_id)
-    .executeTakeFirstOrThrow();
-  const manifest = parse(gameManifestSchema, game.manifest);
-  const allocations = await db
-    .selectFrom('server_allocations')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .execute();
-  const allocation = request.portRole
-    ? allocations.find((entry) => entry.role === request.portRole)
-    : allocations.find((entry) => entry.is_primary);
-  if (!allocation || !manifest.ports.some((entry) => entry.role === allocation.role))
-    throw new DomainError('configuration_invalid');
-  const { values: config } = await getSettings(db, options.env);
-  const configured = (key: string): string => {
-    const value = (config as unknown as Record<string, unknown>)[key];
-    if (typeof value !== 'string' || !value) throw new DomainError('configuration_invalid');
-    return value;
-  };
-  if (manifest.connection.mode === 'static-host-port') {
-    if (request.subdomain) throw new DomainError('validation_failed');
-    return planConnection({
-      mode: 'static-host-port',
-      hostname: configured(manifest.connection.hostnameSettingKey),
-      port: allocation.port,
-    });
-  }
-  if (!request.subdomain || !config.dnsTarget) throw new DomainError('configuration_invalid');
-  if (manifest.connection.srv && !allocation.protocols.includes(manifest.connection.srv.proto))
-    throw new DomainError('configuration_invalid');
-  return planConnection({
-    mode: 'custom-subdomain',
-    zoneName: configured(manifest.connection.zoneSettingKey),
-    subdomain: request.subdomain,
-    port: allocation.port,
-    target: {
-      type: isIP(config.dnsTarget) === 4 ? 'A' : isIP(config.dnsTarget) === 6 ? 'AAAA' : 'CNAME',
-      content: config.dnsTarget,
-    },
-    srv: manifest.connection.srv
-      ? { service: manifest.connection.srv.service, protocol: manifest.connection.srv.proto }
-      : undefined,
-  });
-}
-export async function previewServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  return connectionPlan(db, context, serverId, input, options);
-}
-function publicDns(row: DnsRow) {
-  const intent = row.plan as DnsIntent;
-  return {
-    id: row.id,
-    serverId: row.server_id,
-    state: row.state,
-    connection: intent.connection,
-    updatedAt: row.updated_at,
-  };
-}
-export async function listServerDns(db: Kysely<Database>, context: AuthContext, serverId: string) {
-  await authorizeServer(db, context, serverId, 'server:read');
-  return (
-    await db
-      .selectFrom('dns_assignments')
-      .selectAll()
-      .where('server_id', '=', serverId)
-      .where('state', '!=', 'deleted')
-      .execute()
-  ).map(publicDns);
-}
-async function runDns(
-  db: Kysely<Database>,
-  row: DnsRow,
-  options: ExternalServiceOptions,
-): Promise<DnsRow> {
-  const intent = row.plan as DnsIntent;
-  const { provider, scope } = await dnsProvider(db, options);
-  if (intent.version !== 1 || intent.scope !== scope)
-    throw new DomainError('configuration_invalid');
-  const ownership: DnsOwnership = {
-    instanceId: intent.instanceId,
-    serverId: row.server_id,
-    assignmentId: row.ownership_token,
-  };
-  let ledger = row.ledger as OwnedDnsRecord[];
-  const persist = async () => {
-    await db
-      .updateTable('dns_assignments')
-      .set({ ledger: JSON.stringify(ledger), updated_at: now(options) })
-      .where('id', '=', row.id)
-      .execute();
-  };
-  const callbacks = {
-    onRecordCreated: async (entry: OwnedDnsRecord) => {
-      ledger = ledger.filter(
-        (old) =>
-          old.id !== entry.id &&
-          !(old.record.name === entry.record.name && old.record.type === entry.record.type),
-      );
-      ledger.push(entry);
-      await persist();
-    },
-    onRecordDeleted: async (entry: OwnedDnsRecord) => {
-      ledger = ledger.filter((old) => old.id !== entry.id);
-      await persist();
-    },
-  };
-  try {
-    if (intent.action === 'apply') {
-      await authorizeServer(
-        db,
-        await currentContext(db, intent.context),
-        row.server_id,
-        'server:manage',
-      );
-      await options.verifyServer(db, row.server_id);
-      const changes = await provider.plan({
-        zoneId: intent.zoneId,
-        ownership,
-        desired: intent.connection.records,
-        ledger,
-      });
-      await provider.apply(changes, callbacks);
-      const stale = ledger.filter(
-        (entry) =>
-          !intent.connection.records.some(
-            (desired) => desired.name === entry.record.name && desired.type === entry.record.type,
-          ),
-      );
-      await provider.apply(
-        stale.map((previous) => ({ action: 'delete', previous, record: previous.record })),
-        callbacks,
-      );
-      await db
-        .updateTable('dns_assignments')
-        .set({ state: 'active', updated_at: now(options) })
-        .where('id', '=', row.id)
-        .execute();
-    } else {
-      // Recover a create whose response was lost without ever creating missing records to delete them.
-      for (const recovered of await provider.inspectOwned({
-        zoneId: intent.zoneId,
-        ownership,
-        desired: intent.connection.records,
-      })) {
-        if (!ledger.some((entry) => entry.id === recovered.id)) {
-          ledger.push(recovered);
-          await persist();
-        }
-      }
-      await provider.apply(
-        ledger.map((previous) => ({ action: 'delete', previous, record: previous.record })),
-        callbacks,
-      );
-      await db
-        .updateTable('dns_assignments')
-        .set({ state: 'deleted', hostname: `deleted:${row.id}`, updated_at: now(options) })
-        .where('id', '=', row.id)
-        .execute();
-    }
-  } catch (error) {
-    await db
-      .updateTable('dns_assignments')
-      .set({
-        state: intent.action === 'delete' ? 'deleting' : 'uncertain',
-        updated_at: now(options),
-      })
-      .where('id', '=', row.id)
-      .execute();
-    throw error;
-  }
-  return db
-    .selectFrom('dns_assignments')
-    .selectAll()
-    .where('id', '=', row.id)
-    .executeTakeFirstOrThrow();
-}
-export async function assignServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  regular(context);
-  const value = parse(dnsRequest.extend({ assignmentId: z.uuid() }), input);
-  return locked(db, serverId, (connection) =>
-    dnsLocked(connection, async () => {
-      const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      const server = await authorizeServer(connection, verified, serverId, 'server:manage');
-      if (server.active_operation_id || !server.pterodactyl_uuid) throw new DomainError('conflict');
-      const plan = await connectionPlan(
-        connection,
-        verified,
-        serverId,
-        { subdomain: value.subdomain, portRole: value.portRole },
-        options,
-      );
-      if (!plan.records.length)
-        return { id: null, serverId, state: 'static' as const, connection: plan };
-      let row = await connection
-        .selectFrom('dns_assignments')
-        .selectAll()
-        .where('id', '=', value.assignmentId)
-        .executeTakeFirst();
-      if (row) {
-        const old = row.plan as DnsIntent;
-        if (
-          row.server_id !== serverId ||
-          row.state === 'deleted' ||
-          row.state === 'deleting' ||
-          old.context.actorUserId !== context.actorUserId ||
-          fingerprint(old.connection) !== fingerprint(plan)
-        )
-          throw new DomainError('conflict');
-      } else {
-        const occupied = await connection
-          .selectFrom('dns_assignments')
-          .select('id')
-          .where('hostname', '=', plan.hostname)
-          .executeTakeFirst();
-        if (occupied) throw new DomainError('conflict');
-        const { config, scope } = await dnsProvider(connection, options);
-        if (!config.cloudflareZoneId || !config.dnsInstanceId)
-          throw new DomainError('configuration_invalid');
-        const intent: DnsIntent = {
-          version: 1,
-          context: verified,
-          zoneId: config.cloudflareZoneId,
-          instanceId: config.dnsInstanceId,
-          scope,
-          connection: plan,
-          action: 'apply',
-        };
-        row = await connection.transaction().execute(async (tx) => {
-          const inserted = await tx
-            .insertInto('dns_assignments')
-            .values({
-              id: value.assignmentId,
-              server_id: serverId,
-              hostname: plan.hostname,
-              ownership_token: randomUUID(),
-              plan: JSON.stringify(intent),
-              ledger: '[]',
-              state: 'pending',
-            })
-            .returningAll()
-            .executeTakeFirstOrThrow();
-          await recordAudit(tx, verified, 'server.dns.assigned', {
-            serverId,
-            assignmentId: value.assignmentId,
-          });
-          return inserted;
-        });
-      }
-      if (row.state !== 'active') row = await runDns(connection, row, options);
-      return publicDns(row);
-    }),
-  );
-}
-export async function updateServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  assignmentId: string,
-  input: unknown,
-  options: ExternalServiceOptions,
-) {
-  regular(context);
-  parse(z.uuid(), assignmentId);
-  return locked(db, serverId, (connection) =>
-    dnsLocked(connection, async () => {
-      const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      const server = await authorizeServer(connection, verified, serverId, 'server:manage');
-      if (server.active_operation_id) throw new DomainError('conflict');
-      const row = await connection
-        .selectFrom('dns_assignments')
-        .selectAll()
-        .where('id', '=', assignmentId)
-        .where('server_id', '=', serverId)
-        .executeTakeFirst();
-      if (!row || row.state === 'deleted') throw new DomainError('not_found');
-      if (row.state !== 'active') throw new DomainError('conflict');
-      const plan = await connectionPlan(connection, verified, serverId, input, options);
-      if (!plan.records.length) throw new DomainError('conflict');
-      if (
-        await connection
-          .selectFrom('dns_assignments')
-          .select('id')
-          .where('hostname', '=', plan.hostname)
-          .where('id', '!=', assignmentId)
-          .executeTakeFirst()
-      )
-        throw new DomainError('conflict');
-      const intent: DnsIntent = {
-        ...(row.plan as DnsIntent),
-        context: verified,
-        connection: plan,
-        action: 'apply',
-      };
-      await connection.transaction().execute(async (tx) => {
-        await tx
-          .updateTable('dns_assignments')
-          .set({
-            hostname: plan.hostname,
-            plan: JSON.stringify(intent),
-            state: 'pending',
-            updated_at: now(options),
-          })
-          .where('id', '=', assignmentId)
-          .execute();
-        await recordAudit(tx, verified, 'server.dns.updated', { serverId, assignmentId });
-      });
-      return publicDns(
-        await runDns(
-          connection,
-          await connection
-            .selectFrom('dns_assignments')
-            .selectAll()
-            .where('id', '=', assignmentId)
-            .executeTakeFirstOrThrow(),
-          options,
-        ),
-      );
-    }),
-  );
-}
-async function deleteDnsRow(db: Kysely<Database>, row: DnsRow, options: ExternalServiceOptions) {
-  if (row.state === 'deleted') return row;
-  const intent: DnsIntent = { ...(row.plan as DnsIntent), action: 'delete' };
-  await db
-    .updateTable('dns_assignments')
-    .set({ plan: JSON.stringify(intent), state: 'deleting' })
-    .where('id', '=', row.id)
-    .execute();
-  return runDns(
-    db,
-    await db
-      .selectFrom('dns_assignments')
-      .selectAll()
-      .where('id', '=', row.id)
-      .executeTakeFirstOrThrow(),
-    options,
-  );
-}
-export async function deleteServerDns(
-  db: Kysely<Database>,
-  context: AuthContext,
-  serverId: string,
-  assignmentId: string,
-  options: ExternalServiceOptions,
-) {
-  parse(z.uuid(), assignmentId);
-  return locked(db, serverId, (connection) =>
-    dnsLocked(connection, async () => {
-      const verified = await currentInteractiveContext(connection, context, options.env ?? {});
-      await authorizeServer(connection, verified, serverId, 'server:manage');
-      const row = await connection
-        .selectFrom('dns_assignments')
-        .selectAll()
-        .where('id', '=', assignmentId)
-        .where('server_id', '=', serverId)
-        .executeTakeFirst();
-      if (!row) throw new DomainError('not_found');
-      await recordAudit(connection, verified, 'server.dns.deleted', { serverId, assignmentId });
-      return publicDns(await deleteDnsRow(connection, row, options));
-    }),
-  );
-}
 /** Internal worker hook after lifecycle authorization. Reentrant on the supplied pinned connection. */
 export async function cleanupServerExternalServices(
   db: Kysely<Database>,
@@ -907,14 +793,24 @@ export async function cleanupServerExternalServices(
         .where('state', '!=', 'deleted')
         .execute())
         await deleteDnsRow(connection, row, options);
+      await releaseServerDnsClaims(connection, serverId, options);
     });
   });
 }
 /** Bounded periodic recovery. Failures retain durable pending/uncertain rows and are counted, never hidden. */
+const reconciliationCursors = new WeakMap<
+  Kysely<Database>,
+  { credential: string; primary: string }
+>();
 export async function reconcileExternalServices(
   db: Kysely<Database>,
   options: ExternalServiceOptions,
 ) {
+  // Scheduling only: authoritative desired access and every prepared intent are
+  // durable in PostgreSQL. A restart safely rescans; cursors let later work pass
+  // a repeatedly unavailable server within a running worker's bounded batches.
+  const cursor = reconciliationCursors.get(db) ?? { credential: '', primary: '' };
+  reconciliationCursors.set(db, cursor);
   const credentials = await db
     .selectFrom('external_sftp_credentials')
     .innerJoin('managed_servers', 'managed_servers.id', 'external_sftp_credentials.server_id')
@@ -942,7 +838,8 @@ export async function reconcileExternalServices(
         ]),
       ]),
     )
-    .orderBy('external_sftp_credentials.created_at')
+    .orderBy(sql<boolean>`external_sftp_credentials.id::text > ${cursor.credential}`, 'desc')
+    .orderBy('external_sftp_credentials.id')
     .limit(100)
     .execute();
   const assignments = await db
@@ -967,6 +864,68 @@ export async function reconcileExternalServices(
       recovered++;
     } catch {
       failed++;
+    } finally {
+      cursor.credential = row.id;
+    }
+  }
+  // Explicitly authorized subjects, not a synthetic interactive Owner. Global
+  // Owners have server:manage; project viewers/operators and unrelated users do not.
+  const primary = await db
+    .selectFrom('managed_servers as server')
+    .crossJoin('user as actor')
+    .select(['server.id as server_id', 'actor.id as actor_id'])
+    .select(sql<string>`server.id::text || ':' || actor.id`.as('cursor_key'))
+    .where('server.deleted_at', 'is', null)
+    .where('server.pterodactyl_uuid', 'is not', null)
+    .where('server.active_operation_id', 'is', null)
+    .where((eb) =>
+      eb.or([
+        eb('actor.id', '=', eb.ref('server.owner_id')),
+        eb('actor.role', '=', 'owner'),
+        eb.exists(
+          eb
+            .selectFrom('project_members')
+            .select('user_id')
+            .whereRef('project_id', '=', 'server.project_id')
+            .whereRef('user_id', '=', 'actor.id')
+            .where('role', '=', 'manager'),
+        ),
+      ]),
+    )
+    .where((eb) =>
+      eb.not(
+        eb.exists(
+          eb
+            .selectFrom('external_sftp_credentials as credential')
+            .select('credential.id')
+            .whereRef('credential.server_id', '=', 'server.id')
+            .whereRef('credential.actor_id', '=', 'actor.id')
+            .where('credential.kind', '=', 'primary')
+            .where('credential.state', '!=', 'revoked'),
+        ),
+      ),
+    )
+    .orderBy(sql<boolean>`(server.id::text || ':' || actor.id) > ${cursor.primary}`, 'desc')
+    .orderBy('server.id')
+    .orderBy('actor.id')
+    .limit(100)
+    .execute();
+  for (const candidate of primary) {
+    try {
+      await locked(db, candidate.server_id, (connection) =>
+        ensureCredential(
+          connection,
+          { service: { kind: 'personal-primary', subjectUserId: candidate.actor_id } },
+          candidate.server_id,
+          { credentialId: randomUUID(), kind: 'primary' },
+          options,
+        ),
+      );
+      recovered++;
+    } catch {
+      failed++;
+    } finally {
+      cursor.primary = candidate.cursor_key;
     }
   }
   for (const row of assignments) {
@@ -986,5 +945,6 @@ export async function reconcileExternalServices(
       failed++;
     }
   }
-  return { recovered, failed };
+  const automatic = await reconcileAutomaticDns(db, options);
+  return { recovered: recovered + automatic.recovered, failed: failed + automatic.failed };
 }

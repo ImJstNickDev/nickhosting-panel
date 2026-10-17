@@ -509,9 +509,10 @@ export async function discoverMinecraftWorlds(
     readLevelDat(world: string, maxBytes: number): Promise<Uint8Array | undefined>;
   },
   options: {
-    expectedDataVersion: number;
+    expectedDataVersion?: number;
     release: string;
     maxWorlds?: number;
+    signal?: AbortSignal;
     nbtLimits?: Partial<MinecraftNbtLimits>;
   },
 ): Promise<MinecraftWorldDiscovery[]> {
@@ -521,9 +522,8 @@ export async function discoverMinecraftWorlds(
     fail('discovery_limits');
   const entries = await services.listRoot();
   if (entries.length > 10_000) fail('discovery_limits');
-  const worlds: MinecraftWorldDiscovery[] = [];
+  const candidates: string[] = [];
   const seen = new Set<string>();
-  let scanned = 0;
   for (const entry of entries) {
     if (!entry.isDirectory || entry.isSymlink) continue;
     let name: string;
@@ -532,29 +532,62 @@ export async function discoverMinecraftWorlds(
     } catch {
       continue;
     }
-    if (++scanned > maxWorlds) fail('discovery_limits');
+    if (candidates.length >= maxWorlds) fail('discovery_limits');
     if (seen.has(name.toLowerCase())) fail('discovery_duplicate');
     seen.add(name.toLowerCase());
-    let bytes: Uint8Array | undefined;
-    try {
-      bytes = await services.readLevelDat(name, limits.maxCompressedBytes);
-    } catch {
-      worlds.push({ name, status: 'unavailable' });
-      continue;
-    }
-    if (!bytes) continue;
-    try {
-      worlds.push({
-        name,
-        status: 'verified',
-        validation: validateMinecraftLevelDat(bytes, options.expectedDataVersion, {
-          release: options.release,
-          limits,
-        }),
-      });
-    } catch {
-      worlds.push({ name, status: 'incompatible' });
-    }
+    candidates.push(name);
   }
-  return worlds;
+  // Two bounded readers preserve provider order without retaining every level.dat.
+  const worlds: (MinecraftWorldDiscovery | undefined)[] = new Array(candidates.length);
+  let next = 0;
+  let rejected = false;
+  const read = async () => {
+    for (;;) {
+      if (rejected) return;
+      options.signal?.throwIfAborted();
+      const index = next++;
+      const name = candidates[index];
+      if (name === undefined) return;
+      let bytes: Uint8Array | undefined;
+      try {
+        bytes = await services.readLevelDat(name, limits.maxCompressedBytes);
+      } catch (error) {
+        options.signal?.throwIfAborted();
+        // Revoked authorization is a request failure, never a partial inventory.
+        if (
+          error instanceof DomainError &&
+          (error.status === 401 || error.status === 403 || error.code === 'provenance_mismatch')
+        ) {
+          rejected = true;
+          throw error;
+        }
+        worlds[index] = { name, status: 'unavailable' };
+        continue;
+      }
+      options.signal?.throwIfAborted();
+      if (!bytes) continue;
+      try {
+        const validation = inspectMinecraftLevelDat(bytes, { limits });
+        const compatible =
+          validation.dataVersion === options.expectedDataVersion &&
+          (!validation.versionName || validation.versionName === options.release);
+        worlds[index] = {
+          name,
+          status:
+            options.expectedDataVersion === undefined
+              ? 'unavailable'
+              : compatible
+                ? 'verified'
+                : 'incompatible',
+          validation,
+        };
+      } catch {
+        worlds[index] = { name, status: 'incompatible' };
+      }
+    }
+  };
+  // Settle both readers before propagating errors, so no remote reads outlive this call.
+  const results = await Promise.allSettled([read(), read()]);
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+  return worlds.filter((world): world is MinecraftWorldDiscovery => world !== undefined);
 }

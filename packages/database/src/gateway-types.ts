@@ -13,10 +13,17 @@ export interface GatewayTables {
     server_id: string;
     generation: string;
     enabled: boolean;
+    auto_wake_override: Generated<boolean | null>;
+    owner_auto_wake_override: Generated<boolean | null>;
+    owner_auto_wake_user_access: Generated<'hidden' | 'editable' | 'disable-only' | null>;
+    gateway_messages: Generated<Record<string, unknown>>;
     protocol_id: string;
     game_version: string;
     state: GatewayServerState;
     idle_timeout_seconds: number | null;
+    idle_timeout_inherited: Generated<boolean>;
+    owner_idle_timeout_seconds: Generated<number | null>;
+    owner_idle_timeout_user_access: Generated<'hidden' | 'editable' | 'shorten-only' | null>;
     readiness_timeout_seconds: number;
     readiness_max_age_seconds: number;
     estimate_max_age_seconds: number;

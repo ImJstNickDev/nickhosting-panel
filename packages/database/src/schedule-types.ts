@@ -1,0 +1,43 @@
+import type { ColumnType, Generated } from 'kysely';
+
+export type ScheduleAction = 'start' | 'stop' | 'restart' | 'backup';
+export type ScheduleTiming =
+  | { kind: 'once'; at: string }
+  | { kind: 'interval'; firstAt: string; everySeconds: number }
+  | { kind: 'daily'; localTime: string }
+  | { kind: 'weekly'; localTime: string; weekdays: number[] };
+
+export interface ScheduleTables {
+  server_schedules: {
+    id: string;
+    server_id: string;
+    creator_id: string;
+    authorizer_id: string;
+    name: string;
+    action: ScheduleAction;
+    timing: ColumnType<ScheduleTiming, string, string>;
+    time_zone: string;
+    enabled: boolean;
+    backup_options: ColumnType<Record<string, unknown>, string | undefined, string>;
+    revision: Generated<number>;
+    next_run_at: Date | null;
+    deleted_at: Date | null;
+    created_at: Generated<Date>;
+    updated_at: Generated<Date>;
+  };
+  schedule_occurrences: {
+    id: string;
+    schedule_id: string;
+    revision: number;
+    trigger: Generated<'scheduled' | 'manual'>;
+    request_key: string | null;
+    requester_id: string | null;
+    due_at: Date;
+    action: ScheduleAction;
+    status: 'dispatched' | 'skipped';
+    reason: string | null;
+    missed_count: number;
+    job_id: string | null;
+    created_at: Generated<Date>;
+  };
+}

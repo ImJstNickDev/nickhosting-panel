@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
 import { z } from 'zod';
+import { vanillaJavaMajor } from './vanilla-policy.js';
 
 export const minecraftRuntimeProfiles = ['vanilla', 'paper', 'folia', 'fabric', 'forge'] as const;
 export type MinecraftRuntimeProfile = (typeof minecraftRuntimeProfiles)[number];
@@ -218,15 +219,19 @@ export async function resolveMinecraftRuntime(
   const release = parse(
     z.object({
       id: exactVersion,
-      javaVersion: z.object({ majorVersion: javaVersion }),
+      javaVersion: z.object({ majorVersion: javaVersion }).optional(),
       downloads: z.object({
-        server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }),
+        server: z.object({ url: z.string(), sha1, size: z.number().int().positive() }).optional(),
       }),
     }),
     json(releaseDocument),
   );
   if (release.id !== request.release) return fail('minecraft_release_mismatch');
-  let javaMajor = release.javaVersion.majorVersion;
+  if (!release.downloads.server) return fail('minecraft_server_download_unavailable');
+  let javaMajor =
+    request.profile === 'vanilla'
+      ? vanillaJavaMajor(request.release, entry.type, release.javaVersion?.majorVersion)
+      : (release.javaVersion?.majorVersion ?? fail('minecraft_java_unknown'));
   let upstreamSupport: string | undefined;
   let upstreamChannel: string | undefined;
   let artifacts: RuntimeArtifact[] = [

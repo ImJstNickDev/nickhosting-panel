@@ -5,6 +5,7 @@ import type WebSocket from 'ws';
 import { WebSocketServer } from 'ws';
 import { createPterodactylAdapter } from './adapter.js';
 import type { ConsoleEvent, ConsoleRelay } from './console.js';
+import type { ApplicationServer } from './types.js';
 
 const uuid = 'f729c8a1-6773-467a-af3f-a7ea8704f0bd';
 const client = {
@@ -66,6 +67,7 @@ async function setup() {
   return {
     adapter,
     fetcher,
+    origin,
     incoming,
     origins,
     send(event: string, args: unknown[]) {
@@ -76,6 +78,71 @@ async function setup() {
 }
 
 describe('backend console mediation over a real isolated WebSocket', () => {
+  it('uses the managed stop UUID for its internal relay without refetching Application or Client identity', async () => {
+    const fixture = await setup();
+    const reads: string[] = [];
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      reads.push(path);
+      if (path.endsWith('/websocket')) return fixture.fetcher(url, init);
+      if (path.endsWith('/power')) {
+        fixture.send('status', ['stopping']);
+        fixture.send('status', ['offline']);
+        return new Response(null, { status: 204 });
+      }
+      throw new Error('Unexpected identity refetch');
+    });
+    const observer = { preflight: vi.fn(async () => {}), stopped: vi.fn(async () => true) };
+    const adapter = createPterodactylAdapter({
+      baseURL: 'https://panel.example.com',
+      applicationKey: 'isolated-app-key',
+      clientKey: 'isolated-client-key',
+      fetcher,
+      webSocketOrigins: [fixture.origin],
+      containerObserver: observer,
+      timeoutMs: 1000,
+    });
+    const beforePower = vi.fn(async () => {}),
+      onConfirmed = vi.fn(async () => {});
+    const result = await adapter.stopWithConfirmation(1, client.identifier, {
+      verifiedServer: {
+        id: 1,
+        uuid,
+        identifier: client.identifier,
+        nest: 1,
+        egg: 1,
+      } as ApplicationServer,
+      authorize: async () => true,
+      beforePower,
+      onConfirmed,
+    });
+    expect(result).toEqual({ confirmed: true });
+    expect(reads).toEqual([
+      `/api/client/servers/${client.identifier}/websocket`,
+      `/api/client/servers/${client.identifier}/power`,
+    ]);
+    expect(beforePower).toHaveBeenCalledTimes(1);
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+    expect(observer.stopped).toHaveBeenCalledWith(uuid, 'server');
+  });
+  it('rechecks command permission independently from read-only stream permission', async () => {
+    const fixture = await setup();
+    let writable = true;
+    const relay = await fixture.adapter.relayConsole('f729c8a1', {
+      authorize: async () => true,
+      canSendCommands: true,
+      authorizeCommand: async () => writable,
+      onEvent: () => {},
+    });
+    relays.push(relay);
+    await relay.sendCommand('list');
+    await vi.waitFor(() => expect(fixture.incoming).toHaveLength(2));
+    writable = false;
+    await expect(relay.sendCommand('stop')).rejects.toMatchObject({ code: 'forbidden' });
+    expect(fixture.incoming).toHaveLength(2);
+    await relay.requestStats();
+    await vi.waitFor(() => expect(fixture.incoming.at(-1)?.event).toBe('send stats'));
+  });
   it('sets the Panel Origin, authenticates internally, filters events and redacts tokens', async () => {
     const fixture = await setup();
     const events: ConsoleEvent[] = [];
@@ -88,6 +155,8 @@ describe('backend console mediation over a real isolated WebSocket', () => {
     expect(fixture.origins).toEqual(['https://panel.example.com']);
     expect(fixture.incoming[0]).toEqual({ event: 'auth', args: ['jwt-fixture-secret-0'] });
     fixture.send('console output', ['server ready jwt-fixture-secret-0 client-fixture-secret']);
+    fixture.send('daemon message', ['Pulling image app-fixture-secret']);
+    fixture.send('install output', ['Installer output client-fixture-secret']);
     fixture.send('auth', ['do-not-forward']);
     fixture.send('status', ['running']);
     fixture.send('stats', [
@@ -98,9 +167,11 @@ describe('backend console mediation over a real isolated WebSocket', () => {
         token: 'do-not-forward',
       }),
     ]);
-    await vi.waitFor(() => expect(events).toHaveLength(3));
+    await vi.waitFor(() => expect(events).toHaveLength(5));
     expect(events).toEqual([
       { type: 'console', data: 'server ready [redacted] [redacted]' },
+      { type: 'console', data: 'Pulling image [redacted]' },
+      { type: 'console', data: 'Installer output [redacted]' },
       { type: 'status', data: 'running' },
       { type: 'stats', data: { memory_bytes: 100, cpu_absolute: 4, disk_bytes: 20 } },
     ]);

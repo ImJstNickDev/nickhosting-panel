@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzipSync } from 'node:zlib';
+import { DomainError } from '@nickhosting/core';
 import { type NBT, writeUncompressed } from 'prismarine-nbt';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ZipFile } from 'yazl';
@@ -381,5 +382,91 @@ describe('world operation consent and discovery', () => {
     ]);
     expect(reads).not.toContain('plugins');
     expect(reads).not.toContain('../bad');
+  });
+});
+
+describe('world inventory observations', () => {
+  it('retains actual version metadata without granting compatibility when evidence is unavailable', async () => {
+    const worlds = await discoverMinecraftWorlds(
+      {
+        listRoot: async () => [{ name: 'legacy', isDirectory: true }],
+        readLevelDat: async () => levelDat(1234, '1.9'),
+      },
+      { release: '26.1' },
+    );
+    expect(worlds).toEqual([
+      expect.objectContaining({
+        name: 'legacy',
+        status: 'unavailable',
+        validation: expect.objectContaining({ dataVersion: 1234, versionName: '1.9' }),
+      }),
+    ]);
+    const known = await discoverMinecraftWorlds(
+      {
+        listRoot: async () => [{ name: 'legacy', isDirectory: true }],
+        readLevelDat: async () => levelDat(1234, '1.9'),
+      },
+      { release: '26.1', expectedDataVersion: 5000 },
+    );
+    expect(known[0]).toMatchObject({ status: 'incompatible', validation: { versionName: '1.9' } });
+  });
+
+  it('uses at most two readers, scans each candidate once and preserves provider order', async () => {
+    let active = 0;
+    let maximum = 0;
+    const names = ['one', 'two', 'three', 'four', 'five'];
+    const root = vi.fn(async () => names.map((name) => ({ name, isDirectory: true })));
+    const read = vi.fn(async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      return levelDat();
+    });
+    const worlds = await discoverMinecraftWorlds(
+      { listRoot: root, readLevelDat: read },
+      {
+        release: '26.1',
+        expectedDataVersion: 5000,
+      },
+    );
+    expect(worlds.map((world) => world.name)).toEqual(names);
+    expect(maximum).toBe(2);
+    expect(active).toBe(0);
+    expect(root).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(names.length);
+  });
+
+  it('propagates revoked authorization instead of returning a misleading partial inventory', async () => {
+    await expect(
+      discoverMinecraftWorlds(
+        {
+          listRoot: async () => [{ name: 'world', isDirectory: true }],
+          readLevelDat: async () => {
+            throw new DomainError('forbidden');
+          },
+        },
+        { release: '26.1' },
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('rejects excessive candidates and case aliases before starting remote metadata reads', async () => {
+    const read = vi.fn();
+    for (const names of [
+      ['one', 'two'],
+      ['one', 'ONE'],
+    ]) {
+      await expect(
+        discoverMinecraftWorlds(
+          {
+            listRoot: async () => names.map((name) => ({ name, isDirectory: true })),
+            readLevelDat: read,
+          },
+          { release: '26.1', maxWorlds: names[1] === 'two' ? 1 : 2 },
+        ),
+      ).rejects.toThrow();
+    }
+    expect(read).not.toHaveBeenCalled();
   });
 });

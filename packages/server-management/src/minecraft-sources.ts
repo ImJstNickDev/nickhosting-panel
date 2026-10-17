@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, statfs } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { lstat, open } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   type ContentArtifact,
   type ContentHttp,
@@ -10,15 +10,23 @@ import {
   ModrinthProvider,
   SafeContentHttp,
 } from '@nickhosting/content-providers';
-import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, getSettings, recordAudit } from '@nickhosting/database';
+import { type AuthContext, contentPolicyValues, DomainError } from '@nickhosting/core';
+import {
+  assertStoragePolicyIdle,
+  type Database,
+  getSettings,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
+import {
+  assertContentAdmission,
+  contentStorageRoot,
+  reserveContentStaging,
+} from './content-admission.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, ownerOnly, parse } from './registry.js';
-import { unresolvedTransferBytes } from './transfer-capacity.js';
-import { uploadStagingAvailableBytes } from './upload-admission.js';
 
 type Source = Selectable<Database['minecraft_sources']>;
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
@@ -68,27 +76,6 @@ function sourcePath(source: Source): string {
   parse(z.uuid(), source.id);
   return join(source.storage_root, source.id, 'archive.bin');
 }
-function sourceRoot(setting: string): string {
-  const root = resolve(setting);
-  const mountdata = `${resolve('./mountdata')}${sep}`;
-  if (!root.startsWith(mountdata) || root === mountdata || /[\0\r\n]/.test(root))
-    throw new DomainError('configuration_invalid');
-  return root;
-}
-async function observeDisk(directory: string) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const result = await Promise.race([
-      statfs(directory, { bigint: true }),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new DomainError('integration_unavailable')), 5000);
-      }),
-    ]);
-    return { available: uploadStagingAvailableBytes(result), total: result.blocks * result.bsize };
-  } finally {
-    clearTimeout(timer);
-  }
-}
 async function current(
   db: Kysely<Database>,
   context: AuthContext,
@@ -121,6 +108,7 @@ async function ownedSource(
     .selectFrom('minecraft_sources')
     .selectAll()
     .where('id', '=', reference)
+    .where('game_id', '=', 'minecraft')
     .executeTakeFirst();
   if (!row) throw new DomainError('not_found');
   // Project managers may prepare sources for that server, but never reuse them
@@ -233,123 +221,8 @@ export async function bindMinecraftSource(
   await recordAudit(db, actor, 'minecraft.source.bound', { sourceId: reference, serverId });
 }
 
-/** Durable workers call this after their normal authorization and before any
- * expanded output/download. No second lifecycle or job system is introduced. */
-export async function reserveMinecraftStaging(
-  db: Kysely<Database>,
-  context: AuthContext,
-  jobId: string,
-  serverId: string,
-  expandedBytes: number,
-  env: Environment = {},
-  options: Pick<MinecraftSourceOptions, 'observeDisk'> = {},
-) {
-  parse(z.uuid(), jobId);
-  parse(z.uuid(), serverId);
-  if (
-    !Number.isSafeInteger(expandedBytes) ||
-    expandedBytes < 0 ||
-    expandedBytes > Number.MAX_SAFE_INTEGER - 65536
-  )
-    throw new DomainError('validation_failed');
-  return db.transaction().execute(async (tx) => {
-    await lockResources(tx);
-    const job = await tx
-      .selectFrom('operation_jobs as job')
-      .innerJoin('server_operations as operation', 'operation.job_id', 'job.id')
-      .innerJoin('managed_servers as server', 'server.id', 'operation.server_id')
-      .select([
-        'job.actor_id',
-        'job.subject_id',
-        'job.resource_owner_id',
-        'job.state',
-        'server.id',
-        'server.active_operation_id',
-        'operation.action',
-      ])
-      .where('job.id', '=', jobId)
-      .where('server.id', '=', serverId)
-      .where('server.deleted_at', 'is', null)
-      .executeTakeFirst();
-    if (
-      !job ||
-      job.actor_id !== context.actorUserId ||
-      job.subject_id !== context.subjectUserId ||
-      job.state !== 'running' ||
-      job.active_operation_id !== jobId ||
-      !['provision', 'minecraft-content', 'reinstall', 'wipe'].includes(job.action)
-    )
-      throw new DomainError('forbidden');
-    await authorizeServer(tx, context, serverId, 'server:manage');
-    const { values } = await getSettings(tx, env);
-    const root = sourceRoot(values.minecraftContentRoot);
-    const bytes = BigInt(expandedBytes) + 65536n;
-    const identity = createHash('sha256')
-      .update(JSON.stringify({ jobId, serverId, bytes: String(bytes), root }))
-      .digest('hex');
-    const existing = await tx
-      .selectFrom('minecraft_staging_claims')
-      .selectAll()
-      .where('job_id', '=', jobId)
-      .executeTakeFirst();
-    if (existing) {
-      if (existing.identity_digest !== identity || existing.state !== 'reserved')
-        throw new DomainError('conflict');
-      return { jobId, identityDigest: identity, reservedBytes: Number(bytes) };
-    }
-    await contentStageDirectory(root);
-    const sources = await tx
-      .selectFrom('minecraft_sources')
-      .select(['owner_user_id', 'reserved_bytes'])
-      .where('state', '!=', 'released')
-      .execute();
-    const stages = await tx
-      .selectFrom('minecraft_staging_claims')
-      .select(['owner_user_id', 'reserved_bytes'])
-      .where('state', '=', 'reserved')
-      .execute();
-    const total = [...sources, ...stages].reduce(
-      (sum, row) => sum + BigInt(row.reserved_bytes),
-      0n,
-    );
-    const user = [...sources, ...stages]
-      .filter((row) => row.owner_user_id === job.resource_owner_id)
-      .reduce((sum, row) => sum + BigInt(row.reserved_bytes), 0n);
-    if (
-      total + bytes > BigInt(values.minecraftSourceGlobalBytes) ||
-      user + bytes > BigInt(values.minecraftSourceUserBytes)
-    )
-      throw new DomainError('resources_unavailable');
-    const disk = await (options.observeDisk ?? observeDisk)(root);
-    const percent =
-      (disk.total * BigInt(Math.ceil(values.minecraftSourceFreePercent * 100))) / 10000n;
-    const margin =
-      percent > BigInt(values.minecraftSourceFreeBytes)
-        ? percent
-        : BigInt(values.minecraftSourceFreeBytes);
-    if (disk.available < (await unresolvedTransferBytes(tx)) + bytes + margin)
-      throw new DomainError('resources_unavailable');
-    await tx
-      .insertInto('minecraft_staging_claims')
-      .values({
-        job_id: jobId,
-        server_id: serverId,
-        owner_user_id: job.resource_owner_id,
-        actor_user_id: context.actorUserId,
-        reserved_bytes: String(bytes),
-        storage_root: root,
-        identity_digest: identity,
-      })
-      .execute();
-    await recordAudit(tx, context, 'minecraft.staging.reserved', {
-      jobId,
-      serverId,
-      reservedBytes: Number(bytes),
-      identityDigest: identity,
-    });
-    return { jobId, identityDigest: identity, reservedBytes: Number(bytes) };
-  });
-}
+/** Compatibility export for existing Minecraft worker composition. */
+export const reserveMinecraftStaging = reserveContentStaging;
 
 export function createMinecraftSourceStore(
   db: Kysely<Database>,
@@ -389,6 +262,7 @@ export function createMinecraftSourceStore(
         .selectFrom('minecraft_sources')
         .selectAll()
         .where('owner_user_id', '=', ownerId)
+        .where('game_id', '=', 'minecraft')
         .where((eb) =>
           eb.or([
             eb('idempotency_key', '=', input.idempotencyKey),
@@ -407,51 +281,21 @@ export function createMinecraftSourceStore(
         return existing[0];
       }
       const { values } = await getSettings(tx, env);
-      const root = sourceRoot(values.minecraftSourceRoot);
+      const root = contentStorageRoot(values.contentSourceRoot);
       await contentStageDirectory(root);
-      const claims = await tx
-        .selectFrom('minecraft_sources')
-        .select(['owner_user_id', 'reserved_bytes', 'state'])
-        .where('state', '!=', 'released')
-        .execute();
-      const expansions = await tx
-        .selectFrom('minecraft_staging_claims')
-        .select(['owner_user_id', 'reserved_bytes'])
-        .where('state', '=', 'reserved')
-        .execute();
-      const total = [...claims, ...expansions].reduce(
-        (sum, row) => sum + BigInt(row.reserved_bytes),
-        0n,
-      );
-      const owned = claims.filter((row) => row.owner_user_id === ownerId);
-      const userBytes = [
-        ...owned,
-        ...expansions.filter((row) => row.owner_user_id === ownerId),
-      ].reduce((sum, row) => sum + BigInt(row.reserved_bytes), 0n);
-      const pending = (rows: typeof claims) => rows.filter((row) => row.state !== 'ready').length;
+      await assertStoragePolicyIdle(tx);
       const bytes = BigInt(input.bytes) + 65536n;
-      if (
-        total + bytes > BigInt(values.minecraftSourceGlobalBytes) ||
-        userBytes + bytes > BigInt(values.minecraftSourceUserBytes) ||
-        pending(claims) >= values.minecraftSourceConcurrent ||
-        pending(owned) >= values.minecraftSourceUserConcurrent
-      )
-        throw new DomainError('resources_unavailable');
-      // Fresh under the shared resource lock. All claims remain charged even if
-      // statfs already reflects their bytes; conservative double accounting is intentional.
-      const disk = await (options.observeDisk ?? observeDisk)(root);
-      const percent =
-        (disk.total * BigInt(Math.ceil(values.minecraftSourceFreePercent * 100))) / 10000n;
-      const margin =
-        percent > BigInt(values.minecraftSourceFreeBytes)
-          ? percent
-          : BigInt(values.minecraftSourceFreeBytes);
-      if (disk.available < (await unresolvedTransferBytes(tx)) + bytes + margin)
-        throw new DomainError('resources_unavailable');
+      await assertContentAdmission(
+        tx,
+        values,
+        { gameId: 'minecraft', ownerId, bytes, root },
+        options,
+      );
       const row = await tx
         .insertInto('minecraft_sources')
         .values({
           id: randomUUID(),
+          game_id: 'minecraft',
           actor_user_id: actor.actorUserId,
           owner_user_id: ownerId,
           server_id: input.serverId ?? null,
@@ -578,6 +422,7 @@ export function createMinecraftSourceStore(
       const sources = await db
         .selectFrom('minecraft_sources')
         .selectAll()
+        .where('game_id', '=', 'minecraft')
         .where('state', '!=', 'released')
         .orderBy('created_at', 'asc')
         .limit(500)
@@ -591,6 +436,7 @@ export function createMinecraftSourceStore(
           'identity_digest as identityDigest',
           'state',
         ])
+        .where('game_id', '=', 'minecraft')
         .where('state', '=', 'reserved')
         .orderBy('created_at', 'asc')
         .limit(500)
@@ -661,17 +507,15 @@ export function createMinecraftSourceStore(
       const value = parse(minecraftSourceModrinthSchema, input);
       await authorizeScope(db, await reauthorize(), value.serverId);
       const { values } = await getSettings(db, env);
-      if (!options.http && !values.minecraftMetadataUserAgent)
+      const policy = contentPolicyValues(values, 'minecraft');
+      if (!options.http && !values.contentMetadataUserAgent)
         throw new DomainError('configuration_invalid');
       const http =
         options.http ??
         new SafeContentHttp({
-          allowedOrigins: ['https://api.modrinth.com', ...values.minecraftDownloadOrigins],
-          userAgent: values.minecraftMetadataUserAgent as string,
-          maxDownloadBytes: Math.min(
-            values.minecraftSourceGlobalBytes,
-            values.minecraftSourceUserBytes,
-          ),
+          allowedOrigins: ['https://api.modrinth.com', ...policy.downloadOrigins],
+          userAgent: values.contentMetadataUserAgent as string,
+          maxDownloadBytes: Math.min(policy.sourceGlobalBytes, policy.sourceUserBytes),
         });
       const artifact = await new ModrinthProvider(http).modpackArchive(
         value.projectId,
@@ -735,6 +579,7 @@ export function createMinecraftSourceStore(
           .selectFrom('minecraft_staging_claims')
           .selectAll()
           .where('job_id', '=', jobId)
+          .where('game_id', '=', 'minecraft')
           .executeTakeFirst();
         if (!row) throw new DomainError('not_found');
         const job = await tx
@@ -796,6 +641,7 @@ export function createMinecraftSourceStore(
             .selectFrom('minecraft_sources')
             .selectAll()
             .where('id', '=', reference)
+            .where('game_id', '=', 'minecraft')
             .executeTakeFirst();
           if (!row) throw new DomainError('not_found');
           if (row.identity_digest !== value.identityDigest || row.state === 'released')

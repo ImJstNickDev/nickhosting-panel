@@ -50,9 +50,70 @@ function hello(intent: number, protocol = 767): Buffer {
   );
 }
 describe('production Minecraft Gateway module', () => {
+  it('supports current declarations for modern/legacy families and preserves legacy routes', () => {
+    const adapter = createMinecraftGatewayModuleAdapter();
+    for (const [release, protocolId, family] of [
+      ['26.3', 777, 'netty'],
+      ['a1.0.15', 13, 'legacy'],
+      ['1.6.4', 78, 'legacy'],
+    ] as const) {
+      const selected = route();
+      selected.protocol.gameVersion = release;
+      selected.protocol.minecraft = {
+        release,
+        protocolId,
+        family,
+        transfer: false,
+        acceptsTransfers: false,
+        choiceId: randomUUID(),
+        choiceDigest: 'a'.repeat(64),
+        supportSource: 'integration',
+        declarationId: 'minecraft/vanilla',
+        declarationVersion: 2,
+      };
+      expect(gatewayRouteSchema.safeParse(selected).success).toBe(true);
+      expect(adapter.supports(selected)).toBe(true);
+    }
+  });
+
+  it('accepts only exact compiled declarations without claiming a local evidence run', () => {
+    const adapter = createMinecraftGatewayModuleAdapter({ now: () => now });
+    const selected = route();
+    selected.protocol.gameVersion = '26.1';
+    selected.protocol.minecraft = {
+      release: '26.1',
+      protocolId: 775,
+      family: 'netty',
+      transfer: true,
+      acceptsTransfers: false,
+      choiceId: randomUUID(),
+      choiceDigest: 'a'.repeat(64),
+      supportSource: 'integration',
+      declarationId: 'minecraft-java/vanilla',
+      declarationVersion: 1,
+    };
+    expect(gatewayRouteSchema.safeParse(selected).success).toBe(true);
+    expect(adapter.supports(selected)).toBe(true);
+    const session = adapter.createSession?.({
+      route: selected,
+      signal: new AbortController().signal,
+    });
+    expect(session?.classify(hello(2, 775)).kind).toBe('continue');
+    expect(session?.classify(frameMinecraftPacket(0, Buffer.from([1, 120]))).kind).toBe('join');
+    selected.protocol.minecraft.declarationVersion = 2;
+    expect(adapter.supports(selected)).toBe(false);
+    expect(session?.response('waking')).toEqual({ close: true });
+    selected.protocol.minecraft.declarationVersion = 1;
+    selected.protocol.minecraft.protocolId = 774;
+    expect(adapter.supports(selected)).toBe(false);
+    selected.protocol.minecraft.protocolId = 775;
+    selected.protocol.minecraft.declarationId = 'owner-checkbox';
+    expect(adapter.supports(selected)).toBe(false);
+  });
   it('provides the existing loader contract without fetching metadata', () => {
     expect(gatewayProtocols).toHaveLength(1);
     expect(gatewayProtocols[0]?.id).toBe('minecraft-java');
+    expect(gatewayProtocols[0]?.startupHint).toBe('provider_running');
     const adapter = createMinecraftGatewayModuleAdapter({ now: () => now });
     const selected = route();
     expect(adapter.supports(selected)).toBe(true);
@@ -61,7 +122,8 @@ describe('production Minecraft Gateway module', () => {
       route: selected,
       signal: new AbortController().signal,
     });
-    expect(session?.classify(hello(2)).kind).toBe('join');
+    expect(session?.classify(hello(2)).kind).toBe('continue');
+    expect(session?.classify(frameMinecraftPacket(0, Buffer.from([1, 120]))).kind).toBe('join');
     expect(session?.response('waking').bytes?.length).toBeGreaterThan(0);
   });
   it('requires Core metadata, exact release/handler/role/transport and live evidence', () => {
@@ -91,8 +153,11 @@ describe('production Minecraft Gateway module', () => {
     expect(passive?.classify(hello(1)).kind).toBe('continue');
     expect(passive?.classify(frameMinecraftPacket(0)).kind).toBe('status');
     expect(passive?.response('sleeping').close).toBe(false);
-    expect(adapter.createSession?.(context).classify(hello(3)).kind).toBe('reject');
-    expect(adapter.createSession?.(context).classify(hello(2, 999999)).kind).toBe('unsupported');
+    for (const handshake of [hello(3), hello(2, 999999)]) {
+      const session = adapter.createSession?.(context);
+      expect(session?.classify(handshake).kind).toBe('continue');
+      expect(session?.classify(frameMinecraftPacket(0, Buffer.from([1, 120]))).kind).toBe('reject');
+    }
   });
   it('does not carry an old conversation across replaced protocol evidence', () => {
     const adapter = createMinecraftGatewayModuleAdapter({ now: () => now });
@@ -102,6 +167,7 @@ describe('production Minecraft Gateway module', () => {
       signal: new AbortController().signal,
     });
     expect(session?.classify(hello(1)).kind).toBe('continue');
+    if (selected.protocol.minecraft.supportSource === 'integration') throw new Error('fixture');
     selected.protocol.minecraft.evidenceRunId = randomUUID();
     expect(session?.classify(frameMinecraftPacket(0)).kind).toBe('unsupported');
     expect(session?.response('sleeping')).toEqual({ close: true });
@@ -117,5 +183,6 @@ describe('production Minecraft Gateway module', () => {
     expect(session?.response('sleeping')).toEqual({ close: true });
     expect(await adapter.probeReadiness(context)).toEqual({ ready: false });
     expect(await adapter.probeIdle?.(context)).toEqual({ idle: false });
+    expect(await adapter.observe?.(context)).toEqual({ ready: false, idle: false });
   });
 });

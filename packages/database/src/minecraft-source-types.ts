@@ -2,6 +2,7 @@ import type { ColumnType, Generated } from 'kysely';
 
 export interface MinecraftSourceTables {
   minecraft_staging_claims: {
+    game_id: Generated<string>;
     job_id: string;
     server_id: string;
     owner_user_id: string;
@@ -18,6 +19,7 @@ export interface MinecraftSourceTables {
     created_at: Generated<Date>;
   };
   minecraft_sources: {
+    game_id: Generated<string>;
     id: string;
     actor_user_id: string;
     owner_user_id: string;

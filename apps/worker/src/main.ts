@@ -1,10 +1,21 @@
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger, DomainError, encryptionKeyFromBase64, SecretCodec } from '@nickhosting/core';
 import { createDatabase } from '@nickhosting/database';
 import { processJob, startJobWorker } from '@nickhosting/jobs';
-import { createManagementRuntime } from '@nickhosting/server-management';
+import {
+  createManagementRuntime,
+  createManagementTransportCoordinator,
+  ensureProviderAccounts,
+  recordWorkerHeartbeat,
+  refreshHostObservations,
+} from '@nickhosting/server-management';
+import { startHostObservationLoop } from './host-observations.js';
+import { pollMinecraftMetadata } from './minecraft-metadata.js';
+import { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed.js';
 import { reconcileServers } from './reconcile.js';
+import { pollSchedules } from './schedules.js';
 
 export async function main(env: NodeJS.ProcessEnv = process.env) {
   const logger = createLogger((record) => {
@@ -12,7 +23,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
   });
   if (!env.DATABASE_URL || !env.REDIS_URL || !env.NH_JOB_PREFIX)
     throw new DomainError('configuration_invalid');
-  const { db } = createDatabase(env.DATABASE_URL);
+  const { db, pool } = createDatabase(env.DATABASE_URL);
+  const transportCoordinator = createManagementTransportCoordinator();
   try {
     const management = async () => {
       if (!env.NH_SECRETS_MASTER_KEY) throw new DomainError('configuration_invalid');
@@ -20,6 +32,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       return createManagementRuntime({
         db,
         env,
+        logger,
+        transportCoordinator,
         codec: new SecretCodec({
           activeKeyId: keyId,
           keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
@@ -28,6 +42,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     };
     const runtime = await startJobWorker({
       db,
+      notificationPool: pool,
       redisUrl: env.REDIS_URL,
       prefix: env.NH_JOB_PREFIX,
       logger,
@@ -40,21 +55,87 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         return row ? (await management()).process(jobId) : processJob(db, jobId);
       },
     });
+    const observations = startHostObservationLoop(
+      async () => {
+        await refreshHostObservations(db, env, { force: true });
+      },
+      () => logger.log('warn', 'host.observation_unavailable'),
+    );
+    const providerAccounts = startProviderFeedLoop(
+      async () => {
+        if (!env.NH_SECRETS_MASTER_KEY) return;
+        const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+        const codec = new SecretCodec({
+          activeKeyId: keyId,
+          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+        });
+        await ensureProviderAccounts(db, codec, env, { coordinator: transportCoordinator });
+      },
+      () => logger.log('warn', 'provider.enrollment_unavailable'),
+    );
+    const providerFeeds = startProviderFeedLoop(
+      async () => {
+        if (!env.NH_SECRETS_MASTER_KEY) return;
+        const keyId = env.NH_SECRETS_KEY_ID ?? 'primary';
+        const codec = new SecretCodec({
+          activeKeyId: keyId,
+          keys: { [keyId]: encryptionKeyFromBase64(env.NH_SECRETS_MASTER_KEY) },
+        });
+        await refreshProviderFeeds(db, codec, env, transportCoordinator);
+      },
+      () => logger.log('warn', 'provider.feed_unavailable'),
+    );
     let stopping = false;
+    let schedulesHealthy = true;
+    const workerInstanceId = randomUUID();
+    const heartbeat = async (state: 'running' | 'degraded' | 'stopped') => {
+      try {
+        await recordWorkerHeartbeat(db, workerInstanceId, env.NH_JOB_PREFIX ?? '', state);
+      } catch {
+        logger.log('warn', 'worker.heartbeat_unavailable');
+      }
+    };
     let timer: ReturnType<typeof setTimeout> | undefined;
     let reconciliation: Promise<void> | undefined;
     const poll = async () => {
+      let successful = false;
       try {
         await reconcileServers(db, management, logger, env);
+        successful =
+          schedulesHealthy &&
+          runtime.worker.isRunning() &&
+          (await runtime.queue.getBackend().client).status === 'ready';
       } catch {
         logger.log('warn', 'servers.reconciliation_failed');
       } finally {
+        await heartbeat(successful ? 'running' : 'degraded');
         if (!stopping)
           timer = setTimeout(() => {
             reconciliation = poll();
           }, 5000);
       }
     };
+    let scheduleTimer: ReturnType<typeof setTimeout> | undefined;
+    let schedulePoll: Promise<void> | undefined;
+    const pollAutomation = async () => {
+      const result = await pollSchedules(db, env, logger);
+      schedulesHealthy = result !== null && !result.failures;
+      if (!stopping)
+        scheduleTimer = setTimeout(() => {
+          schedulePoll = pollAutomation();
+        }, 1000);
+    };
+    schedulePoll = pollAutomation();
+    let metadataTimer: ReturnType<typeof setTimeout> | undefined;
+    let metadataPoll: Promise<void> | undefined;
+    const refreshMetadata = async () => {
+      await pollMinecraftMetadata(db, env, logger);
+      if (!stopping)
+        metadataTimer = setTimeout(() => {
+          metadataPoll = refreshMetadata();
+        }, 30_000);
+    };
+    metadataPoll = refreshMetadata();
     reconciliation = poll();
     logger.log('info', 'worker.started');
     let closed: Promise<void> | undefined;
@@ -62,10 +143,20 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
       closed ??= (async () => {
         stopping = true;
         if (timer) clearTimeout(timer);
-        await reconciliation;
+        if (metadataTimer) clearTimeout(metadataTimer);
+        if (scheduleTimer) clearTimeout(scheduleTimer);
+        await Promise.all([
+          reconciliation,
+          metadataPoll,
+          schedulePoll,
+          observations.close(),
+          providerFeeds.close(),
+          providerAccounts.close(),
+        ]);
         try {
           await runtime.close();
         } finally {
+          await heartbeat('stopped');
           await db.destroy();
         }
         logger.log('info', 'worker.stopped');

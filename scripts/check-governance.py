@@ -7,6 +7,8 @@ from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import subprocess
+import struct
+import zlib
 import sys
 import tempfile
 import tomllib
@@ -17,13 +19,45 @@ def git(*args, cwd=None, input=None):
     return subprocess.run(["git", *args], cwd=cwd, input=input, capture_output=True)
 
 
+def safe_review_png(path, blob):
+    """Only browser review PNGs, without embedded text/metadata or trailing data.
+
+    Pixel content still requires a human privacy review; this is not redaction.
+    """
+    if not re.fullmatch(r"docs/screenshots/m5/[a-z0-9-]+\.png", path):
+        return False
+    if not 33 <= len(blob) <= 5 * 1024 * 1024 or blob[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    offset, kinds = 8, []
+    while offset + 12 <= len(blob):
+        size = struct.unpack(">I", blob[offset:offset + 4])[0]
+        kind = blob[offset + 4:offset + 8]
+        end = offset + size + 12
+        if end > len(blob) or kind not in (b"IHDR", b"IDAT", b"IEND"):
+            return False
+        data = blob[offset + 8:end - 4]
+        if zlib.crc32(kind + data) != struct.unpack(">I", blob[end - 4:end])[0]:
+            return False
+        if kind == b"IHDR":
+            if kinds or size != 13:
+                return False
+            width, height = struct.unpack(">II", data[:8])
+            if not 1 <= width <= 4000 or not 1 <= height <= 12000:
+                return False
+        if kind == b"IEND" and (size or end != len(blob)):
+            return False
+        kinds.append(kind)
+        offset = end
+    return offset == len(blob) and kinds[:1] == [b"IHDR"] and kinds[-1:] == [b"IEND"] and b"IDAT" in kinds
+
+
 def main():
     root_result = git("rev-parse", "--show-toplevel")
     if root_result.returncode:
         print("FAIL: run inside the initialized project Git repository")
         return 1
     root = Path(os.fsdecode(root_result.stdout.strip()))
-    failures, files = [], {}
+    failures, files, images = [], {}, set()
     entries = git("ls-files", "--stage", "-z", cwd=root)
     if entries.returncode:
         print("FAIL: cannot read Git index")
@@ -38,6 +72,9 @@ def main():
             failures.append(f"{path}: unresolved, symlink or non-regular index entry")
             continue
         blob = git("show", f":{path}", cwd=root)
+        if not blob.returncode and safe_review_png(path, blob.stdout):
+            images.add(path)
+            continue
         try:
             if blob.returncode or b"\0" in blob.stdout:
                 raise ValueError()
@@ -81,7 +118,7 @@ def main():
                     failures.append(f"{path}: private-network IP address")
                     break
 
-    directories = {str(parent) for path in files
+    directories = {str(parent) for path in set(files) | images
                    for parent in PurePosixPath(path).parents}
     links = 0
     for path, content in files.items():
@@ -100,7 +137,7 @@ def main():
             resolved = posixpath.normpath(posixpath.join(
                 str(PurePosixPath(path).parent), unquote(parsed.path)))
             links += 1
-            if resolved not in files and resolved not in directories:
+            if resolved not in files and resolved not in images and resolved not in directories:
                 failures.append(f"{path}: missing indexed link target {target}")
 
     tomls = {}
@@ -146,7 +183,7 @@ def main():
     whitespace = git("diff", "--cached", "--check", cwd=root)
     if whitespace.returncode:
         failures.append("git diff --cached --check failed; inspect locally before publishing")
-    print(f"Checked {len(files)} indexed text files, {links} relative links, "
+    print(f"Checked {len(files)} indexed text files, {len(images)} review PNGs, {links} relative links, "
           f"{len(tomls)} TOML files and {len(excluded) + len(allowed)} ignore cases.")
     for failure in failures:
         print(f"FAIL: {failure}")

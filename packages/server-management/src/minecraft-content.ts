@@ -22,7 +22,11 @@ import {
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
-import { minecraftCombinationSchema, minecraftDigest } from '@nickhosting/minecraft';
+import {
+  minecraftCombinationSchema,
+  minecraftDigest,
+  minecraftManifest,
+} from '@nickhosting/minecraft';
 import type { PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import type { Kysely } from 'kysely';
 import { z } from 'zod';
@@ -58,6 +62,7 @@ import {
   requireMinecraftRuntimeImageEvidence,
 } from './minecraft-runtime-evidence.js';
 import { createMinecraftSourceStore, reserveMinecraftStaging } from './minecraft-sources.js';
+import { assertServerStorageCapacity } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
 
 export type {
@@ -360,6 +365,20 @@ export async function prepareMinecraftContentPlan(
     );
   return result;
 }
+export function assertMinecraftPlayerConfiguration(
+  choice: Awaited<ReturnType<typeof inspectMinecraftCombination>>,
+  configuration: z.infer<typeof minecraftConfigurationSchema>,
+): void {
+  if (
+    choice.supportAuthority === 'integration' &&
+    !choice.capabilities.playerManagement &&
+    (configuration.operators.length > 0 ||
+      configuration.whitelist.length > 0 ||
+      configuration.properties['white-list'] === true ||
+      configuration.properties['white-list'] === 'true')
+  )
+    throw new DomainError('integration_unavailable');
+}
 export async function prepareMinecraftCreationConfig(
   db: Kysely<Database>,
   choiceId: string,
@@ -367,8 +386,9 @@ export async function prepareMinecraftCreationConfig(
   options: MinecraftContentOptions,
 ) {
   const configuration = minecraftConfigurationSchema.parse(input);
-  if (!configuration.modpack) return { configuration };
   const choice = await inspectMinecraftCombination(db, choiceId, options.env);
+  assertMinecraftPlayerConfiguration(choice, configuration);
+  if (!configuration.modpack) return { configuration };
   const selected = configuration.modpack;
   const source =
     'sourceId' in selected
@@ -800,8 +820,42 @@ async function verifyInstalledRuntime(
   }
   return { profile, choice, verified, imageEvidence };
 }
-/** Read-only launch attestation. Re-run before power and for a new process epoch:
- * SFTP/provider writes do not pass through browser mutation authorization. */
+/** Recover only the first Vanilla egg installation from verified required outputs.
+ * This is not evidence that an installer script succeeded, and old files cannot
+ * establish completion of a reinstall or wipe. */
+export async function verifyMinecraftInitialInstallation(
+  context: GameLifecycleContext,
+  options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
+): Promise<import('./lifecycle.js').InitialInstallationOutputs | null> {
+  if (context.operation().action !== 'provision' || context.operation().phase !== 'installation')
+    return null;
+  const profile = await context.db
+    .selectFrom('minecraft_server_profiles')
+    .selectAll()
+    .where('server_id', '=', context.server.id)
+    .executeTakeFirst();
+  if (!profile || profile.installed) return null;
+  const choice = await inspectMinecraftCombination(
+    context.db,
+    profile.combination_id,
+    options.env ?? {},
+  );
+  const runtime = choice.row.resolved_runtime as ResolvedMinecraftRuntime;
+  if (runtime.profile !== 'vanilla' || runtime.installation.kind !== 'server-jar') return null;
+  await context.authorize();
+  const verified = await verifyInstalledRuntime(context, options);
+  await context.authorize();
+  if (!verified.imageEvidence.observed) throw new DomainError('configuration_invalid');
+  return {
+    integrationId: 'minecraft',
+    combinationId: profile.combination_id,
+    mappingDigest: verified.choice.mappingDigest,
+    imageDigest: verified.imageEvidence.observed,
+    files: verified.verified,
+  };
+}
+/** Explicit read-only artifact audit. Ordinary power and process observations
+ * do not invoke this: installation/content/restore workflows verify their outputs. */
 export async function assertMinecraftLaunchInputs(
   context: MinecraftReadContext,
   options: Pick<MinecraftContentOptions, 'env' | 'observedImageDigest'>,
@@ -858,6 +912,35 @@ export function applyMinecraftStoredPlayerChange(
   configuration[command.list] = players.map((entry) => entry.name);
   return minecraftStoredConfigurationSchema.parse(configuration);
 }
+/** Existing rows carry UUID authority from the current file. A renamed or reclaimed
+ * name must not redirect an edit/removal to whichever account now owns that name. */
+export async function resolveMinecraftPlayerChangeIdentity(
+  command: Extract<MinecraftContentCommand, { kind: 'player' }>,
+  source: string,
+  provider: Parameters<typeof verifyMinecraftPlayer>[1],
+) {
+  if (!command.expectedUuid) return verifyMinecraftPlayer(command.name, provider);
+  let entries: unknown;
+  try {
+    entries = JSON.parse(source);
+  } catch {
+    throw new DomainError('conflict');
+  }
+  if (!Array.isArray(entries) || entries.length > 100000) throw new DomainError('conflict');
+  const matches = entries.filter((entry) => entry && entry.uuid === command.expectedUuid);
+  if (matches.length === 0 && command.action === 'add') {
+    const identity = await verifyMinecraftPlayer(command.name, provider);
+    if (identity.uuid !== command.expectedUuid) throw new DomainError('conflict');
+    return identity;
+  }
+  if (matches.length !== 1 || matches[0].name !== command.name) throw new DomainError('conflict');
+  return {
+    uuid: command.expectedUuid,
+    name: command.name,
+    source: 'server-file' as const,
+    verifiedAt: new Date().toISOString(),
+  };
+}
 /** Recover only the historical ADD receipt-loss bug against unchanged durable
  * intent and an already applied exact file. REMOVE lacks the removed identity
  * in its after-image, so missing REMOVE authority remains explicitly uncertain. */
@@ -881,8 +964,9 @@ async function recoverMinecraftPlayerReceipt(
       (await hashMinecraftRemoteFile(context, path))?.sha256 !== change.afterSha256
     )
       throw new DomainError('operation_uncertain');
-    const player = await verifyMinecraftPlayer(
-      command.name,
+    const player = await resolveMinecraftPlayerChangeIdentity(
+      command,
+      change.content,
       options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent }),
     );
     let entries: unknown;
@@ -996,6 +1080,7 @@ export async function configureMinecraftProvision(
   const identities =
     options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent });
   const configuration = await resolveMinecraftStoredPlayers(profile.configuration, identities);
+  assertMinecraftPlayerConfiguration(verified.choice, configuration);
   if (!minecraftStoredConfigurationSchema.parse(profile.configuration).playerIdentities) {
     // Persist UUID authority before any file effect; retries and reinstalls must
     // never resolve a reclaimed username into a different account.
@@ -1032,7 +1117,8 @@ export async function configureMinecraftProvision(
           release: verified.choice.combination.release,
           supportedKeys: source
             ? Object.keys(parseMinecraftProperties(source))
-            : (verified.imageEvidence.report.server?.supportedProperties ?? []),
+            : (verified.imageEvidence.report?.server?.supportedProperties ??
+              (verified.choice.capabilities.playerManagement ? ['white-list'] : [])),
         });
         changes.push(
           await plannedText(context, 'server.properties', edited.content, snapshot.hash),
@@ -1453,6 +1539,12 @@ async function applyPreparedContent(
     command.kind === 'world-remove'
   )
     return applyWorldContent(context, options, prepared, choice);
+  if (
+    command.kind === 'player' &&
+    choice.supportAuthority === 'integration' &&
+    !choice.capabilities.playerManagement
+  )
+    throw new DomainError('integration_unavailable');
   if (command.kind === 'properties' || command.kind === 'player') {
     let configuration = minecraftStoredConfigurationSchema.parse(profile.configuration);
     if (
@@ -1476,12 +1568,13 @@ async function applyPreparedContent(
           return [await plannedText(context, 'server.properties', result.content, snapshot.hash)];
         }
         const path = command.list === 'operators' ? 'ops.json' : 'whitelist.json';
-        const player = await verifyMinecraftPlayer(
-          command.name,
+        const snapshot = await textSnapshot(context, path, '[]');
+        const player = await resolveMinecraftPlayerChangeIdentity(
+          command,
+          snapshot.content,
           options.identityProvider ??
             createMinecraftIdentityProvider({ userAgent: options.userAgent }),
         );
-        const snapshot = await textSnapshot(context, path, '[]');
         const currentList = JSON.parse(snapshot.content) as {
           uuid?: string;
           level?: number;
@@ -1528,6 +1621,8 @@ async function applyPreparedContent(
         );
         if (
           !receipt.success ||
+          (command.expectedUuid !== undefined &&
+            (receipt.data.uuid !== command.expectedUuid || receipt.data.name !== command.name)) ||
           (command.list === 'operators' &&
             (receipt.data.level === undefined || receipt.data.bypassesPlayerLimit === undefined))
         )
@@ -1628,11 +1723,7 @@ async function applyPreparedContent(
   for (const file of staged.manifest)
     if (!(await completed(context, stepId('install', file.path)))) stagedBytes += file.size;
   const usage = await context.adapter.getResources(context.server.pterodactyl_identifier ?? '');
-  if (
-    !Number.isSafeInteger(stagedBytes) ||
-    stagedBytes + usage.resources.disk_bytes > Number(context.server.limits.disk) * 1024 ** 2
-  )
-    throw new DomainError('resources_unavailable');
+  assertServerStorageCapacity(context.server.limits.disk, stagedBytes + usage.resources.disk_bytes);
   if (
     prepared.backupBefore &&
     context.operation().plan.backupComplete !== true &&
@@ -1826,11 +1917,12 @@ async function readWorldLevel(
   context: Pick<GameLifecycleContext, 'adapter' | 'server' | 'authorize'>,
   world: string,
   maxBytes = 8 * 1024 ** 2,
+  signal?: AbortSignal,
 ) {
   const response = await context.adapter.downloadFile(
     context.server.pterodactyl_identifier ?? '',
     `${minecraftWorldName(world)}/level.dat`,
-    { maxBytes, authorize: context.authorize },
+    { maxBytes, authorize: context.authorize, signal },
   );
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -1849,7 +1941,86 @@ async function readWorldLevel(
   }
   return Buffer.concat(chunks, size);
 }
-/** Called through ManagementRuntime.access after current managed identity and user authorization. */
+export interface MinecraftWorldSnapshot {
+  installed: boolean;
+  supported: boolean;
+  selectedWorld: string | null;
+  release: string;
+  compatibility: 'available' | 'unavailable';
+  worlds: Awaited<ReturnType<typeof discoverMinecraftWorlds>>;
+}
+/** Caller establishes authorization and managed identity through ManagementRuntime.fileReadAccess. */
+export async function inspectMinecraftWorlds(
+  db: Kysely<Database>,
+  adapter: PterodactylAdapter,
+  serverId: string,
+  authorize: () => Promise<void>,
+  env: Environment = {},
+  signal?: AbortSignal,
+): Promise<MinecraftWorldSnapshot> {
+  const profile = await db
+    .selectFrom('minecraft_server_profiles')
+    .selectAll()
+    .where('server_id', '=', serverId)
+    .executeTakeFirst();
+  const server = await db
+    .selectFrom('managed_servers')
+    .selectAll()
+    .where('id', '=', serverId)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst();
+  if (!profile || !server) throw new DomainError('not_found');
+  if (!server.pterodactyl_identifier) throw new DomainError('conflict');
+  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
+  let expectedDataVersion: number | undefined;
+  try {
+    expectedDataVersion = worldDataVersion(choice);
+  } catch (error) {
+    if (!(error instanceof DomainError) || error.code !== 'integration_unavailable') throw error;
+  }
+  const snapshot: MinecraftWorldSnapshot = {
+    installed: profile.installed,
+    supported: minecraftManifest.capabilities.worlds,
+    selectedWorld: null,
+    release: choice.combination.release,
+    compatibility: expectedDataVersion === undefined ? 'unavailable' : 'available',
+    worlds: [],
+  };
+  if (!snapshot.installed || !snapshot.supported) return snapshot;
+  signal?.throwIfAborted();
+  const properties = parseMinecraftProperties(
+    Buffer.from(
+      await adapter.readFile(server.pterodactyl_identifier, 'server.properties', 1048576),
+    ).toString('utf8'),
+  );
+  // Preserve the observed value, including legacy names that managed mutations cannot accept.
+  snapshot.selectedWorld = properties['level-name'] ?? 'world';
+  snapshot.worlds = await discoverMinecraftWorlds(
+    {
+      listRoot: async () => {
+        signal?.throwIfAborted();
+        return (await adapter.listFiles(server.pterodactyl_identifier ?? '')).map((entry) => ({
+          name: entry.name,
+          isDirectory: !entry.is_file,
+          isSymlink: entry.is_symlink,
+        }));
+      },
+      readLevelDat: async (world, maxBytes) => {
+        signal?.throwIfAborted();
+        const entries = await adapter.listFiles(server.pterodactyl_identifier ?? '', world);
+        const level = entries.find((entry) => entry.name === 'level.dat');
+        if (!level) return undefined;
+        if (!level.is_file || level.is_symlink || level.size > maxBytes)
+          throw new DomainError('conflict');
+        return readWorldLevel({ adapter, server, authorize }, world, maxBytes, signal);
+      },
+    },
+    { expectedDataVersion, release: choice.combination.release, signal },
+  );
+  await authorize();
+  return snapshot;
+}
+/** Array contract retained for trusted integration scripts. */
 export async function listMinecraftWorlds(
   db: Kysely<Database>,
   adapter: PterodactylAdapter,
@@ -1857,37 +2028,7 @@ export async function listMinecraftWorlds(
   authorize: () => Promise<void>,
   env: Environment = {},
 ) {
-  const profile = await db
-    .selectFrom('minecraft_server_profiles')
-    .selectAll()
-    .where('server_id', '=', serverId)
-    .executeTakeFirstOrThrow();
-  const server = await db
-    .selectFrom('managed_servers')
-    .selectAll()
-    .where('id', '=', serverId)
-    .where('deleted_at', 'is', null)
-    .executeTakeFirstOrThrow();
-  const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-  return discoverMinecraftWorlds(
-    {
-      listRoot: async () =>
-        (await adapter.listFiles(server.pterodactyl_identifier ?? '')).map((entry) => ({
-          name: entry.name,
-          isDirectory: !entry.is_file,
-          isSymlink: entry.is_symlink,
-        })),
-      readLevelDat: async (world, maxBytes) => {
-        const entries = await adapter.listFiles(server.pterodactyl_identifier ?? '', world);
-        const level = entries.find((entry) => entry.name === 'level.dat');
-        if (!level) return undefined;
-        if (!level.is_file || level.is_symlink || level.size > maxBytes)
-          throw new DomainError('conflict');
-        return readWorldLevel({ adapter, server, authorize }, world, maxBytes);
-      },
-    },
-    { expectedDataVersion: worldDataVersion(choice), release: choice.combination.release },
-  );
+  return (await inspectMinecraftWorlds(db, adapter, serverId, authorize, env)).worlds;
 }
 async function applyWorldContent(
   context: GameLifecycleContext,
@@ -2009,11 +2150,7 @@ async function applyWorldContent(
   for (const file of staged.manifest)
     if (!(await completed(context, stepId('install', file.path)))) bytes += file.size;
   const usage = await context.adapter.getResources(context.server.pterodactyl_identifier ?? '');
-  if (
-    !Number.isSafeInteger(bytes) ||
-    usage.resources.disk_bytes + bytes > Number(context.server.limits.disk) * 1024 ** 2
-  )
-    throw new DomainError('resources_unavailable');
+  assertServerStorageCapacity(context.server.limits.disk, usage.resources.disk_bytes + bytes);
   if (context.operation().plan.minecraftWorldPrepared !== true) {
     const actual = await remoteEntry(context, target);
     if (Boolean(actual) !== prepared.world.existing || actual?.is_file)

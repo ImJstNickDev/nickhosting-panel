@@ -23,6 +23,8 @@ function sftpFixture() {
   let id = 0;
   const calls: { method: string; path: string; body?: Record<string, unknown> }[] = [];
   let loseNextCreateResponse = false;
+  let ignoreNextQuotaUpdate = false;
+  let loseNextUpdateResponse = false;
   const fetcher: typeof fetch = vi.fn(async (input, init) => {
     const url = new URL(String(input));
     expect(init?.redirect).toBe('error');
@@ -35,7 +37,7 @@ function sftpFixture() {
       return Response.json(users.get(username) ?? {}, { status: users.has(username) ? 200 : 404 });
     if (method === 'POST') {
       if (users.has(body.username)) return Response.json({}, { status: 409 });
-      users.set(body.username, { ...body, id: ++id });
+      users.set(body.username, { ...body, id: ++id, used_quota_size: 0 });
       if (loseNextCreateResponse) {
         loseNextCreateResponse = false;
         throw new Error('timeout secret-key fixture-private-key');
@@ -43,7 +45,15 @@ function sftpFixture() {
       return Response.json(users.get(body.username), { status: 201 });
     }
     if (method === 'PUT') {
+      if (ignoreNextQuotaUpdate) {
+        ignoreNextQuotaUpdate = false;
+        return Response.json({ message: 'not applied' });
+      }
       users.set(username, { ...users.get(username), ...body });
+      if (loseNextUpdateResponse) {
+        loseNextUpdateResponse = false;
+        throw new Error('isolated response lost after update');
+      }
       return Response.json({ message: 'updated' });
     }
     if (method === 'DELETE') {
@@ -77,10 +87,126 @@ function sftpFixture() {
     loseNextCreate: () => {
       loseNextCreateResponse = true;
     },
+    ignoreNextQuotaUpdate: () => {
+      ignoreNextQuotaUpdate = true;
+    },
+    loseNextUpdate: () => {
+      loseNextUpdateResponse = true;
+    },
   };
 }
 
 describe('SFTPGo credentials', () => {
+  it('keeps a named persistent primary identity through rotation, quota updates and revocation', async () => {
+    const f = sftpFixture();
+    const request = { ...f.request(), username: 'imjstnick-a3f92c18', expiresAt: 0 };
+    expect(request.password).toMatch(/^[A-Za-z0-9_-]{16}$/);
+    const ref = await f.adapter.ensureCredential(request);
+    expect(ref.username).toBe(request.username);
+    expect(ref.expiresAt).toBe(0);
+    const remote = f.users.get(ref.username);
+    if (!remote) throw new Error('Missing fixture user');
+    delete remote.expiration_date; // Real SFTPGo omits the zero value.
+    expect(await f.adapter.inspectCredential(request)).toEqual(ref);
+    const password = generateSftpPassword();
+    await f.adapter.rotateCredential(ref, { password, expiresAt: 0 });
+    expect(f.users.get(ref.username)).toMatchObject({
+      password,
+      username: request.username,
+      expiration_date: 0,
+    });
+    await f.adapter.updateQuota(ref, 0);
+    await f.adapter.revokeCredential(ref);
+    expect(f.users.has(ref.username)).toBe(false);
+  });
+  it('refuses a named account collision and never overwrites the existing identity', async () => {
+    const f = sftpFixture();
+    const first = { ...f.request(), username: 'nico-a3f92c18', expiresAt: 0 };
+    await f.adapter.ensureCredential(first);
+    await expect(
+      f.adapter.ensureCredential({ ...f.request(), username: first.username, expiresAt: 0 }),
+    ).rejects.toThrow();
+    expect(f.calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+    expect(f.users.get(first.username)).toMatchObject({ password: first.password });
+    await expect(f.adapter.ensureCredential({ ...first, username: '../bad' })).rejects.toThrow();
+  });
+
+  it('accepts zero as an unlimited server quota while retaining session and protocol limits', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential({ ...fixture.request(), quotaBytes: 0 });
+    expect(ref.quotaBytes).toBe(0);
+    expect(fixture.users.get(ref.username)).toMatchObject({ quota_size: 0, max_sessions: 2 });
+    expect(
+      await fixture.adapter.ensureCredential({
+        ...fixture.request(),
+        credentialId: ref.credentialId,
+        quotaBytes: 0,
+      }),
+    ).toEqual(ref);
+  });
+  it('changes active account quotas with readback and no credential, lifetime or policy reset', async () => {
+    const fixture = sftpFixture();
+    const request = fixture.request();
+    const ref = await fixture.adapter.ensureCredential(request);
+    const user = fixture.users.get(ref.username);
+    if (!user) throw new Error('Missing fixture account');
+    user.used_quota_size = 4096;
+    user.upload_bandwidth = 512;
+    (user.filters as Record<string, unknown>).max_upload_file_size = 65536;
+    const unlimited = await fixture.adapter.updateQuota(ref, 0);
+    expect(unlimited).toMatchObject({ quotaBytes: 0, expiresAt: ref.expiresAt });
+    const update = fixture.calls.findLast((call) => call.method === 'PUT');
+    expect(update?.path).toContain('disconnect=1');
+    expect(update?.body).not.toHaveProperty('password');
+    expect(fixture.users.get(ref.username)).toMatchObject({
+      password: request.password,
+      status: 1,
+      expiration_date: ref.expiresAt,
+      quota_size: 0,
+      max_sessions: 2,
+      upload_bandwidth: 512,
+      filters: { max_upload_file_size: 65536 },
+    });
+    expect(await fixture.adapter.updateQuota(unlimited, 4096, 4096)).toMatchObject({
+      quotaBytes: 4096,
+    });
+    expect(fixture.calls.at(-1)?.method).toBe('GET');
+  });
+  it('refuses a finite quota below observed usage or with unavailable usage before any mutation', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential({ ...fixture.request(), quotaBytes: 0 });
+    const user = fixture.users.get(ref.username);
+    if (!user) throw new Error('Missing fixture account');
+    user.used_quota_size = 8192;
+    await expect(fixture.adapter.updateQuota(ref, 4096, 8192)).rejects.toMatchObject({
+      code: 'resources_unavailable',
+    });
+    delete user.used_quota_size;
+    await expect(fixture.adapter.updateQuota(ref, 4096)).rejects.toMatchObject({
+      code: 'integration_unavailable',
+    });
+    expect(fixture.calls.filter((call) => call.method === 'PUT')).toHaveLength(0);
+  });
+  it('requires ownership and isolation proof for quota changes', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential(fixture.request());
+    const user = fixture.users.get(ref.username);
+    if (!user) throw new Error('Missing fixture account');
+    user.additional_info = '{}';
+    await expect(fixture.adapter.updateQuota(ref, 0)).rejects.toMatchObject({ code: 'conflict' });
+    expect(fixture.calls.filter((call) => call.method === 'PUT')).toHaveLength(0);
+  });
+  it('rejects an unconfirmed provider quota and recovers a lost response idempotently', async () => {
+    const fixture = sftpFixture();
+    const ref = await fixture.adapter.ensureCredential(fixture.request());
+    fixture.ignoreNextQuotaUpdate();
+    await expect(fixture.adapter.updateQuota(ref, 0)).rejects.toMatchObject({ code: 'conflict' });
+    fixture.loseNextUpdate();
+    await expect(fixture.adapter.updateQuota(ref, 0)).rejects.toThrow();
+    const puts = fixture.calls.filter((call) => call.method === 'PUT').length;
+    expect(await fixture.adapter.updateQuota(ref, 0)).toMatchObject({ quotaBytes: 0 });
+    expect(fixture.calls.filter((call) => call.method === 'PUT')).toHaveLength(puts);
+  });
   it('provisions independent users with one mapped UUID directory and no broad permissions', async () => {
     const fixture = sftpFixture();
     const first = await fixture.adapter.ensureCredential(fixture.request());
@@ -228,6 +354,11 @@ function dnsFixture() {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ method, path: `${url.pathname}${url.search}`, body });
     const recordId = url.pathname.split('/').at(-1) ?? '';
+    if (body?.comment && body.comment.length > 100)
+      return Response.json(
+        { success: false, errors: [{ code: 1004, message: 'Comment exceeds Free plan limit' }] },
+        { status: 400 },
+      );
     let result: unknown;
     if (method === 'GET' && url.searchParams.has('name'))
       result = [...records.values()].filter((entry) => entry.name === url.searchParams.get('name'));
@@ -348,6 +479,75 @@ describe('DNS connection planning and Cloudflare ownership', () => {
     await fixture.provider.apply(await plan([]), fixture.callbacks);
     expect(fixture.records.size).toBe(0);
     expect(fixture.ledger).toHaveLength(0);
+  });
+  it('fits ownership comments within Cloudflare Free limits and binds all three identifiers', async () => {
+    const f = dnsFixture();
+    const input = { zoneId, ownership: f.ownership, desired: f.desired(), ledger: f.ledger };
+    await f.provider.apply(await f.provider.plan(input), f.callbacks);
+    for (const call of f.calls.filter((entry) => entry.method === 'POST')) {
+      const marker = String(call.body?.comment);
+      expect(marker).toMatch(/^nickhosting:v2:[a-f0-9]{64}$/);
+      expect(marker.length).toBeLessThanOrEqual(100);
+    }
+    for (const key of ['serverId', 'assignmentId'] as const)
+      await expect(
+        f.provider.plan({
+          ...input,
+          ledger: [],
+          ownership: { ...f.ownership, [key]: randomUUID() },
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
+    expect(await f.provider.inspectOwned(input)).toHaveLength(2);
+  });
+  it('recovers exact legacy ownership markers without adopting foreign records', async () => {
+    const f = dnsFixture();
+    const input = { zoneId, ownership: f.ownership, desired: f.desired(), ledger: f.ledger };
+    await f.provider.apply(await f.provider.plan(input), f.callbacks);
+    const { instanceId, serverId, assignmentId } = f.ownership;
+    for (const record of f.records.values())
+      record.comment = `nickhosting:${instanceId}:${serverId}:${assignmentId}`;
+    expect(await f.provider.plan(input)).toEqual([]);
+    expect(await f.provider.inspectOwned(input)).toHaveLength(2);
+    const changed = f
+      .desired()
+      .map((record) => (record.type === 'A' ? { ...record, content: '192.0.2.42' } : record));
+    await f.provider.apply(await f.provider.plan({ ...input, desired: changed }), f.callbacks);
+    expect(f.calls.findLast((call) => call.method === 'PUT')?.body?.comment).toMatch(
+      /^nickhosting:v2:/,
+    );
+    await f.provider.apply(await f.provider.plan({ ...input, desired: [] }), f.callbacks);
+    expect(f.records.size).toBe(0);
+  });
+  it('publishes every replacement record before deleting the old hostname on rename', async () => {
+    const fixture = dnsFixture();
+    await fixture.provider.apply(
+      await fixture.provider.plan({
+        zoneId,
+        ownership: fixture.ownership,
+        desired: fixture.desired(),
+        ledger: [],
+      }),
+      fixture.callbacks,
+    );
+    const desired = planConnection({
+      mode: 'custom-subdomain',
+      zoneName: 'example.test',
+      subdomain: 'replacement',
+      port: 25565,
+      target: { type: 'A', content: '192.0.2.10' },
+      srv: { service: '_game', protocol: 'tcp' },
+    }).records;
+    const changes = await fixture.provider.plan({
+      zoneId,
+      ownership: fixture.ownership,
+      desired,
+      ledger: fixture.ledger,
+    });
+    expect(changes.map((c) => c.action)).toEqual(['create', 'create', 'delete', 'delete']);
+    await fixture.provider.apply(changes, fixture.callbacks);
+    expect(
+      [...fixture.records.values()].every((r) => r.name.includes('replacement.example.test')),
+    ).toBe(true);
   });
   it('rejects foreign names regardless of matching content, and never adopts a prefix', async () => {
     const fixture = dnsFixture();

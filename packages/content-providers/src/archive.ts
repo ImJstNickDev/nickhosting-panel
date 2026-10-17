@@ -16,6 +16,7 @@ export async function visitArchive(
   path: string | Uint8Array,
   visit: (file: ArchiveFile) => Promise<void>,
   options: Partial<ContentLimits> = {},
+  visitDirectory?: (path: string) => Promise<void>,
 ): Promise<void> {
   const limits = contentLimits(options);
   if (typeof path === 'string') {
@@ -66,6 +67,7 @@ export async function visitArchive(
             fail('archive_budget');
           if (name.endsWith('/')) {
             if (entry.uncompressedSize !== 0) fail('archive_directory');
+            await visitDirectory?.(name);
             return;
           }
           if (type === 0x4000) fail('archive_directory');

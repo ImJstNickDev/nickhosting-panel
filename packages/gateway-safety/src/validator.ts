@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { DomainError } from '@nickhosting/core';
 import {
   type GatewayEndpoint,
+  type GatewayProtocolObservation,
   type GatewayRoute,
   type GatewaySafety,
   gatewayRouteSchema,
@@ -94,7 +95,7 @@ export type GatewayNetworkPolicy = z.infer<typeof gatewayNetworkPolicySchema>;
 
 export const gatewayReachabilityProofSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     routeId: z.uuid(),
     serverId: z.uuid(),
     allocationId: z.uuid(),
@@ -160,14 +161,51 @@ export interface GatewaySafetyOptions {
   loadProof(route: GatewayRoute): Promise<GatewayReachabilityProof | null>;
   saveProof(route: GatewayRoute, proof: GatewayReachabilityProof): Promise<void>;
   /** Actual game-protocol challenge/readiness response from the Gateway process namespace. */
-  probeBackend(route: GatewayRoute): Promise<boolean>;
+  probeBackend(
+    route: GatewayRoute,
+    validationId?: string,
+  ): Promise<boolean | GatewayProtocolObservation>;
   /** Fresh nonce challenge response from a configured persistent probe at EXACT backend.address. */
-  probeNode(route: GatewayRoute): Promise<boolean>;
+  probeNode(route: GatewayRoute, context?: GatewaySafetyContext): Promise<boolean>;
+  /** Trusted compiled integration declares Core provider-running readiness authority. */
+  providerReady?: (route: GatewayRoute) => boolean;
   now?: () => number;
+  onTiming?: (event: {
+    routeId: string;
+    generation: string;
+    validationId: string;
+    stage: string;
+    durationMs: number;
+    outcome: 'completed' | 'rejected';
+  }) => void;
 }
 
-function unavailable(): never {
-  throw new DomainError('allocation_unavailable');
+export type GatewaySafetyReason =
+  | 'unsafe_topology'
+  | 'backend_container_missing'
+  | 'backend_container_ambiguous'
+  | 'backend_identity'
+  | 'backend_configured_binding'
+  | 'backend_active_binding'
+  | 'provider_identity'
+  | 'provider_allocation'
+  | 'public_collision'
+  | 'backend_collision'
+  | 'observation_stale'
+  | 'namespace_mismatch'
+  | 'backend_protocol'
+  | 'node_challenge'
+  | 'retained_proof_mismatch';
+export class GatewaySafetyError extends DomainError {
+  constructor(
+    readonly reason: GatewaySafetyReason,
+    readonly observationFailure?: 'lease_grant_replaced' | 'lease_evidence_expired',
+  ) {
+    super('allocation_unavailable');
+  }
+}
+function unavailable(reason: GatewaySafetyReason = 'unsafe_topology'): never {
+  throw new GatewaySafetyError(reason);
 }
 function allocationIdentityEqual(first: string, second: string) {
   // Normalize IPv6 spelling, preserving the provider address family. Collision
@@ -211,19 +249,21 @@ function safeContainer(
   context: GatewaySafetyContext,
   observation: NetworkObservation,
   network: ObservedNetwork,
+  allowTransient = false,
 ) {
   const matches = observation.containers.filter(
     (container) => container.name === `/${context.providerServerUuid}`,
   );
   const container = matches[0];
+  if (matches.length === 0 && allowTransient) return undefined;
+  if (matches.length > 1) unavailable('backend_container_ambiguous');
+  if (!container) unavailable('backend_container_missing');
   if (
-    matches.length !== 1 ||
-    !container ||
     container.service !== 'Pterodactyl' ||
     container.containerType !== 'server_process' ||
     ![network.name, network.id].includes(container.networkMode)
   )
-    unavailable();
+    unavailable('backend_identity');
   for (const transport of ['tcp', 'udp'] as const) {
     const expected = { address: route.backend.address, port: route.backend.port, transport };
     const matching = container.configuredBindings.filter((binding) =>
@@ -236,12 +276,21 @@ function safeContainer(
         (binding) => endpointsOverlap(binding, expected) && !exactEndpoint(binding, expected),
       )
     )
-      unavailable();
+      unavailable('backend_configured_binding');
     if (
       container.running &&
       container.activeBindings.filter((binding) => exactEndpoint(binding, expected)).length !== 1
-    )
-      unavailable();
+    ) {
+      // Docker can report Running before effective publications appear. Only
+      // absent bindings are transient; conflicting publications remain unsafe.
+      if (
+        !allowTransient ||
+        container.activeBindings.some(
+          (binding) => binding.port === expected.port && binding.transport === transport,
+        )
+      )
+        unavailable('backend_active_binding');
+    }
   }
   return container;
 }
@@ -251,10 +300,16 @@ function identityDigest(
   observation: NetworkObservation,
   container: ObservedContainer,
   network: ObservedNetwork,
+  node: GatewayNetworkPolicy['nodes'][number],
+  version: 1 | 2,
 ) {
   return createHash('sha256')
     .update(
       JSON.stringify({
+        // v1 remains readable only against its original Docker container.
+        // v2 binds reachability to the durable, freshly corroborated provider
+        // identity. Wings routinely recreates a container for the same server.
+        ...(version === 2 ? { version, providerNodeUuid: node.nodeUuid } : {}),
         serverId: route.serverId,
         nodeId: route.nodeId,
         allocationId: route.allocationId,
@@ -264,7 +319,7 @@ function identityDigest(
         namespaceId: observation.namespaceId,
         dockerDaemonId: observation.dockerDaemonId,
         container: {
-          id: container.id,
+          ...(version === 1 ? { id: container.id } : {}),
           name: container.name,
           networkMode: container.networkMode,
           bindings: [...container.configuredBindings].sort((a, b) =>
@@ -286,6 +341,43 @@ function identityDigest(
 export function createGatewaySafetyValidator(options: GatewaySafetyOptions): GatewaySafety {
   const policy = gatewayNetworkPolicySchema.parse(options.policy);
   const now = options.now ?? Date.now;
+  async function timed<T>(
+    route: GatewayRoute,
+    validationId: string,
+    stage: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const started = performance.now();
+    let outcome: 'completed' | 'rejected' = 'rejected';
+    try {
+      const value = await action();
+      outcome = 'completed';
+      return value;
+    } finally {
+      if (route.mode === 'waking') {
+        try {
+          options.onTiming?.({
+            routeId: route.id,
+            generation: route.generation,
+            validationId,
+            stage,
+            durationMs: Math.round((performance.now() - started) * 1000) / 1000,
+            outcome,
+          });
+        } catch {
+          /* Diagnostics cannot change safety decisions. */
+        }
+      }
+    }
+  }
+
+  // A prior successful listener validation retains only its proven backend
+  // shape. Every listener use re-reads provider, sockets, topology and durable proof;
+  // this is not cached permission or cached inventory. New listeners cannot use it.
+  const retainedBindings = new Map<
+    string,
+    { public: GatewayEndpoint; container: ObservedContainer }
+  >();
   async function inventories() {
     const result = new Map<number, Awaited<ReturnType<GatewayProviderSource['listAllocations']>>>();
     let next = 0;
@@ -301,26 +393,98 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
     );
     return result;
   }
-  async function inspect(
+  type ProviderEvidence = {
+    started: number;
+    nodes: Awaited<ReturnType<GatewayProviderSource['listNodes']>>;
+    server: Awaited<ReturnType<GatewayProviderSource['getApplicationServer']>>;
+    nodeInventories: Awaited<ReturnType<typeof inventories>>;
+  };
+  // Only backend observations may share a successful listener check. A bind or
+  // renewal always fetches fresh provider inventory; sharing never extends its age.
+  const validatedProvider = new Map<
+    string,
+    {
+      key: string;
+      evidence: ProviderEvidence;
+      leasedProbe?: { routeKey: string; observedAt: number; identity: string; failures: object };
+    }
+  >();
+  const renewals = new Map<string, Promise<{ backendReady: boolean }>>();
+  const failures = new Map<string, object>();
+  function failureToken(routeId: string, revoke = false) {
+    let token = failures.get(routeId);
+    if (!token || revoke) {
+      token = {};
+      failures.set(routeId, token);
+      if (failures.size > 10000) {
+        const oldest = failures.keys().next().value;
+        if (oldest) failures.delete(oldest);
+      }
+    }
+    return token;
+  }
+  const evidenceKey = (route: GatewayRoute, context: GatewaySafetyContext) =>
+    JSON.stringify({ route, context });
+  function inspect(
+    route: GatewayRoute,
+    ownedBindings: readonly GatewayEndpoint[],
+    listener: boolean,
+  ) {
+    const validationId = randomUUID();
+    return timed(route, validationId, 'inspect_total', () =>
+      inspectDetails(route, ownedBindings, listener, validationId),
+    );
+  }
+  async function inspectDetails(
     routeValue: GatewayRoute,
     ownedBindings: readonly GatewayEndpoint[],
     listener: boolean,
+    validationId: string,
   ) {
     const route = gatewayRouteSchema.parse(routeValue);
     if (!exactBindableAddress(route.public.address) || !privateBackend(route.backend.address))
       unavailable();
-    const context = gatewaySafetyContextSchema.parse(await options.resolveContext(route));
+    const context = gatewaySafetyContextSchema.parse(
+      await timed(route, validationId, 'context', () => options.resolveContext(route)),
+    );
     const started = now();
-    // Independent read-only evidence is collected concurrently. Nothing is
-    // cached: every bind/renewal still reads actual sockets and fresh inventory.
-    const [observation, nodes, server, nodeInventories] = await Promise.all([
-      options.observer.observe(),
-      options.provider.listNodes(),
-      options.provider.getApplicationServer(context.providerServerId),
-      inventories(),
+    const previous = listener ? undefined : validatedProvider.get(route.id);
+    const share =
+      previous?.key === evidenceKey(route, context) &&
+      previous.evidence.started <= started &&
+      started - previous.evidence.started < policy.maximumObservationAgeMs;
+    const providerRead = timed(
+      route,
+      validationId,
+      share ? 'provider_reuse' : 'provider_inventory',
+      () =>
+        share
+          ? Promise.resolve(previous.evidence)
+          : Promise.all([
+              options.provider.listNodes(),
+              options.provider.getApplicationServer(context.providerServerId),
+              inventories(),
+            ]).then(([nodes, server, nodeInventories]) => ({
+              started,
+              nodes,
+              server,
+              nodeInventories,
+            })),
+    );
+    // Actual sockets/Docker topology and local context are still fresh on every
+    // probe. Settle both branches before abandoning a failed inspection.
+    const results = await Promise.allSettled([
+      timed(route, validationId, 'host_observation', () => options.observer.observe()),
+      providerRead,
     ]);
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
+    const [observed, provider] = results;
+    if (observed.status !== 'fulfilled' || provider.status !== 'fulfilled') unavailable();
+    const observation = observed.value,
+      providerEvidence = provider.value;
+    const { nodes, server, nodeInventories } = providerEvidence;
+    if (observation.namespaceId !== observation.hostNamespaceId) unavailable('namespace_mismatch');
     if (
-      observation.namespaceId !== observation.hostNamespaceId ||
       observation.observedAt > now() ||
       now() - observation.observedAt > policy.maximumObservationAgeMs
     )
@@ -355,7 +519,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       server.suspended ||
       !server.relationships?.allocations
     )
-      unavailable();
+      unavailable('provider_identity');
     const claims = server.relationships.allocations.data.map((entry) => entry.attributes);
     const ownClaim = claims.filter((allocation) => allocation.id === context.providerAllocationId);
     if (
@@ -364,7 +528,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       !allocationIdentityEqual(ownClaim[0].ip, route.backend.allocationAddress) ||
       ownClaim[0].port !== route.backend.port
     )
-      unavailable();
+      unavailable('provider_allocation');
     if (
       route.backend.allocationAddress === '127.0.0.1' &&
       !selectedNode.loopbackRemap?.verifiedEggs.some(
@@ -386,7 +550,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
           allocation.port === route.public.port &&
           addressesOverlap(effective, route.public.address)
         )
-          unavailable();
+          unavailable('public_collision');
         const selected =
           node.nodeId === context.providerNodeId && allocation.id === context.providerAllocationId;
         if (selected) {
@@ -405,8 +569,22 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
           unavailable();
       }
     }
-    if (!ownInventory) unavailable();
-    const container = safeContainer(route, context, observation, selectedNetwork);
+    if (!ownInventory) unavailable('provider_allocation');
+    const retained = retainedBindings.get(route.id);
+    // A wake operation rotates generation while retaining the same public listener.
+    // Generation scopes control-plane authority, not backend identity: the caller
+    // enforces its current lease, and the fresh v2 proof below still binds the exact
+    // server, allocation, provider context and network. Never promote this retained
+    // shape into forwarding or a new listener.
+    const mayRetainStatus =
+      listener &&
+      (route.mode === 'waking' || route.mode === 'sleeping') &&
+      retained !== undefined &&
+      exactEndpoint(retained.public, route.public) &&
+      ownedBindings.some((binding) => exactEndpoint(binding, route.public));
+    const container = safeContainer(route, context, observation, selectedNetwork, mayRetainStatus);
+    const proofContainer = container ?? (mayRetainStatus ? retained?.container : undefined);
+    if (!proofContainer) unavailable('backend_container_missing');
     for (const existing of observation.containers) {
       // A direct server in host/shared/routed/unknown networking can disregard its
       // allocation binding address. Stopped containers must not become a hidden
@@ -420,13 +598,13 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         if (!configured) unavailable();
       }
       for (const endpoint of [...existing.configuredBindings, ...existing.activeBindings]) {
-        if (listener && endpointsOverlap(endpoint, route.public)) unavailable();
+        if (listener && endpointsOverlap(endpoint, route.public)) unavailable('public_collision');
         if (
-          existing.id !== container.id &&
+          existing.id !== container?.id &&
           endpoint.port === route.backend.port &&
           addressesOverlap(endpoint.address, route.backend.address)
         )
-          unavailable();
+          unavailable('backend_collision');
       }
     }
     if (listener) {
@@ -439,7 +617,7 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
             ownedBindings.some((owned) => exactEndpoint(owned, route.public))
           )
         )
-          unavailable();
+          unavailable('public_collision');
       }
       if (
         ownedBindings.some(
@@ -449,22 +627,66 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
         unavailable();
     }
     if (
+      now() - providerEvidence.started > policy.maximumObservationAgeMs ||
       now() - started > policy.maximumObservationAgeMs ||
       now() - observation.observedAt > policy.maximumObservationAgeMs
     )
-      unavailable();
+      unavailable('observation_stale');
     return {
+      validationId,
       route,
+      context,
       observation,
+      providerEvidence,
       container,
-      digest: identityDigest(route, context, observation, container, selectedNetwork),
+      mayRetainStatus,
+      backendBindingsComplete:
+        !!container &&
+        ['tcp', 'udp'].every(
+          (transport) =>
+            container.activeBindings.filter((binding) =>
+              exactEndpoint(binding, {
+                address: route.backend.address,
+                port: route.backend.port,
+                transport: transport as 'tcp' | 'udp',
+              }),
+            ).length === 1,
+        ),
+      digest: identityDigest(
+        route,
+        context,
+        observation,
+        proofContainer,
+        selectedNetwork,
+        selectedNode,
+        2,
+      ),
+      legacyDigest: identityDigest(
+        route,
+        context,
+        observation,
+        proofContainer,
+        selectedNetwork,
+        selectedNode,
+        1,
+      ),
     };
   }
   async function proveBackend(state: Awaited<ReturnType<typeof inspect>>) {
-    if (!state.container.running || !(await options.probeBackend(state.route))) unavailable();
-    if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
+    if (!state.container?.running || !state.backendBindingsComplete)
+      unavailable('backend_active_binding');
+    const result = await timed(state.route, state.validationId, 'backend_protocol', () =>
+      options.probeBackend(state.route, state.validationId),
+    );
+    if (!(typeof result === 'boolean' ? result : result.ready === true))
+      unavailable('backend_protocol');
+    if (
+      now() - state.observation.observedAt > policy.maximumObservationAgeMs ||
+      now() - state.providerEvidence.started > policy.maximumObservationAgeMs
+    )
+      unavailable('observation_stale');
     const proof: GatewayReachabilityProof = {
-      version: 1,
+      version: 2,
       routeId: state.route.id,
       serverId: state.route.serverId,
       allocationId: state.route.allocationId,
@@ -473,32 +695,215 @@ export function createGatewaySafetyValidator(options: GatewaySafetyOptions): Gat
       digest: state.digest,
       verifiedAt: now(),
     };
-    await options.saveProof(state.route, proof);
-    if (now() - state.observation.observedAt > policy.maximumObservationAgeMs) unavailable();
+    await timed(state.route, state.validationId, 'proof_write', () =>
+      options.saveProof(state.route, proof),
+    );
+    if (
+      now() - state.observation.observedAt > policy.maximumObservationAgeMs ||
+      now() - state.providerEvidence.started > policy.maximumObservationAgeMs
+    )
+      unavailable('observation_stale');
+    // Return only the exact sample whose fresh binding/protocol proof was saved.
+    // Boolean-only adapters retain the legacy data-plane fallback.
+    return typeof result === 'boolean' ? undefined : result;
+  }
+  async function validateBackend(route: GatewayRoute) {
+    try {
+      const state = await inspect(route, [], false);
+      return await proveBackend(state);
+    } catch (error) {
+      // A later failed full inspection must not leave a fast-path grant behind.
+      validatedProvider.delete(route.id);
+      failureToken(route.id, true);
+      throw error;
+    }
+  }
+  async function validateListener(route: GatewayRoute, ownedBindings: readonly GatewayEndpoint[]) {
+    const state = await inspect(route, ownedBindings, true);
+    const accepted = (backendReady: boolean) => {
+      validatedProvider.set(route.id, {
+        key: evidenceKey(state.route, state.context),
+        evidence: structuredClone(state.providerEvidence),
+        ...(state.container?.running && state.backendBindingsComplete
+          ? {
+              leasedProbe: {
+                routeKey: JSON.stringify(state.route),
+                observedAt: state.observation.observedAt,
+                identity: JSON.stringify([state.digest, state.container.id]),
+                failures: failureToken(route.id),
+              },
+            }
+          : {}),
+      });
+      if (validatedProvider.size > 10000) {
+        const oldest = validatedProvider.keys().next().value;
+        if (oldest) validatedProvider.delete(oldest);
+      }
+      return { backendReady };
+    };
+    const raw = await options.loadProof(route);
+    const proof = gatewayReachabilityProofSchema.safeParse(raw);
+    const matches =
+      proof.success &&
+      proof.data.routeId === route.id &&
+      proof.data.serverId === route.serverId &&
+      proof.data.allocationId === route.allocationId &&
+      proof.data.namespaceId === state.observation.namespaceId &&
+      proof.data.dockerDaemonId === state.observation.dockerDaemonId &&
+      proof.data.digest === (proof.data.version === 1 ? state.legacyDigest : state.digest) &&
+      proof.data.verifiedAt <= now();
+    if (!state.container || (state.container.running && !state.backendBindingsComplete)) {
+      if (!state.mayRetainStatus || !matches || !proof.success || proof.data.version !== 2)
+        unavailable('retained_proof_mismatch');
+      if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
+      if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+        unavailable('observation_stale');
+      return accepted(false);
+    }
+    const retainBinding = () => {
+      if (!state.container) return;
+      retainedBindings.set(route.id, {
+        public: { ...route.public },
+        container: structuredClone(state.container),
+      });
+      // Bound memory even if withdrawn routes never return to this validator.
+      if (retainedBindings.size > 10000) {
+        const oldest = retainedBindings.keys().next().value;
+        if (oldest) retainedBindings.delete(oldest);
+      }
+    };
+    // Bootstrap from an actually ready owned backend using this inspection.
+    // Stopped containers and protocol failures cannot replace a missing/stale
+    // proof. This is the same gate used by readiness, not metadata promotion.
+    if (!matches) {
+      await proveBackend(state);
+      if (route.mode === 'online') {
+        retainBinding();
+        return accepted(true);
+      }
+    } else if (
+      route.mode === 'online' &&
+      state.container.running &&
+      state.backendBindingsComplete
+    ) {
+      if (options.providerReady?.(route)) {
+        if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+          unavailable('observation_stale');
+        retainBinding();
+        return accepted(true);
+      }
+      // A failed game probe revokes forwarding, not an independently proven
+      // public binding. Ownership/collision/topology failures above still throw.
+      const result = await options.probeBackend(route).catch(() => false);
+      const backendReady = typeof result === 'boolean' ? result : result.ready === true;
+      if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+        unavailable('observation_stale');
+      if (backendReady) {
+        retainBinding();
+        return accepted(true);
+      }
+    }
+    if (!(await options.probeNode(route, state.context))) unavailable('node_challenge');
+    if (now() - state.observation.observedAt > policy.maximumObservationAgeMs)
+      unavailable('observation_stale');
+    retainBinding();
+    return accepted(false);
   }
   return {
-    async validate(route, ownedBindings) {
-      const state = await inspect(route, ownedBindings, true);
-      if (route.mode === 'online') return proveBackend(state);
-      const raw = await options.loadProof(route);
-      const proof = gatewayReachabilityProofSchema.safeParse(raw);
-      if (
-        !proof.success ||
-        proof.data.routeId !== route.id ||
-        proof.data.serverId !== route.serverId ||
-        proof.data.allocationId !== route.allocationId ||
-        proof.data.namespaceId !== state.observation.namespaceId ||
-        proof.data.dockerDaemonId !== state.observation.dockerDaemonId ||
-        proof.data.digest !== state.digest ||
-        proof.data.verifiedAt > now() ||
-        !(await options.probeNode(route)) ||
-        now() - state.observation.observedAt > policy.maximumObservationAgeMs
-      )
-        unavailable();
+    validate(route, ownedBindings) {
+      // Serialize renewals: an older successful inspection must never restore
+      // authority after a newer failed inspection. Revoke while checks run.
+      const preceding = renewals.get(route.id);
+      validatedProvider.delete(route.id);
+      let work!: Promise<{ backendReady: boolean }>;
+      work = (async () => {
+        await preceding?.catch(() => undefined);
+        validatedProvider.delete(route.id);
+        try {
+          return await validateListener(route, ownedBindings);
+        } catch (error) {
+          validatedProvider.delete(route.id);
+          failureToken(route.id, true);
+          throw error;
+        } finally {
+          if (renewals.get(route.id) === work) renewals.delete(route.id);
+        }
+      })();
+      renewals.set(route.id, work);
+      return work;
     },
-    async validateBackend(route) {
-      const state = await inspect(route, [], false);
-      return proveBackend(state);
+    validateBackend,
+    async probeLeasedBackend(routeValue) {
+      const route = gatewayRouteSchema.parse(routeValue);
+      const previous = validatedProvider.get(route.id);
+      const fresh = () => {
+        const time = now();
+        return (
+          previous?.leasedProbe !== undefined &&
+          previous.leasedProbe.observedAt <= time &&
+          previous.evidence.started <= time &&
+          time - previous.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
+          time - previous.evidence.started < policy.maximumObservationAgeMs
+        );
+      };
+      // The caller owns the live listener lease. This only samples an unchanged
+      // backend within the ORIGINAL full validation budget; it cannot bind,
+      // renew, change identity or produce a reusable reachability proof.
+      if (
+        !['waking', 'online'].includes(route.mode) ||
+        previous?.leasedProbe?.routeKey !== JSON.stringify(route) ||
+        validatedProvider.get(route.id) !== previous ||
+        !fresh()
+      )
+        return validateBackend(route);
+      const leasedProbe = previous.leasedProbe;
+      const validationId = randomUUID();
+      const result = await timed(route, validationId, 'leased_backend_protocol', () =>
+        options.probeBackend(route, validationId),
+      );
+      if (!(typeof result === 'boolean' ? result : result.ready === true))
+        unavailable('backend_protocol');
+      // A fresh identical renewal may finish during the game response. Await it
+      // rather than throwing away that response, within the ORIGINAL age budget.
+      await timed(route, validationId, 'renewal_wait', async () => {
+        while (renewals.has(route.id) && fresh()) {
+          const renewal = renewals.get(route.id);
+          const remaining =
+            Math.min(leasedProbe.observedAt, previous.evidence.started) +
+            policy.maximumObservationAgeMs -
+            now();
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const completed = await Promise.race([
+            renewal?.then(
+              () => true,
+              () => false,
+            ),
+            new Promise<false>((resolve) => {
+              timeout = setTimeout(() => resolve(false), Math.max(0, remaining));
+            }),
+          ]).finally(() => clearTimeout(timeout));
+          if (!completed) break;
+        }
+      });
+      const current = validatedProvider.get(route.id);
+      const equivalent =
+        current?.leasedProbe !== undefined &&
+        current.leasedProbe.observedAt <= now() &&
+        current.evidence.started <= now() &&
+        now() - current.leasedProbe.observedAt < policy.maximumObservationAgeMs &&
+        now() - current.evidence.started < policy.maximumObservationAgeMs &&
+        current?.key === previous.key &&
+        current?.leasedProbe?.identity === previous.leasedProbe.identity &&
+        current?.leasedProbe?.failures === previous.leasedProbe.failures &&
+        failures.get(route.id) === previous.leasedProbe.failures;
+      if (!fresh() || renewals.has(route.id) || !equivalent)
+        throw new GatewaySafetyError(
+          'observation_stale',
+          validatedProvider.get(route.id) !== previous
+            ? 'lease_grant_replaced'
+            : 'lease_evidence_expired',
+        );
+      return typeof result === 'boolean' ? undefined : result;
     },
   };
 }

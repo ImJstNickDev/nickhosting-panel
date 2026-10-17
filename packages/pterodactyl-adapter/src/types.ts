@@ -225,6 +225,20 @@ export const backupActivitySchema = z.object({
   properties: z.object({ name: z.string().optional() }).catch({}),
 });
 export type BackupActivity = z.infer<typeof backupActivitySchema>;
+/** Successful Panel power requests; excludes IP, actor and arbitrary metadata. */
+export const powerActivitySchema = z.object({
+  id: z.string().regex(/^[a-f0-9]{40}$/),
+  event: z.enum([
+    'server:power.start',
+    'server:power.restart',
+    'server:power.stop',
+    'server:power.kill',
+  ]),
+  timestamp: z.string().datetime({ offset: true }),
+  is_api: z.boolean(),
+});
+export type PowerActivity = z.infer<typeof powerActivitySchema>;
+
 export type ApplicationUser = z.infer<typeof userSchema>;
 
 export const provisionPlanSchema = z.strictObject({

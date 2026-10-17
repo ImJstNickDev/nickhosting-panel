@@ -10,6 +10,7 @@ import { addressesOverlap, endpointsOverlap } from './addresses.js';
 import {
   createGatewaySafetyValidator,
   type GatewayReachabilityProof,
+  GatewaySafetyError,
   type GatewaySafetyOptions,
 } from './validator.js';
 
@@ -159,11 +160,252 @@ describe('Gateway address collision semantics', () => {
 });
 
 describe('Gateway pre-bind and forwarding safety', () => {
+  it('uses declared provider readiness only with existing matching network proof and running bindings', async () => {
+    const f = fixture();
+    f.options.providerReady = () => true;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.route.mode = 'online';
+    vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+    expect(await safety.validate(f.route, [f.route.public])).toEqual({ backendReady: true });
+    expect(f.options.probeBackend).not.toHaveBeenCalled();
+    f.server.suspended = true;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+    f.server.suspended = false;
+    f.options.loadProof = async () => null;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+  });
+
+  it.each(['identity', 'collision', 'stale', 'bindings'] as const)(
+    'provider readiness cannot bypass %s validation',
+    async (failure) => {
+      const f = fixture();
+      f.options.providerReady = () => true;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+      if (failure === 'identity') f.server.uuid = 'foreign';
+      if (failure === 'collision')
+        f.observation.sockets.push({ ...f.route.public, processOwned: false, inode: 'foreign' });
+      if (failure === 'stale') f.observation.observedAt -= 5001;
+      if (failure === 'bindings')
+        Object.assign(f.observation.containers[0] ?? {}, { activeBindings: [] });
+      await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+    },
+  );
+
+  it('provider readiness rejects observation expiry while loading the network proof', async () => {
+    const f = fixture();
+    f.options.providerReady = () => true;
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.loadProof = async () => {
+      clock += 5001;
+      return f.proof();
+    };
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+  });
+
+  it('provider readiness cannot forward a stopped backend', async () => {
+    const f = fixture();
+    f.options.providerReady = () => true;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    Object.assign(f.observation.containers[0] ?? {}, { running: false, activeBindings: [] });
+    expect(await safety.validate(f.route, [f.route.public])).toEqual({ backendReady: false });
+  });
+
+  it('separates waking validation timings without leaking context or changing safety on sink failure', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const events: Parameters<NonNullable<GatewaySafetyOptions['onTiming']>>[0][] = [];
+    f.options.onTiming = (event) => {
+      events.push(event);
+    };
+    await f.validator().validateBackend(f.route);
+    expect(events.map((e) => e.stage)).toEqual(
+      expect.arrayContaining([
+        'context',
+        'provider_inventory',
+        'host_observation',
+        'inspect_total',
+        'backend_protocol',
+        'proof_write',
+      ]),
+    );
+    expect(new Set(events.map((e) => e.validationId)).size).toBe(1);
+    expect(events.every((e) => e.durationMs >= 0 && e.outcome === 'completed')).toBe(true);
+    expect(JSON.stringify(events)).not.toContain('nh-owned-server');
+    f.options.onTiming = () => {
+      throw new Error('private sink failure');
+    };
+    await expect(f.validator().validateBackend(f.route)).resolves.toBeUndefined();
+    f.server.suspended = true;
+    await expect(f.validator().validateBackend(f.route)).rejects.toThrow();
+  });
+
+  it.each([
+    ['missing-container', 'waking'],
+    ['active-bindings', 'waking'],
+    ['missing-container', 'sleeping'],
+    ['active-bindings', 'sleeping'],
+  ] as const)(
+    'retains only an already owned waiting responder during %s recreation in %s and requires full proof before forwarding',
+    async (transition, mode) => {
+      const f = fixture();
+      const validator = f.validator();
+      await validator.validate(f.route, []);
+      const original = structuredClone(f.observation.containers[0]);
+      if (!original) throw new Error('fixture');
+      f.route.mode = mode;
+      if (transition === 'missing-container') f.observation.containers = [];
+      else {
+        f.observation.containers[0] = { ...original, id: 'c'.repeat(64), activeBindings: [] };
+      }
+      vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+      await expect(validator.validate(f.route, [f.route.public])).resolves.toEqual({
+        backendReady: false,
+      });
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      await expect(validator.validateBackend(f.route)).rejects.toBeInstanceOf(GatewaySafetyError);
+      // Absence cannot authorize a new bind, even with the same durable proof.
+      await expect(validator.validate(f.route, [])).rejects.toBeInstanceOf(GatewaySafetyError);
+      f.route.mode = 'online';
+      await expect(validator.validate(f.route, [f.route.public])).rejects.toBeInstanceOf(
+        GatewaySafetyError,
+      );
+      f.observation.containers = [{ ...original, id: 'c'.repeat(64) }];
+      vi.mocked(f.options.probeBackend).mockResolvedValue(true);
+      await expect(validator.validate(f.route, [f.route.public])).resolves.toEqual({
+        backendReady: true,
+      });
+    },
+  );
+  it('keeps the existing sleeping responder through a new wake generation before Docker recreates its container', async () => {
+    const f = fixture();
+    const validator = f.validator();
+    await validator.validate(f.route, []);
+    f.route.mode = 'sleeping';
+    const container = f.observation.containers[0];
+    if (!container) throw new Error('fixture');
+    container.running = false;
+    container.activeBindings = [];
+    await validator.validate(f.route, [f.route.public]);
+    f.route.mode = 'waking';
+    f.route.generation = '77777777-7777-4777-8777-777777777777';
+    f.route.revision++;
+    f.observation.containers = [];
+    vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+    await expect(validator.validate(f.route, [f.route.public])).resolves.toEqual({
+      backendReady: false,
+    });
+    expect(f.options.probeBackend).not.toHaveBeenCalled();
+    await expect(validator.validateBackend(f.route)).rejects.toBeInstanceOf(GatewaySafetyError);
+    await expect(validator.validate(f.route, [])).rejects.toBeInstanceOf(GatewaySafetyError);
+    // Core changing mode alone still cannot authorize forwarding without Docker/protocol evidence.
+    f.route.mode = 'online';
+    await expect(validator.validate(f.route, [f.route.public])).rejects.toBeInstanceOf(
+      GatewaySafetyError,
+    );
+  });
+  it.each([
+    'socket-collision',
+    'allocation-collision',
+    'foreign-backend',
+    'provider-identity',
+    'changed-provider-owner',
+    'namespace',
+    'daemon',
+    'network',
+    'proof',
+    'node-challenge',
+  ] as const)(
+    'fails closed on fresh %s even during a known backend replacement gap',
+    async (failure) => {
+      const f = fixture();
+      const validator = f.validator();
+      await validator.validate(f.route, []);
+      const original = structuredClone(f.observation.containers[0]);
+      if (!original) throw new Error('fixture');
+      f.route.mode = 'waking';
+      f.route.generation = '77777777-7777-4777-8777-777777777777';
+      f.observation.containers = [];
+      if (failure === 'socket-collision')
+        f.observation.sockets.push({ ...f.route.public, processOwned: false, inode: 'foreign' });
+      if (failure === 'allocation-collision')
+        vi.mocked(f.options.provider.listAllocations).mockResolvedValue([
+          f.allocation,
+          { id: 99, ip: f.route.public.address, port: f.route.public.port, assigned: true },
+        ]);
+      if (failure === 'foreign-backend')
+        f.observation.containers.push({ ...original, name: '/foreign', id: 'd'.repeat(64) });
+      if (failure === 'provider-identity') f.server.external_id = 'foreign';
+      if (failure === 'changed-provider-owner') {
+        const context = await f.options.resolveContext(f.route);
+        f.server.user = 9;
+        vi.mocked(f.options.resolveContext).mockResolvedValue({ ...context, providerUserId: 9 });
+      }
+      if (failure === 'namespace')
+        f.observation.namespaceId = f.observation.hostNamespaceId = 'net:[200]';
+      if (failure === 'daemon') f.observation.dockerDaemonId = 'different-daemon';
+      if (failure === 'network') {
+        const network = f.observation.networks[0];
+        if (network) network.driver = 'host';
+      }
+      if (failure === 'proof') vi.mocked(f.options.loadProof).mockResolvedValue(null);
+      if (failure === 'node-challenge') vi.mocked(f.options.probeNode).mockResolvedValue(false);
+      await expect(validator.validate(f.route, [f.route.public])).rejects.toBeInstanceOf(
+        GatewaySafetyError,
+      );
+    },
+  );
+  it('does not trust changed configured bindings or ambiguous/misidentified recreated containers', async () => {
+    for (const kind of ['configured', 'ambiguous', 'identity'] as const) {
+      const f = fixture();
+      const validator = f.validator();
+      await validator.validate(f.route, []);
+      f.route.mode = 'waking';
+      const container = f.observation.containers[0];
+      if (!container) throw new Error('fixture');
+      if (kind === 'configured') container.configuredBindings = [];
+      if (kind === 'ambiguous') f.observation.containers.push({ ...container, id: 'c'.repeat(64) });
+      if (kind === 'identity') container.service = 'foreign';
+      await expect(validator.validate(f.route, [f.route.public])).rejects.toBeInstanceOf(
+        GatewaySafetyError,
+      );
+    }
+  });
+
+  it('returns the exact coherent sample after one fresh inventory, protocol challenge and saved proof', async () => {
+    const f = fixture();
+    const sample = { ready: true, idle: true, playerCount: 0 };
+    const probeBackend = vi.fn(async () => sample);
+    const validator = createGatewaySafetyValidator({ ...f.options, probeBackend });
+    expect(await validator.validateBackend(f.route)).toBe(sample);
+    expect(probeBackend).toHaveBeenCalledExactlyOnceWith(f.route, expect.any(String));
+    expect(f.options.observer.observe).toHaveBeenCalledOnce();
+    expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+    expect(f.proof()).toMatchObject({ version: 2, routeId: f.route.id });
+  });
+  it('never turns a structured not-ready sample into binding proof', async () => {
+    const f = fixture();
+    const validator = createGatewaySafetyValidator({
+      ...f.options,
+      probeBackend: async () => ({ ready: false, idle: true, playerCount: 0 }),
+    });
+    await expect(validator.validateBackend(f.route)).rejects.toThrow();
+    expect(f.proof()).toBeNull();
+  });
+
   it('proves loopback provider remap, both real Docker bindings and readiness from current namespace', async () => {
     const f = fixture();
     await f.validator().validate(f.route, []);
-    expect(f.options.probeBackend).toHaveBeenCalledWith(f.route);
+    expect(f.options.probeBackend).toHaveBeenCalledWith(f.route, expect.any(String));
     expect(f.proof()).toMatchObject({
+      version: 2,
       serverId: f.route.serverId,
       allocationId: f.route.allocationId,
       namespaceId: 'net:[100]',
@@ -238,6 +480,355 @@ describe('Gateway pre-bind and forwarding safety', () => {
     const f = fixture();
     f.options.provider.listNodes = vi.fn(async () => [f.node, { ...f.node, id: 2 }]);
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+  });
+  it('shares successful listener provider evidence with backend probes, not socket or game samples', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    await safety.validateBackend(f.route);
+    await safety.validateBackend(f.route);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+    expect(f.options.resolveContext).toHaveBeenCalledTimes(3);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(3);
+    await safety.validate(f.route, [f.route.public]);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+  });
+  it.each(['waking', 'online'] as const)(
+    'probes an unchanged leased %s backend without repeating full inspection or proof writes',
+    async (mode) => {
+      const f = fixture();
+      f.route.mode = mode;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      const sample = { ready: true, idle: false, playerCount: 2 };
+      f.options.probeBackend = vi.fn(async () => sample);
+      expect(await safety.probeLeasedBackend?.(f.route)).toBe(sample);
+      expect(f.options.probeBackend).toHaveBeenCalledExactlyOnceWith(f.route, expect.any(String));
+      expect(f.options.observer.observe).toHaveBeenCalledOnce();
+      expect(f.options.resolveContext).toHaveBeenCalledOnce();
+      expect(f.options.provider.listNodes).toHaveBeenCalledOnce();
+      expect(f.options.saveProof).toHaveBeenCalledOnce();
+      expect(f.options.probeNode).toHaveBeenCalledTimes(mode === 'waking' ? 1 : 0);
+      // A subsequent renewal still checks every source, even while the grant is fresh.
+      await safety.validate(f.route, [f.route.public]);
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(2);
+      expect(f.options.provider.listNodes).toHaveBeenCalledTimes(2);
+    },
+  );
+  it.each([
+    'unvalidated',
+    'revision',
+    'generation',
+    'wake-job',
+    'backend',
+    'online',
+    'expired',
+  ] as const)('requires normal backend inspection for %s leased probes', async (change) => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    if (change !== 'unvalidated') await safety.validate(f.route, []);
+    if (change === 'revision') f.route.revision++;
+    if (change === 'generation') f.route.generation = ids.server;
+    if (change === 'wake-job') f.route.wakeJobId = ids.server;
+    if (change === 'backend') f.route.backend.port++;
+    if (change === 'online') f.route.mode = 'online';
+    if (change === 'expired') {
+      now += f.options.policy.maximumObservationAgeMs;
+      f.observation.observedAt = now;
+    }
+    const before = vi.mocked(f.options.observer.observe).mock.calls.length;
+    if (change === 'backend') await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+    else await safety.probeLeasedBackend?.(f.route);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(before + 1);
+    expect(f.options.resolveContext).toHaveBeenCalledTimes(before + 1);
+  });
+  it.each(['stopped', 'missing-bindings'] as const)(
+    'does not retain fast authority for a %s backend',
+    async (change) => {
+      const f = fixture();
+      f.route.mode = 'waking';
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      const container = f.observation.containers[0];
+      if (!container) throw new Error('Missing fixture container');
+      if (change === 'stopped') container.running = false;
+      else container.activeBindings = [];
+      await safety.validate(f.route, [f.route.public]);
+      await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+      expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+    },
+  );
+  it.each(['waking', 'online'] as const)(
+    'rejects %s leased samples that cross the original evidence deadline without extending it',
+    async (mode) => {
+      const f = fixture();
+      f.route.mode = mode;
+      let now = f.observation.observedAt;
+      f.options.now = () => now;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      f.options.probeBackend = async () => {
+        now += 5000;
+        return { ready: true, idle: false, playerCount: 1 };
+      };
+      await expect(safety.probeLeasedBackend?.(f.route)).rejects.toMatchObject({
+        reason: 'observation_stale',
+      });
+      expect(f.options.observer.observe).toHaveBeenCalledOnce();
+      expect(f.options.saveProof).toHaveBeenCalledOnce();
+    },
+  );
+  it('never accepts a negative leased protocol sample as readiness', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.probeBackend = async () => ({ ready: false });
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toMatchObject({
+      reason: 'backend_protocol',
+    });
+    expect(f.options.saveProof).toHaveBeenCalledOnce();
+  });
+  it.each([
+    'unchanged',
+    'owner',
+    'container',
+    'revision',
+    'expired',
+    'failure',
+    'overlap-failure',
+  ] as const)('coordinates an in-flight leased sample with a %s renewal', async (change) => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const sample = { ready: true, idle: false, playerCount: 1 };
+    let finishProbe!: () => void;
+    f.options.probeBackend = vi.fn(
+      () =>
+        new Promise<typeof sample>((resolve) => {
+          finishProbe = () => resolve(sample);
+        }),
+    );
+    const pending = safety.probeLeasedBackend?.(f.route);
+    if (!pending) throw new Error('Missing leased probe');
+    let finishRenewal!: () => void;
+    let renewalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      renewalStarted = resolve;
+    });
+    let renewalCalls = 0;
+    f.options.provider.listNodes = vi.fn(async () => {
+      if (++renewalCalls > 1) throw new Error('Concurrent renewal failed');
+      renewalStarted();
+      await new Promise<void>((resolve) => {
+        finishRenewal = resolve;
+      });
+      return [f.node];
+    });
+    if (change === 'owner') {
+      f.server.user = 3;
+      const context = await f.options.resolveContext(f.route);
+      f.options.resolveContext = async () => ({ ...context, providerUserId: 3 });
+    }
+    if (change === 'container') {
+      const container = f.observation.containers[0];
+      if (!container) throw new Error('Missing container');
+      container.id = 'c'.repeat(64);
+    }
+    const renewedRoute = {
+      ...f.route,
+      revision: f.route.revision + (change === 'revision' ? 1 : 0),
+    };
+    const renewal = safety.validate(renewedRoute, [f.route.public]);
+    await started;
+    let settled = false;
+    const outcome = pending.then(
+      (value) => {
+        settled = true;
+        return value;
+      },
+      (error) => {
+        settled = true;
+        return error;
+      },
+    );
+    finishProbe();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    // Renewal proof reads must not perform a second deferred protocol call.
+    f.options.probeBackend = vi.fn(async () => sample);
+    if (change === 'expired') now += 5000;
+    if (change === 'failure') f.server.suspended = true;
+    let overlapping: Promise<unknown> | undefined;
+    if (change === 'overlap-failure') {
+      overlapping = safety.validate(f.route, [f.route.public]).catch((error) => error);
+    }
+    finishRenewal();
+    await renewal.catch(() => undefined);
+    if (overlapping) {
+      // The queued renewal runs after the first and must not restore its grant.
+      f.server.suspended = true;
+      finishRenewal();
+      await overlapping;
+    }
+    const result = await outcome;
+    if (change === 'unchanged') expect(result).toBe(sample);
+    else expect(result).toMatchObject({ reason: 'observation_stale' });
+  });
+  it('bounds waiting for an unfinished renewal by the original evidence deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      f.route.mode = 'waking';
+      let now = f.observation.observedAt;
+      f.options.now = () => now;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      let finishProbe!: (value: boolean) => void;
+      f.options.probeBackend = () =>
+        new Promise((resolve) => {
+          finishProbe = resolve;
+        });
+      const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+      let finishRenewal!: () => void;
+      let renewalStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        renewalStarted = resolve;
+      });
+      f.options.provider.listNodes = async () => {
+        renewalStarted();
+        await new Promise<void>((resolve) => {
+          finishRenewal = resolve;
+        });
+        return [f.node];
+      };
+      const renewal = safety.validate(f.route, [f.route.public]).catch((error) => error);
+      await started;
+      finishProbe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      now += 5000;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await pending).toMatchObject({ reason: 'observation_stale' });
+      finishRenewal();
+      await renewal;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('does not salvage a pre-failure sample after a later successful renewal', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    let finishProbe!: (value: boolean) => void;
+    f.options.probeBackend = () =>
+      new Promise((resolve) => {
+        finishProbe = resolve;
+      });
+    const pending = safety.probeLeasedBackend?.(f.route).catch((error) => error);
+    f.server.suspended = true;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+    f.server.suspended = false;
+    f.options.probeBackend = async () => true;
+    await safety.validate(f.route, [f.route.public]);
+    finishProbe(true);
+    expect(await pending).toMatchObject({ reason: 'observation_stale' });
+  });
+  it('revokes fast evidence immediately when a renewal fails during a leased probe', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    let resolveProbe: ((result: boolean) => void) | undefined;
+    f.options.probeBackend = () => new Promise((resolve) => (resolveProbe = resolve));
+    const pending = safety.probeLeasedBackend?.(f.route);
+    f.server.suspended = true;
+    await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+    resolveProbe?.(true);
+    await expect(pending).rejects.toMatchObject({
+      reason: 'observation_stale',
+      observationFailure: 'lease_grant_replaced',
+    });
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+  });
+  it('revokes fast evidence after a full backend inspection observes a conflict', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const original = f.observation.containers[0];
+    if (!original) throw new Error('Missing fixture container');
+    f.observation.containers.push({ ...original, id: 'c'.repeat(64), name: '/foreign' });
+    await expect(safety.validateBackend(f.route)).rejects.toThrow();
+    await expect(safety.probeLeasedBackend?.(f.route)).rejects.toThrow();
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(3);
+  });
+  it.each(['revision', 'generation', 'context', 'expired', 'failed-renewal'] as const)(
+    'does not reuse provider evidence after %s',
+    async (change) => {
+      const f = fixture();
+      let now = f.observation.observedAt;
+      f.options.now = () => now;
+      const safety = f.validator();
+      await safety.validate(f.route, []);
+      if (change === 'revision') f.route.revision++;
+      if (change === 'generation') f.route.generation = ids.server;
+      if (change === 'context') {
+        const old = f.options.resolveContext;
+        f.options.resolveContext = async (route) => ({
+          ...(await old(route)),
+          externalId: 'new-owner',
+        });
+      }
+      if (change === 'expired') {
+        now += 5001;
+        f.observation.observedAt = now;
+      }
+      if (change === 'failed-renewal') {
+        f.server.suspended = true;
+        await expect(safety.validate(f.route, [f.route.public])).rejects.toThrow();
+      }
+      const before = vi.mocked(f.options.provider.listNodes).mock.calls.length;
+      if (change === 'context' || change === 'failed-renewal')
+        await expect(safety.validateBackend(f.route)).rejects.toThrow();
+      else await safety.validateBackend(f.route);
+      expect(f.options.provider.listNodes).toHaveBeenCalledTimes(before + 1);
+    },
+  );
+  it('still rejects fresh Docker conflicts while sharing provider evidence', async () => {
+    const f = fixture();
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    const original = f.observation.containers[0];
+    if (!original) throw new Error('Missing fixture container');
+    f.observation.containers.push({ ...original, id: 'c'.repeat(64), name: '/foreign' });
+    await expect(safety.validateBackend(f.route)).rejects.toThrow();
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+  });
+  it('expires shared evidence if the protocol probe crosses its original age budget', async () => {
+    const f = fixture();
+    let now = f.observation.observedAt;
+    f.options.now = () => now;
+    const safety = f.validator();
+    await safety.validate(f.route, []);
+    f.options.probeBackend = async () => {
+      now += 5001;
+      f.observation.observedAt = now;
+      return true;
+    };
+    await expect(safety.validateBackend(f.route)).rejects.toMatchObject({
+      reason: 'observation_stale',
+    });
   });
   it('requires fresh inventory for every renewal', async () => {
     const f = fixture();
@@ -434,6 +1025,53 @@ describe('Gateway pre-bind and forwarding safety', () => {
     await expect(f.validator().validateBackend(f.route)).rejects.toThrow('allocation_unavailable');
     expect(f.options.saveProof).not.toHaveBeenCalled();
   });
+  it('bootstraps a waiting listener with one fresh inspection and a real protocol proof', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    await f.validator().validate(f.route, []);
+    expect(f.options.provider.listNodes).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(1);
+    expect(f.options.provider.getApplicationServer).toHaveBeenCalledTimes(1);
+    expect(f.options.observer.observe).toHaveBeenCalledTimes(1);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(1);
+    expect(f.options.probeNode).toHaveBeenCalledTimes(1);
+    expect(f.proof()?.version).toBe(2);
+    // Renewal still reads fresh collision/identity evidence, without rehashing proof.
+    await f.validator().validate(f.route, []);
+    expect(f.options.provider.listAllocations).toHaveBeenCalledTimes(2);
+    expect(f.options.probeBackend).toHaveBeenCalledTimes(1);
+  });
+  it('rejects bootstrap evidence that expires during the actual backend probe', async () => {
+    const f = fixture();
+    f.route.mode = 'waking';
+    let clock = f.observation.observedAt;
+    f.options.now = () => clock;
+    f.options.probeBackend = vi.fn(async () => {
+      clock += f.options.policy.maximumObservationAgeMs + 1;
+      return true;
+    });
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    expect(f.options.saveProof).not.toHaveBeenCalled();
+    expect(f.options.probeNode).not.toHaveBeenCalled();
+  });
+  it.each(['protocol', 'identity', 'collision', 'node challenge'] as const)(
+    'never bootstraps a waiting listener past a failed %s check',
+    async (failure) => {
+      const f = fixture();
+      f.route.mode = 'waking';
+      if (failure === 'protocol') vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+      if (failure === 'identity') f.server.external_id = 'foreign-resource';
+      if (failure === 'collision')
+        f.observation.sockets.push({
+          ...f.route.public,
+          inode: '123',
+          processOwned: false,
+        });
+      if (failure === 'node challenge') vi.mocked(f.options.probeNode).mockResolvedValue(false);
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      if (failure !== 'node challenge') expect(f.options.saveProof).not.toHaveBeenCalled();
+    },
+  );
   it('does not establish first sleeping proof without a previously ready exact binding', async () => {
     const f = fixture();
     f.route.mode = 'sleeping';
@@ -448,19 +1086,138 @@ describe('Gateway pre-bind and forwarding safety', () => {
     Object.assign(f.observation.containers[0] ?? {}, { running: false });
     Object.assign(f.observation.containers[0] ?? {}, { activeBindings: [] });
     await f.validator().validate(f.route, []);
-    expect(f.options.probeNode).toHaveBeenCalledWith(f.route);
+    expect(f.options.probeNode).toHaveBeenCalledWith(
+      f.route,
+      await f.options.resolveContext(f.route),
+    );
     f.options.probeNode = vi.fn(async () => false);
     await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
   });
-  it.each(['container', 'network', 'binding', 'daemon', 'namespace'])(
+  it.each(['sleeping', 'waking'] as const)(
+    'retains the %s listener across a corroborated Wings container recreation',
+    async (mode) => {
+      const f = fixture();
+      await f.validator().validateBackend(f.route);
+      f.route.mode = mode;
+      Object.assign(f.observation.containers[0] ?? {}, {
+        id: 'f'.repeat(64),
+        running: false,
+        activeBindings: [],
+      });
+      vi.mocked(f.options.probeBackend).mockClear().mockResolvedValue(false);
+      await f.validator().validate(f.route, []);
+      expect(f.options.probeNode).toHaveBeenCalledWith(
+        f.route,
+        await f.options.resolveContext(f.route),
+      );
+      expect(f.options.probeBackend).not.toHaveBeenCalled();
+      // A retained waiting listener is not evidence that game traffic may forward.
+      await expect(f.validator().validateBackend(f.route)).rejects.toThrow(
+        'allocation_unavailable',
+      );
+      Object.assign(f.observation.containers[0] ?? {}, {
+        running: true,
+        activeBindings: structuredClone(f.observation.containers[0]?.configuredBindings),
+      });
+      f.route.mode = 'online';
+      await expect(f.validator().validate(f.route, [])).resolves.toEqual({ backendReady: false });
+      await expect(f.validator().validateBackend(f.route)).rejects.toThrow(
+        'allocation_unavailable',
+      );
+      vi.mocked(f.options.probeBackend).mockResolvedValue(true);
+      await f.validator().validate(f.route, []);
+    },
+  );
+  it.each(['stopped', 'not-ready', 'probe-error'] as const)(
+    'retains a safe permanent listener when the online backend is %s, without forwarding',
+    async (failure) => {
+      const f = fixture();
+      await f.validator().validateBackend(f.route);
+      if (failure === 'stopped')
+        Object.assign(f.observation.containers[0] ?? {}, { running: false, activeBindings: [] });
+      else if (failure === 'not-ready') vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+      else vi.mocked(f.options.probeBackend).mockRejectedValue(new Error('connection refused'));
+      await expect(f.validator().validate(f.route, [])).resolves.toEqual({ backendReady: false });
+      expect(f.options.probeNode).toHaveBeenCalledWith(
+        f.route,
+        await f.options.resolveContext(f.route),
+      );
+      // Losing node reachability or ownership still closes the listener.
+      vi.mocked(f.options.probeNode).mockResolvedValue(false);
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      vi.mocked(f.options.probeNode).mockResolvedValue(true);
+      f.server.external_id = 'foreign-resource';
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    },
+  );
+  it('retains v1 only for its original container and upgrades only after a new protocol proof', async () => {
+    const f = fixture();
+    await f.validator().validateBackend(f.route);
+    const legacy: GatewayReachabilityProof = {
+      ...(f.proof() as GatewayReachabilityProof),
+      version: 1,
+      // Frozen digest produced by the original v1 fixture/identity format.
+      digest: 'bcc7f84e90237b9a40c22abc7b97dbe777e572a56202c68e89e739fc6ef901bc',
+    };
+    await f.options.saveProof(f.route, legacy);
+    f.route.mode = 'sleeping';
+    await f.validator().validate(f.route, []);
+    expect(f.proof()?.version).toBe(1);
+    Object.assign(f.observation.containers[0] ?? {}, { id: 'f'.repeat(64) });
+    vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    expect(f.proof()?.version).toBe(1);
+    vi.mocked(f.options.probeBackend).mockResolvedValue(false);
+    await expect(f.validator().validateBackend(f.route)).rejects.toThrow('allocation_unavailable');
+    expect(f.proof()?.version).toBe(1);
+    vi.mocked(f.options.probeBackend).mockResolvedValue(true);
+    await f.validator().validateBackend(f.route);
+    expect(f.proof()?.version).toBe(2);
+    await f.validator().validate(f.route, []);
+  });
+  it.each(['uuid', 'externalId', 'claim', 'nodeUuid'] as const)(
+    'rejects a dormant proof after coherent provider %s identity replacement',
+    async (field) => {
+      const f = fixture();
+      await f.validator().validateBackend(f.route);
+      const context = await f.options.resolveContext(f.route);
+      f.route.mode = 'sleeping';
+      Object.assign(f.observation.containers[0] ?? {}, { running: false, activeBindings: [] });
+      if (field === 'uuid') {
+        context.providerServerUuid = f.server.uuid = '77777777-7777-4777-8777-777777777777';
+        Object.assign(f.observation.containers[0] ?? {}, { name: `/${f.server.uuid}` });
+      } else if (field === 'externalId') {
+        context.externalId = f.server.external_id = 'different-owner-resource';
+      } else if (field === 'claim') {
+        context.providerAllocationId = f.allocation.id = 8;
+      } else {
+        f.node.uuid = 'replacement-node';
+        const node = f.options.policy.nodes[0];
+        if (node) node.nodeUuid = f.node.uuid;
+      }
+      f.options.resolveContext = vi.fn(async () => context);
+      await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+      expect(f.options.probeNode).not.toHaveBeenCalled();
+    },
+  );
+  it('still fails closed when the recreated provider container is missing or ambiguous', async () => {
+    const f = fixture();
+    await f.validator().validateBackend(f.route);
+    f.route.mode = 'waking';
+    const original = f.observation.containers.splice(0);
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+    const container = original[0];
+    if (!container) throw new Error('missing fixture container');
+    f.observation.containers.push(...original, { ...container, id: 'f'.repeat(64) });
+    await expect(f.validator().validate(f.route, [])).rejects.toThrow('allocation_unavailable');
+  });
+  it.each(['network', 'binding', 'daemon', 'namespace'])(
     'invalidates sleeping proof after %s drift',
     async (kind) => {
       const f = fixture();
       await f.validator().validateBackend(f.route);
       f.route.mode = 'sleeping';
       Object.assign(f.observation.containers[0] ?? {}, { running: false });
-      if (kind === 'container')
-        Object.assign(f.observation.containers[0] ?? {}, { id: 'f'.repeat(64) });
       if (kind === 'network')
         Object.assign(f.observation.networks[0] ?? {}, { id: 'f'.repeat(64) });
       if (kind === 'binding')

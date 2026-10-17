@@ -3,7 +3,12 @@ import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { ConsoleEvent, ConsoleRelay } from './console.js';
-import { createPterodactylAdapter, type ProvisionPlan, PterodactylError } from './index.js';
+import {
+  createPterodactylAdapter,
+  type FileReadTiming,
+  type ProvisionPlan,
+  PterodactylError,
+} from './index.js';
 
 export const fixtureUUID = 'f729c8a1-6773-467a-af3f-a7ea8704f0bd';
 export const limits = { memory: 128, swap: 0, disk: 256, io: 500, cpu: 25, threads: null };
@@ -89,6 +94,32 @@ const config = {
   clientKey: 'client-fixture-secret',
 };
 
+function fileReadTiming(onStart: (name: string) => void = () => {}) {
+  let now = 0;
+  const durations: Record<string, number> = {};
+  const timing: FileReadTiming = {
+    async measure(name, work) {
+      const start = now;
+      onStart(name);
+      try {
+        return await work();
+      } finally {
+        durations[name] = now - start;
+      }
+    },
+    measureSync(name, work) {
+      const start = now;
+      onStart(name);
+      try {
+        return work();
+      } finally {
+        durations[name] = now - start;
+      }
+    },
+  };
+  return { timing, durations, advance: (ms: number) => (now += ms) };
+}
+
 describe('typed Pterodactyl boundary', () => {
   it('accepts installed Panel null_resource configuration on an egg without inheritance', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
@@ -157,6 +188,66 @@ describe('typed Pterodactyl boundary', () => {
     ]);
     expect(String(fetcher.mock.calls[1]?.[0])).toContain('filter%5Bevent%5D=backup.restore');
   });
+  it('reads bounded recent power receipts and strips private activity metadata', async () => {
+    const receipt = {
+      id: 'b'.repeat(40),
+      event: 'server:power.kill',
+      timestamp: '2026-10-10T19:53:12Z',
+      is_api: false,
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      list(
+        [
+          {
+            ...receipt,
+            ip: 'private-address',
+            properties: { token: 'private-token' },
+            actor: { email: 'private@example.test' },
+          },
+          { ...receipt, id: 'c'.repeat(40), event: 'server:power.stop' },
+        ],
+        1,
+        9,
+      ),
+    );
+    const rows = await createPterodactylAdapter({ ...config, fetcher }).listPowerActivity(
+      'f729c8a1',
+    );
+    expect(rows).toEqual([receipt, { ...receipt, id: 'c'.repeat(40), event: 'server:power.stop' }]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain(
+      'filter%5Bevent%5D=server%3Apower.&sort=-timestamp&per_page=100&page=1',
+    );
+  });
+  it.each([
+    'ascending',
+    'unknown event',
+    'missing origin',
+    'wrong page',
+    'oversized',
+    'truncated tie',
+  ])('rejects ambiguous power history: %s', async (failure) => {
+    const receipt: Record<string, unknown> = {
+      id: 'b'.repeat(40),
+      event: 'server:power.kill',
+      timestamp: '2026-10-10T19:53:12Z',
+      is_api: false,
+    };
+    if (failure === 'unknown event') receipt.event = 'server:power.unknown';
+    if (failure === 'missing origin') delete receipt.is_api;
+    const rows =
+      failure === 'ascending'
+        ? [receipt, { ...receipt, timestamp: '2026-10-10T19:53:13Z' }]
+        : failure === 'oversized' || failure === 'truncated tie'
+          ? Array.from({ length: failure === 'oversized' ? 101 : 100 }, () => receipt)
+          : [receipt];
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(list(rows, failure === 'wrong page' ? 2 : 1, 2));
+    await expect(
+      createPterodactylAdapter({ ...config, fetcher }).listPowerActivity('f729c8a1'),
+    ).rejects.toMatchObject({ reason: 'invalid_response' });
+  });
   it('paginates locally constructed URLs; strips token fields and keeps allocated resources distinct', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -213,6 +304,17 @@ describe('typed Pterodactyl boundary', () => {
       reason: 'permission_denied',
       outcome: 'rejected',
     });
+  });
+  it('sends native kill through the Client power endpoint without a console command', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const adapter = createPterodactylAdapter({ ...config, fetcher });
+    await adapter.power('f729c8a1', 'kill');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0] ?? [];
+    expect(String(url)).toBe(`${config.baseURL}/api/client/servers/f729c8a1/power`);
+    expect(init?.method).toBe('POST');
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer client-fixture-secret' });
+    expect(JSON.parse(String(init?.body))).toEqual({ signal: 'kill' });
   });
   it('uses separate Client credentials and checks effective permissions, not a static permission catalog', async () => {
     const fetcher = vi
@@ -324,6 +426,122 @@ describe('typed Pterodactyl boundary', () => {
 });
 
 describe('files and backup credential isolation', () => {
+  it('separates delayed file response headers from delayed body reception', async () => {
+    const headers = Promise.withResolvers<Response>();
+    const bodyStarted = Promise.withResolvers<void>();
+    const phases: string[] = [];
+    const trace = fileReadTiming((name) => {
+      phases.push(name);
+      if (name === 'file.bodyRead') bodyStarted.resolve();
+    });
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+        },
+      }),
+    );
+    const fetcher = vi.fn<typeof fetch>().mockReturnValue(headers.promise);
+    const reading = createPterodactylAdapter({ ...config, fetcher }).readFile(
+      'f729c8a1',
+      'fixture.txt',
+      16,
+      trace.timing,
+    );
+    expect(phases).toEqual(['file.httpHeaders']);
+    trace.advance(170);
+    headers.resolve(response);
+    await bodyStarted.promise;
+    expect(trace.durations).toEqual({ 'file.httpHeaders': 170 });
+    trace.advance(47);
+    bodyController.enqueue(new TextEncoder().encode('fixture'));
+    bodyController.close();
+    expect(new TextDecoder().decode(await reading)).toBe('fixture');
+    expect(phases).toEqual(['file.httpHeaders', 'file.bodyRead']);
+    expect(trace.durations).toEqual({ 'file.httpHeaders': 170, 'file.bodyRead': 47 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('finishes header timing on provider rejection without starting body timing', async () => {
+    const trace = fileReadTiming();
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      trace.advance(30);
+      return new Response('private provider details', { status: 403 });
+    });
+    await expect(
+      createPterodactylAdapter({ ...config, fetcher }).readFile(
+        'f729c8a1',
+        'fixture.txt',
+        16,
+        trace.timing,
+      ),
+    ).rejects.toMatchObject({ reason: 'permission_denied', scope: 'client' });
+    expect(trace.durations).toEqual({ 'file.httpHeaders': 30 });
+  });
+  it.each(['declared-overflow', 'stream-overflow', 'body-error'] as const)(
+    'records body timing without changing %s error handling',
+    async (failure) => {
+      const trace = fileReadTiming();
+      const cancelled = vi.fn();
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            trace.advance(20);
+            if (failure === 'body-error') controller.error(new Error('private stream details'));
+            else controller.enqueue(new TextEncoder().encode('too much data'));
+          },
+          cancel: cancelled,
+        },
+        { highWaterMark: 0 },
+      );
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+        trace.advance(10);
+        return new Response(body, {
+          headers: failure === 'declared-overflow' ? { 'content-length': '13' } : {},
+        });
+      });
+      await expect(
+        createPterodactylAdapter({ ...config, fetcher }).readFile(
+          'f729c8a1',
+          'fixture.txt',
+          4,
+          trace.timing,
+        ),
+      ).rejects.toMatchObject(
+        failure === 'body-error'
+          ? { reason: 'invalid_response', scope: 'client' }
+          : { code: 'validation_failed', status: 413 },
+      );
+      expect(trace.durations).toEqual({
+        'file.httpHeaders': 10,
+        'file.bodyRead': failure === 'declared-overflow' ? 0 : 20,
+      });
+      expect(cancelled).toHaveBeenCalledTimes(failure === 'body-error' ? 0 : 1);
+    },
+  );
+  it('reads without a debug timer and preserves Client API credentials and request path', async () => {
+    const clock = vi.spyOn(performance, 'now');
+    try {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('fixture'));
+      const contents = await createPterodactylAdapter({ ...config, fetcher }).readFile(
+        'f729c8a1',
+        'config/fixture.txt',
+      );
+      expect(new TextDecoder().decode(contents)).toBe('fixture');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+        'https://panel.example.com/api/client/servers/f729c8a1/files/contents?file=%2Fconfig%2Ffixture.txt',
+      );
+      expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+        method: 'GET',
+        headers: { Authorization: `Bearer ${config.clientKey}` },
+        redirect: 'error',
+      });
+      expect(clock).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it.each([
     '../secret',
     '/etc/passwd',
@@ -363,15 +581,32 @@ describe('files and backup credential isolation', () => {
     expect(() => adapter.deleteFiles('f729c8a1', '', ['../unrelated'])).toThrow();
     expect(() => adapter.writeFile('f729c8a1', 'large', 'x'.repeat(1048577))).toThrow();
   });
-  it('bounds file reads even without Content-Length', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('too much data'));
-    await expect(
-      createPterodactylAdapter({ ...config, fetcher }).readFile('f729c8a1', 'fixture.txt', 4),
-    ).rejects.toMatchObject({ reason: 'invalid_response' });
-  });
+  it.each([false, true])(
+    'bounds file reads with Content-Length=%s and cancels the body',
+    async (declared) => {
+      const cancelled = vi.fn();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('too much data'));
+        },
+        cancel: cancelled,
+      });
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(body, {
+          headers: declared ? { 'content-length': '13' } : {},
+        }),
+      );
+      await expect(
+        createPterodactylAdapter({ ...config, fetcher }).readFile('f729c8a1', 'fixture.txt', 4),
+      ).rejects.toMatchObject({ code: 'validation_failed', status: 413 });
+      expect(cancelled).toHaveBeenCalledTimes(1);
+    },
+  );
   it('proxies signed downloads without exposing URLs or forwarding API credentials', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(
         Response.json({
           attributes: {
@@ -388,8 +623,8 @@ describe('files and backup credential isolation', () => {
     const result = await adapter.downloadFile('f729c8a1', 'fixture.txt', { maxBytes: 100 });
     expect(await new Response(result.body).text()).toBe('fixture-data');
     expect(JSON.stringify(result)).not.toContain('signed-fixture-secret');
-    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).has('Authorization')).toBe(false);
-    expect(fetcher.mock.calls[1]?.[1]?.redirect).toBe('error');
+    expect(new Headers(fetcher.mock.calls[3]?.[1]?.headers).has('Authorization')).toBe(false);
+    expect(fetcher.mock.calls[3]?.[1]?.redirect).toBe('error');
   });
   it('refuses an untrusted signed download host before it can receive a request', async () => {
     const fetcher = vi

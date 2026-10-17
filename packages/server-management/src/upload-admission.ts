@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { statfs } from 'node:fs/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
-import { type Database, recordAudit } from '@nickhosting/database';
+import { assertStoragePolicyIdle, type Database, recordAudit } from '@nickhosting/database';
 import { type Kysely, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
@@ -20,10 +20,16 @@ export async function assertNoPendingUpload(db: Kysely<Database>, serverId: stri
   if (claim) throw new DomainError('operation_uncertain');
 }
 export interface UploadAdmissionOptions {
+  /** Browser-generated batch identity permits a safe retry after a lost prepare response. */
+  claimId?: string;
   /** Internal lifecycle only: exact active operation and attribution are revalidated in SQL. */
   operationId?: string;
   /** Isolated tests only; production reads the Owner-selected local filesystem. */
   availableBytes?: (path: string) => Promise<bigint>;
+  /** A batch reserves its total bytes but validates the largest individual file. */
+  providerLargestFileBytes?: number;
+  /** Concurrent independent requests each need their bounded multipart overhead. */
+  multipartCount?: number;
 }
 export function uploadStagingAvailableBytes(snapshot: {
   bavail: bigint;
@@ -66,17 +72,23 @@ export async function reserveUploadIngestion(
   env: Environment = {},
   options: UploadAdmissionOptions = {},
 ) {
+  const multipartCount = options.multipartCount ?? 1;
+  const multipartBytes = uploadMultipartAllowanceBytes * multipartCount;
   if (
+    !Number.isInteger(multipartCount) ||
+    multipartCount < 1 ||
+    multipartCount > 6 ||
     !Number.isSafeInteger(declaredBytes) ||
     declaredBytes < 0 ||
-    declaredBytes > Math.floor((Number.MAX_SAFE_INTEGER - uploadMultipartAllowanceBytes) / 2)
+    declaredBytes > Math.floor((Number.MAX_SAFE_INTEGER - multipartBytes) / 2)
   )
     throw new DomainError('validation_failed', 413);
-  const claimId = randomUUID();
+  const claimId = options.claimId === undefined ? randomUUID() : parse(z.uuid(), options.claimId);
   let locked = false;
   try {
     await connection.transaction().execute(async (tx) => {
       await lockResources(tx);
+      await assertStoragePolicyIdle(tx);
       const server = await tx
         .selectFrom('managed_servers')
         .selectAll()
@@ -126,7 +138,13 @@ export async function reserveUploadIngestion(
         env.NH_OBSERVER_ID !== host.observer_id
       )
         throw new DomainError('configuration_invalid');
-      if (declaredBytes > policy.providerMaxFileBytes)
+      const providerBytes = options.providerLargestFileBytes ?? declaredBytes;
+      if (
+        !Number.isSafeInteger(providerBytes) ||
+        providerBytes < 0 ||
+        providerBytes > declaredBytes ||
+        providerBytes > policy.providerMaxFileBytes
+      )
         throw new DomainError('validation_failed', 413);
       const existing = await tx
         .selectFrom('upload_ingestion_claims')
@@ -134,7 +152,7 @@ export async function reserveUploadIngestion(
         .where('physical_host_id', '=', host.id)
         .executeTakeFirst();
       if (existing) throw new DomainError('conflict');
-      const reservedBytes = 2 * declaredBytes + uploadMultipartAllowanceBytes;
+      const reservedBytes = 2 * declaredBytes + multipartBytes;
       if (reservedBytes > policy.temporaryDiskBudgetBytes)
         throw new DomainError('validation_failed', 413);
       const observe = options.availableBytes ?? availableBytes;
@@ -201,23 +219,36 @@ export async function reserveUploadIngestion(
     throw error;
   }
   let released = false;
+  async function settle(
+    action: 'server.upload.confirmed' | 'server.upload.not_dispatched' | 'server.upload.cancelled',
+  ) {
+    if (released) throw new DomainError('conflict');
+    await connection.transaction().execute(async (tx) => {
+      await lockResources(tx);
+      const claim = await tx
+        .deleteFrom('upload_ingestion_claims')
+        .where('id', '=', claimId)
+        .where('server_id', '=', serverId)
+        .returning('id')
+        .executeTakeFirst();
+      if (!claim) throw new DomainError('conflict');
+      await recordAudit(tx, context, action, { claimId, serverId });
+    });
+  }
   return {
     id: claimId,
     async complete() {
-      if (released) throw new DomainError('conflict');
-      await connection.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        const claim = await tx
-          .deleteFrom('upload_ingestion_claims')
-          .where('id', '=', claimId)
-          .where('server_id', '=', serverId)
-          .returning('id')
-          .executeTakeFirst();
-        if (!claim) throw new DomainError('conflict');
-        await recordAudit(tx, context, 'server.upload.confirmed', { claimId, serverId });
-      });
+      await settle('server.upload.confirmed');
     },
-    /** Failure, cancellation or process loss must leave the durable claim intact. */
+    /** Only call with adapter proof that the Wings upload POST was never invoked. */
+    async rejectBeforeDispatch() {
+      await settle('server.upload.not_dispatched');
+    },
+    /** Only after Wings confirms rejection of the deliberately incomplete multipart. */
+    async cancelConfirmed() {
+      await settle('server.upload.cancelled');
+    },
+    /** Unproven failure, cancellation or process loss leaves the durable claim intact. */
     async unlock() {
       if (released) return;
       released = true;

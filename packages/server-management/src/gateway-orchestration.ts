@@ -1,20 +1,83 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { type AuthContext, DomainError, type DomainErrorCode } from '@nickhosting/core';
-import { type Database, type GatewayServerState, recordAudit } from '@nickhosting/database';
+import {
+  type AuthContext,
+  DomainError,
+  type DomainErrorCode,
+  idleTimeoutUserAccessSchema,
+} from '@nickhosting/core';
+import {
+  type Database,
+  type GatewayServerState,
+  notifyGatewayChange,
+  recordAudit,
+} from '@nickhosting/database';
 import { type Kysely, type Selectable, sql, type Transaction } from 'kysely';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
+import { type GatewayPolicyContext, loadGatewayPolicyContext } from './gateway-policy-context.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
-import { authorizeServer, enqueueLockedServerOperation, parse } from './registry.js';
+import {
+  assertGatewaySleepFence,
+  authorizeServer,
+  enqueueLockedServerOperation,
+  parse,
+} from './registry.js';
+import { resolveIdleTimeout } from './sleep-policy.js';
+import { resolveAutoWakeValues } from './wake-policy.js';
 
 type State = Selectable<Database['gateway_server_states']>;
 type Server = Selectable<Database['managed_servers']>;
+function matchingSleepOperation(
+  operation: Selectable<Database['server_operations']> | undefined,
+  serverId: string,
+  state: State,
+): operation is Selectable<Database['server_operations']> {
+  const marker = operation?.plan.gatewayAutomation;
+  return (
+    operation?.job_id === state.sleep_job_id &&
+    operation?.server_id === serverId &&
+    operation?.action === 'stop' &&
+    typeof marker === 'object' &&
+    marker !== null &&
+    'kind' in marker &&
+    marker.kind === 'sleep' &&
+    'generation' in marker &&
+    marker.generation === state.generation
+  );
+}
+// Scheduled stops share terminal recovery, but never the idle/quiescence proof:
+// they are explicitly authorized operations, not player-idleness observations.
+function matchingScheduledStopOperation(
+  operation: Selectable<Database['server_operations']> | undefined,
+  serverId: string,
+  state: State,
+): operation is Selectable<Database['server_operations']> {
+  const marker = z
+    .object({
+      scheduleId: z.uuid(),
+      occurrenceId: z.uuid(),
+      revision: z.number().int().positive(),
+      gatewayGeneration: z.uuid(),
+      stopIntent: z.literal('sleeping'),
+    })
+    .safeParse(operation?.plan.scheduleAutomation);
+  return (
+    operation?.job_id === state.sleep_job_id &&
+    operation?.server_id === serverId &&
+    operation?.action === 'stop' &&
+    marker.success &&
+    marker.data.gatewayGeneration === state.generation
+  );
+}
+
 export interface GatewayOrchestrationOptions {
   env?: Environment;
   /** Trusted Core route/revision revalidation, inside the observation's global
    * resource transaction lock. Required by the HTTP ingress integration. */
   validateObservation?: (tx: Transaction<Database>) => Promise<void>;
+  /** In-process provider stream fence, rechecked immediately before readiness writes. */
+  validateLiveReadiness?: () => void;
   /** Isolated deterministic tests only; production uses the actual clock. */
   now?: () => Date;
 }
@@ -35,7 +98,9 @@ export const gatewayPolicySchema = z.strictObject({
   enabled: z.boolean(),
   protocolId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
   gameVersion: z.string().min(1).max(100),
-  idleTimeoutSeconds: z.number().int().min(1).max(604800).nullable(),
+  idleTimeoutSeconds: z.number().int().min(1).max(604800).nullable().optional(),
+  idleTimeoutInherited: z.boolean().optional(),
+  idleTimeoutUserAccess: idleTimeoutUserAccessSchema.nullable().optional(),
   readinessTimeoutSeconds: z.number().int().min(1).max(86400),
   readinessMaxAgeSeconds: z.number().int().min(1).max(300),
   estimateMaxAgeSeconds: z.number().int().min(60).max(2592000),
@@ -52,6 +117,7 @@ export interface GatewayState {
   serverId: string;
   generation: string;
   enabled: boolean;
+  wakeEnabled: boolean;
   protocolId: string;
   gameVersion: string;
   state: GatewayServerState;
@@ -106,6 +172,7 @@ async function rows(db: DB, serverId: string) {
     .selectAll()
     .where('server_id', '=', serverId)
     .executeTakeFirst();
+  if (server?.connection_mode === 'direct') throw new DomainError('integration_unavailable');
   if (!server?.pterodactyl_uuid || !state) throw new DomainError('not_found');
   return { server, state };
 }
@@ -131,7 +198,16 @@ function effectiveState(server: Server, state: State, now: Date): GatewayServerS
   return state.state;
 }
 
-async function publicState(db: DB, server: Server, state: State, now: Date): Promise<GatewayState> {
+async function publicState(
+  db: DB,
+  server: Server,
+  state: State,
+  now: Date,
+  env: Environment = {},
+  policyInputs?: GatewayPolicyContext,
+): Promise<GatewayState> {
+  const inputs = policyInputs ?? (await loadGatewayPolicyContext(db, server.id, env));
+  const idleTimeout = await resolveIdleTimeout(db, server.id, state, env, inputs);
   const samples = await db
     .selectFrom('gateway_startup_samples')
     .select('duration_ms')
@@ -140,13 +216,17 @@ async function publicState(db: DB, server: Server, state: State, now: Date): Pro
     .where('ready_at', '>=', new Date(now.getTime() - state.estimate_max_age_seconds * 1000))
     .where('ready_at', '<=', now)
     .orderBy('ready_at', 'desc')
-    .limit(20)
+    .limit(10)
     .execute();
   const actual = effectiveState(server, state, now);
   return {
     serverId: server.id,
     generation: state.generation,
     enabled: state.enabled,
+    wakeEnabled:
+      !server.automatic_starts_paused &&
+      resolveAutoWakeValues(inputs.values, inputs.mapping.game_id, inputs.mapping.runtime_id, state)
+        .effectiveEnabled,
     protocolId: state.protocol_id,
     gameVersion: state.game_version,
     state: actual,
@@ -158,8 +238,8 @@ async function publicState(db: DB, server: Server, state: State, now: Date): Pro
       state.enabled &&
       actual === 'online' &&
       state.idle_since &&
-      state.idle_timeout_seconds !== null
-        ? new Date(state.idle_since.getTime() + state.idle_timeout_seconds * 1000).toISOString()
+      idleTimeout.effectiveSeconds !== -1
+        ? new Date(state.idle_since.getTime() + idleTimeout.effectiveSeconds * 1000).toISOString()
         : null,
     errorCode:
       actual === 'blocked' ? (state.error_code ?? 'integration_unavailable') : state.error_code,
@@ -175,10 +255,7 @@ export async function getGatewayState(
   options: GatewayOrchestrationOptions = {},
 ) {
   const { server, state } = await rows(db, serverId);
-  if (
-    state.enabled &&
-    (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
-  )
+  if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
     await requireMinecraftGatewayProtocol(
       db,
       serverId,
@@ -186,7 +263,7 @@ export async function getGatewayState(
       options.env,
       nowOf(options),
     );
-  return publicState(db, server, state, nowOf(options));
+  return publicState(db, server, state, nowOf(options), options.env);
 }
 
 export async function setGatewayPolicy(
@@ -194,7 +271,7 @@ export async function setGatewayPolicy(
   context: AuthContext,
   serverId: string,
   input: unknown,
-  options: GatewayOrchestrationOptions = {},
+  options: GatewayOrchestrationOptions & { initializeOnly?: boolean } = {},
 ) {
   const value = parse(gatewayPolicySchema, input);
   // A temporary support session cannot leave a permanent automation grant behind.
@@ -203,10 +280,82 @@ export async function setGatewayPolicy(
     await lockResources(tx);
     const current = await currentInteractiveContext(tx, context, options.env ?? {});
     const server = await authorizeServer(tx, current, serverId, 'server:manage');
+    if (server.connection_mode === 'direct') throw new DomainError('integration_unavailable');
+    const previous = await tx
+      .selectFrom('gateway_server_states')
+      .selectAll()
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    const owner = current.role === 'owner';
+    const currentIdle = await resolveIdleTimeout(tx, serverId, previous ?? null, options.env);
+    const timeoutSupplied =
+      value.idleTimeoutSeconds !== undefined || value.idleTimeoutInherited !== undefined;
+    const newOverride =
+      value.idleTimeoutInherited === true ? null : (value.idleTimeoutSeconds ?? -1);
+    if (!owner) {
+      if (value.idleTimeoutUserAccess !== undefined) throw new DomainError('forbidden');
+      if (
+        timeoutSupplied &&
+        currentIdle.userAccess === 'hidden' &&
+        newOverride !== currentIdle.overrideSeconds
+      )
+        throw new DomainError('forbidden');
+      if (
+        timeoutSupplied &&
+        currentIdle.userAccess === 'shorten-only' &&
+        currentIdle.ownerBaselineSeconds !== -1 &&
+        newOverride !== null &&
+        (newOverride === -1 || newOverride > currentIdle.ownerBaselineSeconds)
+      )
+        throw new DomainError('forbidden');
+      if (
+        previous &&
+        currentIdle.ownerBaselineSeconds !== -1 &&
+        currentIdle.userAccess !== 'editable'
+      ) {
+        const mode =
+          server.intent === 'maintenance'
+            ? 'maintenance'
+            : server.intent === 'manually_stopped'
+              ? 'manually_stopped'
+              : 'auto';
+        if (
+          value.enabled !== previous.enabled ||
+          value.mode !== mode ||
+          value.protocolId !== previous.protocol_id ||
+          value.gameVersion !== previous.game_version ||
+          value.readinessTimeoutSeconds !== previous.readiness_timeout_seconds ||
+          value.readinessMaxAgeSeconds !== previous.readiness_max_age_seconds ||
+          value.estimateMaxAgeSeconds !== previous.estimate_max_age_seconds ||
+          value.wakeRetrySeconds !== previous.wake_retry_seconds
+        )
+          throw new DomainError('forbidden');
+      }
+    }
     if (!server.pterodactyl_uuid || server.installation_state !== 'installed')
       throw new DomainError('conflict');
+    if (options.initializeOnly) {
+      if (
+        value.enabled ||
+        (value.idleTimeoutSeconds !== null && value.idleTimeoutSeconds !== undefined) ||
+        value.mode === 'auto'
+      )
+        throw new DomainError('validation_failed');
+      const existing = await tx
+        .selectFrom('gateway_server_states')
+        .select('server_id')
+        .where('server_id', '=', serverId)
+        .executeTakeFirst();
+      if (
+        existing ||
+        server.active_operation_id ||
+        !server.pterodactyl_id ||
+        value.mode !== (server.intent === 'maintenance' ? 'maintenance' : 'manually_stopped')
+      )
+        throw new DomainError('conflict');
+    }
     const now = nowOf(options);
-    if (value.enabled)
+    if (value.enabled || options.initializeOnly)
       await requireMinecraftGatewayProtocol(
         tx,
         serverId,
@@ -229,6 +378,52 @@ export async function setGatewayPolicy(
             ? 'sleeping'
             : 'waking'
         : mode;
+    const oldMode =
+      server.intent === 'maintenance'
+        ? 'maintenance'
+        : server.intent === 'manually_stopped'
+          ? 'manually_stopped'
+          : 'auto';
+    const operationallyUnchanged =
+      previous &&
+      value.enabled === previous.enabled &&
+      value.mode === oldMode &&
+      value.protocolId === previous.protocol_id &&
+      value.gameVersion === previous.game_version &&
+      value.readinessTimeoutSeconds === previous.readiness_timeout_seconds &&
+      value.readinessMaxAgeSeconds === previous.readiness_max_age_seconds &&
+      value.estimateMaxAgeSeconds === previous.estimate_max_age_seconds &&
+      value.wakeRetrySeconds === previous.wake_retry_seconds;
+    if (operationallyUnchanged) {
+      // Editing a preference cannot manufacture fresh idle time or revoke a wake in flight.
+      await tx
+        .updateTable('gateway_server_states')
+        .set({
+          ...(owner
+            ? {
+                ...(timeoutSupplied ? { owner_idle_timeout_seconds: newOverride } : {}),
+                ...(value.idleTimeoutUserAccess !== undefined
+                  ? { owner_idle_timeout_user_access: value.idleTimeoutUserAccess }
+                  : {}),
+                idle_since: null,
+              }
+            : timeoutSupplied
+              ? {
+                  idle_timeout_seconds: newOverride === -1 ? null : newOverride,
+                  idle_timeout_inherited: newOverride === null,
+                }
+              : {}),
+          updated_at: now,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      await recordAudit(tx, current, 'gateway.policy.updated', {
+        serverId,
+        generation: previous.generation,
+        ...value,
+      });
+      return getGatewayState(tx, serverId, options);
+    }
     const row = {
       server_id: serverId,
       generation: randomUUID(),
@@ -236,7 +431,22 @@ export async function setGatewayPolicy(
       protocol_id: value.protocolId,
       game_version: value.gameVersion,
       state: initial,
-      idle_timeout_seconds: value.idleTimeoutSeconds,
+      idle_timeout_seconds:
+        owner || !timeoutSupplied
+          ? (previous?.idle_timeout_seconds ?? null)
+          : newOverride === -1
+            ? null
+            : newOverride,
+      idle_timeout_inherited:
+        owner || !timeoutSupplied
+          ? (previous?.idle_timeout_inherited ?? true)
+          : newOverride === null,
+      owner_idle_timeout_seconds:
+        owner && timeoutSupplied ? newOverride : (previous?.owner_idle_timeout_seconds ?? null),
+      owner_idle_timeout_user_access:
+        owner && value.idleTimeoutUserAccess !== undefined
+          ? value.idleTimeoutUserAccess
+          : (previous?.owner_idle_timeout_user_access ?? null),
       readiness_timeout_seconds: value.readinessTimeoutSeconds,
       readiness_max_age_seconds: value.readinessMaxAgeSeconds,
       estimate_max_age_seconds: value.estimateMaxAgeSeconds,
@@ -328,10 +538,8 @@ export async function requestGatewayWake(
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options);
     if (value.generation !== state.generation) throw new DomainError('conflict');
-    if (
-      state.enabled &&
-      (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
-    )
+    const wakeInputs = await loadGatewayPolicyContext(tx, serverId, options.env);
+    if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
       await requireMinecraftGatewayProtocol(
         tx,
         serverId,
@@ -341,13 +549,20 @@ export async function requestGatewayWake(
       );
     if (
       value.intent === 'status' ||
+      server.automatic_starts_paused ||
       !state.enabled ||
+      !resolveAutoWakeValues(
+        wakeInputs.values,
+        wakeInputs.mapping.game_id,
+        wakeInputs.mapping.runtime_id,
+        state,
+      ).effectiveEnabled ||
       ['manually_stopped', 'maintenance'].includes(server.intent) ||
       state.state === 'waking' ||
       effectiveState(server, state, now) === 'online' ||
       (state.blocked_until && state.blocked_until > now)
     )
-      return publicState(tx, server, state, now);
+      return publicState(tx, server, state, now, options.env, wakeInputs);
     // An uncertain reservation or operation is never a new automatic start.
     const reservation = await tx
       .selectFrom('resource_reservations')
@@ -430,6 +645,101 @@ function assertQuiescenceDeadline(value: GatewayObservation, now: Date): void {
     throw new DomainError('validation_failed');
 }
 
+/** Private service boundary, never an HTTP request body. The Core obtains this
+ * identity from its authenticated provider console subscription. */
+export type GatewayProviderIdentity = Pick<
+  Server,
+  'pterodactyl_id' | 'pterodactyl_uuid' | 'provider_user_id' | 'external_id' | 'node_id'
+>;
+
+/** A live authenticated provider-running event can establish readiness only for
+ * a completed admitted start. Reuse its durable process proof; do not ask Panel,
+ * Docker, egg metadata and the game protocol to confirm the same start again.
+ * The caller must check the compiled integration readiness policy. */
+export async function reportGatewayProviderRunning(
+  db: Kysely<Database>,
+  serverId: string,
+  input: {
+    generation: string;
+    wakeJobId: string;
+    observedAt: string;
+    providerIdentity: GatewayProviderIdentity;
+  },
+  options: GatewayOrchestrationOptions = {},
+): Promise<GatewayState> {
+  const confirmedProcess = async (connection: DB) => {
+    const operation = await connection
+      .selectFrom('server_operations as operation')
+      .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+      .select([
+        'operation.action',
+        'operation.phase',
+        'operation.effect_state',
+        'operation.plan',
+        'job.state',
+      ])
+      .where('operation.job_id', '=', input.wakeJobId)
+      .where('operation.server_id', '=', serverId)
+      .executeTakeFirst();
+    const restart = operation?.action === 'restart';
+    const epoch = restart
+      ? operation?.plan.restartProcessStartedAt
+      : operation?.plan.startProcessStartedAt;
+    const confirmed = restart ? operation?.plan.restartConfirmed : operation?.plan.startConfirmed;
+    if (
+      !operation ||
+      !['start', 'restart', 'provision'].includes(operation.action) ||
+      operation.phase !== 'complete' ||
+      operation.effect_state !== 'confirmed' ||
+      operation.state !== 'succeeded' ||
+      confirmed !== true ||
+      typeof epoch !== 'string'
+    )
+      throw new DomainError('operation_uncertain');
+    return epoch;
+  };
+  const epoch = await confirmedProcess(db);
+  return reportGatewayObservation(
+    db,
+    serverId,
+    {
+      generation: input.generation,
+      wakeJobId: input.wakeJobId,
+      observedAt: input.observedAt,
+      processStartedAt: epoch,
+      ready: true,
+      // Readiness is not proof of zero players; the first protocol sample owns idle.
+      activeSessions: 0,
+    },
+    {
+      ...options,
+      validateObservation: async (tx) => {
+        await options.validateObservation?.(tx);
+        const server = await tx
+          .selectFrom('managed_servers')
+          .selectAll()
+          .where('id', '=', serverId)
+          .where('deleted_at', 'is', null)
+          .executeTakeFirst();
+        if (
+          !server ||
+          Object.entries(input.providerIdentity).some(
+            ([key, value]) => server[key as keyof GatewayProviderIdentity] !== value,
+          )
+        )
+          throw new DomainError('conflict');
+        const reservation = await tx
+          .selectFrom('resource_reservations')
+          .select('state')
+          .where('server_id', '=', serverId)
+          .executeTakeFirst();
+        if (reservation?.state !== 'running' || (await confirmedProcess(tx)) !== epoch)
+          throw new DomainError('operation_uncertain');
+      },
+    },
+  );
+}
+
 /** Accept only trusted Core corroboration of the exact process identity. The
  * HTTP Gateway report cannot supply its own processStartedAt to bypass this. */
 export async function reportGatewayObservation(
@@ -445,10 +755,7 @@ export async function reportGatewayObservation(
     const { server, state } = await rows(tx, serverId);
     const now = nowOf(options),
       observed = new Date(value.observedAt);
-    if (
-      state.enabled &&
-      (server.game_id === 'minecraft-java' || state.protocol_id === 'minecraft-java')
-    )
+    if (state.enabled && (server.game_id === 'minecraft' || state.protocol_id === 'minecraft-java'))
       await requireMinecraftGatewayProtocol(
         tx,
         serverId,
@@ -466,17 +773,70 @@ export async function reportGatewayObservation(
     )
       throw new DomainError('validation_failed');
     if (['manually_stopped', 'maintenance'].includes(server.intent))
-      return publicState(tx, server, state, now);
+      return publicState(tx, server, state, now, options.env);
     // An identical observation is idempotent and cannot advance the idle timer.
     if (state.last_observed_at?.getTime() === observed.getTime())
-      return publicState(tx, server, state, now);
+      return publicState(tx, server, state, now, options.env);
     const activeOperation = server.active_operation_id
       ? await tx
           .selectFrom('server_operations')
-          .select('action')
+          .selectAll()
           .where('job_id', '=', server.active_operation_id)
           .executeTakeFirst()
       : undefined;
+    if (state.sleep_job_id) {
+      // A prepared stop still needs its retained affirmative idle proof at the
+      // final handoff. A concurrent positive sample must not erase that proof,
+      // nor advertise the server as playable while the stop remains unresolved.
+      let retainedIdle = false;
+      const sleepJob = await tx
+        .selectFrom('operation_jobs')
+        .select('state')
+        .where('id', '=', state.sleep_job_id)
+        .executeTakeFirst();
+      if (
+        sleepJob &&
+        ['queued', 'running'].includes(sleepJob.state) &&
+        state.enabled &&
+        server.intent === 'sleeping' &&
+        server.active_operation_id === state.sleep_job_id &&
+        matchingSleepOperation(activeOperation, serverId, state) &&
+        !['failed', 'complete'].includes(activeOperation.phase) &&
+        server.runtime_state === 'running' &&
+        value.processStartedAt !== null &&
+        value.processStartedAt === state.process_started_at &&
+        value.ready &&
+        value.idle === true &&
+        value.playerCount === 0 &&
+        value.activeSessions === 0 &&
+        state.idle_since &&
+        state.last_observed_at &&
+        observed.getTime() - state.last_observed_at.getTime() <=
+          state.readiness_max_age_seconds * 1000
+      ) {
+        try {
+          assertGatewaySleepFence(activeOperation.plan, now);
+          const idleTimeout = await resolveIdleTimeout(tx, serverId, state, options.env);
+          retainedIdle =
+            idleTimeout.effectiveSeconds !== -1 &&
+            state.last_observed_at.getTime() - state.idle_since.getTime() >=
+              idleTimeout.effectiveSeconds * 1000;
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+        }
+      }
+      await tx
+        .updateTable('gateway_server_states')
+        .set({
+          last_observed_at: observed,
+          idle_since: retainedIdle ? state.idle_since : null,
+          readiness_observed_at: null,
+          updated_at: now,
+        })
+        .where('server_id', '=', serverId)
+        .execute();
+      return reconcileLocked(tx, serverId, options);
+    }
     if (
       !value.processStartedAt ||
       server.runtime_state !== 'running' ||
@@ -520,11 +880,31 @@ export async function reportGatewayObservation(
         .where('job_id', '=', state.wake_job_id)
         .executeTakeFirstOrThrow();
       if (
-        job.state !== 'succeeded' ||
+        (job.state !== 'succeeded' &&
+          !(
+            job.state === 'failed' &&
+            operation.action === 'backup' &&
+            operation.plan.backupResumeOutcome === 'succeeded'
+          )) ||
         !operation.effect_started_at ||
         processNanos <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
         operation.server_id !== serverId ||
-        !['start', 'restart'].includes(operation.action)
+        !(
+          ['start', 'restart'].includes(operation.action) ||
+          (operation.action === 'backup' &&
+            operation.plan.backupResumeOutcome === 'succeeded' &&
+            operation.plan.startConfirmed === true &&
+            operation.effect_state === 'confirmed' &&
+            operation.plan.startProcessStartedAt === value.processStartedAt) ||
+          (operation.action === 'provision' &&
+            operation.plan.autoStart === true &&
+            operation.plan.gatewayRoutesActivated === true &&
+            operation.plan.powerEffectPrepared === true &&
+            typeof operation.plan.effectAttempts === 'object' &&
+            operation.plan.effectAttempts !== null &&
+            'initial_start' in operation.plan.effectAttempts &&
+            Number(operation.plan.effectAttempts.initial_start) >= 1)
+        )
       )
         throw new DomainError('operation_uncertain');
     }
@@ -553,6 +933,7 @@ export async function reportGatewayObservation(
         .execute();
       return getGatewayState(tx, serverId, options);
     }
+    const idleTimeout = await resolveIdleTimeout(tx, serverId, state, options.env);
     const freshIdle = value.idle === true && value.activeSessions === 0 && value.playerCount === 0;
     // Unknown player count is not affirmative proof of idleness. Gaps reset the
     // interval; a stale Gateway cannot sleep a server based on silence.
@@ -560,7 +941,13 @@ export async function reportGatewayObservation(
       state.last_observed_at !== null &&
       observed.getTime() - state.last_observed_at.getTime() <=
         state.readiness_max_age_seconds * 1000;
-    const idleSince = freshIdle ? (continuous ? (state.idle_since ?? observed) : observed) : null;
+    const idleSince =
+      freshIdle && idleTimeout.effectiveSeconds !== -1
+        ? continuous
+          ? (state.idle_since ?? observed)
+          : observed
+        : null;
+    options.validateLiveReadiness?.();
     await tx
       .updateTable('gateway_server_states')
       .set({
@@ -602,9 +989,9 @@ export async function reportGatewayObservation(
       state.enabled &&
       value.quiescenceUntil !== undefined &&
       !server.active_operation_id &&
-      state.idle_timeout_seconds !== null &&
+      idleTimeout.effectiveSeconds !== -1 &&
       idleSince &&
-      observed.getTime() - idleSince.getTime() >= state.idle_timeout_seconds * 1000
+      observed.getTime() - idleSince.getTime() >= idleTimeout.effectiveSeconds * 1000
     ) {
       await sql`savepoint gateway_sleep`.execute(tx);
       try {
@@ -627,7 +1014,8 @@ export async function reportGatewayObservation(
             state: 'blocked',
             sleep_job_id: result.jobId,
             readiness_observed_at: null,
-            idle_since: null,
+            // Retain affirmative idle evidence for the final worker handoff.
+            idle_since: idleSince,
             error_code: 'operation_uncertain',
             updated_at: now,
           })
@@ -700,14 +1088,77 @@ async function reconcileLocked(
         })
         .where('server_id', '=', serverId)
         .execute();
-    } else if (job.state === 'failed') await block(tx, state, 'operation_uncertain', now);
+      // Delivered only on commit; the durable snapshot proof remains authority.
+      await notifyGatewayChange(tx);
+    } else if (job.state === 'failed') {
+      const operation = await tx
+        .selectFrom('server_operations')
+        .selectAll()
+        .where('job_id', '=', state.sleep_job_id)
+        .executeTakeFirst();
+      if (
+        server.intent === 'sleeping' &&
+        server.runtime_state === 'running' &&
+        !server.active_operation_id &&
+        reservation &&
+        job.completed_at &&
+        (matchingSleepOperation(operation, serverId, state) ||
+          matchingScheduledStopOperation(operation, serverId, state)) &&
+        operation.phase === 'failed' &&
+        operation.effect_state === 'none' &&
+        ((operation.plan.rejected === true && operation.plan.powerEffectPrepared === false) ||
+          (operation.effect_started_at === null &&
+            operation.plan.powerEffectPrepared === undefined &&
+            operation.plan.effectAttempts === undefined)) &&
+        operation.plan.gatewaySleepHandoffAt === undefined &&
+        operation.plan.acknowledged !== true &&
+        operation.plan.stopConfirmed !== true &&
+        operation.plan.stopConfirmedAt === undefined
+      ) {
+        // Retire only a never-prepared or conclusively rejected pre-handoff attempt. Keep its
+        // journal and compute reservation; new observations must establish a
+        // new idle interval before a distinct stop can be authorized.
+        await tx
+          .updateTable('gateway_server_states')
+          .set({
+            sleep_job_id: null,
+            state: 'blocked',
+            readiness_observed_at: null,
+            idle_since: null,
+            last_observed_at: null,
+            error_code: 'operation_uncertain',
+            blocked_until: null,
+            updated_at: now,
+          })
+          .where('server_id', '=', serverId)
+          .execute();
+        await tx
+          .updateTable('managed_servers')
+          .set({
+            intent: 'auto_wake_enabled',
+            readiness: 'unknown',
+            updated_at: now,
+          })
+          .where('id', '=', serverId)
+          .execute();
+      } else await block(tx, state, 'operation_uncertain', now);
+    }
   } else if (state.wake_job_id && state.state === 'waking') {
     const job = await tx
       .selectFrom('operation_jobs')
       .selectAll()
       .where('id', '=', state.wake_job_id)
       .executeTakeFirstOrThrow();
-    if (job.state === 'failed')
+    const resumedBackup =
+      job.state === 'failed'
+        ? await tx
+            .selectFrom('server_operations')
+            .select('plan')
+            .where('job_id', '=', job.id)
+            .where('action', '=', 'backup')
+            .executeTakeFirst()
+        : undefined;
+    if (job.state === 'failed' && resumedBackup?.plan.backupResumeOutcome !== 'succeeded')
       await block(
         tx,
         state,

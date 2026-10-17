@@ -7,7 +7,7 @@ Each ADR is a short record of an intentional project decision and the consequenc
 - [0003 Invite auth, linking and first-run](0003-authentication-and-setup.md)
 - [0004 Active compute quotas](0004-resource-policy.md)
 - [0005 Permanent gateway isolation](0005-permanent-gateway.md)
-- [0006 Game SDK and connection policies](0006-game-integrations-and-domains.md)
+- [0006 Game SDK and connection policies — Owner workspace and shared content policy clarified 2026-10-16](0006-game-integrations-and-domains.md)
 - [0007 SFTPGo and persistent mounts](0007-file-transfer-and-storage.md)
 - [0008 Complete frontend — original M6 decision, amended 2026-10-09 to M5 WebPanel/common readiness and M6 game expansion](0008-complete-frontend.md)
 - [0009 Production test permissions](0009-production-safety.md)
@@ -23,3 +23,13 @@ retaining the original decision and consequences, as in ADR 0008. Read its curre
 status and amendment before applying historical milestone numbers.
 
 - [0013 — Minecraft evidence and recoverable content](0013-minecraft-evidence-and-content.md)
+
+- [0014 — WebPanel and common platform contracts](0014-webpanel-and-common-contracts.md)
+
+- [0015 — Per-user provider technical accounts](0015-provider-technical-accounts.md)
+
+- [0016 — Declared provider readiness and responder continuity](0016-provider-readiness.md)
+
+- [0017 — Shared file viewers and private range access](0017-shared-file-viewers.md)
+
+- [0018 — Minecraft identity and protocol-family support](0018-minecraft-identity-and-protocol-families.md)

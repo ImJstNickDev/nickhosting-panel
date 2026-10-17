@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { type AuthContext, authSessionId } from '@nickhosting/core';
-import type { Database } from '@nickhosting/database';
+import { type Database, getSettings } from '@nickhosting/database';
 import type { GameManifest } from '@nickhosting/game-sdk';
 import type { Allocation, PterodactylAdapter } from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
@@ -69,6 +69,55 @@ export async function managementFixture(
       current[authSessionId] = sessionId;
     }
   }
+  // Legacy lifecycle fixtures explicitly grant timeout editing; production defaults hide it.
+  await sql`insert into platform_settings(key,value) values ('platform', '{"idleTimeoutUserAccess":"editable"}'::jsonb)
+    on conflict(key) do update set value = jsonb_set(platform_settings.value, '{idleTimeoutUserAccess}', '"editable"'::jsonb)`.execute(
+    db,
+  );
+  await sql`update platform_settings set value = jsonb_set(value, '{pterodactylBaseUrl}', coalesce(value->'pterodactylBaseUrl', '"https://panel.example.test"'::jsonb)) where key='platform'`.execute(
+    db,
+  );
+  const providerUrl = (await getSettings(db, {})).values.pterodactylBaseUrl?.replace(/\/$/, '');
+  if (!providerUrl) throw new Error('fixture provider URL missing');
+  const feed = await db
+    .insertInto('provider_change_feeds')
+    .values({
+      instance_id: randomUUID(),
+      healthy_at: null,
+      generation: '1',
+      enabled: true,
+      provider_url: providerUrl,
+      callback_url: 'https://nickhosting.example.test/v1/provider-events/pterodactyl',
+    })
+    .onConflict((c) => c.column('provider_url').doUpdateSet({ enabled: true }))
+    .returning('instance_id')
+    .executeTakeFirstOrThrow();
+  const linkedAccounts = await db
+    .selectFrom('provider_accounts')
+    .select('provider_id')
+    .where('provider_url', '=', providerUrl)
+    .execute();
+  const providerUserId = Math.max(0, ...linkedAccounts.map((row) => row.provider_id ?? 0)) + 1;
+  await db
+    .updateTable('provider_accounts')
+    .set({
+      instance_id: feed.instance_id,
+      provider_url: providerUrl,
+      provider_id: providerUserId,
+      provider_uuid: randomUUID(),
+      external_id: `nh-user-${userId}`,
+      status: 'ready',
+      key_identifier: 'isolated-key',
+      key_envelope: {
+        version: 1,
+        keyId: 'fixture',
+        iv: 'fixture',
+        ciphertext: 'fixture',
+        tag: 'fixture',
+      },
+    })
+    .where('user_id', '=', userId)
+    .execute();
   const hostId = randomUUID(),
     nodeId = randomUUID(),
     mappingId = randomUUID(),
@@ -177,6 +226,7 @@ export async function managementFixture(
     .where('id', '=', nodeId)
     .execute();
   const adapter = {
+    prefetchDownloads: vi.fn(async () => {}),
     listAllocations: vi.fn(async () => structuredClone(inventory)),
     getNode: vi.fn(async () => ({ id: providerNodeId })),
     listUsers: vi.fn(async () => [{ id: 1 }]),
@@ -223,7 +273,12 @@ export async function managementFixture(
     ...patch,
   });
   async function server(patch: Record<string, unknown> = {}) {
-    const created = await createManagedServer(db, adapter, context, input(patch));
+    // Legacy fixtures describe pre-existing finite disks. Opt into the new
+    // unlimited creation path explicitly; the stored platform policy is unchanged.
+    const unlimited = (patch.limits as { disk?: number } | undefined)?.disk === 0;
+    const created = await createManagedServer(db, adapter, context, input(patch), {
+      NH_STORAGE_POLICY: unlimited ? 'GLOBAL_POOL' : 'PER_USER_BUDGET',
+    });
     // A completed fixture provision: external behavior is exercised in lifecycle tests.
     const providerId = ++sequence;
     await db
@@ -249,6 +304,20 @@ export async function managementFixture(
       .where('job_id', '=', created.jobId)
       .execute();
     await db.deleteFrom('job_outbox').where('job_id', '=', created.jobId).execute();
+    if (unlimited)
+      await db
+        .insertInto('server_metrics')
+        .values({
+          server_id: created.serverId,
+          observed_at: new Date(),
+          disk_bytes: '0',
+          backup_bytes: '0',
+          memory_bytes: '0',
+          cpu_percent: 0,
+          network_rx_bytes: '0',
+          network_tx_bytes: '0',
+        })
+        .execute();
     return created.serverId;
   }
   return {

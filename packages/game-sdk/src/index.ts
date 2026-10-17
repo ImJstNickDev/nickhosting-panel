@@ -1,7 +1,11 @@
 import { DomainError, type PlatformRole } from '@nickhosting/core';
 import { z } from 'zod';
+import { gatewayMessageDefinitionSchema } from './gateway-messages.js';
+import { runtimeImagePolicySchema } from './runtime-images.js';
 
 export * from './gateway.js';
+export * from './gateway-messages.js';
+export * from './runtime-images.js';
 
 export const gameRolloutStates = [
   'development',
@@ -61,6 +65,11 @@ const translationKey = z.string().regex(/^games\.[a-z][a-z0-9-]*\.[a-zA-Z0-9_.-]
 const settingKey = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/);
 
 export const connectionModeSchema = z.discriminatedUnion('mode', [
+  z.strictObject({
+    mode: z.literal('shared-host'),
+    defaultLabel: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/),
+    allowCustomSubdomain: z.boolean(),
+  }),
   z
     .object({
       mode: z.literal('custom-subdomain'),
@@ -101,11 +110,27 @@ const capabilitySchema = z
     worlds: z.boolean(),
     idleDetection: z.boolean(),
     gracefulStop: z.boolean(),
+    gatewayMessages: z.boolean().optional(),
     readiness: z.boolean(),
     wake: z.enum(['unsupported', 'manual', 'verified-protocol']),
   })
   .strict();
 export type GameCapabilities = z.infer<typeof capabilitySchema>;
+
+export const gameBackupPolicySchema = z.strictObject({
+  offline: z.enum(['required', 'recommended', 'none']),
+});
+export type GameBackupPolicy = z.infer<typeof gameBackupPolicySchema>;
+
+/** Compiled integration hooks must be repeatable after worker recovery. Core
+ * persists preparation before invoking it and always attempts cleanup. */
+export interface GameBackupHooks<Context> {
+  prepareBackup?(context: Context, mode: 'offline' | 'live'): Promise<void>;
+  /** Compensation only: reverse this backup's preparation, even when the
+   * initiating actor or schedule has since lost authority. Never start a new
+   * backup, process or unrelated mutation from this hook. */
+  cleanupBackup?(context: Context, mode: 'offline' | 'live'): Promise<void>;
+}
 
 export const gameManifestSchema = z
   .object({
@@ -113,6 +138,8 @@ export const gameManifestSchema = z
     version: z.string().regex(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/),
     nameKey: translationKey,
     capabilities: capabilitySchema,
+    backupPolicy: gameBackupPolicySchema.optional(),
+    gatewayMessages: gatewayMessageDefinitionSchema.optional(),
     connection: connectionModeSchema,
     ports: z.array(portRequirementSchema).min(1),
     runtimes: z
@@ -122,6 +149,7 @@ export const gameManifestSchema = z
             id: identifier,
             nameKey: translationKey,
             supportedGameVersions: z.array(z.string().min(1)),
+            imagePolicy: runtimeImagePolicySchema.optional(),
             supports: z.record(z.string(), z.boolean()),
           })
           .strict(),

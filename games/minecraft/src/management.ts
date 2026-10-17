@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
+import { minecraftPropertyEnumValue } from './property-enums.js';
 
 function invalid(reason: string): never {
   throw new DomainError('validation_failed', 400, { reason });
@@ -94,6 +95,14 @@ const numeric: Record<string, [number, number]> = {
   'spawn-protection': [0, 29_999_984],
   'player-idle-timeout': [0, 2_147_483_647],
 };
+export const minecraftEditablePropertyKeys: readonly string[] = Object.freeze([
+  ...booleans,
+  ...Object.keys(numeric),
+  'difficulty',
+  'gamemode',
+  'motd',
+]);
+
 /** Product fields exclude bind addresses, ports, RCON, online-mode and service credentials. */
 export function editMinecraftProperties(
   source: string,
@@ -129,13 +138,17 @@ export function editMinecraftProperties(
       if (
         value.length > 256 ||
         [...value].some(
-          (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+          (character) =>
+            (character.charCodeAt(0) < 32 && character !== '\n') || character.charCodeAt(0) === 127,
         )
       )
         return invalid('minecraft_property_motd');
     } else return invalid('minecraft_property_protected');
     // Release-specific support comes from a verified generated-property schema, not semver guesses.
-    replacement.set(key, value);
+    replacement.set(
+      key,
+      minecraftPropertyEnumValue(key, value, parsed.find((line) => line.key === key)?.value),
+    );
   }
   const lines = parsed.map((line) => {
     if (!line.key || !replacement.has(line.key)) return line.raw;
@@ -222,7 +235,7 @@ export function planMinecraftPlayerList(
   source: string,
   kind: 'whitelist' | 'operators',
   action: 'add' | 'remove',
-  player: MinecraftVerifiedPlayer,
+  player: Omit<MinecraftVerifiedPlayer, 'source'> & { readonly source: 'mojang' | 'server-file' },
   options: { operatorLevel?: number; bypassesPlayerLimit?: boolean } = {},
 ): {
   path: 'whitelist.json' | 'ops.json';
@@ -233,7 +246,7 @@ export function planMinecraftPlayerList(
 } {
   if (
     Buffer.byteLength(source) > 4 * 1024 * 1024 ||
-    player.source !== 'mojang' ||
+    !['mojang', 'server-file'].includes(player.source) ||
     !Number.isFinite(Date.parse(player.verifiedAt))
   )
     return invalid('minecraft_player_list');
