@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useState } from 'react';
 import { Link, Navigate, Outlet, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { ApiError, api } from '../api/client.js';
 import { AccountMenu } from '../components/account-menu.js';
@@ -18,6 +18,7 @@ export function Shell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const closeNavigation = useCallback(() => setOpen(false), []);
   const [collapsed, toggleSidebar] = useSidebarCollapsed();
   const [exitError, setExitError] = useState<unknown>();
   const { locale, setLocale } = useLocale();
@@ -29,7 +30,9 @@ export function Shell() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: close navigation and restore focus on each route transition.
   useEffect(() => {
     setOpen(false);
-    document.querySelector<HTMLElement>('h1')?.focus();
+    // The modal finishes its exit before moving focus into the new page.
+    if (!document.querySelector('dialog.mobile-navigation[open]'))
+      document.querySelector<HTMLElement>('h1')?.focus();
   }, [location.pathname]);
   const applySessionLocale = useEffectEvent((value: 'en' | 'it') => {
     if (value && locale !== 'pseudo' && locale !== value) setLocale(value);
@@ -130,6 +133,7 @@ export function Shell() {
           open={open}
           collapsed={collapsed}
           onToggle={toggleSidebar}
+          onClose={closeNavigation}
           instanceName={config.data?.instanceName ?? 'NickHosting'}
           name={current.subject.name}
           showHome={ownerArea && (ordinaryOwner || readOnlyAdmin)}
@@ -139,12 +143,24 @@ export function Shell() {
           <header className="topbar">
             <button
               type="button"
-              className="mobile-menu secondary"
+              className="mobile-menu"
+              aria-label={t('web.openMenu')}
+              aria-haspopup="dialog"
               aria-expanded={open}
-              aria-controls="primary-navigation"
+              aria-controls="mobile-navigation"
               onClick={() => setOpen(!open)}
             >
-              {t('web.openMenu')}
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
             </button>
             <span>
               {ownerArea

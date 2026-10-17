@@ -172,3 +172,137 @@
     outline-offset: -2px;
   }
 }
+
+/* The dialog occupies the viewport without taking a grid track from the page. */
+dialog.mobile-navigation {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overscroll-behavior: contain;
+}
+
+dialog.mobile-navigation::backdrop {
+  background: #14273680;
+  animation: navigation-backdrop-in 180ms ease-out both;
+}
+
+.mobile-navigation .sidebar {
+  width: min(304px, calc(100% - 56px));
+  height: 100%;
+  padding: max(12px, env(safe-area-inset-top)) 12px max(18px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
+  gap: 24px;
+  box-shadow: 6px 0 24px #1427361a;
+  animation: navigation-drawer-in 180ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.mobile-navigation .sidebar .nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 2px;
+  margin: -2px;
+}
+
+.mobile-navigation .sidebar .sidebar-link {
+  flex-shrink: 0;
+  min-height: 44px;
+}
+
+.mobile-navigation .sidebar-bottom {
+  margin-top: 0;
+  gap: 12px;
+}
+
+.sidebar .sidebar-close,
+.mobile-menu {
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 9px;
+  border: 0;
+  border-radius: 6px;
+  color: #36556a;
+  background: transparent;
+}
+
+.sidebar .sidebar-close {
+  display: inline-flex;
+}
+
+.sidebar .sidebar-close svg,
+.topbar .mobile-menu svg {
+  width: 22px;
+  height: 22px;
+}
+
+.sidebar .sidebar-close:hover,
+.mobile-menu:hover {
+  background: #dfe5e4;
+  filter: none;
+}
+
+.mobile-navigation[data-closing] .sidebar {
+  animation-name: navigation-drawer-out;
+}
+
+.mobile-navigation[data-closing]::backdrop {
+  animation-name: navigation-backdrop-out;
+}
+
+@keyframes navigation-drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes navigation-drawer-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes navigation-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes navigation-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-navigation .sidebar,
+  dialog.mobile-navigation::backdrop {
+    animation: none;
+  }
+}

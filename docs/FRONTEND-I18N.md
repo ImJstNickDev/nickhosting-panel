@@ -129,15 +129,22 @@ notices, tables and native dialogs. The shell owns ordinary/Owner navigation,
 identity context and common server services. Regular platform operators have a
 restricted Administration area for audit and read-only settings; Owner mutation
 controls are absent and backend checks remain authoritative. It moves focus to the page heading
-on navigation and supplies a skip link and a mobile navigation disclosure. Desktop
+on navigation and supplies a skip link and a mobile navigation drawer. Desktop
 navigation stays within the viewport while the page scrolls; short windows scroll
 the sidebar internally so administration and account links remain reachable.
 The desktop toggle changes the sidebar from 224 px to a 64 px icon rail. Its local
 display preference persists across reloads and ordinary/Owner navigation. Compact
 links retain accessible names, current-page markers and shared tooltips. A 200 ms
 width transition keeps icons aligned while labels fade without wrapping; reduced
-motion disables transitions. Mobile retains its full-label disclosure regardless
-of the saved desktop preference. Route organization and authorization are unchanged.
+motion disables transitions. Mobile uses an icon-only opener and a native modal
+left drawer, with a dimmed backdrop and a restrained 180 ms slide. It overlays the
+page without moving its content. Full-label navigation scrolls independently inside
+the viewport and respects safe areas, regardless of the saved desktop preference.
+Escape, the close icon, backdrop or navigation dismiss it; background interaction
+and scrolling remain locked until dismissal. Focus returns to the opener, or to
+the destination heading after navigation. Resizing to desktop releases modality
+and restores the desktop preference. Reduced motion removes drawer animations.
+Route organization and authorization are unchanged.
 
 The topbar uses a circular profile silhouette to open an account disclosure with
 an avatar centered above the centered current name, Settings and Sign out.

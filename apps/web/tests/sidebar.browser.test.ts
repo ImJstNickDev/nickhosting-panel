@@ -13,7 +13,9 @@ describe('M5 sidebar viewport and navigation regression', () => {
   const pageErrors: string[] = [];
 
   beforeAll(async () => {
-    fixture = await browserHarness();
+    fixture = await browserHarness({
+      browser: process.env.NH_SIDEBAR_BROWSER === 'firefox' ? 'firefox' : 'chromium',
+    });
     const identities = await prepareJourneyIdentities(fixture);
     owner = identities.owner;
     user = identities.user;
@@ -71,12 +73,12 @@ describe('M5 sidebar viewport and navigation regression', () => {
   }
 
   it('keeps desktop navigation in the viewport and exposes Administration in the topbar', async () => {
-    await owner.setViewportSize({ width: 1440, height: 900 });
+    await owner.setViewportSize({ width: 1440, height: 600 });
     await owner.goto(`${fixture.origin}/settings/security`);
     await browserExpect(
       owner.getByRole('heading', { name: 'Sessions', exact: true }),
     ).toBeVisible();
-    expect(await owner.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(900);
+    expect(await owner.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(600);
     const top = await sidebarFitsViewport();
     const administration = owner
       .locator('.topbar')
@@ -216,54 +218,133 @@ describe('M5 sidebar viewport and navigation regression', () => {
     expect(pageErrors).toEqual([]);
   });
 
-  it('preserves the Italian mobile disclosure, keyboard activation and navigation', async () => {
+  it('opens an Italian mobile drawer without moving the page and restores focus on dismissal', async () => {
+    await owner.setViewportSize({ width: 1440, height: 900 });
+    await owner.goto(`${fixture.origin}/settings`);
+    const desktopToggle = owner.locator('.sidebar-toggle');
+    await browserExpect(desktopToggle).toBeVisible();
+    if ((await desktopToggle.getAttribute('aria-expanded')) === 'true') await desktopToggle.click();
     await journeyRequest(fixture, owner, '/api/auth/update-user', {
       name: 'Morgan Owner',
       locale: 'it',
     });
-    await owner.getByRole('button', { name: 'Collapse navigation', exact: true }).click();
     await owner.setViewportSize({ width: 390, height: 844 });
     await owner.goto(`${fixture.origin}/settings`);
     await browserExpect(
       owner.getByRole('heading', { name: 'Impostazioni', exact: true }),
     ).toBeVisible();
-    const menu = owner.getByRole('button', { name: 'Menu', exact: true });
-    const sidebar = owner.locator('.sidebar');
-    await browserExpect(menu).toHaveAttribute('aria-controls', 'primary-navigation');
-    await browserExpect(menu).toHaveAttribute('aria-expanded', 'false');
-    await browserExpect(sidebar).not.toBeVisible();
+    const menu = owner.locator('.mobile-menu');
+    const drawer = owner.locator('dialog.mobile-navigation');
+    await browserExpect(menu).toHaveAttribute('aria-controls', 'mobile-navigation');
+    expect((await menu.innerText()).trim()).toBe('');
+    const before = await owner.locator('main').boundingBox();
     await menu.focus();
     await owner.keyboard.press('Enter');
+    await browserExpect(drawer).toBeVisible();
     await browserExpect(menu).toHaveAttribute('aria-expanded', 'true');
-    await browserExpect(sidebar).toBeVisible();
-    await browserExpect(
-      sidebar.getByRole('button', { name: /Comprimi navigazione|Espandi navigazione/ }),
-    ).toHaveCount(0);
-    expect(
-      await sidebar
-        .getByRole('link', { name: 'Server', exact: true })
-        .evaluate((node) => node.scrollWidth <= node.clientWidth),
-    ).toBe(true);
-    expect(await sidebar.evaluate((element) => getComputedStyle(element).position)).toBe('static');
-    const administration = owner
-      .locator('.topbar')
-      .getByRole('link', { name: 'Admin', exact: true });
-    await browserExpect(administration).toBeInViewport({ ratio: 1 });
-    await screenshot('sidebar-open-mobile-it');
+    await browserExpect(drawer.locator('.sidebar-close')).toBeFocused();
+    expect(await owner.locator('main').boundingBox()).toEqual(before);
+    const controls = drawer.locator('a:visible, button:visible');
+    await controls.first().focus();
+    // Native dialogs can hand focus to browser chrome at the boundary; they
+    // must never expose controls in the inert application behind the drawer.
+    for (const key of ['Shift+Tab', 'Shift+Tab', 'Tab', 'Tab']) {
+      await owner.keyboard.press(key);
+      expect(
+        await drawer.evaluate(
+          (node) =>
+            document.activeElement === document.body || node.contains(document.activeElement),
+        ),
+      ).toBe(true);
+    }
+    await controls.last().focus();
+    for (let index = 0; index < 2; index += 1) {
+      await owner.keyboard.press('Tab');
+      expect(
+        await drawer.evaluate(
+          (node) =>
+            document.activeElement === document.body || node.contains(document.activeElement),
+        ),
+      ).toBe(true);
+    }
+    await drawer.locator('.sidebar-close').focus();
+    await screenshot('sidebar-drawer-mobile-it');
     await accessible();
+    await owner.keyboard.press('Escape');
+    await browserExpect(drawer).not.toBeVisible();
+    await browserExpect(menu).toBeFocused();
     await menu.click();
-    await browserExpect(sidebar).not.toBeVisible();
+    await browserExpect(drawer).toBeVisible();
+    await owner.mouse.click(382, 450);
+    await browserExpect(drawer).not.toBeVisible();
+    await browserExpect(menu).toBeFocused();
     await menu.click();
-    await administration.focus();
-    await owner.keyboard.press('Enter');
-    await browserExpect(owner).toHaveURL(`${fixture.origin}/owner`);
-    await browserExpect(menu).toHaveAttribute('aria-expanded', 'false');
-    await browserExpect(sidebar).not.toBeVisible();
+    await drawer.getByRole('link', { name: 'Server', exact: true }).click();
+    await browserExpect(owner).toHaveURL(`${fixture.origin}/servers`);
+    await browserExpect(drawer).not.toBeVisible();
+    await browserExpect(owner.locator('h1')).toBeFocused();
+    await accessible();
+  });
+
+  it('keeps short mobile navigation scrollable and releases modality on desktop resize', async () => {
+    await owner.setViewportSize({ width: 320, height: 420 });
+    await owner.goto(`${fixture.origin}/owner/settings`);
+    const menu = owner.locator('.mobile-menu');
+    const drawer = owner.locator('dialog.mobile-navigation');
+    await menu.click();
+    await browserExpect(drawer).toBeVisible();
+    const sidebar = drawer.locator('.sidebar');
+    const bounds = await sidebar.boundingBox();
+    expect(bounds?.height).toBeLessThanOrEqual(420);
+    await sidebar.getByRole('link', { name: 'Home', exact: true }).focus();
+    await browserExpect(sidebar.getByRole('link', { name: 'Home', exact: true })).toBeInViewport({
+      ratio: 0.99,
+    });
+    await sidebar.hover();
+    await owner.mouse.wheel(0, 1000);
+    expect(await owner.evaluate(() => scrollY)).toBe(0);
+    await screenshot('sidebar-drawer-short-mobile-it');
     await accessible();
     await owner.setViewportSize({ width: 1440, height: 900 });
-    await browserExpect(
-      sidebar.getByRole('button', { name: 'Espandi navigazione', exact: true }),
-    ).toHaveAttribute('aria-expanded', 'false');
-    await browserExpect.poll(async () => (await sidebar.boundingBox())?.width).toBe(64);
+    await browserExpect(drawer).not.toBeVisible();
+    expect(await owner.evaluate(() => document.body.style.position)).not.toBe('fixed');
+    expect(await owner.evaluate(() => getComputedStyle(document.body).overflow)).not.toBe('hidden');
+    const desktop = owner.locator('#primary-navigation');
+    await browserExpect(desktop.locator('.sidebar-toggle')).toBeFocused();
+    await browserExpect.poll(async () => (await desktop.boundingBox())?.width).toBe(64);
+    await desktop.getByRole('link', { name: 'Home', exact: true }).click();
+    await browserExpect(owner).toHaveURL(`${fixture.origin}/`);
+  });
+
+  it('supports ordinary mobile users, reduced motion and repeated opening without stuck overlays', async () => {
+    await user.setViewportSize({ width: 390, height: 844 });
+    await user.goto(`${fixture.origin}/servers`);
+    await user.emulateMedia({ reducedMotion: 'reduce' });
+    const menu = user.locator('.mobile-menu');
+    const drawer = user.locator('dialog.mobile-navigation');
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await menu.click();
+      await browserExpect(drawer).toBeVisible();
+      await user.keyboard.press('Escape');
+      await browserExpect(drawer).not.toBeVisible();
+      await browserExpect(menu).toBeFocused();
+    }
+    await menu.click();
+    expect(
+      await drawer.locator('.sidebar').evaluate((node) => getComputedStyle(node).animationName),
+    ).toBe('none');
+    expect(
+      await drawer.evaluate((node) => getComputedStyle(node, '::backdrop').animationName),
+    ).toBe('none');
+    await user.screenshot({
+      path: resolve('.codex/local/m5-browser/screenshots/sidebar-drawer-user-mobile-en.png'),
+    });
+    const result = await new AxeBuilder({ page: user })
+      .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+      .analyze();
+    expect(result.violations.map(({ id }) => id)).toEqual([]);
+    await drawer.locator('.sidebar-close').click();
+    await browserExpect(drawer).not.toBeVisible();
+    expect(pageErrors).toEqual([]);
   });
 });

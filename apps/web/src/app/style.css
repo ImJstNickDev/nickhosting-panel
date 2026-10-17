@@ -689,13 +689,6 @@
   .shell {
     grid-template-columns: 1fr;
   }
-  .sidebar {
-    display: none;
-  }
-  .sidebar.open {
-    display: flex;
-    border-bottom: 1px solid var(--line);
-  }
   .mobile-menu {
     display: inline-flex;
   }

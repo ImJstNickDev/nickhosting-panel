@@ -1,5 +1,15 @@
-import { type ReactNode, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
-import { Link, NavLink } from 'react-router';
+import {
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+import { Link, NavLink, useLocation } from 'react-router';
 import { useT } from '../app/i18n.js';
 import { Tooltip } from './tooltip.js';
 import './sidebar.css';
@@ -125,10 +135,117 @@ function subscribeDesktop(onChange: () => void) {
 const isDesktop = () => window.matchMedia(desktopQuery).matches;
 const serverIsDesktop = () => false;
 
+/** Native modality supplies focus containment and makes the rest of the page inert. */
+function MobileNavigation({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const t = useT();
+  const location = useLocation();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const restoreScroll = useRef<(() => void) | null>(null);
+  const openedPath = useRef(location.pathname);
+  const backdropPointer = useRef(false);
+  const finish = useEffectEvent(() => {
+    dialog.current?.close();
+    restoreScroll.current?.();
+    restoreScroll.current = null;
+    if (location.pathname !== openedPath.current)
+      document.querySelector<HTMLElement>('h1')?.focus();
+  });
+
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    if (open) {
+      delete element.dataset.closing;
+      if (element.open) return;
+      openedPath.current = location.pathname;
+      const { scrollX, scrollY } = window;
+      const body = document.body;
+      const root = document.documentElement;
+      const scrollbarWidth = window.innerWidth - root.clientWidth;
+      const previous = {
+        position: body.style.position,
+        top: body.style.top,
+        left: body.style.left,
+        width: body.style.width,
+        overflow: root.style.overflow,
+      };
+      body.style.position = 'fixed';
+      body.style.top = `${-scrollY}px`;
+      body.style.left = `${-scrollX}px`;
+      body.style.width = `calc(100% - ${scrollbarWidth}px)`;
+      root.style.overflow = 'hidden';
+      restoreScroll.current = () => {
+        body.style.position = previous.position;
+        body.style.top = previous.top;
+        body.style.left = previous.left;
+        body.style.width = previous.width;
+        root.style.overflow = previous.overflow;
+        window.scrollTo({ left: scrollX, top: scrollY, behavior: 'instant' });
+      };
+      element.showModal();
+      element.querySelector<HTMLElement>('.sidebar-close')?.focus();
+    } else if (element.open) {
+      element.dataset.closing = 'true';
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        finish();
+      } else {
+        const timer = window.setTimeout(() => finish(), 180);
+        return () => window.clearTimeout(timer);
+      }
+    }
+  }, [open, location.pathname]);
+
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    return () => {
+      const wasOpen = element?.open;
+      element?.close();
+      restoreScroll.current?.();
+      restoreScroll.current = null;
+      // The mobile opener disappears at this breakpoint; use its desktop counterpart.
+      if (wasOpen && isDesktop())
+        queueMicrotask(() => {
+          document.querySelector<HTMLElement>('.sidebar-toggle')?.focus({ preventScroll: true });
+        });
+    };
+  }, []);
+
+  return (
+    <dialog
+      ref={dialog}
+      id="mobile-navigation"
+      className="mobile-navigation"
+      aria-label={t('web.navigation')}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onPointerDown={(event) => {
+        backdropPointer.current = event.button === 0 && event.target === event.currentTarget;
+      }}
+      onPointerUp={(event) => {
+        if (backdropPointer.current && event.target === event.currentTarget) onClose();
+        backdropPointer.current = false;
+      }}
+    >
+      {children}
+    </dialog>
+  );
+}
+
 export function Sidebar({
   open,
   collapsed,
   onToggle,
+  onClose,
   instanceName,
   name,
   showHome,
@@ -137,6 +254,7 @@ export function Sidebar({
   open: boolean;
   collapsed: boolean;
   onToggle: () => void;
+  onClose: () => void;
   instanceName: string;
   name: string;
   showHome: boolean;
@@ -146,15 +264,42 @@ export function Sidebar({
   const desktop = useSyncExternalStore(subscribeDesktop, isDesktop, serverIsDesktop);
   const compact = desktop && collapsed;
   const toggleLabel = t(collapsed ? 'web.expandNavigation' : 'web.collapseNavigation');
-  return (
+  useEffect(() => {
+    if (desktop && open) onClose();
+  }, [desktop, open, onClose]);
+  function closeAfterNavigation(event: MouseEvent<HTMLAnchorElement>) {
+    if (
+      !desktop &&
+      event.button === 0 &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey
+    )
+      onClose();
+  }
+  const content = (
     <aside
-      className={`sidebar${open ? ' open' : ''}`}
+      className="sidebar"
       id="primary-navigation"
       data-collapsed={collapsed || undefined}
+      onFocusCapture={(event) => {
+        const target = event.target;
+        const scrollport = desktop ? event.currentTarget : target.closest<HTMLElement>('.nav');
+        if (!scrollport) return;
+        const bounds = target.getBoundingClientRect();
+        const top = scrollport.getBoundingClientRect().top + scrollport.clientTop;
+        const bottom = top + scrollport.clientHeight;
+        // Some browsers reveal only part of a focused link. Scroll this container
+        // directly so the full control and its focus outline remain visible.
+        if (bounds.top < top + 2) scrollport.scrollTop += bounds.top - top - 2;
+        else if (bounds.bottom > bottom - 2) scrollport.scrollTop += bounds.bottom - bottom + 2;
+      }}
     >
       <div className="sidebar-header">
         <Link
           className="brand"
+          onClick={closeAfterNavigation}
           to="/"
           aria-label={instanceName}
           aria-hidden={compact || undefined}
@@ -162,6 +307,26 @@ export function Sidebar({
         >
           <span className="brand-mark">{instanceName}</span>
         </Link>
+        {!desktop && (
+          <button
+            type="button"
+            className="sidebar-close"
+            aria-label={t('web.close')}
+            onClick={onClose}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="m6 6 12 12M6 18 18 6" />
+            </svg>
+          </button>
+        )}
         <Tooltip content={desktop ? toggleLabel : ''}>
           <button
             className="sidebar-toggle"
@@ -193,6 +358,7 @@ export function Sidebar({
           <Tooltip key={to} content={compact ? label : ''}>
             <NavLink
               className="sidebar-link"
+              onClick={closeAfterNavigation}
               to={to}
               end={to === '/' || to === '/owner'}
               aria-label={label}
@@ -206,7 +372,12 @@ export function Sidebar({
       <div className="sidebar-bottom">
         {showHome && (
           <Tooltip content={compact ? t('web.home') : ''}>
-            <Link className="sidebar-link" to="/" aria-label={t('web.home')}>
+            <Link
+              className="sidebar-link"
+              to="/"
+              aria-label={t('web.home')}
+              onClick={closeAfterNavigation}
+            >
               <SidebarIcon name="home" />
               <span className="sidebar-label">{t('web.home')}</span>
             </Link>
@@ -217,5 +388,12 @@ export function Sidebar({
         </small>
       </div>
     </aside>
+  );
+  return desktop ? (
+    content
+  ) : (
+    <MobileNavigation open={open} onClose={onClose}>
+      {content}
+    </MobileNavigation>
   );
 }

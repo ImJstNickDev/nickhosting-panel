@@ -11494,3 +11494,53 @@ error. This was the configured automatic effect after repair, not a manually iss
 provider stop. API/worker/Vite remained healthy; no restart was needed. The Gateway's
 pre-existing health failures for other unbound routes remain outside this fix.
 Indexed governance/tracked-content hygiene passed.
+
+
+## Mobile navigation drawer — 2026-10-17
+
+Replaced the mobile in-flow disclosure with a native modal left drawer. The
+icon-only opener, backdrop and 180 ms slide use the existing sidebar identity;
+page content no longer moves down on opening. Navigation scrolls within the
+viewport, including short screens and safe areas. Escape, backdrop, close and
+route activation dismiss it with focus restoration; desktop resize releases
+scroll lock and preserves the desktop collapse preference. Reduced motion
+disables animations. A focused link now scrolls fully into the sidebar's own
+scrollport, including Firefox, without scrolling the page.
+
+Validation uses the real application with disposable identities and isolated
+backend fixtures; external providers remain simulated. No new infrastructure,
+container restart, provider mutation or production deployment was required.
+Screenshot fixtures contain no live identities or secrets. Independent
+technical/accessibility and screenshot review found no remaining must-fix.
+
+Initial checks exposed two test/browser issues: the existing desktop test assumed
+the security page exceeded 900 px after prior UI changes (now tested with a
+600 px viewport); Firefox left a focused desktop link partly clipped in a short
+viewport (fixed by scrolling only the navigation scrollport). These failed
+attempts are preserved here rather than reported as initial passes.
+
+The strengthened boundary test initially assumed immediate first/last focus
+wrapping. Native modal dialogs may focus browser chrome before wrapping; the
+assertion now checks that background application controls remain unreachable.
+A targeted rerun also exposed reliance on the prior test's route; the mobile
+case now opens its own desktop route before testing the saved collapse setting.
+
+Final focused evidence:
+
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/sidebar.browser.test.ts`: final
+  implementation passed the six other cases; corrected Italian drawer test
+  rerun with `-t 'Italian mobile drawer'` passed (1 passed, 6 skipped).
+- Same commands with `NH_SIDEBAR_BROWSER=firefox`: all seven cases covered as
+  six passes plus the corrected targeted pass. Desktop, ordinary/Owner mobile,
+  320/390 px widths, short viewport, no layout shift, modal dismissal/focus,
+  breakpoint cleanup, reduced motion and Axe WCAG checks covered.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- Scoped `biome check` and `git diff --check`: passed; style.css retains its three
+  pre-existing reduced-motion `!important` warnings. No full historical suite rerun.
+
+Reviewed screenshots: [Italian drawer](screenshots/m5/sidebar-drawer-mobile-it.png),
+[short Owner drawer](screenshots/m5/sidebar-drawer-short-mobile-it.png),
+[English ordinary-user drawer](screenshots/m5/sidebar-drawer-user-mobile-en.png).
+Rollback is a source revert; no migration, configuration or data rollback needed.
+SFTPGo #18 and all existing production-release boundaries remain unchanged.
