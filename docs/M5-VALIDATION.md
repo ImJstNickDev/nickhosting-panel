@@ -11371,3 +11371,20 @@ Final result: targeted browser regression **1/1 passed**, five unrelated skipped
 root TypeScript check passed, web app/test typecheck passed after the fixture import
 correction, changed-file Biome passed. Dev API health remained healthy after its
 normal watcher reload. No manual restart or infrastructure mutation.
+
+### 2026-10-17 — Idle-minute spinner correction
+
+Firefox used the fractional `min=1/60` as its native number-step origin, producing
+1.01666… rather than 2 when incrementing one minute. The server editor now uses an
+integer origin, preserving fractional duration input while explicitly rejecting
+zero. Disabled remains a separate choice; existing API limits are unchanged.
+
+Focused regression command: `NH_BROWSER=firefox scripts/dev.sh pnpm exec tsx
+scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts
+apps/web/tests/automation.browser.test.ts -t 'steps idle timeout'` — **1 passed**,
+6 unrelated tests skipped. Exercises real arrows 1→2→3→2, zero rejection, saving
+0.5 minutes as 30 seconds and resetting inheritance through actual isolated API
+handlers. Web app/test typecheck and changed-file Biome passed; independent review
+found no must-fix. No live configuration, server data or infrastructure changed.
+The same focused regression also passed in Chromium (1 passed, 6 skipped).
+Indexed governance/tracked-content hygiene passed. No restart or migration needed.

@@ -13,7 +13,9 @@ describe('Automation browser journeys', () => {
   let page: Page;
   const errors: string[] = [];
   beforeAll(async () => {
-    fixture = await browserHarness();
+    fixture = await browserHarness({
+      browser: process.env.NH_BROWSER === 'firefox' ? 'firefox' : 'chromium',
+    });
     identities = await prepareJourneyIdentities(fixture);
     page = identities.user;
     page.on('pageerror', (error) => errors.push(error.message));
@@ -217,6 +219,47 @@ describe('Automation browser journeys', () => {
     );
     await wake.getByRole('button', { name: 'Save changes', exact: true }).click();
     expect((await inheritedWake).status()).toBe(200);
+  });
+  it('steps idle timeout by whole minutes without losing fractional durations or allowing zero', async () => {
+    await page.goto(`${fixture.origin}${base()}/sleep`);
+    const sleep = page.locator('section').filter({
+      has: page.getByRole('heading', { name: 'Sleep when idle', exact: true }),
+    });
+    await sleep.getByRole('button', { name: 'Custom', exact: true }).click();
+    const minutes = sleep.getByRole('spinbutton');
+    await browserExpect(minutes).toHaveValue('1');
+    await minutes.focus();
+    await page.keyboard.press('ArrowUp');
+    await browserExpect(minutes).toHaveValue('2');
+    await page.keyboard.press('ArrowUp');
+    await browserExpect(minutes).toHaveValue('3');
+    await page.keyboard.press('ArrowDown');
+    await browserExpect(minutes).toHaveValue('2');
+    await minutes.fill('0');
+    expect(await minutes.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(
+      false,
+    );
+    await minutes.fill('0.5');
+    expect(await minutes.evaluate((input) => (input as HTMLInputElement).checkValidity())).toBe(
+      true,
+    );
+    const saved = page.waitForResponse(
+      (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
+    );
+    await sleep.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await saved).status()).toBe(200);
+    const policy = await journeyRequest<{ idleTimeout: { effectiveSeconds: number } }>(
+      fixture,
+      page,
+      `/v1/platform/servers/${provider.ids.serverId}/sleep-policy`,
+    );
+    expect(policy.idleTimeout.effectiveSeconds).toBe(30);
+    await sleep.getByRole('button', { name: 'Inherit', exact: true }).click();
+    const restored = page.waitForResponse(
+      (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
+    );
+    await sleep.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await restored).status()).toBe(200);
   });
   it('edits sleep with retained drafts on failure and renders compact Owner and Italian mobile controls', async () => {
     await page.goto(`${fixture.origin}${base()}/sleep`);

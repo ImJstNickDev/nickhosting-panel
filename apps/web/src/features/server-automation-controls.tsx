@@ -190,11 +190,20 @@ export function ServerSleepEditor({
             type="number"
             label={t('automation.idleMinutes')}
             value={minutes}
-            min={1 / 60}
+            // Use an integral native step base; 1/60 offsets Firefox's arrows.
+            min={0}
             max={maximum / 60}
             step="any"
             required
-            onChange={(event) => setMinutes(event.target.value)}
+            onChange={(event) => {
+              const input = event.currentTarget;
+              input.setCustomValidity(
+                input.value && Math.round(Number(input.value) * 60) < 1
+                  ? t('sleepTiming.invalid')
+                  : '',
+              );
+              setMinutes(input.value);
+            }}
             aria-describedby={!owner && sleep.userAccess === 'shorten-only' ? hintId : undefined}
           />
           {!owner && sleep.userAccess === 'shorten-only' && (
