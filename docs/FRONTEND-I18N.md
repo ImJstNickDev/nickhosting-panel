@@ -1153,3 +1153,12 @@ pending or unavailable. Long addresses truncate on one line and remain available
 in a custom tooltip and accessible button name. Clipboard failure is reported
 without claiming success. Publication is not presented as a reachability badge;
 DNS-mode addresses never fall back to raw IPs while awaiting publication.
+
+
+Gateway message editing uses trusted integration descriptors for localized state,
+channel and variable labels, defaults and safe formatting tokens. The shared UI
+renders only each state's supported fields and uses plain text when formatting is
+not declared. Minecraft formatting is metadata owned by its integration, not a
+special branch in the common editor. No arbitrary HTML/CSS or dynamic code loading
+is accepted. English/Italian real-handler browser evidence and an isolated
+non-Minecraft descriptor cover this boundary; see [Automation](AUTOMATION.md).

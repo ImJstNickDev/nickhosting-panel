@@ -349,7 +349,15 @@ Migration039 adds independent autowake policy and revisioned per-state Gateway
 message overrides. GET/PUT `/v1/platform/servers/:id/auto-wake-policy` and
 `/v1/owner/integrations/:gameId/auto-wake-policy` expose the Owner hierarchy.
 GET/PUT `/v1/servers/:id/gateway-messages` reads defaults/capabilities and writes
-`{revision,overrides}` with regular manage authority, CSRF and audit. Optional
+`{revision,overrides}` with regular manage authority, CSRF and audit. GET returns
+`{available,editable,revision,overrides,definition?}`: `definition` is the trusted
+SDK `GatewayMessageDefinition` (version, channels, states, variables), replacing
+the previous fixed state/default/variable response. State defaults and preview
+variables have EN/IT maps. Revisions include the resolved descriptor, so stale
+edits after a default change also conflict. Only declared state/channel pairs and
+template variables are accepted; transport bounds remain independent of game text
+limits. Existing stored `{stateId:{channelId:text}}` overrides need no migration.
+Optional
 `presentation` and `wakeEnabled` fields on leased SDK routes carry these settings
 without changing readiness or forwarding. See [Automation](AUTOMATION.md).
 

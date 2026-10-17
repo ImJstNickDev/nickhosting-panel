@@ -113,9 +113,15 @@ changing wake never implicitly changes sleep or that consent.
 
 ## Per-server Gateway messages
 
-Trusted integrations opt in with `capabilities.gatewayMessages`. Minecraft does;
-direct connections cannot customize a fake endpoint that they do not use.
-Each supported state has independent MOTD and login-disconnect overrides:
+Trusted integrations declare a versioned `manifest.gatewayMessages` descriptor;
+the legacy capability boolean alone does not enable the editor. Direct connections
+cannot customize a fake endpoint that they do not use. The descriptor supplies
+localized states, channels, defaults, variables, length/multiline limits and
+optional formatting tokens. The common editor does not assume MOTD, disconnect,
+Minecraft color codes or any particular state vocabulary. Per-state channel sets
+may differ; plain channels have no formatting controls.
+
+Minecraft declares independent MOTD and login-disconnect overrides for:
 sleeping, waking, stopping, blocked, maintenance, manually stopped, wake disabled,
 capacity denied and temporarily unavailable. Online gameplay/MOTD is forwarded
 from the real server, not replaced by this editor.
@@ -129,7 +135,8 @@ other than tab/newline/carriage return are rejected. Expanded output is bounded
 to 1,024 code units without ending on an isolated high surrogate. State text is presentation only. Active stops display stopping
 without changing routing or weakening readiness.
 
-Writes use a revision to reject stale edits, emit an audit event and notify the
+Writes use a revision over overrides and the resolved descriptor to reject stale
+edits (including changed Owner defaults), emit an audit event and notify the
 Gateway. Cosmetic changes do not reset lifecycle generation or established
 forwarding connections. Legacy clients retain their required encoding and
 single-line adaptation. Unknown capabilities do not acquire management rights.

@@ -1,6 +1,11 @@
-import { type AuthContext, DomainError } from '@nickhosting/core';
+import { type AuthContext, DomainError, type PlatformConfig } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
-import { type GameBackupHooks, type GameManifest, gameManifestSchema } from '@nickhosting/game-sdk';
+import {
+  type GameBackupHooks,
+  type GameManifest,
+  type GatewayMessageDefinition,
+  gameManifestSchema,
+} from '@nickhosting/game-sdk';
 import type {
   ApplicationServer,
   PterodactylAdapter,
@@ -30,6 +35,12 @@ export interface TrustedGameModule {
   id: string;
   manifest: GameManifest;
   provisionAsResourceOwner: boolean;
+  /** Trusted integration supplies presentation defaults; no lifecycle authority.
+   * The manifest declares the editor contract, this hook resolves Owner settings. */
+  resolveGatewayMessages?(
+    settings: PlatformConfig,
+    context: { serverName: string },
+  ): GatewayMessageDefinition;
   /** Compiled game policy: authenticated provider running may establish readiness. */
   readinessSource?: 'provider_running';
   /** Read-only binding for initial automation configuration; compiled modules only. */

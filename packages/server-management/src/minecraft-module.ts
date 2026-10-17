@@ -12,6 +12,7 @@ import {
   minecraftManifest,
   minecraftReadinessSource,
   minecraftRuntimeMappingSchema,
+  resolveMinecraftGatewayMessages,
 } from '@nickhosting/minecraft';
 import {
   type PterodactylAdapter,
@@ -137,6 +138,9 @@ export const minecraftModule: TrustedGameModule = {
   id: 'minecraft',
   manifest: minecraftManifest,
   provisionAsResourceOwner: true,
+  resolveGatewayMessages(settings, context) {
+    return resolveMinecraftGatewayMessages(settings.minecraftGatewayResponses, context.serverName);
+  },
   readinessSource: minecraftReadinessSource,
   async gatewayPolicyBinding(db, server, env) {
     const profile = await db

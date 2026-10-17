@@ -1,62 +1,40 @@
 import { describe, expect, it } from 'vitest';
 import {
   gatewayMessageOverridesSchema,
-  gatewayMessageState,
-  renderGatewayMessage,
+  gatewayPresentationSchema,
 } from './gateway-presentation.js';
 
-describe('Gateway presentation only', () => {
-  it('accepts bounded formatting and known variables but not controls, unknown states or placeholders', () => {
+describe('Generic Gateway message transport', () => {
+  it('preserves arbitrary integration state/channel data and leaves template semantics to the integration', () => {
+    const messages = { queued: { status: '{position}\nReady soon', announcement: '§a{world}' } };
+    expect(gatewayMessageOverridesSchema.parse(messages)).toEqual(messages);
     expect(
-      gatewayMessageOverridesSchema.parse({
-        sleeping: { motd: '§a{server}\n{state}', disconnect: 'Wait {eta}' },
+      gatewayPresentationSchema.parse({
+        serverName: 'Demo',
+        messages,
+        stopping: true,
+        blockedReason: 'capacity_denied',
+        estimatedStartupSeconds: 10,
       }),
-    ).toBeTruthy();
+    ).toMatchObject({ messages, stopping: true });
+  });
+  it('rejects unsafe identifiers, controls, unbounded records and excessive text', () => {
     for (const input of [
-      { ready: { motd: 'x' } },
-      { sleeping: { motd: '{secret}' } },
-      { sleeping: { motd: '\u0000' } },
-      { sleeping: { motd: 'x'.repeat(513) } },
+      { 'bad state': { status: 'x' } },
+      { queued: { constructor: 'x' } },
+      { queued: { status: '\u0000' } },
+      { queued: { status: 'x'.repeat(4097) } },
+      Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`state${i}`, {}])),
+      { queued: Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`channel${i}`, 'x'])) },
+      Object.fromEntries(
+        Array.from({ length: 2 }, (_, i) => [
+          `state${i}`,
+          Object.fromEntries(
+            Array.from({ length: 16 }, (_, j) => [`channel${j}`, 'x'.repeat(4096)]),
+          ),
+        ]),
+      ),
     ])
       expect(gatewayMessageOverridesSchema.safeParse(input).success).toBe(false);
-  });
-  it('separates disabled wake and capacity failures without changing operational states', () => {
-    expect(gatewayMessageState('sleeping', false)).toBe('wake_disabled');
-    expect(gatewayMessageState('stopping', false)).toBe('stopping');
-    expect(
-      gatewayMessageState('blocked', true, {
-        serverName: 'Demo',
-        messages: {},
-        blockedReason: 'capacity_denied',
-      }),
-    ).toBe('capacity_denied');
-    expect(gatewayMessageState('online', true)).toBeUndefined();
-  });
-  it('renders startup estimate only while positive and never recursively interprets server names', () => {
-    const presentation = {
-      serverName: '{eta}',
-      messages: {},
-      estimatedStartupSeconds: 10,
-      startupBeganAt: '2026-10-17T10:00:00Z',
-    };
-    expect(
-      renderGatewayMessage(
-        '{server}: {eta}',
-        'waking',
-        'en',
-        presentation,
-        Date.parse('2026-10-17T10:00:03Z'),
-      ),
-    ).toBe('{eta}: 7 s');
-    expect(
-      renderGatewayMessage(
-        '{eta}',
-        'waking',
-        'en',
-        presentation,
-        Date.parse('2026-10-17T10:00:15Z'),
-      ),
-    ).toBe('');
-    expect(renderGatewayMessage('{eta}', 'sleeping', 'en', presentation)).toBe('');
   });
 });

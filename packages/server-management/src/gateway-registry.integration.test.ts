@@ -79,6 +79,19 @@ describe('durable explicit Gateway route registry', () => {
       .where('id', '=', f.nodeId)
       .execute();
   }
+  it('carries opaque integration presentation on a non-Minecraft route without changing routing authority', async () => {
+    const messages = { queue_full: { announcement: 'Try another room' } };
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ gateway_messages: messages })
+      .where('server_id', '=', serverId)
+      .execute();
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes[0]?.presentation?.messages).toEqual(messages);
+    expect(snapshot.routes[0]?.protocol?.handlerId).toBe('fixture');
+    expect(snapshot.routes[0]?.mode).toBe('sleeping');
+  });
   it('allows direct and Gateway on one IP at different ports, including same-number backend ports', async () => {
     await withDirectPin(27000);
     const row = await setGatewayRoute(f.db, f.owner, { ...input(), publicPort: 20000 }, env);

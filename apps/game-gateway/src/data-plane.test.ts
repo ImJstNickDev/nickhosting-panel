@@ -629,7 +629,10 @@ describe('persistent Gateway fixture forwarding', () => {
           wakeEnabled: false,
           presentation: {
             serverName: 'Changed name',
-            messages: { sleeping: { motd: 'Custom status', disconnect: 'Custom reason' } },
+            messages: {
+              sleeping: { motd: 'Custom status', disconnect: 'Custom reason' },
+              queue_full: { announcement: 'Integration-defined reply' },
+            },
           },
         })),
         2,

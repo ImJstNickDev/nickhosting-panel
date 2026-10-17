@@ -320,3 +320,35 @@ Core content policy. Integrations can narrow budgets/trust and raise free-space
 minimums, never multiply global capacity. Protocol sources, Minecraft response
 formats and Minecraft player/runtime rules remain Minecraft-specific. See
 [configuration and migration](CONFIGURATION-AND-DEPLOYMENT.md#shared-content-limits-and-integration-overrides-2026-10-16).
+
+
+## Integration-owned Gateway message descriptors
+
+`GameManifest.gatewayMessages` is an optional SDK-validated, versioned descriptor
+from compiled first-party code. It declares channels (not necessarily MOTD or
+login replies), message states, EN/IT labels/defaults, template variables and
+preview values, per-channel text limits/multiline support, and optional formatting
+tokens. Different states may expose different channel subsets. Formatting tokens
+have a small safe style vocabulary and optional case-insensitive matching; they
+cannot inject HTML, CSS rules or executable code. A game without a descriptor has
+no message editor even if stale stored metadata claims a boolean capability.
+
+The generic service authorizes the current server manager, validates submitted
+state/channel/template values against the selected trusted descriptor, and stores
+`{stateId: {channelId: text}}`. The generic Gateway transports these overrides and
+operational facts; it never interprets text, placeholders or formatting. The game
+protocol adapter chooses its presentation state, substitutes values and emits its
+own protocol bytes. Presentation state identifiers are separate from authoritative
+lifecycle modes. Cosmetic edits cannot grant routing, wake or readiness authority.
+
+An optional compiled `resolveGatewayMessages` module hook resolves Owner defaults
+and preview context. Minecraft owns its legacy `minecraftGatewayResponses` binding,
+all message defaults, state mapping, formatting and template expansion. Existing
+settings/environment precedence and persisted server overrides are preserved;
+there is no database migration. Routing protocol identity/compatibility contracts
+are unchanged by this presentation refactor.
+
+The [SDK descriptor tests](../packages/game-sdk/src/gateway-messages.test.ts),
+[service tests](../packages/server-management/src/gateway-messages.integration.test.ts)
+and browser fixture exercise non-Minecraft announcement channels, custom states
+and variables. They demonstrate extensibility, not support for an additional game.

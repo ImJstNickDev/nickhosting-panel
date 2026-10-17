@@ -1,8 +1,10 @@
 import { DomainError, type PlatformRole } from '@nickhosting/core';
 import { z } from 'zod';
+import { gatewayMessageDefinitionSchema } from './gateway-messages.js';
 import { runtimeImagePolicySchema } from './runtime-images.js';
 
 export * from './gateway.js';
+export * from './gateway-messages.js';
 export * from './runtime-images.js';
 
 export const gameRolloutStates = [
@@ -137,6 +139,7 @@ export const gameManifestSchema = z
     nameKey: translationKey,
     capabilities: capabilitySchema,
     backupPolicy: gameBackupPolicySchema.optional(),
+    gatewayMessages: gatewayMessageDefinitionSchema.optional(),
     connection: connectionModeSchema,
     ports: z.array(portRequirementSchema).min(1),
     runtimes: z

@@ -1,28 +1,25 @@
 import { createHash } from 'node:crypto';
-import {
-  type AuthContext,
-  DomainError,
-  gatewayMessageDefaults,
-  gatewayMessageOverridesSchema,
-  gatewayMessageStates,
-  gatewayMessageVariables,
-} from '@nickhosting/core';
+import { type AuthContext, DomainError, gatewayMessageOverridesSchema } from '@nickhosting/core';
 import { getSettings, notifyGatewayChange, recordAudit } from '@nickhosting/database';
+import {
+  gatewayMessageDefinitionSchema,
+  validateGatewayMessageOverrides,
+} from '@nickhosting/game-sdk';
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { trustedGameModules } from './game-modules.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, parse } from './registry.js';
 
+type MessageModules = Pick<typeof trustedGameModules, 'get'>;
 const revision = (value: unknown) =>
-  createHash('sha256')
-    .update(JSON.stringify(gatewayMessageOverridesSchema.parse(value)))
-    .digest('hex');
+  createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export async function getServerGatewayMessages(
   db: DB,
   context: AuthContext,
   serverId: string,
   env: Environment = {},
+  modules: MessageModules = trustedGameModules,
 ) {
   const server = await authorizeServer(db, context, serverId);
   const mapping = await db
@@ -35,10 +32,18 @@ export async function getServerGatewayMessages(
     .select('gateway_messages')
     .where('server_id', '=', serverId)
     .executeTakeFirst();
-  const available =
-    server.connection_mode !== 'direct' &&
-    !!state &&
-    trustedGameModules.get(mapping.game_id)?.manifest.capabilities.gatewayMessages === true;
+  const module = modules.get(mapping.game_id);
+  const declared = module?.manifest.gatewayMessages;
+  const definition = declared
+    ? gatewayMessageDefinitionSchema.parse(
+        module.resolveGatewayMessages
+          ? module.resolveGatewayMessages((await getSettings(db, env)).values, {
+              serverName: server.name,
+            })
+          : declared,
+      )
+    : undefined;
+  const available = server.connection_mode !== 'direct' && !!state && !!definition;
   const overrides = gatewayMessageOverridesSchema.parse(state?.gateway_messages ?? {});
   // Authorize manage via the same project-scoped registry, never capability alone.
   let editable = false;
@@ -50,34 +55,12 @@ export async function getServerGatewayMessages(
       if (!(error instanceof DomainError) || error.code !== 'forbidden') throw error;
     }
   }
-  const { values } = await getSettings(db, env);
-  const responses = mapping.game_id === 'minecraft' ? values.minecraftGatewayResponses : undefined;
-  const defaults = (
-    id: (typeof gatewayMessageStates)[number],
-    locale: 'en' | 'it',
-    kind: 'motd' | 'disconnect',
-  ) => {
-    const configured = responses?.[kind];
-    return (
-      (configured && id in configured
-        ? (configured as Record<string, Partial<Record<'en' | 'it', string>>>)[id]?.[locale]
-        : undefined) ?? gatewayMessageDefaults[locale][id]
-    );
-  };
   return {
     available,
     editable,
-    revision: revision(overrides),
+    revision: revision({ overrides, definition }),
     overrides,
-    states: gatewayMessageStates.map((id) => ({
-      id,
-      stateText: { en: gatewayMessageDefaults.en[id], it: gatewayMessageDefaults.it[id] },
-      defaults: {
-        en: { motd: defaults(id, 'en', 'motd'), disconnect: defaults(id, 'en', 'disconnect') },
-        it: { motd: defaults(id, 'it', 'motd'), disconnect: defaults(id, 'it', 'disconnect') },
-      },
-    })),
-    variables: gatewayMessageVariables,
+    definition,
   };
 }
 export async function setServerGatewayMessages(
@@ -86,6 +69,7 @@ export async function setServerGatewayMessages(
   serverId: string,
   input: unknown,
   env: Environment = {},
+  modules: MessageModules = trustedGameModules,
 ) {
   const value = parse(
     z.strictObject({
@@ -99,9 +83,14 @@ export async function setServerGatewayMessages(
     await lockResources(tx);
     const context = await currentInteractiveContext(tx, previous, env);
     await authorizeServer(tx, context, serverId, 'server:manage');
-    const current = await getServerGatewayMessages(tx, context, serverId, env);
-    if (!current.available) throw new DomainError('integration_unavailable');
+    const current = await getServerGatewayMessages(tx, context, serverId, env, modules);
+    if (!current.available || !current.definition) throw new DomainError('integration_unavailable');
     if (current.revision !== value.revision) throw new DomainError('conflict');
+    try {
+      validateGatewayMessageOverrides(current.definition, value.overrides);
+    } catch {
+      throw new DomainError('validation_failed');
+    }
     await tx
       .updateTable('gateway_server_states')
       .set({ gateway_messages: value.overrides, updated_at: new Date() })
@@ -112,6 +101,6 @@ export async function setServerGatewayMessages(
       serverId,
       states: Object.keys(value.overrides),
     });
-    return getServerGatewayMessages(tx, context, serverId, env);
+    return getServerGatewayMessages(tx, context, serverId, env, modules);
   });
 }

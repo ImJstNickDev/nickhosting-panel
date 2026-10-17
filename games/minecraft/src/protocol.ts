@@ -1,13 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import {
-  gatewayMessageDefaults,
-  gatewayMessageState,
-  type MinecraftGatewayResponses,
-  minecraftGatewayResponsesSchema,
-  renderGatewayMessage,
-} from '@nickhosting/core';
+import { type MinecraftGatewayResponses, minecraftGatewayResponsesSchema } from '@nickhosting/core';
 import type {
   GatewayProbeDiagnostic,
   GatewayProtocolAdapter,
@@ -16,6 +10,11 @@ import type {
   GatewayResponseMode,
   GatewayRoute,
 } from '@nickhosting/game-sdk';
+import {
+  gatewayMessageDefaults,
+  gatewayMessageState,
+  renderGatewayMessage,
+} from './gateway-messages.js';
 import {
   detectMinecraftInitial,
   encodeMinecraftFrame,

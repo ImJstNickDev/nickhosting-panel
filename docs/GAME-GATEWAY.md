@@ -186,3 +186,20 @@ validation succeeds. Existing local status connections remain open; backend stre
 and UDP forwarding sessions close. New/changed routes, real collisions, unknown
 safety errors and expired leases still fail closed. One immediate validation retry
 is bounded; no indefinite retry or lease extension is introduced.
+
+
+## Message presentation boundary
+
+Gateway message kinds and text belong to the game integration. The common route
+`presentation.messages` is a bounded opaque state/channel/text record, carried for
+any registered protocol adapter. Core continues to supply operational facts such
+as stopping, block reason and historical startup estimate. Adapters decide which
+messages these facts imply and how to encode them; no generic MOTD/disconnect
+serializer or Minecraft text catalogue lives in Core or the data plane.
+
+The trusted SDK descriptor drives API validation and the shared WebPanel editor;
+it is not sent to public clients or carried in every routing snapshot. Existing
+Minecraft overrides keep their JSON shape. Snapshot revision changes for cosmetic
+edits still preserve established TCP/UDP forwarding and lifecycle generation.
+No extra provider reads, polling loop, readiness delay or lease extension is added.
+See [integration descriptors](GAME-INTEGRATIONS.md#integration-owned-gateway-message-descriptors).

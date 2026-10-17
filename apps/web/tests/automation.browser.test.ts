@@ -628,4 +628,78 @@ describe('Automation browser journeys', () => {
     ).toEqual([]);
     expect(errors).toEqual([]);
   });
+  it('renders an isolated integration with a state-specific announcement channel and no Minecraft controls', async () => {
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const pattern = `**/v1/servers/${provider.ids.serverId}/gateway-messages`;
+    await page.route(pattern, async (route) => {
+      await route.fulfill({
+        json: {
+          available: true,
+          editable: true,
+          revision: 'a'.repeat(64),
+          overrides: {},
+          definition: {
+            version: 1,
+            channels: [
+              {
+                id: 'announcement',
+                label: { en: 'Announcement', it: 'Annuncio' },
+                maxLength: 64,
+                multiline: false,
+              },
+              {
+                id: 'banner',
+                label: { en: 'Banner', it: 'Banner' },
+                maxLength: 128,
+                multiline: true,
+              },
+            ],
+            variables: [{ id: 'room', label: { en: 'Room', it: 'Stanza' } }],
+            states: [
+              {
+                id: 'queue_full',
+                label: { en: 'Queue full', it: 'Coda piena' },
+                defaults: {
+                  en: { announcement: 'Try room {room}' },
+                  it: { announcement: 'Stanza {room}' },
+                },
+                previewVariables: { en: { room: 'A' }, it: { room: 'A' } },
+              },
+              {
+                id: 'welcome',
+                label: { en: 'Welcome', it: 'Benvenuto' },
+                defaults: { en: { banner: 'Hello' }, it: { banner: 'Ciao' } },
+                previewVariables: { en: { room: 'B' }, it: { room: 'B' } },
+              },
+            ],
+          },
+        },
+      });
+    });
+    try {
+      await page.goto(`${fixture.origin}${base()}/messages`);
+      await browserExpect(page.getByLabel('Announcement', { exact: true })).toHaveAttribute(
+        'maxlength',
+        '64',
+      );
+      await browserExpect(page.locator('.gateway-preview')).toHaveText('Try room A');
+      await browserExpect(page.getByLabel('Server list message', { exact: true })).toHaveCount(0);
+      await browserExpect(page.getByLabel('Join message', { exact: true })).toHaveCount(0);
+      await browserExpect(page.getByLabel('Formatting', { exact: true })).toHaveCount(0);
+      await page.getByLabel('Announcement', { exact: true }).fill('Room: ');
+      await page.getByRole('button', { name: 'Room', exact: true }).click();
+      await browserExpect(page.getByLabel('Announcement', { exact: true })).toHaveValue(
+        'Room: {room}',
+      );
+      await page.getByLabel('Status', { exact: true }).selectOption('welcome');
+      await browserExpect(page.getByLabel('Announcement', { exact: true })).toHaveCount(0);
+      await browserExpect(page.getByLabel('Banner', { exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Room', exact: true }).click();
+      await browserExpect(page.getByLabel('Banner', { exact: true })).toHaveValue('{room}');
+      expect(errors).toEqual([]);
+    } finally {
+      await page.unroute(pattern);
+    }
+  });
 });

@@ -1,5 +1,6 @@
 import { gameManifestSchema } from '@nickhosting/game-sdk';
 import { minecraftProfiles } from './compatibility.js';
+import { minecraftGatewayMessages } from './gateway-messages.js';
 import { minecraftImagePolicy } from './image-policy.js';
 
 /** Public capabilities are implemented backend contracts, not a release support matrix. */
@@ -9,6 +10,7 @@ export const minecraftManifest = gameManifestSchema.parse({
   nameKey: 'games.minecraft.name',
   // Live save-command receipts need runtime/version-specific evidence before exposure.
   backupPolicy: { offline: 'required' },
+  gatewayMessages: minecraftGatewayMessages,
   capabilities: {
     console: true,
     files: true,

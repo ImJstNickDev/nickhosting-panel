@@ -11544,3 +11544,73 @@ Reviewed screenshots: [Italian drawer](screenshots/m5/sidebar-drawer-mobile-it.p
 [English ordinary-user drawer](screenshots/m5/sidebar-drawer-user-mobile-en.png).
 Rollback is a source revert; no migration, configuration or data rollback needed.
 SFTPGo #18 and all existing production-release boundaries remain unchanged.
+
+
+## Integration-owned Gateway messages — 2026-10-17
+
+M5 presentation refactor: Core transports bounded state/channel/text overrides;
+SDK descriptors and the compiled game module own message semantics. Minecraft
+now owns defaults, state mapping, template expansion and formatting metadata.
+The shared API/editor renders declared channels and safe token styles without
+Minecraft branches. Existing override JSON, Owner/environment precedence and
+protocol bytes remain compatible. No migration or new provider calls/polling.
+Snapshot presentation is carried for non-Minecraft adapters too; operational
+modes, route identities, readiness/admission, leases and forwarding fences remain
+unchanged. Revisions also cover resolved defaults, preventing stale saves after
+an Owner default changes. Missing descriptors expose no editor/management rights.
+
+Focused evidence (not a full M1–M5 suite):
+
+- `scripts/dev.sh pnpm exec vitest run` for core `gateway-presentation`, SDK
+  `gateway-messages` and Minecraft `gateway-messages`, `protocol`: **46 passed**.
+  The original invocation additionally included obsolete `packages/game-sdk/src/index.test.ts`
+  and `games/minecraft/src/manifest.test.ts` filters; neither exists or contributed
+  coverage. The four actual files are named above, each under its package's `src/`.
+- Same unit command with `packages/game-sdk/src/game-sdk.test.ts`,
+  `packages/game-sdk/src/gateway.test.ts`, `games/minecraft/src/protocol-codecs.test.ts`,
+  `games/minecraft/src/multiprotocol.test.ts`, `games/minecraft/src/gateway-module.test.ts`:
+  **101 passed**. Final descriptor/schema tightening reran core/SDK/Minecraft
+  message files: **9 passed** (subset of the 147 unit cases).
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/features/gateway-message-preview.test.ts`:
+  **7 passed**, arbitrary placeholders/channels/tokens, safe text/style handling,
+  case-insensitive matching only when declared, per-state channel subsets.
+- `scripts/dev.sh pnpm exec vitest run apps/game-gateway/src/data-plane.test.ts
+  -t 'cosmetic presentation'`: **1 passed**, 159 unrelated skipped. Existing TCP
+  and UDP sessions survive cosmetic snapshot updates containing both Minecraft
+  fields and an integration-defined announcement channel.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.integration.config.ts packages/server-management/src/gateway-messages.integration.test.ts
+  packages/server-management/src/gateway-registry.integration.test.ts`: registry
+  **43 passed**, messages initially **4 passed/2 failed** due to new fictional
+  fixture retaining its old translation namespace. Corrected fixture identity;
+  the next messages run passed **5**, including the new default-revision case,
+  but two failed because the helper attempted to reinsert its existing game row.
+  Corrected to update that isolated fixture row. Targeted rerun of the same
+  command with messages only and `-t 'non-Minecraft|infer message support'`:
+  **2 passed**, 5 unrelated skipped. All **50** relevant DB cases now covered:
+  preservation/reset, stale revisions, authorization/support/direct restrictions,
+  unknown templates/fields, metadata-only rejection and opaque route transport.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run
+  --config vitest.browser.config.ts apps/web/tests/automation.browser.test.ts
+  -t 'Gateway messages|isolated integration'`: **2 passed**, 6 unrelated skipped.
+  Initial run failed the Italian label assertion after an unintended copy change;
+  restored original labels in the integration. Final run passed real API save/
+  read, localized mobile/desktop rendering, Axe checks and a separate fictional
+  descriptor with state-specific channels and no Minecraft controls. The latter
+  substitutes only descriptor HTTP data to test the generic renderer; matching
+  persistence/authorization semantics are covered independently by DB tests.
+- `scripts/dev.sh pnpm typecheck`, scoped Biome, `pnpm i18n:check` and
+  `git diff --check`: passed. No additional dependencies or infrastructure.
+
+Reviewed screenshots: [desktop EN](screenshots/m5/gateway-messages-generic-desktop-en.png),
+[mobile IT](screenshots/m5/gateway-messages-generic-mobile-it.png).
+Independent technical/accessibility/content review found no remaining must-fix;
+its requested stale-default revision coverage was added and passed.
+
+Tests use isolated database fixtures, local TCP/UDP echo endpoints and simulated
+providers. No real game server was created/modified, no Panel/Wings/DNS/SFTPGo or
+production configuration changed, and no container restart was performed. Fixture
+schemas/resources were cleaned by their harnesses. Minecraft client/live evidence
+was reused, not rerun or expanded. SFTPGo #18 remains a release gate. Rollback is a
+source revert with no DB migration; future non-Minecraft overrides must be exported
+before reverting to the old fixed-schema code (none were written to live state).

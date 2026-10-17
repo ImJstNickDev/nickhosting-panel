@@ -313,8 +313,7 @@ async function describeServer(
         ...manifest.data.capabilities,
         // Message handlers use the installed module; older persisted manifests
         // may predate this optional capability.
-        gatewayMessages:
-          trustedGameModules.get(mapping.game_id)?.manifest.capabilities.gatewayMessages === true,
+        gatewayMessages: !!trustedGameModules.get(mapping.game_id)?.manifest.gatewayMessages,
         ...(row.connection_mode === 'direct'
           ? { idleDetection: false, readiness: false, wake: 'unsupported' as const }
           : {}),
