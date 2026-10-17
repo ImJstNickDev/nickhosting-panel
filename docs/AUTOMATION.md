@@ -77,6 +77,17 @@ Gateway enablement, manual-stop suppression and resource-admission checks remain
 Status requests never wake servers. Sleep continues to use its independent
 hierarchy and hidden/editable/shorten-only controls.
 
+### Server policy controls
+
+Sleep/wake uses aligned settings rows with the saved effective value and its
+source. Sleep offers Inherit, Custom and Disabled; wake offers Inherit, Enabled
+and Disabled. Custom sleep starts from the inherited duration rather than
+implicitly disabling sleep. Save/Cancel appear only for changes; Cancel discards
+the draft and clears rejected-save errors. Operational-state refreshes do not
+reset an edited duration. Owner access controls and technical Gateway settings
+remain collapsed until needed. Automatic-start consent is a separate control;
+changing wake never implicitly changes sleep or that consent.
+
 ## Per-server Gateway messages
 
 Trusted integrations opt in with `capabilities.gatewayMessages`. Minecraft does;

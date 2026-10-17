@@ -4,18 +4,14 @@ import { Link, useLocation } from 'react-router';
 import { api } from '../api/client.js';
 import { useFormat, useT } from '../app/i18n.js';
 import { useSession } from '../app/session.js';
-import { ActionForm, ErrorNotice, Notice, Select, Time, text } from '../components/ui.js';
+import { ActionForm, ErrorNotice, Notice, Select, text } from '../components/ui.js';
 import { ServerWakeSettings } from './auto-wake-policy.js';
 import { AutomationSwitch } from './automation-controls.js';
 import { SchedulesSection } from './automation-schedules.js';
 import { GatewayMessageEditor } from './gateway-message-editor.js';
+import { PolicyHeading, ServerSleepEditor } from './server-automation-controls.js';
 import { platformPath, type SleepPolicy, serverPath, useServer } from './service-contracts.js';
-import {
-  readSleepAccess,
-  readSleepTimeout,
-  SleepAccessField,
-  SleepTimeoutField,
-} from './sleep-timeout.js';
+import { readSleepAccess, readSleepTimeout } from './sleep-timeout.js';
 import './automation.css';
 
 export function AutomationPage({ serverId }: { serverId: string }) {
@@ -113,23 +109,28 @@ function SleepAndWake({
       />
     );
   return (
-    <div className="automation-policy-grid">
+    <div className="sleep-wake-page">
       {policy.error && <ErrorNotice error={policy.error} />}
-      {data.state && (
-        <div className="automation-state">
-          <strong>{t(data.state.messageKey)}</strong>
-          <span>
-            {t('service.readyObserved')}: <Time value={data.state.readinessObservedAt} />
-          </span>
+      <section className="sleep-wake-consent">
+        <div className="sleep-wake-consent-copy">
+          <h3>{t('automation.startPermission')}</h3>
+          {consent.data && (
+            <p>
+              {t(
+                consent.data.allowed
+                  ? 'automation.startsAllowedHint'
+                  : 'automation.startsPausedHint',
+              )}
+            </p>
+          )}
         </div>
-      )}
-      <section className="automation-policy">
-        <h3>{t('automation.automaticStarts')}</h3>
         {consent.error && <ErrorNotice error={consent.error} />}
         {consent.data && (
           <>
             <div className="automation-row">
-              <span>{t('automation.startPermission')}</span>
+              <span className="sleep-wake-status">
+                {t(consent.data.allowed ? 'automation.startsAllowed' : 'automation.startsPaused')}
+              </span>
               <AutomationSwitch
                 label={t('automation.startPermission')}
                 checked={consent.data.allowed}
@@ -143,111 +144,94 @@ function SleepAndWake({
                 }}
               />
             </div>
-            <p className="muted">{t('automation.startPermissionHint')}</p>
+
             {consent.data.grantBlockedReason && (
               <Notice>{t(`service.consent.${consent.data.grantBlockedReason}`)}</Notice>
             )}
           </>
         )}
       </section>
-      <ServerWakeSettings serverId={serverId} editable={editable} owner={owner} />
-      <section className="automation-policy">
-        <h3>{t('automation.autoSleep')}</h3>
-        {!data.policy ? (
-          data.proposedPolicy && editable ? (
-            <ActionForm
-              submitLabel={t('service.configureSleep')}
-              onSubmit={async () => {
-                await api(`${serverPath(serverId)}/gateway`, {
-                  method: 'PUT',
-                  body: data.proposedPolicy,
-                  headers: { 'If-None-Match': '*' },
-                });
-                await policy.refetch();
-              }}
-            >
-              <p>{t('service.configureSleepDescription')}</p>
-            </ActionForm>
+      <div className="sleep-wake-settings">
+        <section className="automation-policy sleep-wake-policy">
+          {sleep ? (
+            <PolicyHeading
+              kind="sleep"
+              title={t('automation.autoSleep')}
+              value={
+                sleep.effectiveSeconds === -1
+                  ? t('sleepTiming.disabled')
+                  : t('sleepTiming.minutes', {
+                      minutes: format.number(sleep.effectiveSeconds / 60, 3),
+                    })
+              }
+              source={sleep.source}
+            />
           ) : (
-            <Notice>
-              {t(
-                server.data?.connectionMode === 'direct'
-                  ? 'service.directSleepUnavailable'
-                  : 'service.sleepUnavailable',
-              )}
-            </Notice>
-          )
-        ) : sleep ? (
-          <>
-            <p className="automation-effective">
-              {t('sleepTiming.effective', {
-                value:
-                  sleep.effectiveSeconds === -1
-                    ? t('sleepTiming.disabled')
-                    : t('sleepTiming.minutes', {
-                        minutes: format.number(sleep.effectiveSeconds / 60, 3),
-                      }),
-                source: t(`sleepTiming.source.${sleep.source}`),
-              })}
-            </p>
-            {editable && (
-              <ActionForm
-                key={JSON.stringify([data.policy, sleep])}
-                onSubmit={async (form) => {
-                  if (!data.policy) return;
-                  const timeout = readSleepTimeout(form, 'idleMinutes');
-                  const {
-                    idleTimeoutSeconds: _seconds,
-                    idleTimeoutInherited: _inherited,
-                    ...existing
-                  } = data.policy;
-                  await api(`${serverPath(serverId)}/gateway`, {
-                    method: 'PUT',
-                    body: {
-                      ...existing,
-                      idleTimeoutInherited: timeout === null,
-                      idleTimeoutSeconds: timeout === null || timeout === -1 ? null : timeout,
-                      ...(owner
-                        ? { idleTimeoutUserAccess: readSleepAccess(form, 'sleepAccess') }
-                        : {}),
-                    },
-                  });
-                  await policy.refetch();
-                }}
-              >
-                <SleepTimeoutField
-                  name="idleMinutes"
-                  value={sleep.overrideSeconds}
-                  inheritedSeconds={sleep.inheritedSeconds}
-                  allowDisable={
-                    owner ||
-                    sleep.userAccess !== 'shorten-only' ||
-                    sleep.ownerBaselineSeconds === -1
-                  }
-                  maximumSeconds={
-                    !owner &&
-                    sleep.userAccess === 'shorten-only' &&
-                    sleep.ownerBaselineSeconds !== -1
-                      ? sleep.ownerBaselineSeconds
-                      : 604800
-                  }
+            <h3>{t('automation.autoSleep')}</h3>
+          )}
+          <div className="sleep-wake-controls">
+            {!data.policy ? (
+              data.proposedPolicy && editable ? (
+                <ActionForm
+                  submitLabel={t('service.configureSleep')}
+                  onSubmit={async () => {
+                    await api(`${serverPath(serverId)}/gateway`, {
+                      method: 'PUT',
+                      body: data.proposedPolicy,
+                      headers: { 'If-None-Match': '*' },
+                    });
+                    await policy.refetch();
+                  }}
+                >
+                  <p>{t('service.configureSleepDescription')}</p>
+                </ActionForm>
+              ) : (
+                <Notice>
+                  {t(
+                    server.data?.connectionMode === 'direct'
+                      ? 'service.directSleepUnavailable'
+                      : 'service.sleepUnavailable',
+                  )}
+                </Notice>
+              )
+            ) : sleep ? (
+              editable && (
+                <ServerSleepEditor
+                  key={JSON.stringify(sleep)}
+                  sleep={sleep}
+                  owner={owner}
+                  onSubmit={async (form) => {
+                    if (!data.policy) return;
+                    const timeout = readSleepTimeout(form, 'idleMinutes');
+                    const {
+                      idleTimeoutSeconds: _seconds,
+                      idleTimeoutInherited: _inherited,
+                      ...existing
+                    } = data.policy;
+                    await api(`${serverPath(serverId)}/gateway`, {
+                      method: 'PUT',
+                      body: {
+                        ...existing,
+                        idleTimeoutInherited: timeout === null,
+                        idleTimeoutSeconds: timeout === null || timeout === -1 ? null : timeout,
+                        ...(owner
+                          ? { idleTimeoutUserAccess: readSleepAccess(form, 'sleepAccess') }
+                          : {}),
+                      },
+                    });
+                    await policy.refetch();
+                  }}
                 />
-                {owner && 'ownerUserAccessOverride' in sleep && (
-                  <SleepAccessField
-                    name="sleepAccess"
-                    value={sleep.ownerUserAccessOverride ?? null}
-                    inherited={sleep.inheritedUserAccess ?? 'hidden'}
-                  />
-                )}
-              </ActionForm>
+              )
+            ) : (
+              <Notice>{t('sleepTiming.ownerControlled')}</Notice>
             )}
-          </>
-        ) : (
-          <Notice>{t('sleepTiming.ownerControlled')}</Notice>
-        )}
-      </section>
+          </div>
+        </section>
+        <ServerWakeSettings serverId={serverId} editable={editable} owner={owner} />
+      </div>
       {data.policy && editable && data.policyControlsEditable !== false && (
-        <details className="automation-policy automation-advanced">
+        <details className="automation-policy automation-advanced sleep-wake-advanced">
           <summary>{t('automation.gatewayOperation')}</summary>
           <ActionForm
             key={`${data.policy.enabled}-${data.policy.mode}`}

@@ -153,10 +153,39 @@ describe('Automation browser journeys', () => {
   });
   it('disables wake independently and restores inheritance through actual handlers', async () => {
     await page.goto(`${fixture.origin}${base()}/sleep`);
+    const consent = page.getByRole('switch', { name: 'Allow automatic starts', exact: true });
+    await browserExpect(consent).toHaveAttribute('aria-checked', 'false');
+    async function expectKnob(checked: boolean) {
+      const track = await consent.boundingBox();
+      const knob = await consent.locator('span').boundingBox();
+      if (!track || !knob) throw new Error('Switch must be visible');
+      expect(knob.x).toBeGreaterThanOrEqual(track.x);
+      expect(knob.x + knob.width).toBeLessThanOrEqual(track.x + track.width);
+      expect(Math.abs(knob.x - track.x - (checked ? 15 : 2))).toBeLessThan(0.5);
+    }
+    await expectKnob(false);
+    await browserExpect(page.locator('.sleep-wake-consent-copy p')).toContainText(
+      'cannot start the server',
+    );
+    await consent.click();
+    await browserExpect(consent).toHaveAttribute('aria-checked', 'true');
+    await expectKnob(true);
+    await browserExpect(page.locator('.sleep-wake-consent-copy p')).toContainText(
+      'can start the server when configured',
+    );
+    await browserExpect(page.locator('.sleep-wake-status')).toHaveText('Allowed');
+    await fixture.screenshot(page, 'automation-sleep-consent-en');
+    await consent.click();
+    await browserExpect(consent).toHaveAttribute('aria-checked', 'false');
+    await expectKnob(false);
+    await browserExpect(page.locator('.sleep-wake-status')).toHaveText('Paused');
     const wake = page
-      .locator('.automation-policy')
+      .locator('section')
       .filter({ has: page.getByRole('heading', { name: 'Wake on join', exact: true }) });
-    await wake.getByLabel('Wake on join', { exact: true }).selectOption('false');
+    await browserExpect(
+      wake.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toHaveCount(0);
+    await wake.getByRole('button', { name: 'Disabled', exact: true }).click();
     const savedWake = page.waitForResponse(
       (response) =>
         response.url().endsWith('/auto-wake-policy') && response.request().method() === 'PUT',
@@ -176,13 +205,132 @@ describe('Automation browser journeys', () => {
       .executeTakeFirstOrThrow();
     expect(stored).toEqual({ enabled: true, owner_idle_timeout_seconds: 60 });
     await fixture.screenshot(page, 'automation-sleep-desktop-en');
-    await wake.getByLabel('Wake on join', { exact: true }).selectOption('inherit');
+    await wake.getByRole('button', { name: 'Inherit', exact: true }).click();
     const inheritedWake = page.waitForResponse(
       (response) =>
         response.url().endsWith('/auto-wake-policy') && response.request().method() === 'PUT',
     );
     await wake.getByRole('button', { name: 'Save changes', exact: true }).click();
     expect((await inheritedWake).status()).toBe(200);
+  });
+  it('edits sleep with retained drafts on failure and renders compact Owner and Italian mobile controls', async () => {
+    await page.goto(`${fixture.origin}${base()}/sleep`);
+    const sleep = page.locator('section').filter({
+      has: page.getByRole('heading', { name: 'Sleep when idle', exact: true }),
+    });
+    await sleep.getByRole('button', { name: 'Custom', exact: true }).click();
+    const minutes = sleep.getByRole('spinbutton');
+    // Entering a custom duration starts from the inherited value, never -1.
+    await browserExpect(minutes).toHaveValue('1');
+    await minutes.fill('2');
+    await page.route(`**/v1/servers/${provider.ids.serverId}/gateway`, (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'integration_unavailable', messageKey: 'errors.integration_unavailable' },
+        }),
+      }),
+    );
+    await sleep.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await browserExpect(sleep.getByRole('alert')).toBeVisible();
+    await browserExpect(minutes).toHaveValue('2');
+    await fixture.screenshot(page, 'automation-sleep-save-error-en');
+    await sleep.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(sleep.getByRole('alert')).toHaveCount(0);
+    await sleep.getByRole('button', { name: 'Custom', exact: true }).click();
+    await browserExpect(minutes).toHaveValue('1');
+    await minutes.fill('2');
+    await page.unroute(`**/v1/servers/${provider.ids.serverId}/gateway`);
+    const saved = page.waitForResponse(
+      (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
+    );
+    await sleep.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await saved).status()).toBe(200);
+    await browserExpect(
+      sleep.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toHaveCount(0);
+    const policy = await journeyRequest<{ idleTimeout: { effectiveSeconds: number } }>(
+      fixture,
+      page,
+      `/v1/platform/servers/${provider.ids.serverId}/sleep-policy`,
+    );
+    expect(policy.idleTimeout.effectiveSeconds).toBe(120);
+    await minutes.fill('3');
+    await sleep.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(minutes).toHaveValue('2');
+    await sleep.getByRole('button', { name: 'Inherit', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    const restored = page.waitForResponse(
+      (response) => response.url().endsWith('/gateway') && response.request().method() === 'PUT',
+    );
+    await sleep.getByRole('button', { name: 'Save changes', exact: true }).click();
+    expect((await restored).status()).toBe(200);
+    await browserExpect(
+      sleep.getByRole('button', { name: 'Save changes', exact: true }),
+    ).toHaveCount(0);
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    const owner = identities.owner;
+    await owner.goto(`${fixture.origin}${base()}/sleep`);
+    await browserExpect(
+      owner.getByRole('heading', { name: 'Sleep when idle', exact: true }),
+    ).toBeVisible();
+    const accessDisclosures = owner.locator('.sleep-wake-permissions > summary');
+    await browserExpect(accessDisclosures).toHaveCount(2);
+    await accessDisclosures.first().click();
+    await accessDisclosures.last().click();
+    await browserExpect(owner.locator('select[name="sleepAccess"]')).toBeVisible();
+    await browserExpect(owner.locator('select[name="access"]')).toBeVisible();
+    expect(
+      (
+        await new AxeBuilder({ page: owner })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await fixture.screenshot(owner, 'automation-sleep-owner-en');
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await browserExpect(
+      page.getByRole('heading', { name: 'Sospensione per inattività', exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await fixture.screenshot(page, 'automation-sleep-mobile-it');
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await fixture.database.db
+      .updateTable('gateway_server_states')
+      .set({ owner_idle_timeout_user_access: 'shorten-only' })
+      .where('server_id', '=', provider.ids.serverId)
+      .execute();
+    await page.goto(`${fixture.origin}${base()}/sleep`);
+    await browserExpect(
+      sleep.getByRole('button', { name: 'Disabled', exact: true }),
+    ).toBeDisabled();
+    await sleep.getByRole('button', { name: 'Custom', exact: true }).click();
+    await browserExpect(sleep.getByRole('spinbutton')).toHaveAttribute('max', '1');
+    await sleep.getByRole('spinbutton').fill('2');
+    expect(
+      await sleep
+        .getByRole('spinbutton')
+        .evaluate((input) => (input as HTMLInputElement).validity.rangeOverflow),
+    ).toBe(true);
   });
   it('saves Owner global, game and runtime policies and enforces disable-only in the user form', async () => {
     const owner = identities.owner;
@@ -229,11 +377,11 @@ describe('Automation browser journeys', () => {
     await fixture.screenshot(owner, 'automation-owner-runtime-en');
     await page.goto(`${fixture.origin}${base()}/sleep`);
     const wake = page
-      .locator('.automation-policy')
+      .locator('section')
       .filter({ has: page.getByRole('heading', { name: 'Wake on join', exact: true }) });
-    await browserExpect(wake.locator('select[name="wake"] option[value="true"]')).toBeDisabled();
+    await browserExpect(wake.getByRole('button', { name: 'Enabled', exact: true })).toBeDisabled();
     await browserExpect(
-      wake.locator('select[name="wake"] option[value="inherit"]'),
+      wake.getByRole('button', { name: 'Inherit', exact: true }),
     ).not.toBeDisabled();
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${fixture.origin}${base()}`);

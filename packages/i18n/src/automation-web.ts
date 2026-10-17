@@ -15,6 +15,11 @@ export const automationWebMessages: Record<string, readonly [string, string]> = 
   'automation.tab.schedules': ['Schedules', 'Pianificazioni'],
   'automation.tab.sleep': ['Sleep / wake', 'Sospensione / risveglio'],
   'automation.tab.messages': ['Gateway messages', 'Messaggi Gateway'],
+  'automation.inherit': ['Inherit', 'Eredita'],
+  'automation.custom': ['Custom', 'Personalizza'],
+  'automation.idleMinutes': ['Minutes without players', 'Minuti senza giocatori'],
+  'automation.inheritedValue': ['Inherited: {value}', 'Valore ereditato: {value}'],
+  'automation.fromSource': ['From {source}', 'Da {source}'],
   'automation.autoWake': ['Wake on join', 'Risveglio alla connessione'],
   'automation.wakeHint': [
     'A player joining can start the server. Sleep and schedules remain independent.',
@@ -27,9 +32,15 @@ export const automationWebMessages: Record<string, readonly [string, string]> = 
   'automation.effective': ['{value} · {source}', '{value} · {source}'],
   'automation.automaticStarts': ['Automatic starts', 'Avvii automatici'],
   'automation.startPermission': ['Allow automatic starts', 'Consenti avvii automatici'],
-  'automation.startPermissionHint': [
-    'A manual stop pauses automatic starts until you allow them again or start the server.',
-    'Un arresto manuale sospende gli avvii automatici finché non li autorizzi di nuovo o avvii il server.',
+  'automation.startsAllowed': ['Allowed', 'Consentiti'],
+  'automation.startsPaused': ['Paused', 'Sospesi'],
+  'automation.startsAllowedHint': [
+    'Schedules and player connections can start the server when configured. A manual stop pauses automatic starts.',
+    'Pianificazioni e connessioni dei giocatori possono avviare il server, se configurate. Un arresto manuale sospende gli avvii automatici.',
+  ],
+  'automation.startsPausedHint': [
+    'Schedules and player connections cannot start the server. Start it manually or allow automatic starts again.',
+    'Pianificazioni e connessioni dei giocatori non possono avviare il server. Avvialo manualmente o autorizza di nuovo gli avvii automatici.',
   ],
   'automation.gatewayOperation': ['Gateway operation', 'Funzionamento Gateway'],
   'automation.messagesUnavailable': [

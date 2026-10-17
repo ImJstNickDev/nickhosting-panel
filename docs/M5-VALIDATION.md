@@ -11309,3 +11309,42 @@ fixture translation key. Removed the banner, retained inline outcomes, corrected
 the fixture to the real `integration_unavailable` envelope, and verified localized
 failure/retry. The two affected browser tests passed again (three skipped), and
 the error screenshot was refreshed. These changes do not alter provider execution.
+
+### 2026-10-17 — Sleep/wake interface polish
+
+Aligned Sleep and Wake settings in one compact surface, with saved effective
+values and sources, segmented choices, inline custom minutes and dirty-only
+Save/Cancel. Owner access and technical Gateway controls remain disclosures.
+Automatic-start consent is separate and describes its saved Allowed/Paused state;
+it is not labeled with the unrelated server lifecycle state. Fixed inherited
+button centering that displaced the shared switch knob; its bounds are asserted
+in both positions. No API, scheduling, sleep/wake execution or authorization
+contract changed. New custom duration starts from the inherited time rather than
+implicitly choosing Disabled. Failed saves retain drafts; Cancel clears errors.
+
+Validation used actual application handlers with the isolated browser PostgreSQL
+fixture and provider mocks. No live game server, production service or dev setting
+was mutated. No container restart, migration or new external test asset was needed.
+Targeted command:
+`scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/automation.browser.test.ts -t 'disables wake|edits sleep|saves Owner global'`
+passed **3 tests**, with 3 unrelated tests skipped. Added Owner-expanded axe checks
+then found hidden explicit select labels; changed the scoped CSS to visually
+hidden, accessible labels. The affected test passed after correction. Final
+follow-ups use `-t 'disables wake|edits sleep'` (2 tests; 4 intentionally skipped),
+covering consent on/off geometry, contextual descriptions, sleep/wake independence,
+inheritance, failed-save/cancel/retry, numeric restriction and disabled choices,
+Owner disclosures, desktop EN and mobile IT. Scoped axe found no remaining
+violations; this is not a blanket WCAG certification.
+
+Web app/test typecheck, changed-file Biome lint/format and i18n catalogue checks
+passed. No historical full suite or production build was repeated for this UI
+slice. Independent code and rendered UX review found no remaining must-fix.
+SFTPGo #18 and previously documented deployment gates are unchanged.
+
+Reviewed browser captures:
+
+- [Sleep/wake desktop](screenshots/m5/automation-sleep-desktop-en.png)
+- [Automatic starts allowed](screenshots/m5/automation-sleep-consent-en.png)
+- [Owner controls expanded](screenshots/m5/automation-sleep-owner-en.png)
+- [Italian mobile](screenshots/m5/automation-sleep-mobile-it.png)
+- [Failed save with retained draft](screenshots/m5/automation-sleep-save-error-en.png)
