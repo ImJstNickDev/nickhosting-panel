@@ -36,7 +36,6 @@ import {
   lockResources,
   reserveStartInTransaction,
 } from './admission.js';
-
 import {
   allocationAddressesOverlap,
   assertBackendPoolNamespace,
@@ -44,7 +43,9 @@ import {
   poolAllowsLoopbackEgg,
   validatedBackendInventory,
 } from './allocation-pool.js';
+import { backupOptionsSchema, resolveBackupMode } from './backup-policy.js';
 import { consumeDnsWizardReservation } from './dns-reservations.js';
+import { trustedGameModules } from './game-modules.js';
 import { planProvisionGateway } from './gateway-provision.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import {
@@ -54,6 +55,7 @@ import {
 } from './minecraft-content-contracts.js';
 import { requireMinecraftChoice } from './minecraft-registry.js';
 import { bindMinecraftSource } from './minecraft-sources.js';
+import { backupSchemaAvailable } from './provider-backup-events.js';
 import { integrationImageCandidates, mappingProvisionImage } from './runtime-images.js';
 import { killRequestSchema, requestStopEscalation } from './stop-escalation.js';
 import { storageCommitments } from './storage-accounting.js';
@@ -96,6 +98,7 @@ export const createServerSchema = z
   .strict();
 export const operationSchema = z.discriminatedUnion('action', [
   killRequestSchema,
+  backupOptionsSchema.extend({ action: z.literal('backup'), idempotencyKey: keySchema }),
   z
     .object({
       action: z.literal('minecraft-content'),
@@ -103,9 +106,7 @@ export const operationSchema = z.discriminatedUnion('action', [
       command: z.unknown(),
     })
     .strict(),
-  z
-    .object({ action: z.enum(['start', 'stop', 'restart', 'backup']), idempotencyKey: keySchema })
-    .strict(),
+  z.object({ action: z.enum(['start', 'stop', 'restart']), idempotencyKey: keySchema }).strict(),
   z
     .object({
       action: z.enum(['reinstall', 'wipe', 'delete']),
@@ -121,6 +122,7 @@ export const operationSchema = z.discriminatedUnion('action', [
       confirm: z.literal(true),
       backupId: id,
       truncate: z.boolean().default(true),
+      backupBefore: z.boolean().default(false),
     })
     .strict(),
   z
@@ -764,6 +766,13 @@ export async function enqueueLockedServerOperation(
 ) {
   const value = parse(operationSchema, input);
   if (value.action === 'kill') throw new DomainError('conflict');
+  if (
+    (['backup', 'restore'].includes(value.action) ||
+      ('backupBefore' in value && value.backupBefore) ||
+      options.minecraftPlan?.backupBefore) &&
+    !(await backupSchemaAvailable(tx))
+  )
+    throw new DomainError('configuration_invalid');
   if (value.action !== 'stop') await assertStoragePolicyIdle(tx);
   const hash = digest({ kind: 'operation', subject: context.subjectUserId, serverId, value });
   const server = await authorizeServer(
@@ -893,8 +902,23 @@ export async function enqueueLockedServerOperation(
   )
     throw new DomainError('conflict');
   if ('backupBefore' in value) plan.backupBefore = value.backupBefore;
+  if (value.action === 'backup') {
+    const mapping = await tx
+      .selectFrom('runtime_egg_mappings')
+      .select('game_id')
+      .where('id', '=', server.mapping_id)
+      .executeTakeFirstOrThrow();
+    const policy = trustedGameModules.get(mapping.game_id)?.manifest.backupPolicy;
+    plan.backupOptions = backupOptionsSchema.parse({
+      name: value.name,
+      ignored: value.ignored,
+      isLocked: value.isLocked,
+      mode: value.mode,
+    });
+    plan.backupMode = resolveBackupMode(value.mode, policy);
+  }
   if (value.action === 'restore') {
-    plan.backupId = value.backupId;
+    plan.restoreBackupId = value.backupId;
     plan.truncate = value.truncate;
   }
   if (value.action === 'configure') {

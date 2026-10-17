@@ -7,7 +7,8 @@ import {
   DomainError,
   safeError,
 } from '@nickhosting/core';
-import { type Database, recordAudit } from '@nickhosting/database';
+import { type Database, notifyGatewayChange, recordAudit } from '@nickhosting/database';
+import type { GameBackupPolicy } from '@nickhosting/game-sdk';
 import { parseCommand, processJob } from '@nickhosting/jobs';
 import {
   type ApplicationServer,
@@ -22,6 +23,12 @@ import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources, physicalMemoryMiB } from './admission.js';
 import { assertServerBackendAllocations, canonicalAllocationAddress } from './allocation-pool.js';
+import {
+  backupOptionsSchema,
+  backupRetentionSchema,
+  canResumeBackup,
+  resolveBackupMode,
+} from './backup-policy.js';
 import { effectiveNodeOverhead } from './configuration.js';
 import { reconcileGatewayState } from './gateway-orchestration.js';
 import {
@@ -86,6 +93,27 @@ export interface ExternalStopReceipt {
 export interface LifecycleOptions {
   logger?: ReturnType<typeof createLogger>;
   adapter: PterodactylAdapter;
+  backupSchemaAvailable?: (db: Kysely<Database>) => Promise<boolean>;
+  backupPolicy?: (context: GameLifecycleContext) => Promise<GameBackupPolicy>;
+  prepareBackup?: (context: GameLifecycleContext, mode: 'offline' | 'live') => Promise<void>;
+  cleanupBackup?: (context: GameLifecycleContext, mode: 'offline' | 'live') => Promise<void>;
+  backupEventsEnabled?: (db: Kysely<Database>, serverId: string) => Promise<boolean>;
+  readBackupCompletion?: (
+    db: Kysely<Database>,
+    serverId: string,
+    backupId: string,
+    type: 'backup.completed' | 'backup.restore-completed',
+    since?: Date,
+  ) => Promise<{
+    eventId: string;
+    occurredAt: string;
+    backup: {
+      uuid: string;
+      isSuccessful: boolean;
+      checksum: string | null;
+      completedAt: string;
+    };
+  } | null>;
   /** Game hooks run under the same pinned server lock and durable effect journal. */
   configureGameProvision?: (context: GameLifecycleContext) => Promise<boolean>;
   /** Read-only, trusted integration attestation; never used for reinstall/wipe. */
@@ -488,15 +516,60 @@ export async function processServerOperation(
       const processConfirmation =
         options.observeProcessStart !== undefined &&
         (['start', 'restart'].includes(operation.action) ||
-          (operation.action === 'provision' && operation.phase === 'initial_start')) &&
-        ['power_confirmation', 'start_terminal_unproven', 'restart_terminal_unproven'].includes(
-          reason,
-        );
+          (operation.action === 'provision' && operation.phase === 'initial_start') ||
+          (operation.action === 'backup' && operation.phase === 'backup_resume')) &&
+        [
+          'power_confirmation',
+          'start_terminal_unproven',
+          'restart_terminal_unproven',
+          'backup_resume_confirmation',
+          'backup_resume_unknown',
+        ].includes(reason);
       // A fresh process signal must not wait behind exponential resource-cache
       // polling. Provider failures and unrelated operations retain their backoff.
-      const delay = processConfirmation ? 2000 : Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4));
-      const next = new Date(nowOf(options).getTime() + delay + Math.floor(Math.random() * 500));
+      const backupRecovery =
+        (operation.phase === 'backup' ||
+          operation.phase === 'restore' ||
+          reason === 'backup_confirmation') &&
+        (await options.backupEventsEnabled?.(db, server.id));
+      const delay = backupRecovery
+        ? 60_000
+        : processConfirmation
+          ? 2000
+          : Math.min(10_000, 1_000 * 2 ** Math.min(poll, 4));
+      let next = new Date(nowOf(options).getTime() + delay + Math.floor(Math.random() * 500));
       await db.transaction().execute(async (tx) => {
+        await tx
+          .selectFrom('operation_jobs')
+          .select('id')
+          .where('id', '=', jobId)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        const waitingBackupId =
+          reason === 'backup_confirmation'
+            ? operation.plan.backupId
+            : reason === 'restore_confirmation'
+              ? (operation.plan.restoreBackupId ?? operation.plan.backupId)
+              : undefined;
+        if (
+          typeof waitingBackupId === 'string' &&
+          options.readBackupCompletion &&
+          operation.effect_started_at
+        ) {
+          const completion = await options.readBackupCompletion(
+            tx,
+            server.id,
+            waitingBackupId,
+            reason === 'backup_confirmation' ? 'backup.completed' : 'backup.restore-completed',
+            reason === 'backup_confirmation' ? undefined : operation.effect_started_at,
+          );
+          if (
+            completion &&
+            (reason !== 'restore_confirmation' ||
+              completion.eventId !== operation.plan.restoreEventBaseline)
+          )
+            next = nowOf(options);
+        }
         await tx
           .updateTable('operation_jobs')
           .set({
@@ -806,6 +879,7 @@ export async function processServerOperation(
         phase === 'power' && operation.action === 'start' && operation.phase === 'planned';
       const finalPowerIdentity =
         phase === 'initial_start' ||
+        phase === 'backup_resume' ||
         (phase === 'power' && ['start', 'restart'].includes(operation.action));
       // Stop preparation may share this attempt's initial identity for its internal
       // status relay. beforePower always rechecks identity after the socket handshake.
@@ -823,6 +897,9 @@ export async function processServerOperation(
         plan: {
           ...operation.plan,
           acknowledged: false,
+          // Backup completion, retention and resume are distinct effects. A
+          // rejected earlier phase cannot label an admitted resume as rejected.
+          ...(operation.action === 'backup' ? { rejected: false, rejectionCode: undefined } : {}),
           waitReason: null,
           effectAttempts: { ...attempts, [phase]: attempt },
           ...(['power', 'initial_start'].includes(phase) ? { powerEffectPrepared: true } : {}),
@@ -907,6 +984,8 @@ export async function processServerOperation(
             await timed('authorization', () => options.authorizeEffect(jobId, server.id, db));
           }
           if (phase === 'initial_start') await assertProvisionGatewayStart(db, server.id, jobId);
+          if (phase === 'backup_resume' && !(await backupResumeAllowed()))
+            throw new DomainError('forbidden');
         } catch (error) {
           await update({
             effect_state: 'none',
@@ -1030,29 +1109,99 @@ export async function processServerOperation(
       );
     };
     const backup = async (): Promise<boolean> => {
+      if (options.backupSchemaAvailable && !(await options.backupSchemaAvailable(db)))
+        throw new DomainError('configuration_invalid');
+      if (operation.plan.backupComplete === true) return true;
+      const settings = backupOptionsSchema.parse(operation.plan.backupOptions ?? {});
+      // Provider names are immutable correlation keys. Optional display names
+      // remain local, so rename/duplicate labels cannot weaken recovery evidence.
       const name = `nickhosting-operation-${jobId}`;
+      const label = async () => {
+        if (settings.name && typeof operation.plan.backupId === 'string')
+          await db
+            .insertInto('backup_labels')
+            .values({
+              server_id: server.id,
+              backup_id: operation.plan.backupId,
+              name: settings.name,
+            })
+            .onConflict((conflict) => conflict.columns(['server_id', 'backup_id']).doNothing())
+            .execute();
+      };
       if (!operation.plan.backupId && operation.phase !== 'backup') {
+        await update({
+          plan: {
+            ...operation.plan,
+            backupRequestedAt: nowOf(options).toISOString(),
+          },
+        });
         await effect(
           'backup',
-          () => options.adapter.createBackup(server.pterodactyl_identifier ?? '', { name }),
+          () =>
+            options.adapter.createBackup(server.pterodactyl_identifier ?? '', {
+              name,
+              ignored: settings.ignored,
+              is_locked: settings.isLocked,
+            }),
           (result) => ({ backupId: result.uuid }),
         );
+        await label();
         return false;
       }
       if (!operation.plan.backupId) {
+        const baseline = new Set(z.array(z.string()).parse(operation.plan.backupBaseline ?? []));
+        const requestedAt = Date.parse(
+          String(operation.plan.backupRequestedAt ?? operation.effect_started_at?.toISOString()),
+        );
         const found = (
           await options.adapter.listBackups(server.pterodactyl_identifier ?? '')
-        ).filter((entry) => entry.name === name);
+        ).filter(
+          (entry) =>
+            entry.name === name &&
+            !baseline.has(entry.uuid) &&
+            Date.parse(entry.created_at) >= Math.floor(requestedAt / 1000) * 1000,
+        );
         if (found.length > 1) throw new DomainError('conflict');
         if (found.length === 0) return false;
         await update({ plan: { ...operation.plan, backupId: found[0]?.uuid } });
       }
-      const snapshot = await options.adapter.getBackup(
-        server.pterodactyl_identifier ?? '',
-        z.uuid().parse(operation.plan.backupId),
+      await label();
+      const backupId = z.uuid().parse(operation.plan.backupId);
+      const since = new Date(
+        String(operation.plan.backupRequestedAt ?? operation.effect_started_at?.toISOString()),
       );
-      if (!snapshot.completed_at) return false;
-      if (!snapshot.is_successful || !snapshot.checksum) {
+      const completion = await options.readBackupCompletion?.(
+        db,
+        server.id,
+        backupId,
+        'backup.completed',
+      );
+      let successful: boolean, checksum: string | null;
+      if (completion) {
+        successful = completion.backup.isSuccessful;
+        checksum = completion.backup.checksum;
+        await update({
+          plan: {
+            ...operation.plan,
+            backupEvidence: { eventId: completion.eventId, occurredAt: completion.occurredAt },
+          },
+        });
+      } else {
+        // Provider snapshots are recovery only when the authenticated event feed is enabled.
+        if (
+          (await options.backupEventsEnabled?.(db, server.id)) &&
+          nowOf(options).getTime() - since.getTime() < 60_000
+        )
+          return false;
+        const snapshot = await options.adapter.getBackup(
+          server.pterodactyl_identifier ?? '',
+          backupId,
+        );
+        if (!snapshot.completed_at) return false;
+        successful = snapshot.is_successful;
+        checksum = snapshot.checksum;
+      }
+      if (!successful || !checksum) {
         await update({ plan: { ...operation.plan, backupFailed: true } });
         throw new DomainError('integration_unavailable');
       }
@@ -1080,6 +1229,450 @@ export async function processServerOperation(
           throw new DomainError('operation_uncertain');
       },
     });
+    const backupResumeAllowed = async () => {
+      const current = await db
+        .selectFrom('managed_servers')
+        .select('intent')
+        .where('id', '=', server.id)
+        .executeTakeFirstOrThrow();
+      const gateway = await db
+        .selectFrom('gateway_server_states')
+        .select('generation')
+        .where('server_id', '=', server.id)
+        .executeTakeFirst();
+      return canResumeBackup(
+        {
+          intent: String(operation.plan.backupPriorIntent),
+          generation:
+            typeof operation.plan.backupGatewayGeneration === 'string'
+              ? operation.plan.backupGatewayGeneration
+              : null,
+          wasRunning: operation.plan.backupWasRunning === true,
+        },
+        { intent: current.intent, generation: gateway?.generation ?? null },
+      );
+    };
+    const prepareStandaloneBackup = async (): Promise<boolean> => {
+      const request = backupOptionsSchema.parse(operation.plan.backupOptions ?? {});
+      const policy = await options.backupPolicy?.(gameContext());
+      const mode = resolveBackupMode(request.mode, policy);
+      if (operation.plan.backupMode !== mode)
+        await update({ plan: { ...operation.plan, backupMode: mode } });
+      if (mode === 'offline' && operation.plan.backupOfflineConfirmed !== true) {
+        if (operation.plan.backupWasRunning === undefined) {
+          const current = await resources();
+          if (!['running', 'offline'].includes(current.current_state))
+            throw new DomainError('conflict');
+          const stopped = await options.confirmAlreadyStopped?.(server.id, db);
+          let wasRunning = false;
+          if (!stopped) {
+            // Both cached offline-after-start and running-after-stop are possible.
+            // Only a trusted live process epoch establishes prior running intent.
+            const epoch = processStartTime(await options.observeProcessStart?.(server.id, db));
+            if (epoch === null || epoch > BigInt(nowOf(options).getTime()) * 1_000_000n)
+              return false;
+            wasRunning = true;
+          }
+          const gateway = await db
+            .selectFrom('gateway_server_states')
+            .select('generation')
+            .where('server_id', '=', server.id)
+            .executeTakeFirst();
+          await update({
+            plan: {
+              ...operation.plan,
+              backupWasRunning: wasRunning,
+              backupPriorIntent: server.intent,
+              backupGatewayGeneration: gateway?.generation ?? null,
+            },
+          });
+        }
+        if (operation.plan.backupWasRunning === true && operation.phase !== 'backup_stop') {
+          await effect('backup_stop', async (verifiedServer) => {
+            await options.adapter.stopWithConfirmation(
+              server.pterodactyl_id ?? 0,
+              server.pterodactyl_identifier ?? '',
+              {
+                ...(verifiedServer ? { verifiedServer } : {}),
+                beforePower: async () => {
+                  await ownedRemote(db, server, options);
+                  await options.authorizeEffect(jobId, server.id, db);
+                },
+                authorize: async () => {
+                  try {
+                    await (options.authorizeIntent ?? options.authorizeEffect)(
+                      jobId,
+                      server.id,
+                      db,
+                    );
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
+                onConfirmed: async () =>
+                  update({ plan: { ...operation.plan, backupStopConfirmed: true } }),
+              },
+            );
+          });
+        }
+        // Recovery may prove that the temporary stop completed even after its reply was lost.
+        if (!options.confirmAlreadyStopped || !(await options.confirmAlreadyStopped(server.id, db)))
+          return false;
+        await db.transaction().execute(async (tx) => {
+          await lockResources(tx);
+          await tx.deleteFrom('resource_reservations').where('server_id', '=', server.id).execute();
+          await tx
+            .updateTable('managed_servers')
+            .set({
+              runtime_state: 'offline',
+              readiness: 'unknown',
+              last_observed_at: nowOf(options),
+            })
+            .where('id', '=', server.id)
+            .execute();
+          if (typeof operation.plan.backupGatewayGeneration === 'string')
+            await tx
+              .updateTable('gateway_server_states')
+              .set({
+                state: 'sleeping',
+                wake_job_id: null,
+                sleep_job_id: null,
+                process_started_at: null,
+                readiness_observed_at: null,
+                idle_since: null,
+                startup_deadline_at: null,
+                last_observed_at: null,
+                error_code: null,
+                updated_at: nowOf(options),
+              })
+              .where('server_id', '=', server.id)
+              .where('generation', '=', String(operation.plan.backupGatewayGeneration))
+              .execute();
+          await notifyGatewayChange(tx);
+        });
+        await update({
+          phase: 'backup_offline',
+          effect_state: 'confirmed',
+          plan: { ...operation.plan, backupOfflineConfirmed: true },
+        });
+      }
+      if (operation.plan.backupPrepared !== true) {
+        await update({ plan: { ...operation.plan, backupPreparationStarted: true } });
+        try {
+          await options.prepareBackup?.(gameContext(), mode);
+        } catch (error) {
+          await update({ plan: { ...operation.plan, backupFailed: true } });
+          throw error;
+        }
+        await update({ plan: { ...operation.plan, backupPrepared: true } });
+      }
+      return true;
+    };
+    const applyBackupRetention = async () => {
+      const automation = operation.plan.scheduleAutomation as
+        | { scheduleId?: unknown; retention?: unknown }
+        | undefined;
+      const retention = backupRetentionSchema.parse(automation?.retention ?? {});
+      if (
+        !retention.enabled ||
+        typeof automation?.scheduleId !== 'string' ||
+        operation.plan.backupComplete !== true
+      )
+        return;
+      if (!Array.isArray(operation.plan.backupRetentionIds)) {
+        const previous = await db
+          .selectFrom('server_operations as operation')
+          .innerJoin('operation_jobs as job', 'job.id', 'operation.job_id')
+          .select(['operation.plan', 'job.completed_at'])
+          .where('operation.server_id', '=', server.id)
+          .where('operation.action', '=', 'backup')
+          .where('job.state', '=', 'succeeded')
+          .orderBy('job.completed_at', 'desc')
+          .execute();
+        const ids = previous
+          .filter(
+            (row) =>
+              row.plan.backupComplete === true &&
+              (row.plan.scheduleAutomation as { scheduleId?: unknown } | undefined)?.scheduleId ===
+                automation.scheduleId,
+          )
+          .map((row) => row.plan.backupId)
+          .filter((id): id is string => typeof id === 'string')
+          .slice(retention.keepLast - 1);
+        await update({
+          plan: {
+            ...operation.plan,
+            backupRetentionIds: [...new Set(ids)],
+            backupRetentionDone: [],
+          },
+        });
+      }
+      const ids = z.array(z.uuid()).parse(operation.plan.backupRetentionIds);
+      for (const id of ids) {
+        if ((operation.plan.backupRetentionDone as string[]).includes(id)) continue;
+        try {
+          // Only durable successful backups from this exact schedule are eligible.
+          // Recheck provider protection immediately before every deletion.
+          const snapshot = await options.adapter.getBackup(server.pterodactyl_identifier ?? '', id);
+          if (!snapshot.is_locked && snapshot.completed_at && snapshot.is_successful) {
+            await effect(`backup_retention_${id}`, async () => {
+              const fresh = await options.adapter.getBackup(
+                server.pterodactyl_identifier ?? '',
+                id,
+              );
+              if (!fresh.is_locked && fresh.completed_at && fresh.is_successful)
+                await options.adapter.deleteBackup(server.pterodactyl_identifier ?? '', id);
+            });
+          }
+        } catch (error) {
+          if (!(error instanceof PterodactylError && error.reason === 'not_found')) throw error;
+        }
+        await update({
+          plan: {
+            ...operation.plan,
+            backupRetentionDone: [...(operation.plan.backupRetentionDone as string[]), id],
+          },
+        });
+      }
+    };
+    const blockBackupResume = async (code: string) => {
+      if (typeof operation.plan.backupGatewayGeneration !== 'string') return;
+      await db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await tx
+          .updateTable('gateway_server_states')
+          .set({
+            state: 'blocked',
+            error_code: code,
+            readiness_observed_at: null,
+            idle_since: null,
+            startup_deadline_at: null,
+            updated_at: nowOf(options),
+          })
+          .where('server_id', '=', server.id)
+          .where('wake_job_id', '=', jobId)
+          .where('generation', '=', String(operation.plan.backupGatewayGeneration))
+          .execute();
+        await notifyGatewayChange(tx);
+      });
+    };
+    const completeStandaloneBackup = async (): Promise<Result> => {
+      const mode = operation.plan.backupMode === 'live' ? 'live' : 'offline';
+      if (
+        operation.plan.backupPreparationStarted === true &&
+        operation.plan.backupCleanupComplete !== true
+      ) {
+        try {
+          // Compensating cleanup may restore saving after creator/schedule
+          // authority is withdrawn. It cannot authorize a new backup or start:
+          // effect() retains ordinary authorization and only compiled cleanup
+          // hooks receive this identity-bound command authorization.
+          const cleanupContext = gameContext();
+          cleanupContext.authorize = async () => {
+            if (operation.plan.backupPreparationStarted !== true)
+              throw new DomainError('forbidden');
+            const current = await db
+              .selectFrom('managed_servers')
+              .selectAll()
+              .where('id', '=', server.id)
+              .executeTakeFirstOrThrow();
+            if (current.deleted_at || current.active_operation_id !== jobId)
+              throw new DomainError('forbidden');
+            for (const key of [
+              'pterodactyl_id',
+              'pterodactyl_uuid',
+              'pterodactyl_identifier',
+              'external_id',
+              'mapping_id',
+              'node_id',
+              'provider_user_id',
+            ] as const)
+              if (current[key] !== server[key]) throw new DomainError('provenance_mismatch');
+            await options.verifyObservationHost?.(server.id, db);
+            await ownedRemote(db, current, options);
+          };
+          cleanupContext.assertStopped = async () => {
+            await cleanupContext.authorize();
+            if (
+              !options.confirmAlreadyStopped ||
+              !(await options.confirmAlreadyStopped(server.id, db))
+            )
+              throw new DomainError('operation_uncertain');
+            // This is compensation proof only; retain all reservations for the
+            // normal lifecycle/reconciler to account for the external stop.
+          };
+          await options.cleanupBackup?.(cleanupContext, mode);
+          await update({ plan: { ...operation.plan, backupCleanupComplete: true } });
+        } catch (error) {
+          await update({ plan: { ...operation.plan, backupCleanupError: safeError(error).code } });
+          return wait('backup_cleanup', safeError(error).code);
+        }
+      }
+      const success = operation.plan.backupComplete === true;
+      if (success && operation.plan.backupRetentionComplete !== true) {
+        try {
+          await applyBackupRetention();
+          await update({
+            phase: 'backup_complete',
+            effect_state: 'confirmed',
+            plan: { ...operation.plan, rejected: false, backupRetentionComplete: true },
+          });
+        } catch (error) {
+          // Retention failure does not erase a successful backup or block resumption.
+          await update({
+            phase: 'backup_complete',
+            effect_state: 'confirmed',
+            plan: {
+              ...operation.plan,
+              rejected: false,
+              backupRetentionComplete: true,
+              backupRetentionError: safeError(error).code,
+            },
+          });
+        }
+      }
+      if (
+        mode !== 'offline' ||
+        operation.plan.backupWasRunning !== true ||
+        operation.plan.backupOfflineConfirmed !== true
+      )
+        return finish(success, false, success ? null : 'integration_unavailable');
+      if (operation.phase !== 'backup_resume') {
+        if (!(await backupResumeAllowed())) {
+          await update({ plan: { ...operation.plan, backupResumeOutcome: 'suppressed' } });
+          return finish(success, false, success ? null : 'integration_unavailable');
+        }
+        try {
+          if (!options.reserveStart) throw new DomainError('configuration_invalid');
+          await options.reserveStart(server.id, jobId, 'start', db);
+          await update({ plan: { ...operation.plan, backupResumeOutcome: 'pending' } });
+          await db.transaction().execute(async (tx) => {
+            await lockResources(tx);
+            const gateway = await tx
+              .selectFrom('gateway_server_states')
+              .selectAll()
+              .where('server_id', '=', server.id)
+              .executeTakeFirst();
+            if (gateway && gateway.generation === operation.plan.backupGatewayGeneration) {
+              await tx
+                .updateTable('gateway_server_states')
+                .set({
+                  state: 'waking',
+                  wake_job_id: jobId,
+                  sleep_job_id: null,
+                  process_started_at: null,
+                  readiness_observed_at: null,
+                  idle_since: null,
+                  last_observed_at: null,
+                  startup_deadline_at: new Date(
+                    nowOf(options).getTime() + gateway.readiness_timeout_seconds * 1000,
+                  ),
+                  error_code: null,
+                  blocked_until: null,
+                  updated_at: nowOf(options),
+                })
+                .where('server_id', '=', server.id)
+                .execute();
+              await notifyGatewayChange(tx);
+            }
+          });
+          await effect('backup_resume', () =>
+            options.adapter.power(server.pterodactyl_identifier ?? '', 'start'),
+          );
+        } catch (error) {
+          if (operation.phase === 'backup_resume' && operation.effect_state !== 'none')
+            return wait('backup_resume_unknown', safeError(error).code);
+          await db
+            .deleteFrom('resource_reservations')
+            .where('server_id', '=', server.id)
+            .where('operation_id', '=', jobId)
+            .execute();
+          await update({
+            plan: {
+              ...operation.plan,
+              backupResumeOutcome: 'failed',
+              backupResumeError: safeError(error).code,
+            },
+          });
+          await blockBackupResume(safeError(error).code);
+          return finish(success, false, success ? null : 'integration_unavailable');
+        }
+      }
+      if (!options.observeProcessStart || !operation.effect_started_at)
+        return wait('backup_resume_confirmation', 'operation_uncertain');
+      const startedAt = await options.observeProcessStart(server.id, db);
+      const started = processStartTime(startedAt);
+      if (
+        started === null ||
+        started <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
+        started > BigInt(nowOf(options).getTime()) * 1_000_000n
+      )
+        return wait('backup_resume_confirmation', 'operation_uncertain');
+      await db
+        .updateTable('resource_reservations')
+        .set({ state: 'running', updated_at: nowOf(options) })
+        .where('server_id', '=', server.id)
+        .where('operation_id', '=', jobId)
+        .execute();
+      await db
+        .updateTable('managed_servers')
+        .set({ runtime_state: 'running', last_observed_at: nowOf(options) })
+        .where('id', '=', server.id)
+        .execute();
+      await update({
+        plan: {
+          ...operation.plan,
+          backupResumeOutcome: 'succeeded',
+          startConfirmed: true,
+          startConfirmedAt: nowOf(options).toISOString(),
+          startProcessStartedAt: startedAt,
+        },
+      });
+      return finish(success, false, success ? null : 'integration_unavailable');
+    };
+    const recoverRejectedBackup = async (): Promise<Result> => {
+      if (operation.phase === 'backup_resume') {
+        // Rejection was durably recorded before a worker crash: the snapshot is
+        // still successful and this rejected power effect did not start a process.
+        await db
+          .deleteFrom('resource_reservations')
+          .where('server_id', '=', server.id)
+          .where('operation_id', '=', jobId)
+          .execute();
+        await update({
+          plan: {
+            ...operation.plan,
+            backupResumeOutcome: 'failed',
+            backupResumeError: operation.plan.rejectionCode ?? 'integration_unavailable',
+          },
+        });
+        await blockBackupResume(String(operation.plan.rejectionCode ?? 'integration_unavailable'));
+        return finish(
+          operation.plan.backupComplete === true,
+          false,
+          operation.plan.backupComplete === true ? null : 'integration_unavailable',
+        );
+      }
+      if (
+        operation.plan.backupComplete === true &&
+        operation.phase.startsWith('backup_retention_')
+      ) {
+        await update({
+          phase: 'backup_complete',
+          effect_state: 'confirmed',
+          plan: {
+            ...operation.plan,
+            rejected: false,
+            backupRetentionComplete: true,
+            backupRetentionError: operation.plan.rejectionCode ?? 'integration_unavailable',
+          },
+        });
+      } else {
+        await update({ plan: { ...operation.plan, rejected: false, backupFailed: true } });
+      }
+      return completeStandaloneBackup();
+    };
     const recoverInitialInstallation = async () => {
       if (
         operation.action !== 'provision' ||
@@ -1274,7 +1867,10 @@ export async function processServerOperation(
         command.payload.operationId !== jobId
       )
         throw new DomainError('validation_failed');
-      if (operation.plan.rejected === true) return finish(false, false, 'integration_unavailable');
+      if (operation.plan.rejected === true)
+        return operation.action === 'backup'
+          ? recoverRejectedBackup()
+          : finish(false, false, 'integration_unavailable');
       if (operation.action === 'delete') {
         const leasesExpired = await db.transaction().execute(async (tx) => {
           await lockResources(tx);
@@ -1783,7 +2379,10 @@ export async function processServerOperation(
         return wait('power_confirmation');
       }
       if (operation.action === 'backup') {
-        if (await backup()) return finish(true);
+        if (operation.plan.backupComplete === true || operation.plan.backupFailed === true)
+          return completeStandaloneBackup();
+        if (!(await prepareStandaloneBackup())) return wait('backup_offline_confirmation');
+        if (await backup()) return completeStandaloneBackup();
         return wait('backup_confirmation');
       }
       await requireQuiescentReservation();
@@ -1978,7 +2577,9 @@ export async function processServerOperation(
         return wait('installation');
       }
       if (operation.action === 'restore') {
-        const backupId = z.uuid().parse(operation.plan.backupId);
+        if (options.backupSchemaAvailable && !(await options.backupSchemaAvailable(db)))
+          throw new DomainError('configuration_invalid');
+        const backupId = z.uuid().parse(operation.plan.restoreBackupId ?? operation.plan.backupId);
         if (operation.phase !== 'restore') {
           const snapshot = await options.adapter.getBackup(
             server.pterodactyl_identifier ?? '',
@@ -1994,10 +2595,17 @@ export async function processServerOperation(
           const baseline = await options.adapter.listBackupActivity(
             server.pterodactyl_identifier ?? '',
           );
+          const priorCompletion = await options.readBackupCompletion?.(
+            db,
+            server.id,
+            backupId,
+            'backup.restore-completed',
+          );
           await update({
             plan: {
               ...operation.plan,
               restoreBackupName: snapshot.name,
+              restoreEventBaseline: priorCompletion?.eventId ?? null,
               restoreActivityBaseline: baseline.map((event) => event.id),
             },
           });
@@ -2010,6 +2618,45 @@ export async function processServerOperation(
           );
           return wait('restore_confirmation');
         }
+        const completion =
+          operation.effect_started_at &&
+          (await options.readBackupCompletion?.(
+            db,
+            server.id,
+            backupId,
+            'backup.restore-completed',
+            operation.effect_started_at,
+          ));
+        if (completion && completion.eventId !== operation.plan.restoreEventBaseline) {
+          if (remote.status || !settled())
+            return wait('restore_terminal_pending', 'operation_uncertain');
+          await update({
+            plan: {
+              ...operation.plan,
+              restoreEvidence: {
+                eventId: completion.eventId,
+                occurredAt: completion.occurredAt,
+              },
+            },
+          });
+          if (
+            completion.backup.isSuccessful &&
+            options.verifyGameRestore &&
+            !(await options.verifyGameRestore(gameContext()))
+          )
+            return wait('game_restore_verification');
+          return finish(
+            completion.backup.isSuccessful,
+            true,
+            completion.backup.isSuccessful ? null : 'integration_unavailable',
+          );
+        }
+        if (
+          (await options.backupEventsEnabled?.(db, server.id)) &&
+          operation.effect_started_at &&
+          nowOf(options).getTime() - operation.effect_started_at.getTime() < 60_000
+        )
+          return wait('restore_confirmation');
         // Panel clears restoring_backup for both success and failure. Only a new
         // correlated terminal activity event proves the outcome; HTTP 204 is not success.
         if (
@@ -2064,6 +2711,13 @@ export async function processServerOperation(
       throw new DomainError('validation_failed');
     } catch (error) {
       const code = safeError(error).code;
+      if (
+        operation.action === 'backup' &&
+        (operation.plan.backupFailed === true || operation.plan.rejected === true)
+      ) {
+        await update({ plan: { ...operation.plan, backupFailed: true } });
+        return completeStandaloneBackup();
+      }
       if (operation.plan.rejected === true || operation.plan.backupFailed === true)
         return finish(false, false, code);
       if (operation.effect_state === 'prepared' || operation.effect_state === 'uncertain')
@@ -2161,7 +2815,7 @@ function reconciliationSnapshot(db: Kysely<Database>, serverId: string) {
       where reservation.server_id = server.id),
     (select jsonb_build_array(operation.job_id, operation.xmin::text, job.xmin::text)
       from server_operations operation join operation_jobs job on job.id = operation.job_id
-      where operation.server_id = server.id and operation.action in ('start','restart','stop','provision','reinstall','wipe','delete','restore')
+      where operation.server_id = server.id and operation.action in ('start','restart','stop','provision','reinstall','wipe','delete','restore','backup')
       order by operation.updated_at desc, operation.job_id desc limit 1),
     (select jsonb_build_array(settings.value->'pterodactylBaseUrl', settings.value->'dockerObserverSocket') from platform_settings settings where settings.key = 'platform'),
     (select secret.xmin::text from encrypted_secrets secret where secret.name = 'pterodactylApplicationKey'),
@@ -2265,6 +2919,7 @@ export async function reconcileManagedServer(
         'wipe',
         'delete',
         'restore',
+        'backup',
       ])
       .orderBy('operation.updated_at', 'desc')
       .orderBy('operation.job_id', 'desc')
@@ -2284,9 +2939,14 @@ export async function reconcileManagedServer(
     if (
       reservation &&
       latestPower &&
-      ['start', 'restart', 'provision'].includes(latestPower.action) &&
-      latestPower.phase === 'complete' &&
-      latestPower.job_state === 'succeeded' &&
+      ['start', 'restart', 'provision', 'backup'].includes(latestPower.action) &&
+      (latestPower.phase === 'complete' ||
+        (latestPower.action === 'backup' &&
+          latestPower.plan.backupResumeOutcome === 'succeeded')) &&
+      (latestPower.job_state === 'succeeded' ||
+        (latestPower.job_state === 'failed' &&
+          latestPower.action === 'backup' &&
+          latestPower.plan.backupResumeOutcome === 'succeeded')) &&
       latestPower.effect_state === 'confirmed' &&
       latestPower.effect_started_at &&
       (restart ? latestPower.plan.restartConfirmed : latestPower.plan.startConfirmed) === true &&
@@ -2320,7 +2980,7 @@ export async function reconcileManagedServer(
       .selectFrom('server_operations')
       .select(['action', 'phase', 'plan'])
       .where('server_id', '=', server.id)
-      .where('action', 'in', ['start', 'restart', 'stop', 'provision'])
+      .where('action', 'in', ['start', 'restart', 'stop', 'provision', 'backup'])
       .orderBy('updated_at', 'desc')
       .orderBy('job_id', 'desc')
       .executeTakeFirst();

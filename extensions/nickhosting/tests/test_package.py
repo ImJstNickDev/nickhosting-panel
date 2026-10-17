@@ -61,9 +61,9 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             for name in ('app/Services/TechnicalAccounts.php', 'app/Http/Middleware/TechnicalAccountAccess.php', 'private/migrations/2026_10_12_000003_nickhosting_technical_users.php'):
                 self.assertIn(name, archive.namelist())
-            self.assertIn(b'version: 1.4.0\n', archive.read('conf.yml'))
-            self.assertIn(b"'extensionVersion' => '1.4.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertIn(b'<small>1.4.0</small>', archive.read('admin/view.blade.php'))
+            self.assertIn(b'version: 1.5.0\n', archive.read('conf.yml'))
+            self.assertIn(b"'extensionVersion' => '1.5.0'", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'<small>1.5.0</small>', archive.read('admin/view.blade.php'))
 
     def test_client_upload_route_and_authorization_packaged(self):
         packager.build(self.source, self.output)
@@ -89,6 +89,15 @@ class PackageTests(unittest.TestCase):
                 self.assertIn(name, archive.namelist())
             self.assertIn(b"'bulkDownloadUrls' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
 
+    def test_backup_capability_and_durable_source_packaged(self):
+        packager.build(self.source, self.output)
+        with zipfile.ZipFile(self.output) as archive:
+            self.assertIn('app/Services/BackupEvents.php', archive.namelist())
+            self.assertIn('private/migrations/2026_10_17_000004_nickhosting_backup_events.php', archive.namelist())
+            self.assertIn(b"'backupEvents' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
+            self.assertIn(b'ActivityLogged::class', archive.read('app/Providers/BridgeServiceProvider.php'))
+            self.assertNotIn('/backups', archive.read('routes/client.php').decode())
+
     def test_does_not_overwrite(self):
         self.output.write_text("preserve")
         with self.assertRaises(FileExistsError):
@@ -108,7 +117,7 @@ class PackageTests(unittest.TestCase):
                          'Http/Controllers/DirectorySettingsController.php'):
                 self.assertIn('app/' + name, archive.namelist())
             self.assertIn(b"'bulkDirectoryListings' => true", archive.read('app/Http/Controllers/CapabilitiesController.php'))
-            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 3)
+            self.assertEqual(sum(name.startswith('private/migrations/') for name in archive.namelist()), 4)
 
     def test_rejects_source_symlink(self):
         config = self.source / "conf.yml"

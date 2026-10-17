@@ -542,6 +542,7 @@ export function createApp(options: Options) {
   registerServerRoutes(app, {
     logger: options.logger,
     db,
+    pool: options.database.pool,
     env,
     principal,
     acquireUploadSlot,

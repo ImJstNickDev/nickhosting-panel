@@ -28,6 +28,7 @@ import {
   type SleepPolicy,
   serverPath,
   useServer,
+  useTransfers,
 } from './service-contracts.js';
 import {
   readSleepAccess,
@@ -420,6 +421,11 @@ function ScheduleForm({
 }) {
   const t = useT();
   const [kind, setKind] = useState(schedule?.timing.kind ?? 'once');
+  const [action, setAction] = useState(schedule?.action ?? 'backup');
+  const [retention, setRetention] = useState(schedule?.retention?.enabled ?? false);
+  const transfers = useTransfers(serverId);
+  const backupPolicy = transfers.data?.backups.policy.offline ?? 'required';
+  const retentionMaximum = Math.max(0, (transfers.data?.backups.limit ?? 0) - 1);
   const at = schedule
     ? schedule.timing.kind === 'once'
       ? schedule.timing.at
@@ -432,7 +438,16 @@ function ScheduleForm({
         const instant = new Date(text(data, 'at')).toISOString();
         const body = {
           name: text(data, 'name'),
-          action: text(data, 'action'),
+          action,
+          ...(action === 'backup'
+            ? {
+                backupOptions: { mode: text(data, 'backupMode') || 'auto' },
+                retention: {
+                  enabled: retention,
+                  keepLast: retention ? number(data, 'keepLast') : 7,
+                },
+              }
+            : {}),
           enabled: data.has('enabled'),
           timeZone: zone,
           timing:
@@ -456,13 +471,50 @@ function ScheduleForm({
         required
         maxLength={80}
       />
-      <Select label={t('service.action')} name="action" defaultValue={schedule?.action ?? 'backup'}>
+      <Select
+        label={t('service.action')}
+        name="action"
+        value={action}
+        onChange={(event) => setAction(event.target.value as Schedules[number]['action'])}
+      >
         {['start', 'stop', 'restart', 'backup'].map((action) => (
           <option key={action} value={action}>
             {t(`service.action.${action}`)}
           </option>
         ))}
       </Select>
+      {action === 'backup' && (
+        <>
+          <Select
+            label={t('backup.serverDuring')}
+            name="backupMode"
+            defaultValue={schedule?.backupOptions?.mode ?? 'auto'}
+          >
+            <option value="auto">{t('backup.integrationDefault')}</option>
+            <option value="offline">{t('backup.offline')}</option>
+            {backupPolicy !== 'required' && <option value="live">{t('backup.live')}</option>}
+          </Select>
+          <p className="muted">{t('backup.scheduleStopWarning')}</p>
+          <Check
+            checked={retention}
+            disabled={retentionMaximum < 1 && !retention}
+            onChange={(event) => setRetention(event.target.checked)}
+            label={t('backup.retention')}
+          />
+          {retention && (
+            <Input
+              label={t('backup.keepLast')}
+              name="keepLast"
+              type="number"
+              min={1}
+              max={retentionMaximum}
+              defaultValue={schedule?.retention?.keepLast ?? Math.min(7, retentionMaximum)}
+              required
+            />
+          )}
+          {retention && <p className="muted">{t('backup.retentionHelp')}</p>}
+        </>
+      )}
       <Select
         label={t('service.repeat')}
         value={kind}

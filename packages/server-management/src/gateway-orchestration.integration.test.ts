@@ -1986,7 +1986,16 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     await configure();
     const fixture = await lifecycleFixture();
     for (let index = 0; index < 11; index++) {
+      // Production refreshes host admission evidence before each wake. Eleven
+      // real DB-backed cycles can outlive the strict four-second sample age.
+      await f.observe();
       const state = await wake();
+      expect({
+        index,
+        state: state.state,
+        code: state.errorCode,
+        hasJob: Boolean(state.wakeJobId),
+      }).toEqual({ index, state: 'waking', code: null, hasJob: true });
       expect(await fixture.process(state.wakeJobId ?? '')).toBe('waiting');
       advance(1000 + index * 100);
       expect(await fixture.process(state.wakeJobId ?? '')).toBe('succeeded');
@@ -2009,4 +2018,48 @@ describe('durable Gateway sleep/wake using M2 admission and lifecycle', () => {
     advance(61000);
     expect((await getGatewayState(f.db, serverId, options)).startupEstimate).toBeNull();
   });
+});
+
+it('rebinds Gateway readiness to the admitted process after an offline backup', async () => {
+  const running = await started();
+  expect((await report(running)).state).toBe('online');
+  const previous = await getGatewayState(f.db, serverId, options);
+  const snapshots: Array<import('@nickhosting/pterodactyl-adapter').Backup> = [];
+  running.lifecycle.adapter = {
+    ...running.lifecycle.adapter,
+    createBackup: async (_id, input) => {
+      const snapshot = {
+        uuid: randomUUID(),
+        name: input.name,
+        is_successful: true,
+        is_locked: false,
+        ignored_files: [],
+        checksum: 'sha256:fixture',
+        bytes: 1,
+        created_at: clock.toISOString(),
+        completed_at: clock.toISOString(),
+      };
+      snapshots.push(snapshot);
+      return snapshot;
+    },
+    getBackup: async (_id, id) => {
+      const snapshot = snapshots.find((backup) => backup.uuid === id);
+      if (!snapshot) throw new Error('Unknown fixture backup');
+      return snapshot;
+    },
+  };
+  running.lifecycle.backupPolicy = async () => ({ offline: 'required' });
+  const operation = await enqueueServerOperation(f.db, f.context, serverId, {
+    action: 'backup',
+    idempotencyKey: randomUUID(),
+  });
+  expect(await running.process(operation.jobId)).toBe('waiting');
+  const offline = await getGatewayState(f.db, serverId, options);
+  expect(offline.processStartedAt).toBeNull();
+  expect(offline.generation).toBe(previous.generation);
+  advance(1000);
+  expect(await running.process(operation.jobId)).toBe('succeeded');
+  const resumed = await getGatewayState(f.db, serverId, options);
+  expect(resumed.wakeJobId).toBe(operation.jobId);
+  expect((await report(running, { wakeJobId: operation.jobId })).state).toBe('online');
 });

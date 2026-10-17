@@ -5,6 +5,7 @@ import { type Database, recordAudit, type ScheduleTiming } from '@nickhosting/da
 import { type Kysely, type Selectable, sql } from 'kysely';
 import { z } from 'zod';
 import { type Environment, lockResources } from './admission.js';
+import { backupOptionsSchema, backupRetentionSchema } from './backup-policy.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, enqueueLockedServerOperation, parse } from './registry.js';
@@ -22,6 +23,8 @@ export const scheduleTimingSchema = z.discriminatedUnion('kind', [
 export const scheduleSchema = z.strictObject({
   name: z.string().trim().min(1).max(80),
   action: z.enum(['start', 'stop', 'restart', 'backup']),
+  backupOptions: backupOptionsSchema.optional(),
+  retention: backupRetentionSchema.optional(),
   timing: scheduleTimingSchema,
   timeZone: z
     .string()
@@ -218,6 +221,26 @@ export function scheduleOccurrence(timing: ScheduleTiming, next: Date, now: Date
   };
 }
 
+function scheduleBackupOptions(stored: Record<string, unknown>) {
+  const { retention: _retention, ...options } = stored;
+  return backupOptionsSchema.parse(options);
+}
+
+async function assertRetentionCapacity(db: Kysely<Database>, serverId: string, input: unknown) {
+  const retention = backupRetentionSchema.parse(input ?? {});
+  if (!retention.enabled) return;
+  const mapping = await db
+    .selectFrom('managed_servers as server')
+    .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+    .select('mapping.feature_limits')
+    .where('server.id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  // A verified replacement must exist before pruning. Never ask Panel to
+  // override its limit, which may delete unrelated unlocked snapshots.
+  if (retention.keepLast >= mapping.feature_limits.backups)
+    throw new DomainError('validation_failed');
+}
+
 function publicSchedule(row: Schedule) {
   return {
     id: row.id,
@@ -226,6 +249,14 @@ function publicSchedule(row: Schedule) {
     name: row.name,
     action: row.action,
     timing: row.timing,
+    ...(row.action === 'backup'
+      ? {
+          backupOptions: scheduleBackupOptions(row.backup_options),
+          retention: backupRetentionSchema.parse(
+            (row.backup_options as Record<string, unknown>)?.retention ?? {},
+          ),
+        }
+      : {}),
     timeZone: row.time_zone,
     enabled: row.enabled,
     revision: row.revision,
@@ -272,6 +303,7 @@ export async function createSchedule(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const context = await manager(tx, previous, serverId, env);
+    if (value.action === 'backup') await assertRetentionCapacity(tx, serverId, value.retention);
     const count = await tx
       .selectFrom('server_schedules')
       .select(({ fn }) => fn.countAll<string>().as('count'))
@@ -290,6 +322,14 @@ export async function createSchedule(
         name: value.name,
         action: value.action,
         timing: JSON.stringify(value.timing),
+        backup_options: JSON.stringify(
+          value.action === 'backup'
+            ? {
+                ...backupOptionsSchema.parse(value.backupOptions ?? {}),
+                retention: backupRetentionSchema.parse(value.retention ?? {}),
+              }
+            : {},
+        ),
         time_zone: value.timeZone,
         enabled: value.enabled,
         next_run_at: next,
@@ -319,6 +359,7 @@ export async function updateSchedule(
   return db.transaction().execute(async (tx) => {
     await lockResources(tx);
     const context = await manager(tx, previous, serverId, env);
+    if (value.action === 'backup') await assertRetentionCapacity(tx, serverId, value.retention);
     const old = await tx
       .selectFrom('server_schedules')
       .selectAll()
@@ -346,6 +387,14 @@ export async function updateSchedule(
         name: value.name,
         action: value.action,
         timing: JSON.stringify(value.timing),
+        backup_options: JSON.stringify(
+          value.action === 'backup'
+            ? {
+                ...backupOptionsSchema.parse(value.backupOptions ?? {}),
+                retention: backupRetentionSchema.parse(value.retention ?? {}),
+              }
+            : {},
+        ),
         time_zone: value.timeZone,
         enabled: value.enabled,
         revision: old.revision + 1,
@@ -487,6 +536,7 @@ const markerSchema = z.strictObject({
   occurrenceId: id,
   revision: z.number().int().positive(),
   gatewayGeneration: id.nullable(),
+  retention: backupRetentionSchema.optional(),
 });
 
 /** Called by the existing lifecycle authorizer before NEW provider effects.
@@ -599,6 +649,8 @@ export async function runDueSchedules(
         if (!reason) {
           const context = await creatorContext(tx, schedule.creator_id);
           const server = await authorizeServer(tx, context, schedule.server_id, 'server:manage');
+          if (schedule.action === 'backup')
+            await assertRetentionCapacity(tx, server.id, schedule.backup_options.retention);
           if (
             ['start', 'restart'].includes(schedule.action) &&
             ['manually_stopped', 'maintenance'].includes(server.intent)
@@ -647,7 +699,13 @@ export async function runDueSchedules(
               tx,
               context,
               server.id,
-              { action: schedule.action, idempotencyKey: `schedule_${occurrenceId}` },
+              {
+                action: schedule.action,
+                idempotencyKey: `schedule_${occurrenceId}`,
+                ...(schedule.action === 'backup'
+                  ? scheduleBackupOptions(schedule.backup_options)
+                  : {}),
+              },
               env,
             );
             jobId = operation.jobId;
@@ -689,6 +747,13 @@ export async function runDueSchedules(
                   ...stored.plan,
                   scheduleAutomation: {
                     scheduleId: schedule.id,
+                    ...(schedule.action === 'backup'
+                      ? {
+                          retention: backupRetentionSchema.parse(
+                            schedule.backup_options.retention ?? {},
+                          ),
+                        }
+                      : {}),
                     occurrenceId,
                     revision: schedule.revision,
                     gatewayGeneration: generation,

@@ -20,6 +20,7 @@ final class DeliverChanges implements ShouldQueue
     public function handle(): void
     {
         $settings = app(Settings::class)->operational(['webhookBatchLimit', 'webhookConnectTimeoutSeconds', 'webhookTimeoutSeconds']);
+        app(\Pterodactyl\BlueprintFramework\Extensions\{identifier}\Services\BackupEvents::class)->recover($settings['webhookBatchLimit']);
         // Claim each event transactionally before I/O; expired claims are retried by scheduler.
         for ($i = 0; $i < $settings['webhookBatchLimit']; $i++) {
             $row = DB::transaction(function () {

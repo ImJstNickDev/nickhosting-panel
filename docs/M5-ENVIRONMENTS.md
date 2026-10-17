@@ -1231,3 +1231,63 @@ restarted or reconfigured for this feature. No Pterodactyl/Wings, DNS, real game
 files, production deployment or test-server creation/cleanup was involved. Issue18
 remains unchanged. No rollback was required; the scoped recovery plan above remains
 available without resetting the database.
+
+## Backup workflow activation proposal — 2026-10-17
+
+Prepared source and isolated evidence are described in [Backups](BACKUPS.md). This
+section is a proposal, **not an activation record**. No live backup, restore or
+server power action is included.
+
+Required operation-specific activation:
+
+1. Recheck reviewed HEAD and existing container identities/topology. Tag the current
+   API/worker image `nickhosting-dev-app:before-backup-events`. Preserve a private,
+   non-overwriting copy of the existing Blueprint extension/configuration and the
+   verified 1.4.0 package. Existing settings/account links must survive the update.
+2. Build only the dev API image (shared by worker). Stop only dev API/worker and
+   make a private custom-format `pg_dump` of the dev database; verify its inventory.
+3. Explicitly run the development migration tool, applying only 037. It adds tables,
+   columns and notification triggers; it does not reset users, servers or job history.
+4. Install reviewed `build/blueprint/1.5.0-reviewed/nickhosting.blueprint` using the
+   existing native Blueprint installer in the existing Panel container. The sole
+   extension migration creates its owned backup-event marker table. Native installer
+   cache/ownership housekeeping affects the shared Panel, so use a suitable window.
+5. Recreate only dev API/worker. Vite uses source HMR; no dependency/image update is
+   required. Verify health, unchanged mounts/networks/ports, migration checksums,
+   Blueprint capability discovery, callback delivery path and HTTPS. Read-only
+   capability/list checks are sufficient; the Owner initiates any real backup test.
+
+Core command sequence (execute only after approval, from the project directory):
+
+```bash
+docker image tag sha256:354193e0234c3dad5753f2b8cde5d1858ceddf49e3ed2523a77da38722aa8356 nickhosting-dev-app:before-backup-events
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local build api
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local stop api worker
+# Private non-overwriting pg_dump, then inventory verification.
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local --profile tools run --rm --no-deps migrate
+docker cp build/blueprint/1.5.0-reviewed/nickhosting.blueprint pterodactyl-panel-2:/app/nickhosting.blueprint
+docker exec -w /app pterodactyl-panel-2 blueprint -install nickhosting
+docker compose --env-file .env.dev.local --env-file .env.dev.viewer.local --env-file .env.dev.sftp.local up -d --no-deps --no-build --wait api worker
+```
+
+All existing Compose overlays come from the private `COMPOSE_FILE`; do not replace
+that chain with the base file alone. The temporary migration container is removed
+by `--rm`; its existing project networks remain. Preserve prior packages/images
+and all private backups. No Wings restart, NPM/DNS/network/port change, production
+NickHosting deployment, database reset or game data mutation is authorized here.
+
+If activation fails, retain logs and additive schema. Do not downgrade an active
+new-format backup/restore job: first let recovery reach a terminal state or review
+that exact operation. Drain pending backup notifications before downgrading the
+receiver; older Core cannot consume that event family. With no active affected
+jobs or pending backup deliveries, revert application source,
+restore the tagged prior API/worker image and recreate only those services with the
+same full configuration. Restore Blueprint 1.4.0 with the same native installer;
+retain its added event table for later reviewed retirement. Do not overwrite the
+database with the snapshot over newer changes as routine rollback. Installing
+Blueprint can briefly affect Panel requests; replacing API/worker interrupts
+NickHosting requests/jobs, whose durable state must be retained.
+
+Read-only preflight observed the existing dev Gateway unhealthy before activation.
+This proposal does not claim Gateway/live resume verification or repair that
+separate health issue. API, worker, Vite and the remaining dev services were healthy.

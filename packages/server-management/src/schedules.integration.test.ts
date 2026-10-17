@@ -77,6 +77,7 @@ async function lifecycleFixture() {
     .selectAll()
     .where('id', '=', serverId)
     .executeTakeFirstOrThrow();
+  if (server.provider_user_id === null) throw new Error('Missing fixture provider account');
   const allocations = await f.db
     .selectFrom('server_allocations')
     .selectAll()
@@ -92,7 +93,7 @@ async function lifecycleFixture() {
     suspended: false,
     limits: server.limits,
     feature_limits: { databases: 0, allocations: 3, backups: 1 },
-    user: 1,
+    user: server.provider_user_id,
     node: f.providerNodeId,
     allocation:
       allocations.find((allocation) => allocation.is_primary)?.pterodactyl_allocation_id ?? 0,
@@ -118,9 +119,11 @@ async function lifecycleFixture() {
   };
   let state: Resources['current_state'] = 'offline';
   let processStart: string | null = null;
+  let processClock = new Date();
   const power = vi.fn(async () => {
     state = 'running';
-    processStart = new Date().toISOString();
+    processClock = new Date(processClock.getTime() + 1);
+    processStart = processClock.toISOString();
   });
   const adapter = {
     getApplicationServer: vi.fn(async () => structuredClone(remote)),
@@ -142,6 +145,7 @@ async function lifecycleFixture() {
   } as unknown as PterodactylAdapter;
   const options: LifecycleOptions = {
     adapter,
+    now: () => processClock,
     settleMs: 0,
     authorizeEffect: async (jobId, id, db) => {
       await authorizeQueuedEffect(db, jobId, id);
@@ -491,7 +495,7 @@ describe('durable generic schedules', () => {
     });
   });
 
-  it('fences manual-stop then rearm against an older admitted start', async () => {
+  it('fences manual-stop and refuses rearm while an older admitted start remains active', async () => {
     await allowStarts();
     const schedule = await create({ action: 'start' });
     expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
@@ -499,7 +503,17 @@ describe('durable generic schedules', () => {
     await expect(authorizeQueuedEffect(f.db, jobId, serverId)).resolves.toMatchObject({
       sessionType: 'regular',
     });
-    await allowStarts();
+    const consent = await getAutomationConsent(f.db, f.context, serverId);
+    await setAutomationConsent(f.db, f.context, serverId, {
+      allowed: false,
+      expectedIntent: consent.expectedIntent,
+    });
+    await expect(
+      setAutomationConsent(f.db, f.context, serverId, {
+        allowed: true,
+        expectedIntent: 'manually_stopped',
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
     await expect(authorizeQueuedEffect(f.db, jobId, serverId)).rejects.toMatchObject({
       code: 'forbidden',
     });
@@ -610,7 +624,22 @@ describe('durable generic schedules', () => {
         .executeTakeFirst(),
     ).toBeDefined();
     fixture.options.checkpoint = undefined;
-    expect(await fixture.process(jobId)).toBe('succeeded');
+    const recovered = await fixture.process(jobId);
+    const detail = await f.db
+      .selectFrom('server_operations')
+      .select('plan')
+      .where('job_id', '=', jobId)
+      .executeTakeFirstOrThrow();
+    const failedJob = await f.db
+      .selectFrom('operation_jobs')
+      .select('error_code')
+      .where('id', '=', jobId)
+      .executeTakeFirstOrThrow();
+    expect({ recovered, reason: detail.plan.waitReason, error: failedJob.error_code }).toEqual({
+      recovered: 'succeeded',
+      reason: null,
+      error: null,
+    });
     expect(fixture.power).toHaveBeenCalledTimes(1);
     expect((await outcomes(schedule.id)).items[0]?.jobState).toBe('succeeded');
     expect(
@@ -623,4 +652,46 @@ describe('durable generic schedules', () => {
       ).state,
     ).toBe('running');
   });
+});
+
+it('persists backup options and disabled-by-default retention through scheduled dispatch', async () => {
+  const schedule = await create({
+    backupOptions: {
+      name: 'Before maintenance',
+      ignored: 'cache/**',
+      isLocked: true,
+      mode: 'offline',
+    },
+  });
+  expect(schedule.backupOptions).toEqual({
+    name: 'Before maintenance',
+    ignored: 'cache/**',
+    isLocked: true,
+    mode: 'offline',
+  });
+  expect(schedule.retention).toEqual({ enabled: false, keepLast: 7 });
+  expect(await due()).toEqual({ dispatched: 1, skipped: 0 });
+  const jobId = await jobOf(schedule.id);
+  const operation = await f.db
+    .selectFrom('server_operations')
+    .select('plan')
+    .where('job_id', '=', jobId)
+    .executeTakeFirstOrThrow();
+  expect(operation.plan.backupOptions).toEqual(schedule.backupOptions);
+  expect(operation.plan.scheduleAutomation).toMatchObject({
+    scheduleId: schedule.id,
+    retention: { enabled: false, keepLast: 7 },
+  });
+});
+
+it('requires a spare provider slot before enabling post-success retention', async () => {
+  const mapping = await f.db
+    .selectFrom('managed_servers as server')
+    .innerJoin('runtime_egg_mappings as mapping', 'mapping.id', 'server.mapping_id')
+    .select('mapping.feature_limits')
+    .where('server.id', '=', serverId)
+    .executeTakeFirstOrThrow();
+  await expect(
+    create({ retention: { enabled: true, keepLast: mapping.feature_limits.backups } }),
+  ).rejects.toMatchObject({ code: 'validation_failed' });
 });

@@ -114,12 +114,28 @@ const capabilitySchema = z
   .strict();
 export type GameCapabilities = z.infer<typeof capabilitySchema>;
 
+export const gameBackupPolicySchema = z.strictObject({
+  offline: z.enum(['required', 'recommended', 'none']),
+});
+export type GameBackupPolicy = z.infer<typeof gameBackupPolicySchema>;
+
+/** Compiled integration hooks must be repeatable after worker recovery. Core
+ * persists preparation before invoking it and always attempts cleanup. */
+export interface GameBackupHooks<Context> {
+  prepareBackup?(context: Context, mode: 'offline' | 'live'): Promise<void>;
+  /** Compensation only: reverse this backup's preparation, even when the
+   * initiating actor or schedule has since lost authority. Never start a new
+   * backup, process or unrelated mutation from this hook. */
+  cleanupBackup?(context: Context, mode: 'offline' | 'live'): Promise<void>;
+}
+
 export const gameManifestSchema = z
   .object({
     id: identifier,
     version: z.string().regex(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/),
     nameKey: translationKey,
     capabilities: capabilitySchema,
+    backupPolicy: gameBackupPolicySchema.optional(),
     connection: connectionModeSchema,
     ports: z.array(portRequirementSchema).min(1),
     runtimes: z

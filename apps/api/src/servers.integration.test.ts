@@ -311,6 +311,18 @@ describe('M2 Hono API with real invitation, password and session authentication'
       writeFile,
       sendCommand,
       deleteBackup,
+      getBackup: vi.fn(async () => ({
+        uuid: backupId,
+        name: 'fixture',
+        is_successful: true,
+        is_locked: false,
+        bytes: 12,
+        checksum: 'fixture',
+        ignored_files: [],
+        created_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+      })),
+      toggleBackupLock: vi.fn(async () => ({})),
       listBackups: vi.fn(async () => [
         {
           uuid: backupId,
@@ -1070,6 +1082,22 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(audits.some((audit) => audit.actor_user_id === peerId)).toBe(true);
     expect(JSON.stringify(audits)).not.toMatch(/private-content|private-command/);
   });
+  it('scopes backup labels and protection to server managers without changing provider names', async () => {
+    const server = await f.server();
+    const route = `/v1/servers/${server}/backups/${backupId}`;
+    expect((await request(outsider, route, { name: 'foreign' }, { method: 'PATCH' })).status).toBe(
+      403,
+    );
+    expect(
+      (await request(user, route, { name: 'Before update', isLocked: true }, { method: 'PATCH' }))
+        .status,
+    ).toBe(204);
+    const listed = await request(user, `/v1/servers/${server}/backups`);
+    expect(listed.status).toBe(200);
+    expect((await listed.json())[0].name).toBe('Before update');
+    expect(f.adapter.toggleBackupLock).toHaveBeenCalledWith(expect.any(String), backupId);
+    expect((await request(user, route, { name: ' ' }, { method: 'PATCH' })).status).toBe(400);
+  });
   it('streams safe bytes/events without privileged provider URLs or tokens', async () => {
     const server = await f.server();
     const file = await request(user, `/v1/servers/${server}/files/content?path=server.properties`);
@@ -1081,7 +1109,9 @@ describe('M2 Hono API with real invitation, password and session authentication'
     expect(file.headers.get('content-disposition')).toBe(
       'attachment; filename="server.properties"; filename*=UTF-8\'\'server.properties',
     );
-    expect(backup.headers.get('content-disposition')).toBe('attachment');
+    expect(backup.headers.get('content-disposition')).toBe(
+      `attachment; filename="backup-${backupId}.tar.gz"`,
+    );
     for (const response of [file, backup]) {
       expect(response.headers.get('cache-control')).toBe('no-store');
       expect(response.headers.get('x-content-type-options')).toBe('nosniff');

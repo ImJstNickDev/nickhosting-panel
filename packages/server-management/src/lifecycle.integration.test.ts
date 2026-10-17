@@ -387,6 +387,7 @@ async function fixture(
     authorizeEffect: async () => {},
     now: () => clock,
     reserveStart,
+    backupPolicy: async () => ({ offline: 'none' }),
     reserveInstallation: async (_serverId, _jobId, connection) => {
       await connection
         .insertInto('installation_reservations')
@@ -426,7 +427,7 @@ async function fixture(
     setUptime(value: number) {
       uptime = value;
     },
-    tick(ms = 22_000) {
+    tick(ms = ['backup', 'restore'].includes(action) ? 62_000 : 22_000) {
       clock = new Date(clock.getTime() + ms);
     },
     run() {
@@ -3496,4 +3497,401 @@ describe('terminal failed installation reservation recovery', () => {
     expect(await f.installationReservation()).toBeDefined();
     expect((await f.server()).installation_state).toBe('installing');
   });
+});
+
+describe('event-driven backup lifecycle', () => {
+  it('passes backup options and completes from durable event without provider polling', async () => {
+    const f = await fixture('backup', {
+      backupOptions: {
+        name: 'Before update',
+        ignored: '*.log\ncache/**',
+        isLocked: true,
+        mode: 'live',
+      },
+    });
+    f.options.backupEventsEnabled = async () => true;
+    let completion: Awaited<ReturnType<NonNullable<LifecycleOptions['readBackupCompletion']>>> =
+      null;
+    f.options.readBackupCompletion = async () => completion;
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.createBackup).toHaveBeenCalledWith(f.remote.identifier, {
+      name: `nickhosting-operation-${f.jobId}`,
+      ignored: '*.log\ncache/**',
+      is_locked: true,
+    });
+    expect(f.adapter.getBackup).not.toHaveBeenCalled();
+    const job = await f.db
+      .selectFrom('operation_jobs')
+      .select('next_attempt_at')
+      .where('id', '=', f.jobId)
+      .executeTakeFirstOrThrow();
+    expect(job.next_attempt_at.getTime() - f.now().getTime()).toBeGreaterThanOrEqual(60_000);
+    const id = String((await f.operation()).plan.backupId);
+    expect(
+      await f.db
+        .selectFrom('backup_labels')
+        .select('name')
+        .where('backup_id', '=', id)
+        .executeTakeFirst(),
+    ).toEqual({ name: 'Before update' });
+    completion = {
+      eventId: randomUUID(),
+      occurredAt: f.now().toISOString(),
+      backup: {
+        uuid: id,
+        isSuccessful: true,
+        checksum: 'sha256:fixture',
+        completedAt: f.now().toISOString(),
+      },
+    };
+    await f.db
+      .updateTable('operation_jobs')
+      .set({ next_attempt_at: f.now() })
+      .where('id', '=', f.jobId)
+      .execute();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.adapter.getBackup).not.toHaveBeenCalled();
+  });
+
+  it('temporarily stops, cleans up and resumes only after admission', async () => {
+    const f = await fixture('backup');
+    f.setState('running');
+    f.options.backupPolicy = async () => ({ offline: 'required' });
+    f.options.confirmAlreadyStopped = async () =>
+      (await f.adapter.getResources()).current_state === 'offline';
+    f.options.observeProcessStart = async () =>
+      (await f.adapter.getResources()).current_state === 'running'
+        ? new Date(f.now().getTime() - 1_000).toISOString()
+        : null;
+    f.options.prepareBackup = vi.fn(async () => {});
+    f.options.cleanupBackup = vi.fn(async () => {});
+    await f.db
+      .updateTable('managed_servers')
+      .set({ intent: 'auto_wake_enabled' })
+      .where('id', '=', f.serverId)
+      .execute();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+    expect(f.options.prepareBackup).toHaveBeenCalledTimes(1);
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.options.reserveStart).toHaveBeenCalledTimes(1);
+    expect(f.adapter.power).toHaveBeenCalledWith(f.remote.identifier, 'start');
+    const started = new Date(f.now().getTime() + 1).toISOString();
+    f.options.observeProcessStart = async () => started;
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.cleanupBackup).toHaveBeenCalledTimes(1);
+    expect((await f.operation()).plan).toMatchObject({
+      backupComplete: true,
+      backupResumeOutcome: 'succeeded',
+    });
+  });
+
+  it('suppresses automatic resume after a manual stop and preserves backup success on admission failure', async () => {
+    for (const manualStop of [true, false]) {
+      const f = await fixture('backup');
+      f.setState('running');
+      f.options.backupPolicy = async () => ({ offline: 'required' });
+      f.options.confirmAlreadyStopped = async () =>
+        (await f.adapter.getResources()).current_state === 'offline';
+      f.options.observeProcessStart = async () =>
+        (await f.adapter.getResources()).current_state === 'running'
+          ? new Date(f.now().getTime() - 1_000).toISOString()
+          : null;
+      await f.db
+        .updateTable('managed_servers')
+        .set({ intent: 'auto_wake_enabled' })
+        .where('id', '=', f.serverId)
+        .execute();
+      expect(await f.run()).toBe('waiting');
+      if (manualStop)
+        await f.db
+          .updateTable('managed_servers')
+          .set({ intent: 'manually_stopped' })
+          .where('id', '=', f.serverId)
+          .execute();
+      else
+        f.options.reserveStart = async () => {
+          throw new DomainError('resources_unavailable');
+        };
+      f.tick();
+      expect(await f.run()).toBe('succeeded');
+      expect(f.adapter.power).not.toHaveBeenCalled();
+      expect((await f.operation()).plan).toMatchObject({
+        backupComplete: true,
+        backupResumeOutcome: manualStop ? 'suppressed' : 'failed',
+      });
+    }
+  });
+
+  it('rejects a required-offline live override before stopping or creating a backup', async () => {
+    const f = await fixture('backup', { backupOptions: { mode: 'live' } });
+    f.options.backupPolicy = async () => ({ offline: 'required' });
+    expect(await f.run()).toBe('failed');
+    expect(f.adapter.createBackup).not.toHaveBeenCalled();
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+  });
+});
+
+describe('backup recovery and restore safety', () => {
+  it('cleans up a durably rejected backup after worker recovery', async () => {
+    const f = await fixture('backup', {
+      backupMode: 'live',
+      backupPreparationStarted: true,
+      backupPrepared: true,
+      rejected: true,
+      rejectionCode: 'integration_unavailable',
+    });
+    f.options.cleanupBackup = vi.fn(async () => {});
+    expect(await f.run()).toBe('failed');
+    expect(f.options.cleanupBackup).toHaveBeenCalledTimes(1);
+    expect(f.adapter.createBackup).not.toHaveBeenCalled();
+  });
+  it('keeps successful snapshot outcome when rejected resume is recovered', async () => {
+    const f = await fixture('backup', {
+      backupComplete: true,
+      rejected: true,
+      rejectionCode: 'resources_unavailable',
+    });
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'backup_resume', effect_state: 'none' })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    expect(await f.run()).toBe('succeeded');
+    expect((await f.operation()).plan).toMatchObject({
+      backupComplete: true,
+      backupResumeOutcome: 'failed',
+      backupResumeError: 'resources_unavailable',
+    });
+    expect(f.adapter.power).not.toHaveBeenCalled();
+  });
+  it('creates optional safety backup without replacing the requested restore target', async () => {
+    const id = randomUUID();
+    const f = await fixture('restore', { restoreBackupId: id, backupBefore: true, truncate: true });
+    f.backups.push({
+      uuid: id,
+      name: 'original',
+      is_successful: true,
+      is_locked: false,
+      ignored_files: [],
+      checksum: 'sha256:original',
+      bytes: 100,
+      created_at: f.now().toISOString(),
+      completed_at: f.now().toISOString(),
+    });
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    f.tick();
+    expect(await f.run()).toBe('waiting');
+    expect(f.adapter.restoreBackup).toHaveBeenCalledWith(f.remote.identifier, id, true);
+    expect((await f.operation()).plan.backupId).not.toBe(id);
+    expect((await f.operation()).plan.restoreBackupId).toBe(id);
+  });
+});
+
+it('retention deletes only successful same-schedule backups and preserves provider protection', async () => {
+  const scheduleId = randomUUID();
+  const f = await fixture('backup', {
+    scheduleAutomation: { scheduleId, retention: { enabled: true, keepLast: 1 } },
+  });
+  const template = await f.db
+    .selectFrom('operation_jobs')
+    .selectAll()
+    .where('id', '=', f.jobId)
+    .executeTakeFirstOrThrow();
+  const eligible: string[] = [];
+  for (const [isLocked, sameSchedule] of [
+    [false, true],
+    [true, true],
+    [false, false],
+  ] as const) {
+    const backupId = randomUUID(),
+      oldJob = randomUUID();
+    f.backups.push({
+      uuid: backupId,
+      name: `old-${oldJob}`,
+      is_successful: true,
+      is_locked: isLocked,
+      ignored_files: [],
+      checksum: 'sha256:fixture',
+      bytes: 100,
+      created_at: f.now().toISOString(),
+      completed_at: f.now().toISOString(),
+    });
+    await f.db
+      .insertInto('operation_jobs')
+      .values({
+        ...template,
+        command: JSON.stringify(template.command),
+        policy_snapshot: JSON.stringify(template.policy_snapshot),
+        id: oldJob,
+        idempotency_key: oldJob,
+        state: 'succeeded',
+        completed_at: f.now(),
+      })
+      .execute();
+    await f.db
+      .insertInto('server_operations')
+      .values({
+        job_id: oldJob,
+        server_id: f.serverId,
+        action: 'backup',
+        phase: 'complete',
+        plan: JSON.stringify({
+          backupComplete: true,
+          backupId,
+          scheduleAutomation: { scheduleId: sameSchedule ? scheduleId : randomUUID() },
+        }),
+        effect_started_at: null,
+        lease_until: null,
+        lease_token: null,
+      })
+      .execute();
+    if (!isLocked && sameSchedule) eligible.push(backupId);
+  }
+  const deleteBackup = vi.fn(async () => {});
+  f.options.adapter = { ...f.options.adapter, deleteBackup };
+  expect(await f.run()).toBe('waiting');
+  f.tick();
+  expect(await f.run()).toBe('succeeded');
+  expect(deleteBackup.mock.calls).toEqual(eligible.map((id) => [f.remote.identifier, id]));
+  expect((await f.operation()).plan.backupRetentionComplete).toBe(true);
+});
+
+it('stops a physically running server even when Panel still caches offline after start', async () => {
+  const f = await fixture('backup');
+  f.setState('offline');
+  f.options.backupPolicy = async () => ({ offline: 'required' });
+  let physicallyRunning = true;
+  f.options.confirmAlreadyStopped = async () => !physicallyRunning;
+  f.options.observeProcessStart = async () =>
+    physicallyRunning ? new Date(f.now().getTime() - 1_000).toISOString() : null;
+  f.adapter.stopWithConfirmation.mockImplementationOnce(async (_id, _identifier, options) => {
+    await options.beforePower?.();
+    physicallyRunning = false;
+    await options.onConfirmed();
+    return { confirmed: true };
+  });
+  expect(await f.run()).toBe('waiting');
+  expect(f.adapter.stopWithConfirmation).toHaveBeenCalledTimes(1);
+  expect(f.adapter.createBackup).toHaveBeenCalledTimes(1);
+  expect((await f.operation()).plan.backupWasRunning).toBe(true);
+});
+
+it('allows only compensating cleanup after creator authorization is withdrawn', async () => {
+  const f = await fixture('backup', { backupOptions: { mode: 'live' } });
+  f.options.prepareBackup = vi.fn(async () => {});
+  f.options.cleanupBackup = vi.fn(async (context) => {
+    await context.authorize();
+  });
+  expect(await f.run()).toBe('waiting');
+  f.options.authorizeEffect = async () => {
+    throw new DomainError('forbidden');
+  };
+  f.tick();
+  expect(await f.run()).toBe('succeeded');
+  expect(f.options.cleanupBackup).toHaveBeenCalledTimes(1);
+  expect(f.adapter.power).not.toHaveBeenCalled();
+});
+
+it('terminates a recovered rejected resume even when the backup itself also failed', async () => {
+  const f = await fixture('backup', {
+    backupFailed: true,
+    rejected: true,
+    rejectionCode: 'forbidden',
+  });
+  await f.db
+    .updateTable('server_operations')
+    .set({ phase: 'backup_resume', effect_state: 'none' })
+    .where('job_id', '=', f.jobId)
+    .execute();
+  expect(await f.run()).toBe('failed');
+  expect((await f.operation()).plan).toMatchObject({
+    backupResumeOutcome: 'failed',
+    backupResumeError: 'forbidden',
+  });
+  expect(f.adapter.power).not.toHaveBeenCalled();
+});
+
+it('consumes an exact restore terminal event without polling activity after the effect', async () => {
+  const id = randomUUID();
+  const f = await fixture('restore', { restoreBackupId: id, truncate: true });
+  f.options.settleMs = 0;
+  f.options.backupEventsEnabled = async () => true;
+  let completion: Awaited<ReturnType<NonNullable<LifecycleOptions['readBackupCompletion']>>> = null;
+  f.options.readBackupCompletion = async () => completion;
+  f.backups.push({
+    uuid: id,
+    name: 'original',
+    is_successful: true,
+    is_locked: false,
+    ignored_files: [],
+    checksum: 'sha256:original',
+    bytes: 100,
+    created_at: f.now().toISOString(),
+    completed_at: f.now().toISOString(),
+  });
+  f.adapter.restoreBackup.mockImplementation(async () => {
+    completion = {
+      eventId: randomUUID(),
+      occurredAt: f.now().toISOString(),
+      backup: {
+        uuid: id,
+        isSuccessful: true,
+        checksum: 'sha256:original',
+        completedAt: f.now().toISOString(),
+      },
+    };
+  });
+  expect(await f.run()).toBe('waiting');
+  f.tick();
+  expect(await f.run()).toBe('waiting');
+  const pending = await f.db
+    .selectFrom('operation_jobs')
+    .select('next_attempt_at')
+    .where('id', '=', f.jobId)
+    .executeTakeFirstOrThrow();
+  expect(pending.next_attempt_at).toEqual(f.now());
+  expect(await f.run()).toBe('succeeded');
+  expect(f.adapter.listBackupActivity).toHaveBeenCalledTimes(1);
+});
+
+it('retains resumed compute after a rejected backup create without inheriting its rejection', async () => {
+  const f = await fixture('backup');
+  f.setState('running');
+  await f.db
+    .updateTable('managed_servers')
+    .set({ intent: 'auto_wake_enabled' })
+    .where('id', '=', f.serverId)
+    .execute();
+  f.options.backupPolicy = async () => ({ offline: 'required' });
+  f.options.confirmAlreadyStopped = async () =>
+    (await f.adapter.getResources()).current_state === 'offline';
+  f.options.observeProcessStart = async () =>
+    (await f.adapter.getResources()).current_state === 'running'
+      ? new Date(f.now().getTime() - 1_000).toISOString()
+      : null;
+  f.adapter.createBackup.mockRejectedValue(
+    new PterodactylError('invalid_request', 'client', 'rejected'),
+  );
+  expect(await f.run()).toBe('waiting');
+  expect((await f.operation()).plan).toMatchObject({
+    backupFailed: true,
+    rejected: false,
+    backupResumeOutcome: 'pending',
+  });
+  f.tick();
+  expect(await f.run()).toBe('failed');
+  expect((await f.operation()).plan.backupResumeOutcome).toBe('succeeded');
+  expect(f.adapter.power).toHaveBeenCalledTimes(1);
+  expect(
+    await f.db
+      .selectFrom('resource_reservations')
+      .select('state')
+      .where('server_id', '=', f.serverId)
+      .executeTakeFirst(),
+  ).toEqual({ state: 'running' });
 });

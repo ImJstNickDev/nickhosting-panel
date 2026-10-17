@@ -1374,3 +1374,10 @@ action. The scan panel retains measured progress and a bounded optional log whil
 switching integration tabs; leaving/reloading the workspace cancels this
 browser-driven scan. Registered test reports remain separate from integration
 capabilities and are fetched only with detail. No new migration is required.
+
+## Backup events and recovery — 2026-10-17
+
+[Backups](BACKUPS.md) documents the extended creation/restore options, game policy,
+protected backups, local names, SSE invalidations, scheduling/retention and separate
+backup/resumption outcomes. Core retains the existing adapter and durable operation
+boundary; Blueprint 1.5.0 supplies committed native completion receipts.

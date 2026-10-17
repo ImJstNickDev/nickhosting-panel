@@ -52,6 +52,11 @@ import {
 } from './lifecycle.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { resolveProviderCredential } from './provider-accounts.js';
+import {
+  backupSchemaAvailable,
+  providerBackupEventsEnabled,
+  readProviderBackupCompletion,
+} from './provider-backup-events.js';
 import { cachedProviderStartLimits } from './provider-change-feed.js';
 import { assertGatewaySleepFence, authorizeServer } from './registry.js';
 import { authorizeScheduledEffect } from './schedules.js';
@@ -146,6 +151,19 @@ export async function authorizeQueuedEffect(
   if (server.owner_id !== job.resource_owner_id) throw new DomainError('forbidden');
   if (operation.plan.scheduleAutomation !== undefined)
     await authorizeScheduledEffect(db, jobId, serverId);
+  if (operation.action === 'backup' && operation.phase === 'backup_resume') {
+    const gateway = await db
+      .selectFrom('gateway_server_states')
+      .select('generation')
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    if (
+      ['manually_stopped', 'maintenance'].includes(server.intent) ||
+      server.intent !== operation.plan.backupPriorIntent ||
+      (gateway?.generation ?? null) !== (operation.plan.backupGatewayGeneration ?? null)
+    )
+      throw new DomainError('forbidden');
+  }
   const game = await trustedGameModules.resolve(db, serverId);
 
   if (operation.plan.gatewayAutomation !== undefined) {
@@ -572,6 +590,24 @@ export async function createManagementRuntime(options: ManagementOptions) {
     );
   }
   const lifecycle = {
+    backupEventsEnabled: providerBackupEventsEnabled,
+    backupSchemaAvailable,
+    readBackupCompletion: readProviderBackupCompletion,
+    backupPolicy: async (context: import('./lifecycle.js').GameLifecycleContext) =>
+      (await trustedGameModules.resolve(context.db, context.server.id)).module?.manifest
+        .backupPolicy ?? { offline: 'required' as const },
+    prepareBackup: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      mode: 'offline' | 'live',
+    ) => {
+      await (await gameRuntime(context.db, context.server.id))?.prepareBackup?.(context, mode);
+    },
+    cleanupBackup: async (
+      context: import('./lifecycle.js').GameLifecycleContext,
+      mode: 'offline' | 'live',
+    ) => {
+      await (await gameRuntime(context.db, context.server.id))?.cleanupBackup?.(context, mode);
+    },
     cachedStartLimits: (serverId: string, connection: Kysely<Database>) =>
       cachedProviderStartLimits(connection, serverId, values.pterodactylBaseUrl ?? ''),
     env,
@@ -836,7 +872,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
         .executeTakeFirstOrThrow();
       if (
         ['start', 'restart'].includes(operation.action) ||
-        (operation.action === 'provision' && operation.phase === 'initial_start')
+        (operation.action === 'provision' && operation.phase === 'initial_start') ||
+        (operation.action === 'backup' && operation.phase === 'backup_resume')
       ) {
         await stage('runtime_image', () =>
           assertRuntimeImage(serverId, connection, false, {

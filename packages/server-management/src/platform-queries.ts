@@ -18,6 +18,7 @@ import {
   getGatewayState,
 } from './gateway-orchestration.js';
 import { currentInteractiveContext } from './interactive-context.js';
+import { backupSchemaAvailable, providerBackupEventsEnabled } from './provider-backup-events.js';
 import {
   authorizeServer,
   enqueueServerOperation,
@@ -246,7 +247,12 @@ async function describeServer(
       db
         .selectFrom('runtime_egg_mappings as mapping')
         .innerJoin('game_integrations as game', 'game.id', 'mapping.game_id')
-        .select(['mapping.game_id', 'mapping.runtime_id', 'game.manifest'])
+        .select([
+          'mapping.game_id',
+          'mapping.runtime_id',
+          'mapping.feature_limits',
+          'game.manifest',
+        ])
         .where('mapping.id', '=', row.mapping_id)
         .executeTakeFirstOrThrow(),
       row.project_id
@@ -330,6 +336,10 @@ async function describeServer(
         !['manually_stopped', 'maintenance'].includes(row.intent),
     ),
     capabilities,
+    backupPolicy: trustedGameModules.get(mapping.game_id)?.manifest.backupPolicy ?? {
+      offline: 'required' as const,
+    },
+    backupLimit: mapping.feature_limits.backups,
     permissions: {
       read: true,
       operate,
@@ -920,6 +930,14 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
     }
   }
   let ownerRecovery: { available: boolean; availableAt: Date } | null = null;
+  const backupOperation = ['backup', 'restore'].includes(job.action ?? '')
+    ? await db
+        .selectFrom('server_operations')
+        .select('plan')
+        .where('job_id', '=', jobId)
+        .executeTakeFirst()
+    : undefined;
+  const backupPlan = backupOperation?.plan;
   if (owner(context) && job.serverId && ['queued', 'running'].includes(job.state)) {
     const recovery = await db
       .selectFrom('server_operations as operation')
@@ -946,6 +964,25 @@ export async function getPlatformJob(db: DB, context: AuthContext, jobId: string
   }
   return {
     ...job,
+    backupResult: backupPlan
+      ? {
+          state:
+            backupPlan.backupComplete === true
+              ? 'succeeded'
+              : backupPlan.backupFailed === true
+                ? 'failed'
+                : 'pending',
+          resume: ['pending', 'succeeded', 'failed', 'suppressed'].includes(
+            String(backupPlan.backupResumeOutcome),
+          )
+            ? String(backupPlan.backupResumeOutcome)
+            : null,
+          cleanupFailed:
+            typeof backupPlan.backupCleanupError === 'string' &&
+            backupPlan.backupCleanupComplete !== true,
+          retentionFailed: typeof backupPlan.backupRetentionError === 'string',
+        }
+      : null,
     // This is only permission/timing eligibility. Resolution still corroborates
     // provider identity and installed/offline state under the server lock.
     ownerRecovery,
@@ -1335,9 +1372,13 @@ export async function getPlatformTransfers(
     },
     backups: {
       supported: info.capabilities?.backups === true,
-      canCreate: info.availableActions.backup,
+      limit: info.backupLimit,
+      policy: info.backupPolicy,
+      events: await providerBackupEventsEnabled(db, serverId),
+      canCreate: info.availableActions.backup && (await backupSchemaAvailable(db)),
       canRestore:
         info.permissions.manage &&
+        (await backupSchemaAvailable(db)) &&
         !server.active_operation_id &&
         server.runtime_state === 'offline',
     },

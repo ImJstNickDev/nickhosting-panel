@@ -10838,3 +10838,127 @@ production container or persistent storage was changed. Private activation evide
 is retained locally; the browser context was closed. Independent activation review
 confirmed the exact Vite scope, rollback image, before/after snapshots and browser
 smoke evidence; no remaining activation blocker. PR21 remains open and unmerged.
+
+## Backup pipeline and interface — 2026-10-17
+
+Implemented the [backup contract](BACKUPS.md): SDK offline policy, temporary
+stop/backup/admitted resume, optional pre-restore snapshot, native replacement
+semantics, protection and human names, schedule options and opt-in retention.
+Blueprint 1.5.0 captures committed native completion into the existing signed
+outbox; Core deduplicates receipts and wakes durable jobs. Database notifications
+feed one shared API listener and authorized server SSE. Migration 037 is additive
+and explicit. Source-before-migration guards preserve unrelated services.
+
+Reviewed browser evidence uses actual React components in Firefox with isolated
+API responses, not generated images or live game backups:
+
+- [Desktop](screenshots/m5/backups-desktop-en.png)
+- [Italian mobile](screenshots/m5/backups-mobile-it.png)
+- [Destructive restoration](screenshots/m5/backups-restore-mobile-en.png)
+- [Backup success / resumption failure](screenshots/m5/backups-partial-outcome-en.png)
+
+Ten backup scenarios cover creation, exclusions, native protection, rename,
+streamed-download launch, quotas, permissions, failed requests with preserved
+list data, loading/empty/uncertain jobs, partial outcome, and keyboard dialog
+focus. Four additional schedule scenarios verify submitted modes/retention,
+capacity-derived defaults and bounds, zero/one-slot disabling and required-offline
+policy. EN/IT desktop/mobile reflow and automated axe checks passed; independent
+visual/content review inspected eleven rendered states without blocking findings.
+This evidence does not establish actual provider transfer/restore behavior.
+
+Commands and results:
+
+```bash
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/backup-policy.test.ts packages/server-management/src/minecraft-backup.test.ts packages/pterodactyl-adapter/src/blueprint.test.ts packages/pterodactyl-adapter/src/blueprint-bridge.test.ts packages/server-management/src/scoped-provider-adapter.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/provider-events.integration.test.ts apps/api/src/provider-backup-events.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/servers.integration.test.ts -t 'scopes backup labels|streams safe bytes'
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/backups-ui.browser.test.ts
+scripts/dev.sh pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/backups-ui.browser.test.ts -t 'schedules .*backups'
+python3 extensions/nickhosting/tests/run_php_tests.py --container pterodactyl-panel-2
+python3 -m unittest discover -s extensions/nickhosting/tests -p 'test_package.py'
+scripts/dev.sh pnpm typecheck
+scripts/dev.sh pnpm build
+scripts/dev.sh pnpm i18n:check
+```
+
+- Event/API integration: 12 passed; backup metadata/download authorization targeted
+  cases: 2 passed, 80 intentionally skipped.
+- Browser: 10 backup scenarios passed across full plus targeted correction runs;
+  schedule-only run 4 passed, 10 skipped. Do not interpret these as a full M5 browser run.
+- Vendor-backed PHP: 280 checks passed, including real native activity-save ordering,
+  transaction rollback, source recovery, identity rejection and microsecond timestamps.
+  The harness uses in-memory SQLite, no Panel bootstrap, outbound HTTP or production
+  database writes. Package: 13 passed. Reviewed archive SHA-256
+  `fd256f922bcd9b33355159a05d588fb91d54b1883e53c8fdee5c524e78a2b88f`.
+- Production WebPanel build passed; existing large lazy viewer chunks still produce
+  the bundle-size advisory. EN/IT/pseudo compilation checks passed (1965 keys).
+- Focused changed-source Biome checks pass with existing warnings; formatting and
+  whitespace checks pass. Full historical M1–M5/SFTPGo suites were not repeated.
+
+Independent review drove fixes for event timestamp precision, early-receipt/wait
+race, old restore baselines, stale Panel resource state, rejected-operation recovery,
+Gateway process rebinding, compensation after authorization withdrawal, retention
+spare capacity and cleanup after external stop. A later full integration run exposed
+a null Gateway generation on direct servers; it was fixed rather than weakening
+identity/admission checks. Synthetic-clock fixture failures are recorded with final
+suite evidence below; initial failures are not represented as passes.
+
+Activation remains pending the [scoped procedure](M5-ENVIRONMENTS.md#backup-workflow-activation-proposal--2026-10-17).
+No live backup, restore, server power command, extension install, migration, container
+restart or production configuration change was performed. Existing isolated M2 test
+services were reused; disposable test schemas and browsers were cleaned by their
+fixtures. No new game server or persistent test asset was created. Read-only
+preflight found dev API/worker/Vite healthy and the existing Gateway unhealthy;
+this work does not claim live Gateway validation. Native restore callbacks lack
+attempt tokens as documented in BACKUPS.md. SFTPGo #18 remains a release gate.
+
+Final capability review found that legacy Minecraft could accept `save-off` while
+the modern-only receipt parser rejected both preparation and cleanup replies.
+Minecraft therefore declares required offline backup consistently; the generic SDK
+recommended/none policies and live preparation/cleanup hooks are implemented and
+isolated-tested, but live Minecraft availability remains pending exact version
+evidence. No guessed cutoff or fixture-only real-server compatibility claim is used.
+
+Remaining non-blocking behavior: a recent live-backup receipt can temporarily
+shadow an older Start receipt in cached resource-state reconciliation. The existing
+reservation stays conservatively retained; no readiness promotion or resource
+release is inferred. This does not enable live Minecraft backups.
+
+Final execution evidence:
+
+```bash
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/schedules.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/schedules.integration.test.ts
+```
+
+The final combined run was **347 passed / 1 failed**: lifecycle 237 and Gateway 92
+passed completely; schedules had 18 passes and one fixture failure. That fixture
+hardcoded provider user 1 rather than its allocated technical owner. After correcting
+only the fixture identity, the full schedules file passed **19/19**. An earlier
+Gateway synthetic-clock fixture exhausted the four-second host-proof freshness
+window; refreshing the fixture observation each cycle matched production without
+changing the freshness limit.
+
+A subsequent lifecycle regression found and fixed rejection flags leaking from a
+failed backup-create phase into admitted resumption. Targeted final backup/journal
+coverage passed **11 tests, 227 skipped**, including failure → pending resume →
+confirmed process with one power request and retained compute reservation. This
+is targeted final-source evidence, not a claimed final rerun of all 348 tests.
+Final five-file adapter/backup unit command above passed **66/66**. Additional SDK/
+schedule unit coverage with the lifecycle author's four-file selection passed
+17/17 (overlapping backup units; these counts must not be added as unique tests).
+Root/web typechecks passed. Changed-source Biome/format and index governance passed;
+existing non-null assertion warnings were not unrelatedly refactored.
+
+Final independent security/durability review accepted the revised event, cleanup,
+Gateway, retention and phase-journal paths with no remaining must-fix finding.
+The reviewer separately accepted the required-offline Minecraft capability decision.
+The remaining operational boundary is explicit activation and Owner-triggered live
+backup/restore verification, not a fabricated production pass.
+
+The final targeted selections (Node 24.21.0, equivalently via `scripts/dev.sh`):
+
+```bash
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'event-driven backup lifecycle|backup recovery and restore safety|recovered rejected resume|retains resumed compute|retention deletes|compensating cleanup'
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/backup-policy.test.ts packages/server-management/src/minecraft-backup.test.ts packages/server-management/src/schedules.test.ts packages/game-sdk/src/game-sdk.test.ts
+```

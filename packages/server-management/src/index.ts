@@ -1,5 +1,6 @@
 export * from './admission.js';
 export * from './allocation-pool.js';
+export * from './backup-policy.js';
 export * from './configuration.js';
 export * from './content-admission.js';
 export { createDirectoryIdentityCache } from './directory-identity.js';
@@ -19,6 +20,7 @@ export * from './minecraft-registry.js';
 export * from './minecraft-sources.js';
 export * from './platform-queries.js';
 export { ensureProviderAccounts, resolveProviderCredential } from './provider-accounts.js';
+export * from './provider-backup-events.js';
 export * from './provider-change-feed.js';
 export { refreshProviderFeeds, startProviderFeedLoop } from './provider-feed-worker.js';
 export * from './registry.js';

@@ -1,7 +1,11 @@
 import type { SecretCodec } from '@nickhosting/core';
 import { type Database, getSecret, getSettings } from '@nickhosting/database';
-import { createNickHostingBridge } from '@nickhosting/pterodactyl-adapter';
+import {
+  createNickHostingBridge,
+  discoverNickHostingExtension,
+} from '@nickhosting/pterodactyl-adapter';
 import { type Kysely, sql } from 'kysely';
+import { backupSchemaAvailable } from './provider-backup-events.js';
 import {
   invalidateProviderFeedHealth,
   linkProviderFeedServer,
@@ -92,6 +96,26 @@ export async function refreshProviderFeeds(
           .where('instance_id', '=', feed.instance_id)
           .executeTakeFirstOrThrow();
         const health = await bridge.health(feed.instance_id);
+        // Shared discovery, never an extra request per backup or browser tab.
+        if (
+          (await backupSchemaAvailable(db)) &&
+          (!feed.capabilities_checked_at ||
+            Date.now() - feed.capabilities_checked_at.getTime() > 60_000)
+        ) {
+          const extension = await discoverNickHostingExtension({
+            baseURL: values.pterodactylBaseUrl ?? '',
+            applicationKey,
+            coordinator,
+          });
+          await db
+            .updateTable('provider_change_feeds')
+            .set({
+              backup_events: extension?.capabilities.backupEvents === true,
+              capabilities_checked_at: new Date(),
+            })
+            .where('instance_id', '=', feed.instance_id)
+            .execute();
+        }
         if (health.instanceId !== feed.instance_id) throw new Error('identity mismatch');
         await markProviderFeedHealth(db, { ...health, expectedGeneration: cursor.generation });
       });

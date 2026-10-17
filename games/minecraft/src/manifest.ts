@@ -7,6 +7,8 @@ export const minecraftManifest = gameManifestSchema.parse({
   id: 'minecraft',
   version: '1.0.0',
   nameKey: 'games.minecraft.name',
+  // Live save-command receipts need runtime/version-specific evidence before exposure.
+  backupPolicy: { offline: 'required' },
   capabilities: {
     console: true,
     files: true,

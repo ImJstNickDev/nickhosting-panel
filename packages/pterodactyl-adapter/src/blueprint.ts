@@ -20,6 +20,7 @@ export const nickHostingExtensionSchema = z
         bulkUploadUrls: z.boolean().optional(),
         bulkDownloadUrls: z.boolean().optional(),
         bulkDirectoryListings: z.boolean().optional(),
+        backupEvents: z.boolean().optional(),
       })
       .strict(),
   })
@@ -75,6 +76,28 @@ export const providerChangeSchema = z
   })
   .strict();
 export type ProviderChange = z.infer<typeof providerChangeSchema>;
+export const providerBackupEventSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    eventId: z.uuid(),
+    instanceId: z.uuid(),
+    server: providerIdentitySchema,
+    type: z.enum(['backup.completed', 'backup.restore-completed']),
+    occurredAt: z.iso.datetime({ offset: true }),
+    backup: z
+      .object({
+        uuid: z.uuid(),
+        name: z.string().max(191),
+        isSuccessful: z.boolean(),
+        checksum: z.string().max(255).nullable(),
+        bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        completedAt: z.iso.datetime({ offset: true }),
+      })
+      .strict(),
+  })
+  .strict();
+export type ProviderBackupEvent = z.infer<typeof providerBackupEventSchema>;
+export const providerEventSchema = z.union([providerChangeSchema, providerBackupEventSchema]);
 export const providerHealthSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -224,6 +247,18 @@ export function verifyProviderChangeSignature(input: {
   secret: string;
   now?: number;
 }): ProviderChange {
+  return providerChangeSchema.parse(verifyProviderEventSignature(input));
+}
+
+/** Transport authentication is shared; each event family has its own durable replay fence. */
+export function verifyProviderEventSignature(input: {
+  body: string;
+  timestamp: string;
+  signature: string;
+  eventId: string;
+  secret: string;
+  now?: number;
+}): ProviderChange | ProviderBackupEvent {
   if (
     Buffer.byteLength(input.body) > 65536 ||
     !/^[0-9]{10}$/.test(input.timestamp) ||
@@ -243,7 +278,7 @@ export function verifyProviderChangeSignature(input: {
   } catch {
     throw new DomainError('validation_failed');
   }
-  const parsed = providerChangeSchema.safeParse(payload);
+  const parsed = providerEventSchema.safeParse(payload);
   if (!parsed.success || parsed.data.eventId !== input.eventId)
     throw new DomainError('validation_failed');
   return parsed.data;

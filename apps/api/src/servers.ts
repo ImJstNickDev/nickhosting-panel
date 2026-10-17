@@ -11,6 +11,7 @@ import {
   assignServerDns,
   authorizeServer,
   backendAllocationPoolOverrides,
+  backupSchemaAvailable,
   createManagedServer,
   createProject,
   createServerSchema,
@@ -54,6 +55,7 @@ import type { Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { createBackupEventStream } from './backup-events-stream.js';
 import { createConsoleCommandRelays } from './console-command-relays.js';
 import { registerFileBrowsingRoutes } from './file-browsing.js';
 import { createFileDirectoryPlan, fileDirectoryAncestors } from './file-directory-plan.js';
@@ -71,6 +73,7 @@ type C = Context<{ Variables: Variables }>;
 export interface ServerRouteOptions {
   logger?: ReturnType<typeof createLogger>;
   db: ReturnType<typeof createDatabase>['db'];
+  pool?: ReturnType<typeof createDatabase>['pool'];
   env: Readonly<Record<string, string | undefined>>;
   principal: (c: C, regularOnly?: boolean) => Promise<AuthContext>;
   management: () => Promise<ManagementRuntime>;
@@ -91,6 +94,7 @@ export function registerServerRoutes(
 ) {
   const { db, env, principal, management } = options;
   const commandRelays = createConsoleCommandRelays();
+  const backupEvents = options.pool ? createBackupEventStream(options.pool) : undefined;
   registerFileBrowsingRoutes(app, options);
   registerFileOperationRoutes(app, options);
   const runBatchUpload = registerUploadBatchRoutes(app, options);
@@ -786,14 +790,115 @@ export function registerServerRoutes(
       trace.finish(outcome, response);
     }
   });
+  app.get('/v1/servers/:id/backups/events', async (c) => {
+    const server = await authorizeServer(db, await principal(c), c.req.param('id'));
+    if (!backupEvents) throw new DomainError('integration_unavailable');
+    return streamSSE(c, async (stream) => {
+      let dirty = true;
+      let lost = false;
+      let wake: (() => void) | undefined;
+      const release = await backupEvents.subscribe(
+        server.id,
+        () => {
+          dirty = true;
+          wake?.();
+        },
+        () => {
+          lost = true;
+          wake?.();
+        },
+      );
+      stream.onAbort(() => wake?.());
+      try {
+        const end = Date.now() + 900_000;
+        while (!stream.aborted && !lost && Date.now() < end) {
+          // Authorization precedes every event/heartbeat, never held across remote work.
+          await authorizeServer(db, await principal(c), server.id);
+          if (dirty) {
+            dirty = false;
+            await stream.writeSSE({
+              event: 'change',
+              data: JSON.stringify({ serverId: server.id }),
+            });
+          } else await stream.writeSSE({ event: 'heartbeat', data: '{}' });
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(done, 15_000);
+            function done() {
+              clearTimeout(timer);
+              wake = undefined;
+              resolve();
+            }
+            wake = done;
+            if (dirty || lost || stream.aborted) done();
+          });
+        }
+      } finally {
+        release();
+      }
+    });
+  });
   app.get('/v1/servers/:id/backups', async (c) => {
     const context = await principal(c),
       service = await management();
     return c.json(
-      await service.access(context, c.req.param('id'), false, (id) =>
-        service.adapter.listBackups(id),
-      ),
+      await service.access(context, c.req.param('id'), false, async (id) => {
+        const [backups, labels] = await Promise.all([
+          service.adapter.listBackups(id),
+          (await backupSchemaAvailable(db))
+            ? db
+                .selectFrom('backup_labels')
+                .select(['backup_id', 'name'])
+                .where('server_id', '=', c.req.param('id'))
+                .execute()
+            : [],
+        ]);
+        const names = new Map(labels.map((entry) => [entry.backup_id, entry.name]));
+        return backups.map((backup) => ({
+          ...backup,
+          name: names.get(backup.uuid) ?? backup.name,
+        }));
+      }),
     );
+  });
+  app.patch('/v1/servers/:id/backups/:backupId', async (c) => {
+    const context = await principal(c),
+      service = await management();
+    const input = parse(
+      z
+        .object({
+          name: z.string().trim().min(1).max(191).optional(),
+          isLocked: z.boolean().optional(),
+        })
+        .strict()
+        .refine((value) => value.name !== undefined || value.isLocked !== undefined),
+      await body(c),
+    );
+    const backupId = parse(z.uuid(), c.req.param('backupId'));
+    if (!(await backupSchemaAvailable(db))) throw new DomainError('configuration_invalid');
+    await service.access(
+      context,
+      c.req.param('id'),
+      true,
+      async (identifier, connection, current) => {
+        const backup = await service.adapter.getBackup(identifier, backupId);
+        if (input.isLocked !== undefined && backup.is_locked !== input.isLocked)
+          await service.adapter.toggleBackupLock(identifier, backupId);
+        if (input.name !== undefined)
+          await connection
+            .insertInto('backup_labels')
+            .values({ server_id: c.req.param('id'), backup_id: backupId, name: input.name })
+            .onConflict((conflict) =>
+              conflict.columns(['server_id', 'backup_id']).doUpdateSet({ name: input.name }),
+            )
+            .execute();
+        await recordAudit(connection, current, 'server.backup.updated', {
+          serverId: c.req.param('id'),
+          backupId,
+          ...input,
+        });
+      },
+    );
+    return c.body(null, 204);
   });
   app.delete('/v1/servers/:id/backups/:backupId', async (c) => {
     const context = await principal(c),
@@ -824,7 +929,7 @@ export function registerServerRoutes(
           ? {}
           : { 'content-length': String(download.contentLength) }),
         'cache-control': 'no-store',
-        'content-disposition': 'attachment',
+        'content-disposition': `attachment; filename="backup-${parse(z.uuid(), c.req.param('backupId'))}.tar.gz"`,
         'x-content-type-options': 'nosniff',
       },
     });

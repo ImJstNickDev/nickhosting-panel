@@ -32,6 +32,8 @@ FILES = (
     'app/Jobs/DeliverChanges.php',
     'app/Providers/BridgeServiceProvider.php',
     'app/Services/ChangeFeed.php',
+    'app/Services/BackupEvents.php',
+    'private/migrations/2026_10_17_000004_nickhosting_backup_events.php',
     'app/Services/Protocol.php',
     'app/Services/Settings.php',
     'private/configure.php',
@@ -83,6 +85,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT.parent.parent / "build/blueprint/1.4.0/nickhosting.blueprint",
+        default=ROOT.parent.parent / "build/blueprint/1.5.0/nickhosting.blueprint",
     )
     print(build(ROOT, parser.parse_args().output))

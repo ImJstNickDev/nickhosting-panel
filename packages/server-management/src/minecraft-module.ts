@@ -28,6 +28,7 @@ import type {
 } from './game-modules.js';
 import { requireMinecraftGatewayProtocol } from './gateway-registry.js';
 import type { GameLifecycleContext } from './lifecycle.js';
+import { cleanupMinecraftBackup, prepareMinecraftBackup } from './minecraft-backup.js';
 import {
   assertMinecraftPlayerConfiguration,
   assertMinecraftRuntimePathsPreserved,
@@ -395,6 +396,8 @@ export function createMinecraftModuleRuntime(options: MinecraftModuleOptions) {
   }
 
   const hooks: GameRuntimeHooks = {
+    prepareBackup: prepareMinecraftBackup,
+    cleanupBackup: cleanupMinecraftBackup,
     verifyInitialInstallation: (context) =>
       verifyMinecraftInitialInstallation(context, { env, observedImageDigest }),
     assertRuntimeImage: (serverId, connection, requireObserved, context) =>

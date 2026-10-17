@@ -15,6 +15,7 @@ export interface ScheduleTables {
     timing: ColumnType<ScheduleTiming, string, string>;
     time_zone: string;
     enabled: boolean;
+    backup_options: ColumnType<Record<string, unknown>, string | undefined, string>;
     revision: Generated<number>;
     next_run_at: Date | null;
     deleted_at: Date | null;

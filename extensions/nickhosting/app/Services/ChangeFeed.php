@@ -37,6 +37,12 @@ final class ChangeFeed
     public function enqueue(object $link, string $type): array
     {
         $payload = $this->payload($link, $type);
+        $this->persist($link, $payload);
+        return $payload;
+    }
+
+    public function persist(object $link, array $payload): void
+    {
         DB::table('nickhosting_outbox')->insert(['id' => $payload['eventId'], 'instance_id' => $link->instance_id,
             'server_uuid' => $link->uuid, 'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
             'available_at' => now(), 'created_at' => now(), 'updated_at' => now()]);
@@ -44,6 +50,5 @@ final class ChangeFeed
             try { DeliverChanges::dispatch()->onQueue('standard'); }
             catch (\Throwable $error) { /* Durable outbox remains available to scheduled recovery. */ }
         });
-        return $payload;
     }
 }

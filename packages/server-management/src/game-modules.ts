@@ -1,6 +1,6 @@
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
-import { type GameManifest, gameManifestSchema } from '@nickhosting/game-sdk';
+import { type GameBackupHooks, type GameManifest, gameManifestSchema } from '@nickhosting/game-sdk';
 import type {
   ApplicationServer,
   PterodactylAdapter,
@@ -67,7 +67,7 @@ export interface FileMutationContext {
   providerIdentifier: string;
   listFiles(directory: string): Promise<ServerFile[]>;
 }
-export interface GameRuntimeHooks {
+export interface GameRuntimeHooks extends GameBackupHooks<GameLifecycleContext> {
   configureProvision(context: GameLifecycleContext): Promise<boolean>;
   verifyInitialInstallation?(
     context: GameLifecycleContext,

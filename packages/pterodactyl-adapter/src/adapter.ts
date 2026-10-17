@@ -512,6 +512,8 @@ export function createPterodactylAdapter(options: PterodactylOptions) {
     },
     deleteBackup: (identifier: string, backupId: string) =>
       transport.empty('client', backupPath(identifier, backupId), 'DELETE'),
+    toggleBackupLock: (identifier: string, backupId: string) =>
+      transport.entity('client', `${backupPath(identifier, backupId)}/lock`, backupSchema, 'POST'),
     restoreBackup(identifier: string, backupId: string, truncate: boolean) {
       fileDownloads.invalidate(identifier);
       return transport

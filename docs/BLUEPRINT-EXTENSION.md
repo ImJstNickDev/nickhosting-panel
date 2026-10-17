@@ -780,3 +780,22 @@ a source revert; no schema rollback is required. A missing batch endpoint simply
 disables optional acceleration, leaving native foreground navigation available.
 It does not remove the existing technical-account/mail guards or weaken the
 separate SFTPGo production-release gate in issue #18.
+
+## 1.5.0 — committed backup notifications (2026-10-17)
+
+Adds capability `backupEvents` and an extension-owned durable activity marker.
+Native backup completion/failure and restore completion/failure enter the existing
+signed outbox after commit. Marker recovery covers a process crash before callback
+materialization. It does not change backup execution, storage, server ownership or
+limits-feed revision. [Backups](BACKUPS.md) describes event correlation and the
+upstream restore attempt-token limitation.
+
+The isolated PHP harness uses the installed upstream ActivityLogService with
+in-memory SQLite: 280 checks passed, including native subject ordering, rollback,
+identity rejection, duplicate delivery, recovery and microsecond timestamps.
+These are fixture/runtime compatibility checks, not a live game backup. Installing
+this version and applying its additive migration remain a separate activation.
+
+Reviewed 1.5.0 package SHA-256: `fd256f922bcd9b33355159a05d588fb91d54b1883e53c8fdee5c524e78a2b88f`.
+The non-overwriting build is `build/blueprint/1.5.0-reviewed/nickhosting.blueprint`.
+Package tests: 13 passed. This archive has not yet been installed.

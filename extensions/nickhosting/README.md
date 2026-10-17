@@ -1,6 +1,6 @@
 # NickHosting Blueprint bridge
 
-Version **1.4.0**, targeting Pterodactyl **1.11.11** and Blueprint
+Version **1.5.0**, targeting Pterodactyl **1.11.11** and Blueprint
 **beta-2025-09**. The monorepo is the source of truth; `.blueprint/dev` is optional
 Blueprint build staging. Do not use `-build` on production as a development loop.
 Actual deployment evidence is recorded in [the extension report](../../docs/BLUEPRINT-EXTENSION.md).
@@ -196,6 +196,49 @@ signature/timestamp/event ID, persist before acknowledgement, deduplicate and
 reject stale revisions. A 2xx response acknowledges delivery. No credentials,
 startup environment or game files are serialized in events.
 
+### Native backup outcomes — signed notifications
+
+Version 1.5.0 advertises `backupEvents:true`. Native Client backup create, list,
+lock, restore and delete routes remain unchanged. The extension listens to the
+native `ActivityLogged` event for `server:backup.complete`, `server:backup.fail`,
+`server:backup.restore-complete` and `server.backup.restore-failed` (the last
+spelling is the native 1.11.11 failure event). It does not infer restore success
+from the server returning to an ordinary status.
+
+Envelope: `{schemaVersion:1,eventId,instanceId,server,occurredAt,type,backup}`.
+`type` is `backup.completed` or `backup.restore-completed`. `backup` contains
+`{uuid,name,isSuccessful,checksum,bytes,completedAt}`. Nullable checksum and byte
+count describe the backup archive; `isSuccessful` describes the reported action.
+For restores, both timestamps describe the restore occurrence, never the old
+archive completion time. These events have no limits or revision and do not
+advance the linked server's limits revision. Only exact, valid linked server
+identities and unchanged owners can produce a notification.
+
+Native backup completion saves its activity after S3 finalization. Activity events
+fire inside the native transaction before activity subjects are inserted. A new
+extension-owned `nickhosting_backup_events` table records a source marker in that
+same transaction. After commit, the extension resolves the committed subjects and
+atomically writes the event into the existing outbox while marking the source
+processed. S3/native transaction rollback therefore removes the source too. A
+process crash before the after-commit callback leaves a recoverable marker;
+existing scheduled delivery jobs materialize pending markers before delivery.
+Missing or pruned native subjects remain uncertain and retry at most every fifteen
+minutes, without manufacturing success or starving later sources.
+
+The same activity ID always retains the same event ID. Backup completion is also
+deduplicated by backup UUID. Distinct native restore activity IDs are distinct
+outcomes because the native callback has no restore-operation identifier; receivers
+must deduplicate delivery by event ID and reconcile current provider state. The
+existing exact-body HMAC, destination policy, retry and acknowledgement rules apply.
+No Panel/Wings controller, model, route or core file is modified.
+
+The migration is additive and retained on rollback. Rolling code back to 1.4.0
+stops capturing new backup outcomes; pending generic outbox rows remain deliverable,
+and source markers await a compatible version. Retain both extension tables and
+native activity/backup subjects during recovery; this feature does not backfill
+historical activities from before installation or replace native backup listing.
+Production installation remains a separate Owner-approved operation.
+
 ## Delivery and recovery
 
 The global Laravel service provider listens synchronously to server Updated and
@@ -294,7 +337,7 @@ uses Laravel fakes. It exercises transaction rollback, idempotency, encryption,
 authorization, identity invalidation, delivery retry and configuration transforms.
 It is not a MySQL lock-concurrency or real HTTP middleware test. Packaging uses
 an explicit file allowlist, excludes secrets/tests/docs, rejects symlinks and
-existing output, and defaults to ignored `build/blueprint/1.4.0/nickhosting.blueprint`.
+existing output, and defaults to ignored `build/blueprint/1.5.0/nickhosting.blueprint`.
 
 Version 1.2.0 introduced bulk upload URLs. Version 1.3.0 adds bulk path-scoped
 download URLs, transfer settings discovery and configurable operational bounds;
@@ -307,7 +350,7 @@ Version 1.4.0 adds directory batches and three configurable bounds. The stable
 defaults are 48 directories per request and two parallel Wings reads, with an
 eight-second whole-batch deadline. Updating preserves all saved Owner settings;
 the new defaults apply only when a setting is absent or invalid.
-The admin view lists eight responsibilities in English and Italian.
+The admin view lists nine responsibilities in English and Italian.
 
 ## Upstream reference / licensing
 

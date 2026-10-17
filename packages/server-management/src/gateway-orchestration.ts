@@ -838,12 +838,22 @@ export async function reportGatewayObservation(
         .where('job_id', '=', state.wake_job_id)
         .executeTakeFirstOrThrow();
       if (
-        job.state !== 'succeeded' ||
+        (job.state !== 'succeeded' &&
+          !(
+            job.state === 'failed' &&
+            operation.action === 'backup' &&
+            operation.plan.backupResumeOutcome === 'succeeded'
+          )) ||
         !operation.effect_started_at ||
         processNanos <= BigInt(operation.effect_started_at.getTime()) * 1_000_000n ||
         operation.server_id !== serverId ||
         !(
           ['start', 'restart'].includes(operation.action) ||
+          (operation.action === 'backup' &&
+            operation.plan.backupResumeOutcome === 'succeeded' &&
+            operation.plan.startConfirmed === true &&
+            operation.effect_state === 'confirmed' &&
+            operation.plan.startProcessStartedAt === value.processStartedAt) ||
           (operation.action === 'provision' &&
             operation.plan.autoStart === true &&
             operation.plan.gatewayRoutesActivated === true &&
@@ -1096,7 +1106,16 @@ async function reconcileLocked(
       .selectAll()
       .where('id', '=', state.wake_job_id)
       .executeTakeFirstOrThrow();
-    if (job.state === 'failed')
+    const resumedBackup =
+      job.state === 'failed'
+        ? await tx
+            .selectFrom('server_operations')
+            .select('plan')
+            .where('job_id', '=', job.id)
+            .where('action', '=', 'backup')
+            .executeTakeFirst()
+        : undefined;
+    if (job.state === 'failed' && resumedBackup?.plan.backupResumeOutcome !== 'succeeded')
       await block(
         tx,
         state,

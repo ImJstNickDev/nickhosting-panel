@@ -1,10 +1,10 @@
 import { DomainError, type SecretCodec } from '@nickhosting/core';
 import { type Database, getSettings } from '@nickhosting/database';
 import {
-  providerChangeSchema,
-  verifyProviderChangeSignature,
+  providerEventSchema,
+  verifyProviderEventSignature,
 } from '@nickhosting/pterodactyl-adapter';
-import { applyProviderChange } from '@nickhosting/server-management';
+import { applyProviderBackupEvent, applyProviderChange } from '@nickhosting/server-management';
 import type { Kysely } from 'kysely';
 
 export const PROVIDER_EVENTS_PATH = '/v1/provider-events/pterodactyl';
@@ -23,7 +23,7 @@ export async function receiveProviderEvent(options: {
   } catch {
     throw new DomainError('validation_failed');
   }
-  const parsed = providerChangeSchema.safeParse(input);
+  const parsed = providerEventSchema.safeParse(input);
   if (!parsed.success) throw new DomainError('validation_failed');
   const instanceId = parsed.data.instanceId;
   const [feed, { values }, secret] = await Promise.all([
@@ -46,13 +46,15 @@ export async function receiveProviderEvent(options: {
     feed.callback_url !== new URL(PROVIDER_EVENTS_PATH, values.publicUrl).href
   )
     throw new DomainError('forbidden');
-  const event = verifyProviderChangeSignature({
+  const event = verifyProviderEventSignature({
     body: options.raw,
     timestamp: options.headers.get('x-nickhosting-timestamp') ?? '',
     signature: options.headers.get('x-nickhosting-signature') ?? '',
     eventId: options.headers.get('x-nickhosting-event-id') ?? '',
     secret: options.codec.decrypt(secret.envelope, `blueprintWebhook:${instanceId}`),
   });
-  await applyProviderChange(options.db, event);
+  if (event.type === 'backup.completed' || event.type === 'backup.restore-completed')
+    await applyProviderBackupEvent(options.db, event);
+  else await applyProviderChange(options.db, event);
   return { received: true };
 }

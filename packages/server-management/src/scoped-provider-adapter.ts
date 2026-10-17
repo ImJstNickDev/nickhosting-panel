@@ -30,6 +30,7 @@ const identifierArguments: Partial<Record<keyof PterodactylAdapter, number>> = {
   getBackup: 0,
   createBackup: 0,
   deleteBackup: 0,
+  toggleBackupLock: 0,
   restoreBackup: 0,
   downloadBackup: 0,
   downloadFile: 0,

@@ -653,6 +653,12 @@ export async function installBrowserFixtures(
       r.backups.set(uuid, { metadata, files: snapshot });
       return metadata;
     },
+    toggleBackupLock: async (id, backupId) => {
+      const backup = remote(id).backups.get(backupId);
+      if (!backup) throw new PterodactylError('not_found', 'client', 'rejected');
+      backup.metadata.is_locked = !backup.metadata.is_locked;
+      return { ...backup.metadata };
+    },
     deleteBackup: async (id, backupId) => {
       remote(id).backups.delete(backupId);
     },

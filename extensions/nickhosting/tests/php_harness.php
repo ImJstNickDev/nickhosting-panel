@@ -32,6 +32,7 @@ $validator->setPresenceVerifier($presence);
 Request::macro('validate', function (array $rules) use ($validator) { return $validator->make($this->all(), $rules)->validate(); });
 \Laravel\Sanctum\Sanctum::usePersonalAccessTokenModel(\Pterodactyl\Models\ApiKey::class);
 $schemaMigration->up();
+$backupMigration->up();
 
 Schema::create('settings', function ($t) { $t->string('key')->primary(); $t->text('value'); });
 $settings = new Pterodactyl\BlueprintFramework\Extensions\nickhosting\Services\Settings();
@@ -238,7 +239,7 @@ foreach (['en','it'] as $locale) {
     check(str_contains($html, 'name="_token"') && str_contains($html, 'value="PATCH"'), 'Blade CSRF and method fields ' . $locale);
     check(str_contains($html, $locale==='it' ? 'Ultima consegna confermata' : 'Last acknowledged delivery'), 'Blade status localized ' . $locale);
     check(str_contains($html, 'https://review.example'), 'Blade origin visible ' . $locale);
-    check(substr_count($html, '<li>') === 8 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
+    check(substr_count($html, '<li>') === 9 && str_contains($html, $locale==='it' ? 'più upload' : 'multiple uploads'), 'Blade concise feature bullets ' . $locale);
     check(str_contains($html, 'name="downloadBatchLimit"') && str_contains($html, 'value="2500"') && str_contains($html, $locale === 'it' ? 'Durata URL firmati' : 'Signed URL lifetime'), 'Blade operational settings localized ' . $locale);
 }
 $instance = '11111111-1111-4111-8111-111111111111';
@@ -505,6 +506,7 @@ $ttl=strtotime($lowerUploadBody['expiresAt'])-time();
 check($ttl>=118 && $ttl<=120, 'upload signing uses configurable lifetime');
 $settings->saveOperational($defaults);
 eval($directoryHarness);
+eval($backupHarness);
 DB::table('nickhosting_servers')->where('uuid',$uploadServer->uuid)->update(['valid'=>false]);
 denied(fn () => $uploads($uploadReq,$uploadServer),409,'bulk upload rejects invalidated server link');
 denied(fn () => $downloads($downloadReq,$uploadServer),409,'bulk download rejects invalidated server link');
