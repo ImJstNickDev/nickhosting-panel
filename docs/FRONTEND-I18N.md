@@ -1190,3 +1190,17 @@ mode exposes the existing serialized template. The generic Gateway editor stays
 available to other integrations. See [reference, assets and editing
 behavior](MINECRAFT-MESSAGE-EDITOR.md). Controls use EN/IT, native keyboard focus
 and plain-text-only paste. Visual field history is local and bounded.
+
+### Minecraft Settings workspace — 2026-10-17
+
+Server game sections are grouped under the integration name, with a compact
+secondary navigation and preserved deep links. Minecraft Settings is a bundled
+integration-owned form view: server description, gameplay, access, world and
+performance. It renders only supported fields; unavailable groups disappear.
+Choice segments retain native radio keyboard behavior, switches expose their
+state, numeric fields retain bounds, and desktop columns become a single mobile
+column. Save and icon-only reset appear only for edits. Errors preserve drafts;
+accepted jobs are not presented as saved, including recovery from uncertainty.
+Whitelist settings remain here until the separate Players pass. The running-server
+MOTD and player idle-kick timeout explicitly distinguish themselves from Gateway
+messages and automatic server sleep.

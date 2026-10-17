@@ -119,6 +119,15 @@ export const gameUiWebMessages: Record<string, [string, string]> = {
     'Stop the server before changing these settings.',
     'Arresta il server prima di modificare queste impostazioni.',
   ],
+  'gameUi.resetChanges': ['Reset changes', 'Ripristina modifiche'],
+  'gameUi.saveFailed': [
+    'Changes could not be saved. Your draft is preserved.',
+    'Salvataggio non riuscito. Le modifiche sono conservate nella bozza.',
+  ],
+  'gameUi.saveUncertain': [
+    'The result is being checked. Do not repeat the operation.',
+    'L’esito è in verifica. Non ripetere l’operazione.',
+  ],
   'gameUi.noPermission': [
     'You do not have permission to make this change.',
     'Non hai il permesso di effettuare questa modifica.',

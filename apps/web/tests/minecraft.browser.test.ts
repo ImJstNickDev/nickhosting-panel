@@ -131,13 +131,17 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
     expect(profile.effectiveProperties).not.toHaveProperty('online-mode');
     expect(JSON.stringify(profile)).not.toContain('isolated-browser-hidden-secret');
     await user.goto(`${base}/properties`);
-    const form = section('Server properties');
-    await browserExpect(form.getByLabel('Server description', { exact: true })).toBeVisible();
+    const form = user.getByRole('form', { name: 'Server properties' });
+    await browserExpect(
+      form.getByRole('textbox', { name: 'Server description', exact: true }),
+    ).toBeVisible();
     await browserExpect(form.getByLabel('Player combat', { exact: true })).toBeChecked();
     await browserExpect(form.getByLabel('Player limit', { exact: true })).toHaveValue('20');
     await browserExpect(form.getByLabel('Allow flying', { exact: true })).toHaveCount(0);
-    await form.getByLabel('Server description', { exact: true }).fill('Weekend survival');
-    await form.getByLabel('Difficulty', { exact: true }).selectOption('hard');
+    await form
+      .getByRole('textbox', { name: 'Server description', exact: true })
+      .fill('Weekend survival');
+    await form.getByRole('radio', { name: 'Hard', exact: true }).press('Space');
     await form.getByLabel('Player limit', { exact: true }).fill('8');
     await operation(() => form.getByRole('button', { name: 'Save changes', exact: true }).click());
     const content = parseMinecraftProperties(
@@ -148,12 +152,12 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
       difficulty: 'hard',
       'max-players': '8',
     });
-    await browserExpect(form.getByLabel('Server description', { exact: true })).toHaveValue(
-      'Weekend survival',
-    );
+    await browserExpect(
+      form.getByRole('textbox', { name: 'Server description', exact: true }),
+    ).toHaveValue('Weekend survival');
     await browserExpect(
       form.getByRole('button', { name: 'Save changes', exact: true }),
-    ).toBeEnabled();
+    ).toHaveCount(0);
     await fixture.screenshot(user, 'minecraft-properties-desktop-en');
     await accessible(user);
   });
@@ -359,7 +363,7 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
     await user.setViewportSize({ width: 390, height: 844 });
     await user.goto(`${base}/properties`);
     await browserExpect(
-      user.getByRole('heading', { name: 'Proprietà del server', exact: true }),
+      user.getByRole('form', { name: 'Proprietà del server', exact: true }),
     ).toBeVisible();
     expect(
       await user.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),

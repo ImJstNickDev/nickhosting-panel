@@ -361,3 +361,31 @@ alongside existing placeholders. Live substitution remains integration-owned;
 Core and the generic Gateway do not interpret those names. See the
 [Minecraft editor reference](MINECRAFT-MESSAGE-EDITOR.md) for reference-client
 layout guides and their measurement limits.
+
+### Per-server game workspace — 2026-10-17
+
+The shared server shell groups each integration's declared sections beneath its
+translated game name. Existing `/servers/:id/game/:sectionId` links remain valid;
+`/servers/:id/game` opens the first section available to the user's permissions
+and server capabilities. The current Minecraft subsections are Settings, Players,
+Worlds and Content. Only the active section loads. Generic Files, Backups,
+Connection and Automation retain their existing places and authority.
+
+A form can declare a bounded `renderer` key resolved only through bundled
+first-party presentation components. The shared form still owns validation,
+permissions, stopped-state requirements, idempotency and durable job tracking.
+`submitChangedOnly` opts a patch-style form into submitting changed supported
+fields; other forms retain full payloads. Destructive forms retain the shared
+confirmation presentation. Minecraft Settings uses this extension point for
+compact grouped properties, with save/reset appearing only for changed values.
+It preserves drafts on failure and waits for confirmed job completion plus a fresh
+profile before clearing them; unresolved effects remain blocked and observable.
+Historical numeric difficulty/game-mode properties are presented as named choices
+and written back using the installed encoding. This is not a certification of all
+historical property values (e.g. game-mode availability still needs finer profiles).
+
+Presets mean **Owner-curated, personally tested configurations**, especially custom
+maps with exact Minecraft versions and server.properties overrides. Ordinary
+modpack/map installation is not itself a verified preset. Players, Worlds, Content
+and preset workflow changes follow in separate work; this Settings pass does not
+implement them or expand runtime eligibility.

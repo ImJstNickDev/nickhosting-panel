@@ -248,6 +248,23 @@ describe('Minecraft browser module and exact API contracts', () => {
       controller.updateProperties(serverId, 'properties-three', { pvp: true }),
     ).rejects.toThrow('integration_unavailable');
   });
+  it('normalizes historical property enums without treating ordinary numeric properties as enums', () => {
+    expect(
+      minecraftPropertyValues({ difficulty: '1', gamemode: '0', 'view-distance': '3' }),
+    ).toEqual({
+      difficulty: 'easy',
+      gamemode: 'survival',
+      'view-distance': 3,
+    });
+    expect(minecraftPropertyValues({ difficulty: 'hard', gamemode: 'creative' })).toEqual({
+      difficulty: 'hard',
+      gamemode: 'creative',
+    });
+    expect(minecraftPropertyValues({ difficulty: '9', gamemode: 'unknown' })).toEqual({
+      difficulty: '9',
+      gamemode: 'unknown',
+    });
+  });
   it('requires exact destructive consent and preserves original deletion preview', async () => {
     const client = clientFixture(),
       controller = createMinecraftUiController(client);

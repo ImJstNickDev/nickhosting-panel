@@ -7,6 +7,7 @@ import {
   type UiSectionData,
 } from '@nickhosting/game-sdk/ui';
 import { z } from 'zod';
+import { minecraftPropertyEnumName } from '../property-enums.js';
 import {
   createMinecraftUiController,
   MinecraftUiError,
@@ -107,7 +108,7 @@ const translated: Record<string, [string, string]> = {
     'Read the Minecraft EULA before accepting.',
     'Leggi l’EULA di Minecraft prima di accettare.',
   ],
-  'sections.properties': ['Game settings', 'Impostazioni di gioco'],
+  'sections.properties': ['Settings', 'Impostazioni'],
   'sections.players': ['Players', 'Giocatori'],
   'sections.worlds': ['Worlds', 'Mondi'],
   'sections.content': ['Content', 'Contenuti'],
@@ -196,6 +197,32 @@ const translated: Record<string, [string, string]> = {
     'Player idle timeout (minutes)',
     'Timeout inattività giocatori (minuti)',
   ],
+  'settings.description': ['Server description', 'Descrizione del server'],
+  'settings.gameplay': ['Gameplay', 'Gioco'],
+  'settings.access': ['Access', 'Accesso'],
+  'settings.world': ['World', 'Mondo'],
+  'settings.performance': ['Performance', 'Prestazioni'],
+  'settings.other': ['Other settings', 'Altre impostazioni'],
+  'settings.motdHelp': [
+    'Shown in the server list while Minecraft is running. Gateway messages are in Automation.',
+    'Visibile nella lista server quando Minecraft è in esecuzione. I messaggi Gateway sono in Automazione.',
+  ],
+  'settings.flightHelp': [
+    'Allows flying clients to stay connected; does not grant flight.',
+    'Consente ai client in volo di restare connessi; non abilita il volo.',
+  ],
+  'settings.hardcoreHelp': [
+    'Players cannot return to survival after death.',
+    'Dopo la morte i giocatori non possono tornare in sopravvivenza.',
+  ],
+  'settings.structuresHelp': [
+    'Applies to newly generated terrain.',
+    'Si applica al terreno generato da questo momento.',
+  ],
+  'settings.idleHelp': [
+    'Disconnects inactive players. 0 disables it; server sleep is configured in Automation.',
+    'Disconnette i giocatori inattivi. 0 lo disattiva; la sospensione del server si configura in Automazione.',
+  ],
   'options.peaceful': ['Peaceful', 'Pacifica'],
   'options.easy': ['Easy', 'Facile'],
   'options.normal': ['Normal', 'Normale'],
@@ -271,7 +298,13 @@ const propertyFields: unknown[] = [
     'simulation-distance': [2, 32],
     'spawn-protection': [0, 29999984],
     'player-idle-timeout': [0, 2147483647],
-  }).map(([id, bounds]) => ({ id, type: 'number', min: bounds[0], max: bounds[1] })),
+  }).map(([id, bounds]) => ({
+    id,
+    type: 'number',
+    min: bounds[0],
+    max: bounds[1],
+    required: true,
+  })),
 ].map((f) => ({ ...f, labelKey: k(`properties.${f.id}`) }));
 export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
   gameId: 'minecraft',
@@ -377,6 +410,8 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
         {
           id: 'properties',
           titleKey: k('forms.properties'),
+          renderer: 'minecraft-properties',
+          submitChangedOnly: true,
           fields: propertyFields,
           action: action('save', 'files'),
         },
@@ -590,7 +625,7 @@ export function minecraftPropertyValues(
               : Number.NaN;
         return Number.isFinite(number) ? [[f.id, number]] : [];
       }
-      return typeof value === 'string' ? [[f.id, value]] : [];
+      return typeof value === 'string' ? [[f.id, minecraftPropertyEnumName(f.id, value)]] : [];
     }),
   );
 }

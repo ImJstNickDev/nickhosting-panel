@@ -145,6 +145,10 @@ export const uiFormSchema = z
     id,
     titleKey: key,
     fields: z.array(uiFieldSchema).max(64),
+    /** Optional presentation key resolved against bundled first-party views only. */
+    renderer: id.optional(),
+    /** For patch-style handlers; action forms otherwise submit all visible fields. */
+    submitChangedOnly: z.boolean().optional(),
     action: uiActionSchema.optional(),
   })
   .strict();

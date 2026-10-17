@@ -6,9 +6,21 @@ import {
   gameUiDescriptorSchema,
   type TrustedGameUiModule,
   uiFieldSchema,
+  uiFormSchema,
   validateUiValues,
   visibleFields,
 } from './ui.js';
+
+it('accepts bounded presentation keys and explicit patch forms without executable URLs', () => {
+  const form = { id: 'settings', titleKey: 'games.fixture-arena.settings', fields: [] };
+  expect(
+    uiFormSchema.parse({ ...form, renderer: 'fixture-settings', submitChangedOnly: true }),
+  ).toMatchObject({ renderer: 'fixture-settings', submitChangedOnly: true });
+  expect(
+    uiFormSchema.safeParse({ ...form, renderer: 'https://example.test/view.js' }).success,
+  ).toBe(false);
+  expect(uiFormSchema.parse(form).submitChangedOnly).toBeUndefined();
+});
 
 it('retains only a trusted bounded message-editor key across registry construction', () => {
   const source = moduleFixture();

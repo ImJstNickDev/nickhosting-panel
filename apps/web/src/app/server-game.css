@@ -1,0 +1,23 @@
+.game-section-tabs {
+  gap: 1.25rem;
+  margin-top: -0.5rem;
+}
+.game-section-tabs a {
+  padding: 0.5rem 0 0.7rem;
+  font-size: 0.9rem;
+}
+.game-form-skeleton {
+  min-height: 32rem;
+  border-radius: 12px;
+  background: var(--line);
+  opacity: 0.35;
+}
+.game-form-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.6rem;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}

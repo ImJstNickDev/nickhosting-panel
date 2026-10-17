@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DomainError } from '@nickhosting/core';
+import { minecraftPropertyEnumValue } from './property-enums.js';
 
 function invalid(reason: string): never {
   throw new DomainError('validation_failed', 400, { reason });
@@ -143,7 +144,10 @@ export function editMinecraftProperties(
         return invalid('minecraft_property_motd');
     } else return invalid('minecraft_property_protected');
     // Release-specific support comes from a verified generated-property schema, not semver guesses.
-    replacement.set(key, value);
+    replacement.set(
+      key,
+      minecraftPropertyEnumValue(key, value, parsed.find((line) => line.key === key)?.value),
+    );
   }
   const lines = parsed.map((line) => {
     if (!line.key || !replacement.has(line.key)) return line.raw;

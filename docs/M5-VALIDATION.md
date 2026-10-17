@@ -11842,3 +11842,53 @@ or new live test assets. Live dev Vite main/settings module transformations retu
 HTTP200 through the existing source mounts. Prior Gateway readiness finding and
 SFTPGo#18 release gate remain separate and unchanged. Rollback is this UI commit;
 no data migration or destructive rollback needed. PR21 remains OPEN/unmerged.
+
+### Minecraft Settings and grouped game navigation — 2026-10-17
+
+First slice of the Owner-approved Minecraft workspace refresh. Game sections now
+sit under the translated integration name with a secondary navigation; old deep
+links remain valid. Settings uses a bundled first-party form view and the existing
+shared mutation/permission/job flow. Supported properties are grouped into server
+description, gameplay, access, world and performance. Save/reset appear for edits
+only, and the patch contains only changed fields. No optimistic completion claim.
+Whitelist controls remain available here pending the separate Players slice.
+
+Fixed the directly related legacy enum regression: numeric difficulty/game-mode
+values display readable choices and preserve the installed numeric encoding when
+saved. No new provider reads were introduced. This does not certify every value for
+every historical release: the existing universal Spectator option still needs
+version-aware option metadata. Worlds, Content, Players and Owner provider settings
+were not expanded. Presets were clarified as Owner-curated, personally verified
+configurations, not a synonym for ordinary modpack/map installation.
+
+Independent review identified two parts of an existing durable-form recovery gap:
+failed uncertain jobs stopped polling, and the terminal refresh guard only tracked
+the job ID. Unresolved effects now remain blocked and polled (5s after failure),
+and resolution of the same job reloads the authoritative profile before clearing
+the draft. A browser regression covers this transition without reloading the page.
+Uncertainty uses a neutral disabled Save label and a link to Activity.
+
+Validation and evidence boundaries:
+
+- `scripts/dev.sh pnpm typecheck`: passed. Subsequent affected WebPanel/test typechecks passed; final check recorded below.
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/ui.test.ts games/minecraft/src/ui/ui.test.ts games/minecraft/src/management.test.ts`: 51 passed. After adding the renderer/schema regression, reran only SDK/UI files: 29 passed; management's 23 unchanged tests remain covered by the initial run.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/minecraft-settings.browser.test.ts`: Chromium covered all four journeys across the initial and targeted runs. Initial failures were test selectors: the description region and textbox shared a label, and pointer-based radio selection targeted the visually hidden native input. Corrected to textbox-role selection and keyboard Space. Reran only affected journeys; all passed.
+- `NH_BROWSER=firefox scripts/dev.sh pnpm test:browser apps/web/tests/minecraft-settings.browser.test.ts`: final four journeys passed, including same-job reconciliation and mobile Italian layout.
+- Normal saves use real authentication, profile and operation handlers, disposable PostgreSQL schemas and the fixture worker's simulated external provider. HTTP503 and uncertain/reconciled job outcomes are explicit fixture injections; the legacy profile response is an explicit UI fixture, with separate pure writer round-trip tests. No real game server was modified.
+- Axe reported zero violations for the exercised desktop/mobile/error/uncertain states; no browser page errors or mobile overflow. This is scoped evidence, not a complete WCAG audit. Native radio keyboard selection and readonly controls are exercised.
+- `scripts/dev.sh pnpm build`: passed; existing large-chunk warning remains. No dependencies changed.
+- Scoped Biome checks passed; `scripts/dev.sh pnpm i18n:check` passed with 2182 English/Italian/pseudolocale keys.
+- Six sanitized real-browser screenshots: `docs/screenshots/m5/minecraft-settings-{desktop-en,mobile-it,running-desktop-en,error-desktop-en,uncertain-desktop-en,legacy-desktop-en}.png`. Independent reviewer and parent inspected rendered screens; no remaining must-fix visual/content finding.
+
+Dev ingress and new Settings module returned HTTP200. API/worker/Vite containers
+were healthy in the read-only check; Gateway was already unhealthy as previously
+reported and is outside this task. No explicit container restart, rebuild, network
+change, production/provider mutation or new live test asset occurred. Existing
+approved isolated test services were reused; fixture schemas cleaned by harnesses.
+Rollback is the source commit; no migration. SFTPGo issue18 remains unchanged.
+
+Final affected checks: WebPanel/application and browser-test typecheck passed.
+`scripts/dev.sh pnpm test:browser apps/web/tests/minecraft.browser.test.ts -t 'renders evidence-supported properties'`
+passed1/1 (four unrelated journeys skipped). Five owned harness schemas and the
+legacy journey's temporary staging directory were cleaned. No outstanding must-fix
+review finding; broader historical value compatibility remains the noted limitation.

@@ -29,9 +29,24 @@ export function getGameFileIcon(gameId: string | undefined, name: string): strin
 }
 
 import type { GatewayMessageDefinition } from '@nickhosting/game-sdk';
+import type { ComponentType } from 'react';
 // Owner executable contributions are bundled first-party imports. Metadata never imports code.
 import { lazy } from 'react';
+import type { GameFormViewProps } from './game-form-view.js';
 import { MinecraftResponseSettings } from './integration-game-settings.js';
+
+const MinecraftSettingsForm = lazy(() =>
+  import('../integrations/minecraft/settings.js').then((module) => ({
+    default: module.MinecraftSettingsForm,
+  })),
+);
+const formViews = new Map<string, ComponentType<GameFormViewProps>>([
+  ['minecraft-properties', MinecraftSettingsForm],
+]);
+/** Form views replace presentation only, never the shared authorization or mutation path. */
+export function getGameFormView(renderer: string | undefined) {
+  return renderer ? formViews.get(renderer) : undefined;
+}
 
 const MinecraftGatewayEditor = lazy(() =>
   import('../integrations/minecraft/gateway-editor.js').then((module) => ({

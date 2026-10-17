@@ -3,8 +3,29 @@ import { Navigate, NavLink, Outlet, useLocation, useParams } from 'react-router'
 import { ErrorNotice, Loading } from '../components/ui.js';
 import { GameSections } from '../features/game-sections.js';
 import { gameUiRegistry } from '../features/integrations.js';
-import { useServer } from '../features/service-contracts.js';
+import { type ServerInfo, useServer } from '../features/service-contracts.js';
+import './server-game.css';
 import { useT } from './i18n.js';
+
+function availableGameSections(server: ServerInfo) {
+  const permissions = new Set(
+    Object.entries(server.permissions).flatMap(([name, allowed]) =>
+      allowed ? [`server:${name}`] : [],
+    ),
+  );
+  return (
+    gameUiRegistry
+      .get(server.gameId)
+      ?.descriptor.sections.filter(
+        (section) =>
+          section.requiredPermissions.every((permission) => permissions.has(permission)) &&
+          section.requiredCapabilities.every(
+            (capability) =>
+              server.capabilities?.[capability as keyof typeof server.capabilities] === true,
+          ),
+      ) ?? []
+  );
+}
 
 export function ServerShell() {
   const location = useLocation(),
@@ -21,7 +42,7 @@ export function ServerShell() {
   if (server.error) return <ErrorNotice error={server.error} />;
   const value = server.data,
     base = `/servers/${serverId}`;
-  const tabs = [
+  const tabs: string[][] = [
     ...(value.capabilities?.console || value.permissions.operate
       ? [['console', 'web.console']]
       : []),
@@ -38,6 +59,7 @@ export function ServerShell() {
     ...(value.permissions.manage ? [['settings', 'web.settings']] : []),
   ];
   const game = gameUiRegistry.get(value.gameId);
+  const gameSections = availableGameSections(value);
   return (
     <>
       <nav
@@ -51,14 +73,12 @@ export function ServerShell() {
       >
         {tabs.map(([slug, key]) => (
           <NavLink key={slug} to={`${base}/${slug}`} end={slug !== 'automation'}>
-            {key === 'SFTP' ? key : t(key!)}
+            {key === 'SFTP' ? key : t(key ?? '')}
           </NavLink>
         ))}
-        {game?.descriptor.sections.map((section) => (
-          <NavLink key={section.id} to={`${base}/game/${section.id}`}>
-            {t(section.titleKey)}
-          </NavLink>
-        ))}
+        {game && Boolean(gameSections?.length) && (
+          <NavLink to={`${base}/game`}>{t(game.descriptor.nameKey)}</NavLink>
+        )}
         <NavLink to={`${base}/status`} end>
           {t('web.serverStatus')}
         </NavLink>
@@ -69,10 +89,32 @@ export function ServerShell() {
 }
 export function ServerGameSection() {
   const { serverId = '', sectionId = '' } = useParams(),
-    server = useServer(serverId);
+    server = useServer(serverId),
+    t = useT();
   if (server.isPending) return <Loading />;
   if (server.error) return <ErrorNotice error={server.error} />;
-  return <GameSections serverId={serverId} sectionId={sectionId} gameId={server.data.gameId} />;
+  const game = gameUiRegistry.get(server.data.gameId);
+  const sections = availableGameSections(server.data);
+  if (!sectionId && sections?.[0]) return <Navigate to={sections[0].id} replace />;
+  return (
+    <>
+      {game && Boolean(sections?.length) && (
+        <nav className="tabs game-section-tabs" aria-label={t(game.descriptor.nameKey)}>
+          {sections?.map((section) => (
+            <NavLink key={section.id} to={`/servers/${serverId}/game/${section.id}`} end>
+              {t(section.titleKey)}
+            </NavLink>
+          ))}
+        </nav>
+      )}
+      <GameSections
+        key={`${serverId}:${sectionId}`}
+        serverId={serverId}
+        sectionId={sectionId}
+        gameId={server.data.gameId}
+      />
+    </>
+  );
 }
 
 export function ServerIndex() {

@@ -20,6 +20,33 @@ const player = {
   verifiedAt: '2026-10-10T00:00:00.000Z',
 };
 describe('Minecraft properties plans', () => {
+  it('preserves installed numeric or named enum representation when applying UI choices', () => {
+    for (const [release, original, expected] of [
+      ['1.5.2', 'difficulty=1\ngamemode=0\n', { difficulty: '3', gamemode: '2' }],
+      [
+        '26.1',
+        'difficulty=easy\ngamemode=survival\n',
+        { difficulty: 'hard', gamemode: 'adventure' },
+      ],
+    ] as const) {
+      const result = editMinecraftProperties(
+        `${original}motd=Unchanged\n`,
+        { difficulty: 'hard', gamemode: 'adventure' },
+        { release, supportedKeys: ['difficulty', 'gamemode', 'motd'] },
+      );
+      expect(parseMinecraftProperties(result.content)).toEqual({ ...expected, motd: 'Unchanged' });
+      expect(
+        editMinecraftProperties(
+          result.content,
+          { difficulty: 'hard', gamemode: 'adventure' },
+          {
+            release,
+            supportedKeys: ['difficulty', 'gamemode', 'motd'],
+          },
+        ).content,
+      ).toBe(result.content);
+    }
+  });
   it.each(['\r', '\n', '\r\n'])(
     'recognizes Java line endings %j before launcher redirects',
     (ending) => {
