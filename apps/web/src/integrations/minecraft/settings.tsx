@@ -11,7 +11,7 @@ const groups = [
   { id: 'gameplay', fields: ['difficulty', 'gamemode', 'pvp', 'allow-flight', 'hardcore'] },
   {
     id: 'access',
-    fields: ['max-players', 'white-list', 'enforce-whitelist', 'player-idle-timeout'],
+    fields: ['max-players', 'enforce-whitelist', 'player-idle-timeout'],
   },
   {
     id: 'world',

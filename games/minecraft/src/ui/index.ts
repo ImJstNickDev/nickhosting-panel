@@ -14,6 +14,7 @@ import {
   minecraftCatalogOptions,
   minecraftContentCapabilities,
 } from './controller.js';
+import { minecraftPlayersMessages } from './players-catalog.js';
 
 export { minecraftFormattingTokens } from '../message-formatting.js';
 export * from '../message-layout.js';
@@ -22,6 +23,7 @@ export * from './controller.js';
 const namespace = 'games.minecraft';
 const k = (name: string) => `${namespace}.${name}`;
 const translated: Record<string, [string, string]> = {
+  ...minecraftPlayersMessages,
   'messages.disconnected': ['Failed to connect to the server', 'Connessione al server fallita'],
   'messages.back': ['Back to Server List', 'Torna alla lista dei server'],
   'messages.source': ['Text codes', 'Codici di testo'],
@@ -245,12 +247,6 @@ const field = (id: string, extra: Record<string, unknown>) => ({
   labelKey: k(`fields.${id}`),
   ...extra,
 });
-const choice = (id: string, entries: string[]) =>
-  field(id, {
-    type: 'choice',
-    required: true,
-    options: entries.map((value) => ({ value, labelKey: k(`fields.${value}`) })),
-  });
 const action = (id: string, capability: string, extra: Record<string, unknown> = {}) => ({
   id,
   handler: id,
@@ -260,10 +256,6 @@ const action = (id: string, capability: string, extra: Record<string, unknown> =
   requiresStopped: true,
   ...extra,
 });
-const operatorWhen = [
-  { field: 'list', operator: 'equals', values: ['operators'] },
-  { field: 'action', operator: 'equals', values: ['add'] },
-];
 const propertyFields: unknown[] = [
   { id: 'motd', type: 'text', maxLength: 256 },
   {
@@ -284,7 +276,6 @@ const propertyFields: unknown[] = [
   },
   ...[
     'pvp',
-    'white-list',
     'enforce-whitelist',
     'hardcore',
     'allow-flight',
@@ -422,33 +413,11 @@ export const minecraftUiDescriptor = gameUiDescriptorSchema.parse({
       id: 'players',
       titleKey: k('sections.players'),
       loader: 'players',
+      renderer: 'minecraft-players',
       requiredPermissions: ['server:read'],
       requiredCapabilities: ['players'],
-      columns: [
-        { id: 'name', labelKey: k('fields.name') },
-        { id: 'list', labelKey: k('fields.list'), format: 'message' },
-      ],
-      forms: [
-        {
-          id: 'player',
-          titleKey: k('forms.player'),
-          fields: [
-            choice('list', ['operators', 'whitelist']),
-            choice('action', ['add', 'remove']),
-            field('name', {
-              type: 'text',
-              format: 'player-name',
-              lookupHandler: 'lookup-player',
-              minLength: 3,
-              maxLength: 16,
-              required: true,
-            }),
-            field('operatorLevel', { type: 'number', min: 1, max: 4, when: operatorWhen }),
-            field('bypassesPlayerLimit', { type: 'boolean', when: operatorWhen }),
-          ],
-          action: action('applyPlayer', 'players', { id: 'apply-player', handler: 'apply-player' }),
-        },
-      ],
+      columns: [],
+      forms: [],
     },
     {
       id: 'worlds',
@@ -799,17 +768,11 @@ export const minecraftUiModule = defineTrustedGameUiModule({
         context.signal,
       ),
     players: async (client, context): Promise<UiSectionData> => {
-      const profile = await createMinecraftUiController(client).profile(
+      const players = await createMinecraftUiController(client).players(
         server(context),
         context.signal,
       );
-      return {
-        values: { list: 'whitelist', action: 'add', operatorLevel: 4, bypassesPlayerLimit: false },
-        rows: [
-          ...profile.configuration.operators.map((name) => ({ name, list: k('fields.operators') })),
-          ...profile.configuration.whitelist.map((name) => ({ name, list: k('fields.whitelist') })),
-        ],
-      };
+      return { values: {}, rows: [], metadata: { players, installed: players.installed } };
     },
     'apply-player': async (client, context) => {
       const v = context.values;

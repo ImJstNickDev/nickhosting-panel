@@ -26,7 +26,8 @@ export const minecraftStoredPlayerSchema = z
   .object({
     uuid: z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
     name: playerName,
-    source: z.literal('mojang'),
+    // Server-file provenance preserves observed UUID authority without claiming Mojang verification.
+    source: z.enum(['mojang', 'server-file']),
     verifiedAt: z.iso.datetime({ offset: true }),
     level: z.number().int().min(1).max(4).optional(),
     bypassesPlayerLimit: z.boolean().optional(),
@@ -94,6 +95,7 @@ export const minecraftContentCommandSchema = z.discriminatedUnion('kind', [
       list: z.enum(['operators', 'whitelist']),
       action: z.enum(['add', 'remove']),
       name: playerName,
+      expectedUuid: minecraftStoredPlayerSchema.shape.uuid.optional(),
       operatorLevel: z.number().int().min(1).max(4).optional(),
       bypassesPlayerLimit: z.boolean().optional(),
     })

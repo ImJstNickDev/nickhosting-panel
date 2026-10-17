@@ -31,7 +31,12 @@ import {
   Textarea,
   Time,
 } from '../components/ui.js';
-import { gameUiClient, gameUiRegistry, getGameFormView } from './integrations.js';
+import {
+  gameUiClient,
+  gameUiRegistry,
+  getGameFormView,
+  getGameSectionView,
+} from './integrations.js';
 import { useServer } from './service-contracts.js';
 
 export function GameFields({
@@ -561,6 +566,7 @@ export function GameSections({
 
   if (!section.requiredPermissions.every((permission) => permissions.includes(permission)))
     return <Notice>{t('gameUi.noPermission')}</Notice>;
+  const SectionView = getGameSectionView(section.renderer);
   return (
     <>
       {operation.error && (
@@ -576,8 +582,28 @@ export function GameSections({
           <Link to={`/activity/${operationId}`}>{t('web.viewActivity')}</Link>
         </Notice>
       )}
-      {loaded.data.metadata?.installed === false && <Notice>{t('gameUi.profileNotReady')}</Notice>}
-      {section.columns.length > 0 && (
+      {!SectionView && loaded.data.metadata?.installed === false && (
+        <Notice>{t('gameUi.profileNotReady')}</Notice>
+      )}
+      {SectionView && (
+        <Suspense fallback={<Loading />}>
+          <SectionView
+            key={`${serverId}-${section.id}`}
+            data={loaded.data}
+            serverId={serverId}
+            serverName={server.data.name}
+            runtimeState={server.data.runtimeState}
+            canManage={server.data.permissions.manage === true}
+            pending={pendingOperation || Boolean(server.data.activeOperationId)}
+            onAccepted={(jobId) => {
+              setOperationId(jobId);
+              void server.refetch();
+            }}
+            reload={() => loaded.refetch({ throwOnError: true })}
+          />
+        </Suspense>
+      )}
+      {!SectionView && section.columns.length > 0 && (
         <Section title={t(section.titleKey)}>
           {loaded.data.rows.length ? (
             <div className="table-scroll">
@@ -613,42 +639,43 @@ export function GameSections({
           )}
         </Section>
       )}
-      {section.forms.map((form) => {
-        const capability = form.action?.requiredCapabilities.every(
-          (cap) =>
-            server.data.capabilities?.[
-              cap as keyof NonNullable<typeof server.data.capabilities>
-            ] === true,
-        );
-        const profileCapability = form.action?.requiredCapabilities.every(
-          (cap) => loaded.data.metadata?.[cap] !== false,
-        );
-        if (capability === false || profileCapability === false) return null;
-        return (
-          <GameActionForm
-            key={`${serverId}-${form.id}`}
-            {...{ module, form, serverId }}
-            serverName={server.data.name}
-            data={loaded.data}
-            canManage={
-              form.action?.requiredPermissions.every((p) => permissions.includes(p)) ?? false
-            }
-            state={server.data.runtimeState}
-            activeOperation={pendingOperation || Boolean(server.data.activeOperationId)}
-            unresolvedOperation={
-              effectState === 'uncertain' ||
-              (operationState === 'failed' && effectState === 'prepared')
-            }
-            refreshToken={refreshToken}
-            completedOperationId={completedOperationId}
-            onAccepted={(jobId) => {
-              setOperationId(jobId);
-              void loaded.refetch();
-              void server.refetch();
-            }}
-          />
-        );
-      })}
+      {!SectionView &&
+        section.forms.map((form) => {
+          const capability = form.action?.requiredCapabilities.every(
+            (cap) =>
+              server.data.capabilities?.[
+                cap as keyof NonNullable<typeof server.data.capabilities>
+              ] === true,
+          );
+          const profileCapability = form.action?.requiredCapabilities.every(
+            (cap) => loaded.data.metadata?.[cap] !== false,
+          );
+          if (capability === false || profileCapability === false) return null;
+          return (
+            <GameActionForm
+              key={`${serverId}-${form.id}`}
+              {...{ module, form, serverId }}
+              serverName={server.data.name}
+              data={loaded.data}
+              canManage={
+                form.action?.requiredPermissions.every((p) => permissions.includes(p)) ?? false
+              }
+              state={server.data.runtimeState}
+              activeOperation={pendingOperation || Boolean(server.data.activeOperationId)}
+              unresolvedOperation={
+                effectState === 'uncertain' ||
+                (operationState === 'failed' && effectState === 'prepared')
+              }
+              refreshToken={refreshToken}
+              completedOperationId={completedOperationId}
+              onAccepted={(jobId) => {
+                setOperationId(jobId);
+                void loaded.refetch();
+                void server.refetch();
+              }}
+            />
+          );
+        })}
     </>
   );
 }

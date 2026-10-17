@@ -11923,3 +11923,53 @@ writes or production changes. Disposable browser schemas cleaned by the harness.
 Dev Vite served both modified modules with HTTP200. No migration or dependency
 change; rollback is the source commit. Issue18 and existing release boundaries
 remain unchanged.
+
+
+### 2026-10-17 — Minecraft Players
+
+Replaced the old offline-only Players forms with a trusted integration section:
+searchable UUID-merged player rows, role filters, avatars, pagination, verified
+player lookup, operator/whitelist controls, and running-server kick/ban/pardon.
+The whitelist switch lives here instead of appearing twice in Settings. Tempban
+is not advertised. Existing runtime capability gates remain in force.
+
+The new player-list, online-roster and typed-action endpoints use existing managed
+provider access, permissions, console transport and Activity audit. Offline list
+changes reuse durable jobs. Online commands are dispatched once; persistent effects
+are confirmed from authoritative files without pretending request acceptance is
+completion. Selected UUIDs prevent renamed or reclaimed accounts from redirecting
+actions. Unknown post-send outcomes block repeats until a fresh authoritative
+read confirms the effect. Roster collection accepts only the current Vanilla
+console response, is bounded and shared for five seconds per provider binding,
+and releases the database connection before relay/credential work. Unknown roster
+formats are unavailable, not an empty list. No per-player lookup on list reads.
+
+Independent technical and rendered UI review identified and resolved: historical
+name/UUID ambiguity, UUID-less effect confirmation, nested connection retention,
+audit failures masking command uncertainty, and Italian mobile control clipping.
+The final uncertainty notice has no misleading generic retry action; the toolbar's
+Refresh players performs a read. No remaining must-fix finding in the scoped review.
+
+Validation:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/player-management.test.ts games/minecraft/src/management.test.ts apps/api/src/minecraft-players.test.ts packages/server-management/src/minecraft-content.test.ts games/minecraft/src/compatibility.test.ts`: initial 93 passed. After review fixes, reran affected API/player-management/content files: 76 passed.
+- `scripts/dev.sh pnpm exec vitest run packages/game-sdk/src/ui.test.ts games/minecraft/src/ui/ui.test.ts`: 32 passed. After extracting the identity merge helper, affected `players-model.test.ts` and `games/minecraft/src/ui/ui.test.ts`: 19 passed.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/minecraft-players.browser.test.ts`: final seven Chromium journeys passed. A final single uncertainty journey passed after removing the redundant retry button; six unrelated journeys skipped.
+- The existing `minecraft.browser.test.ts` remaining suite initially passed 3/4 (properties, worlds, content); its Owner case used the obsolete “Minecraft compatibility” heading and old catalog route. Updated only the route/locators and standalone locale setup. Focused Owner/mobile rerun: 1 passed, 3 skipped. The superseded Players form journey is replaced by the new suite above.
+- Initial browser runs were 5/7 and 4/7: fixture assumptions about post-dispatch HTTP status, the five-second roster cache, and when to inject/reset provider failures were corrected. The mobile bounding-box check found real clipping and prompted the CSS fix. Failed attempts are not counted as passing runs.
+- Browser coverage exercises actual auth/API/job handlers with disposable PostgreSQL schemas and simulated provider effects: offline durable changes, all nine running action variants, permission denial, uncertain outcome with no duplicate dispatch, delayed confirmation, readonly sharing, unsupported runtime, provider failure, loading and unavailable roster states.
+- Axe found zero violations in exercised states. Italian controls checked at 320px and 390px; desktop English and mobile screenshots reviewed independently. This is scoped Chromium evidence, not a full accessibility audit or a new Firefox run.
+- `scripts/dev.sh pnpm typecheck` and `scripts/dev.sh pnpm build`: final pass. Existing Vite large-chunk warning remains. `scripts/dev.sh pnpm i18n:check`: 2251 English/Italian/pseudolocale keys passed.
+- Scoped Biome and whitespace checks passed. No full historical M1–M5 suite was rerun.
+
+Eight sanitized screenshots in `docs/screenshots/m5/` use the prefix
+`minecraft-players-`: offline/running desktop English, mobile Italian (390px and
+320px), mobile add-player, readonly, uncertain and provider-error states.
+
+The dev ingress and Players Vite module returned HTTP200; unauthenticated access
+to the new API route returned HTTP401. These are availability checks, not real
+Minecraft mutation evidence. No live server, player list or game state was changed;
+no containers were restarted/rebuilt, no production configuration changed and no
+live test assets were created. Existing isolated services were reused and disposable
+schemas cleaned by the harness. No dependencies or migrations. Rollback is a source
+revert. SFTPGo issue18 remains an independent production-release gate.

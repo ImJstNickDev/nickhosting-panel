@@ -18,6 +18,7 @@ import {
   minecraftConfigurationSchema,
   minecraftContentCommandSchema,
   minecraftContentWipePreview,
+  resolveMinecraftPlayerChangeIdentity,
   resolveMinecraftStoredPlayers,
 } from './minecraft-content.js';
 import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
@@ -474,5 +475,86 @@ describe('Minecraft durable content safety', () => {
       'mods',
     ]);
     expect(f.adapter.writeFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('UUID-bound existing Minecraft player changes', () => {
+  const old = {
+    uuid: '11111111-1111-1111-1111-111111111111',
+    name: 'Original',
+    level: 1,
+    bypassesPlayerLimit: false,
+  };
+  const currentOwner = { id: '22222222222222222222222222222222', name: 'Original' };
+  const command = {
+    kind: 'player' as const,
+    list: 'operators' as const,
+    action: 'add' as const,
+    name: old.name,
+    expectedUuid: old.uuid,
+    operatorLevel: 2,
+  };
+  function provider() {
+    return {
+      lookupName: vi.fn(async () => currentOwner),
+      lookupUuid: vi.fn(async () => currentOwner),
+    };
+  }
+  it.each(['add', 'remove'] as const)(
+    'preserves selected UUID on %s even when the name is reclaimed',
+    async (action) => {
+      const lookup = provider();
+      const identity = await resolveMinecraftPlayerChangeIdentity(
+        { ...command, action },
+        JSON.stringify([old]),
+        lookup,
+      );
+      expect(identity).toMatchObject({ uuid: old.uuid, name: old.name, source: 'server-file' });
+      expect(lookup.lookupName).not.toHaveBeenCalled();
+      const result = planMinecraftPlayerList(JSON.stringify([old]), 'operators', action, identity, {
+        operatorLevel: 2,
+      });
+      expect(JSON.parse(result.content)).toEqual(action === 'remove' ? [] : [{ ...old, level: 2 }]);
+    },
+  );
+  it('rejects a stale UUID/name row instead of granting the newly named account', async () => {
+    const lookup = provider();
+    await expect(
+      resolveMinecraftPlayerChangeIdentity(
+        command,
+        JSON.stringify([{ ...old, name: 'Renamed' }]),
+        lookup,
+      ),
+    ).rejects.toThrow('conflict');
+    expect(lookup.lookupName).not.toHaveBeenCalled();
+  });
+  it('requires independent matching identity when adding selected UUID to a different list', async () => {
+    const lookup = provider();
+    await expect(resolveMinecraftPlayerChangeIdentity(command, '[]', lookup)).rejects.toThrow(
+      'conflict',
+    );
+    expect(lookup.lookupName).toHaveBeenCalledOnce();
+  });
+  it('allows a cross-list addition only when both provider directions confirm the selected UUID', async () => {
+    const lookup = {
+      lookupName: vi.fn(async () => ({ id: old.uuid, name: old.name })),
+      lookupUuid: vi.fn(async () => ({ id: old.uuid, name: old.name })),
+    };
+    expect(await resolveMinecraftPlayerChangeIdentity(command, '[]', lookup)).toMatchObject({
+      uuid: old.uuid,
+      source: 'mojang',
+    });
+    expect(lookup.lookupName).toHaveBeenCalledOnce();
+    expect(lookup.lookupUuid).toHaveBeenCalledOnce();
+  });
+  it('still independently verifies newly entered additions with no selected UUID', async () => {
+    const lookup = provider();
+    const { expectedUuid: _expectedUuid, ...fresh } = command;
+    expect(await resolveMinecraftPlayerChangeIdentity(fresh, '[]', lookup)).toMatchObject({
+      uuid: '22222222-2222-2222-2222-222222222222',
+      source: 'mojang',
+    });
+    expect(lookup.lookupName).toHaveBeenCalledOnce();
+    expect(lookup.lookupUuid).toHaveBeenCalledOnce();
   });
 });

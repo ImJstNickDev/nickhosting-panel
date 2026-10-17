@@ -401,3 +401,73 @@ describe('shared creation catalog chronology', () => {
     expect(catalog?.applies?.('choices', { sourceMode: 'modpack' })).toBe(false);
   });
 });
+
+describe('Minecraft Players UI contracts', () => {
+  const snapshot = {
+    supported: true,
+    installed: true,
+    operators: [
+      {
+        name: 'Notch',
+        uuid: '069a79f4-44e9-4726-a5be-fca90e38aaf5',
+        level: 4,
+        bypassesPlayerLimit: false,
+      },
+    ],
+    whitelist: [],
+    banned: [],
+    whitelistEnabled: false,
+    enforceWhitelist: false,
+  };
+  it('uses a dedicated authoritative Players loader rather than the content profile', async () => {
+    const client = clientFixture();
+    client.request.mockResolvedValue(snapshot);
+    expect(
+      minecraftUiModule.descriptor.sections.find((section) => section.id === 'players'),
+    ).toMatchObject({
+      renderer: 'minecraft-players',
+      forms: [],
+      columns: [],
+    });
+    expect(await minecraftUiModule.handlers.players?.(client, { serverId, values: {} })).toEqual({
+      values: {},
+      rows: [],
+      metadata: { players: snapshot, installed: true },
+    });
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(client.request.mock.calls[0]?.[0]).toBe(`/v1/servers/${serverId}/minecraft/players`);
+  });
+  it('preserves unavailable roster status and only reports dispatched command outcomes', async () => {
+    const client = clientFixture();
+    const controller = createMinecraftUiController(client);
+    client.request.mockResolvedValueOnce({ state: 'unavailable', players: [], observedAt: null });
+    expect(await controller.onlinePlayers(serverId)).toEqual({
+      state: 'unavailable',
+      players: [],
+      observedAt: null,
+    });
+    client.request.mockResolvedValueOnce({ outcome: 'dispatched' });
+    expect(
+      await controller.playerAction(serverId, { action: 'kick', name: 'Notch', reason: 'Test' }),
+    ).toEqual({ outcome: 'dispatched' });
+    expect(client.request.mock.calls.at(-1)).toMatchObject([
+      `/v1/servers/${serverId}/minecraft/players/actions`,
+      { method: 'POST', body: { action: 'kick', name: 'Notch', reason: 'Test' } },
+    ]);
+  });
+  it('rejects console injection, missing targets and unsupported temporary bans before dispatch', async () => {
+    const client = clientFixture();
+    const controller = createMinecraftUiController(client);
+    for (const action of [
+      { action: 'kick', name: 'Notch', reason: 'bye\nop Attacker' },
+      { action: 'op' },
+      { action: 'tempban', name: 'Notch' },
+      { action: 'whitelist-on', name: 'Notch' },
+    ]) {
+      await expect(
+        controller.playerAction(serverId, action as Parameters<typeof controller.playerAction>[1]),
+      ).rejects.toThrow();
+    }
+    expect(client.request).not.toHaveBeenCalled();
+  });
+});

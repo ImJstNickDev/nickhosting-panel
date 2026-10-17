@@ -1430,3 +1430,26 @@ read-only authority and change/reset callbacks. It owns the existing GET/PUT
 contract, revision, errors and save lifecycle. Minecraft registers its Vanilla
 26.1 preview; unknown keys or unsupported channel sets use the generic editor.
 No database migration or Gateway packet change accompanies this UI extension.
+
+### Minecraft player management — 2026-10-17
+
+- `GET /v1/servers/:id/minecraft/players`: authorized server readers receive bounded
+  authoritative operator, whitelist and player-ban lists, installed/support flags,
+  and whitelist enabled/enforcement state. Missing list files are empty only for
+  an explicit provider404; transport/permission/parse errors remain errors.
+- `GET /v1/servers/:id/minecraft/players/online`: parsed names, observation time and
+  `available|unavailable|offline` state. Unavailable does not mean an empty server.
+  Readers can request only this fixed observation, never arbitrary console input.
+- `POST /v1/servers/:id/minecraft/players/actions`: server managers only, installed
+  supported running server, typed `op|deop|whitelist-add|whitelist-remove|whitelist-on|whitelist-off|kick|ban|pardon`.
+  Named actions accept bounded Minecraft names and optional `expectedUuid`; only
+  kick/ban accept a single-line reason. No arbitrary command, selectors or tempban.
+  Returns202 with `outcome: dispatched`. Unknown post-send outcomes remain
+  `operation_uncertain`; there is no transport fallback or automatic replay.
+- Existing `/minecraft/operations` player commands retain offline jobs, including
+  operator level and slot-limit bypass. Optional selected `expectedUuid` protects
+  existing-row edits/removals; new additions still require verified identity.
+
+Standard managed-server authorization, lifecycle locks, provider identity and
+actor/subject audit apply. Typed commands appear in Activity through the existing
+console audit model. No new provider keys, database tables or deployment settings.

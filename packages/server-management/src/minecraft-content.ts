@@ -908,6 +908,35 @@ export function applyMinecraftStoredPlayerChange(
   configuration[command.list] = players.map((entry) => entry.name);
   return minecraftStoredConfigurationSchema.parse(configuration);
 }
+/** Existing rows carry UUID authority from the current file. A renamed or reclaimed
+ * name must not redirect an edit/removal to whichever account now owns that name. */
+export async function resolveMinecraftPlayerChangeIdentity(
+  command: Extract<MinecraftContentCommand, { kind: 'player' }>,
+  source: string,
+  provider: Parameters<typeof verifyMinecraftPlayer>[1],
+) {
+  if (!command.expectedUuid) return verifyMinecraftPlayer(command.name, provider);
+  let entries: unknown;
+  try {
+    entries = JSON.parse(source);
+  } catch {
+    throw new DomainError('conflict');
+  }
+  if (!Array.isArray(entries) || entries.length > 100000) throw new DomainError('conflict');
+  const matches = entries.filter((entry) => entry && entry.uuid === command.expectedUuid);
+  if (matches.length === 0 && command.action === 'add') {
+    const identity = await verifyMinecraftPlayer(command.name, provider);
+    if (identity.uuid !== command.expectedUuid) throw new DomainError('conflict');
+    return identity;
+  }
+  if (matches.length !== 1 || matches[0].name !== command.name) throw new DomainError('conflict');
+  return {
+    uuid: command.expectedUuid,
+    name: command.name,
+    source: 'server-file' as const,
+    verifiedAt: new Date().toISOString(),
+  };
+}
 /** Recover only the historical ADD receipt-loss bug against unchanged durable
  * intent and an already applied exact file. REMOVE lacks the removed identity
  * in its after-image, so missing REMOVE authority remains explicitly uncertain. */
@@ -931,8 +960,9 @@ async function recoverMinecraftPlayerReceipt(
       (await hashMinecraftRemoteFile(context, path))?.sha256 !== change.afterSha256
     )
       throw new DomainError('operation_uncertain');
-    const player = await verifyMinecraftPlayer(
-      command.name,
+    const player = await resolveMinecraftPlayerChangeIdentity(
+      command,
+      change.content,
       options.identityProvider ?? createMinecraftIdentityProvider({ userAgent: options.userAgent }),
     );
     let entries: unknown;
@@ -1534,12 +1564,13 @@ async function applyPreparedContent(
           return [await plannedText(context, 'server.properties', result.content, snapshot.hash)];
         }
         const path = command.list === 'operators' ? 'ops.json' : 'whitelist.json';
-        const player = await verifyMinecraftPlayer(
-          command.name,
+        const snapshot = await textSnapshot(context, path, '[]');
+        const player = await resolveMinecraftPlayerChangeIdentity(
+          command,
+          snapshot.content,
           options.identityProvider ??
             createMinecraftIdentityProvider({ userAgent: options.userAgent }),
         );
-        const snapshot = await textSnapshot(context, path, '[]');
         const currentList = JSON.parse(snapshot.content) as {
           uuid?: string;
           level?: number;
@@ -1586,6 +1617,8 @@ async function applyPreparedContent(
         );
         if (
           !receipt.success ||
+          (command.expectedUuid !== undefined &&
+            (receipt.data.uuid !== command.expectedUuid || receipt.data.name !== command.name)) ||
           (command.list === 'operators' &&
             (receipt.data.level === undefined || receipt.data.bypassesPlayerLimit === undefined))
         )

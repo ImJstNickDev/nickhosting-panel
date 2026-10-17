@@ -39,6 +39,7 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import type { Variables } from './app.js';
+import { registerMinecraftPlayerRoutes } from './minecraft-players.js';
 
 type C = Context<{ Variables: Variables }>;
 // Public choices carry all runtime-selection authority; an Owner-only mapping
@@ -56,6 +57,7 @@ export function registerMinecraftRoutes(
     management: () => Promise<ManagementRuntime>;
   },
 ) {
+  registerMinecraftPlayerRoutes(app, options);
   const { db, env, principal, body, management } = options;
   const owner = async (c: C) => {
     const context = await principal(c, true);

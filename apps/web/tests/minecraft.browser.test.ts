@@ -27,8 +27,6 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
   let base: string;
   let ownedDirectory: string;
   const pageErrors: string[] = [];
-  const providerRequests: string[] = [];
-  const player = { name: 'BrowserAlex', id: '12345678123442348234123456789abc' };
   beforeAll(async () => {
     fixture = await browserHarness();
     identities = await prepareJourneyIdentities(fixture);
@@ -43,14 +41,7 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
       NH_MINECRAFT_SOURCE_ROOT: `${staging}/sources`,
       NH_MINECRAFT_CONTENT_ROOT: `${staging}/expanded`,
     });
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
-      const url = new URL(input instanceof Request ? input.url : String(input));
-      providerRequests.push(`${url.hostname}${url.pathname}`);
-      if (
-        url.href === `https://api.mojang.com/users/profiles/minecraft/${player.name}` ||
-        url.href === `https://sessionserver.mojang.com/session/minecraft/profile/${player.id}`
-      )
-        return Response.json(player);
+    vi.stubGlobal('fetch', async () => {
       throw new Error('Unexpected external request in isolated Minecraft browser fixture');
     });
     provider = await installBrowserFixtures(
@@ -159,42 +150,6 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
       form.getByRole('button', { name: 'Save changes', exact: true }),
     ).toHaveCount(0);
     await fixture.screenshot(user, 'minecraft-properties-desktop-en');
-    await accessible(user);
-  });
-
-  it('verifies independent player identity and updates whitelist and operator files', async () => {
-    await user.goto(`${base}/players`);
-    let form = section('Player access');
-    await form.getByLabel('Player name', { exact: true }).fill(player.name);
-    await form.getByRole('button', { name: 'Find player', exact: true }).click();
-    await browserExpect(form.getByRole('status')).toContainText('Player identity verified');
-    await operation(() => form.getByRole('button', { name: 'Apply', exact: true }).click());
-    expect(JSON.parse((await provider.files()).get('whitelist.json')?.toString() ?? '[]')).toEqual([
-      { uuid: '12345678-1234-4234-8234-123456789abc', name: player.name },
-    ]);
-    await browserExpect(user.getByRole('cell', { name: player.name, exact: true })).toHaveCount(1);
-    form = section('Player access');
-    await form.getByLabel('Access list', { exact: true }).selectOption('operators');
-    await form.getByLabel('Player name', { exact: true }).fill(player.name);
-    await form.getByLabel('Operator level', { exact: true }).fill('2');
-    await operation(() => form.getByRole('button', { name: 'Apply', exact: true }).click());
-    expect(JSON.parse((await provider.files()).get('ops.json')?.toString() ?? '[]')).toEqual([
-      {
-        uuid: '12345678-1234-4234-8234-123456789abc',
-        name: player.name,
-        level: 2,
-        bypassesPlayerLimit: false,
-      },
-    ]);
-    expect(providerRequests).toContain(`api.mojang.com/users/profiles/minecraft/${player.name}`);
-    expect(providerRequests).toContain(
-      `sessionserver.mojang.com/session/minecraft/profile/${player.id}`,
-    );
-    await browserExpect(user.getByRole('cell', { name: player.name, exact: true })).toHaveCount(2);
-    await browserExpect(
-      section('Player access').getByRole('button', { name: 'Apply', exact: true }),
-    ).toBeEnabled();
-    await fixture.screenshot(user, 'minecraft-players-desktop-en');
     await accessible(user);
   });
 
@@ -349,16 +304,19 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
         )
       ).status(),
     ).toBe(403);
-    await identities.owner.goto(`${fixture.origin}/owner/integrations/minecraft`);
+    await identities.owner.goto(`${fixture.origin}/owner/integrations/minecraft/versions`);
     await browserExpect(
-      identities.owner.getByRole('heading', { name: 'Minecraft compatibility', exact: true }),
+      identities.owner.getByRole('heading', { name: 'Minecraft', exact: true }),
     ).toBeVisible();
     await browserExpect(
-      identities.owner.getByRole('cell', { name: browserMinecraft.release, exact: true }),
+      identities.owner.getByRole('cell').filter({
+        has: identities.owner.getByText(browserMinecraft.release, { exact: true }),
+      }),
     ).toBeVisible();
     await fixture.screenshot(identities.owner, 'owner-minecraft-desktop-en');
     await accessible(identities.owner);
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
+    await user.goto(fixture.origin);
     await user.evaluate(() => localStorage.setItem('nh.locale', 'it'));
     await user.setViewportSize({ width: 390, height: 844 });
     await user.goto(`${base}/properties`);

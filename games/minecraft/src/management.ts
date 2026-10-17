@@ -235,7 +235,7 @@ export function planMinecraftPlayerList(
   source: string,
   kind: 'whitelist' | 'operators',
   action: 'add' | 'remove',
-  player: MinecraftVerifiedPlayer,
+  player: Omit<MinecraftVerifiedPlayer, 'source'> & { readonly source: 'mojang' | 'server-file' },
   options: { operatorLevel?: number; bypassesPlayerLimit?: boolean } = {},
 ): {
   path: 'whitelist.json' | 'ops.json';
@@ -246,7 +246,7 @@ export function planMinecraftPlayerList(
 } {
   if (
     Buffer.byteLength(source) > 4 * 1024 * 1024 ||
-    player.source !== 'mojang' ||
+    !['mojang', 'server-file'].includes(player.source) ||
     !Number.isFinite(Date.parse(player.verifiedAt))
   )
     return invalid('minecraft_player_list');

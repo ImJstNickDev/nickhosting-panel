@@ -33,6 +33,7 @@ import type { ComponentType } from 'react';
 // Owner executable contributions are bundled first-party imports. Metadata never imports code.
 import { lazy } from 'react';
 import type { GameFormViewProps } from './game-form-view.js';
+import type { GameSectionViewProps } from './game-section-view.js';
 import { MinecraftResponseSettings } from './integration-game-settings.js';
 
 const MinecraftSettingsForm = lazy(() =>
@@ -98,4 +99,16 @@ export function getGameAdminSections(gameId: string) {
 }
 export function getGameConnectionAdmin(gameId: string) {
   return ownerConnectionComponents.get(gameId);
+}
+
+const MinecraftPlayersSection = lazy(() =>
+  import('../integrations/minecraft/players.js').then((module) => ({
+    default: module.MinecraftPlayersSection,
+  })),
+);
+const sectionViews = new Map<string, ComponentType<GameSectionViewProps>>([
+  ['minecraft-players', MinecraftPlayersSection],
+]);
+export function getGameSectionView(renderer: string | undefined) {
+  return renderer ? sectionViews.get(renderer) : undefined;
 }

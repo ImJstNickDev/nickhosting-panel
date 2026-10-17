@@ -389,3 +389,40 @@ maps with exact Minecraft versions and server.properties overrides. Ordinary
 modpack/map installation is not itself a verified preset. Players, Worlds, Content
 and preset workflow changes follow in separate work; this Settings pass does not
 implement them or expand runtime eligibility.
+
+### Minecraft Players — 2026-10-17
+
+Players now uses a bundled section renderer (`minecraft-players`), the same trusted
+registry model as custom form views. Core owns section access and durable job
+tracking; the integration owns its roster, list controls and typed commands.
+Executable code is never loaded from API metadata. The loader reads authoritative
+`ops.json`, `whitelist.json`, `banned-players.json` and whitelist properties together,
+not stale configuration intent or the unrelated content inventory. Only the
+integration's declared player-management capability enables this UI.
+
+The whitelist enable switch lives in Players; version-supported enforcement and
+idle-kick properties remain in Settings. Existing offline list changes and whitelist
+property changes reuse durable Minecraft operations. At runtime, typed op/deop,
+whitelist add/remove/on/off, ban/pardon and kick go through the regular managed
+provider boundary. No tempban is advertised for Vanilla. Command dispatch is not
+presented as game-side execution; persistent list effects are checked before
+synchronizing replay configuration, and uncertain delivery is never automatically
+retried. Existing-row operations carry their selected UUID to prevent a renamed
+or reclaimed username from silently changing the target identity. Authoritative
+server-file UUIDs have explicit `server-file` provenance; Mojang lookup remains
+the verifier for new offline additions.
+
+Online names come from a fresh bounded console `list` receipt, not the incomplete
+server-list status sample. The initial parser supports the English timestamped
+Vanilla server-thread response; unsupported formats report unavailable. No chat or
+console history is returned. Observation is requested only while Players is open
+and running (15-second refresh); same-server/provider observations coalesce for
+five seconds, with caller authorization checked independently. List loading is a
+constant four-file fanout, not a request per player. Rendering is limited to 50 rows
+per page, with search and filters over the loaded list.
+
+Reference: [Mojang's commands overview](https://www.minecraft.net/en-us/article/minecraft-commands)
+and the existing locally cached official 26.1 client language resource
+(`commands.list.players`, `commands.op`, `commands.whitelist`, `commands.ban`,
+`commands.pardon`, `commands.kick`). This implements management contracts; it does
+not expand runtime installation or Gateway certification.

@@ -1215,3 +1215,16 @@ is preserved. The two contexts share formatting tokens and cached preview fonts.
 Multiline MOTDs are escaped into one physical Java-properties entry on save;
 other control characters remain rejected. Read-only state is explicit for the
 contenteditable surface as well as the surrounding controls.
+
+Minecraft Players is a compact list workspace with search, role/online filters,
+avatars, quiet labelled icon actions and 50-row pagination. Matching UUIDs combine
+roles without merging different identities that share a historical name. The
+observed online name is used for live actions; saved list names remain available
+for offline changes. An inline account lookup verifies names separately from
+avatar rendering. Whitelist state is server-backed, and commands never optimistically
+change membership. Confirmations explain OP, ban and kick consequences; advanced
+operator permissions are disclosed only for offline editing. Unknown roster and
+uncertain mutation states are distinct from zero players and success. English and
+Italian use the integration-owned `players-catalog.ts`. Mobile controls wrap;
+keyboard navigation, labelled switches and Cancel-first confirmations reuse the
+shared accessibility patterns.

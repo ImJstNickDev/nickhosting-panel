@@ -40,6 +40,7 @@ export const minecraftUiCommandSchema = z.discriminatedUnion('kind', [
       list: z.enum(['operators', 'whitelist']),
       action: z.enum(['add', 'remove']),
       name: player,
+      expectedUuid: uuid.optional(),
       operatorLevel: z.number().int().min(1).max(4).optional(),
       bypassesPlayerLimit: z.boolean().optional(),
     })
@@ -119,6 +120,71 @@ const profileSchema = z
   })
   .strip();
 export type MinecraftUiProfile = z.infer<typeof profileSchema>;
+const managedPlayer = z.object({ name: player, uuid: z.string().max(36) }).strip();
+export const minecraftPlayersSchema = z
+  .object({
+    supported: z.boolean(),
+    installed: z.boolean(),
+    operators: z
+      .array(
+        managedPlayer.extend({
+          level: z.number().int().min(1).max(4),
+          bypassesPlayerLimit: z.boolean(),
+        }),
+      )
+      .max(100000),
+    whitelist: z.array(managedPlayer).max(100000),
+    banned: z
+      .array(
+        managedPlayer.extend({ reason: z.string().optional(), expires: z.string().optional() }),
+      )
+      .max(100000),
+    whitelistEnabled: z.boolean(),
+    enforceWhitelist: z.boolean(),
+  })
+  .strip();
+export type MinecraftPlayers = z.infer<typeof minecraftPlayersSchema>;
+export const minecraftOnlinePlayersSchema = z
+  .object({
+    state: z.enum(['available', 'unavailable', 'offline']),
+    players: z.array(z.object({ name: player }).strip()).max(100000),
+    observedAt: z.iso.datetime({ offset: true }).nullable(),
+  })
+  .strip();
+export const minecraftPlayerActionSchema = z
+  .object({
+    action: z.enum([
+      'op',
+      'deop',
+      'whitelist-add',
+      'whitelist-remove',
+      'whitelist-on',
+      'whitelist-off',
+      'kick',
+      'ban',
+      'pardon',
+    ]),
+    name: player.optional(),
+    expectedUuid: uuid.optional(),
+    reason: z
+      .string()
+      .trim()
+      .min(1)
+      .max(256)
+      .refine((value) => !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value))
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const toggle = value.action === 'whitelist-on' || value.action === 'whitelist-off';
+    if (!toggle && !value.name)
+      context.addIssue({ code: 'custom', path: ['name'], message: 'required' });
+    if (toggle && (value.name || value.expectedUuid))
+      context.addIssue({ code: 'custom', path: ['name'], message: 'unexpected' });
+    if (value.reason !== undefined && !['ban', 'kick'].includes(value.action))
+      context.addIssue({ code: 'custom', path: ['reason'], message: 'unexpected' });
+  });
+export type MinecraftPlayerAction = z.infer<typeof minecraftPlayerActionSchema>;
 const worldSchema = z
   .object({
     name: world,
@@ -250,6 +316,29 @@ export function createMinecraftUiController(client: GameUiClient) {
       return minecraftCatalogOptions(await choices(signal), 'choices', { runtime });
     },
     profile,
+    async players(serverId: string, signal?: AbortSignal): Promise<MinecraftPlayers> {
+      return minecraftPlayersSchema.parse(
+        await request(serverPath(serverId, '/players'), 'GET', undefined, signal),
+      );
+    },
+    async onlinePlayers(serverId: string, signal?: AbortSignal) {
+      return minecraftOnlinePlayersSchema.parse(
+        await request(serverPath(serverId, '/players/online'), 'GET', undefined, signal),
+      );
+    },
+    async playerAction(serverId: string, action: MinecraftPlayerAction, signal?: AbortSignal) {
+      return z
+        .object({ outcome: z.literal('dispatched') })
+        .strip()
+        .parse(
+          await request(
+            serverPath(serverId, '/players/actions'),
+            'POST',
+            minecraftPlayerActionSchema.parse(action),
+            signal,
+          ),
+        );
+    },
     async worlds(serverId: string, signal?: AbortSignal) {
       return z
         .array(worldSchema)

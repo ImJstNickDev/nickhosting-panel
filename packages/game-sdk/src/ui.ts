@@ -255,6 +255,8 @@ export const gameUiDescriptorSchema = z
             id,
             titleKey: key,
             loader: id,
+            /** Bundled first-party section view; never executable code from metadata. */
+            renderer: id.optional(),
             requiredPermissions: z
               .array(z.enum(['server:read', 'server:operate', 'server:manage', 'platform:manage']))
               .min(1)
