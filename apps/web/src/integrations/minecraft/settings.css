@@ -15,6 +15,13 @@
 .minecraft-settings-group--description {
   grid-column: 1 / -1;
 }
+.minecraft-settings-motd {
+  max-width: 720px;
+  margin-inline: auto;
+}
+.minecraft-settings-motd .mc-message-heading {
+  margin-bottom: 12px;
+}
 .minecraft-settings-group h2 {
   margin: 0 0 12px;
   font-size: 1rem;
@@ -55,6 +62,9 @@
   font-size: 0.77rem;
   line-height: 1.5;
   margin-top: 5px;
+}
+.minecraft-settings-motd > .minecraft-settings-hint {
+  margin-top: 10px;
 }
 .minecraft-settings-text {
   display: grid;

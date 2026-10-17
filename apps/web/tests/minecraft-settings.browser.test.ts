@@ -108,7 +108,7 @@ describe('Minecraft settings browser journeys', () => {
     await form().getByRole('button', { name: 'Reset changes', exact: true }).click();
     await browserExpect(
       form().getByRole('textbox', { name: 'Server description', exact: true }),
-    ).toHaveValue('Browser survival');
+    ).toHaveText('Browser survival');
     await browserExpect(form().getByRole('radio', { name: 'Normal', exact: true })).toBeChecked();
     await browserExpect(save()).toHaveCount(0);
     await form()
@@ -175,6 +175,97 @@ describe('Minecraft settings browser journeys', () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
   });
 
+  it('edits the real server MOTD with shared formatting while leaving Gateway template text literal', async () => {
+    await page.goto(`${fixture.origin}${base()}/properties`);
+    const editor = form().getByRole('textbox', { name: 'Server description', exact: true });
+    await browserExpect(editor).toHaveAttribute('contenteditable', 'true');
+    await browserExpect(
+      form().getByRole('button', { name: 'Insert variable', exact: true }),
+    ).toHaveCount(0);
+    for (const alignment of ['Align left', 'Align center', 'Align right'])
+      await browserExpect(form().getByRole('button', { name: alignment, exact: true })).toHaveCount(
+        0,
+      );
+    await editor.fill('Hello world');
+    await editor.press('Home');
+    await editor.press('Control+Shift+ArrowRight');
+    await form().getByRole('button', { name: 'Bold', exact: true }).click();
+    await browserExpect(editor.locator('span[style*="bold"]')).toContainText('Hello');
+    await form().getByRole('button', { name: 'Text codes', exact: true }).click();
+    await browserExpect(editor).toHaveValue(/§lHello/);
+    await browserExpect(editor).toHaveAttribute('maxlength', '256');
+    await editor.fill('x'.repeat(256));
+    await editor.press('End');
+    await editor.pressSequentially('x');
+    await browserExpect(editor).toHaveValue('x'.repeat(256));
+    await form().getByRole('button', { name: 'Reset changes', exact: true }).click();
+    await browserExpect(save()).toHaveCount(0);
+    const motd = '§aCaffè {server}\n§l[align=center] Not a Gateway template';
+    await editor.fill(motd);
+    await form().getByRole('button', { name: 'Visual editor', exact: true }).click();
+    await browserExpect(editor).toContainText('Caffè {server}');
+    await browserExpect(editor).toContainText('[align=center] Not a Gateway template');
+    await browserExpect(editor.locator('span[style*="bold"]')).toContainText('[align=center]');
+    const accepted = acceptedResponse();
+    await save().click();
+    const response = await accepted;
+    expect(response.status()).toBe(202);
+    expect(response.request().postDataJSON()).toMatchObject({
+      command: { kind: 'properties', changes: { motd } },
+    });
+    const { jobId } = (await response.json()) as { jobId: string };
+    const delivery = await provider.processPending();
+    expect(
+      await fixture.database.db
+        .selectFrom('operation_jobs')
+        .select(['state', 'error_code'])
+        .where('id', '=', jobId)
+        .executeTakeFirstOrThrow(),
+      JSON.stringify(delivery),
+    ).toEqual({ state: 'succeeded', error_code: null });
+    await browserExpect(editor).toHaveAttribute('contenteditable', 'true');
+    await browserExpect(save()).toHaveCount(0);
+    expect(
+      parseMinecraftProperties((await provider.files()).get('server.properties')?.toString() ?? '')
+        .motd,
+    ).toBe(motd);
+    await page.reload();
+    await browserExpect(editor).toContainText('Caffè {server}');
+    await browserExpect(editor).toContainText('[align=center] Not a Gateway template');
+    await form().getByRole('button', { name: 'Text codes', exact: true }).click();
+    await browserExpect(editor).toHaveValue(motd);
+    await form().getByRole('button', { name: 'Visual editor', exact: true }).click();
+    await screenshot('minecraft-settings-motd-desktop-en');
+    await accessible();
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'it' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.reload();
+    await browserExpect(
+      page.getByRole('textbox', { name: 'Descrizione del server', exact: true }),
+    ).toContainText('{server}');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      390,
+    );
+    await screenshot('minecraft-settings-motd-mobile-it');
+    await accessible();
+    await journeyRequest(fixture, page, '/api/auth/update-user', { locale: 'en' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await fixture.database.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'running' })
+      .where('id', '=', provider.ids.serverId)
+      .execute();
+    await page.reload();
+    await browserExpect(editor).toHaveAttribute('contenteditable', 'false');
+    await browserExpect(form().getByRole('button', { name: 'Bold', exact: true })).toBeDisabled();
+    await browserExpect(save()).toHaveCount(0);
+    await fixture.database.db
+      .updateTable('managed_servers')
+      .set({ runtime_state: 'offline' })
+      .where('id', '=', provider.ids.serverId)
+      .execute();
+  });
+
   it('keeps supported settings readable without save actions while running or shared view-only', async () => {
     const db = fixture.database.db;
     await db
@@ -184,6 +275,10 @@ describe('Minecraft settings browser journeys', () => {
       .execute();
     await page.goto(`${fixture.origin}${base()}/properties`);
     await browserExpect(form().getByLabel('Player limit', { exact: true })).toBeDisabled();
+    await browserExpect(
+      form().getByRole('textbox', { name: 'Server description', exact: true }),
+    ).toHaveAttribute('contenteditable', 'false');
+    await browserExpect(form().getByRole('button', { name: 'Bold', exact: true })).toBeDisabled();
     await browserExpect(save()).toHaveCount(0);
     await browserExpect(
       page.getByText('Stop the server before changing these settings.'),
@@ -216,6 +311,9 @@ describe('Minecraft settings browser journeys', () => {
     await browserExpect(
       form(identities.peer).getByLabel('Player limit', { exact: true }),
     ).toBeDisabled();
+    await browserExpect(
+      form(identities.peer).getByRole('textbox', { name: 'Server description', exact: true }),
+    ).toHaveAttribute('contenteditable', 'false');
     await browserExpect(
       form(identities.peer).getByRole('button', { name: 'Save changes' }),
     ).toHaveCount(0);
@@ -255,7 +353,7 @@ describe('Minecraft settings browser journeys', () => {
       await page.goto(`${fixture.origin}${base()}/properties`);
       await browserExpect(
         form().getByRole('textbox', { name: 'Server description', exact: true }),
-      ).toHaveValue('Legacy world');
+      ).toHaveText('Legacy world');
       await browserExpect(form().getByRole('radio', { name: 'Normal', exact: true })).toBeChecked();
       await browserExpect(
         form().getByRole('radio', { name: 'Survival', exact: true }),
@@ -296,7 +394,7 @@ describe('Minecraft settings browser journeys', () => {
     expect((await failed).status()).toBe(503);
     await browserExpect(
       form().getByRole('textbox', { name: 'Server description', exact: true }),
-    ).toHaveValue('Preserved draft');
+    ).toHaveText('Preserved draft');
     await browserExpect(form().getByRole('alert')).toBeVisible();
     await browserExpect(save()).toBeEnabled();
     await screenshot('minecraft-settings-error-desktop-en');
@@ -324,7 +422,7 @@ describe('Minecraft settings browser journeys', () => {
     ).toBeVisible();
     await browserExpect(
       form().getByRole('textbox', { name: 'Server description', exact: true }),
-    ).toHaveValue('Preserved draft');
+    ).toHaveText('Preserved draft');
     await browserExpect(form().locator('button[type="submit"]')).toBeDisabled();
     await browserExpect(page.getByText('Changes saved', { exact: true })).toHaveCount(0);
     await screenshot('minecraft-settings-uncertain-desktop-en');
@@ -360,14 +458,14 @@ describe('Minecraft settings browser journeys', () => {
     });
     await browserExpect(
       form().getByRole('textbox', { name: 'Server description', exact: true }),
-    ).toBeEnabled({ timeout: 15000 });
+    ).toHaveAttribute('contenteditable', 'true', { timeout: 15000 });
     await browserExpect(save()).toHaveCount(0);
     await browserExpect(
       page.getByText('The result is being checked. Do not repeat the operation.'),
     ).toHaveCount(0);
     await browserExpect(
       form().getByRole('textbox', { name: 'Server description', exact: true }),
-    ).toHaveValue('Preserved draft');
+    ).toHaveText('Preserved draft');
     expect(errors).toEqual([]);
   });
 });

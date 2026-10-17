@@ -1204,3 +1204,14 @@ accepted jobs are not presented as saved, including recovery from uncertainty.
 Whitelist settings remain here until the separate Players pass. The running-server
 MOTD and player idle-kick timeout explicitly distinguish themselves from Gateway
 messages and automatic server sleep.
+
+Minecraft's running-server description reuses the same `MinecraftMessageEditor`
+as Gateway messages, placed after the other settings and before Save: direct
+preview editing, legacy colors/styles, source view,
+undo/redo and the two-line layout guide. Settings supplies a plain MOTD channel
+(maximum256 characters), the real server name, and no Gateway variables,
+inheritance/reset or alignment-template controls. Literal template-looking text
+is preserved. The two contexts share formatting tokens and cached preview fonts.
+Multiline MOTDs are escaped into one physical Java-properties entry on save;
+other control characters remain rejected. Read-only state is explicit for the
+contenteditable surface as well as the surrounding controls.

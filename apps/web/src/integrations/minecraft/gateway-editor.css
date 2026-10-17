@@ -222,7 +222,7 @@
 .mc-disconnect-return {
   width: min(100%, 400px);
 }
-.mc-message-editor .gateway-rich-text {
+.mc-message-section .gateway-rich-text {
   min-height: 38px;
   width: 100%;
   white-space: pre-wrap;
@@ -232,14 +232,14 @@
   cursor: text;
   caret-color: #fff;
 }
-.mc-message-editor .gateway-rich-text:focus-visible {
+.mc-message-section .gateway-rich-text:focus-visible {
   box-shadow: inset 0 -1px #ffffff50;
 }
-.mc-message-editor .gateway-rich-text-variable {
+.mc-message-section .gateway-rich-text-variable {
   background: #ffffff15;
   border-radius: 2px;
 }
-.mc-message-editor .mc-message-source {
+.mc-message-section .mc-message-source {
   font-family: ui-monospace, monospace;
   font-size: 13px;
   color: #fff;

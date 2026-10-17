@@ -1,3 +1,4 @@
+import type { GatewayMessageDefinition } from '@nickhosting/game-sdk';
 import {
   type MinecraftMessageAlignment,
   minecraftGlyphAdvance,
@@ -11,13 +12,18 @@ import {
   type ReactNode,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import type { GatewayMessageExtensionProps } from '../../features/gateway-message-extension.js';
-import { messageChannels, messagePreview } from '../../features/gateway-message-preview.js';
+import {
+  type MessageChannel,
+  messageChannels,
+  messagePreview,
+} from '../../features/gateway-message-preview.js';
 import { GatewayRichText, type GatewayRichTextHandle } from '../../features/gateway-rich-text.js';
 import {
   minecraftDisconnectHeight,
@@ -56,7 +62,7 @@ function Panorama() {
   return <div className="mc-panorama" aria-hidden="true" style={assetStyle('gatewayPanorama')} />;
 }
 
-export function MinecraftGatewayEditor(props: GatewayMessageExtensionProps) {
+function useMinecraftFont() {
   const [fontReady, setFontReady] = useState(false);
   useEffect(() => {
     let active = true;
@@ -67,29 +73,80 @@ export function MinecraftGatewayEditor(props: GatewayMessageExtensionProps) {
       active = false;
     };
   }, []);
+  return fontReady;
+}
+
+export function MinecraftGatewayEditor(props: GatewayMessageExtensionProps) {
   return (
     <div className="mc-message-editor">
       {messageChannels(props.definition, props.state, props.locale).map((channel) => (
-        <MessageScreen key={channel.id} {...props} channel={channel} fontReady={fontReady} />
+        <MinecraftMessageEditor
+          key={channel.id}
+          channel={channel}
+          locale={props.locale}
+          value={
+            props.overrides[channel.id] ?? props.state.defaults[props.locale][channel.id] ?? ''
+          }
+          onChange={(value) => props.onChange(channel.id, value)}
+          readOnly={props.readOnly}
+          variables={props.state.previewVariables[props.locale]}
+          variableDefinitions={props.definition.variables}
+          inheritance={Object.hasOwn(props.overrides, channel.id) ? 'custom' : 'inherited'}
+          onReset={() => props.onReset(channel.id)}
+        />
       ))}
     </div>
   );
 }
 
-function MessageScreen({
-  channel,
-  state,
-  definition,
+export interface MinecraftMessageEditorProps {
+  channel: MessageChannel;
+  locale: 'en' | 'it';
+  value: string;
+  onChange(value: string): void;
+  readOnly: boolean;
+  serverName?: string;
+  variables?: Record<string, string>;
+  variableDefinitions?: GatewayMessageDefinition['variables'];
+  inheritance?: 'custom' | 'inherited';
+  onReset?(): void;
+  allowAlignment?: boolean;
+}
+const noVariables: Record<string, string> = {};
+const noVariableDefinitions: GatewayMessageDefinition['variables'] = [];
+
+/** Shared Minecraft chrome and editing surface for real MOTDs and Gateway templates. */
+export function MinecraftMessageEditor({
+  channel: suppliedChannel,
   locale,
-  overrides,
-  readOnly,
+  value,
   onChange,
+  readOnly,
+  serverName,
+  variables = noVariables,
+  variableDefinitions = noVariableDefinitions,
+  inheritance,
   onReset,
-  fontReady,
-}: GatewayMessageExtensionProps & {
-  channel: GatewayMessageExtensionProps['definition']['channels'][number];
-  fontReady: boolean;
-}) {
+  allowAlignment = true,
+}: MinecraftMessageEditorProps) {
+  const fontReady = useMinecraftFont();
+  // Alignment directives belong to Gateway templates. A real server MOTD must
+  // keep any such text literal, including when editing a pre-existing value.
+  const channel = useMemo(
+    () =>
+      !allowAlignment && suppliedChannel.formatting
+        ? {
+            ...suppliedChannel,
+            formatting: {
+              ...suppliedChannel.formatting,
+              tokens: suppliedChannel.formatting.tokens.filter(
+                (token) => stripMinecraftMessageAlignment(token.value) === token.value,
+              ),
+            },
+          }
+        : suppliedChannel,
+    [suppliedChannel, allowAlignment],
+  );
   const t = useT();
   const editor = useRef<GatewayRichTextHandle>(null);
   const sourceField = useRef<HTMLTextAreaElement>(null);
@@ -98,10 +155,8 @@ function MessageScreen({
   const [variableMenu, setVariableMenu] = useState(false);
   const toolbar = useRef<HTMLFieldSetElement>(null);
   const field = channel.id;
-  const custom = Object.hasOwn(overrides, field);
-  const value = overrides[field] ?? state.defaults[locale][field] ?? '';
-  const alignment = field === 'motd' ? minecraftMessageAlignment(value) : 'left';
-  const variables = state.previewVariables[locale];
+  const custom = inheritance === 'custom';
+  const alignment = allowAlignment && field === 'motd' ? minecraftMessageAlignment(value) : 'left';
   const surface = useRef<HTMLDivElement>(null);
   const [guide, setGuide] = useState({ lines: 0, overflow: false });
   const lineLabel = `${t('games.minecraft.messages.lineCount', { count: guide.lines })}${field === 'motd' ? ' / 2' : ''}`;
@@ -110,7 +165,7 @@ function MessageScreen({
     if (!node) return;
     // Controls belong to the template, never to substituted variable values.
     const runs = messagePreview(
-      field === 'motd' ? stripMinecraftMessageAlignment(value) : value,
+      allowAlignment && field === 'motd' ? stripMinecraftMessageAlignment(value) : value,
       variables,
       {
         ...channel,
@@ -140,7 +195,7 @@ function MessageScreen({
     const observer = new ResizeObserver(update);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [value, variables, channel, field]);
+  }, [value, variables, channel, field, allowAlignment]);
   const colors = channel.formatting?.tokens.filter((token) => token.style?.color) ?? [];
   const formats =
     channel.formatting?.tokens.filter(
@@ -165,7 +220,7 @@ function MessageScreen({
       const end = node?.selectionEnd ?? start;
       const next = value.slice(0, start) + token + value.slice(end);
       if (next.length <= channel.maxLength) {
-        onChange(field, next);
+        onChange(next);
         requestAnimationFrame(() => {
           node?.focus();
           node?.setSelectionRange(start + token.length, start + token.length);
@@ -185,7 +240,7 @@ function MessageScreen({
       maxLength={channel.maxLength}
       rows={field === 'motd' ? 2 : 4}
       spellCheck={false}
-      onChange={(event) => onChange(field, event.target.value)}
+      onChange={(event) => onChange(event.target.value)}
     />
   ) : (
     <GatewayRichText
@@ -195,16 +250,18 @@ function MessageScreen({
       variables={variables}
       label={channel.label[locale]}
       readOnly={readOnly}
-      onChange={(text) => onChange(field, text)}
+      onChange={onChange}
     />
   );
   return (
     <section className="mc-message-section" aria-label={channel.label[locale]}>
       <header className="mc-message-heading">
         <span>{channel.label[locale]}</span>
-        <span className="mc-message-inheritance">
-          {t(`games.minecraft.messages.${custom ? 'custom' : 'inherited'}`)}
-        </span>
+        {inheritance && (
+          <span className="mc-message-inheritance">
+            {t(`games.minecraft.messages.${inheritance}`)}
+          </span>
+        )}
         <div className="mc-message-heading-actions">
           <IconButton
             label={t(`games.minecraft.messages.${source ? 'visual' : 'source'}`)}
@@ -213,13 +270,15 @@ function MessageScreen({
           >
             <CodeIcon />
           </IconButton>
-          <IconButton
-            label={t('automation.resetMessage')}
-            disabled={readOnly || !custom}
-            onClick={() => onReset(field)}
-          >
-            ↺
-          </IconButton>
+          {onReset && (
+            <IconButton
+              label={t('automation.resetMessage')}
+              disabled={readOnly || (inheritance !== undefined && !custom)}
+              onClick={onReset}
+            >
+              ↺
+            </IconButton>
+          )}
         </div>
       </header>
       {field === 'motd' ? (
@@ -241,7 +300,7 @@ function MessageScreen({
                 style={assetStyle('gatewayServerIcon')}
               />
               <div className="mc-server-description">
-                <div className="mc-server-name">{variables.server}</div>
+                <div className="mc-server-name">{serverName ?? variables.server}</div>
                 <div className="mc-aligned-message" style={{ textAlign: alignment }}>
                   {content}
                 </div>
@@ -351,7 +410,7 @@ function MessageScreen({
             )}
           </IconButton>
         ))}
-        {field === 'motd' && (
+        {allowAlignment && field === 'motd' && (
           <fieldset
             className="mc-alignment-tools"
             aria-label={t('games.minecraft.messages.alignment')}
@@ -368,7 +427,7 @@ function MessageScreen({
                   setMinecraftMessageAlignment(value, direction).length > channel.maxLength
                 }
                 onClick={() => {
-                  if (source) onChange(field, setMinecraftMessageAlignment(value, direction));
+                  if (source) onChange(setMinecraftMessageAlignment(value, direction));
                   else
                     editor.current?.transform((edit) => {
                       const next = setMinecraftMessageAlignment(edit.value, direction);
@@ -406,31 +465,37 @@ function MessageScreen({
         >
           ↷
         </IconButton>
-        <div className="mc-message-menu-anchor">
-          <IconButton
-            label={t('games.minecraft.messages.variables')}
-            disabled={readOnly}
-            expanded={variableMenu}
-            onClick={() => {
-              setVariableMenu(!variableMenu);
-              setPalette(false);
-            }}
-          >
-            {'{ }'}
-          </IconButton>
-          {variableMenu && (
-            <fieldset
-              className="mc-variable-menu"
-              aria-label={t('games.minecraft.messages.variables')}
+        {variableDefinitions.length > 0 && (
+          <div className="mc-message-menu-anchor">
+            <IconButton
+              label={t('games.minecraft.messages.variables')}
+              disabled={readOnly}
+              expanded={variableMenu}
+              onClick={() => {
+                setVariableMenu(!variableMenu);
+                setPalette(false);
+              }}
             >
-              {definition.variables.map((variable) => (
-                <button key={variable.id} type="button" onClick={() => insert(`{${variable.id}}`)}>
-                  {variable.label[locale]}
-                </button>
-              ))}
-            </fieldset>
-          )}
-        </div>
+              {'{ }'}
+            </IconButton>
+            {variableMenu && (
+              <fieldset
+                className="mc-variable-menu"
+                aria-label={t('games.minecraft.messages.variables')}
+              >
+                {variableDefinitions.map((variable) => (
+                  <button
+                    key={variable.id}
+                    type="button"
+                    onClick={() => insert(`{${variable.id}}`)}
+                  >
+                    {variable.label[locale]}
+                  </button>
+                ))}
+              </fieldset>
+            )}
+          </div>
+        )}
         <Tooltip
           content={`${t(`games.minecraft.messages.${field === 'motd' ? 'motdGuide' : 'disconnectGuide'}`)} ${t('games.minecraft.messages.measurementGuide')}${!fontReady ? ` ${t('games.minecraft.messages.fallbackGuide')}` : ''}`}
         >

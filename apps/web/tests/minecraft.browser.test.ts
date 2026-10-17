@@ -154,7 +154,7 @@ describe('M5 Minecraft browser management through actual API and durable jobs', 
     });
     await browserExpect(
       form.getByRole('textbox', { name: 'Server description', exact: true }),
-    ).toHaveValue('Weekend survival');
+    ).toHaveText('Weekend survival');
     await browserExpect(
       form.getByRole('button', { name: 'Save changes', exact: true }),
     ).toHaveCount(0);

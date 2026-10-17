@@ -7,6 +7,7 @@ export interface GameFormViewProps {
   values: Record<string, unknown>;
   errors: Record<string, string>;
   data: UiSectionData;
+  serverName: string;
   disabled: boolean;
   dirty: boolean;
   onChange(id: string, value: unknown): void;

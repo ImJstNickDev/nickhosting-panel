@@ -11892,3 +11892,34 @@ Final affected checks: WebPanel/application and browser-test typecheck passed.
 passed1/1 (four unrelated journeys skipped). Five owned harness schemas and the
 legacy journey's temporary staging directory were cleaned. No outstanding must-fix
 review finding; broader historical value compatibility remains the noted limitation.
+
+
+### 2026-10-17 — Shared Minecraft MOTD editor in Settings
+
+The running-server description reuses the Gateway Minecraft editor, placed last
+after Performance and before the save controls. Colors, styles, direct preview,
+source mode, undo/redo and the two-line guide share the existing implementation.
+Settings supplies the real server name and plain MOTD: Gateway variables, template
+alignment, inheritance and reset controls are not exposed. Template-looking text
+remains literal. The existing 256-character limit remains; LF is now accepted and
+escaped into one physical Java-properties entry, with other controls rejected.
+
+Focused validation:
+
+- `scripts/dev.sh pnpm typecheck`: passed.
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/management.test.ts`: 25 passed, including multiline escaping, literal backslashes and property-injection regression.
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/gateway-messages.test.ts games/minecraft/src/ui/ui.test.ts apps/web/src/features/gateway-rich-text-model.test.ts`: 30 passed.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/minecraft-settings.browser.test.ts -t 'groups Minecraft|edits the real server MOTD'`: 2 passed, 3 unrelated journeys skipped.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/automation.browser.test.ts -t 'saves Gateway messages through actual handlers'`: 1 passed, 8 unrelated journeys skipped.
+- Browser checks exercise real handlers and durable fixture jobs: formatting/multiline save and reload, literal placeholders, length limit, reset and running-server read-only behavior. External provider effects are simulated in the isolated harness, not a live Minecraft write.
+- Desktop English/mobile Italian Axe checks: zero violations in exercised states. Chromium-only targeted follow-up; no new Firefox or full historical-suite run.
+- Independent source/security and rendered UI review found no must-fix issue. Scoped Biome and whitespace checks passed.
+
+Final screenshots: `docs/screenshots/m5/minecraft-settings-motd-desktop-en.png`
+and `docs/screenshots/m5/minecraft-settings-motd-mobile-it.png`. The focused MOTD
+journey was repeated only to capture the final bottom placement requested during
+review. No new infrastructure resources, container restarts/rebuilds, provider
+writes or production changes. Disposable browser schemas cleaned by the harness.
+Dev Vite served both modified modules with HTTP200. No migration or dependency
+change; rollback is the source commit. Issue18 and existing release boundaries
+remain unchanged.

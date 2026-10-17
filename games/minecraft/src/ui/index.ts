@@ -15,6 +15,7 @@ import {
   minecraftContentCapabilities,
 } from './controller.js';
 
+export { minecraftFormattingTokens } from '../message-formatting.js';
 export * from '../message-layout.js';
 export * from './controller.js';
 

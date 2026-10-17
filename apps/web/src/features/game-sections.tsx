@@ -628,6 +628,7 @@ export function GameSections({
           <GameActionForm
             key={`${serverId}-${form.id}`}
             {...{ module, form, serverId }}
+            serverName={server.data.name}
             data={loaded.data}
             canManage={
               form.action?.requiredPermissions.every((p) => permissions.includes(p)) ?? false
@@ -655,6 +656,7 @@ function GameActionForm({
   module,
   form,
   serverId,
+  serverName,
   data,
   canManage,
   state,
@@ -667,6 +669,7 @@ function GameActionForm({
   module: TrustedGameUiModule;
   form: UiForm;
   serverId: string;
+  serverName: string;
   data: UiSectionData;
   canManage: boolean;
   state: string;
@@ -791,7 +794,7 @@ function GameActionForm({
           }
         >
           <View
-            {...{ fields, values, errors, data, onChange }}
+            {...{ fields, values, errors, data, onChange, serverName }}
             disabled={Boolean(blocked) || busy}
             dirty={hasChanges}
             feedback={

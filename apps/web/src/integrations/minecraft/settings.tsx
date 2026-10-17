@@ -1,12 +1,13 @@
 import type { UiField } from '@nickhosting/game-sdk/ui';
-import { useId } from 'react';
-import { useT } from '../../app/i18n.js';
+import { minecraftFormattingTokens, minecraftUiCatalogs } from '@nickhosting/minecraft/ui';
+import { useId, useMemo } from 'react';
+import { useLocale, useT } from '../../app/i18n.js';
 import type { GameFormViewProps } from '../../features/game-form-view.js';
+import { MinecraftMessageEditor } from './gateway-editor.js';
 import './settings.css';
 
 const key = (name: string) => `games.minecraft.settings.${name}`;
 const groups = [
-  { id: 'description', fields: ['motd'] },
   { id: 'gameplay', fields: ['difficulty', 'gamemode', 'pvp', 'allow-flight', 'hardcore'] },
   {
     id: 'access',
@@ -23,6 +24,7 @@ const groups = [
     ],
   },
   { id: 'performance', fields: ['view-distance', 'simulation-distance'] },
+  { id: 'description', fields: ['motd'] },
 ] as const;
 
 const help: Record<string, string> = {
@@ -56,8 +58,19 @@ export function MinecraftSettingsForm(props: GameFormViewProps) {
             aria-labelledby={`${id}-${group.id}`}
             key={group.id}
           >
-            <h2 id={`${id}-${group.id}`}>{t(key(group.id))}</h2>
-            <div className="minecraft-settings-surface">
+            <h2
+              id={`${id}-${group.id}`}
+              className={group.id === 'description' ? 'visually-hidden' : undefined}
+            >
+              {t(key(group.id))}
+            </h2>
+            <div
+              className={
+                group.id === 'description'
+                  ? 'minecraft-settings-motd'
+                  : 'minecraft-settings-surface'
+              }
+            >
               {group.fields.map((field) => (
                 <Property key={field.id} field={field} {...props} />
               ))}
@@ -70,7 +83,14 @@ export function MinecraftSettingsForm(props: GameFormViewProps) {
   );
 }
 
-function Property({ field, values, errors, onChange }: GameFormViewProps & { field: UiField }) {
+function Property({
+  field,
+  values,
+  errors,
+  onChange,
+  disabled,
+  serverName,
+}: GameFormViewProps & { field: UiField }) {
   const t = useT();
   const id = useId();
   const value = values[field.id];
@@ -93,6 +113,21 @@ function Property({ field, values, errors, onChange }: GameFormViewProps & { fie
       )}
     </>
   );
+
+  if (field.id === 'motd' && field.type === 'text') {
+    return (
+      <>
+        <ServerMotd
+          value={typeof value === 'string' ? value : ''}
+          maxLength={field.maxLength}
+          readOnly={disabled}
+          serverName={serverName}
+          onChange={(next) => onChange(field.id, next)}
+        />
+        {messages}
+      </>
+    );
+  }
 
   if (field.type === 'choice') {
     return (
@@ -192,4 +227,44 @@ function Property({ field, values, errors, onChange }: GameFormViewProps & { fie
     );
   }
   return null;
+}
+
+function ServerMotd({
+  value,
+  maxLength,
+  readOnly,
+  serverName,
+  onChange,
+}: {
+  value: string;
+  maxLength: number;
+  readOnly: boolean;
+  serverName: string;
+  onChange(value: string): void;
+}) {
+  const { locale } = useLocale();
+  const channel = useMemo(
+    () => ({
+      id: 'motd',
+      label: {
+        en: minecraftUiCatalogs.en['games.minecraft.properties.motd'] ?? '',
+        it: minecraftUiCatalogs.it['games.minecraft.properties.motd'] ?? '',
+      },
+      maxLength,
+      multiline: true,
+      formatting: { tokens: minecraftFormattingTokens, caseInsensitive: true },
+    }),
+    [maxLength],
+  );
+  return (
+    <MinecraftMessageEditor
+      channel={channel}
+      locale={locale === 'it' ? 'it' : 'en'}
+      value={value}
+      readOnly={readOnly}
+      serverName={serverName}
+      onChange={onChange}
+      allowAlignment={false}
+    />
+  );
 }

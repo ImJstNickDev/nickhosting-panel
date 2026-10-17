@@ -138,7 +138,8 @@ export function editMinecraftProperties(
       if (
         value.length > 256 ||
         [...value].some(
-          (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+          (character) =>
+            (character.charCodeAt(0) < 32 && character !== '\n') || character.charCodeAt(0) === 127,
         )
       )
         return invalid('minecraft_property_motd');
