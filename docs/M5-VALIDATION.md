@@ -11090,3 +11090,36 @@ remain documented rather than silently reclassified. API/worker/SFTP are healthy
 the unrelated unhealthy Gateway remains unchanged. No new game-server test assets
 were created; the one migration container was removed, while private backups and
 provenance were retained. SFTPGo #18 remains a separate production-release gate.
+
+### SFTP upload ownership regression discovered — 2026-10-17
+
+After Activity activation, the Owner's real FileZilla upload of `fondinf.txt`
+failed with `SSH_FX_PERMISSION_DENIED`. Read-only SFTPGo logs identify an OS-level
+`open(..., O_CREAT|O_TRUNC)` denial, before a transfer starts. This is not an
+Event Manager action blocking the transfer.
+
+The user-SFTP process still runs as 988:988, matching Wings' configured system
+user. Its read-write server mount instead has owner 100:101 (`nginx`) and mode 0755;
+existing files likewise belong to nginx. The target root and `server.jar` ctime
+are 02:15:39 UTC, coincident with the preceding backup extension installation.
+The installed standard Blueprint script runs `find "$FOLDER/"`, excludes only
+`node_modules`, then applies `chown "$OWNERSHIP"` to every other entry. In this
+installation `/app/var` contains Wings volumes. Therefore native installer ownership
+housekeeping traversed the game data too. The previous backup-activation checks of
+provider identities and application fingerprints did **not** detect this filesystem
+metadata change; prior no-game-data-change statements must not be read as evidence
+that ownership was preserved.
+
+Read-only inventory: all 29 top-level volume directories currently belong to 100:101.
+The specific affected Owner server has 5,324 entries, all 100:101, with no symlinks or
+multiply linked regular files. Its durable private metadata inventory was saved;
+no repair has yet been applied. The proposed scoped correction restores only this
+server to 988:988, preserving file contents and modes, after explicit Owner approval.
+Other volumes are outside that request. Do not change SFTPGo to nginx or broaden
+filesystem permissions to mask the regression.
+
+Further native Blueprint installations must wait for a separately reviewed way to
+prevent traversal of Wings data. Rechecking provider metadata alone is insufficient;
+future deployment verification must include the mounted game-data owner and SFTP
+write eligibility. No live installer, filesystem or configuration modification was
+performed during this diagnosis.

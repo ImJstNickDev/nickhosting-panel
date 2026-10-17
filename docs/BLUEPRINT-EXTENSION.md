@@ -810,3 +810,15 @@ server metadata were preserved. See the
 [activation record](M5-ENVIRONMENTS.md#backup-workflow-activation-completed--2026-10-17).
 No live game backup/restore was initiated; callback outcomes still need the Owner's
 interactive test. The earlier not-installed statement records the pre-approval state.
+
+### Deployment blocker: Panel tree contains Wings data
+
+The 2026-10-17 SFTP investigation confirmed that native Blueprint ownership
+housekeeping traverses the deployment's `/app/var` bind mount into Wings volumes,
+changing game files to the Panel's nginx user. See the
+[incident evidence](M5-VALIDATION.md#sftp-upload-ownership-regression-discovered--2026-10-17).
+Do not repeat native installation in that layout until an Owner-approved deployment
+correction prevents this traversal. This is an observed failure, not an extension
+payload issue. A successful installer exit or unchanged provider IDs does not prove
+that game filesystem permissions survived. Do not automatically repair unrelated
+servers or change the SFTP service identity as a workaround.
