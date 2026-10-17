@@ -33,6 +33,10 @@ export type GatewayMessageOverrides = z.infer<typeof gatewayMessageOverridesSche
 export const gatewayPresentationSchema = z.strictObject({
   serverName: z.string().max(160),
   messages: gatewayMessageOverridesSchema,
+  variables: z
+    .record(identifier, z.string().max(1024))
+    .refine((values) => Object.keys(values).length <= 32)
+    .optional(),
   stopping: z.boolean().optional(),
   blockedReason: z.enum(['capacity_denied', 'unavailable']).optional(),
   // Historical startup estimate, not a routing/readiness timer.

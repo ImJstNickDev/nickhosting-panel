@@ -14,6 +14,7 @@ import {
   minecraftContentCapabilities,
 } from './controller.js';
 
+export * from '../message-layout.js';
 export * from './controller.js';
 
 const namespace = 'games.minecraft';
@@ -38,6 +39,39 @@ const translated: Record<string, [string, string]> = {
   'messages.delete': ['Delete', 'Elimina'],
   'messages.refresh': ['Refresh', 'Aggiorna'],
   'messages.cancel': ['Cancel', 'Annulla'],
+  'messages.alignLeft': ['Align left', 'Allinea a sinistra'],
+  'messages.alignCenter': ['Align center', 'Allinea al centro'],
+  'messages.alignRight': ['Align right', 'Allinea a destra'],
+  'messages.alignment': ['Message alignment', 'Allineamento del messaggio'],
+  'messages.layoutGuide': ['Client layout guide', 'Guida al layout del client'],
+  'messages.lineCount': [
+    '{count, plural, one {# line} other {# lines}}',
+    '{count, plural, one {# riga} other {# righe}}',
+  ],
+  'messages.motdGuide': [
+    'Vanilla 26.1 wraps at 267 GUI pixels and displays only the first two lines, without an ellipsis. Variable values can change the result.',
+    'Vanilla 26.1 va a capo a 267 pixel GUI e mostra solo le prime due righe, senza puntini di sospensione. I valori delle variabili possono cambiare il risultato.',
+  ],
+  'messages.disconnectGuide': [
+    'Vanilla 26.1 wraps to the game window width minus 50 GUI pixels. There is no line limit; long messages can extend beyond the screen. This guide uses the preview window size.',
+    'Vanilla 26.1 va a capo alla larghezza della finestra meno 50 pixel GUI. Non esiste un limite di righe: i messaggi lunghi possono uscire dallo schermo. La guida usa le dimensioni di questa anteprima.',
+  ],
+  'messages.measurementGuide': [
+    'Estimated with the default font. Client fonts and settings can change the result.',
+    'Stima con il font predefinito. Font e impostazioni del client possono cambiare il risultato.',
+  ],
+  'messages.fallbackGuide': [
+    'Preview font unavailable. The guide uses default Minecraft metrics.',
+    'Font di anteprima non disponibile. La guida usa le misure predefinite di Minecraft.',
+  ],
+  'messages.motdClipped': [
+    'The text is estimated to exceed the two visible lines. All lines remain editable here.',
+    'Il testo supera le due righe visibili secondo la stima. Qui puoi ancora modificarle tutte.',
+  ],
+  'messages.disconnectClipped': [
+    'The message may extend beyond a game window this size.',
+    'Il messaggio potrebbe uscire da una finestra di gioco di queste dimensioni.',
+  ],
   name: ['Minecraft', 'Minecraft'],
   'admin.versions': ['Versions', 'Versioni'],
   'installer.runtime': ['Choose a runtime', 'Scegli un runtime'],

@@ -537,6 +537,7 @@ export function createMinecraftProtocolAdapter(
             context.route.locale,
             presentation,
             Date.now(),
+            kind,
           );
         };
         if (action === 'status') {

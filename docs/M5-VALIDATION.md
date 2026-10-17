@@ -11715,3 +11715,75 @@ Screenshots replace the earlier message-editor desktop/mobile captures after the
 correction. Production and dev infrastructure unchanged; source mounts/HMR apply
 the UI/resources. The separately reported Gateway readiness issue remains outside
 this UI correction and has not been declared resolved.
+
+### Gateway variables and Minecraft client-layout guides — 2026-10-17
+
+Added version/runtime/confirmed public address/startup elapsed placeholders. Generic
+bounded snapshot context is negotiated with `presentation-variables-v1`, including
+observation/sleep/startup receipts; legacy strict readers retain their prior shape.
+Metadata reads are batched locally, with no new provider requests per ping. Runtime
+names and placeholder interpretation stay inside Minecraft. Elapsed works without
+historical ETA; unavailable values remain empty. No schema migration.
+
+Inspected the official 26.1 JAR: MOTD fixed267GUI-pixel wrapping, first two lines
+only without ellipsis; disconnect width window−50, uncapped centered stack of
+73+9×linesGUI pixels. The compact estimated line guide uses glyph advances and
+expanded values, including bold. It is advisory; resource packs/fallback glyphs
+and other client releases may differ. Editing keeps all text reachable through
+bounded scrolling. See MINECRAFT-MESSAGE-EDITOR.md for precise reference limits.
+
+Validation (targeted, counts overlap; not a full-suite claim):
+
+- `scripts/dev.sh pnpm exec vitest run packages/core/src/gateway-presentation.test.ts games/minecraft/src/gateway-messages.test.ts`:7 passed.
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/integrations/minecraft/gateway-message-layout.test.ts apps/web/src/features/gateway-rich-text-model.test.ts`:15 passed.
+- `scripts/dev.sh pnpm exec vitest run apps/api/src/gateway-sleep.test.ts apps/api/src/gateway-startup.test.ts apps/game-gateway/src/control-client.test.ts apps/game-gateway/src/startup-client.test.ts games/minecraft/src/gateway-messages.test.ts`:93 passed.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/gateway.integration.test.ts packages/server-management/src/gateway-minecraft.integration.test.ts`:35 passed. Earlier registry/message/Minecraft targeted integration run:62 passed, with overlap. Initial M1 harness unavailable; existing M2 isolated services reused without starting containers.
+- `scripts/dev.sh pnpm test:browser apps/web/tests/automation.browser.test.ts -t 'saves Gateway messages|edits Minecraft preview'`:2 passed,7 unrelated journeys skipped; repeated with `NH_BROWSER=firefox`:2 passed,7 skipped. Actual handler save/reload, new variables, 40-line editing/scrolling, long disconnect, glyph/bold boundary, EN/IT, desktop/mobile, keyboard formatting/history, Axe0 including overflow state.
+- Root TypeScript and WebPanel/application-test typechecks passed; focused Biome passed.
+
+Failure record: an intermediate browser assertion used a proposed label rather
+than the descriptor's actual label; corrected. Chromium then exposed that restoring
+a controlled contenteditable caret did not scroll to the final line; bounded
+nearest-ancestor caret scrolling fixed it and both browser journeys were rerun.
+Review also caught strict legacy snapshot compatibility, missing long-MOTD scroll,
+count accessibility and overconfident font claims; all corrected and independently
+reviewed. No must-fix findings remained at this checkpoint.
+
+Screenshots: minecraft-message-editor-desktop-en.png, mobile-it.png and
+-overflow-desktop-en.png under docs/screenshots/m5. Source assets remain ignored.
+
+Activation: exact `nickhosting-dev` Gateway container identity verified; used
+standing Owner authorization for `docker restart --time 20 nickhosting-dev-gateway-1`.
+API remains healthy; Gateway control is available with3 routes, but readiness
+still returns503/ready=false, as before this task. This existing finding is not a
+successful Gateway end-to-end test or a resolved operational defect. No game-server
+power/file operations, DNS changes, other container restarts or new live test assets.
+Rollback needs compatible Gateway/Core code and stored templates; preserve data.
+PR21 remains open/unmerged; SFTPGo#18 and production gates unchanged.
+
+
+Follow-up in the same change: MOTD left/center/right alignment uses measured neutral
+spaces after variable expansion. Left preserves the previous output; the client
+already centers disconnect text, so that editor has no alignment buttons. Shared
+267-pixel wrapping and ASCII/Latin-1 glyph advances drive guides and network output.
+Unknown glyphs/resource packs remain approximate. The independent reviewer compared
+all196 measured glyph entries with the local reference font: no mismatches. The
+font and client artwork remain ignored, not published as new source assets.
+
+Alignment validation:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/message-layout.test.ts games/minecraft/src/gateway-messages.test.ts games/minecraft/src/protocol.test.ts`: layout5 and renderer5 passed; protocol37/38 passed initially, with an existing socket fixture observing `socket_closed` instead of `socket_error`. The affected protocol file rerun passed38/38. This is48 passing tests across runs, not a clean initial full run.
+- Repeated only the two affected Chromium/Firefox browser journeys for alignment, saved/reloaded center selection, and undo history. An independent review found direct alignment updates cleared editor history; recorded transforms fixed it. Regression now edits text, aligns, undoes alignment, then undoes text. All other automation journeys remain skipped.
+- Final `scripts/dev.sh pnpm typecheck`, `scripts/dev.sh pnpm i18n:check` (2155 EN/IT/pseudolocale keys), changed-source Biome and `git diff --check` passed.
+- Independent backend, accessibility/content and rendered desktop/mobile reviews closed with no remaining must-fix findings. Screenshots refreshed with alignment controls.
+
+A second necessary Gateway-only restart under the same standing authorization loads
+alignment. No API/container rebuild, migrations, provider writes or new live assets.
+The pre-existing readiness failure remains explicitly separate from fixture/browser
+acceptance; no successful real-client Minecraft run is claimed for these changes.
+
+Final activation check: API healthy; Gateway control available, three routes,
+HTTP503/ready=false (same pre-existing readiness result). Governance passed:
+1102 indexed text files,433 sanitized browser screenshots,925 relative links,
+4 TOML files and44 ignore cases. Final Chromium and Firefox runs each passed the
+two targeted journeys, with7 unrelated journeys skipped.

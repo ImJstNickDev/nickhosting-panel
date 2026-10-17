@@ -18,6 +18,7 @@ function fixture(authenticated = true) {
   const route = {
     id: input.routeId,
     generation: input.generation,
+    presentation: { serverName: 'Demo', messages: {}, variables: { version: '26.1' } },
     completedSleep: undefined as undefined | { generation: string; quiescenceUntil: string },
   };
   mocks.snapshot.mockImplementation(async () => ({ routes: [{ ...route }] }));
@@ -56,10 +57,13 @@ function fixture(authenticated = true) {
         quiescenceUntil: input.quiescenceUntil,
       };
     },
-    call: async (signal?: AbortSignal, body: unknown = input) =>
+    call: async (signal?: AbortSignal, body: unknown = input, features?: string) =>
       app.request(`/internal/gateway/${gatewayId}/sleep-completion`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(features ? { 'X-NickHosting-Gateway-Features': features } : {}),
+        },
         body: JSON.stringify(body),
         signal,
       }),
@@ -84,6 +88,21 @@ describe('durable sleep completion notifications', () => {
     );
     expect(f.close).toHaveBeenCalledOnce();
   });
+  it.each([undefined, 'presentation-variables-v1'])(
+    'negotiates sleep receipt presentation for %s',
+    async (features) => {
+      const f = fixture();
+      f.complete();
+      const response = await f.call(undefined, f.input, features);
+      expect(response.status).toBe(200);
+      const payload = await response.json();
+      expect(payload.routes[0].presentation.variables).toEqual(
+        features ? f.route.presentation.variables : undefined,
+      );
+      expect(payload.routes[0].presentation.serverName).toBe('Demo');
+      expect(payload.routes[0].completedSleep).toEqual(f.route.completedSleep);
+    },
+  );
   it('waits for the durable exact proof, ignoring unrelated hints and mismatched fences', async () => {
     const f = fixture();
     let settled = false;

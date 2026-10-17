@@ -1,4 +1,9 @@
-import { type AuthContext, DomainError, type PlatformConfig } from '@nickhosting/core';
+import {
+  type AuthContext,
+  DomainError,
+  type GatewayPresentation,
+  type PlatformConfig,
+} from '@nickhosting/core';
 import type { Database, gameCatalog } from '@nickhosting/database';
 import {
   type GameBackupHooks,
@@ -39,7 +44,7 @@ export interface TrustedGameModule {
    * The manifest declares the editor contract, this hook resolves Owner settings. */
   resolveGatewayMessages?(
     settings: PlatformConfig,
-    context: { serverName: string },
+    context: { serverName: string; variables?: GatewayPresentation['variables'] },
   ): GatewayMessageDefinition;
   /** Compiled game policy: authenticated provider running may establish readiness. */
   readinessSource?: 'provider_running';

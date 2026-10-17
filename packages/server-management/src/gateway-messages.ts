@@ -8,6 +8,7 @@ import {
 import { z } from 'zod';
 import { type DB, type Environment, lockResources } from './admission.js';
 import { trustedGameModules } from './game-modules.js';
+import { getGatewayPresentationVariables } from './gateway-presentation.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { authorizeServer, parse } from './registry.js';
 
@@ -24,12 +25,12 @@ export async function getServerGatewayMessages(
   const server = await authorizeServer(db, context, serverId);
   const mapping = await db
     .selectFrom('runtime_egg_mappings')
-    .select('game_id')
+    .select(['game_id', 'runtime_id'])
     .where('id', '=', server.mapping_id)
     .executeTakeFirstOrThrow();
   const state = await db
     .selectFrom('gateway_server_states')
-    .select('gateway_messages')
+    .select(['gateway_messages', 'game_version'])
     .where('server_id', '=', serverId)
     .executeTakeFirst();
   const module = modules.get(mapping.game_id);
@@ -39,6 +40,15 @@ export async function getServerGatewayMessages(
         module.resolveGatewayMessages
           ? module.resolveGatewayMessages((await getSettings(db, env)).values, {
               serverName: server.name,
+              variables: (
+                await getGatewayPresentationVariables(db, [
+                  {
+                    id: server.id,
+                    runtimeId: mapping.runtime_id,
+                    gameVersion: state?.game_version ?? '',
+                  },
+                ])
+              ).get(server.id),
             })
           : declared,
       )

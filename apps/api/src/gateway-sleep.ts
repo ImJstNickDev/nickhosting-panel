@@ -4,6 +4,7 @@ import { getGatewaySnapshot } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { gatewayPresentationForClient } from './gateway-presentation.js';
 
 const requestSchema = z
   .object({
@@ -143,7 +144,11 @@ export function registerGatewaySleepRoutes(
       });
       if (c.req.raw.signal.aborted) abort();
       const snapshot = await result;
-      return snapshot ? c.json(snapshot) : c.body(null, 204);
+      return snapshot
+        ? c.json(
+            gatewayPresentationForClient(snapshot, c.req.header('X-NickHosting-Gateway-Features')),
+          )
+        : c.body(null, 204);
     } finally {
       done = true;
       clearTimeout(timer);

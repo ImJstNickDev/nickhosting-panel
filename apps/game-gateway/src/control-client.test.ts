@@ -36,6 +36,9 @@ describe('authenticated bounded Gateway control client', () => {
     const client = createGatewayControlClient({ ...settings, fetcher });
     expect(await client.waitForSleep?.(request, new AbortController().signal)).toBeUndefined();
     expect(String(fetcher.mock.calls[0]?.[0])).toContain('/sleep-completion');
+    expect(
+      new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('X-NickHosting-Gateway-Features'),
+    ).toBe('presentation-variables-v1');
     client.close();
   });
   it('aborts a pending sleep completion on caller cancellation', async () => {
@@ -230,7 +233,7 @@ describe('authenticated bounded Gateway control client', () => {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${token}`,
-        'X-NickHosting-Gateway-Features': 'completed-sleep-v1',
+        'X-NickHosting-Gateway-Features': 'completed-sleep-v1,presentation-variables-v1',
       },
       redirect: 'error',
     });
@@ -244,7 +247,7 @@ describe('authenticated bounded Gateway control client', () => {
     ).toBe(false);
     expect(
       new Headers(fetcher.mock.calls[2]?.[1]?.headers).get('X-NickHosting-Gateway-Features'),
-    ).toBe('readiness-receipt-v1');
+    ).toBe('readiness-receipt-v1,presentation-variables-v1');
     fetcher.mockResolvedValueOnce(Response.json(snapshot));
     expect(await client.reportObservation(observation)).toEqual(snapshot);
     fetcher.mockResolvedValueOnce(Response.json({ ...snapshot, gatewayId: randomUUID() }));

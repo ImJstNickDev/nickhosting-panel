@@ -604,15 +604,91 @@ describe('Automation browser journeys', () => {
           }),
       ).toBe(true);
     await browserExpect(page.locator('.mc-list-actions .mc-game-button')).toHaveCount(7);
+    const motd = page.getByRole('textbox', { name: 'Server list message', exact: true });
+    const motdSection = page.getByRole('region', { name: 'Server list message', exact: true });
+    await motd.fill('First line\nSecond line\nStill editable');
+    await browserExpect(motdSection.getByRole('status')).toContainText('two visible lines');
+    await browserExpect(motd).toContainText('Still editable');
+    await browserExpect(
+      motdSection.getByRole('button', { name: /^Client layout guide:/ }),
+    ).toHaveText('3 lines / 2');
+    await fixture.screenshot(page, 'automation-messages-overflow-desktop-en');
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await motd.fill(Array.from({ length: 40 }, (_, index) => `Line ${index}`).join('\n'));
+    await motd.press('ControlOrMeta+End');
+    await motd.press('x');
+    await browserExpect(motd).toContainText('Line 39x');
+    expect(
+      await page
+        .locator('.mc-list-viewport')
+        .evaluate((node) => node.scrollHeight > node.clientHeight && node.scrollTop > 0),
+    ).toBe(true);
+    const disconnect = page.getByRole('textbox', { name: 'Join message', exact: true });
+    await disconnect.fill('Line\n'.repeat(40));
+    await browserExpect(page.locator('.mc-disconnect-overflow')).toBeVisible();
+    await disconnect.press('ControlOrMeta+End');
+    await disconnect.press('x');
+    await browserExpect(disconnect).toContainText('x');
+    await page
+      .getByRole('region', { name: 'Join message', exact: true })
+      .getByRole('button', { name: 'Restore default' })
+      .click();
+    await motdSection.getByRole('button', { name: 'Insert variable' }).click();
+    for (const name of ['Game version', 'Runtime', 'Server address', 'Elapsed startup time'])
+      await browserExpect(motdSection.getByRole('button', { name, exact: true })).toBeVisible();
+    await motdSection.getByRole('button', { name: 'Insert variable' }).click();
+    if (
+      existsSync(
+        new URL(
+          '../../../games/minecraft/src/ui/assets/local-26.1/minecraft.woff',
+          import.meta.url,
+        ),
+      )
+    ) {
+      // 44 normal A glyphs fit per 267-GUI-pixel line; bold adds 1 pixel each.
+      await motd.fill('A'.repeat(88));
+      await browserExpect(
+        motdSection.getByRole('button', { name: /^Client layout guide:/ }),
+      ).toHaveText('2 lines / 2');
+      await motd.fill(`§l${'A'.repeat(88)}`);
+      await browserExpect(
+        motdSection.getByRole('button', { name: /^Client layout guide:/ }),
+      ).toHaveText('3 lines / 2');
+    }
     await page
       .getByRole('textbox', { name: 'Server list message', exact: true })
-      .fill('§a{server}');
+      .fill('§a{server} · {version} {runtime}');
+    await motd.press('Control+End');
+    await motd.press('!');
+    await motdSection.getByRole('button', { name: 'Align right', exact: true }).click();
+    await browserExpect(
+      motdSection.getByRole('button', { name: 'Align right', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await motdSection.getByRole('button', { name: 'Undo', exact: true }).click();
+    await browserExpect(
+      motdSection.getByRole('button', { name: 'Align left', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await browserExpect(motd).toHaveText('Survival · 26.1 Vanilla!');
+    await motdSection.getByRole('button', { name: 'Undo', exact: true }).click();
+    await browserExpect(motd).toHaveText('Survival · 26.1 Vanilla');
+    await motdSection.getByRole('button', { name: 'Align left', exact: true }).click();
+    await motdSection.getByRole('button', { name: 'Align center', exact: true }).click();
+    await browserExpect(motdSection.locator('.mc-aligned-message')).toHaveCSS(
+      'text-align',
+      'center',
+    );
     await page.getByLabel('Status', { exact: true }).selectOption('waking');
     await page.getByRole('textbox', { name: 'Join message', exact: true }).fill('Starting soon');
     await page.getByLabel('Status', { exact: true }).selectOption('sleeping');
     await browserExpect(
       page.getByRole('textbox', { name: 'Server list message', exact: true }),
-    ).toHaveText('Survival');
+    ).toHaveText('Survival · 26.1 Vanilla');
     await browserExpect(page.locator('.mc-server-entry')).toContainText('Survival');
     const savedMessages = page.waitForResponse(
       (response) =>
@@ -623,7 +699,7 @@ describe('Automation browser journeys', () => {
     const saved = await journeyRequest<{
       overrides: Record<string, { motd?: string; disconnect?: string }>;
     }>(fixture, page, `/v1/servers/${provider.ids.serverId}/gateway-messages`);
-    expect(saved.overrides.sleeping?.motd).toBe('§a{server}');
+    expect(saved.overrides.sleeping?.motd).toBe('[align=center]§a{server} · {version} {runtime}');
     expect(saved.overrides.waking?.disconnect).toBe('Starting soon');
     await page.mouse.move(0, 0);
     await fixture.screenshot(page, 'automation-messages-desktop-en');
@@ -643,6 +719,9 @@ describe('Automation browser journeys', () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
+    await browserExpect(
+      page.getByRole('button', { name: 'Allinea al centro', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true');
     await fixture.screenshot(page, 'automation-messages-mobile-it');
     expect(
       (

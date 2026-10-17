@@ -3,6 +3,7 @@ import { createTestDatabase } from '@nickhosting/database/testing';
 import { minecraftDigest, minecraftVerificationChecks } from '@nickhosting/minecraft';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { lockResources } from './admission.js';
+import { getServerGatewayMessages } from './gateway-messages.js';
 import { getGatewayState, setGatewayPolicy } from './gateway-orchestration.js';
 import { activateProvisionGateway, planProvisionGateway } from './gateway-provision.js';
 import {
@@ -168,6 +169,82 @@ async function register() {
   );
 }
 describe('Minecraft declared-capability Gateway registration', () => {
+  it('shares locally bound message variables with editor previews and never exposes listener addresses', async () => {
+    await register();
+    const values = { version: '26.1', runtime: 'Vanilla', address: '' };
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes[0]?.presentation?.variables).toEqual({ ...values, runtime: 'vanilla' });
+    expect(
+      (await getServerGatewayMessages(f.db, f.context, serverId, env)).definition?.states[0]
+        ?.previewVariables.en,
+    ).toMatchObject(values);
+    const assignmentId = randomUUID();
+    const connection = {
+      hostname: 'world.example.test',
+      port: 27001,
+      records: [{ type: 'SRV', data: { port: 27001 } }],
+    };
+    await f.db
+      .insertInto('dns_assignments')
+      .values({
+        id: assignmentId,
+        server_id: serverId,
+        hostname: connection.hostname,
+        ownership_token: randomUUID(),
+        plan: JSON.stringify({ connection }),
+        ledger: JSON.stringify([]),
+        state: 'pending',
+      })
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      '',
+    );
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ state: 'active' })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      'world.example.test',
+    );
+    expect(
+      (await getServerGatewayMessages(f.db, f.context, serverId, env)).definition?.states[0]
+        ?.previewVariables.it.address,
+    ).toBe('world.example.test');
+    await f.db
+      .updateTable('dns_assignments')
+      .set({
+        state: 'uncertain',
+        plan: JSON.stringify({
+          connection: { ...connection, hostname: 'pending.example.test' },
+          confirmedConnection: connection,
+        }),
+      })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      'world.example.test',
+    );
+    await f.db
+      .updateTable('dns_assignments')
+      .set({
+        state: 'active',
+        plan: JSON.stringify({ connection: { ...connection, records: [] } }),
+      })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      'world.example.test:27001',
+    );
+    await f.db
+      .updateTable('dns_assignments')
+      .set({ plan: JSON.stringify({ connection: { ...connection, port: 27002 } }) })
+      .where('id', '=', assignmentId)
+      .execute();
+    expect((await getGatewaySnapshot(f.db, env)).routes[0]?.presentation?.variables?.address).toBe(
+      '',
+    );
+  });
   it('publishes stopping presentation for an active scheduled stop without granting forwarding', async () => {
     await register();
     await f.db

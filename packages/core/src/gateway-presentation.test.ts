@@ -38,3 +38,18 @@ describe('Generic Gateway message transport', () => {
       expect(gatewayMessageOverridesSchema.safeParse(input).success).toBe(false);
   });
 });
+
+it('bounds generic integration variables and accepts absent or empty values', () => {
+  const base = { serverName: 'Demo', messages: {} };
+  expect(gatewayPresentationSchema.parse(base).variables).toBeUndefined();
+  expect(
+    gatewayPresentationSchema.parse({ ...base, variables: { room: 'A', address: '' } }).variables,
+  ).toEqual({ room: 'A', address: '' });
+  for (const variables of [
+    { room: 'x'.repeat(1025) },
+    { constructor: 'unsafe' },
+    { 'bad name': 'unsafe' },
+    Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`name${i}`, 'x'])),
+  ])
+    expect(gatewayPresentationSchema.safeParse({ ...base, variables }).success).toBe(false);
+});

@@ -646,6 +646,25 @@ describe('per-server Gateway presentation', () => {
     login.classify(loginStart());
     expect(componentText(decodeJson(login.response('sleeping').bytes))).toBe('Join later: Demo');
   });
+  it('emits space-aligned MOTD components while leaving disconnect alignment literal', () => {
+    const ctx = context();
+    const presentation = {
+      serverName: 'AAA',
+      messages: {
+        sleeping: { motd: '[align=center]§a{server}', disconnect: '[align=right]{server}' },
+      },
+    };
+    const status = session({ ...ctx, route: { ...ctx.route, presentation } });
+    status.classify(handshake());
+    status.classify(frameMinecraftPacket(0));
+    const description = decodeJson(status.response('sleeping').bytes).description;
+    expect(componentText(description)).toBe(`${' '.repeat(31)}AAA`);
+    expect(description.extra.at(-1)).toMatchObject({ text: 'AAA', color: 'green' });
+    const login = session({ ...ctx, route: { ...ctx.route, presentation } });
+    login.classify(handshake(766, 2));
+    login.classify(loginStart());
+    expect(componentText(decodeJson(login.response('sleeping').bytes))).toBe('[align=right]AAA');
+  });
   it('explains disabled automatic wake rather than inviting a join to start', () => {
     const ctx = context('1.20.5', 'it');
     const status = session({ ...ctx, route: { ...ctx.route, wakeEnabled: false } });

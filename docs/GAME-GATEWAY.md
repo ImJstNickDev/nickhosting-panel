@@ -203,3 +203,18 @@ Minecraft overrides keep their JSON shape. Snapshot revision changes for cosmeti
 edits still preserve established TCP/UDP forwarding and lifecycle generation.
 No extra provider reads, polling loop, readiness delay or lease extension is added.
 See [integration descriptors](GAME-INTEGRATIONS.md#integration-owned-gateway-message-descriptors).
+
+
+Optional `presentation.variables` carries bounded integration context strings
+(maximum32 keys,1024 characters/value); only the integration assigns their meaning.
+The control API includes this additive field only for clients advertising
+`presentation-variables-v1` in the comma-separated
+`X-NickHosting-Gateway-Features` header. This applies to normal snapshots,
+observation readiness receipts, sleep-completion receipts and startup SSE snapshots.
+Existing `completed-sleep-v1`, `readiness-receipt-v1` and startup features remain
+independent. This preserves strict older readers during API-first rolling updates.
+
+Minecraft uses locally batched binding/DNS data for version, runtime ID and
+confirmed public address; its adapter resolves runtime display names. The startup
+clock is published even when no historical duration estimate exists, so elapsed
+time does not depend on ETA. Rendering these values performs no provider calls.

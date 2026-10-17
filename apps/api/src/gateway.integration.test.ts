@@ -253,12 +253,30 @@ describe('M3 Core service authentication and managed control plane', () => {
     expect(legacy.status).toBe(200);
     const oldPayload = await legacy.json();
     expect(oldPayload.routes[0].completedSleep).toBeUndefined();
+    expect(oldPayload.routes[0].presentation.variables).toBeUndefined();
     const modern = await request(`${prefix()}/snapshot`, undefined, {
       'X-NickHosting-Gateway-Features': 'completed-sleep-v1',
     });
     expect(modern.status).toBe(200);
     const newPayload = await modern.json();
     expect(newPayload.routes[0].completedSleep).toMatchObject({ jobId: operation.job_id });
+    expect(newPayload.routes[0].presentation.variables).toBeUndefined();
+    for (const features of [
+      'presentation-variables-v1',
+      'completed-sleep-v1, presentation-variables-v1,unknown-v1',
+    ]) {
+      const capable = await request(`${prefix()}/snapshot`, undefined, {
+        'X-NickHosting-Gateway-Features': features,
+      });
+      expect(capable.status).toBe(200);
+      const payload = await capable.json();
+      expect(payload.routes[0].presentation.variables).toEqual(route.presentation?.variables);
+      const { variables: _variables, ...presentation } = payload.routes[0].presentation;
+      expect(presentation).toEqual(oldPayload.routes[0].presentation);
+      expect(payload.routes[0].completedSleep !== undefined).toBe(
+        features.includes('completed-sleep-v1'),
+      );
+    }
     expect(newPayload.revision).toBe(oldPayload.revision);
     expect(newPayload.routes[0].revision).toBe(oldPayload.routes[0].revision);
   });
@@ -538,7 +556,7 @@ describe('M3 Core service authentication and managed control plane', () => {
     });
     expect((await request(`${prefix()}/observations`, observation())).status).toBe(409);
   });
-  it.each([false, true])(
+  it.each(['', 'readiness-receipt-v1', 'readiness-receipt-v1,presentation-variables-v1'])(
     'logs accepted readiness timing and negotiates receipt=%s',
     async (receipt) => {
       const startedAt = new Date(Date.now() - 1000).toISOString();
@@ -561,14 +579,19 @@ describe('M3 Core service authentication and managed control plane', () => {
       const accepted = await request(
         `${prefix()}/observations`,
         observation(),
-        receipt ? { 'X-NickHosting-Gateway-Features': 'readiness-receipt-v1' } : {},
+        receipt ? { 'X-NickHosting-Gateway-Features': receipt } : {},
       );
       expect(accepted.status).toBe(receipt ? 200 : 204);
-      if (receipt)
-        expect(await accepted.json()).toMatchObject({
+      if (receipt) {
+        const payload = await accepted.json();
+        expect(payload.routes[0].presentation.variables).toEqual(
+          receipt.includes('presentation-variables-v1') ? route.presentation?.variables : undefined,
+        );
+        expect(payload).toMatchObject({
           gatewayId: env.NH_GATEWAY_ID,
           routes: [expect.objectContaining({ id: route.id, mode: 'online' })],
         });
+      }
       expect(timingLogs).toHaveLength(1);
       expect(timingLogs[0]).toMatchObject({
         event: 'gateway.observation_state_changed',

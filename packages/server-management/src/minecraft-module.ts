@@ -139,7 +139,9 @@ export const minecraftModule: TrustedGameModule = {
   manifest: minecraftManifest,
   provisionAsResourceOwner: true,
   resolveGatewayMessages(settings, context) {
-    return resolveMinecraftGatewayMessages(settings.minecraftGatewayResponses, context.serverName);
+    return resolveMinecraftGatewayMessages(settings.minecraftGatewayResponses, context.serverName, {
+      variables: context.variables,
+    });
   },
   readinessSource: minecraftReadinessSource,
   async gatewayPolicyBinding(db, server, env) {

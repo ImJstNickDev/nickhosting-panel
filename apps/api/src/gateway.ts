@@ -28,6 +28,7 @@ import {
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { gatewayClientFeatures, gatewayPresentationForClient } from './gateway-presentation.js';
 import { registerGatewaySleepRoutes } from './gateway-sleep.js';
 import { registerGatewayStartupRoutes } from './gateway-startup.js';
 
@@ -106,10 +107,11 @@ export function registerGatewayRoutes(
     );
   });
   app.get(`${prefix}/snapshot`, async (c) => {
-    const snapshot = await getGatewaySnapshot(db, env);
+    const features = c.req.header('X-NickHosting-Gateway-Features');
+    const snapshot = gatewayPresentationForClient(await getGatewaySnapshot(db, env), features);
     // Old Gateways use strict route decoding. Negotiate the additive terminal
     // proof so a Core-first rolling update cannot interrupt their listeners.
-    if (c.req.header('X-NickHosting-Gateway-Features') !== 'completed-sleep-v1') {
+    if (!gatewayClientFeatures(features).has('completed-sleep-v1')) {
       return c.json({
         ...snapshot,
         routes: snapshot.routes.map(({ completedSleep: _proof, ...route }) => route),
@@ -282,9 +284,16 @@ export function registerGatewayRoutes(
       selected.mode === 'waking' &&
       value.ready &&
       result.state === 'online' &&
-      c.req.header('X-NickHosting-Gateway-Features') === 'readiness-receipt-v1'
+      gatewayClientFeatures(c.req.header('X-NickHosting-Gateway-Features')).has(
+        'readiness-receipt-v1',
+      )
     )
-      return c.json(await getGatewaySnapshot(db, env));
+      return c.json(
+        gatewayPresentationForClient(
+          await getGatewaySnapshot(db, env),
+          c.req.header('X-NickHosting-Gateway-Features'),
+        ),
+      );
     return c.body(null, 204);
   });
   app.post(`${prefix}/context`, async (c) =>

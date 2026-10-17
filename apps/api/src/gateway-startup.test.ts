@@ -84,6 +84,7 @@ function fixture(authenticated = true) {
     signal?: AbortSignal,
     keepalives = true,
     providerReadiness = false,
+    variables = false,
   ) =>
     app.request(`/internal/gateway/${gatewayId}/startup-events`, {
       method: 'POST',
@@ -94,6 +95,7 @@ function fixture(authenticated = true) {
               'X-NickHosting-Gateway-Features': [
                 keepalives ? 'startup-keepalive-v1' : '',
                 providerReadiness ? 'provider-readiness-v1' : '',
+                variables ? 'presentation-variables-v1' : '',
               ]
                 .filter(Boolean)
                 .join(','),
@@ -111,28 +113,34 @@ function fixture(authenticated = true) {
 }
 beforeEach(() => vi.clearAllMocks());
 describe('Gateway startup hints', () => {
-  it('sends a durable readiness snapshot only for negotiated compiled provider readiness', async () => {
-    const f = fixture();
-    mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
-    mocks.running.mockResolvedValue({ state: 'online' });
-    const snapshot = { routes: [{ id: input.routeId, mode: 'online' }] };
-    mocks.snapshot.mockResolvedValue(snapshot);
-    const response = await f.call(input, undefined, true, true);
-    const relay = await f.ready();
-    relay.onEvent({ type: 'status', data: 'starting' });
-    expect(mocks.running).not.toHaveBeenCalled();
-    relay.onEvent({ type: 'status', data: 'running' });
-    const text = await response.text();
-    expect(text).toContain('"readinessSnapshot":');
-    expect(text).toContain('"observedAt":');
-    expect(mocks.running).toHaveBeenCalledWith(
-      expect.anything(),
-      serverId,
-      expect.objectContaining({ generation: input.generation, wakeJobId: input.wakeJobId }),
-      expect.anything(),
-    );
-    expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
-  });
+  it.each([false, true])(
+    'sends a durable readiness snapshot with negotiated presentation=%s',
+    async (variables) => {
+      const f = fixture();
+      mocks.module.mockReturnValue({ readinessSource: 'provider_running' });
+      mocks.running.mockResolvedValue({ state: 'online' });
+      const presentation = { serverName: 'Demo', messages: {}, variables: { version: '26.1' } };
+      const snapshot = { routes: [{ id: input.routeId, mode: 'online', presentation }] };
+      mocks.snapshot.mockResolvedValue(snapshot);
+      const response = await f.call(input, undefined, true, true, variables);
+      const relay = await f.ready();
+      relay.onEvent({ type: 'status', data: 'starting' });
+      expect(mocks.running).not.toHaveBeenCalled();
+      relay.onEvent({ type: 'status', data: 'running' });
+      const text = await response.text();
+      expect(text).toContain('"readinessSnapshot":');
+      expect(text.includes('"variables":')).toBe(variables);
+      expect(text).toContain('"serverName":"Demo"');
+      expect(text).toContain('"observedAt":');
+      expect(mocks.running).toHaveBeenCalledWith(
+        expect.anything(),
+        serverId,
+        expect.objectContaining({ generation: input.generation, wakeJobId: input.wakeJobId }),
+        expect.anything(),
+      );
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+    },
+  );
   it.each([false, true])(
     'keeps unnegotiated or undeclared provider readiness as a hint (%s)',
     async (declared) => {

@@ -23,6 +23,7 @@ import {
   effectiveBackendAllocationPool,
 } from './allocation-pool.js';
 import { getGatewayState } from './gateway-orchestration.js';
+import { getGatewayPresentationVariables } from './gateway-presentation.js';
 import { currentInteractiveContext } from './interactive-context.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
 import { authorizeServer, parse } from './registry.js';
@@ -352,6 +353,8 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         'server.runtime_state',
         'server.active_operation_id',
         'mapping.game_id',
+        'mapping.runtime_id',
+        'policy.game_version',
         'policy.protocol_id as stored_handler_id',
         'allocation.address',
         'allocation.backend_address',
@@ -370,6 +373,14 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
       .limit(10001)
       .execute();
     if (rows.length > 10000) throw new DomainError('configuration_invalid');
+    const presentationVariables = await getGatewayPresentationVariables(
+      tx,
+      rows.map((row) => ({
+        id: row.server_id,
+        runtimeId: row.runtime_id,
+        gameVersion: row.game_version ?? '',
+      })),
+    );
     // One batched lookup, selecting the latest operation before checking success.
     // Filtering for successful stops in SQL would resurrect an older proof after a
     // newer failed/uncertain operation. No per-route operation/reservation query.
@@ -495,6 +506,7 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
         wakeEnabled: state.wakeEnabled,
         presentation: {
           serverName: row.server_name,
+          variables: presentationVariables.get(row.server_id),
           ...(operation?.action === 'stop' &&
           row.active_operation_id === operation.job_id &&
           ['queued', 'running', 'uncertain'].includes(operation.state)
@@ -506,15 +518,16 @@ export async function getGatewaySnapshot(db: Kysely<Database>, env: Environment 
             : state.errorCode === 'integration_unavailable'
               ? { blockedReason: 'unavailable' as const }
               : {}),
-          ...(state.state === 'waking' &&
-          state.startupEstimate &&
-          row.startup_deadline_at &&
-          row.readiness_timeout_seconds
+          ...(state.state === 'waking' && row.startup_deadline_at && row.readiness_timeout_seconds
             ? {
-                estimatedStartupSeconds: Math.min(
-                  86400,
-                  Math.ceil(state.startupEstimate.p90Ms / 1000),
-                ),
+                ...(state.startupEstimate
+                  ? {
+                      estimatedStartupSeconds: Math.min(
+                        86400,
+                        Math.ceil(state.startupEstimate.p90Ms / 1000),
+                      ),
+                    }
+                  : {}),
                 startupBeganAt: new Date(
                   row.startup_deadline_at.getTime() - row.readiness_timeout_seconds * 1000,
                 ).toISOString(),

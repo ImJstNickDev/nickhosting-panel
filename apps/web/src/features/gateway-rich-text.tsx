@@ -11,6 +11,7 @@ import {
 
 export interface GatewayRichTextHandle {
   insert(token: string): void;
+  transform(change: (edit: RichMessageEdit) => RichMessageEdit): void;
   undo(): void;
   redo(): void;
   focus(): void;
@@ -72,6 +73,30 @@ function restoreSelection(root: HTMLElement, selection: RichMessageSelection) {
   const browserSelection = window.getSelection();
   browserSelection?.removeAllRanges();
   browserSelection?.addRange(range);
+  // Controlled edits rebuild the text nodes, so browsers do not consistently
+  // scroll the restored caret into view (notably Chromium). Keep the nearest
+  // bounded editor surface visible without scrolling the whole page.
+  if (document.activeElement === root && range.collapsed) {
+    const caret = range.getBoundingClientRect();
+    if (!caret.height) return;
+    for (
+      let container: HTMLElement | null = root;
+      container && container !== document.body;
+      container = container.parentElement
+    ) {
+      if (
+        !/^(auto|scroll)$/.test(getComputedStyle(container).overflowY) ||
+        container.scrollHeight <= container.clientHeight
+      )
+        continue;
+      const box = container.getBoundingClientRect();
+      const top = box.top + container.clientTop;
+      const bottom = top + container.clientHeight;
+      if (caret.bottom > bottom) container.scrollTop += caret.bottom - bottom + 4;
+      else if (caret.top < top) container.scrollTop -= top - caret.top + 4;
+      break;
+    }
+  }
 }
 
 /** A small controlled editor. DOM is rebuilt only on source/style changes; text,
@@ -179,6 +204,11 @@ export function GatewayRichText(props: GatewayRichTextProps) {
   }
   useImperativeHandle(props.editorRef, () => ({
     insert: (token) => insert(token, true),
+    transform: (change) => {
+      rememberSelection();
+      const edit = change({ value: value.current, selection: { ...selection.current } });
+      if (edit.value.length <= latest.current.channel.maxLength) commit(edit);
+    },
     undo: () => restoreHistory('undo'),
     redo: () => restoreHistory('redo'),
     focus: () => {

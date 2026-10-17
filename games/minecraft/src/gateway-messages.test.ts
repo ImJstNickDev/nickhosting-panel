@@ -79,3 +79,80 @@ it('preserves Minecraft Owner defaults, server-name previews and protocol format
   ])
     expect(() => validateGatewayMessageOverrides(minecraftGatewayMessages, input)).toThrow();
 });
+
+it('uses literal bounded context values for all new variables without recursive substitution', async () => {
+  const { resolveMinecraftGatewayMessages, minecraftGatewayRuntimeName } = await import(
+    './gateway-messages.js'
+  );
+  const variables = {
+    version: '26.1',
+    runtime: 'vanilla',
+    address: '{version}.example.test',
+  };
+  const presentation = {
+    serverName: 'World {elapsed}',
+    messages: {},
+    variables,
+    startupBeganAt: '2026-10-17T10:00:00Z',
+  };
+  const now = Date.parse('2026-10-17T10:00:03.900Z');
+  const template = '{server}|{version}|{runtime}|{address}|{elapsed}|{eta}';
+  expect(renderGatewayMessage(template, 'waking', 'en', presentation, now)).toBe(
+    'World {elapsed}|26.1|Vanilla|{version}.example.test|3 s|',
+  );
+  expect(renderGatewayMessage('{elapsed}|{eta}', 'sleeping', 'en', presentation, now)).toBe('|');
+  expect(renderGatewayMessage('{version}|{runtime}|{address}|{elapsed}', 'waking', 'en')).toBe(
+    '|||',
+  );
+  expect(renderGatewayMessage('{elapsed}', 'waking', 'it', presentation, now - 10000)).toBe('0 s');
+  const definition = resolveMinecraftGatewayMessages(
+    undefined,
+    presentation.serverName,
+    presentation,
+    now,
+  );
+  const preview = definition.states.find((state) => state.id === 'waking')?.previewVariables;
+  expect(preview?.en).toMatchObject({ ...variables, runtime: 'Vanilla', elapsed: '3 s', eta: '' });
+  expect(preview?.it).toMatchObject({ ...variables, runtime: 'Vanilla', elapsed: '3 s', eta: '' });
+  expect(minecraftGatewayRuntimeName('constructor')).toBe('');
+  expect(minecraftGatewayRuntimeName('unknown')).toBe('');
+  const { validateGatewayMessageOverrides } = await import('@nickhosting/game-sdk');
+  expect(
+    validateGatewayMessageOverrides(definition, {
+      waking: { motd: template, disconnect: template },
+    }),
+  ).toBeTruthy();
+});
+
+it('applies MOTD alignment after expansion but never interprets variable values as controls', async () => {
+  const { minecraftGatewayMessages } = await import('./gateway-messages.js');
+  const { validateGatewayMessageOverrides } = await import('@nickhosting/game-sdk');
+  const presentation = { serverName: 'AAA', messages: {} };
+  expect(renderGatewayMessage('[align=center]{server}', 'sleeping', 'en', presentation)).toBe(
+    `§r${' '.repeat(31)}AAA`,
+  );
+  expect(
+    renderGatewayMessage('{server}', 'sleeping', 'en', {
+      ...presentation,
+      serverName: '[align=right]AAA',
+    }),
+  ).toBe('[align=right]AAA');
+  expect(
+    renderGatewayMessage('[align=center]{server}', 'sleeping', 'en', presentation, 0, 'disconnect'),
+  ).toBe('[align=center]AAA');
+  expect(
+    minecraftGatewayMessages.channels
+      .find((channel) => channel.id === 'motd')
+      ?.formatting?.tokens.filter((token) => token.value.startsWith('[align=')),
+  ).toHaveLength(2);
+  expect(
+    minecraftGatewayMessages.channels
+      .find((channel) => channel.id === 'disconnect')
+      ?.formatting?.tokens.some((token) => token.value.startsWith('[align=')),
+  ).toBe(false);
+  expect(
+    validateGatewayMessageOverrides(minecraftGatewayMessages, {
+      sleeping: { motd: '[align=right]§a{server}' },
+    }),
+  ).toBeTruthy();
+});

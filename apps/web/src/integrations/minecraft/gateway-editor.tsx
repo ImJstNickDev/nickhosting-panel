@@ -1,22 +1,45 @@
-import { minecraftUiModule } from '@nickhosting/minecraft/ui';
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react';
+import {
+  type MinecraftMessageAlignment,
+  minecraftGlyphAdvance,
+  minecraftMessageAlignment,
+  minecraftUiModule,
+  setMinecraftMessageAlignment,
+  stripMinecraftMessageAlignment,
+} from '@nickhosting/minecraft/ui';
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
 import type { GatewayMessageExtensionProps } from '../../features/gateway-message-extension.js';
-import { messageChannels } from '../../features/gateway-message-preview.js';
+import { messageChannels, messagePreview } from '../../features/gateway-message-preview.js';
 import { GatewayRichText, type GatewayRichTextHandle } from '../../features/gateway-rich-text.js';
+import {
+  minecraftDisconnectHeight,
+  minecraftMessageLines,
+  minecraftMotdWidth,
+} from './gateway-message-layout.js';
 import './gateway-editor.css';
 
 // All URLs are bundled first-party module resources, never API-supplied CSS or executable code.
 const assets = minecraftUiModule.assets ?? {};
-let fontRequest: Promise<unknown> | undefined;
+let fontRequest: Promise<boolean> | undefined;
 function prepareFont() {
-  if (fontRequest || !assets.gatewayFont || typeof FontFace === 'undefined') return;
+  if (!assets.gatewayFont || typeof FontFace === 'undefined') return Promise.resolve(false);
   fontRequest ??= new FontFace('MinecraftPreview', `url(${JSON.stringify(assets.gatewayFont)})`)
     .load()
-    .then((font) => document.fonts.add(font))
+    .then((font) => {
+      document.fonts.add(font);
+      return true;
+    })
     // A source checkout without locally supplied Mojang resources remains editable.
-    .catch(() => undefined);
+    .catch(() => false);
+  return fontRequest;
 }
 const assetStyle = (name: string): CSSProperties =>
   assets[name] ? { backgroundImage: `url(${JSON.stringify(assets[name])})` } : {};
@@ -34,11 +57,20 @@ function Panorama() {
 }
 
 export function MinecraftGatewayEditor(props: GatewayMessageExtensionProps) {
-  useEffect(prepareFont, []);
+  const [fontReady, setFontReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void prepareFont().then((ready) => {
+      if (active) setFontReady(ready);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   return (
     <div className="mc-message-editor">
       {messageChannels(props.definition, props.state, props.locale).map((channel) => (
-        <MessageScreen key={channel.id} {...props} channel={channel} />
+        <MessageScreen key={channel.id} {...props} channel={channel} fontReady={fontReady} />
       ))}
     </div>
   );
@@ -53,8 +85,10 @@ function MessageScreen({
   readOnly,
   onChange,
   onReset,
+  fontReady,
 }: GatewayMessageExtensionProps & {
   channel: GatewayMessageExtensionProps['definition']['channels'][number];
+  fontReady: boolean;
 }) {
   const t = useT();
   const editor = useRef<GatewayRichTextHandle>(null);
@@ -66,7 +100,47 @@ function MessageScreen({
   const field = channel.id;
   const custom = Object.hasOwn(overrides, field);
   const value = overrides[field] ?? state.defaults[locale][field] ?? '';
+  const alignment = field === 'motd' ? minecraftMessageAlignment(value) : 'left';
   const variables = state.previewVariables[locale];
+  const surface = useRef<HTMLDivElement>(null);
+  const [guide, setGuide] = useState({ lines: 0, overflow: false });
+  const lineLabel = `${t('games.minecraft.messages.lineCount', { count: guide.lines })}${field === 'motd' ? ' / 2' : ''}`;
+  useLayoutEffect(() => {
+    const node = surface.current;
+    if (!node) return;
+    // Controls belong to the template, never to substituted variable values.
+    const runs = messagePreview(
+      field === 'motd' ? stripMinecraftMessageAlignment(value) : value,
+      variables,
+      {
+        ...channel,
+        ...(channel.formatting
+          ? {
+              formatting: {
+                ...channel.formatting,
+                tokens: channel.formatting.tokens.filter(
+                  (token) => stripMinecraftMessageAlignment(token.value) === token.value,
+                ),
+              },
+            }
+          : {}),
+      },
+    );
+    const update = () => {
+      const scale = Number.parseFloat(getComputedStyle(node).fontSize) / 9;
+      const width = field === 'motd' ? minecraftMotdWidth : node.clientWidth / scale - 50;
+      const lines = minecraftMessageLines(runs, width, minecraftGlyphAdvance).length;
+      const overflow =
+        field === 'motd' ? lines > 2 : minecraftDisconnectHeight(lines) > node.clientHeight / scale;
+      setGuide((old) =>
+        old.lines === lines && old.overflow === overflow ? old : { lines, overflow },
+      );
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [value, variables, channel, field]);
   const colors = channel.formatting?.tokens.filter((token) => token.style?.color) ?? [];
   const formats =
     channel.formatting?.tokens.filter(
@@ -149,7 +223,7 @@ function MessageScreen({
         </div>
       </header>
       {field === 'motd' ? (
-        <div className="mc-server-list mc-game-surface">
+        <div ref={surface} className="mc-server-list mc-game-surface">
           <Panorama />
           <div className="mc-list-title" aria-hidden="true">
             {t('games.minecraft.messages.multiplayer')}
@@ -168,7 +242,9 @@ function MessageScreen({
               />
               <div className="mc-server-description">
                 <div className="mc-server-name">{variables.server}</div>
-                {content}
+                <div className="mc-aligned-message" style={{ textAlign: alignment }}>
+                  {content}
+                </div>
               </div>
               <div className="mc-server-status" aria-hidden="true">
                 <span className="mc-server-players">
@@ -197,7 +273,10 @@ function MessageScreen({
           </div>
         </div>
       ) : (
-        <div className="mc-disconnect mc-game-surface">
+        <div
+          ref={surface}
+          className={`mc-disconnect mc-game-surface${guide.overflow ? ' mc-disconnect-overflow' : ''}`}
+        >
           <Panorama />
           <div className="mc-disconnect-content">
             <div className="mc-disconnect-title">{t('games.minecraft.messages.disconnected')}</div>
@@ -272,6 +351,46 @@ function MessageScreen({
             )}
           </IconButton>
         ))}
+        {field === 'motd' && (
+          <fieldset
+            className="mc-alignment-tools"
+            aria-label={t('games.minecraft.messages.alignment')}
+          >
+            {(['left', 'center', 'right'] as const).map((direction) => (
+              <IconButton
+                key={direction}
+                label={t(
+                  `games.minecraft.messages.align${direction[0]?.toUpperCase()}${direction.slice(1)}`,
+                )}
+                pressed={alignment === direction}
+                disabled={
+                  readOnly ||
+                  setMinecraftMessageAlignment(value, direction).length > channel.maxLength
+                }
+                onClick={() => {
+                  if (source) onChange(field, setMinecraftMessageAlignment(value, direction));
+                  else
+                    editor.current?.transform((edit) => {
+                      const next = setMinecraftMessageAlignment(edit.value, direction);
+                      const prefix = next.length - stripMinecraftMessageAlignment(next).length;
+                      const offset = (position: number) =>
+                        prefix +
+                        stripMinecraftMessageAlignment(edit.value.slice(0, position)).length;
+                      return {
+                        value: next,
+                        selection: {
+                          start: Math.min(next.length, offset(edit.selection.start)),
+                          end: Math.min(next.length, offset(edit.selection.end)),
+                        },
+                      };
+                    });
+                }}
+              >
+                <AlignIcon direction={direction} />
+              </IconButton>
+            ))}
+          </fieldset>
+        )}
         <span className="mc-toolbar-divider" />
         <IconButton
           label={t('games.minecraft.messages.undo')}
@@ -312,10 +431,25 @@ function MessageScreen({
             </fieldset>
           )}
         </div>
+        <Tooltip
+          content={`${t(`games.minecraft.messages.${field === 'motd' ? 'motdGuide' : 'disconnectGuide'}`)} ${t('games.minecraft.messages.measurementGuide')}${!fontReady ? ` ${t('games.minecraft.messages.fallbackGuide')}` : ''}`}
+        >
+          <button
+            type="button"
+            className={`mc-layout-count${guide.overflow ? ' mc-layout-overflow' : ''}`}
+            aria-label={`${t('games.minecraft.messages.layoutGuide')}: ${lineLabel}`}
+          >
+            {lineLabel}
+          </button>
+        </Tooltip>
         <span className="mc-message-length">
           {value.length}/{channel.maxLength}
         </span>
       </fieldset>
+      <div className="mc-layout-feedback" role="status" aria-live="polite">
+        {guide.overflow &&
+          t(`games.minecraft.messages.${field === 'motd' ? 'motdClipped' : 'disconnectClipped'}`)}
+      </div>
     </section>
   );
 }
@@ -363,6 +497,22 @@ function CodeIcon() {
       aria-hidden="true"
     >
       <path d="m8 7-5 5 5 5m8-10 5 5-5 5M14 4l-4 16" />
+    </svg>
+  );
+}
+function AlignIcon({ direction }: { direction: MinecraftMessageAlignment }) {
+  const start = direction === 'left' ? 3 : direction === 'center' ? 6 : 9;
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="17"
+      height="17"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      aria-hidden="true"
+    >
+      <path d={`M3 5h18M${start} 10h12M3 15h18M${start} 20h12`} />
     </svg>
   );
 }

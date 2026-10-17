@@ -3,6 +3,12 @@ import {
   type GatewayMessageDefinition,
   gatewayMessageDefinitionSchema,
 } from '@nickhosting/game-sdk';
+import {
+  alignMinecraftMotd,
+  boundedMinecraftMessage,
+  minecraftMessageAlignment,
+  stripMinecraftMessageAlignment,
+} from './message-layout.js';
 
 export const gatewayMessageStates = [
   'sleeping',
@@ -16,7 +22,26 @@ export const gatewayMessageStates = [
   'unavailable',
 ] as const;
 export type GatewayMessageState = (typeof gatewayMessageStates)[number];
-export const gatewayMessageVariables = ['server', 'state', 'eta'] as const;
+export const gatewayMessageVariables = [
+  'server',
+  'state',
+  'eta',
+  'version',
+  'runtime',
+  'address',
+  'elapsed',
+] as const;
+
+export function minecraftGatewayRuntimeName(runtimeId: string): string {
+  const names: Record<string, string> = {
+    vanilla: 'Vanilla',
+    paper: 'Paper',
+    folia: 'Folia',
+    fabric: 'Fabric',
+    forge: 'Forge',
+  };
+  return Object.hasOwn(names, runtimeId) ? (names[runtimeId] ?? '') : '';
+}
 export const gatewayMessageDefaults: Record<'en' | 'it', Record<GatewayMessageState, string>> = {
   en: {
     sleeping: 'Server sleeping. Join to start it.',
@@ -59,28 +84,50 @@ export function renderGatewayMessage(
   locale: 'en' | 'it',
   presentation?: GatewayPresentation,
   now = Date.now(),
+  channel: 'motd' | 'disconnect' = 'motd',
+) {
+  const alignment = channel === 'motd' ? minecraftMessageAlignment(template) : 'left';
+  const source = channel === 'motd' ? stripMinecraftMessageAlignment(template) : template;
+  const variables = minecraftGatewayMessageValues(state, locale, presentation, now);
+  const rendered = source
+    .replace(
+      /\{(server|state|eta|version|runtime|address|elapsed)\}/g,
+      (_, name: keyof typeof variables) => variables[name],
+    )
+    .slice(0, 1024);
+  return channel === 'motd'
+    ? alignMinecraftMotd(rendered, alignment)
+    : boundedMinecraftMessage(rendered);
+}
+
+/** One value resolver for protocol output and editor metadata. */
+export function minecraftGatewayMessageValues(
+  state: GatewayMessageState,
+  locale: 'en' | 'it',
+  presentation?: GatewayPresentation,
+  now = Date.now(),
 ) {
   let eta = '';
-  if (
-    state === 'waking' &&
-    presentation?.estimatedStartupSeconds !== undefined &&
-    presentation.startupBeganAt
-  ) {
-    const elapsed = Math.max(0, (now - Date.parse(presentation.startupBeganAt)) / 1000);
-    const remaining = Math.ceil(presentation.estimatedStartupSeconds - elapsed);
-    if (remaining > 0) eta = `${remaining} s`;
+  let elapsed = '';
+  if (state === 'waking' && presentation?.startupBeganAt) {
+    const seconds = Math.max(0, (now - Date.parse(presentation.startupBeganAt)) / 1000);
+    if (Number.isFinite(seconds)) {
+      elapsed = `${Math.floor(seconds)} s`;
+      if (presentation.estimatedStartupSeconds !== undefined) {
+        const remaining = Math.ceil(presentation.estimatedStartupSeconds - seconds);
+        if (remaining > 0) eta = `${remaining} s`;
+      }
+    }
   }
-  const variables = {
+  return {
     server: presentation?.serverName ?? '',
     state: gatewayMessageDefaults[locale][state],
     eta,
+    version: presentation?.variables?.version ?? '',
+    runtime: minecraftGatewayRuntimeName(presentation?.variables?.runtime ?? ''),
+    address: presentation?.variables?.address ?? '',
+    elapsed,
   };
-  const rendered = template
-    .replace(/\{(server|state|eta)\}/g, (_, name: keyof typeof variables) => variables[name])
-    .slice(0, 1024);
-  // Never emit an isolated high surrogate when limiting expanded placeholders.
-  const last = rendered.charCodeAt(rendered.length - 1);
-  return last >= 0xd800 && last <= 0xdbff ? rendered.slice(0, -1) : rendered;
 }
 
 const stateLabels: Record<GatewayMessageState, { en: string; it: string }> = {
@@ -138,7 +185,17 @@ export const minecraftGatewayMessages = gatewayMessageDefinitionSchema.parse({
       label: { en: 'Server list message', it: 'Messaggio nella lista server' },
       maxLength: 512,
       multiline: true,
-      formatting: { tokens: formattingTokens, caseInsensitive: true },
+      formatting: {
+        tokens: [
+          ...formattingTokens,
+          {
+            value: '[align=center]',
+            label: { en: 'Center alignment', it: 'Allineamento al centro' },
+          },
+          { value: '[align=right]', label: { en: 'Right alignment', it: 'Allineamento a destra' } },
+        ],
+        caseInsensitive: true,
+      },
     },
     {
       id: 'disconnect',
@@ -156,22 +213,28 @@ export const minecraftGatewayMessages = gatewayMessageDefinitionSchema.parse({
       it: { motd: gatewayMessageDefaults.it[id], disconnect: gatewayMessageDefaults.it[id] },
     },
     previewVariables: {
-      en: { server: '', state: gatewayMessageDefaults.en[id], eta: '' },
-      it: { server: '', state: gatewayMessageDefaults.it[id], eta: '' },
+      en: minecraftGatewayMessageValues(id, 'en'),
+      it: minecraftGatewayMessageValues(id, 'it'),
     },
   })),
   variables: [
     { id: 'server', label: { en: 'Server name', it: 'Nome server' } },
     { id: 'state', label: { en: 'State', it: 'Stato' } },
     { id: 'eta', label: { en: 'Estimated time', it: 'Tempo stimato' } },
+    { id: 'version', label: { en: 'Game version', it: 'Versione del gioco' } },
+    { id: 'runtime', label: { en: 'Runtime', it: 'Runtime' } },
+    { id: 'address', label: { en: 'Server address', it: 'Indirizzo server' } },
+    { id: 'elapsed', label: { en: 'Elapsed startup time', it: 'Tempo trascorso dall’avvio' } },
   ],
 });
 
-/** Owner defaults follow the existing channel/state precedence. Preview estimates
- * stay empty because readiness and historical timing are operational facts. */
+/** Owner defaults follow the existing channel/state precedence. Hypothetical
+ * editor states omit timing context rather than inventing elapsed time or estimates. */
 export function resolveMinecraftGatewayMessages(
   responses: MinecraftGatewayResponses | undefined,
   serverName: string,
+  context: Omit<GatewayPresentation, 'serverName' | 'messages'> = {},
+  now = Date.now(),
 ): GatewayMessageDefinition {
   return gatewayMessageDefinitionSchema.parse({
     ...minecraftGatewayMessages,
@@ -191,8 +254,18 @@ export function resolveMinecraftGatewayMessages(
         ]),
       ),
       previewVariables: {
-        en: { ...state.previewVariables.en, server: serverName },
-        it: { ...state.previewVariables.it, server: serverName },
+        en: minecraftGatewayMessageValues(
+          state.id as GatewayMessageState,
+          'en',
+          { ...context, serverName, messages: {} },
+          now,
+        ),
+        it: minecraftGatewayMessageValues(
+          state.id as GatewayMessageState,
+          'it',
+          { ...context, serverName, messages: {} },
+          now,
+        ),
       },
     })),
   });

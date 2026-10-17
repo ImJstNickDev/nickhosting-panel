@@ -13,6 +13,7 @@ import type { Context, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import type { Variables } from './app.js';
+import { gatewayPresentationForClient } from './gateway-presentation.js';
 import { boundedEventWriter } from './stream-buffer.js';
 
 const requestSchema = z
@@ -241,7 +242,10 @@ export function registerGatewayStartupRoutes(
                       },
                     );
                     if (result.state === 'online') {
-                      readinessSnapshot = await getGatewaySnapshot(options.db, options.env);
+                      readinessSnapshot = gatewayPresentationForClient(
+                        await getGatewaySnapshot(options.db, options.env),
+                        c.req.header('X-NickHosting-Gateway-Features'),
+                      );
                       log('gateway_provider_readiness_committed', {
                         durationMs: Math.round((performance.now() - commitStarted) * 1000) / 1000,
                         observedAt,

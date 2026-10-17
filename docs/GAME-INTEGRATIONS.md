@@ -352,3 +352,12 @@ The [SDK descriptor tests](../packages/game-sdk/src/gateway-messages.test.ts),
 [service tests](../packages/server-management/src/gateway-messages.integration.test.ts)
 and browser fixture exercise non-Minecraft announcement channels, custom states
 and variables. They demonstrate extensibility, not support for an additional game.
+
+
+The optional preview resolver receives generic bounded `context.variables`
+from local server bindings and confirmed connection metadata. Minecraft translates
+its runtime ID and exposes `{version}`, `{runtime}`, `{address}` and `{elapsed}`
+alongside existing placeholders. Live substitution remains integration-owned;
+Core and the generic Gateway do not interpret those names. See the
+[Minecraft editor reference](MINECRAFT-MESSAGE-EDITOR.md) for reference-client
+layout guides and their measurement limits.

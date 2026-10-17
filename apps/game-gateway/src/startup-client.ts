@@ -74,7 +74,8 @@ export async function watchGatewayStartup(
         Authorization: `Bearer ${options.token}`,
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
-        'X-NickHosting-Gateway-Features': 'startup-keepalive-v1,provider-readiness-v1',
+        'X-NickHosting-Gateway-Features':
+          'startup-keepalive-v1,provider-readiness-v1,presentation-variables-v1',
       },
       body: JSON.stringify(request),
       redirect: 'error',

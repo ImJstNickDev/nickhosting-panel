@@ -27,7 +27,8 @@ describe('startup client', () => {
         redirect: 'error',
         headers: {
           Authorization: `Bearer ${options.token}`,
-          'X-NickHosting-Gateway-Features': 'startup-keepalive-v1,provider-readiness-v1',
+          'X-NickHosting-Gateway-Features':
+            'startup-keepalive-v1,provider-readiness-v1,presentation-variables-v1',
         },
       },
     ]);

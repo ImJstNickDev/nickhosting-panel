@@ -92,6 +92,18 @@ describe('durable explicit Gateway route registry', () => {
     expect(snapshot.routes[0]?.protocol?.handlerId).toBe('fixture');
     expect(snapshot.routes[0]?.mode).toBe('sleeping');
   });
+  it('publishes the startup clock without requiring historical estimates', async () => {
+    await setGatewayRoute(f.db, f.owner, input(), env);
+    const began = new Date();
+    await f.db
+      .updateTable('gateway_server_states')
+      .set({ state: 'waking', startup_deadline_at: new Date(began.getTime() + 60000) })
+      .where('server_id', '=', serverId)
+      .execute();
+    const snapshot = await getGatewaySnapshot(f.db, env);
+    expect(snapshot.routes[0]?.presentation?.startupBeganAt).toBe(began.toISOString());
+    expect(snapshot.routes[0]?.presentation?.estimatedStartupSeconds).toBeUndefined();
+  });
   it('allows direct and Gateway on one IP at different ports, including same-number backend ports', async () => {
     await withDirectPin(27000);
     const row = await setGatewayRoute(f.db, f.owner, { ...input(), publicPort: 20000 }, env);

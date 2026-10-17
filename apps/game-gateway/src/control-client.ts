@@ -96,10 +96,13 @@ export function createGatewayControlClient(
           Authorization: `Bearer ${options.token}`,
           Accept: 'application/json',
           ...(action === 'snapshot'
-            ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1' }
+            ? { 'X-NickHosting-Gateway-Features': 'completed-sleep-v1,presentation-variables-v1' }
             : {}),
           ...(action === 'observations'
-            ? { 'X-NickHosting-Gateway-Features': 'readiness-receipt-v1' }
+            ? { 'X-NickHosting-Gateway-Features': 'readiness-receipt-v1,presentation-variables-v1' }
+            : {}),
+          ...(action === 'sleep-completion'
+            ? { 'X-NickHosting-Gateway-Features': 'presentation-variables-v1' }
             : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },

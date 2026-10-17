@@ -4,7 +4,8 @@ M5, 2026-10-17. The Minecraft integration supplies an inline editor for the
 server-list message and login-disconnect message. The visual reference is Vanilla
 26.1 for all server versions; this is an editing preview, not a protocol or
 resource-pack compatibility claim. Online traffic still receives the real
-server's messages. No network/protocol, lifecycle or permission behavior changes.
+server's messages. No game-wire protocol, lifecycle or permission behavior changes. Message context
+is transported through negotiated Gateway snapshot metadata.
 
 ## Ownership and behavior
 
@@ -19,8 +20,8 @@ The application owns state selection, drafts, revision-checked saves, inheritanc
 errors and authorization. The integration renders the two Minecraft surfaces and
 compact formatting tools. Clicking the rendered message edits it directly.
 Colors and styles apply to a selection or the insertion point. Variables are
-atomic tokens: they display sample values but retain `{server}`, `{state}` or
-`{eta}` in the stored template. An empty sample retains its token label while
+atomic tokens: they display available values but retain placeholders in the
+stored template. An empty sample retains its token label while
 editing. These values do not represent live player counts or latency.
 
 Text codes provides the exact serialized template when needed. Reset removes the
@@ -48,9 +49,10 @@ Relevant GUI measurements are a 32×32 server icon, text offset35, MOTD offset12
 9-pixel line height and a 10×8 ping sprite. The disconnection screen centers its
 vertical stack with10-pixel cell padding and a 200×20 return button. The web
 preview uses a readable enlarged scale and responsive sizing. Its return-button
-image is contextual, not a navigation action. The editor allows more than the
-client's two visible MOTD lines so long messages remain editable; client wrapping
-varies with screen size. Both previews now use the authentic 26.1 panorama,
+image is contextual, not a navigation action. The editor keeps the entire MOTD editable in a scrollable region. Vanilla 26.1
+wraps its MOTD at a fixed 267 GUI pixels and draws only two lines, without ellipsis;
+its MOTD width does not vary with the window. The earlier statement that its MOTD
+wrapping varies with screen size was incorrect. Both previews now use the authentic 26.1 panorama,
 blurred and darkened behind the text. It is a static forward cubemap face, not
 the continuously rotating 3D scene. The multiplayer preview includes the title,
 list overlay, separators, selection frame and both footer button rows. These
@@ -115,3 +117,90 @@ Model tests cover templates, bounded selection operations and formatting. Browse
 journeys use actual NickHosting handlers and isolated database/provider fixtures:
 editing, save/reload, EN/IT, desktop/mobile, generic fallback and accessibility.
 They do not change real servers or establish additional Minecraft protocol support.
+
+
+## Variables and client layout guides — 2026-10-17
+
+| Placeholder | Value |
+| --- | --- |
+| `{server}` | Stored server name |
+| `{state}` | Localized default description of the current Gateway message state |
+| `{eta}` | Positive historical startup estimate remaining, while starting |
+| `{version}` | Configured server release, not the connecting client's version |
+| `{runtime}` | Integration runtime display name |
+| `{address}` | Confirmed assigned DNS connection address, including port when needed |
+| `{elapsed}` | Whole seconds since startup began, while starting, even without an estimate |
+
+Metadata is assembled from local server bindings and batched DNS/route queries.
+There are no provider requests per ping. Unavailable values render empty; no
+private backend/listener address is substituted. Templates are expanded once;
+values containing another placeholder are not recursively interpreted. Editor
+metadata leaves dynamic clocks empty for hypothetical states, avoiding invented
+live estimates and continuously changing save revisions. Empty values retain
+placeholder chips while editing; the layout calculation uses their actual empty
+expansion, so future runtime values can change the line count.
+
+Core transports bounded optional string `presentation.variables`; Minecraft owns
+their meaning and runtime labels. `presentation-variables-v1` is negotiated on
+snapshot/control/startup paths. Older Gateway clients receive the previous strict
+presentation shape, including in readiness receipts; `completed-sleep-v1` remains
+independent. Restart/update Gateway readers to enable new runtime substitutions.
+Do not roll an old Core reader back over templates using new variables without
+reverting those templates or retaining compatible metadata definitions.
+
+The client reference was inspected directly in the official 26.1 JAR (hash above):
+`ServerSelectionList.getRowWidth()` is305; entry content width is301; MOTD width
+is301−32−2=267. `OnlineServerEntry` draws `min(lineCount,2)` at Y+12 andY+21.
+`StringSplitter` prefers ASCII spaces, consumes separating spaces/newlines, and
+otherwise breaks before the overflowing codepoint. Exact width fits; a trailing
+newline contributes an empty final line. Glyph advance includes one extra GUI
+pixel for bold; italic does not add advance. These rules are implemented in the
+small pure layout helper and tested independently from browser layout.
+
+The guide and wire alignment share scalar default-font advances, measured from
+the locally prepared bitmap font at9CSSpx (1GUI pixel). These numeric metrics cover
+ASCII, Latin-1 and common EN/IT punctuation; unknown glyphs use an approximate
+6-pixel advance. No glyph artwork is part of this metric table. Formatting tokens do not consume
+width; bold does. Font fallback, unprovided glyphs, browser shaping/resource packs
+and other client releases can differ: guides are advisory, never save validation.
+The responsive editable surface stays readable; its browser wrapping and atomic
+chips are not used to count client lines. The compact line counter exposes the
+267-pixel/two-line rule, and a warning appears when the client would omit text.
+
+For disconnection messages, `DisconnectedScreen` uses window width−50GUI pixels,
+no line cap and no ellipsis. Its centered stack has ordinary height73+9×lines:
+long messages can extend beyond the game window. The separate guide compares that
+height with the fixed preview viewport at its font scale, and marks overflow.
+The editor itself remains scrollable so no text becomes inaccessible. This is a
+preview-window warning, not a universal disconnect-message length limit.
+
+
+## MOTD alignment
+
+The Minecraft toolbar offers left (default), center and right alignment for the
+whole MOTD. This is integration-specific; the shared Gateway has no alignment
+logic. Disconnect messages retain the client's own centered layout, whose width
+depends on the player's window. There is no justified mode.
+
+Stored templates use integration controls `[align=center]` or `[align=right]`;
+left removes them. The declared controls are hidden by the visual editor and
+visible in Text codes. They count toward the existing512-character template limit.
+Controls are read/removed from the template **before** variable expansion; variable
+values cannot become alignment instructions. Multiple recognized controls use the
+last value; toolbar selection normalizes them to one prefix. Color resets do not
+change the selected alignment.
+
+After expansion, the integration wraps styled glyphs using the same267GUI-pixel
+rule as the guide, then pads each physical line with neutral ASCII spaces. Color
+and decoration state are restored after padding, including across automatic wraps;
+bold spaces therefore cannot distort positioning. Right alignment leaves under4GUI
+pixels of remainder; centering leaves under4GUI pixels of center error because
+spaces advance4pixels. Unknown glyphs/resource packs remain approximate. Left
+alignment retains the previous text bytes apart from removing explicit controls.
+Output retains the existing1024-code-unit/surrogate-safe bound. No font download,
+provider call, asset load or new polling occurs on a ping.
+
+The responsive writing surface uses CSS alignment to remain editable and readable;
+wire output uses spaces and reference-client widths. Full text remains stored and
+editable even when the client will only display two lines. Formatting/alignment
+controls are never forwarded as control syntax to the Minecraft client.
