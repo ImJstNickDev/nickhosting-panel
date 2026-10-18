@@ -12915,3 +12915,43 @@ permission repairs. No game fixture or live import/delete was created by this
 activation. Existing code-test evidence above was reused; documentation checks
 and an independent post-install configuration/permission review passed with no
 remaining must-fix. PR #21 remains open and unmerged; SFTPGo #18 is unchanged.
+
+### Owner world test after native 1.6.1 activation — 2026-10-18
+
+Read-only observation of the Owner's 14:59 UTC import/delete found both jobs
+`succeeded`, one attempt each, no job error. Import worker time is **5,189 ms**
+(previous 7,266 ms: 2,077 ms / 28.6% less); deletion is **789 ms** (previous 790).
+Durable job creation-to-completion clocks are 5,214 and 801 ms respectively.
+Redis publication-to-worker delays are 5 and 2 ms. These clocks exclude the
+earlier browser source upload, API preparation before enqueue and final UI refresh.
+
+Import breakdown for 101 files / 81,251,294-byte normalized archive:
+
+| Worker interval | Wall time |
+| --- | ---: |
+| Lifecycle/game preparation before Fileman archive entry | about 1,006 ms |
+| Fileman preflight through start of streaming | about 434 ms |
+| Archive upload to Wings | 2,259 ms |
+| Manifest/journal/publication preparation after streaming | about 72 ms |
+| Blueprint commit request | 1,368 ms |
+| Receipts and remaining completion | about 50 ms |
+
+Validation takes 2,170 ms **concurrently with** upload, not in addition. The
+parallel listing/quota/token preflight calls take 304/227/267 ms. Individual
+authorization events include nested transfer checks and must not be added again.
+Within the 1,368 ms commit: preflight 69.777 ms, Wings decompression 1,003.869 ms,
+tree verification 22.050 ms, destination check 1.837 ms, rename 2.361 ms,
+readback 2.382 ms, cleanup 1.623 ms. The remaining approximately 264 ms belongs
+to the surrounding request path; these logs cannot divide it further. Upload
+includes producer/validation backpressure and is not a pure network benchmark.
+
+Deletion's 301 ms provider-effect span is preceded by approximately 472 ms of
+preparation and followed by 16 ms of completion. It is not a measurement of the
+filesystem delete syscall alone. Neither the three-second import target nor
+sub-300 ms complete deletion is met. Background Gateway inventory requests also
+recorded four Application API 429 responses just after import completion; they
+are not job failures or evidence that these measured jobs retried.
+
+Stage boundaries were independently checked against source. Only existing logs
+and selected development job records were read; no added instrumentation, test
+mutation, restart or implementation change was made for this measurement.
