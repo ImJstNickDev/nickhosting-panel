@@ -1511,8 +1511,13 @@ per-file write or second installation path is exposed for directory input.
 Acquisition resolves exact project/file metadata again, honors distribution denial,
 then reuses source admission, quota/concurrency limits, authorized streaming,
 integrity verification and immutable source sealing. It reuses the downloader's
-verified digest instead of hashing the archive twice. The source is bound to the
-same server/owner; idempotent retries return ready sources without a new download.
+verified digest instead of hashing the archive twice. Archive downloads follow at
+most three HTTP 301/302/303/307/308 redirects, validating each HTTPS origin and
+pinning newly validated public DNS before each connection. Loops, unapproved
+origins and credential-bearing URLs are rejected; provider API keys and cookies
+are never sent with downloads. Metadata requests still refuse all redirects.
+The source is bound to the same server/owner; idempotent retries return ready
+sources without a new download.
 Uncertain transfers retain their reservation and existing Owner recovery controls.
 Browser disconnect is not a claim that an external download completed or that its
 staging was removed. The existing `world-import` command and its explicit overwrite

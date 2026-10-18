@@ -7,6 +7,7 @@ import { request } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { DomainError } from '@nickhosting/core';
 import {
   artifactSchema,
   type ContentArtifact,
@@ -70,6 +71,8 @@ export function validateDownloadUrl(input: string, allowedOrigins: readonly stri
   return url;
 }
 class RetryableResponse extends Error {}
+const downloadRedirectStatuses = new Set([301, 302, 303, 307, 308]);
+const maxDownloadRedirects = 3;
 export interface SafeContentHttpOptions {
   allowedOrigins: readonly string[];
   userAgent: string;
@@ -78,7 +81,8 @@ export interface SafeContentHttpOptions {
   timeoutMs?: number;
   attempts?: number;
 }
-/** DNS is validated and pinned into the actual TLS connection. Every redirect is refused. */
+/** DNS is validated and pinned into every TLS connection. Metadata never follows
+ * redirects; archive downloads may follow at most three independently approved hops. */
 export class SafeContentHttp implements ContentHttp {
   private readonly options: Required<SafeContentHttpOptions>;
   constructor(options: SafeContentHttpOptions) {
@@ -108,6 +112,7 @@ export class SafeContentHttp implements ContentHttp {
     input: string,
     headers: Readonly<Record<string, string>> = {},
     signal?: AbortSignal,
+    downloadRedirects = false,
   ): Promise<IncomingMessage> {
     const url = validateDownloadUrl(input, this.options.allowedOrigins);
     if (
@@ -148,16 +153,27 @@ export class SafeContentHttp implements ContentHttp {
           lookup: (_host, _options, callback) => callback(null, address.address, address.family),
         },
         (res) => {
+          if (downloadRedirects && downloadRedirectStatuses.has(res.statusCode ?? 0)) {
+            resolve(res);
+            return;
+          }
           if (res.statusCode !== 200) {
-            res.resume();
+            res.destroy();
             if (res.statusCode === 429 || (res.statusCode ?? 0) >= 500)
               reject(new RetryableResponse());
-            else reject(new Error('content_http_refused'));
+            else
+              reject(
+                new DomainError('integration_unavailable', 503, { reason: 'content_http_refused' }),
+              );
             return;
           }
           if (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity') {
             res.destroy();
-            reject(new Error('content_encoding_refused'));
+            reject(
+              new DomainError('integration_unavailable', 503, {
+                reason: 'content_encoding_refused',
+              }),
+            );
             return;
           }
           resolve(res);
@@ -174,6 +190,31 @@ export class SafeContentHttp implements ContentHttp {
       req.on('error', reject);
       req.end();
     });
+  }
+  private async downloadResponse(input: string, signal?: AbortSignal): Promise<IncomingMessage> {
+    let url = validateDownloadUrl(input, this.options.allowedOrigins);
+    const visited = new Set<string>();
+    for (let redirects = 0; ; redirects++) {
+      signal?.throwIfAborted();
+      if (visited.has(url.href)) unavailable('download_redirect_loop');
+      visited.add(url.href);
+      // Downloads never carry provider API keys, including same-origin hops.
+      const response = await this.response(url.href, {}, signal, true);
+      if (response.statusCode === 200) return response;
+      response.destroy();
+      const location = response.headers.location;
+      if (redirects >= maxDownloadRedirects || !location || location.length > 8192)
+        unavailable('download_redirect_refused');
+      let target: URL;
+      try {
+        target = new URL(location, url);
+      } catch {
+        return unavailable('download_redirect_refused');
+      }
+      // Reuse the existing HTTPS/origin/credential restrictions and re-resolve
+      // all addresses through response() before opening the next pinned socket.
+      url = validateDownloadUrl(target.href, this.options.allowedOrigins);
+    }
   }
   private async retry<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     for (let attempt = 0; attempt < this.options.attempts; attempt++) {
@@ -224,7 +265,7 @@ export class SafeContentHttp implements ContentHttp {
     // All alternatives must be approved before any request, including unused fallback URLs.
     for (const url of artifact.urls) validateDownloadUrl(url, this.options.allowedOrigins);
     return this.retry(async () => {
-      const response = await this.response(artifact.urls[0] as string, {}, options.signal);
+      const response = await this.downloadResponse(artifact.urls[0] as string, options.signal);
       let size = 0;
       const hashes = new Map(
         Object.keys({ ...artifact.hashes, sha256: '' }).map((name) => [name, createHash(name)]),
@@ -233,7 +274,7 @@ export class SafeContentHttp implements ContentHttp {
         transform(chunk: Buffer, _encoding, callback) {
           size += chunk.length;
           if (size > artifact.size) {
-            callback(new Error('content_size_mismatch'));
+            callback(new DomainError('validation_failed', 400, { reason: 'download_size' }));
             return;
           }
           for (const hash of hashes.values()) hash.update(chunk);

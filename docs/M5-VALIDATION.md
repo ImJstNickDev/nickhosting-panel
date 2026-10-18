@@ -13210,3 +13210,46 @@ Real Chromium through development HTTPS loaded the login form, reported zero pag
 errors and confirmed a connected secure Vite HMR WebSocket. Independent read-only
 review recomputed container topology and SQL checksums and found no remaining
 activation blocker. Existing Gateway/SFTPGo release limitations remain unchanged.
+
+
+### CurseForge world download redirect regression — 2026-10-18
+
+The Owner's first Diversity 3 acquisition returned HTTP 500. Read-only diagnosis
+confirmed the selected file metadata was valid, but its advertised
+`edge.forgecdn.net` URL returned HTTP 302 to `mediafilez.forgecdn.net`. Both origins
+were already allowed. The downloader's blanket redirect refusal raised an
+unclassified error before any archive bytes were staged; the source remained
+uncertain. The declared Minecraft 1.14.4/server 26.1 difference was unrelated.
+Prior synthetic catalog tests did not exercise a real CDN redirect; their passing
+results above remain fixture evidence, not successful live acquisition evidence.
+
+Archive downloads now follow at most three independently validated HTTPS redirects;
+each hop validates the origin and pins public DNS. No provider key/cookie travels
+with downloads, and metadata requests still refuse redirects. Refused responses
+and invalid streamed sizes produce controlled domain errors. Existing integrity,
+exclusive destination creation, cancellation and partial-download cleanup remain.
+
+Validation: 193 content-provider unit tests (including 31 HTTP tests), 41 API/source
+integration tests in two disposable-schema suites, TypeScript, scoped Biome,
+governance and diff checks passed. Tests include allowed redirect statuses,
+relative locations, denied origins, private DNS, credential-bearing URLs, loops,
+hop limits, cancellation and streamed integrity. Independent technical review
+found no must-fix. No frontend changes or new browser screenshot claims.
+
+Using the real configured provider from the dev API container, a diagnostic GET
+of Diversity 3’s 124,154,066-byte archive completed in 2,438 ms with advertised SHA-1 and
+size verified. The temporary diagnostic archive was removed; it was never imported
+into game storage. This proves real acquisition, not world activation/playability.
+The exact failed dev source was then checked under its normal source/resource
+locks: unused by jobs/bindings, no seal/digest and an owned empty nonsymlink staging
+directory. A separately reviewed, guarded one-off repair restored only that source
+to reserved and recorded a system audit event. Identity, quota reservation and
+historical failure events were retained; no files or records were deleted.
+General uncertain-source recovery policy is unchanged. The Owner can retry the
+same selection; no import was submitted on their behalf.
+
+The normal development watcher loaded the source fix; API readiness is 200.
+No Docker restart/rebuild, migration, Blueprint/Wings/NPM/DNS change, provider
+mutation or game-server file write occurred. SFTPGo #18 remains a separate release
+blocker. PR #21 remains open and unmerged. Code rollback is a revert of this fix;
+retain the recovered source and its audit history.
