@@ -17,6 +17,7 @@ import { type LifecycleOptions, processServerOperation } from './lifecycle.js';
 import {
   assertMinecraftLaunchInputs,
   configureMinecraftProvision,
+  inspectMinecraftWorlds,
   type MinecraftContentOptions,
   type MinecraftPreparedContent,
   prepareMinecraftContentPlan,
@@ -519,192 +520,219 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     ).toEqual({ state: 'running' });
   });
 
-  it('applies a new world online without stopping, invalidating installation or overwriting a late collision', async () => {
-    const f = await minecraftFixture(undefined, true);
-    const root = `./mountdata/test-assets/world-online-${randomUUID()}`;
-    const env = {
-      ...f.options.env,
-      NH_OBSERVER_ID: 'isolated-observer',
-      NH_MINECRAFT_SOURCE_ROOT: `${root}/sources`,
-      NH_MINECRAFT_CONTENT_ROOT: `${root}/expanded`,
-      NH_MINECRAFT_SOURCE_FREE_BYTES: '0',
-      NH_MINECRAFT_SOURCE_FREE_PERCENT: '0',
-    };
-    const checkDisk = contentDisk.assertContentDiskSpace;
-    vi.spyOn(contentDisk, 'assertContentDiskSpace').mockImplementation((directory, bytes, policy) =>
-      checkDisk(directory, bytes, { ...policy, minimumFreePercent: 0, minimumFreeBytes: 0 }),
-    );
-    try {
-      await f.f.db
-        .updateTable('minecraft_server_profiles')
-        .set({ installed: true, configuration_state: '{}' })
-        .where('server_id', '=', f.serverId)
-        .execute();
-      await f.f.db
-        .updateTable('managed_servers')
-        .set({ runtime_state: 'running', active_operation_id: f.operation.job_id })
-        .where('id', '=', f.serverId)
-        .execute();
-      await f.f.db
-        .updateTable('operation_jobs')
-        .set({ state: 'running', completed_at: null })
-        .where('id', '=', f.operation.job_id)
-        .execute();
-      f.context.assertStopped = vi.fn(async () => {
-        throw new Error('running server must not require stop');
-      });
-      // DataVersion3955 is Minecraft1.21.1; the actual import validates real NBT.
-      const version = Buffer.alloc(4);
-      version.writeInt32BE(3955);
-      const named = (type: number, name: string, body: Buffer) => {
-        const length = Buffer.alloc(2);
-        length.writeUInt16BE(Buffer.byteLength(name));
-        return Buffer.concat([Buffer.from([type]), length, Buffer.from(name), body]);
+  it.each([
+    { label: 'matching', field: 'DataVersion', value: 3955, status: 'verified' },
+    { label: 'different version', field: 'DataVersion', value: 4786, status: 'incompatible' },
+    { label: 'legacy Anvil', field: 'version', value: 19133, status: 'unknown' },
+  ])(
+    'imports a $label world online without selecting it or overwriting collisions',
+    async ({ field, value, status }) => {
+      const f = await minecraftFixture(undefined, true);
+      const root = `./mountdata/test-assets/world-online-${randomUUID()}`;
+      const env = {
+        ...f.options.env,
+        NH_OBSERVER_ID: 'isolated-observer',
+        NH_MINECRAFT_SOURCE_ROOT: `${root}/sources`,
+        NH_MINECRAFT_CONTENT_ROOT: `${root}/expanded`,
+        NH_MINECRAFT_SOURCE_FREE_BYTES: '0',
+        NH_MINECRAFT_SOURCE_FREE_PERCENT: '0',
       };
-      const level = Buffer.concat([
-        Buffer.from([10, 0, 0]),
-        named(10, 'Data', Buffer.concat([named(3, 'DataVersion', version), Buffer.from([0])])),
-        Buffer.from([0]),
-      ]);
-      const zip = new ZipFile();
-      zip.addBuffer(level, 'map/level.dat');
-      zip.addBuffer(Buffer.from('region fixture'), 'map/region/r.0.0.mca');
-      zip.end();
-      const chunks: Buffer[] = [];
-      for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
-      const bytes = Buffer.concat(chunks);
-      const store = createMinecraftSourceStore(f.f.db, f.f.context, env);
-      const source = await store.reserveUpload({
-        kind: 'world',
-        serverId: f.serverId,
-        idempotencyKey: randomUUID(),
-        bytes: bytes.length,
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-      });
-      await store.upload(
-        source.id,
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(bytes);
-            controller.close();
-          },
-        }),
-        bytes.length,
+      const checkDisk = contentDisk.assertContentDiskSpace;
+      vi.spyOn(contentDisk, 'assertContentDiskSpace').mockImplementation(
+        (directory, bytes, policy) =>
+          checkDisk(directory, bytes, { ...policy, minimumFreePercent: 0, minimumFreeBytes: 0 }),
       );
-      f.options = {
-        ...f.options,
-        env,
-        mountdataRoot: resolve(env.NH_MINECRAFT_CONTENT_ROOT),
-        sourceRoot: resolve(env.NH_MINECRAFT_SOURCE_ROOT),
-        worldArchiveResolver: store.worldArchiveResolver,
-      };
-      await f.f.db
-        .updateTable('physical_hosts')
-        .set({
-          local_disk_path: resolve(env.NH_MINECRAFT_SOURCE_ROOT),
-          upload_policy: JSON.stringify({
-            providerMaxFileBytes: 1024 ** 2,
-            temporaryDiskPath: resolve(env.NH_MINECRAFT_SOURCE_ROOT),
-            temporaryDiskBudgetBytes: 16 * 1024 ** 2,
-            temporaryDiskHeadroomBytes: 0,
-          }),
-        })
-        .where('id', '=', f.f.hostId)
-        .execute();
-      const command = { kind: 'world-import', archiveRef: source.id, targetWorld: 'new_world' };
-      const prepared = await prepareMinecraftContentPlan(f.f.db, f.serverId, command, {
-        ...f.options,
-        adapter: f.context.adapter,
-      });
-      f.operation.action = 'minecraft-content';
-      f.operation.plan.minecraftContent = prepared;
-      await f.f.db
-        .updateTable('server_operations')
-        .set({ action: 'minecraft-content', plan: JSON.stringify(f.operation.plan) })
-        .where('job_id', '=', f.operation.job_id)
-        .execute();
-      f.context.adapter.getResources = vi.fn(async () => ({
-        current_state: 'running' as const,
-        is_suspended: false,
-        resources: {
-          memory_bytes: 0,
-          cpu_absolute: 0,
-          disk_bytes: 0,
-          network_rx_bytes: 0,
-          network_tx_bytes: 0,
-          uptime: 1000,
-        },
-      }));
-      const directories = new Set<string>();
-      const list = f.context.adapter.listFiles;
-      f.context.adapter.listFiles = vi.fn(async (id, parent = '') => {
-        const result = await list(id, parent);
-        for (const directory of directories) {
-          const pieces = directory.split('/');
-          const name = pieces.pop() ?? '';
-          if (pieces.join('/') === parent && !result.some((entry) => entry.name === name))
-            result.push({
-              name,
-              is_file: false,
-              is_symlink: false,
-              size: 0,
-            } as (typeof result)[number]);
-        }
-        return result;
-      });
-      f.context.adapter.createDirectory = vi.fn(async (_id, parent, name) => {
-        directories.add([parent, name].filter(Boolean).join('/'));
-      });
-      f.context.adapter.uploadFile = vi.fn(async (_id, path, upload) => {
-        await upload.authorize();
-        expect(
-          (
-            await f.f.db
-              .selectFrom('minecraft_server_profiles')
-              .select('installed')
-              .where('server_id', '=', f.serverId)
-              .executeTakeFirstOrThrow()
-          ).installed,
-        ).toBe(true);
-        const chunks: Uint8Array[] = [];
-        for await (const chunk of upload.body) chunks.push(chunk);
-        f.files.set(path, Buffer.concat(chunks));
-      });
-      f.files.set('new_world/foreign.txt', Buffer.from('keep'));
-      await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
-        code: 'conflict',
-      });
-      expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
-      f.files.delete('new_world/foreign.txt');
-      f.files.set('server.properties', Buffer.from('level-name=new_world\n'));
-      await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
-        'running server must not require stop',
-      );
-      // An offline import into the selected, missing folder must retain the
-      // stopped guard at subsequent effects if the process starts externally.
-      vi.mocked(f.context.assertStopped).mockClear().mockResolvedValueOnce(undefined);
-      await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
-        'running server must not require stop',
-      );
-      expect(f.context.assertStopped).toHaveBeenCalledTimes(2);
-      expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
-      f.files.set('server.properties', Buffer.from('level-name=world\n'));
-      vi.mocked(f.context.assertStopped).mockClear();
-      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
-      expect(f.files.get('new_world/level.dat')).toEqual(level);
-      expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
-      expect(f.context.assertStopped).not.toHaveBeenCalled();
-      expect(
+      try {
         await f.f.db
-          .selectFrom('minecraft_server_profiles')
-          .select(['installed', 'content_state'])
+          .updateTable('minecraft_server_profiles')
+          .set({ installed: true, configuration_state: '{}' })
           .where('server_id', '=', f.serverId)
-          .executeTakeFirst(),
-      ).toEqual({ installed: true, content_state: {} });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+          .execute();
+        await f.f.db
+          .updateTable('managed_servers')
+          .set({ runtime_state: 'running', active_operation_id: f.operation.job_id })
+          .where('id', '=', f.serverId)
+          .execute();
+        await f.f.db
+          .updateTable('operation_jobs')
+          .set({ state: 'running', completed_at: null })
+          .where('id', '=', f.operation.job_id)
+          .execute();
+        f.context.assertStopped = vi.fn(async () => {
+          throw new Error('running server must not require stop');
+        });
+        // Different-version and legacy worlds use the same durable import path.
+        const version = Buffer.alloc(4);
+        version.writeInt32BE(value);
+        const named = (type: number, name: string, body: Buffer) => {
+          const length = Buffer.alloc(2);
+          length.writeUInt16BE(Buffer.byteLength(name));
+          return Buffer.concat([Buffer.from([type]), length, Buffer.from(name), body]);
+        };
+        const level = Buffer.concat([
+          Buffer.from([10, 0, 0]),
+          named(10, 'Data', Buffer.concat([named(3, field, version), Buffer.from([0])])),
+          Buffer.from([0]),
+        ]);
+        const zip = new ZipFile();
+        zip.addBuffer(level, 'map/level.dat');
+        zip.addBuffer(Buffer.from('region fixture'), 'map/region/r.0.0.mca');
+        zip.end();
+        const chunks: Buffer[] = [];
+        for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
+        const bytes = Buffer.concat(chunks);
+        const store = createMinecraftSourceStore(f.f.db, f.f.context, env);
+        const source = await store.reserveUpload({
+          kind: 'world',
+          serverId: f.serverId,
+          idempotencyKey: randomUUID(),
+          bytes: bytes.length,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+        });
+        await store.upload(
+          source.id,
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(bytes);
+              controller.close();
+            },
+          }),
+          bytes.length,
+        );
+        f.options = {
+          ...f.options,
+          env,
+          mountdataRoot: resolve(env.NH_MINECRAFT_CONTENT_ROOT),
+          sourceRoot: resolve(env.NH_MINECRAFT_SOURCE_ROOT),
+          worldArchiveResolver: store.worldArchiveResolver,
+        };
+        await f.f.db
+          .updateTable('physical_hosts')
+          .set({
+            local_disk_path: resolve(env.NH_MINECRAFT_SOURCE_ROOT),
+            upload_policy: JSON.stringify({
+              providerMaxFileBytes: 1024 ** 2,
+              temporaryDiskPath: resolve(env.NH_MINECRAFT_SOURCE_ROOT),
+              temporaryDiskBudgetBytes: 16 * 1024 ** 2,
+              temporaryDiskHeadroomBytes: 0,
+            }),
+          })
+          .where('id', '=', f.f.hostId)
+          .execute();
+        const command = { kind: 'world-import', archiveRef: source.id, targetWorld: 'new_world' };
+        const prepared = await prepareMinecraftContentPlan(f.f.db, f.serverId, command, {
+          ...f.options,
+          adapter: f.context.adapter,
+        });
+        f.operation.action = 'minecraft-content';
+        f.operation.plan.minecraftContent = prepared;
+        await f.f.db
+          .updateTable('server_operations')
+          .set({ action: 'minecraft-content', plan: JSON.stringify(f.operation.plan) })
+          .where('job_id', '=', f.operation.job_id)
+          .execute();
+        f.context.adapter.getResources = vi.fn(async () => ({
+          current_state: 'running' as const,
+          is_suspended: false,
+          resources: {
+            memory_bytes: 0,
+            cpu_absolute: 0,
+            disk_bytes: 0,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            uptime: 1000,
+          },
+        }));
+        const directories = new Set<string>();
+        const list = f.context.adapter.listFiles;
+        f.context.adapter.listFiles = vi.fn(async (id, parent = '') => {
+          const result = await list(id, parent);
+          for (const directory of directories) {
+            const pieces = directory.split('/');
+            const name = pieces.pop() ?? '';
+            if (pieces.join('/') === parent && !result.some((entry) => entry.name === name))
+              result.push({
+                name,
+                is_file: false,
+                is_symlink: false,
+                size: 0,
+              } as (typeof result)[number]);
+          }
+          return result;
+        });
+        f.context.adapter.createDirectory = vi.fn(async (_id, parent, name) => {
+          directories.add([parent, name].filter(Boolean).join('/'));
+        });
+        f.context.adapter.uploadFile = vi.fn(async (_id, path, upload) => {
+          await upload.authorize();
+          expect(
+            (
+              await f.f.db
+                .selectFrom('minecraft_server_profiles')
+                .select('installed')
+                .where('server_id', '=', f.serverId)
+                .executeTakeFirstOrThrow()
+            ).installed,
+          ).toBe(true);
+          const chunks: Uint8Array[] = [];
+          for await (const chunk of upload.body) chunks.push(chunk);
+          f.files.set(path, Buffer.concat(chunks));
+        });
+        f.files.set('new_world/foreign.txt', Buffer.from('keep'));
+        await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+          code: 'conflict',
+        });
+        expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
+        f.files.delete('new_world/foreign.txt');
+        f.files.set('server.properties', Buffer.from('level-name=new_world\n'));
+        await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
+          'running server must not require stop',
+        );
+        // An offline import into the selected, missing folder must retain the
+        // stopped guard at subsequent effects if the process starts externally.
+        vi.mocked(f.context.assertStopped).mockClear().mockResolvedValueOnce(undefined);
+        if (status === 'verified') {
+          await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
+            'running server must not require stop',
+          );
+          expect(f.context.assertStopped).toHaveBeenCalledTimes(2);
+        } else {
+          // An incompatible/unknown source cannot replace the selected folder,
+          // even when the first stopped check succeeds. No external effect.
+          await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+            code: 'validation_failed',
+            details: { reason: 'minecraft_world_active_version' },
+          });
+          expect(f.context.assertStopped).toHaveBeenCalledTimes(1);
+        }
+        expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
+        f.files.set('server.properties', Buffer.from('level-name=world\n'));
+        vi.mocked(f.context.assertStopped).mockClear();
+        expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+        expect(f.files.get('new_world/level.dat')).toEqual(level);
+        expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
+        expect(f.context.assertStopped).not.toHaveBeenCalled();
+        const inventory = await inspectMinecraftWorlds(
+          f.f.db,
+          f.context.adapter,
+          f.serverId,
+          f.context.authorize,
+          f.options.env,
+        );
+        expect(inventory.selectedWorld).toBe('world');
+        expect(inventory.worlds.find((world) => world.name === 'new_world')?.status).toBe(status);
+        expect(
+          await f.f.db
+            .selectFrom('minecraft_server_profiles')
+            .select(['installed', 'content_state'])
+            .where('server_id', '=', f.serverId)
+            .executeTakeFirst(),
+        ).toEqual({ installed: true, content_state: {} });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   async function installedPackFixture(
     selection:

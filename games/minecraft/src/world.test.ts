@@ -42,13 +42,21 @@ function levelDat(version = 5000, release = '26.1', gzip = true): Buffer {
   const bytes = writeUncompressed(nbt, 'big');
   return gzip ? gzipSync(bytes) : bytes;
 }
+function metadata(data: NBT['value']): Buffer {
+  return gzipSync(
+    writeUncompressed(
+      { type: 'compound', name: '', value: { Data: { type: 'compound', value: data } } },
+      'big',
+    ),
+  );
+}
 it('observes an actual bounded DataVersion without guessing while exact validation still rejects mismatches', () => {
   expect(
     inspectMinecraftLevelDat(levelDat(12345, 'future-release'), { release: 'future-release' }),
   ).toMatchObject({ dataVersion: 12345, versionName: 'future-release' });
   expect(() => validateMinecraftLevelDat(levelDat(12345), 5000)).toThrow();
   expect(() => inspectMinecraftLevelDat(levelDat(-1))).toThrow();
-  expect(() => inspectMinecraftLevelDat(levelDat(), { release: '1.21.1' })).toThrow();
+  expect(inspectMinecraftLevelDat(levelDat(), { release: '1.21.1' }).versionName).toBe('26.1');
   expect(() =>
     inspectMinecraftLevelDat(levelDat(), { limits: { maxUncompressedBytes: 16 } }),
   ).toThrow();
@@ -115,6 +123,121 @@ function rootWith(dataPayload: Buffer): Buffer {
 }
 
 describe('bounded Java level.dat validation', () => {
+  it.each([19132, 19133])(
+    'recognizes legacy storage %s without inventing an exact release',
+    (storage) => {
+      const bytes = metadata({
+        version: { type: 'int', value: storage },
+        LevelName: { type: 'string', value: 'Old map' },
+      });
+      const observation = inspectMinecraftLevelDat(bytes);
+      expect(observation).toMatchObject({ storageVersion: storage });
+      expect(observation.dataVersion).toBeUndefined();
+      expect(observation.versionName).toBeUndefined();
+      expect(observation.detectedRelease).toBeUndefined();
+      expect(() => validateMinecraftLevelDat(bytes, 4786, { release: '26.1' })).toThrow();
+    },
+  );
+  it('recognizes markerless Alpha/Beta metadata using its typed core fields', () => {
+    const legacy = {
+      RandomSeed: { type: 'long' as const, value: [0, 123] as [number, number] },
+      Time: { type: 'long' as const, value: [0, 0] as [number, number] },
+      SpawnX: { type: 'int' as const, value: 0 },
+      SpawnY: { type: 'int' as const, value: 64 },
+      SpawnZ: { type: 'int' as const, value: 0 },
+    };
+    expect(inspectMinecraftLevelDat(metadata(legacy)).dataVersion).toBeUndefined();
+    const { RandomSeed: _seed, ...insufficient } = legacy;
+    expect(() => inspectMinecraftLevelDat(metadata(insufficient))).toThrow();
+    expect(() => inspectMinecraftLevelDat(metadata({}))).toThrow();
+  });
+  it('preserves Series, Snapshot and 26.3 version history while resolving a known display alias', () => {
+    const bytes = metadata({
+      version: { type: 'int', value: 19133 },
+      DataVersion: { type: 'int', value: 4764 },
+      Version: {
+        type: 'compound',
+        value: {
+          Id: { type: 'int', value: 4764 },
+          Name: { type: 'string', value: '26.1 Snapshot 1' },
+          Series: { type: 'string', value: 'main' },
+          Snapshot: { type: 'byte', value: 1 },
+        },
+      },
+      version_history: { type: 'list', value: { type: 'int', value: [3700, 4764] } },
+    });
+    expect(validateMinecraftLevelDat(bytes, 4764, { release: '26.1-snapshot-1' })).toMatchObject({
+      dataVersion: 4764,
+      versionName: '26.1 Snapshot 1',
+      detectedRelease: '26.1-snapshot-1',
+      storageVersion: 19133,
+      versionSeries: 'main',
+      snapshot: true,
+      versionHistory: [3700, 4764],
+    });
+    expect(
+      inspectMinecraftLevelDat(
+        metadata({
+          DataVersion: { type: 'int', value: 5023 },
+          version_history: { type: 'list', value: { type: 'int', value: [] } },
+        }),
+      ),
+    ).toMatchObject({ dataVersion: 5023, detectedRelease: '26.3', versionHistory: [] });
+  });
+  it('rejects malformed version metadata rather than converting it to an unknown version', () => {
+    for (const extra of [
+      { version: { type: 'string', value: '19133' } },
+      { version: { type: 'int', value: 19132 } },
+      { Version: { type: 'compound', value: { Id: { type: 'int', value: 1 } } } },
+      { Version: { type: 'compound', value: { Snapshot: { type: 'byte', value: 2 } } } },
+      { Version: { type: 'compound', value: { Series: { type: 'int', value: 1 } } } },
+      { version_history: { type: 'intArray', value: [4786] } },
+      { version_history: { type: 'list', value: { type: 'int', value: [0] } } },
+      {
+        version_history: {
+          type: 'list',
+          value: { type: 'int', value: new Array(4097).fill(4786) },
+        },
+      },
+    ] as NBT['value'][])
+      expect(() =>
+        inspectMinecraftLevelDat(
+          metadata({
+            DataVersion: { type: 'int', value: 4786 },
+            ...extra,
+          }),
+        ),
+      ).toThrow();
+  });
+  it('accepts the empty TAG_End list representation of version history', () => {
+    const version = Buffer.alloc(4);
+    version.writeInt32BE(5023);
+    const bytes = rootWith(
+      namedTag(
+        10,
+        'Data',
+        Buffer.concat([
+          namedTag(3, 'DataVersion', version),
+          namedTag(9, 'version_history', Buffer.from([0, 0, 0, 0, 0])),
+          Buffer.from([0]),
+        ]),
+      ),
+    );
+    expect(inspectMinecraftLevelDat(bytes).versionHistory).toEqual([]);
+  });
+  it('does not infer a mainline release from a nameless experimental-series save', () => {
+    const observed = inspectMinecraftLevelDat(
+      metadata({
+        DataVersion: { type: 'int', value: 4786 },
+        Version: {
+          type: 'compound',
+          value: { Series: { type: 'string', value: 'custom-series' } },
+        },
+      }),
+    );
+    expect(observed.versionSeries).toBe('custom-series');
+    expect(observed.detectedRelease).toBeUndefined();
+  });
   it('validates gzip and raw big-endian NBT against exact trusted DataVersion, never release semver', () => {
     for (const gzip of [true, false]) {
       const bytes = levelDat(5000, '26.1', gzip);
@@ -214,7 +337,7 @@ describe('streamed isolated world staging', () => {
       stageMinecraftWorld(archive.path, options(root, archive.sha256)),
     ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_existing_mismatch' } });
   });
-  it('checks archive digest, exact DataVersion, plan identity and cancellation', async () => {
+  it('checks archive digest, preserves mismatched source metadata, plan identity and cancellation', async () => {
     const { root } = await environment();
     const archive = await makeZip(root, { 'level.dat': levelDat() });
     await expect(
@@ -225,7 +348,7 @@ describe('streamed isolated world staging', () => {
         ...options(root, archive.sha256),
         expectedDataVersion: 5001,
       }),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({ validation: { dataVersion: 5000, targetRelease: '26.1' } });
     await expect(
       stageMinecraftWorld(archive.path, options(root, archive.sha256)),
     ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_plan_conflict' } });
@@ -238,6 +361,26 @@ describe('streamed isolated world staging', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow();
+  });
+  it('stages a wrapped legacy world and unknown target without converting its bytes', async () => {
+    const { root } = await environment();
+    const original = metadata({ version: { type: 'int', value: 19133 } });
+    const archive = await makeZip(root, {
+      'FCTN/level.dat': original,
+      'FCTN/region/r.0.0.mca': Buffer.from('opaque chunk bytes'),
+    });
+    const staged = await stageMinecraftWorld(archive.path, {
+      ...options(root, archive.sha256),
+      expectedDataVersion: undefined,
+      release: 'unknown-future-server',
+    });
+    expect(staged.validation).toMatchObject({
+      storageVersion: 19133,
+      targetRelease: 'unknown-future-server',
+    });
+    expect(staged.validation.dataVersion).toBeUndefined();
+    expect(staged.validation.versionName).toBeUndefined();
+    expect(await readFile(join(staged.directory, 'imported/level.dat'))).toEqual(original);
   });
   it('does not follow staging/source symlinks or accept browser-like paths outside mountdata', async () => {
     const { root, parent } = await environment();
@@ -402,7 +545,7 @@ describe('world inventory observations', () => {
     expect(worlds).toEqual([
       expect.objectContaining({
         name: 'legacy',
-        status: 'unavailable',
+        status: 'unknown',
         validation: expect.objectContaining({ dataVersion: 1234, versionName: '1.9' }),
       }),
     ]);
@@ -414,6 +557,32 @@ describe('world inventory observations', () => {
       { release: '26.1', expectedDataVersion: 5000 },
     );
     expect(known[0]).toMatchObject({ status: 'incompatible', validation: { versionName: '1.9' } });
+  });
+  it('distinguishes unknown legacy/future identity, malformed metadata and unavailable reads', async () => {
+    const worlds = await discoverMinecraftWorlds(
+      {
+        listRoot: async () =>
+          ['legacy', 'future', 'ambiguous', 'invalid', 'offline'].map((name) => ({
+            name,
+            isDirectory: true,
+          })),
+        readLevelDat: async (name) => {
+          if (name === 'offline') throw new Error('unavailable');
+          if (name === 'invalid') return metadata({});
+          if (name === 'legacy') return metadata({ version: { type: 'int', value: 19133 } });
+          if (name === 'ambiguous') return metadata({ DataVersion: { type: 'int', value: 111 } });
+          return levelDat(77777, 'future-custom');
+        },
+      },
+      { release: 'unknown-server' },
+    );
+    expect(worlds.map(({ name, status }) => ({ name, status }))).toEqual([
+      { name: 'legacy', status: 'unknown' },
+      { name: 'future', status: 'unknown' },
+      { name: 'ambiguous', status: 'unknown' },
+      { name: 'invalid', status: 'invalid' },
+      { name: 'offline', status: 'unavailable' },
+    ]);
   });
 
   it('uses at most two readers, scans each candidate once and preserves provider order', async () => {

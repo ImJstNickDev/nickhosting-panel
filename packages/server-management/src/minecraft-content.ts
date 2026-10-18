@@ -50,11 +50,13 @@ import {
 } from '../../../games/minecraft/src/runtime.js';
 import {
   discoverMinecraftWorlds,
+  inspectMinecraftLevelDat,
   planMinecraftWorldReplacement,
   recoverMinecraftWorldStageLock,
   stageMinecraftWorld,
   validateMinecraftLevelDat,
 } from '../../../games/minecraft/src/world.js';
+import { assessMinecraftWorldCompatibility } from '../../../games/minecraft/src/world-version.js';
 import type { Environment } from './admission.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { inspectMinecraftCombination } from './minecraft-registry.js';
@@ -289,7 +291,13 @@ export async function prepareMinecraftContentPlan(
     )
       throw new DomainError('conflict');
     assertMinecraftRuntimePathsPreserved([name], profile.installed_manifest);
-    result.world = { dataVersion: worldDataVersion(choice), existing: actual.length === 1 };
+    result.world = {
+      dataVersion:
+        command.kind === 'world-select'
+          ? worldDataVersion(choice)
+          : minecraftWorldDataVersion(choice.combination.release),
+      existing: actual.length === 1,
+    };
     if (command.kind === 'world-import') {
       if (server.runtime_state === 'running') {
         const properties = parseMinecraftProperties(
@@ -1982,12 +1990,7 @@ export async function inspectMinecraftWorlds(
   if (!profile || !server) throw new DomainError('not_found');
   if (!server.pterodactyl_identifier) throw new DomainError('conflict');
   const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
-  let expectedDataVersion: number | undefined;
-  try {
-    expectedDataVersion = worldDataVersion(choice);
-  } catch (error) {
-    if (!(error instanceof DomainError) || error.code !== 'integration_unavailable') throw error;
-  }
+  const expectedDataVersion = minecraftWorldDataVersion(choice.combination.release);
   const snapshot: MinecraftWorldSnapshot = {
     installed: profile.installed,
     supported: minecraftManifest.capabilities.worlds,
@@ -2056,7 +2059,10 @@ async function applyWorldContent(
   const target = minecraftWorldName(
     command.kind === 'world-import' ? command.targetWorld : command.world,
   );
-  if (!prepared.world || prepared.world.dataVersion !== worldDataVersion(choice))
+  if (
+    !prepared.world ||
+    prepared.world.dataVersion !== minecraftWorldDataVersion(choice.combination.release)
+  )
     throw new DomainError('conflict');
   const profile = await context.db
     .selectFrom('minecraft_server_profiles')
@@ -2065,6 +2071,7 @@ async function applyWorldContent(
     .executeTakeFirstOrThrow();
   assertMinecraftRuntimePathsPreserved([target], profile.installed_manifest);
   if (command.kind === 'world-select') {
+    if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
     if (!(await remoteEntry(context, `${target}/level.dat`))) throw new DomainError('not_found');
     const validation = validateMinecraftLevelDat(
       await readWorldLevel(context, target),
@@ -2088,9 +2095,7 @@ async function applyWorldContent(
     if ((source['level-name'] ?? 'world') === target) fail('minecraft_world_selected');
     if (!(await completed(context, stepId('remove', target)))) {
       if (!(await remoteEntry(context, `${target}/level.dat`))) throw new DomainError('not_found');
-      validateMinecraftLevelDat(await readWorldLevel(context, target), prepared.world.dataVersion, {
-        release: choice.combination.release,
-      });
+      inspectMinecraftLevelDat(await readWorldLevel(context, target));
       if (
         prepared.backupBefore &&
         context.operation().plan.backupComplete !== true &&
@@ -2112,14 +2117,11 @@ async function applyWorldContent(
     return true;
   }
   const onlineImport = minecraftContentAllowsOnline(prepared);
-  let activeTarget = false;
+  const properties = parseMinecraftProperties(await textFile(context, 'server.properties'));
+  const activeTarget = (properties['level-name'] ?? 'world').toLowerCase() === target.toLowerCase();
   // Even a missing folder is the running world's target when level-name points
   // to it; importing there would race the game's own writes.
-  if (onlineImport) {
-    const properties = parseMinecraftProperties(await textFile(context, 'server.properties'));
-    activeTarget = (properties['level-name'] ?? 'world').toLowerCase() === target.toLowerCase();
-    if (activeTarget) await context.assertStopped();
-  }
+  if (onlineImport && activeTarget) await context.assertStopped();
   const assertWritable = onlineImport && !activeTarget ? context.authorize : context.assertStopped;
   if (!prepared.archivePath || !prepared.world.archiveSha256)
     throw new DomainError('configuration_invalid');
@@ -2166,6 +2168,16 @@ async function applyWorldContent(
     options.env,
   );
   const staged = await stageMinecraftWorld(prepared.archivePath, stageOptions);
+  // Replacing the selected folder would activate its data on the next start.
+  // Cross-version imports belong in an inactive folder, without conversion.
+  if (
+    activeTarget &&
+    assessMinecraftWorldCompatibility(staged.validation, {
+      expectedDataVersion: prepared.world.dataVersion,
+      release: choice.combination.release,
+    }) !== 'verified'
+  )
+    fail('minecraft_world_active_version');
   let bytes = 0;
   for (const file of staged.manifest)
     if (!(await completed(context, stepId('install', file.path)))) bytes += file.size;
@@ -2210,18 +2222,16 @@ async function applyWorldContent(
       target,
       assertWritable,
     );
-  const level = validateMinecraftLevelDat(
-    await readWorldLevel(context, target),
-    prepared.world.dataVersion,
-    { release: choice.combination.release },
-  );
-  if (level.sha256 !== staged.validation.levelDatSha256)
+  // Staging already parsed the metadata. Verify the promoted bytes without
+  // reinterpreting an imported world's version as the target runtime's version.
+  const levelDatSha256 = sha256(await readWorldLevel(context, target));
+  if (levelDatSha256 !== staged.validation.levelDatSha256)
     throw new DomainError('operation_uncertain');
   await verifyMinecraftPendingContent(context);
-  await context.event('minecraft.world.verified', {
+  await context.event('minecraft.world.imported', {
     world: target,
     files: staged.manifest.length,
-    levelDatSha256: level.sha256,
+    levelDatSha256,
   });
   return true;
 }

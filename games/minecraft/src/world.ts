@@ -17,6 +17,10 @@ import {
 import { DomainError } from '@nickhosting/core';
 import { parseUncompressed } from 'prismarine-nbt';
 import { minecraftWorldName, planMinecraftWorldImport } from './management.js';
+import {
+  assessMinecraftWorldCompatibility,
+  identifyMinecraftWorldRelease,
+} from './world-version.js';
 
 function fail(reason: string): never {
   throw new DomainError('validation_failed', 400, { reason: `minecraft_world_${reason}` });
@@ -141,24 +145,35 @@ function preflightNbt(buffer: Buffer, limits: MinecraftNbtLimits): void {
   if (offset !== buffer.length) fail('nbt_trailing');
 }
 export interface MinecraftWorldValidation {
-  dataVersion: number;
+  dataVersion?: number;
   sha256: string;
   uncompressedBytes: number;
+  /** Literal saved display name, not necessarily the release ID. */
   versionName?: string;
+  detectedRelease?: string;
+  storageVersion?: number;
+  versionSeries?: string;
+  snapshot?: boolean;
+  versionHistory?: number[];
 }
 /** Java big-endian level.dat only. Exact DataVersion comes from integration release metadata, never semver. */
 export function validateMinecraftLevelDat(
   input: Uint8Array,
   expectedDataVersion: number,
-  options: { release?: string; limits?: Partial<MinecraftNbtLimits> } = {},
-): MinecraftWorldValidation {
+  options: { release?: string; expectedSeries?: string; limits?: Partial<MinecraftNbtLimits> } = {},
+): MinecraftWorldValidation & { dataVersion: number } {
   if (!Number.isSafeInteger(expectedDataVersion) || expectedDataVersion < 1) fail('level_data');
   const inspected = inspectMinecraftLevelDat(input, options);
-  if (inspected.dataVersion !== expectedDataVersion) fail('data_version');
-  return inspected;
+  if (
+    assessMinecraftWorldCompatibility(inspected, { ...options, expectedDataVersion }) !==
+      'verified' ||
+    inspected.dataVersion === undefined
+  )
+    fail('data_version');
+  return { ...inspected, dataVersion: inspected.dataVersion };
 }
-/** Bounded observation for trusted test evidence; this does not establish that a
- * caller-selected release is compatible with a different world's DataVersion. */
+/** Bounded structural observation. A target release never changes source facts;
+ * absent modern metadata is valid for recognized historical world formats. */
 export function inspectMinecraftLevelDat(
   input: Uint8Array,
   options: { release?: string; limits?: Partial<MinecraftNbtLimits> } = {},
@@ -186,29 +201,70 @@ export function inspectMinecraftLevelDat(
   const data = parsed.value.Data;
   if (data?.type !== 'compound') fail('level_data');
   const version = data.value.DataVersion;
-  if (version?.type !== 'int' || version.value < 1) fail('data_version');
+  if (version && (version.type !== 'int' || version.value < 1)) fail('data_version');
+  const storage = data.value.version;
+  if (storage && (storage.type !== 'int' || storage.value < 1)) fail('storage_version');
+  if (storage?.value === 19132 && version) fail('storage_version');
+  // Alpha/early Beta lack a storage marker. Recognize their actual typed core
+  // fields rather than treating any arbitrary Data compound as a world.
+  const legacyShape =
+    !storage &&
+    data.value.RandomSeed?.type === 'long' &&
+    data.value.Time?.type === 'long' &&
+    ['SpawnX', 'SpawnY', 'SpawnZ'].every((key) => data.value[key]?.type === 'int');
+  if (!version && storage?.value !== 19132 && storage?.value !== 19133 && !legacyShape)
+    fail('level_data');
   const detailedVersion = data.value.Version;
   let versionName: string | undefined;
+  let versionSeries: string | undefined;
+  let snapshot: boolean | undefined;
   if (detailedVersion) {
     if (detailedVersion.type !== 'compound') fail('data_version');
     const id = detailedVersion.value.Id;
-    if (id && (id.type !== 'int' || id.value !== version.value)) fail('data_version');
+    if (id && (id.type !== 'int' || id.value < 1 || (version && id.value !== version.value)))
+      fail('data_version');
     const name = detailedVersion.value.Name;
     if (name) {
-      if (
-        name.type !== 'string' ||
-        name.value.length > 128 ||
-        (options.release && name.value !== options.release)
-      )
-        fail('release_version');
+      if (name.type !== 'string' || name.value.length > 128) fail('release_version');
       versionName = name.value;
     }
+    const series = detailedVersion.value.Series;
+    if (series) {
+      if (series.type !== 'string' || !series.value || series.value.length > 128)
+        fail('version_series');
+      versionSeries = series.value;
+    }
+    const experimental = detailedVersion.value.Snapshot;
+    if (experimental) {
+      if (experimental.type !== 'byte' || ![0, 1].includes(experimental.value))
+        fail('version_snapshot');
+      snapshot = experimental.value === 1;
+    }
   }
+  let versionHistory: number[] | undefined;
+  const history = data.value.version_history;
+  if (history) {
+    if (
+      history.type !== 'list' ||
+      (history.value.type !== 'int' &&
+        !((history.value.type as string) === 'end' && history.value.value.length === 0)) ||
+      history.value.value.length > 4096 ||
+      history.value.value.some((value) => typeof value !== 'number' || value < 1)
+    )
+      fail('version_history');
+    versionHistory = history.value.value as number[];
+  }
+  const detectedRelease = identifyMinecraftWorldRelease(version?.value, versionName, versionSeries);
   return {
-    dataVersion: version.value,
+    ...(version ? { dataVersion: version.value } : {}),
     sha256: createHash('sha256').update(compressed).digest('hex'),
     uncompressedBytes: bytes.length,
     ...(versionName ? { versionName } : {}),
+    ...(detectedRelease ? { detectedRelease } : {}),
+    ...(storage ? { storageVersion: storage.value } : {}),
+    ...(versionSeries ? { versionSeries } : {}),
+    ...(snapshot !== undefined ? { snapshot } : {}),
+    ...(versionHistory ? { versionHistory } : {}),
   };
 }
 async function fileDigest(
@@ -259,7 +315,7 @@ export interface StagedMinecraftWorld {
   directory: string;
   planDigest: string;
   manifest: StagedContentFile[];
-  validation: MinecraftWorldValidation & { release: string; levelDatSha256: string };
+  validation: MinecraftWorldValidation & { targetRelease: string; levelDatSha256: string };
   targetWorld: string;
   archiveSha256: string;
 }
@@ -272,7 +328,7 @@ export async function stageMinecraftWorld(
     jobId: string;
     targetWorld: string;
     release: string;
-    expectedDataVersion: number;
+    expectedDataVersion?: number;
     archiveSha256: string;
     limits?: Partial<ContentLimits>;
     nbtLimits?: Partial<MinecraftNbtLimits>;
@@ -291,8 +347,8 @@ export async function stageMinecraftWorld(
     !root.split(sep).includes('mountdata') ||
     !options.release ||
     options.release.length > 128 ||
-    !Number.isSafeInteger(options.expectedDataVersion) ||
-    options.expectedDataVersion < 1 ||
+    (options.expectedDataVersion !== undefined &&
+      (!Number.isSafeInteger(options.expectedDataVersion) || options.expectedDataVersion < 1)) ||
     !/^[a-f0-9]{64}$/.test(options.archiveSha256) ||
     !isAbsolute(archivePath) ||
     !resolve(archivePath).startsWith(`${root}${sep}`)
@@ -418,16 +474,18 @@ export async function stageMinecraftWorld(
       levelInfo.size > metadataLimits.maxCompressedBytes
     )
       fail('level_data');
-    const validation = validateMinecraftLevelDat(
-      await readFile(levelPath),
-      options.expectedDataVersion,
-      { release: options.release, limits: metadataLimits },
-    );
+    const validation = inspectMinecraftLevelDat(await readFile(levelPath), {
+      limits: metadataLimits,
+    });
     const result: StagedMinecraftWorld = {
       directory,
       planDigest,
       manifest,
-      validation: { ...validation, release: options.release, levelDatSha256: validation.sha256 },
+      validation: {
+        ...validation,
+        targetRelease: options.release,
+        levelDatSha256: validation.sha256,
+      },
       targetWorld,
       archiveSha256: options.archiveSha256,
     };
@@ -499,7 +557,7 @@ export function planMinecraftWorldReplacement(
 }
 export interface MinecraftWorldDiscovery {
   name: string;
-  status: 'verified' | 'incompatible' | 'unavailable';
+  status: 'verified' | 'incompatible' | 'unknown' | 'invalid' | 'unavailable';
   validation?: MinecraftWorldValidation;
 }
 /** Capability-limited remote services are provided by Core after managed-server authorization. */
@@ -510,6 +568,7 @@ export async function discoverMinecraftWorlds(
   },
   options: {
     expectedDataVersion?: number;
+    expectedSeries?: string;
     release: string;
     maxWorlds?: number;
     signal?: AbortSignal;
@@ -568,21 +627,13 @@ export async function discoverMinecraftWorlds(
       if (!bytes) continue;
       try {
         const validation = inspectMinecraftLevelDat(bytes, { limits });
-        const compatible =
-          validation.dataVersion === options.expectedDataVersion &&
-          (!validation.versionName || validation.versionName === options.release);
         worlds[index] = {
           name,
-          status:
-            options.expectedDataVersion === undefined
-              ? 'unavailable'
-              : compatible
-                ? 'verified'
-                : 'incompatible',
+          status: assessMinecraftWorldCompatibility(validation, options),
           validation,
         };
       } catch {
-        worlds[index] = { name, status: 'incompatible' };
+        worlds[index] = { name, status: 'invalid' };
       }
     }
   };

@@ -439,10 +439,16 @@ two concurrent readers. Only `level.dat` is read, not region/chunk contents.
 Missing installation or unknown release metadata does not hide the inventory.
 World-format compatibility uses the integration's bundled exact-release DataVersion
 catalog, independently of signed per-server reports (M5 correction, 2026-10-18).
-Unknown/pre-DataVersion releases retain unavailable mutation eligibility.
-Malformed or mismatched worlds remain distinct from unreadable directories. The
-existing exact DataVersion/release checks remain; this pass does not add automatic
-world upgrading, downgrading or support for historical NBT formats.
+The M5 world-format amendment (2026-10-18) separates structural import from
+activation compatibility. Modern metadata and recognized legacy Java worlds can be
+imported into an inactive folder even when the source differs from the target or
+its release is unknown. Saved display names and unambiguous catalog identities are
+shown without inventing missing versions. Compatible, incompatible, unknown,
+invalid and unreadable states remain distinct. Unknown target metadata does not
+disable import/removal, while selection and replacement of the configured world
+retain strict compatibility. No automatic world upgrade/downgrade is introduced.
+See [world metadata evidence](MINECRAFT-WORLD-FORMATS.md) and the current
+[import/selection contract](M4-WORLDS.md#version-detection-and-cross-version-imports--m5-2026-10-18).
 
 The configured world is marked independently of compatibility. Importing a ZIP
 creates its requested folder; selecting it is a separate durable operation and

@@ -1,8 +1,9 @@
 # M4 Minecraft world staging and validation
 
 The [2026-10-18 world-format investigation](MINECRAFT-WORLD-FORMATS.md) records
-historical metadata gaps and proposes a later compatibility model. It is research
-only; the implementation behavior described below has not changed as a result.
+the metadata evidence behind the M5 implementation amendment at the end of this
+document. Earlier M4/M5 constraints below are retained as implementation history;
+the final amendment separates import from activation compatibility.
 
 World imports are authorized durable jobs. The public request identifies an uploaded archive; it never supplies a local path or chooses a world DataVersion. Core resolves the immutable archive reference to a trusted file under project `mountdata`, obtains its recorded SHA-256, and passes the selected release's integration-owned world DataVersion to the Minecraft package. Neither release spelling nor Owner configuration is accepted as evidence of the world format.
 
@@ -95,3 +96,43 @@ directories); the generated ZIP, including its headers, must fit the existing
 8 GiB source limit. CRC preparation and source SHA-256 are two local reads, not
 two uploads. Large-offset ZIP64 layout is covered synthetically; no multi-GiB
 browser transfer is claimed by that test.
+
+### Version detection and cross-version imports — M5, 2026-10-18
+
+`inspectMinecraftLevelDat` now observes bounded metadata independently of a target
+release. It recognizes modern DataVersion, legacy McRegion/Anvil storage markers,
+and markerless worlds with the typed seed/time/spawn fields of early Java saves.
+Malformed or contradictory metadata remains invalid. Optional observed fields
+include storage version, display name, Series, Snapshot and bounded version history.
+Missing version fields are never filled from the target server or a filename.
+
+The bundled catalog is indexed once in both directions. An unambiguous native
+DataVersion can identify a release; an unfamiliar saved name or a shared number
+does not become a guessed exact release. Known display-name aliases use inspected
+artifact evidence. DataVersion/name comparisons and Series uncertainty share one
+assessment between discovery and strict activation validation. Unknown target
+metadata is reported as unknown compatibility. This is metadata compatibility,
+not verification of every chunk, mod or datapack.
+
+An import stages structurally recognized worlds even when their version differs
+from the installed game or cannot be identified. It preserves the original bytes,
+does not change `level-name`, and performs no conversion or game start. The optional
+target DataVersion remains in the durable plan identity; source metadata is recorded
+separately with `targetRelease` explicitly named. Final promotion compares the
+remote metadata digest with the staged digest rather than parsing it again.
+The completion event says the world was imported, not certified compatible.
+
+Cross-version imports must target an inactive folder. Replacement of the configured
+world still requires compatible metadata as well as the existing stopped-state,
+consent and backup conditions. Selection remains restricted to compatible metadata
+and a stopped server; this change adds no upgrade/downgrade workflow. Removal of a
+structurally recognized inactive world no longer requires matching versions, so an
+imported old world is not trapped behind the compatibility gate. Invalid/unreadable
+folders remain manageable through Files with its existing authorization rules.
+
+Worlds shows distinct compatible, incompatible, unknown, invalid and unavailable
+states. It displays a saved version name or an unambiguous inferred release;
+otherwise it says the version is unknown. Import and removal are independent of
+the target-version catalog gate; selection is not. Catalog and metadata processing
+add no provider calls or network lookups. Existing archive containment, integrity,
+resource admission, permission and recovery boundaries remain in place.

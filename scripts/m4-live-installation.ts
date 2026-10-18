@@ -559,6 +559,13 @@ async function capture(
     const world = minecraftWorldName(text(parsed['level-name']));
     const level = await read(`${world}/level.dat`, { collect: 8 * MAX_METADATA });
     const observedWorld = inspectMinecraftLevelDat(level.bytes, { release: runtime.release });
+    assert(observedWorld.dataVersion !== undefined, 'World does not declare a data version');
+    assert(
+      !observedWorld.versionName ||
+        observedWorld.versionName === runtime.release ||
+        observedWorld.detectedRelease === runtime.release,
+      'Observed world release differs from the tested runtime',
+    );
     await options.assertOwned();
     return {
       artifactSha256,

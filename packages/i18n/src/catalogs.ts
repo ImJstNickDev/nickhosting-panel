@@ -9,6 +9,7 @@ export const en = {
   'minecraft.content.verified': 'Content installation verified.',
   'minecraft.player.receipt_recovered': 'Player change verified and recovered.',
   'minecraft.world.verified': 'World verified: {world}.',
+  'minecraft.world.imported': 'World imported: {world}.',
   'games.minecraft.name': 'Minecraft',
   'games.minecraft.runtimes.vanilla': 'Vanilla',
   'games.minecraft.runtimes.paper': 'Paper',
@@ -134,6 +135,7 @@ export const it: Record<MessageKey, string> = {
   'minecraft.content.verified': 'Installazione dei contenuti verificata.',
   'minecraft.player.receipt_recovered': 'Modifica del giocatore verificata e recuperata.',
   'minecraft.world.verified': 'Mondo verificato: {world}.',
+  'minecraft.world.imported': 'Mondo importato: {world}.',
 
   'games.minecraft.name': 'Minecraft',
   'games.minecraft.runtimes.vanilla': 'Vanilla',

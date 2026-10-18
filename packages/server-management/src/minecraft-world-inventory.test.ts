@@ -36,7 +36,10 @@ const level = Buffer.concat([
   Buffer.from([0]),
 ]);
 
-function fixture(options: { installed?: boolean; missing?: boolean; properties?: string } = {}) {
+function fixture(
+  options: { installed?: boolean; missing?: boolean; properties?: string; level?: Buffer } = {},
+) {
+  const worldLevel = options.level ?? level;
   const profile = options.missing
     ? undefined
     : {
@@ -59,10 +62,12 @@ function fixture(options: { installed?: boolean; missing?: boolean; properties?:
   const readFile = vi.fn(async () => Buffer.from(options.properties ?? 'level-name=Older World\n'));
   const listFiles = vi.fn(async (_identifier: string, directory?: string) =>
     directory
-      ? [{ name: 'level.dat', is_file: true, size: level.length }]
+      ? [{ name: 'level.dat', is_file: true, size: worldLevel.length }]
       : [{ name: 'older', is_file: false }],
   );
-  const downloadFile = vi.fn(async () => ({ body: new Response(level).body }));
+  const downloadFile = vi.fn(async () => ({
+    body: new Response(Uint8Array.from(worldLevel)).body,
+  }));
   const adapter = { readFile, listFiles, downloadFile } as unknown as PterodactylAdapter;
   const authorize = vi.fn(async () => {});
   return { db, adapter, authorize, readFile, listFiles, downloadFile };
@@ -119,8 +124,28 @@ describe('Minecraft world inventory snapshot', () => {
     const f = fixture();
     expect(await inspectMinecraftWorlds(f.db, f.adapter, 'server', f.authorize)).toMatchObject({
       compatibility: 'unavailable',
-      worlds: [{ status: 'unavailable', validation: { dataVersion: 169 } }],
+      worlds: [{ status: 'unknown', validation: { dataVersion: 169 } }],
     });
+  });
+
+  it('keeps a legacy Anvil world visible without inventing a release or repeating reads', async () => {
+    const storageVersion = Buffer.alloc(4);
+    storageVersion.writeInt32BE(19133);
+    const legacy = Buffer.concat([
+      Buffer.from([10, 0, 0]),
+      named(10, 'Data', Buffer.concat([named(3, 'version', storageVersion), Buffer.from([0])])),
+      Buffer.from([0]),
+    ]);
+    const f = fixture({ level: legacy });
+    const snapshot = await inspectMinecraftWorlds(f.db, f.adapter, 'server', f.authorize);
+    expect(snapshot.worlds).toMatchObject([
+      { name: 'older', status: 'unknown', validation: { storageVersion: 19133 } },
+    ]);
+    expect(snapshot.worlds[0]?.validation?.dataVersion).toBeUndefined();
+    expect(snapshot.worlds[0]?.validation?.versionName).toBeUndefined();
+    expect(f.readFile).toHaveBeenCalledTimes(1);
+    expect(f.listFiles).toHaveBeenCalledTimes(2);
+    expect(f.downloadFile).toHaveBeenCalledTimes(1);
   });
 
   it('returns installation state without attempting files before installation', async () => {

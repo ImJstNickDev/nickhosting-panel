@@ -90,12 +90,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const folderPicker = useRef<HTMLInputElement>(null);
   const importKey = useRef(idempotencyKey());
   const mutationsDisabled =
-    !props.canManage ||
-    !supported ||
-    snapshot?.compatibility !== 'available' ||
-    props.pending ||
-    busy ||
-    Boolean(uncertain);
+    !props.canManage || !supported || props.pending || busy || Boolean(uncertain);
   const disabled = mutationsDisabled || !offline;
   const importStateAllowed =
     offline || (props.runtimeState === 'running' && snapshot?.selectedWorld != null);
@@ -121,17 +116,11 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
 
   useEffect(() => () => transfer.current?.abort(), []);
   useEffect(() => {
-    if (
-      !importStateAllowed ||
-      !props.canManage ||
-      props.pending ||
-      !supported ||
-      snapshot?.compatibility !== 'available'
-    ) {
+    if (!importStateAllowed || !props.canManage || props.pending || !supported) {
       transfer.current?.abort();
       if (!mutationLock.current) setSelection(undefined);
     }
-  }, [importStateAllowed, props.canManage, props.pending, supported, snapshot?.compatibility]);
+  }, [importStateAllowed, props.canManage, props.pending, supported]);
   useEffect(() => {
     if (!offline && !mutationLock.current) setSelection(undefined);
   }, [offline]);
@@ -346,7 +335,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       if (
         !snapshot?.selectedWorld ||
         selection.name === snapshot.selectedWorld ||
-        !rows.some((row) => row.name === selection.name && row.status === 'verified')
+        !rows.some((row) => row.name === selection.name && row.validation)
       )
         return;
       await submit({
@@ -487,8 +476,12 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                         >
                           {t(key(`status.${world.status}`))}
                         </span>
-                        {world.validation?.versionName && (
-                          <span>{world.validation.versionName}</span>
+                        {world.validation && (
+                          <span className="minecraft-world-version">
+                            {world.validation.versionName ||
+                              world.validation.detectedRelease ||
+                              t(key('versionUnknown'))}
+                          </span>
                         )}
                       </div>
                     </div>
@@ -541,8 +534,8 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                           content={
                             selected
                               ? t(key('selectedCannotDelete'))
-                              : world.status !== 'verified'
-                                ? t(key('cannotChange'))
+                              : !world.validation
+                                ? t(key('cannotDelete'))
                                 : actionName('delete')
                           }
                         >
@@ -553,7 +546,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
                             disabled={
                               disabled ||
                               selected ||
-                              world.status !== 'verified' ||
+                              !world.validation ||
                               snapshot.selectedWorld === null
                             }
                             onClick={() => choose('delete', world.name)}

@@ -111,8 +111,15 @@
 .minecraft-world-compatibility--verified {
   color: #28714a;
 }
-.minecraft-world-compatibility--incompatible {
+.minecraft-world-compatibility--incompatible,
+.minecraft-world-compatibility--invalid {
   color: var(--danger, #a13226);
+}
+.minecraft-world-compatibility--unknown {
+  color: #8b5a16;
+}
+.minecraft-world-version {
+  overflow-wrap: anywhere;
 }
 .minecraft-world-actions {
   gap: 3px;

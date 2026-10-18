@@ -148,7 +148,8 @@ export interface MinecraftPreparedContent {
   archiveSha256?: string;
   planDigest?: string;
   deletePaths?: string[];
-  world?: { archiveSha256?: string; dataVersion: number; existing: boolean };
+  /** Target runtime data version, when known; imported metadata is observed separately. */
+  world?: { archiveSha256?: string; dataVersion?: number; existing: boolean };
 }
 
 /** Only a new, isolated world folder can be written without stopping the game.

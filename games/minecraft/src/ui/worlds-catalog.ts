@@ -12,6 +12,10 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
     'This world is not verified for the server version.',
     'Questo mondo non è verificato per la versione del server.',
   ],
+  'worlds.cannotDelete': [
+    'World metadata could not be read. Use Files to inspect this folder.',
+    'Impossibile leggere i metadati del mondo. Controlla questa cartella in File.',
+  ],
   'worlds.configured': [
     'Selected world: {name}. This folder is not listed.',
     'Mondo selezionato: {name}. Questa cartella non è elencata.',
@@ -28,7 +32,10 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
   'worlds.selected': ['Selected', 'Selezionato'],
   'worlds.status.verified': ['Compatible', 'Compatibile'],
   'worlds.status.incompatible': ['Incompatible version', 'Versione incompatibile'],
-  'worlds.status.unavailable': ['Not verified', 'Non verificato'],
+  'worlds.status.unknown': ['Compatibility unknown', 'Compatibilità sconosciuta'],
+  'worlds.status.invalid': ['Invalid world data', 'Dati del mondo non validi'],
+  'worlds.status.unavailable': ['Metadata unavailable', 'Metadati non disponibili'],
+  'worlds.versionUnknown': ['Version unknown', 'Versione sconosciuta'],
   'worlds.selectedCannotDelete': [
     'Select another world before deleting this one.',
     'Seleziona un altro mondo prima di eliminare questo.',
@@ -60,8 +67,8 @@ export const minecraftWorldsMessages: Record<string, [string, string]> = {
     'Hai accesso in sola lettura ai mondi.',
   ],
   'worlds.compatibilityUnavailable': [
-    'Version compatibility cannot be checked. World changes are unavailable.',
-    'Impossibile verificare la compatibilità della versione. Modifiche ai mondi non disponibili.',
+    'Version compatibility cannot be checked. Worlds can be imported, but cannot be selected.',
+    'Impossibile verificare la compatibilità della versione. Puoi importare mondi, ma non selezionarli.',
   ],
   'worlds.selectionUnknown': [
     'The selected world could not be determined.',

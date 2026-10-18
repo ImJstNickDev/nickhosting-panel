@@ -12191,3 +12191,61 @@ loaded config reproduced `web.errors.fileRead` from the actual hash worker in
 12.54 s. The temporary override was removed; the committed test is the identical
 passing version (11.50 s). WebPanel typecheck and test-file Biome also passed.
 No real upload or world mutation was used to reproduce this failure.
+
+
+### 2026-10-18 — World version detection and cross-version import
+
+Implemented the approved import/detection subset of the
+[world-format investigation](MINECRAFT-WORLD-FORMATS.md), without a converter or
+new runtime rollout. One bounded metadata observation recognizes modern and legacy
+Java worlds; source version facts remain separate from the selected runtime.
+Discovery and activation share the same compatibility assessment. The catalog
+reverse index does not invent a release for ambiguous numbers, unfamiliar names,
+or nameless experimental Series. The artifact-backed snapshot display-name alias
+avoids comparing a known display name directly with a release ID.
+
+Worlds displays compatible, incompatible, unknown, invalid and unreadable metadata
+states, with an observed/inferred version when available. Inactive-folder imports
+accept different or unknown versions, and those worlds can subsequently be removed.
+Selection and active-folder replacement retain strict compatibility and stopped
+state. Imported files are preserved, `level-name` is not changed, and no world is
+started or converted. Completion says imported rather than implying compatibility.
+
+Focused evidence:
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/world.test.ts games/minecraft/src/world-version.test.ts`: **46 passed** on the final metadata implementation. Legacy Anvil/McRegion/markerless fields, malformed metadata, Series, history (including empty TAG_End list), display aliases, ambiguous/future versions, mismatched imports and existing archive/recovery checks covered.
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/ui/ui.test.ts`: **21 passed**.
+- `scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-content-world.test.ts packages/server-management/src/minecraft-world-inventory.test.ts apps/api/src/minecraft-worlds.test.ts packages/server-management/src/minecraft-content.test.ts`: initial **36 passed / 1 failed** because unknown target metadata was incorrectly classified as incompatible. The shared assessor was corrected; the affected inventory file rerun passed **7/7**. Other three files were not unnecessarily repeated.
+- `scripts/dev.sh pnpm exec vitest run scripts/m4-live-installation.test.ts`: **11 passed**. The diagnostic script now explicitly requires a native data version before recording numeric evidence, preserving its release check with the verified alias. The live script itself was not executed.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'prepares a new world online|imports a .* world online'`: initial **2 passed / 2 failed / 39 excluded**. The two failures were old test expectations: incompatible active-folder replacement now fails before the second stopped guard. Assertions were corrected to require that earlier refusal and zero uploads. Affected `-t 'imports a .* world online'` rerun: **3 passed / 40 excluded**. Matching, different-version and legacy sources reach the durable import path without changing the configured world; late collisions and active-folder replacement remain protected.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts`: **12/12 passed**. A subsequently added direct-API mismatched-selection test passed **1/1**, with 12 unrelated cases excluded. Its first request used the wrong envelope and returned400; the fixture was corrected to the existing API contract. The accepted job fails before an external effect and leaves the source and `server.properties` unchanged.
+- Browser evidence uses real application authentication/API/durable-job handlers, disposable isolated PostgreSQL schemas and an in-memory provider filesystem. It does not certify loading the imported maps in Minecraft. Axe and 320/390px reflow checks passed. English desktop and Italian mobile screenshots were visually reviewed by the coordinator and independent reviewer.
+
+Independent review found one correctness edge: a nameless world from a non-main
+Series could inherit a mainline release label from its numeric DataVersion. Fixed
+and covered by metadata/helper regressions; no unresolved must-fix finding remains.
+The current workflow never scans every chunk or performs a remote release lookup.
+The existing archive integrity, path, authorization, collision and resource controls
+remain in force.
+
+Evidence images:
+
+- [Desktop version states](screenshots/m5/minecraft-worlds-version-states-desktop-en.png)
+- [Italian mobile version states](screenshots/m5/minecraft-worlds-version-states-mobile-it.png)
+
+Test infrastructure was reused after project/network verification; no containers
+were started, recreated or manually restarted. Test-owned schemas and staging data
+were cleaned by their fixtures. No real provider/world files, DNS, credentials or
+production configuration were changed. Dev API/worker/Vite reloaded normally; an
+interim import/export mismatch during edits was corrected and the watcher recovered.
+Final read-only checks showed those three services healthy, frontend HTTP200 and
+unauthenticated API HTTP401. No Owner world was imported on the Owner's behalf.
+The historical full suite was not rerun; SFTPGo issue18 is unchanged.
+
+Final source checks: `scripts/dev.sh pnpm typecheck`,
+`scripts/dev.sh pnpm i18n:check`, Biome lint/format on the changed source files,
+`git diff --check`, and indexed governance/hygiene checks passed. Initial typecheck
+findings were resolved in the empty-list NBT typing, fixture Response bytes and
+the diagnostic script's newly optional metadata field; formatting was corrected
+in the affected fixture only. No production build or full historical suite was
+needed for this bounded change.

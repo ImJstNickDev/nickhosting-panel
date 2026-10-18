@@ -513,6 +513,31 @@ describe('Minecraft Worlds UI contracts', () => {
       worlds: [{ name: 'adventure', status: 'unavailable' }],
     });
   });
+  it('retains observed and inferred metadata without inventing a version for legacy worlds', async () => {
+    const client = clientFixture();
+    const common = { sha256: 'a'.repeat(64), uncompressedBytes: 128 };
+    const worlds = [
+      { name: 'legacy', status: 'unknown', validation: { ...common, storageVersion: 19133 } },
+      {
+        name: 'modern',
+        status: 'incompatible',
+        validation: {
+          ...common,
+          storageVersion: 19133,
+          dataVersion: 3700,
+          versionName: '1.20.4',
+          detectedRelease: '1.20.4',
+          versionSeries: 'main',
+          snapshot: false,
+          versionHistory: [3465, 3700],
+        },
+      },
+      { name: 'broken', status: 'invalid' },
+      { name: 'unreadable', status: 'unavailable' },
+    ];
+    client.request.mockResolvedValue({ ...snapshot, worlds });
+    expect((await createMinecraftUiController(client).worlds(serverId)).worlds).toEqual(worlds);
+  });
   it('rejects unsafe world paths and implicit replacement before requesting a job', async () => {
     const client = clientFixture();
     const controller = createMinecraftUiController(client);

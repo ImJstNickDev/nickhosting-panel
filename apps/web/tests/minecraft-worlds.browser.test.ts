@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { AxeBuilder } from '@axe-core/playwright';
 import { DomainError } from '@nickhosting/core';
 import { expect as browserExpect, type Page } from '@playwright/test';
@@ -17,6 +18,38 @@ async function archive(files: Record<string, Buffer>) {
   const chunks: Buffer[] = [];
   for await (const chunk of zip.outputStream) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
+}
+
+function importedLevelDat(version?: { id: number; name?: string }) {
+  const text = (value: string) => {
+    const bytes = Buffer.from(value);
+    const length = Buffer.alloc(2);
+    length.writeUInt16BE(bytes.length);
+    return Buffer.concat([length, bytes]);
+  };
+  const integer = (name: string, value: number) => {
+    const bytes = Buffer.alloc(4);
+    bytes.writeInt32BE(value);
+    return Buffer.concat([Buffer.from([3]), text(name), bytes]);
+  };
+  return gzipSync(
+    Buffer.concat([
+      Buffer.from([10, 0, 0, 10]),
+      text('Data'),
+      integer('version', 19133),
+      ...(version
+        ? [
+            integer('DataVersion', version.id),
+            Buffer.from([10]),
+            text('Version'),
+            integer('Id', version.id),
+            ...(version.name ? [Buffer.from([8]), text('Name'), text(version.name)] : []),
+            Buffer.from([0]),
+          ]
+        : []),
+      Buffer.from([0, 0]),
+    ]),
+  );
 }
 
 describe('M5 Minecraft worlds through authorized APIs and durable provider jobs', () => {
@@ -284,6 +317,125 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     ).toBeVisible();
     expect((await provider.files()).has('broken/level.dat')).toBe(false);
     await screenshot(user, 'minecraft-worlds-invalid-import-desktop-en');
+  });
+
+  it('imports mismatched and legacy worlds, labels their metadata and allows removal without activation', async () => {
+    await user.goto(route());
+    const selectedBefore = (await provider.files()).get('server.properties')?.toString();
+    for (const [name, levelDat, status, version] of [
+      [
+        'older-release',
+        importedLevelDat({ id: 3700, name: '1.20.4' }),
+        'Incompatible version',
+        '1.20.4',
+      ],
+      ['legacy-anvil', importedLevelDat(), 'Compatibility unknown', 'Version unknown'],
+      ['inferred-release', importedLevelDat({ id: 4786 }), 'Compatible', '26.1'],
+    ] as const) {
+      const dialog = await importDialog(name, await archive({ 'source/level.dat': levelDat }));
+      await operation(() =>
+        dialog.getByRole('button', { name: 'Import world', exact: true }).click(),
+      );
+      const row = user
+        .locator('.minecraft-world')
+        .filter({ has: user.getByText(name, { exact: true }) });
+      await browserExpect(row.locator('.minecraft-world-compatibility')).toHaveText(status);
+      await browserExpect(row.locator('.minecraft-world-version')).toHaveText(version);
+      if (status !== 'Compatible') {
+        await browserExpect(
+          row.getByRole('button', { name: `Select world: ${name}`, exact: true }),
+        ).toBeDisabled();
+      }
+      await browserExpect(
+        row.getByRole('button', { name: `Delete world: ${name}`, exact: true }),
+      ).toBeEnabled();
+      expect((await provider.files()).get(`${name}/level.dat`)).toEqual(levelDat);
+    }
+    expect((await provider.files()).get('server.properties')?.toString()).toBe(selectedBefore);
+    await screenshot(user, 'minecraft-worlds-version-states-desktop-en');
+    await accessible();
+    const dialog = await choose('Delete world', 'legacy-anvil');
+    await dialog.getByLabel('Create a verified backup first', { exact: true }).uncheck();
+    await operation(() =>
+      dialog.getByRole('button', { name: 'Delete world', exact: true }).click(),
+    );
+    expect((await provider.files()).has('legacy-anvil/level.dat')).toBe(false);
+  });
+
+  it('keeps import and recognized-world deletion available when target compatibility is unknown', async () => {
+    const endpoint = `${fixture.origin}${api()}/worlds`;
+    await user.route(endpoint, async (request) => {
+      const response = await request.fetch();
+      const body = await response.json();
+      await request.fulfill({
+        response,
+        json: {
+          ...body,
+          compatibility: 'unavailable',
+          worlds: body.worlds.map((world: Record<string, unknown>) => ({
+            ...world,
+            status: world.validation ? 'unknown' : world.status,
+          })),
+        },
+      });
+    });
+    try {
+      await user.goto(route());
+      await browserExpect(
+        user.getByText(
+          'Version compatibility cannot be checked. Worlds can be imported, but cannot be selected.',
+          { exact: true },
+        ),
+      ).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeEnabled();
+      await browserExpect(
+        user.getByRole('button', { name: 'Select world: older-release', exact: true }),
+      ).toBeDisabled();
+      await browserExpect(
+        user.getByRole('button', { name: 'Delete world: older-release', exact: true }),
+      ).toBeEnabled();
+      await screenshot(user, 'minecraft-worlds-unknown-target-desktop-en');
+      await accessible();
+    } finally {
+      await user.unroute(endpoint);
+    }
+  });
+
+  it('rejects a forged activation of a mismatched world without changing the selected world', async () => {
+    const world = 'blocked-mismatch';
+    const files = await provider.files();
+    await provider.adapter.createDirectory(identifier, '', world);
+    files.set(`${world}/level.dat`, importedLevelDat({ id: 3700, name: '1.20.4' }));
+    const selectedBefore = files.get('server.properties');
+    const response = await user.request.post(`${fixture.origin}${api()}/operations`, {
+      headers: { Origin: fixture.origin },
+      data: {
+        action: 'minecraft-content',
+        command: { kind: 'world-select', world },
+        idempotencyKey: 'forged-mismatched-world-selection',
+      },
+    });
+    expect(response.status(), await response.text()).toBe(202);
+    const { jobId } = (await response.json()) as { jobId: string };
+    await provider.processPending();
+    expect(
+      await fixture.database.db
+        .selectFrom('operation_jobs')
+        .select(['state', 'error_code'])
+        .where('id', '=', jobId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ state: 'failed', error_code: 'validation_failed' });
+    expect(
+      await fixture.database.db
+        .selectFrom('server_operations')
+        .select('effect_state')
+        .where('job_id', '=', jobId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ effect_state: 'none' });
+    expect(files.get('server.properties')).toEqual(selectedBefore);
+    expect(files.get(`${world}/level.dat`)).toEqual(importedLevelDat({ id: 3700, name: '1.20.4' }));
   });
 
   it('imports new folders while running, rejects collisions and preserves a shared viewer inventory', async () => {

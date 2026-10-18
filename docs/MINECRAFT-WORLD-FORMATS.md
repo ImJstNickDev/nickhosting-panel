@@ -3,8 +3,10 @@
 Date: 2026-10-18. M5, PR #21. Product source inspected at
 `d2545345851e96a89da9d260cd494c82856a5581`.
 
-**Research only.** This document proposes a later importer change; it does not
-change the behavior specified in [M4-WORLDS.md](M4-WORLDS.md). No game was started,
+**Historical research report.** The subsequent approved M5 import/detection subset
+is documented in [M4-WORLDS.md](M4-WORLDS.md#version-detection-and-cross-version-imports--m5-2026-10-18).
+The research findings and proposed broader conversion workflow below are retained
+as recorded; not every proposal has been implemented. No game was started,
 world converted, provider resource modified or infrastructure restarted for this
 investigation. Official client artifacts were inspected statically with ZIP tools
 and `javap`, after checking their published SHA-1. World writers from official

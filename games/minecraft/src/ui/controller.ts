@@ -188,13 +188,18 @@ export type MinecraftPlayerAction = z.infer<typeof minecraftPlayerActionSchema>;
 const worldSchema = z
   .object({
     name: world,
-    status: z.enum(['verified', 'incompatible', 'unavailable']),
+    status: z.enum(['verified', 'incompatible', 'unknown', 'invalid', 'unavailable']),
     validation: z
       .object({
-        dataVersion: z.number().int().nonnegative(),
+        dataVersion: z.number().int().nonnegative().optional(),
         sha256: z.string().regex(/^[a-f0-9]{64}$/),
         uncompressedBytes: z.number().int().nonnegative(),
         versionName: z.string().max(128).optional(),
+        detectedRelease: z.string().max(128).optional(),
+        storageVersion: z.number().int().nonnegative().optional(),
+        versionSeries: z.string().max(128).optional(),
+        snapshot: z.boolean().optional(),
+        versionHistory: z.array(z.number().int().positive()).max(4096).optional(),
       })
       .strip()
       .optional(),
