@@ -2,6 +2,8 @@ import { DomainError } from '@nickhosting/core';
 import { type PterodactylAdapter, PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import { describe, expect, it, vi } from 'vitest';
 import { createFilemanReadService } from './fileman-read.js';
+import { createFilemanJobServices } from './fileman-transfers.js';
+import type { GameLifecycleContext } from './lifecycle.js';
 
 function fixture() {
   const adapter = {
@@ -21,6 +23,30 @@ function fixture() {
 }
 
 describe('shared Fileman reads for trusted integrations', () => {
+  it('shares job read authority only within a phase and still reads fresh bytes', async () => {
+    const f = fixture();
+    const context = {
+      adapter: f.adapter,
+      server: { pterodactyl_identifier: 'managed' },
+      authorize: f.authorize,
+    } as unknown as GameLifecycleContext;
+    const services = createFilemanJobServices(context, { authorize: vi.fn() });
+    const scope = services.readScope?.();
+    if (!scope) throw new Error('Missing job read scope');
+    await Promise.all([scope.list(''), scope.prepare(['config'])]);
+    await scope.read({ path: 'config', maxBytes: 1024 });
+    f.adapter.readFileForEditor.mockResolvedValueOnce(Buffer.from('changed'));
+    expect(
+      Buffer.from((await scope.read({ path: 'config', maxBytes: 1024 })) ?? []).toString(),
+    ).toBe('changed');
+    expect(f.authorize).toHaveBeenCalledOnce();
+    expect(f.adapter.listFiles).toHaveBeenCalledOnce();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(2);
+    f.authorize.mockRejectedValueOnce(new DomainError('forbidden'));
+    await expect(services.readScope?.().list('')).rejects.toMatchObject({ code: 'forbidden' });
+    expect(f.authorize).toHaveBeenCalledTimes(2);
+    expect(f.adapter.listFiles).toHaveBeenCalledOnce();
+  });
   it('prepares a group once, reads directly through the Fileman signed transport, and never lists for known files', async () => {
     const f = fixture();
     const requests = ['ops.json', 'whitelist.json', 'banned-players.json', 'server.properties'].map(

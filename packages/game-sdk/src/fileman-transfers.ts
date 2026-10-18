@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { FilemanReadService } from './fileman-read.js';
 
 const path = z
   .string()
@@ -62,6 +63,9 @@ export interface FilemanTransferReceipt {
  * replacement consent and selection. One manifest per operation, reused unchanged
  * on recovery. An interrupted write is never blindly replayed. */
 export interface FilemanJobServices {
+  /** One job-phase metadata scope, with uncached file bytes and shared read authority.
+   * Create a new scope after a mutation; the host reauthorizes every external effect. */
+  readScope?(): FilemanReadService;
   /** Delete one inactive top-level directory. The game interprets its small
    * configuration file; Fileman owns the identity, effect receipt and transport. */
   removeDirectory?(input: {

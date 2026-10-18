@@ -503,7 +503,12 @@ World selection uses the existing live process-stopped observation and quiescent
 resource reservations, rather than waiting for the generic cached-telemetry
 settling window. Its delivery shares the managed-provider identity and Fileman
 read scope, validates only the selected world's metadata, and reads that metadata
-alongside `server.properties`. The properties write retains its fresh source-hash
+alongside `server.properties`. Root and selected-directory metadata are requested
+in one configured Blueprint batch while signed download URLs are prepared.
+The final properties comparison reuses that phase's root metadata but reads new
+file bytes. An initially missing properties file requires a fresh listing so an
+external creation is detected; existing files do not repeat the root listing.
+The properties write retains its fresh source-hash
 comparison, current authorization and final stopped proof; uncertain replies
 reconcile the persisted after-image without replaying the write.
 After confirmed job success, the UI changes `selectedWorld` in the already loaded
@@ -531,6 +536,10 @@ from ViewerEngine's browser presentation extensions.
   Fileman's existing Owner-configured Blueprint directory batch adapter; native
   Client API/Wings remains the fallback when the optional endpoint is absent.
   No second cache, filesystem proxy, or provider credentials reach the browser.
+- `FilemanJobServices.readScope()` gives durable jobs the same bounded transport.
+  A private read phase shares one authorization result and its directory metadata,
+  never cached file bytes. Mutations still require current lifecycle authorization;
+  recovery or reads after a possible mutation use a new scope.
 - `uploadStaged` creates a new destination tree from one immutable manifest per
   durable operation, with at most 20,000 files. The caller resolves trusted staged
   streams and owns replacement consent/backup/selection semantics. One ingestion

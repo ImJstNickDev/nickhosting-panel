@@ -6,11 +6,16 @@ import {
   type FilemanTransferManifest,
   filemanTransferManifestSchema,
 } from '@nickhosting/game-sdk';
-import { isUploadNotDispatched, relativePath } from '@nickhosting/pterodactyl-adapter';
+import {
+  type DirectoryBatchResult,
+  isUploadNotDispatched,
+  relativePath,
+} from '@nickhosting/pterodactyl-adapter';
 import type { Environment } from './admission.js';
 import { createUploadUrlCache } from './file-upload-urls.js';
 import { uploadFilemanArchive } from './fileman-archive.js';
 import { removeFilemanDirectory } from './fileman-directory.js';
+import { createFilemanReadService } from './fileman-read.js';
 import type { GameLifecycleContext } from './lifecycle.js';
 import { assertServerStorageCapacity, serverStorageLimitBytes } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
@@ -25,9 +30,22 @@ export const filemanTransferReceiptStep = (digest: string) => `fileman.transfer.
  * job instead of a browser session. The caller already holds the server lock. */
 export function createFilemanJobServices(
   context: GameLifecycleContext,
-  options: { env?: Environment; authorize: () => Promise<AuthContext> },
+  options: {
+    env?: Environment;
+    authorize: () => Promise<AuthContext>;
+    listDirectories?: (directories: string[]) => Promise<DirectoryBatchResult[]>;
+  },
 ): FilemanJobServices {
   return {
+    readScope() {
+      let authorized: Promise<void> | undefined;
+      return createFilemanReadService({
+        adapter: context.adapter,
+        identifier: context.server.pterodactyl_identifier ?? '',
+        authorize: () => (authorized ??= context.authorize()),
+        listDirectories: options.listDirectories,
+      });
+    },
     removeDirectory: (input) => removeFilemanDirectory(context, input),
     uploadArchive: (input) => uploadFilemanArchive(context, options, input),
     async uploadStaged(input) {

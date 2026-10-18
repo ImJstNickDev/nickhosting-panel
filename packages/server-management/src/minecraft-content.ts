@@ -577,6 +577,7 @@ function uncertainEffect(context: GameLifecycleContext, phase: string): boolean 
 export async function applyMinecraftTextChange(
   context: GameLifecycleContext,
   change: TextChange,
+  files?: FilemanReadService,
 ): Promise<void> {
   textChangeSchema.parse(change);
   if (sha256(change.content) !== change.afterSha256) throw new DomainError('conflict');
@@ -590,7 +591,14 @@ export async function applyMinecraftTextChange(
   }
   await context.assertStopped();
   await context.authorize();
-  const current = await readTextSnapshot(context, change.path);
+  // Reuse only this pre-effect phase's directory metadata, never its file bytes.
+  // Absence needs a fresh listing: an external writer may have created the file.
+  // Recovery above also creates a new scope after a possible mutation.
+  const current = await readTextSnapshot(
+    context,
+    change.path,
+    change.beforeSha256 === null ? undefined : files,
+  );
   if (current?.hash === change.afterSha256) {
     await complete(context, step);
     return;
@@ -685,7 +693,7 @@ async function applyTextPlan(
   }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
   await beforeEffects?.(plan);
-  for (const change of plan) await applyMinecraftTextChange(context, change);
+  for (const change of plan) await applyMinecraftTextChange(context, change, files);
 }
 const initialConfigurationSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('pending'), jobId: z.uuid().optional() }).strict(),
@@ -1335,6 +1343,8 @@ function targetsConfiguredMinecraftWorld(configured: string, target: string): bo
 /** One authorized metadata scope per world preflight. The durable effect checks
  * current authority again after local staging, before any provider mutation. */
 function worldFileScope(context: GameLifecycleContext): FilemanReadService {
+  const hosted = context.fileman?.readScope?.();
+  if (hosted) return hosted;
   let authorized: Promise<void> | undefined;
   return createFilemanReadService({
     adapter: context.adapter,
@@ -2355,10 +2365,23 @@ async function applyWorldContent(
   if (command.kind === 'world-select') {
     if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
     const files = worldFileScope(context);
-    const [root] = await Promise.all([
-      files.list(''),
+    const [directories, tickets] = await Promise.allSettled([
+      files.listMany(['', target]),
       files.prepare(['server.properties', `${target}/level.dat`]),
     ]);
+    if (directories.status === 'rejected') throw directories.reason;
+    if (tickets.status === 'rejected') throw tickets.reason;
+    for (const result of directories.value) {
+      if ('error' in result)
+        throw new DomainError(
+          result.error === 'not_found'
+            ? 'not_found'
+            : result.error === 'forbidden'
+              ? 'forbidden'
+              : 'integration_unavailable',
+        );
+    }
+    const root = await files.list('');
     if (!worldDirectoryEntry(root, target)) throw new DomainError('not_found');
     const level = (await files.list(target)).filter(
       (entry) => entry.name.toLowerCase() === 'level.dat',

@@ -207,7 +207,10 @@ Trusted game integrations also use Fileman's backend host services (M5,
 2026-10-18). `FilemanReadService` exposes bounded byte and directory reads through
 the existing signed Wings transport and optional Blueprint directory batching.
 Its directory snapshots live only for the request/operation phase; bytes are not
-cached across calls. `GameLifecycleContext.fileman.uploadStaged` accepts an
+cached across calls. `GameLifecycleContext.fileman.readScope()` shares the job's
+read-phase authority and the existing configured Blueprint batch transport.
+Effect dispatch retains fresh authorization and physical/identity preconditions;
+recovery never reuses pre-effect metadata. `GameLifecycleContext.fileman.uploadStaged` accepts an
 immutable relative-path/hash/size manifest and a lazy stream opener, under the
 real durable job's authority. It reuses Fileman's upload grants and ingestion
 admission, without creating an interactive session or exposing provider tokens.

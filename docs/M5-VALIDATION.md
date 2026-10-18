@@ -13360,3 +13360,68 @@ restart/rebuild, migration, Blueprint/Panel/Wings modification, provider mutatio
 or live game-file write was performed. The Owner controls the next live selection;
 no post-fix live latency is claimed. Disposable test state is cleaned by the
 harness. Code rollback is a revert, retaining all operation/history data.
+
+### World selection preparation — 2026-10-18
+
+The Owner's subsequent selection completed in **2,295.550 ms**, with one worker
+delivery: about 32 ms before the worker, 2,028 ms of preparation, 225 ms for the
+acknowledged properties write and 11 ms to finish. Read-only diagnosis isolated
+three directory listings, repeated authorization and adjacent resource transactions.
+The previously removed 21-second settling window did not recur.
+
+The next implementation reuses Fileman's existing configured Blueprint directory
+batch for root plus the selected world, concurrently with download-grant preparation.
+It reuses that phase's metadata for the final properties comparison, while still
+reading fresh bytes. An absent optional batch endpoint retains bounded native
+fallback; forbidden responses cannot fall back. Owner batch limits still apply.
+No second cache or transport was added.
+
+Normal existing-properties selection now has one two-path batch instead of three
+directory requests, five authorization passes instead of ten, two host preflights
+instead of three, and three resource transactions before the write instead of four.
+These are code-path counts, not new live timings. The first host preflight overlaps
+provider identity lookup. The final host/process proof and current authorization
+remain after durable preparation; compute, upload and installation exclusions share
+the existing resource lock. Both physical stopped observations remain. No change to
+other offline-only lifecycle semantics or to ambiguous-write recovery.
+
+Independent Fileman review found that cached absence could otherwise overwrite a
+properties file created externally during preparation. That exceptional path now
+refreshes the listing and has a conflict regression. Existing properties retain
+the optimized path. Additional batch tests reject symlink world/level.dat entries
+before reading bytes. Independent lifecycle/security review found no remaining
+must-fix, including host/allocation changes and authority revoked during observation.
+
+Focused validation commands:
+
+```sh
+scripts/dev.sh pnpm exec vitest run packages/server-management/src/minecraft-content.test.ts packages/server-management/src/fileman-read.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'world selection|world-selection|no-op stop proof|configured physical host|inactive-world|additive Minecraft world imports|inactive Minecraft world removal'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'selects a compatible world|world-selection|incompatible world without|changed properties source|world removed since selection|properties created after world selection'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'additive Minecraft world imports|inactive Minecraft world removal|removes an inactive world online'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts -t 'selects a world after confirmed|imports, selects, downloads and removes|recovers a lost response'
+scripts/dev.sh pnpm exec tsc --noEmit
+```
+
+Final results: **66/66 unit tests**, **52 targeted lifecycle/runtime cases**
+(297 excluded), **10 selection/content cases** (56 excluded), and **33 import/removal
+regression cases** (312 excluded) passed. The latter run overlaps the lifecycle
+cases; these are per-command counts, not additive totals. **3 Chromium behavior
+tests** passed (13 excluded), including confirmed-only selection without inventory
+rediscovery. Root TypeScript, scoped Biome, governance and diff checks passed. No visual layout
+changed; the existing confirmed-selection browser evidence remains applicable.
+
+An initial content-test run failed because the new batch fixture attempted to
+retrieve an original function through a spy API; the fixture now captures the
+original before spying. An initial lifecycle fixture tried to change an immutable
+allocation port; the trigger correctly rejected it, and the test now removes an
+isolated allocation claim to exercise the intended identity mismatch. These were
+test-fixture failures, not passing security checks.
+
+Tests use isolated database state and adapter/observer fixtures; browser tests use
+real application handlers with an isolated provider. No live world was selected,
+no server file was written and no game process was started/stopped. No migration,
+container restart/rebuild, Blueprint update or production configuration change.
+Existing development watchers load the changes; live latency for this new pass
+remains to be measured on the Owner's next selection. No full historical-suite
+claim. Code rollback is a revert; operation history and persistent data are retained.

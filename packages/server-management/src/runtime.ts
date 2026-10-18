@@ -617,6 +617,12 @@ export async function createManagementRuntime(options: ManagementOptions) {
     fileman: (context: import('./lifecycle.js').GameLifecycleContext) =>
       createFilemanJobServices(context, {
         env,
+        listDirectories: (directories) =>
+          fileDirectoryBatch(
+            context.server.pterodactyl_identifier ?? '',
+            context.server,
+            directories,
+          ),
         authorize: () =>
           authorizeQueuedEffect(
             context.db,

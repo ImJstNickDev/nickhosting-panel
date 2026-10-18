@@ -3932,10 +3932,69 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(f.adapter.getApplicationServer).toHaveBeenCalledOnce();
     expect(f.adapter.getResources).not.toHaveBeenCalled();
     expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(2);
-    expect(f.options.authorizeEffect).toHaveBeenCalledOnce();
+    expect(f.options.authorizeEffect).not.toHaveBeenCalled();
     expect(f.options.authorizeIntent).toHaveBeenCalledTimes(7);
     expect((await f.operation()).plan.offlineSince).toBeUndefined();
   });
+  it('overlaps preparation host and provider proofs but refreshes the host proof at dispatch', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const providerStarted = Promise.withResolvers<void>();
+    const hostStarted = Promise.withResolvers<void>();
+    f.adapter.getApplicationServer.mockImplementation(async () => {
+      providerStarted.resolve();
+      await hostStarted.promise;
+      return structuredClone(f.remote);
+    });
+    f.options.verifyObservationHost = vi.fn(async () => {
+      hostStarted.resolve();
+      await providerStarted.promise;
+    });
+    const proofs: Parameters<NonNullable<LifecycleOptions['confirmAlreadyStopped']>>[2][] = [];
+    f.options.confirmAlreadyStopped = async (_server, _db, proof) => {
+      proofs.push(proof);
+      await proof?.observerPreflight;
+      return true;
+    };
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.text.fixture', async () => {});
+      return true;
+    };
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.verifyObservationHost).toHaveBeenCalledOnce();
+    expect(proofs).toHaveLength(2);
+    expect(proofs[0]?.observerPreflight).toBeInstanceOf(Promise);
+    expect(proofs[1]?.observerPreflight).toBeUndefined();
+  });
+  it.each(['upload', 'installation', 'compute'] as const)(
+    'refuses world selection when a %s reservation appears during preparation',
+    async (kind) => {
+      const f = await fixture('minecraft-content', plan());
+      const other = kind === 'installation' ? await fixture('minecraft-content') : undefined;
+      const write = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = vi.fn(async () => true);
+      f.options.processGameContent = async (context) => {
+        if (kind === 'upload') await pendingUploadFixture(f.db, f.serverId);
+        else if (kind === 'compute') await f.prepareReservation();
+        else
+          await f.db
+            .insertInto('installation_reservations')
+            .values({
+              server_id: f.serverId,
+              physical_host_id: f.hostId,
+              operation_id: other?.jobId ?? f.jobId,
+              memory_mib: 1178,
+              cpu_percent: 100,
+            })
+            .execute();
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      };
+      expect(await f.run()).toBe('waiting');
+      expect(write).not.toHaveBeenCalled();
+      expect((await f.operation()).effect_state).toBe('none');
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+    },
+  );
   it.each(['running', 'missing observer'] as const)(
     'does not trust cached offline state when %s',
     async (state) => {

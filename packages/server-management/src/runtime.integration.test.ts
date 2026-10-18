@@ -5,6 +5,7 @@ import { createDatabase } from '@nickhosting/database';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import type { ApplicationServer } from '@nickhosting/pterodactyl-adapter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { processServerOperation } from './lifecycle.js';
 import {
   createManagedServer,
   createProject,
@@ -839,6 +840,114 @@ describe('management runtime execution-time authorization', () => {
     );
     expect(observer.stopped).not.toHaveBeenCalled();
   });
+
+  it.each(['unchanged', 'allocation removed', 'host changed', 'permission revoked'] as const)(
+    'shares world-selection preparation proofs and keeps final authority when %s',
+    async (change) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          action: 'minecraft-content',
+          plan: JSON.stringify({
+            minecraftContent: {
+              combinationId: randomUUID(),
+              command: { kind: 'world-select', world: 'selected_world' },
+              world: { existing: true, dataVersion: 3955 },
+              backupBefore: false,
+            },
+          }),
+        })
+        .where('job_id', '=', queued.job)
+        .execute();
+      const remote = await providerIdentity(queued.server);
+      const getApplicationServer = vi.fn(async () => remote);
+      const getDirectoryBatchSettings = vi.fn(async () => ({
+        directoryBatchLimit: 1,
+        directoryConcurrency: 1,
+        directoryTimeoutSeconds: 10,
+      }));
+      const listDirectoriesBatch = vi.fn(async (_identifier: string, directories: string[]) =>
+        directories.map((directory) => ({ directory, files: [] })),
+      );
+      Object.assign(f.adapter, {
+        getApplicationServer,
+        getDirectoryBatchSettings,
+        listDirectoriesBatch,
+      });
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => {
+          if (change === 'permission revoked' && observer.stopped.mock.calls.length === 2)
+            await f.db
+              .updateTable('operation_jobs')
+              .set({ resource_owner_id: f.owner.subjectUserId })
+              .where('id', '=', queued.job)
+              .execute();
+          return true;
+        }),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      const write = vi.fn(async () => {});
+      const result = await processServerOperation(f.db, queued.job, {
+        ...runtime.lifecycle,
+        checkpoint: async (phase) => {
+          if (phase !== 'prepared') return;
+          if (change === 'allocation removed')
+            await f.db
+              .deleteFrom('server_allocations')
+              .where('server_id', '=', queued.server)
+              .execute();
+          if (change === 'host changed')
+            await f.db
+              .updateTable('physical_hosts')
+              .set({ observer_id: 'another-host' })
+              .where('id', '=', f.hostId)
+              .execute();
+        },
+        processGameContent: async (context) => {
+          await context.assertStopped();
+          await context.authorize();
+          if (change === 'unchanged') {
+            const files = context.fileman?.readScope?.();
+            expect(files).toBeDefined();
+            expect(await files?.listMany(['', 'selected_world'])).toEqual([
+              { directory: '', files: [] },
+              { directory: 'selected_world', files: [] },
+            ]);
+          }
+          await context.effect('minecraft.text.fixture', write);
+          return true;
+        },
+      });
+      expect(result).toBe(change === 'unchanged' ? 'succeeded' : 'failed');
+      expect(write).toHaveBeenCalledTimes(change === 'unchanged' ? 1 : 0);
+      expect(getApplicationServer).toHaveBeenCalledOnce();
+      if (change === 'unchanged') {
+        expect(getDirectoryBatchSettings).toHaveBeenCalledOnce();
+        expect(listDirectoriesBatch.mock.calls).toEqual([
+          [remote.identifier, ['']],
+          [remote.identifier, ['selected_world']],
+        ]);
+      }
+      expect(observer.preflight).toHaveBeenCalledTimes(change === 'host changed' ? 1 : 2);
+      expect(observer.stopped).toHaveBeenCalledTimes(
+        ['unchanged', 'permission revoked'].includes(change) ? 2 : 1,
+      );
+      const operation = await f.db
+        .selectFrom('server_operations')
+        .select('effect_state')
+        .where('job_id', '=', queued.job)
+        .executeTakeFirstOrThrow();
+      expect(operation.effect_state).toBe(change === 'unchanged' ? 'confirmed' : 'none');
+    },
+  );
 
   it('awaits a generic game provider proof before the final revocable authority check', async () => {
     const server = await f.server();

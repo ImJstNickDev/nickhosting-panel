@@ -153,8 +153,8 @@ export interface LifecycleOptions {
       deferFinalIntentCheck?: true;
     },
   ) => Promise<void>;
-  /** Current DB permission/policy only. External effects still require authorizeEffect
-   * at the final handoff; internal stop-console checks may use this scoped guard. */
+  /** Current DB permission/policy only. External effects retain their final physical
+   * and identity proofs; world selection binds these through confirmAlreadyStopped. */
   authorizeIntent?: (
     jobId: string,
     serverId: string,
@@ -185,7 +185,8 @@ export interface LifecycleOptions {
     serverId: string,
     connection: Kysely<Database>,
   ) => Promise<ExternalStopReceipt | null>;
-  /** Physical proof for a no-op stop, only when no compute/installer reservation exists. */
+  /** Fresh host- and current registry/provider-identity-bound physical stopped proof,
+   * only when no compute/installer reservation exists. */
   confirmAlreadyStopped?: (
     serverId: string,
     connection: Kysely<Database>,
@@ -877,19 +878,22 @@ export async function processServerOperation(
       }
       return worldContentIdentity.remote;
     };
-    const requireQuiescentReservation = async () => {
-      await db.transaction().execute(async (tx) => {
-        await lockResources(tx);
-        if (
-          await tx
-            .selectFrom('resource_reservations')
-            .select('server_id')
-            .where('server_id', '=', server.id)
-            .executeTakeFirst()
-        )
-          throw new DomainError('operation_uncertain');
-      });
+    const assertQuiescentReservation = async (connection: Kysely<Database>) => {
+      if (
+        await connection
+          .selectFrom('resource_reservations')
+          .select('server_id')
+          .where('server_id', '=', server.id)
+          .executeTakeFirst()
+      )
+        throw new DomainError('operation_uncertain');
     };
+    const requireQuiescentReservation = () =>
+      db.transaction().execute(async (tx) => {
+        await lockResources(tx);
+        await assertQuiescentReservation(tx);
+      });
+    let worldSelectionObserverPreflight: Promise<void> | undefined;
     let worldSelectionStopped: Promise<boolean> | undefined;
     const confirmWorldSelectionStopped = (fresh = false) => {
       if (fresh || !worldSelectionStopped)
@@ -899,6 +903,9 @@ export async function processServerOperation(
           const remote = await worldContentProvider();
           return options.confirmAlreadyStopped(server.id, db, {
             providerServer: Promise.resolve(remote),
+            // Only preparation shares the concurrent host proof. Dispatch always
+            // takes a new physical/host observation after durable intent.
+            ...(fresh ? {} : { observerPreflight: worldSelectionObserverPreflight }),
           });
         })();
       return worldSelectionStopped;
@@ -910,7 +917,7 @@ export async function processServerOperation(
       preparationServer?: ApplicationServer,
     ): Promise<boolean> => {
       await timed('authorization', () =>
-        (['power', 'initial_start'].includes(phase)
+        (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
           ? (options.authorizeIntent ?? options.authorizeEffect)
           : options.authorizeEffect)(jobId, server.id, db),
       );
@@ -926,9 +933,11 @@ export async function processServerOperation(
             .executeTakeFirst()
         )
           throw new DomainError('operation_uncertain');
+        if (offlineWorldSelection) await assertQuiescentReservation(tx);
       });
       if (
         !onlineWorldContent &&
+        !offlineWorldSelection &&
         ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
           operation.action,
         )
@@ -1027,14 +1036,15 @@ export async function processServerOperation(
               current.provider_user_id !== server.provider_user_id
             )
               throw new DomainError('conflict');
-            if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
-            await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
             if (offlineWorldSelection) {
+              // This host-bound physical proof also checks the current registry
+              // identity and allocations. Do not repeat those reads immediately
+              // before it, or authorize while that observation is still pending.
               if (!(await confirmWorldSelectionStopped(true)))
                 throw new DomainError('operation_uncertain');
-              // The physical observation can wait; keep current authority at dispatch.
-              await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
-            }
+            } else if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
+            // Physical observations can wait; current authority belongs at dispatch.
+            await (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db);
           } else if (leanStart) {
             await timed('authorization', () =>
               options.authorizeEffect(jobId, server.id, db, {
@@ -2243,6 +2253,15 @@ export async function processServerOperation(
           remote = identity.value;
           initialResources = status.value;
           await observation(db, server, initialResources, nowOf(options));
+        } else if (offlineWorldSelection && options.verifyObservationHost) {
+          const [identity, host] = await Promise.allSettled([
+            timed('provider_identity', () => ownedRemote(db, server, options)),
+            options.verifyObservationHost(server.id, db),
+          ]);
+          if (identity.status === 'rejected') throw identity.reason;
+          if (host.status === 'rejected') throw host.reason;
+          remote = identity.value;
+          worldSelectionObserverPreflight = Promise.resolve();
         } else {
           remote = await timed('provider_identity', () => ownedRemote(db, server, options));
         }

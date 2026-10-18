@@ -465,7 +465,10 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     return { f, serverId, operation, combinationId, files, context, options };
   }
 
-  async function worldSelectionFixture(version = minecraftWorldDataVersion('1.21.1') ?? -1) {
+  async function worldSelectionFixture(
+    version = minecraftWorldDataVersion('1.21.1') ?? -1,
+    batch = true,
+  ) {
     const f = await minecraftFixture();
     await f.f.db
       .updateTable('minecraft_server_profiles')
@@ -488,11 +491,24 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       ]),
     );
     f.files.set('server.properties', Buffer.from('motd=Fixture\nlevel-name=old_world\n'));
+    const providerList = f.context.adapter.listFiles;
     const list = vi.spyOn(f.context.adapter, 'listFiles');
     const read = vi.spyOn(f.context.adapter, 'readFileForEditor');
     const download = vi.spyOn(f.context.adapter, 'downloadFile');
     const write = vi.spyOn(f.context.adapter, 'writeFile');
     const prepare = vi.spyOn(f.context.adapter, 'prefetchDownloads');
+    const listDirectories = vi.fn(async (directories: string[]) =>
+      Promise.all(
+        directories.map(async (directory) => ({
+          directory,
+          files: await providerList(f.context.server.pterodactyl_identifier ?? '', directory),
+        })),
+      ),
+    );
+    f.context.fileman = createFilemanJobServices(f.context, {
+      authorize: async () => f.f.context,
+      ...(batch ? { listDirectories } : {}),
+    });
     const stopped = vi.fn(async () => {});
     f.context.assertStopped = stopped;
     const prepared = await prepareMinecraftContentPlan(
@@ -506,28 +522,66 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     f.operation.phase = 'planned';
     f.operation.effect_state = 'none';
     f.operation.plan = { minecraftContent: prepared };
-    return { ...f, list, read, download, write, prepare, stopped };
+    return { ...f, list, listDirectories, read, download, write, prepare, stopped };
   }
 
-  it('selects a compatible world through shared Fileman reads and one acknowledged properties write', async () => {
+  it.each([true, false])(
+    'selects a compatible world through shared Fileman reads, batch=%s',
+    async (batch) => {
+      const f = await worldSelectionFixture(undefined, batch);
+      expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      expect(f.files.get('server.properties')?.toString()).toContain('level-name=selected');
+      expect(f.files.get('server.properties')?.toString()).toContain('motd=Fixture');
+      expect(f.list.mock.calls.map((call) => call[1] ?? '')).toEqual(batch ? [] : ['', 'selected']);
+      if (batch) expect(f.listDirectories).toHaveBeenCalledExactlyOnceWith(['', 'selected']);
+      else expect(f.listDirectories).not.toHaveBeenCalled();
+      expect(f.read.mock.calls.map((call) => call[1])).toEqual([
+        'selected/level.dat',
+        'server.properties',
+        'server.properties',
+      ]);
+      expect(f.prepare).toHaveBeenCalledExactlyOnceWith(f.context.server.pterodactyl_identifier, [
+        'server.properties',
+        'selected/level.dat',
+      ]);
+      expect(f.download).not.toHaveBeenCalled();
+      expect(f.write).toHaveBeenCalledOnce();
+      expect(f.stopped).toHaveBeenCalled();
+    },
+  );
+  it('rejects a forbidden world-selection batch instead of falling back to native reads', async () => {
     const f = await worldSelectionFixture();
-    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
-    expect(f.files.get('server.properties')?.toString()).toContain('level-name=selected');
-    expect(f.files.get('server.properties')?.toString()).toContain('motd=Fixture');
-    expect(f.list.mock.calls.map((call) => call[1] ?? '')).toEqual(['', 'selected', '']);
-    expect(f.read.mock.calls.map((call) => call[1])).toEqual([
-      'selected/level.dat',
-      'server.properties',
-      'server.properties',
-    ]);
-    expect(f.prepare).toHaveBeenCalledExactlyOnceWith(f.context.server.pterodactyl_identifier, [
-      'server.properties',
-      'selected/level.dat',
-    ]);
-    expect(f.download).not.toHaveBeenCalled();
-    expect(f.write).toHaveBeenCalledOnce();
-    expect(f.stopped).toHaveBeenCalled();
+    f.listDirectories.mockRejectedValueOnce(
+      new PterodactylError('permission_denied', 'client', 'rejected', 403),
+    );
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      upstreamStatus: 403,
+    });
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.read).not.toHaveBeenCalled();
+    expect(f.write).not.toHaveBeenCalled();
   });
+  it.each(['selected', 'level.dat'])(
+    'rejects a symlink %s from the world-selection batch before reading bytes',
+    async (name) => {
+      const f = await worldSelectionFixture();
+      const batch = f.listDirectories.getMockImplementation();
+      if (!batch) throw new Error('Missing batch fixture');
+      f.listDirectories.mockImplementation(async (directories) =>
+        (await batch(directories)).map((result) => ({
+          ...result,
+          files: result.files.map((entry) => ({
+            ...entry,
+            is_symlink: entry.name === name,
+          })),
+        })),
+      );
+      await expect(processMinecraftContent(f.context, f.options)).rejects.toBeDefined();
+      expect(f.list).not.toHaveBeenCalled();
+      expect(f.read).not.toHaveBeenCalled();
+      expect(f.write).not.toHaveBeenCalled();
+    },
+  );
   it('rejects a changed properties source before world selection without overwriting it', async () => {
     const f = await worldSelectionFixture();
     let propertiesReads = 0;
@@ -545,6 +599,25 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
     });
     expect(f.write).not.toHaveBeenCalled();
     expect(f.files.get('server.properties')?.toString()).toContain('motd=Changed externally');
+  });
+  it('rejects properties created after world selection observed their absence', async () => {
+    const f = await worldSelectionFixture();
+    f.files.delete('server.properties');
+    const update = f.context.update;
+    f.context.update = async (patch) => {
+      await update(patch);
+      if (patch.plan?.minecraftText)
+        f.files.set(
+          'server.properties',
+          Buffer.from('motd=Created externally\nlevel-name=old_world\n'),
+        );
+    };
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.list.mock.calls.map((call) => call[1] ?? '')).toEqual(['']);
+    expect(f.files.get('server.properties')?.toString()).toContain('motd=Created externally');
   });
   it('rejects an incompatible world without writing the selection', async () => {
     const f = await worldSelectionFixture(1976);
