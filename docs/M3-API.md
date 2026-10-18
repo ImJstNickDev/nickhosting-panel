@@ -459,7 +459,10 @@ one snapshot application, including the final pre-bind check. Nodes and each
 configured node's complete allocation inventory are read once. Core's authenticated
 `inventory` operation `{operation: "servers", routeIds}` accepts 1–1000 unique
 managed route IDs and returns only sanitized, identity-verified server records.
-The Gateway chunks larger snapshots into bounded control requests. The existing
+The Gateway chunks larger snapshots into bounded control requests. A route
+withdrawn before/during batch context resolution returns 412 with
+`gatewayControlReason: snapshot_membership_changed`: the existing bounded refresh
+retry preserves only original leases. Identity failures remain hard failures. The
 single-server operation remains available for independent validations.
 
 The Pterodactyl adapter uses the standard Application server list, filtered by

@@ -12955,3 +12955,98 @@ are not job failures or evidence that these measured jobs retried.
 Stage boundaries were independently checked against source. Only existing logs
 and selected development job records were read; no added instrumentation, test
 mutation, restart or implementation change was made for this measurement.
+
+
+### Gateway provider request reduction — 2026-10-18
+
+The Owner requested an end-to-end correction for Application API rate limiting
+observed during world tests. Read-only inspection found four enabled Gateway
+routes on one node (three sleeping, one manually stopped), two-second snapshot
+and observation intervals, and a shared Panel Application quota of 240/minute.
+Serial validations repeated node/allocation inventory per route. Concurrent
+observations of already stopped games also repeated checks and invalidated useful
+listener evidence. An authenticated cooldown can produce several local error
+records for one upstream 429; log-event counts are not HTTP request counts.
+
+Implementation at `75ccd141db7866850c6d1d8587f60ecb01ea2b30`:
+
+- One explicit snapshot batch shares fresh node/allocation inventory and a
+  UUID-filtered standard Application server-list read with allocations. Four
+  routes now need **3 provider list operations instead of 12** per cycle before
+  pagination (75% fewer). Provider UUID chunks of 48 and Core route chunks of 1000 keep
+  requests bounded; full snapshot bounds are preserved.
+- Current managed identity, host bindings, collision coverage, durable proof and
+  original evidence expiry remain checked. No cross-snapshot inventory cache or
+  provider rate-limit increase. Missing/duplicate/foreign bulk data rejects.
+- An equivalent pending listener renewal is joined within the original backend
+  grant deadline. No parallel duplicate inspection and no temporary authority
+  extension. Membership changes during a batch use a narrow 412 bounded refresh;
+  true provenance failures remain hard failures.
+- Dormant authenticated modes skip gameplay observations, while listener safety
+  still renews. Worker reconciliation remains responsible for detecting external
+  starts and returning sleeping servers to blocked/readiness observation.
+
+Focused final checks:
+
+- `scripts/dev.sh pnpm exec vitest run packages/gateway-safety/src apps/game-gateway/src`:
+  **455 passed**, nine files; includes TCP routing, stale-lease/cooldown behavior,
+  bulk freshness, renewal races, dormant observations and control contracts.
+- `scripts/dev.sh pnpm exec vitest run packages/pterodactyl-adapter/src/adapter.test.ts packages/pterodactyl-adapter/src/transport.test.ts`:
+  **76 passed**, including bounded UUID batches, pagination, missing/foreign/
+  duplicate members and the existing transport coordinator.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts apps/api/src/gateway.integration.test.ts packages/server-management/src/gateway-registry.integration.test.ts packages/server-management/src/gateway-orchestration.integration.test.ts`:
+  **180 passed**, using existing isolated PostgreSQL/Redis test services.
+- `scripts/dev.sh pnpm typecheck`: passed, including web production/test configs.
+  Initial failures exposed an incomplete browser provider fixture and in-progress
+  test typing; corrected, then the complete typecheck passed.
+- Biome check on all 14 changed TypeScript files, `git diff --check` and index
+  governance passed. The historical full M1–M5 matrix and browser/UI suite were
+  not rerun for this backend-only change. No UI, dependency or migration changes.
+- Independent technical review found no outstanding must-fix after correcting
+  both snapshot-membership race windows and checking request-budget headroom.
+
+Live evidence is read-only except the approved development Gateway restart.
+Core hot reload accepted the new bulk operation: HTTP 200, all four requested
+managed servers returned with allocation relationships, 741 ms for the control
+round trip. This confirms installed standard Panel UUID-filter/include behavior;
+it is not a pure database or network timing measurement. No Blueprint update,
+Panel/Wings change, game command, game-file mutation or live test asset was needed.
+
+
+Activation used the standing specific Owner authorization for
+`docker restart --time 20 nickhosting-dev-gateway-1` at 15:37:08 UTC. Normal startup
+lease drain completed and the first snapshot bound three listeners at 15:37:47.
+Container identity/image, mount definitions, HostConfig, network IDs and published
+ports are unchanged; Docker reordered its mount array only. API/worker containers
+were not restarted and remain healthy. Their source watchers loaded the changes.
+
+The settled **197.6-second** window (15:37:47–15:41:04 UTC) has:
+
+- No 429/rate-limit records in API, worker or Gateway logs; API/worker emitted no
+  new error records. This is observed absence, not a measured global HTTP total.
+- 99 Gateway observation cycles, **zero observation/snapshot errors and lease
+  expirations**, three stable listeners and continually refreshed authority.
+- Three successful TCP Minecraft status responses with mirrored protocol 775,
+  zero wake requests and zero backend-forwarded bytes. No login/start was sent.
+- A second bulk control read returned HTTP 200, four servers with allocations,
+  390 ms. This read was additional to normal Gateway/worker background activity.
+- The pre-existing fourth manually stopped route remains withheld with
+  `backend_active_binding` (76 safety diagnostics). Aggregate `/readyz` remains 503
+  and Docker health remains unhealthy, as before, because only three of four
+  configured routes can bind. Its missing backend binding/proof was not bypassed
+  or bootstrapped by starting a game server. This is an unresolved existing route
+  condition, not a pass for complete Gateway readiness.
+
+These live checks establish stable dormant-route polling and status responses,
+not new live world import/delete, online-player or sleep/wake evidence. Those
+behavior paths retain automated fixture coverage; another Owner gameplay test
+can measure real load without claiming it already happened. No test assets were
+created; existing isolated test-schema cleanup completed normally. Original M1–M4
+and SFTPGo #18 release boundaries remain unchanged.
+
+Rollback: revert the scoped implementation commit and restart only the approved
+development Gateway after checking its exact Compose identity. Core-first
+compatibility is preserved by retaining the old single-server inventory operation;
+restore Gateway before removing the new Core bulk endpoint. Preserve logs,
+configuration, networks and all persistent data. No database migration is involved.
+PR #21 remains open/unmerged; no production deployment is authorized by these checks.
