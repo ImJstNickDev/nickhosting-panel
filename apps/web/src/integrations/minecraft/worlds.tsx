@@ -7,13 +7,18 @@ import { Tooltip } from '../../components/tooltip.js';
 import { Check, ConfirmDialog, Dialog, ErrorNotice, Input } from '../../components/ui.js';
 import type { GameSectionViewProps } from '../../features/game-section-view.js';
 import { gameUiClient } from '../../features/integrations.js';
+import { prepareMinecraftWorldFolder, WorldFolderArchiveError } from './world-folder-archive.js';
 import './worlds.css';
 
 const controller = createMinecraftUiController(gameUiClient);
 const key = (name: string) => `games.minecraft.worlds.${name}`;
 type Selection = { action: 'select' | 'delete' | 'replace'; name: string; requestKey: string };
 type Intent = { requestKey: string; command: Record<string, unknown> };
-type Progress = { phase: 'hashing' | 'uploading' | 'checking'; sent: number; total: number };
+type Progress = {
+  phase: 'preparing' | 'hashing' | 'uploading' | 'checking';
+  sent: number;
+  total: number;
+};
 
 function Icon({
   name,
@@ -82,6 +87,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
   const transfer = useRef<AbortController | undefined>(undefined);
   const mutationLock = useRef(false);
   const picker = useRef<HTMLInputElement>(null);
+  const folderPicker = useRef<HTMLInputElement>(null);
   const importKey = useRef(idempotencyKey());
   const mutationsDisabled =
     !props.canManage ||
@@ -157,25 +163,31 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     setAdding(false);
     setDragging(false);
   }
-  async function upload(files: FileList | null) {
-    if (importDisabled || transfer.current || !files) return;
+  async function upload(files: FileList | null, folder = false) {
+    if (importDisabled || transfer.current || !files?.length) return;
+    const selectedFiles = Array.from(files);
+    const firstFile = selectedFiles[0];
+    if (!firstFile) return;
     if (
-      files.length !== 1 ||
-      !files[0]?.name.toLowerCase().endsWith('.zip') ||
-      files[0].size === 0
+      !folder &&
+      (selectedFiles.length !== 1 ||
+        !selectedFiles[0]?.name.toLowerCase().endsWith('.zip') ||
+        selectedFiles[0].size === 0)
     ) {
       setUploadError(new ApiError('validation_failed', key('invalidZip')));
       return;
     }
-    const file = files[0];
+    const selectedName = folder
+      ? selectedFiles[0]?.webkitRelativePath.split('/')[0] || selectedFiles[0]?.name || ''
+      : selectedFiles[0]?.name || '';
     const abort = new AbortController();
     transfer.current = abort;
     setArchiveRef(undefined);
     setUploadError(undefined);
     setOperationError(undefined);
-    setFileName(file.name);
+    setFileName(selectedName);
     const base =
-      file.name
+      selectedName
         .replace(/\.zip$/i, '')
         .normalize('NFKD')
         .replace(/[^A-Za-z0-9_-]/g, '-')
@@ -192,6 +204,20 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
     setTarget(suggested);
     importKey.current = idempotencyKey();
     try {
+      let file: File;
+      if (folder) {
+        setProgress({
+          phase: 'preparing',
+          sent: 0,
+          total: selectedFiles.reduce((sum, item) => sum + item.size, 0),
+        });
+        file = await prepareMinecraftWorldFolder(selectedFiles, {
+          signal: abort.signal,
+          onProgress: ({ processedBytes, totalBytes }) =>
+            setProgress({ phase: 'preparing', sent: processedBytes, total: totalBytes }),
+        });
+      } else file = firstFile;
+      abort.signal.throwIfAborted();
       setProgress({ phase: 'hashing', sent: 0, total: file.size });
       const sha256 = await hashFile(file, {
         signal: abort.signal,
@@ -213,12 +239,24 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
       setUploadError(
         error instanceof DOMException && error.name === 'AbortError'
           ? new ApiError('cancelled', key('cancelled'))
-          : error,
+          : error instanceof WorldFolderArchiveError
+            ? new ApiError(
+                'validation_failed',
+                key(
+                  error.code === 'limit_exceeded'
+                    ? 'folderLimit'
+                    : error.code === 'invalid_folder'
+                      ? 'invalidFolder'
+                      : 'folderFailed',
+                ),
+              )
+            : error,
       );
     } finally {
       setProgress(undefined);
       transfer.current = undefined;
       if (picker.current) picker.current.value = '';
+      if (folderPicker.current) folderPicker.current.value = '';
     }
   }
   function allowsState(intent: Intent) {
@@ -580,7 +618,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
           {Boolean(uploadError) && <ErrorNotice error={uploadError} />}
           {Boolean(operationError) && <ErrorNotice error={operationError} />}
           <fieldset
-            aria-label={t(key('zip'))}
+            aria-label={t(key('source'))}
             className={`minecraft-worlds-dropzone${dragging ? ' dragging' : ''}`}
             onDragOver={(event) => {
               event.preventDefault();
@@ -594,15 +632,25 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
             }}
           >
             <Icon name="upload" />
-            <button
-              type="button"
-              data-world-picker
-              className="secondary"
-              disabled={importDisabled || Boolean(progress)}
-              onClick={() => picker.current?.click()}
-            >
-              {t(key(fileName ? 'changeZip' : 'chooseZip'))}
-            </button>
+            <div className="actions minecraft-worlds-source-actions">
+              <button
+                type="button"
+                data-world-picker
+                className="secondary"
+                disabled={importDisabled || Boolean(progress)}
+                onClick={() => picker.current?.click()}
+              >
+                {t(key('chooseZip'))}
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                disabled={importDisabled || Boolean(progress)}
+                onClick={() => folderPicker.current?.click()}
+              >
+                {t(key('chooseFolder'))}
+              </button>
+            </div>
             <input
               ref={picker}
               type="file"
@@ -611,6 +659,15 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
               hidden
               onChange={(event) => void upload(event.target.files)}
             />
+            <input
+              ref={folderPicker}
+              type="file"
+              {...{ webkitdirectory: '' }}
+              multiple
+              aria-label={t(key('worldFolder'))}
+              hidden
+              onChange={(event) => void upload(event.target.files, true)}
+            />
             <span>{fileName || t(key('dropZip'))}</span>
           </fieldset>
           {progress && (
@@ -618,7 +675,7 @@ export function MinecraftWorldsSection(props: GameSectionViewProps) {
               <label htmlFor={`${id}-progress`}>{t(key(progress.phase))}</label>
               <progress
                 id={`${id}-progress`}
-                max={progress.total}
+                max={Math.max(1, progress.total)}
                 value={progress.phase === 'checking' ? undefined : progress.sent}
               />
               <button type="button" className="secondary" onClick={() => transfer.current?.abort()}>

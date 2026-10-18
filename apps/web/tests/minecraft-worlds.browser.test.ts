@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { AxeBuilder } from '@axe-core/playwright';
 import { DomainError } from '@nickhosting/core';
@@ -133,7 +133,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
   async function importDialog(target: string, bytes?: Buffer) {
     await user.getByRole('button', { name: 'Import world', exact: true }).click();
     const dialog = user.getByRole('dialog', { name: 'Import world', exact: true });
-    await dialog.locator('input[type="file"]').setInputFiles({
+    await dialog.locator('input[type="file"]:not([webkitdirectory])').setInputFiles({
       name: 'world.zip',
       mimeType: 'application/zip',
       buffer:
@@ -144,7 +144,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
         })),
     });
     await browserExpect(
-      dialog.getByText('ZIP uploaded. Import it to add the world.', { exact: true }),
+      dialog.getByText('World uploaded. Import it to add it to the server.', { exact: true }),
     ).toBeVisible({ timeout: 15_000 });
     await dialog.getByLabel('Folder name', { exact: true }).fill(target);
     return dialog;
@@ -451,7 +451,7 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       const uploadStarted = user.waitForRequest((request) =>
         /\/v1\/minecraft\/sources\/[^/]+\/upload$/.test(request.url()),
       );
-      await dialog.locator('input[type=file]').setInputFiles({
+      await dialog.locator('input[type=file]:not([webkitdirectory])').setInputFiles({
         name: 'cancel.zip',
         mimeType: 'application/zip',
         buffer: await archive({ 'level.dat': browserLevelDat() }),
@@ -464,7 +464,9 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
       await dialog.getByRole('button', { name: 'Cancel upload', exact: true }).click();
       release();
       await browserExpect(
-        dialog.getByText('Upload cancelled. Choose the ZIP again to continue.', { exact: true }),
+        dialog.getByText('Upload cancelled. Choose the ZIP or folder again to continue.', {
+          exact: true,
+        }),
       ).toBeVisible();
       await browserExpect(
         dialog.getByRole('button', { name: 'Import world', exact: true }),
@@ -595,6 +597,74 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     }
   });
 
+  it('imports a selected world folder with nested files while running through the existing world job', async () => {
+    const directory = resolve(ownedDirectory, 'folder-world');
+    await mkdir(resolve(directory, 'region'), { recursive: true });
+    await mkdir(resolve(directory, 'data/nested'), { recursive: true });
+    await writeFile(resolve(directory, 'level.dat'), browserLevelDat());
+    await writeFile(resolve(directory, 'region/r.0.0.mca'), Buffer.from([0, 1, 2, 255]));
+    await writeFile(resolve(directory, 'data/nested/note.txt'), 'Folder import fixture');
+    await running(true);
+    await user.goto(route());
+    await user.getByRole('button', { name: 'Import world', exact: true }).click();
+    const dialog = user.getByRole('dialog', { name: 'Import world', exact: true });
+    await dialog.locator('input[webkitdirectory]').setInputFiles(directory);
+    await browserExpect(
+      dialog.getByText('World uploaded. Import it to add it to the server.', { exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+    await browserExpect(dialog.getByLabel('Folder name', { exact: true })).toHaveValue(
+      'folder-world',
+    );
+    await screenshot(user, 'minecraft-worlds-folder-import-desktop-en');
+    await accessible();
+    const selectedBefore = (await provider.files()).get('server.properties')?.toString();
+    await operation(() =>
+      dialog.getByRole('button', { name: 'Import world', exact: true }).click(),
+    );
+    await browserExpect(user.getByRole('dialog')).toHaveCount(0);
+    const files = await provider.files();
+    expect(files.get('folder-world/data/nested/note.txt')?.toString()).toBe(
+      'Folder import fixture',
+    );
+    expect(files.get('folder-world/region/r.0.0.mca')).toEqual(Buffer.from([0, 1, 2, 255]));
+    expect(files.get('folder-world/level.dat')).toEqual(browserLevelDat());
+    expect(files.get('server.properties')?.toString()).toBe(selectedBefore);
+    expect(files.has('folder-world/folder-world/level.dat')).toBe(false);
+  });
+
+  it('rejects a folder without level.dat before uploading or requesting an operation', async () => {
+    const directory = resolve(ownedDirectory, 'not-a-world');
+    await mkdir(directory);
+    await writeFile(resolve(directory, 'readme.txt'), 'Not a world');
+    await user.goto(route());
+    await user.getByRole('button', { name: 'Import world', exact: true }).click();
+    const dialog = user.getByRole('dialog', { name: 'Import world', exact: true });
+    const writes: string[] = [];
+    const reserved = (request: import('@playwright/test').Request) => {
+      if (
+        request.method() === 'POST' &&
+        (request.url().includes('/v1/minecraft/sources') ||
+          request.url().endsWith(`${api()}/operations`))
+      )
+        writes.push(request.url());
+    };
+    user.on('request', reserved);
+    try {
+      await dialog.locator('input[webkitdirectory]').setInputFiles(directory);
+      await browserExpect(dialog.getByRole('alert')).toContainText(
+        'Choose the world folder containing level.dat.',
+      );
+      await browserExpect(
+        dialog.getByRole('button', { name: 'Import world', exact: true }),
+      ).toBeDisabled();
+      expect(writes).toEqual([]);
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    } finally {
+      user.off('request', reserved);
+    }
+    expect(pageErrors).toEqual([]);
+  });
+
   it('renders Italian mobile worlds and import controls without overflow', async () => {
     await journeyRequest(fixture, user, '/api/auth/update-user', { locale: 'it' });
     const localizedSession = await journeyRequest<{ subject: { locale: string } }>(
@@ -617,6 +687,9 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     }
     await user.getByRole('button', { name: 'Importa mondo', exact: true }).click();
     await browserExpect(user.getByRole('dialog')).toBeVisible();
+    await browserExpect(
+      user.getByRole('button', { name: 'Scegli cartella', exact: true }),
+    ).toBeVisible();
     await screenshot(user, 'minecraft-worlds-import-mobile-it');
     await accessible();
     expect(pageErrors).toEqual([]);

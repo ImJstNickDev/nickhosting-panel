@@ -275,3 +275,9 @@
   background: var(--surface-subtle, #f1f4f7);
   color: var(--text);
 }
+
+.minecraft-worlds-source-actions {
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 0;
+}

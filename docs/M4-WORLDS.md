@@ -69,3 +69,25 @@ remain blocked. The durable operation still serializes conflicting NickHosting
 mutations, and rechecks the destination before promotion; external writes are not
 made atomic by this policy. Offline replacement retains explicit consent and its
 optional verified backup. No existing world is automatically converted.
+
+### Directory input — M5, 2026-10-18
+
+The Worlds importer also accepts a local world directory through the browser's
+[directory picker](https://developer.mozilla.org/en-US/docs/Web/API/HTMLInputElement/webkitdirectory).
+Select the directory containing `level.dat`, not its parent collection of worlds.
+Nested files keep their relative paths; empty directories are not supplied by the
+browser and are not required for the world data. A browser worker packages the
+selection as stored ZIP/ZIP64 using the [PKWARE format specification](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
+It reads CRC input in bounded chunks and retains source File references in Blob
+parts, rather than reading the complete world into a JavaScript byte array.
+No compression, new package or server-side alternative installer is introduced.
+Preparation is cancellable, reports actual bytes read, and precedes the existing
+SHA-256/upload/source-reference/import job. Existing Fileman folder path validation
+and the archive size boundary apply before processing; backend ZIP/NBT/storage and
+replacement validation remain authoritative. Selecting a directory does not
+bypass world-version or live-collision checks.
+The directory picker retains Fileman's existing 10,000-item bound (files plus
+directories); the generated ZIP, including its headers, must fit the existing
+8 GiB source limit. CRC preparation and source SHA-256 are two local reads, not
+two uploads. Large-offset ZIP64 layout is covered synthetically; no multi-GiB
+browser transfer is claimed by that test.

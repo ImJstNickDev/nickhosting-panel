@@ -1481,3 +1481,8 @@ Downloads use the existing `/v1/servers/:id/files/archive` endpoint with root `'
 and the selected world directory; they retain file-transfer authorization and
 streaming bounds. This is not a new backup or consistency guarantee. No new
 settings, migrations, credentials or external API are required.
+
+World directory selection (2026-10-18) is a browser input alternative, not a new
+API contract: the worker prepares a ZIP source and uses the same authenticated
+`/v1/minecraft/sources` upload and `world-import` durable command. No direct
+per-file write or second installation path is exposed for directory input.

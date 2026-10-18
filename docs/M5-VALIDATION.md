@@ -12111,3 +12111,49 @@ check. The independent reviewer approved this final change.
 `python3 scripts/check-governance.py` passed for the staged content. Final dev API,
 worker and Vite were running/healthy. PR #21 remains open and unmerged; no release,
 production deployment or later milestone work is implied by these checks.
+
+## Minecraft world directory input — 2026-10-18
+
+The import dialog now offers Choose ZIP and Choose folder. A selected world
+directory is packaged in a cancellable browser worker, then follows the existing
+hash/source upload/durable import path. Nested files retain their paths; selecting
+a directory without root `level.dat` fails before any upload reservation or job.
+No new backend endpoint, dependency, migration or provider installer was added.
+Directory preparation reads CRC chunks of 1 MiB and uses File-backed Blob parts;
+source SHA-256 remains a separate local pass. Existing limits are documented in
+`docs/M4-WORLDS.md`; this is not a claim of constant overall browser memory use.
+
+Focused checks:
+
+- `scripts/dev.sh pnpm exec vitest run apps/web/src/integrations/minecraft/world-folder-archive.test.ts`:
+  **6/6 passed**. Actual backend ZIP reader/CRC roundtrip for nested Unicode,
+  binary and empty files, invalid paths/root, size bounds, cancellation and
+  explicit worker paths. ZIP64 offsets above 4 GiB are synthetic layout tests,
+  not a real multi-GiB browser upload.
+- Browser command prefix:
+  `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts`.
+  `-t 'selected world folder|folder without level.dat'`: **2/2 passed**,
+  eight excluded. Real Chromium directory selection/worker/upload/API/job with
+  simulated provider effects verified nested bytes and unchanged server.properties.
+  `-t 'renders Italian'`: **1/1 passed**, nine excluded, at 390/320 px with zero
+  automated accessibility violations; desktop folder dialog also passed axe.
+  `-t 'imports, selects|cancels an upload'`: **2/2 passed**, eight excluded,
+  covering the affected existing ZIP lifecycle and cancellation. A test-only
+  file-input locator was narrowed to exclude the new directory picker before
+  this regression run. No complete historical browser suite was repeated.
+- `scripts/dev.sh pnpm --filter @nickhosting/web typecheck`: passed.
+- `scripts/dev.sh pnpm --filter @nickhosting/web build`: passed (11.72 s), including
+  the new worker artifact; existing large-chunk and plugin-timing warnings remain.
+- `scripts/dev.sh pnpm i18n:check`: 2312 EN/IT/pseudolocale keys; scoped Biome passed.
+
+Independent review approved the source, ZIP structure, cancellation and desktop/mobile
+layout without must-fix findings. Screenshots preserve earlier evidence under new
+names: `minecraft-worlds-folder-import-desktop-en.png` and
+`minecraft-worlds-folder-import-mobile-it.png` in `docs/screenshots/m5/`.
+All mutations used isolated fixtures and simulated provider storage. No real world
+was imported or changed; no container was rebuilt/restarted or infrastructure
+configuration changed. Test-owned temporary directories were cleaned by fixtures.
+This focused follow-up does not supersede the historical full/targeted results
+above, nor remove the independent SFTPGo #18 release gate.
+Final staged governance passed: 1135 text files, 463 review PNGs, 925 relative
+links, four TOML files and 44 ignore cases. `git diff --cached --check` passed.
