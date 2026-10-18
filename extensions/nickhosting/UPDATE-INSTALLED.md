@@ -102,3 +102,17 @@ The rollout is not a multi-file filesystem transaction. A PHP request already in
 flight may complete against the previous code. New classes are available before
 new routes are published, and requests should be checked after activation. No
 claim of production activation is made by a successful dry run.
+
+
+## Post-update game-volume verification
+
+After activation, inspect the actual Wings data mount read-only. Confirm Wings'
+configured UID/GID against game-container and SFTP process identities, then check
+game-directory/file ownership and numeric modes against private inventories.
+The updater manifest covers extension files only; it is not a game-volume backup
+or proof that every game inode remained unchanged. Keep game paths and inventories
+private. Distinguish files created/replaced during normal operation, technical
+non-server directories and symbolic links; never follow links outside the roots.
+Use read-only write-eligibility checks rather than creating test files. Report
+any mismatch before proposing a separately authorized repair. Do not run chmod,
+chown or the native installer automatically as part of this verification.

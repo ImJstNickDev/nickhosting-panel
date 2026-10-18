@@ -12687,3 +12687,46 @@ took 356 ms; this is inspection latency only, not a deletion benchmark, and is
 additional evidence against claiming an already proven 300 ms end-to-end bound.
 No game mutation or new test world was performed. Existing development services
 remain healthy. The next Owner test can use the activated path immediately.
+
+
+### Blueprint 1.6 post-update Wings permission audit — 2026-10-18
+
+The Owner requested explicit filesystem verification after the extension update.
+Read-only inspection confirmed the actual Panel/Wings bind mounts and Wings'
+configured game UID/GID 988:988. All 13 existing game containers declare 988:988;
+the one running game process and the user-SFTP process report the same identity.
+Read-only write-eligibility checks pass for the running game's root/properties
+and the Owner test server's SFTP root/JAR. No file was created to test writes.
+
+A complete no-follow, descriptor-relative metadata scan of all 28 known server
+roots counted **3,410,085 entries**: 313,812 directories, 3,096,267 regular files
+and 6 symbolic links. Every object has UID/GID **988:988**. No unexpected owner,
+walk error, crossed filesystem or disappearing entry was observed. Symlink
+targets were not followed. The technical `.sftp` directory remains 100:101/0755,
+matching its prior excluded state; it is not a game-server volume.
+
+Comparison against the private metadata journals from the approved previous
+ownership repairs examined 3,410,058 baseline entries. **3,410,043 retain their
+original device/inode and complete numeric mode**, with zero same-inode mode
+changes. Fourteen paths now identify replaced inodes and one is absent; these
+are reported separately, without attributing them to the extension update or
+claiming their old inode permissions remain comparable. New files are included
+in the complete current ownership scan. This is a sequential observation against
+a historical baseline, not an atomic snapshot or a fresh immediate preactivation
+inventory. The full audit completed in 122.67 seconds; private results and scripts
+are retained locally, with no game contents read.
+
+Independent review verified the updater's completed manifest and fingerprints:
+12 extension-file changes, eight new extension files at the extension's 100:101
+identity, and no UID/GID/mode changes on existing extension targets. The updater's
+chmod/chown/chgrp operations address only exclusive temporary siblings of its
+allowlisted extension files. It never ran native Blueprint housekeeping. Its
+manifest contains no game-volume baseline; the separate scan above supplies the
+post-update game ownership evidence. The historical native installer incident
+remains a distinct deployment blocker.
+
+No chmod/chown, restart, game-file write, configuration mutation or test-resource
+creation occurred in this audit. No application test suite was needed for this
+read-only infrastructure check. Documentation now explicitly includes this
+post-update verification step. PR #21 remains open and unmerged; SFTPGo #18 remains
+unchanged.
