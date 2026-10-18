@@ -155,7 +155,28 @@ async function rowLock<T>(
     }
   });
 }
-async function hashSource(row: Source, authorize: () => Promise<unknown>) {
+const sourceAuthorizationIntervalMs = 500;
+/** One authority check per time window, shared by streaming and the stalled-body
+ * timer. Boundaries force a fresh check; archive chunks never each query SQL. */
+function sourceAuthorization(check: () => Promise<unknown>, signal?: AbortSignal) {
+  let checkedAt = performance.now();
+  let checking: Promise<void> | undefined;
+  return async (force = false): Promise<void> => {
+    signal?.throwIfAborted();
+    if (checking) return checking;
+    if (!force && performance.now() - checkedAt < sourceAuthorizationIntervalMs) return;
+    checking = (async () => {
+      await check();
+      signal?.throwIfAborted();
+      checkedAt = performance.now();
+    })().finally(() => {
+      checking = undefined;
+    });
+    return checking;
+  };
+}
+async function hashSource(row: Source, authorize: (force?: boolean) => Promise<void>) {
+  await authorize();
   await contentStageDirectory(row.storage_root);
   const directory = join(row.storage_root, row.id);
   const info = await lstat(directory);
@@ -188,6 +209,7 @@ async function hashSource(row: Source, authorize: () => Promise<unknown>) {
       (row.actual_sha256 !== null && actual.sha256 !== row.actual_sha256)
     )
       throw new DomainError('conflict');
+    await authorize(true);
     return actual.sha256 as string;
   } finally {
     await file.close();
@@ -345,27 +367,32 @@ export function createMinecraftSourceStore(
       row = claimed;
       const controller = new AbortController();
       const abort = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-      const authorize = async () => {
-        abort.throwIfAborted();
-        await ownedSource(connection, await reauthorize(connection), reference);
-      };
+      // The exact source and actor were checked above under this source lock.
+      const authorize = sourceAuthorization(
+        async () => ownedSource(connection, await reauthorize(connection), reference),
+        abort,
+      );
       // Revocation must interrupt stalled provider/raw uploads too, rather than
       // waiting indefinitely for another body chunk. At most one query is in flight.
       let checking: Promise<void> | undefined;
       const timer = setInterval(() => {
         if (!checking)
-          checking = authorize()
+          checking = authorize(true)
             .catch(() => controller.abort(new DomainError('forbidden')))
             .finally(() => {
               checking = undefined;
             });
-      }, 500);
+      }, sourceAuthorizationIntervalMs);
       timer.unref();
       try {
         await contentStageDirectory(join(row.storage_root, row.id));
         await transfer(row, abort, authorize);
-        await authorize();
         const sha256 = await hashSource(row, authorize);
+        // Do not let the background check share this pinned connection with the
+        // final transaction. The transaction reauthorizes once more before ready.
+        clearInterval(timer);
+        await checking;
+        abort.throwIfAborted();
         await connection.transaction().execute(async (tx) => {
           await lockResources(tx);
           const currentActor = await reauthorize(tx);
@@ -388,6 +415,9 @@ export function createMinecraftSourceStore(
           updated_at: new Date(),
         });
       } catch (error) {
+        clearInterval(timer);
+        controller.abort(error);
+        await checking;
         // Even when the provider removed its partial file, keep the claim. A
         // crashed process cannot assert filesystem cleanup on a future retry.
         await connection
@@ -410,9 +440,10 @@ export function createMinecraftSourceStore(
       const row = await ownedSource(connection, await reauthorize(connection), reference, serverId);
       if (row.state !== 'ready' || row.kind !== kind || (!serverId && row.server_id))
         throw new DomainError('conflict');
-      const sha256 = await hashSource(row, async () =>
+      const authorize = sourceAuthorization(async () =>
         ownedSource(connection, await reauthorize(connection), reference, serverId),
       );
+      const sha256 = await hashSource(row, authorize);
       return { path: sourcePath(row), sha256 };
     });
   }

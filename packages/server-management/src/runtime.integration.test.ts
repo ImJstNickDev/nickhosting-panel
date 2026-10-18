@@ -131,48 +131,55 @@ describe('management runtime execution-time authorization', () => {
     await correct.lifecycle.authorizeEffect(queued.job, queued.server, f.db);
     expect(observer.preflight).toHaveBeenCalledTimes(1);
   });
-  it('authorizes inactive-world removal without a host observer and still rejects revoked authority', async () => {
-    const queued = await stop();
-    await f.db
-      .updateTable('server_operations')
-      .set({
-        action: 'minecraft-content',
-        plan: JSON.stringify({
-          minecraftContent: {
-            combinationId: randomUUID(),
-            command: { kind: 'world-remove', world: 'spare', confirm: true, backupBefore: false },
-            world: { existing: true },
-            backupBefore: false,
-          },
+  it.each(['remove', 'import'] as const)(
+    'authorizes inactive-world %s without a host observer and still rejects revoked authority',
+    async (kind) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          action: 'minecraft-content',
+          plan: JSON.stringify({
+            minecraftContent: {
+              combinationId: randomUUID(),
+              command:
+                kind === 'remove'
+                  ? { kind: 'world-remove', world: 'spare', confirm: true, backupBefore: false }
+                  : { kind: 'world-import', archiveRef: randomUUID(), targetWorld: 'spare' },
+              world: { existing: kind === 'remove' },
+              deletePaths: [],
+              backupBefore: false,
+            },
+          }),
+        })
+        .where('job_id', '=', queued.job)
+        .execute();
+      const observer = {
+        preflight: vi.fn(async () => {
+          throw new Error('Unused observer');
         }),
-      })
-      .where('job_id', '=', queued.job)
-      .execute();
-    const observer = {
-      preflight: vi.fn(async () => {
-        throw new Error('Unused observer');
-      }),
-      stopped: vi.fn(async () => false),
-    };
-    const runtime = await createManagementRuntime({
-      db: f.db,
-      codec,
-      adapter: f.adapter,
-      containerObserver: observer,
-      env: { NH_OBSERVER_ID: 'wrong-host' },
-    });
-    await runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db);
-    expect(observer.preflight).not.toHaveBeenCalled();
-    expect(observer.stopped).not.toHaveBeenCalled();
-    await f.db
-      .updateTable('operation_jobs')
-      .set({ resource_owner_id: f.owner.subjectUserId })
-      .where('id', '=', queued.job)
-      .execute();
-    await expect(
-      runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db),
-    ).rejects.toMatchObject({ code: 'forbidden' });
-  });
+        stopped: vi.fn(async () => false),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'wrong-host' },
+      });
+      await runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db);
+      expect(observer.preflight).not.toHaveBeenCalled();
+      expect(observer.stopped).not.toHaveBeenCalled();
+      await f.db
+        .updateTable('operation_jobs')
+        .set({ resource_owner_id: f.owner.subjectUserId })
+        .where('id', '=', queued.job)
+        .execute();
+      await expect(
+        runtime.lifecycle.authorizeEffect(queued.job, queued.server, f.db),
+      ).rejects.toMatchObject({ code: 'forbidden' });
+    },
+  );
   it.each([false, true])(
     'keeps standalone final authorization, delegates it only to the lifecycle guard: %s',
     async (defer) => {

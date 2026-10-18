@@ -488,6 +488,11 @@ from ViewerEngine's browser presentation extensions.
   reservation covers the transfer; the configured Fileman `uploadConcurrency`
   controls streams. One lane takes large files while remaining lanes drain small
   ones. Bulk grants use windows of at most 500 and renew only unused grants.
+  Destination ancestors remain ordered; sibling directories are prepared at that
+  same bounded concurrency, overlapping the first bulk-grant request. Failure
+  stops queued preparation and drains in-flight work before releasing admission.
+  Shared-pool storage skips per-server disk telemetry, while physical free space
+  and transfer budgets remain covered by the batch reservation.
 - Source bytes are hashed while streaming. A successful Wings response and
   durable per-file receipt confirm that upload; they do not certify gameplay or
   an atomic filesystem snapshot. Normal completion does not download the same
@@ -509,6 +514,19 @@ Worlds overlaps properties/root reads, batches candidate directories and prepare
 download URLs only for actual `level.dat` files. World imports hand the validated
 stage to `uploadStaged`; they retain archive/NBT/path rules and the existing
 online-additive versus stopped-replacement distinction.
+
+World import preparation shares the validated ZIP inventory with staging
+reservation instead of scanning it again to count expanded bytes. Source-store
+authorization is coalesced over 500 ms (including stalled-transfer revocation)
+and checked freshly at completion, never once per 64 KiB chunk. Each resolution
+still verifies the source hash. Staging hashes the archive once, fences changes
+with inode/size/nanosecond modification metadata, and verifies extracted CRC and
+per-file hashes. Private directory validation is reused within the job; disk
+headroom is checked at bounded file/byte/time boundaries. A confirmed world-only
+transfer does not reread the unrelated root EULA. Additive inactive imports need
+no process/host observation, including during a power transition; current local
+authority, fresh provider identity at the effect boundary, staging/storage
+admission and normalized active-world protection remain enforced.
 
 The Worlds UI shows confirmed transfer counts and follows the current server job
 after remount. Completion refreshes the inventory; accepted/uncertain/failed jobs

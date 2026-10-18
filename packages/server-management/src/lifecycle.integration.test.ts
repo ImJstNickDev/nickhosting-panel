@@ -3940,13 +3940,14 @@ describe('additive Minecraft world imports', () => {
     ).toEqual({ state: 'running' });
     expect(f.adapter.power).not.toHaveBeenCalled();
   });
-  it('does not execute an online import during a provider power transition', async () => {
+  it('imports an inactive folder during a power transition without reading process telemetry', async () => {
     const f = await fixture('minecraft-content', plan());
     f.setState('starting');
     f.options.processGameContent = vi.fn(async () => true);
-    expect(await f.run()).toBe('waiting');
-    expect(f.options.processGameContent).not.toHaveBeenCalled();
-    expect((await f.operation()).plan.waitReason).toBe('world_import_power_transition');
+    expect(await f.run()).toBe('succeeded');
+    expect(f.options.processGameContent).toHaveBeenCalledOnce();
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.adapter.power).not.toHaveBeenCalled();
   });
   it('keeps existing-world replacement behind quiescence even with a running reservation', async () => {
     const prepared = plan();

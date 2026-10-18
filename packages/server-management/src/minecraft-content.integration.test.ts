@@ -870,6 +870,12 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         });
         expect(f.context.adapter.uploadFile).not.toHaveBeenCalled();
         f.files.delete('new_world/foreign.txt');
+        for (const selected of ['./new_world', 'new_world/nested']) {
+          f.files.set('server.properties', Buffer.from(`level-name=${selected}\n`));
+          await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
+            'running server must not require stop',
+          );
+        }
         f.files.set('server.properties', Buffer.from('level-name=new_world\n'));
         await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow(
           'running server must not require stop',
@@ -899,6 +905,7 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         expect(f.files.get('new_world/region/r.0.0.mca')).toEqual(Buffer.from('region fixture'));
         expect(f.context.assertStopped).not.toHaveBeenCalled();
         expect(downloads.mock.calls.some(([, path]) => path === 'server.jar')).toBe(false);
+        expect(downloads.mock.calls.some(([, path]) => path === 'eula.txt')).toBe(false);
         const inventory = await inspectMinecraftWorlds(
           f.f.db,
           f.context.adapter,

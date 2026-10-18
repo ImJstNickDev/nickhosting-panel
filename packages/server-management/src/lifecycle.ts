@@ -1262,7 +1262,7 @@ export async function processServerOperation(
         event,
         backup,
         authorize: () =>
-          (inactiveWorldRemoval
+          (onlineWorldContent
             ? (options.authorizeIntent ?? options.authorizeEffect)
             : options.authorizeEffect)(jobId, server.id, db),
         assertStopped: async () => {
@@ -2440,14 +2440,9 @@ export async function processServerOperation(
       }
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
-      if (!inactiveWorldRemoval) {
-        if (onlineWorldContent) {
-          if (!['running', 'offline'].includes((await resources()).current_state))
-            return wait('world_import_power_transition');
-        } else {
-          await requireQuiescentReservation();
-          if (!(await offline())) return wait('offline_confirmation');
-        }
+      if (!onlineWorldContent) {
+        await requireQuiescentReservation();
+        if (!(await offline())) return wait('offline_confirmation');
       }
       if (operation.action === 'minecraft-content') {
         if (!options.processGameContent) throw new DomainError('configuration_invalid');

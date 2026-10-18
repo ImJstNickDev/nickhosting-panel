@@ -12371,3 +12371,55 @@ production mutation or new persistent test asset was needed. The pre-existing de
 Gateway health check was already failing (over 5,000 consecutive checks) and was
 not modified in this file-operation task. Isolated test schemas were cleaned by
 the fixtures. Issue #18 and production-release boundaries remain unchanged.
+
+### 2026-10-18 — World import preparation and transfer latency
+
+The Owner's latest measured real-provider deletion succeeded in **1.072 s**, including
+**332 ms** for the provider-effect request (previously 34.835 s end-to-end).
+The measured import of 101 files / 116,278,134 bytes succeeded in
+**31.997 s**: 7.584 s through two provider-unavailable retries, 14.530 s preparation,
+9.109 s in the Fileman transfer effect, and 0.774 s finalization. This measures
+import of an already staged archive, not the browser's initial ZIP upload.
+Concurrent API logs contained provider 429 responses; they do not independently
+prove the cause of each worker retry. Earlier import evidence (951.525 s) remains
+historical, not rewritten as a successful fast run.
+
+This pass removes per-chunk SQL authorization, a duplicate ZIP inventory pass,
+the second staging hash, repeated directory ancestry checks, per-file disk probes,
+process/host checks for additive imports, duplicate local authorization and the
+unrelated post-import EULA download. Source hashes, bounded revocation checks,
+final current authority, archive/NBT/path limits, CRC, staging reservation,
+fresh transfer-effect provider identity and durable receipts remain. Directory
+siblings run concurrently within the existing upload limit; their parents stay
+ordered and first-window signed grants overlap preparation. Shared-pool transfers
+retain physical admission without querying an irrelevant per-server disk quota.
+The normalized selected-world/ancestor/dimension guard is shared with deletion.
+
+Focused evidence on isolated fixtures (no historical full-suite rerun):
+
+- `scripts/dev.sh pnpm exec vitest run games/minecraft/src/world.test.ts games/minecraft/src/management.test.ts games/minecraft/src/world-version.test.ts`: **76 passed**. Includes reserve-before-extraction, source changes during extraction, reused directory validation, bounded disk checks, corruption, traversal and recovery.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-sources.integration.test.ts -t 'bounds upload|quick hash|final upload chunk|stalled body|streams exact binary|resolves a server-scoped|charged uncertain claim'`: **9 passed / 12 excluded**. Current authority at completion, stalled revocation, exact bytes, tampering and uncertain claims.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/fileman-transfers.integration.test.ts packages/server-management/src/minecraft-content.integration.test.ts -t 'Fileman durable integration transfers|imports a .* world online|removes an inactive world online'`: **13 passed / 43 excluded**. Bounded sibling concurrency, grant overlap, ordered parents, failed-wave settlement, no queued uploads after failure, shared-pool admission, no replay, online import and selected-world aliases/ancestors.
+- `scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/runtime.integration.test.ts -t 'additive Minecraft world imports|inactive Minecraft world removal|authorizes inactive-world|binds lifecycle observation'`: **11 passed / 298 excluded**. Additive operations avoid telemetry while preserving compute reservations, replacement quiescence, host checks for power and revoked authority rejection.
+- Additional focused content-unit selectors exercised immediate removal and selected-world behavior (**2 passed / 40 excluded**) and the shared normalized path guard (**9 passed / 33 excluded**).
+- Backend TypeScript, changed-source Biome, whitespace and indexed governance/hygiene checks passed. No frontend changes, dependency updates, migrations or production build were required.
+
+An isolated 8 MiB upload delivered in 2,048 chunks used **5 authority-hook calls**
+and took **339.70 ms**, including its final local hash. Its source resolution used
+**2 calls / 66.92 ms**. The previous algorithm required at least 2,176 chunk-level
+checks for that upload and 129 total checks for resolution; those old counts are
+derived from code, not invented old elapsed-time measurements. A synthetic,
+interleaved local 101-file / 111 MiB staging benchmark (three runs per revision)
+changed median time from **1,672.78 to 976.18 ms**. Earlier standalone measurements
+were noisy under concurrent host activity; these are local preparation results,
+not a real-provider end-to-end guarantee. Temporary measurement logging was
+removed and synthetic fixtures cleaned.
+
+Independent source review found no remaining must-fix. Existing API/worker
+watchers briefly encountered an intermediate syntax error during edits, recovered
+after correction, and loaded the final code; API, worker, Vite and web were healthy.
+HTTPS returned 200 and unauthenticated `/v1/me` returned 401. No manual restart,
+provider mutation, game-server file operation, Blueprint update or infrastructure
+change occurred. The **15 s maximum / 5–10 s target remains to be measured on the
+Owner's next real import**; network throughput and provider rate-limit retries
+are not bounded by the local benchmark. SFTPGo #18 remains a release gate.

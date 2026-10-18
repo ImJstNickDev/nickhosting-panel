@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { lstat, open, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { type BigIntStats, createReadStream, createWriteStream } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -267,12 +267,25 @@ export function inspectMinecraftLevelDat(
     ...(versionHistory ? { versionHistory } : {}),
   };
 }
+async function assertFileUnchanged(path: string, before: BigIntStats): Promise<void> {
+  const after = await lstat(path, { bigint: true });
+  if (
+    !after.isFile() ||
+    after.isSymbolicLink() ||
+    after.dev !== before.dev ||
+    after.ino !== before.ino ||
+    after.size !== before.size ||
+    after.mtimeNs !== before.mtimeNs ||
+    after.ctimeNs !== before.ctimeNs
+  )
+    fail('archive_changed');
+}
 async function fileDigest(
   path: string,
   maxBytes: number,
   signal?: AbortSignal,
-): Promise<{ sha256: string; size: number }> {
-  const info = await lstat(path);
+): Promise<{ sha256: string; size: number; identity: BigIntStats }> {
+  const info = await lstat(path, { bigint: true });
   if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes) fail('source_file');
   const hash = createHash('sha256');
   let size = 0;
@@ -281,8 +294,9 @@ async function fileDigest(
     if (size > maxBytes) fail('source_file');
     hash.update(chunk);
   }
-  if (size !== info.size) fail('source_changed');
-  return { sha256: hash.digest('hex'), size };
+  if (BigInt(size) !== info.size) fail('source_changed');
+  await assertFileUnchanged(path, info);
+  return { sha256: hash.digest('hex'), size, identity: info };
 }
 async function exists(path: string): Promise<boolean> {
   try {
@@ -333,6 +347,8 @@ export async function stageMinecraftWorld(
     limits?: Partial<ContentLimits>;
     nbtLimits?: Partial<MinecraftNbtLimits>;
     diskPolicy?: ContentDiskPolicy;
+    /** Reserve the validated expanded size once, before creating any extracted files. */
+    reserve?: (expandedBytes: number) => Promise<void>;
     signal?: AbortSignal;
   },
 ): Promise<StagedMinecraftWorld> {
@@ -368,11 +384,8 @@ export async function stageMinecraftWorld(
   const planDigest = createHash('sha256').update(JSON.stringify(plan)).digest('hex');
   try {
     options.signal?.throwIfAborted();
-    if (
-      (await fileDigest(archivePath, limits.maxArchiveBytes, options.signal)).sha256 !==
-      options.archiveSha256
-    )
-      fail('archive_changed');
+    const source = await fileDigest(archivePath, limits.maxArchiveBytes, options.signal);
+    if (source.sha256 !== options.archiveSha256) fail('archive_changed');
     const metadataPath = join(job, 'plan.json');
     if (await exists(metadataPath)) {
       const info = await lstat(metadataPath);
@@ -407,11 +420,33 @@ export async function stageMinecraftWorld(
     });
     const level = world.files.find((file) => file.target === `${targetWorld}/level.dat`);
     if (!level || level.size > metadataLimits.maxCompressedBytes) fail('level_data');
+    await options.reserve?.(world.totalBytes);
+    options.signal?.throwIfAborted();
+    await assertFileUnchanged(archivePath, source.identity);
     await assertContentDiskSpace(job, world.totalBytes, options.diskPolicy);
     const directory = join(job, 'files');
     await contentStageDirectory(directory);
+    // This private, job-locked tree is verified once per directory, not from / for every file.
+    const checkedDirectories = new Set([directory]);
+    const ensureDirectory = async (path: string): Promise<void> => {
+      if (checkedDirectories.has(path)) return;
+      if (!path.startsWith(`${directory}${sep}`)) fail('stage_root');
+      await ensureDirectory(dirname(path));
+      try {
+        await mkdir(path, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) fail('stage_symlink');
+      checkedDirectories.add(path);
+    };
     const expected = new Map(world.files.map((file) => [file.source, file]));
     const manifest: StagedContentFile[] = [];
+    let extractedBytes = 0;
+    let batchBytes = 0;
+    let batchFiles = 0;
+    let lastDiskCheck = performance.now();
     await visitArchive(
       archivePath,
       async (file) => {
@@ -420,8 +455,19 @@ export async function stageMinecraftWorld(
         options.signal?.throwIfAborted();
         if (planned.size !== file.size) fail('archive_changed');
         const target = join(directory, planned.target);
-        await contentStageDirectory(dirname(target));
-        await assertContentDiskSpace(job, file.size, options.diskPolicy);
+        await ensureDirectory(dirname(target));
+        // Shared staging reservation covers the whole plan. Recheck host headroom at bounded
+        // file/byte/time boundaries, rather than issuing statfs for each small chunk file.
+        if (
+          batchFiles >= 32 ||
+          batchBytes >= 64 * 1024 ** 2 ||
+          performance.now() - lastDiskCheck >= 1000
+        ) {
+          await assertContentDiskSpace(job, world.totalBytes - extractedBytes, options.diskPolicy);
+          batchFiles = 0;
+          batchBytes = 0;
+          lastDiskCheck = performance.now();
+        }
         const temporary = join(job, `.extract-${randomUUID()}`);
         let size = 0;
         let checksum = 0;
@@ -453,6 +499,9 @@ export async function stageMinecraftWorld(
               fail('stage_existing_mismatch');
           } else await rename(temporary, target);
           manifest.push({ path: planned.target, size, sha256, source: 'override' });
+          extractedBytes += size;
+          batchBytes += size;
+          batchFiles++;
           expected.delete(file.path);
         } finally {
           await rm(temporary, { force: true });
@@ -460,12 +509,10 @@ export async function stageMinecraftWorld(
       },
       limits,
     );
-    if (
-      expected.size ||
-      (await fileDigest(archivePath, limits.maxArchiveBytes, options.signal)).sha256 !==
-        options.archiveSha256
-    )
-      fail('archive_changed');
+    if (expected.size) fail('archive_changed');
+    // SHA256 was checked before inspection; per-file CRC/SHA256 protects extraction. A source
+    // replacement or in-place edit invalidates the stage without a second whole-ZIP read.
+    await assertFileUnchanged(archivePath, source.identity);
     const levelPath = join(directory, targetWorld, 'level.dat');
     const levelInfo = await lstat(levelPath);
     if (

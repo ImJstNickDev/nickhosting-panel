@@ -51,7 +51,7 @@ import {
   reconcileManagedServer,
   verifyManagedIdentity,
 } from './lifecycle.js';
-import { minecraftContentRemovesInactiveWorld } from './minecraft-content-contracts.js';
+import { minecraftContentAllowsOnline } from './minecraft-content-contracts.js';
 import { createMinecraftModuleRuntime } from './minecraft-module.js';
 import { resolveProviderCredential } from './provider-accounts.js';
 import {
@@ -886,9 +886,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
         .executeTakeFirstOrThrow();
       if (
         operation.action === 'minecraft-content' &&
-        minecraftContentRemovesInactiveWorld(operation.plan.minecraftContent)
+        minecraftContentAllowsOnline(operation.plan.minecraftContent)
       ) {
-        // This operation only removes an inactive directory through the adapter.
+        // This operation only imports/removes an inactive directory through the adapter.
         // Lifecycle owns provider identity; host/process/image observations have
         // no bearing on this file effect. Keep current local authority at handoff.
         await authorizeQueuedEffect(connection, jobId, serverId, env, adapter);

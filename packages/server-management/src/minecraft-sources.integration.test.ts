@@ -5,9 +5,11 @@ import type { ContentHttp } from '@nickhosting/content-providers';
 import { authSessionId } from '@nickhosting/core';
 import { createTestDatabase } from '@nickhosting/database/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { currentInteractiveContext } from './interactive-context.js';
 import {
   bindMinecraftSource,
   createMinecraftSourceStore,
+  type MinecraftSourceOptions,
   reserveMinecraftStaging,
 } from './minecraft-sources.js';
 import { enqueueServerOperation } from './registry.js';
@@ -109,6 +111,82 @@ describe('durable Minecraft archive source admission', () => {
     await expect(
       createMinecraftSourceStore(f.db, other.context, env).reserveUpload(uploadInput({ serverId })),
     ).rejects.toThrow('forbidden');
+  });
+  it('bounds upload and source-hash authorization by elapsed time instead of chunk count', async () => {
+    const bytes = new Uint8Array(8 * 1024 ** 2).fill(37);
+    const authorize = vi.fn<NonNullable<MinecraftSourceOptions['authorize']>>(
+      (connection, previous) => currentInteractiveContext(connection, previous, env),
+    );
+    const service = createMinecraftSourceStore(f.db, f.context, env, { authorize });
+    const source = await service.reserveUpload(
+      uploadInput({ bytes: bytes.length, sha256: digest(bytes) }),
+    );
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset === bytes.length) controller.close();
+        else {
+          controller.enqueue(bytes.subarray(offset, offset + 4096));
+          offset += 4096;
+        }
+      },
+    });
+    authorize.mockClear();
+    const uploadStarted = performance.now();
+    expect((await service.upload(source.id, body, bytes.length)).state).toBe('ready');
+    const uploadMs = performance.now() - uploadStarted;
+    // 2,048 body chunks plus 128 hash chunks must not each query authorization.
+    expect(authorize.mock.calls.length).toBeLessThanOrEqual(6 + Math.ceil(uploadMs / 500) * 2);
+    authorize.mockClear();
+    const resolveStarted = performance.now();
+    expect((await service.resolveForCreation(source.id)).sha256).toBe(digest(bytes));
+    const resolveMs = performance.now() - resolveStarted;
+    expect(authorize.mock.calls.length).toBeLessThanOrEqual(2 + Math.ceil(resolveMs / 500) * 2);
+    expect(authorize.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+  it('rechecks authority at the end of a quick hash before resolving a ready source', async () => {
+    const service = store();
+    const source = await service.reserveUpload(uploadInput());
+    await service.upload(source.id, stream(), binary.length);
+    let checks = 0;
+    const revoked = createMinecraftSourceStore(f.db, f.context, env, {
+      authorize: async (connection, previous) => {
+        const actor = await currentInteractiveContext(connection, previous, env);
+        if (++checks === 1)
+          await connection
+            .deleteFrom('session')
+            .where('id', '=', f.context[authSessionId] ?? '')
+            .execute();
+        return actor;
+      },
+    });
+    await expect(revoked.resolveForCreation(source.id)).rejects.toThrow('unauthenticated');
+    expect(checks).toBe(1);
+  });
+  it('rejects revocation after the final upload chunk without waiting for the timer', async () => {
+    const service = store();
+    const source = await service.reserveUpload(uploadInput());
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          await f.db
+            .deleteFrom('session')
+            .where('id', '=', f.context[authSessionId] ?? '')
+            .execute();
+          controller.enqueue(binary);
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    await expect(service.upload(source.id, body, binary.length)).rejects.toThrow();
+    expect(
+      await f.db
+        .selectFrom('minecraft_sources')
+        .select('state')
+        .where('id', '=', source.id)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({ state: 'uncertain' });
   });
   it('resolves a server-scoped modpack for reinstall without allowing creation or another server', async () => {
     const serverId = await f.server();

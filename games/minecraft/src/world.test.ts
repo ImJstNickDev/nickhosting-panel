@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzipSync } from 'node:zlib';
+import * as contentProviders from '@nickhosting/content-providers';
 import { DomainError } from '@nickhosting/core';
 import { type NBT, writeUncompressed } from 'prismarine-nbt';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -310,6 +311,132 @@ describe('bounded Java level.dat validation', () => {
   });
 });
 describe('streamed isolated world staging', () => {
+  it('reserves only the validated world bytes before extraction and checks disk space in batches', async () => {
+    const { root } = await environment();
+    const level = levelDat();
+    const entries: Record<string, Buffer> = {
+      'source/level.dat': level,
+      'source/session.lock': Buffer.from('ignored lock'),
+    };
+    for (let index = 0; index < 70; index++)
+      entries[`source/region/r.${index}.mca`] = Buffer.from('region');
+    const archive = await makeZip(root, entries);
+    const reserve = vi.fn(async (bytes: number) => {
+      expect(bytes).toBe(level.length + 70 * 6);
+      await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+    const disk = vi.spyOn(contentProviders, 'assertContentDiskSpace');
+    try {
+      const staged = await stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        reserve,
+      });
+      expect(staged.manifest).toHaveLength(71);
+      expect(reserve).toHaveBeenCalledOnce();
+      // One full-budget check and bounded refreshes, never a syscall for every small file.
+      expect(disk.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(disk.mock.calls.length).toBeLessThan(10);
+      expect(disk.mock.calls[0]?.[1]).toBe(level.length + 70 * 6);
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it('does not extract when reservation is denied or the verified source changes', async () => {
+    const { root } = await environment();
+    const archive = await makeZip(root, { 'source/level.dat': levelDat() });
+    const denied = new Error('staging capacity unavailable');
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        reserve: async () => {
+          throw denied;
+        },
+      }),
+    ).rejects.toBe(denied);
+    await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      stageMinecraftWorld(archive.path, {
+        ...options(root, archive.sha256),
+        reserve: async () => {
+          const bytes = await readFile(archive.path);
+          await rm(archive.path);
+          await writeFile(archive.path, bytes);
+        },
+      }),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+    await expect(lstat(join(root, 'world-staging/job-one/files'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('rejects corrupt entry bytes even when the outer archive hash matches', async () => {
+    const { root } = await environment();
+    const payload = Buffer.from('unchanged-region-fixture');
+    const archive = await makeZip(root, {
+      'source/level.dat': levelDat(),
+      'source/region/r.0.0.mca': payload,
+    });
+    const bytes = await readFile(archive.path);
+    const index = bytes.indexOf(payload);
+    expect(index).toBeGreaterThan(0);
+    bytes[index] = (bytes[index] ?? 0) ^ 1;
+    await writeFile(archive.path, bytes);
+    await expect(
+      stageMinecraftWorld(
+        archive.path,
+        options(root, createHash('sha256').update(bytes).digest('hex')),
+      ),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_integrity' } });
+    await expect(lstat(join(root, 'world-staging/job-one/manifest.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+  it('does not publish a manifest if the source is edited during extraction', async () => {
+    const { root } = await environment();
+    const entries: Record<string, Buffer> = { 'source/level.dat': levelDat() };
+    for (let index = 0; index < 40; index++)
+      entries[`source/region/r.${index}.mca`] = Buffer.from('region');
+    const archive = await makeZip(root, entries);
+    const checkDisk = contentProviders.assertContentDiskSpace;
+    let checks = 0;
+    const disk = vi
+      .spyOn(contentProviders, 'assertContentDiskSpace')
+      .mockImplementation(async (...args) => {
+        await checkDisk(...args);
+        if (++checks !== 2) return;
+        // Same bytes and size still constitute a concurrent source edit; CRC alone cannot see it.
+        await writeFile(archive.path, await readFile(archive.path));
+      });
+    try {
+      await expect(
+        stageMinecraftWorld(archive.path, options(root, archive.sha256)),
+      ).rejects.toMatchObject({ details: { reason: 'minecraft_world_archive_changed' } });
+      await expect(lstat(join(root, 'world-staging/job-one/manifest.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it('rejects pre-existing symlinks below the cached staging directory boundary', async () => {
+    const { root, parent } = await environment();
+    const archive = await makeZip(root, {
+      'source/level.dat': levelDat(),
+      'source/region/r.0.0.mca': Buffer.from('region'),
+    });
+    const stagedWorld = join(root, 'world-staging/job-one/files/imported');
+    const outside = join(parent, 'outside');
+    await mkdir(stagedWorld, { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, join(stagedWorld, 'region'));
+    await expect(
+      stageMinecraftWorld(archive.path, options(root, archive.sha256)),
+    ).rejects.toMatchObject({ details: { reason: 'minecraft_world_stage_symlink' } });
+    await expect(lstat(join(outside, 'r.0.0.mca'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('streams a 16MiB region file, preserves dimensions, discards ephemeral locks and verifies recovery', async () => {
     const { root } = await environment();
     const archive = await makeZip(

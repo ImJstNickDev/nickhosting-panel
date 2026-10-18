@@ -18,7 +18,6 @@ import {
   safeContentPath,
   stageContent,
   validateContentPlan,
-  visitArchive,
 } from '@nickhosting/content-providers';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { Database } from '@nickhosting/database';
@@ -318,7 +317,7 @@ export async function prepareMinecraftContentPlan(
         );
         if (
           result.world.existing ||
-          (properties['level-name'] ?? 'world').toLowerCase() === name.toLowerCase()
+          targetsConfiguredMinecraftWorld(properties['level-name'] ?? 'world', name)
         )
           throw new DomainError('conflict');
       }
@@ -1305,6 +1304,27 @@ async function removeContentPath(
   if (await remoteEntry(context, path)) throw new DomainError('operation_uncertain');
   await complete(context, step);
 }
+/** Normalized selected tree, including dimension siblings and enclosing roots. */
+function targetsConfiguredMinecraftWorld(configured: string, target: string): boolean {
+  const active = posix.normalize(configured).replace(/\/+$/u, '').toLowerCase();
+  if (
+    !configured ||
+    !active ||
+    configured.includes('\\') ||
+    /\p{Cc}/u.test(configured) ||
+    /^[a-z]:/i.test(configured) ||
+    posix.isAbsolute(configured) ||
+    active === '.' ||
+    active === '..' ||
+    active.startsWith('../')
+  )
+    throw new DomainError('conflict');
+  const selected = [active, `${active}_nether`, `${active}_the_end`];
+  return selected.some(
+    (path) => path === target.toLowerCase() || path.startsWith(`${target.toLowerCase()}/`),
+  );
+}
+
 /** A world-folder removal is one acknowledged provider effect. It does not
  * reinstall/configure Minecraft, so it needs no binary/EULA/level.dat audit. */
 export async function applyMinecraftWorldRemoval(
@@ -1353,26 +1373,7 @@ export async function applyMinecraftWorldRemoval(
     if (!bytes) throw new DomainError('not_found');
     const configured =
       parseMinecraftProperties(Buffer.from(bytes).toString('utf8'))['level-name'] ?? 'world';
-    const active = posix.normalize(configured).replace(/\/+$/u, '').toLowerCase();
-    if (
-      !configured ||
-      !active ||
-      configured.includes('\\') ||
-      /\p{Cc}/u.test(configured) ||
-      /^[a-z]:/i.test(configured) ||
-      posix.isAbsolute(configured) ||
-      active === '.' ||
-      active === '..' ||
-      active.startsWith('../')
-    )
-      throw new DomainError('conflict');
-    const selected = [active, `${active}_nether`, `${active}_the_end`];
-    if (
-      selected.some(
-        (path) => path === target.toLowerCase() || path.startsWith(`${target.toLowerCase()}/`),
-      )
-    )
-      fail('minecraft_world_selected');
+    if (targetsConfiguredMinecraftWorld(configured, target)) fail('minecraft_world_selected');
   }
   if (options.backupBefore && context.operation().plan.backupComplete !== true) {
     await context.assertStopped();
@@ -1539,7 +1540,7 @@ async function beginContent(
   const previous = await pendingContent(context);
   if (previous?.jobId === context.operation().job_id) return;
   await context.authorize();
-  await assertWritable();
+  if (assertWritable !== context.authorize) await assertWritable();
   await context.db
     .updateTable('minecraft_server_profiles')
     .set({
@@ -1588,7 +1589,12 @@ export async function verifyMinecraftPendingContent(context: GameLifecycleContex
       .executeTakeFirst();
     if (!proof) throw new DomainError('operation_uncertain');
   }
-  if (parseMinecraftProperties(await textFile(context, 'eula.txt', '')).eula !== 'true')
+  // A confirmed world transfer only writes below its destination directory.
+  // Installation owns EULA verification; importing an inactive world cannot alter it.
+  if (
+    !(transferConfirmed && pending.kind === 'world') &&
+    parseMinecraftProperties(await textFile(context, 'eula.txt', '')).eula !== 'true'
+  )
     throw new DomainError('operation_uncertain');
   await context.db.transaction().execute(async (tx) => {
     for (const path of pending.removeInventoryPaths)
@@ -2308,7 +2314,7 @@ async function applyWorldContent(
   }
   const onlineImport = minecraftContentAllowsOnline(prepared);
   const properties = parseMinecraftProperties(await textFile(context, 'server.properties'));
-  const activeTarget = (properties['level-name'] ?? 'world').toLowerCase() === target.toLowerCase();
+  const activeTarget = targetsConfiguredMinecraftWorld(properties['level-name'] ?? 'world', target);
   // Even a missing folder is the running world's target when level-name points
   // to it; importing there would race the game's own writes.
   if (onlineImport && activeTarget) await context.assertStopped();
@@ -2345,19 +2351,21 @@ async function applyWorldContent(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
   // Complete ZIP, hash and NBT validation must precede optional backup and deletion.
-  let expandedBytes = 0;
-  await visitArchive(prepared.archivePath, async (file) => {
-    expandedBytes += file.size;
+  const staged = await stageMinecraftWorld(prepared.archivePath, {
+    ...stageOptions,
+    // Reuse the staging inventory instead of parsing the ZIP once more just to
+    // count bytes. Reservation still precedes extraction and every remote write.
+    reserve: async (expandedBytes) => {
+      await reserveMinecraftStaging(
+        context.db,
+        await options.authorizeJob(context.db, stageOptions.jobId, context.server.id),
+        stageOptions.jobId,
+        context.server.id,
+        expandedBytes,
+        options.env,
+      );
+    },
   });
-  await reserveMinecraftStaging(
-    context.db,
-    await options.authorizeJob(context.db, stageOptions.jobId, context.server.id),
-    stageOptions.jobId,
-    context.server.id,
-    expandedBytes,
-    options.env,
-  );
-  const staged = await stageMinecraftWorld(prepared.archivePath, stageOptions);
   // Replacing the selected folder would activate its data on the next start.
   // Cross-version imports belong in an inactive folder, without conversion.
   if (

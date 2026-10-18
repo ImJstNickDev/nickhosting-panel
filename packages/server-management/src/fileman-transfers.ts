@@ -10,7 +10,7 @@ import { isUploadNotDispatched, relativePath } from '@nickhosting/pterodactyl-ad
 import type { Environment } from './admission.js';
 import { createUploadUrlCache } from './file-upload-urls.js';
 import type { GameLifecycleContext } from './lifecycle.js';
-import { assertServerStorageCapacity } from './storage-capacity.js';
+import { assertServerStorageCapacity, serverStorageLimitBytes } from './storage-capacity.js';
 import { reserveUploadIngestion } from './upload-admission.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -133,8 +133,12 @@ export function createFilemanJobServices(
       const { values } = await getSettings(context.db, options.env);
       const concurrency = Math.min(values.uploadConcurrency, pending.length);
       const total = pending.reduce((sum, file) => sum + file.size, 0);
-      const usage = await context.adapter.getResources(identifier);
-      assertServerStorageCapacity(context.server.limits.disk, usage.resources.disk_bytes + total);
+      // A shared-pool server has no per-server disk quota to compare. Physical
+      // free space and ingestion budgets are still reserved below for the batch.
+      if (serverStorageLimitBytes(context.server.limits.disk) !== null) {
+        const usage = await context.adapter.getResources(identifier);
+        assertServerStorageCapacity(context.server.limits.disk, usage.resources.disk_bytes + total);
+      }
       const urls = createUploadUrlCache();
       // A source is opened only when a stream slot is available. Memory is bounded
       // by concurrency, not by the size of an archive or its largest file.
@@ -177,18 +181,49 @@ export function createFilemanJobServices(
             }),
           ),
         ].sort((a, b) => a.split('/').length - b.split('/').length);
-        for (const directory of directories) {
-          const marker = `${prefix}.directory.${hash(directory)}`;
-          if (steps.has(marker)) continue;
-          const slash = directory.lastIndexOf('/');
-          await authorize();
-          await context.adapter.createDirectory(
-            identifier,
-            directory.slice(0, slash),
-            directory.slice(slash + 1),
-          );
-          await record(marker);
-        }
+        // Parents must exist first; sibling directories are independent. Keep
+        // network concurrency bounded and serialize all use of the pinned DB.
+        let failure: unknown;
+        const prepareDirectories = async () => {
+          for (let offset = 0; offset < directories.length; ) {
+            if (failure) throw failure;
+            const depth = directories[offset]?.split('/').length;
+            let levelEnd = offset;
+            while (
+              levelEnd < directories.length &&
+              directories[levelEnd]?.split('/').length === depth
+            )
+              levelEnd++;
+            for (let start = offset; start < levelEnd; start += concurrency) {
+              if (failure) throw failure;
+              const group = directories.slice(start, Math.min(start + concurrency, levelEnd));
+              const results = await Promise.allSettled(
+                group
+                  .map(async (directory) => {
+                    const marker = `${prefix}.directory.${hash(directory)}`;
+                    if (steps.has(marker)) return;
+                    const slash = directory.lastIndexOf('/');
+                    await authorize();
+                    if (failure) throw failure;
+                    await context.adapter.createDirectory(
+                      identifier,
+                      directory.slice(0, slash),
+                      directory.slice(slash + 1),
+                    );
+                    await serial(() => record(marker));
+                  })
+                  .map((work) =>
+                    work.catch((error) => {
+                      failure ??= error;
+                      throw error;
+                    }),
+                  ),
+              );
+              for (const result of results) if (result.status === 'rejected') throw result.reason;
+            }
+            offset = levelEnd;
+          }
+        };
         const claim = await reserveUploadIngestion(
           context.db,
           actor,
@@ -204,13 +239,29 @@ export function createFilemanJobServices(
         let uncertain = false;
         let settled = false;
         let confirmed = 0;
-        let failure: unknown;
         const settle = async () => {
           if (confirmed) await claim.complete();
           else await claim.rejectBeforeDispatch();
           settled = true;
         };
         try {
+          // Grant issuance does not require destination directories to exist.
+          // Settle both tasks on failure before releasing this operation's claim.
+          const first = pending.slice(0, 500);
+          const preparation = await Promise.allSettled([
+            prepareDirectories(),
+            urls
+              .warm(
+                `${digest}:0`,
+                first.map((file) => ({ id: file.path, path: `/${file.path}` })),
+                (paths) => context.adapter.prepareUploadBatch(identifier, paths),
+              )
+              .catch((error) => {
+                failure ??= error;
+                throw error;
+              }),
+          ]);
+          for (const result of preparation) if (result.status === 'rejected') throw result.reason;
           // Same disposable bulk grants as browser Fileman, at most 500 per window.
           for (let offset = 0; offset < pending.length && !failure; offset += 500) {
             const window = pending.slice(offset, offset + 500).sort((a, b) => a.size - b.size);

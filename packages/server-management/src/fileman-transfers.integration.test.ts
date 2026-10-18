@@ -204,6 +204,95 @@ describe('Fileman durable integration transfers', () => {
       expect(await f.claims()).toEqual([]);
     });
   });
+  it('overlaps grants and sibling directories, waits for parents, and respects the configured concurrency', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input(4);
+      const open = input.open.getMockImplementation();
+      const paths = new Map(
+        input.files.map((file, index) => [`new-world/part${index}/region/file.mca`, file.path]),
+      );
+      input.files = input.files.map((file, index) => ({
+        ...file,
+        path: [...paths.keys()][index] as string,
+      }));
+      input.open.mockImplementation(
+        (path) => open?.(paths.get(path) as string) as Promise<ReadableStream<Uint8Array>>,
+      );
+      let active = 0;
+      let peak = 0;
+      let firstDirectory!: () => void;
+      const directoryStarted = new Promise<void>((resolve) => {
+        firstDirectory = resolve;
+      });
+      const mkdir = f.adapter.createDirectory.getMockImplementation();
+      f.adapter.createDirectory.mockImplementation(async (id, parent, name) => {
+        if (parent) expect(f.directories.has(parent)).toBe(true);
+        active++;
+        peak = Math.max(peak, active);
+        if (parent) firstDirectory();
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          await mkdir?.(id, parent, name);
+        } finally {
+          active--;
+        }
+      });
+      const grants = f.adapter.prepareUploadBatch.getMockImplementation();
+      f.adapter.prepareUploadBatch.mockImplementation(async (id, paths) => {
+        await directoryStarted;
+        expect(input.open).not.toHaveBeenCalled();
+        return grants?.(id, paths) as ReturnType<NonNullable<typeof grants>>;
+      });
+      await f.files.uploadStaged(input);
+      expect(peak).toBe(2);
+      expect(active).toBe(0);
+      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(9);
+      expect(f.adapter.prepareUploadBatch).toHaveBeenCalledOnce();
+      expect(f.uploaded.size).toBe(4);
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+  it('settles failed directory waves without creating queued descendants or dispatching uploads', async () => {
+    await database.db.connection().execute(async (db) => {
+      const f = await fixture(db);
+      const input = f.input(4);
+      input.files = input.files.map((file, index) => ({
+        ...file,
+        path: `new-world/part${index}/region/file.mca`,
+      }));
+      const mkdir = f.adapter.createDirectory.getMockImplementation();
+      let active = 0;
+      f.adapter.createDirectory.mockImplementation(async (id, parent, name) => {
+        if (!parent) return mkdir?.(id, parent, name);
+        active++;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, name === 'part0' ? 5 : 20));
+          if (name === 'part0') throw new Error('mkdir failed');
+          await mkdir?.(id, parent, name);
+        } finally {
+          active--;
+        }
+      });
+      await expect(f.files.uploadStaged(input)).rejects.toMatchObject({
+        code: 'operation_uncertain',
+      });
+      expect(active).toBe(0);
+      expect(f.adapter.createDirectory).toHaveBeenCalledTimes(3);
+      expect(input.open).not.toHaveBeenCalled();
+      expect(f.send).not.toHaveBeenCalled();
+      expect(await f.claims()).toEqual([]);
+    });
+  });
+  it('skips per-server disk telemetry for shared-pool storage while retaining batch admission', async () => {
+    const f = await fixture();
+    f.context.server.limits.disk = 0;
+    f.adapter.getResources.mockRejectedValueOnce(new Error('unused telemetry'));
+    await f.files.uploadStaged(f.input());
+    expect(f.adapter.getResources).not.toHaveBeenCalled();
+    expect(f.uploaded.size).toBe(3);
+    expect(await f.claims()).toEqual([]);
+  });
   it('waits for active streams and retains the fence after a lost acknowledgement without replaying it', async () => {
     await database.db.connection().execute(async (db) => {
       const f = await fixture(db);
