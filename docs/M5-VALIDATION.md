@@ -13737,3 +13737,104 @@ created or removed. Rollback is a code revert with durable state preserved.
 PR #21 remains open and unmerged; issue #18 remains an independent release gate.
 The next Owner Select supplies real post-change timing; fixture tests do not
 establish the 300 ms target or browser latency.
+
+
+## Minecraft management: shared Fileman paths and metadata jobs — 2026-10-19
+
+Audited Settings, Players and Worlds after the world-selection optimization.
+This change reuses existing Fileman and Blueprint transports; it adds no provider
+endpoint, credential, database schema or UI layout.
+
+- API read scopes share managed identity and phase-local metadata, with a final
+  current authorization/binding check. Single-folder listings now use the same
+  configured Blueprint batch transport as multi-folder reads. Denied responses
+  remain denied; only a missing optional endpoint uses the native fallback.
+- Settings overlaps independent lookups and prepares its write grant privately in
+  the background. Players prepares its three applicable paths, reads saved files
+  together and coalesces the online roster/resource observation. Optional grant
+  denial or unavailability cannot evict an otherwise valid identity proof.
+- Live player commands reread only the affected file for confirmation, never
+  replay commands, and merge only the observed configuration fields. Legacy
+  identity metadata initializes both lists from real file contents once.
+- Settings/player jobs use hosted Fileman scopes for build, fresh comparison and
+  uncertain-write recovery. Later effects get a new scope; cached metadata never
+  substitutes for a fresh after-image. No repeated runtime JAR hashing was added.
+- Validated property/player edits without backup now use atomic metadata journal
+  preparation and completion under the server lock. They avoid global capacity
+  locking, unrelated reservation deletion and the generic offline settling wait.
+  Claims remain checked at dispatch. One fresh physical stopped proof and one
+  same-handoff host preflight precede current effect authorization. Runtime,
+  installation, backup, allocation and resource-release paths remain separate.
+- Settings no longer refetches old data immediately after job acceptance. Section
+  completion is tied to its originating tab. Players refreshes independent data
+  in parallel, and a stale kick response cannot clear a newer uncertain action.
+
+Independent technical review covered authorization revocation, provider binding,
+cache invalidation, legacy player metadata, final physical evidence, claims,
+journal rollback and frontend response races. All must-fix findings were resolved.
+
+Validation uses existing isolated PostgreSQL/Redis services and disposable test
+schemas. API/browser journeys exercise real handlers with synthetic provider
+files/console events; no live server mutation is used to establish correctness.
+The focused unit command passed **163/163**:
+
+```sh
+scripts/dev.sh pnpm exec vitest run apps/api/src/minecraft-worlds.test.ts apps/api/src/minecraft-players.test.ts games/minecraft/src/player-management.test.ts games/minecraft/src/ui/ui.test.ts packages/server-management/src/fileman-read.test.ts packages/server-management/src/minecraft-content.test.ts
+```
+
+Browser coverage passed **6 Settings + 17 Worlds + 10 Players** cases, including
+EN/IT desktop/mobile screenshots, accessibility checks, permissions, lost replies,
+refresh concurrency and navigation across an unfinished operation:
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-settings.browser.test.ts apps/web/tests/minecraft-players.browser.test.ts apps/web/tests/minecraft-worlds.browser.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-worlds.browser.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.browser.config.ts apps/web/tests/minecraft-players.browser.test.ts
+```
+
+These are separate final per-file results, not a claim that the initial combined
+run passed. That run passed Settings but exposed an incomplete new Worlds fixture
+and its unfinished-job cascade. The fixture now supplies valid whitelist data and
+cleans up its accepted job. Players also hit an intermittent bootstrap HTTP 500;
+its cause was not established, and it did not recur in either subsequent run.
+The next Players run passed all assertions but exposed a held-request cleanup
+race in the test; the final complete rerun passed without unhandled errors.
+A stale native-list assertion and typed mocks were corrected for the shared
+transport. The preliminary lifecycle run overlapped implementation and exposed
+the pre-fix non-atomic metadata journal; only fresh final runs are evidence below.
+No product authorization or file-validation rule was weakened for a fixture.
+
+Sanitized screenshots under `.codex/local/m5-browser/screenshots/` were refreshed.
+Independent visual review found no layout regressions; screenshot evidence does
+not replace behavioral assertions. No new copy, styles or translation keys were
+introduced. Full root/web/test TypeScript and scoped Biome on all 23 changed
+TypeScript/TSX files passed. Historical M1–M5 suites and a production build were
+not rerun for this focused pass.
+
+Final integration runs passed **404/404 lifecycle + runtime** and **81/81
+Minecraft content** tests on the final source (485 distinct cases):
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts packages/server-management/src/runtime.integration.test.ts
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/minecraft-content.integration.test.ts
+scripts/dev.sh pnpm typecheck
+python3 scripts/check-governance.py
+git diff --cached --check
+```
+
+The final cases include metadata completion while unrelated capacity locking is
+held, claims appearing during preparation, transaction rollback, process running
+or unavailable, permission revocation during physical observation, a single host
+preflight/identity read, concurrent file changes and lost-response recovery.
+Indexed governance and whitespace checks passed. Preliminary and targeted runs
+are not added to these totals.
+
+Dev API, worker and Vite were running/healthy with container restart counters 0;
+public HTTPS returned 200. Existing watchers loaded project source. No manual
+container restart, rebuild, migration, Blueprint update, DNS change, live game-file
+write or power command was issued. Disposable isolated schemas and browser test
+assets were cleaned by their fixtures; no live assets were created or removed.
+Rollback is a code revert preserving durable jobs/data. PR #21 stays open and
+unmerged; issue #18 remains independent. No new release approval is implied.
+Actual production-provider latency is not established by fixture timings; the
+Owner's next Settings/Players/Worlds actions provide that measurement.

@@ -299,17 +299,25 @@ describe('Minecraft browser module and exact API contracts', () => {
     expect(
       await minecraftUiModule.handlers.properties?.(client, { serverId, values: {} }),
     ).toMatchObject({ values: { pvp: true, 'view-distance': 12 } });
+    client.request.mockClear();
     expect(await controller.updateProperties(serverId, 'properties-one', { pvp: true })).toEqual({
       serverId,
       jobId,
     });
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(client.request).toHaveBeenCalledWith(
+      `/v1/servers/${serverId}/minecraft/operations`,
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.objectContaining({ command: { kind: 'properties', changes: { pvp: true } } }),
+      }),
+    );
+    // Current support/permissions are checked by the API, never inferred from
+    // another frontend profile read immediately before the same POST.
+    client.request.mockRejectedValueOnce(new Error('property_unavailable'));
     await expect(
       controller.updateProperties(serverId, 'properties-two', { 'online-mode': false }),
-    ).rejects.toThrow('integration_unavailable');
-    client.request.mockResolvedValueOnce({ ...profile, supportedProperties: undefined });
-    await expect(
-      controller.updateProperties(serverId, 'properties-three', { pvp: true }),
-    ).rejects.toThrow('integration_unavailable');
+    ).rejects.toThrow('property_unavailable');
   });
   it('normalizes historical property enums without treating ordinary numeric properties as enums', () => {
     expect(

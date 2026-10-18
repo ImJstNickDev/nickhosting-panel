@@ -3911,6 +3911,19 @@ describe('Minecraft world selection without telemetry settling', () => {
       backupBefore: false,
     },
   });
+  const metadataPlan = (kind: 'world-select' | 'properties' | 'player') =>
+    kind === 'world-select'
+      ? plan()
+      : {
+          minecraftContent: {
+            combinationId: randomUUID(),
+            backupBefore: false,
+            command:
+              kind === 'properties'
+                ? { kind, changes: { motd: 'fixture' } }
+                : { kind, list: 'operators', action: 'add', name: 'Player' },
+          },
+        };
   async function resourceBlockedWorker(jobId: string) {
     const worker = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
       options: `-c search_path=${database.schema} -c lock_timeout=200ms`,
@@ -3920,11 +3933,14 @@ describe('Minecraft world selection without telemetry settling', () => {
     });
     const blocker = await database.pool.connect();
     const attempts: Promise<unknown>[] = [];
-    try {
+    const block = async () => {
       const held = await blocker.query<{ acquired: boolean }>(
         "select pg_try_advisory_lock(hashtextextended(current_schema() || ':resources',0)) as acquired",
       );
       expect(held.rows[0]?.acquired).toBe(true);
+    };
+    try {
+      await block();
     } catch (error) {
       blocker.release();
       await worker.db.destroy();
@@ -3951,20 +3967,42 @@ describe('Minecraft world selection without telemetry settling', () => {
       },
     };
   }
-  it.each([false, true])(
-    'finishes selection with the global resource lock held and no reservation DELETE, rejected=%s',
-    async (rejected) => {
-      const f = await fixture('minecraft-content', plan());
+  it.each([
+    ['world-select', false],
+    ['world-select', true],
+    ['properties', false],
+    ['properties', true],
+    ['player', false],
+    ['player', true],
+  ] as const)(
+    'finishes %s with the global resource lock held and no reservation DELETE, rejected=%s',
+    async (kind, rejected) => {
+      const prepared = plan();
+      const f = await fixture(
+        'minecraft-content',
+        kind === 'world-select'
+          ? prepared
+          : {
+              minecraftContent: {
+                combinationId: randomUUID(),
+                backupBefore: false,
+                command:
+                  kind === 'properties'
+                    ? { kind, changes: { motd: 'fixture' } }
+                    : { kind, list: 'operators', action: 'add', name: 'Player' },
+              },
+            },
+      );
       const write = vi.fn(async () => {});
       f.options.confirmAlreadyStopped = async () => true;
-      f.options.processGameContent = async (context) => {
-        if (rejected) throw new DomainError('conflict');
-        await context.effect('minecraft.text.fixture', write);
-        return true;
-      };
       await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
       const reservation = await f.installationReservation();
       const blocked = await resourceBlockedWorker(f.jobId);
+      f.options.processGameContent = async (context) => {
+        if (!rejected) await context.effect('minecraft.text.fixture', write);
+        if (rejected) throw new DomainError('conflict');
+        return true;
+      };
       try {
         // Statement-level protection also detects the otherwise empty generic DELETE.
         // Only this isolated worker is guarded; other fixture sessions are unaffected.
@@ -3981,6 +4019,7 @@ describe('Minecraft world selection without telemetry settling', () => {
         `);
         expect(await blocked.run(f.options)).toBe(rejected ? 'failed' : 'succeeded');
         expect(write).toHaveBeenCalledTimes(rejected ? 0 : 1);
+        expect(f.adapter.getResources).not.toHaveBeenCalled();
         expect(await f.installationReservation()).toEqual(reservation);
         expect((await f.server()).active_operation_id).toBeNull();
         expect(await f.operation()).toMatchObject({
@@ -4023,6 +4062,62 @@ describe('Minecraft world selection without telemetry settling', () => {
       }
     },
   );
+  it.each([
+    ['properties', 'offline'],
+    ['properties', 'running'],
+    ['properties', 'revoked'],
+    ['properties', 'unavailable'],
+    ['player', 'offline'],
+    ['player', 'running'],
+    ['player', 'revoked'],
+    ['player', 'unavailable'],
+  ] as const)(
+    'dispatches %s only after one fresh process proof and final authority (%s)',
+    async (kind, state) => {
+      const f = await fixture('minecraft-content', {
+        minecraftContent: {
+          combinationId: randomUUID(),
+          backupBefore: false,
+          command:
+            kind === 'properties'
+              ? { kind, changes: { motd: 'fixture' } }
+              : { kind, list: 'operators', action: 'add', name: 'Player' },
+        },
+      });
+      const write = vi.fn(async () => {});
+      let revoked = false;
+      const order: string[] = [];
+      f.options.authorizeIntent = vi.fn(async () => {});
+      f.options.authorizeEffect = vi.fn(async () => {
+        order.push('authorization');
+        if (revoked) throw new DomainError('forbidden');
+      });
+      f.options.confirmAlreadyStopped = vi.fn(async (_server, _db, proof) => {
+        order.push('physical');
+        expect(await proof?.providerServer).toMatchObject({
+          uuid: (await f.server()).pterodactyl_uuid,
+        });
+        revoked = state === 'revoked';
+        if (state === 'unavailable') throw new DomainError('integration_unavailable');
+        return state !== 'running';
+      });
+      f.options.processGameContent = async (context) => {
+        expect(context.effectVerifiesStopped).toBe(true);
+        await context.authorize();
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      };
+      expect(await f.run()).toBe(state === 'offline' ? 'succeeded' : 'failed');
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledTimes(1);
+      expect(f.adapter.getResources).not.toHaveBeenCalled();
+      expect(f.adapter.getApplicationServer).toHaveBeenCalledTimes(1);
+      expect(write).toHaveBeenCalledTimes(state === 'offline' ? 1 : 0);
+      if (state === 'offline' || state === 'revoked')
+        expect(order.slice(-2)).toEqual(['physical', 'authorization']);
+      expect((await f.server()).active_operation_id).toBeNull();
+    },
+  );
+
   it('retains the global lock when a confirmed stop finishes and releases reservations', async () => {
     const f = await fixture('stop', { stopConfirmed: true });
     await f.prepareReservation();
@@ -4237,15 +4332,17 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(write).not.toHaveBeenCalled();
     expect((await f.operation()).effect_state).toBe('none');
   });
-  it('rolls back selection journal failures without inventing an uncertain external write', async () => {
-    const f = await fixture('minecraft-content', plan());
-    const write = vi.fn(async () => {});
-    f.options.confirmAlreadyStopped = async () => true;
-    f.options.processGameContent = async (context) => {
-      await context.effect('minecraft.text.fixture', write);
-      return true;
-    };
-    await database.pool.query(`
+  it.each(['world-select', 'properties', 'player'] as const)(
+    'rolls back %s journal failures without inventing an uncertain external write',
+    async (kind) => {
+      const f = await fixture('minecraft-content', metadataPlan(kind));
+      const write = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = async () => true;
+      f.options.processGameContent = async (context) => {
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      };
+      await database.pool.query(`
       CREATE FUNCTION fail_selection_journal() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF NEW.message_key = 'servers.operation.effect_prepared' AND NEW.job_id = '${f.jobId}' THEN
@@ -4256,19 +4353,20 @@ describe('Minecraft world selection without telemetry settling', () => {
       CREATE TRIGGER selection_journal_failure BEFORE INSERT ON server_events
         FOR EACH ROW EXECUTE FUNCTION fail_selection_journal();
     `);
-    try {
-      await f.run();
-      expect(write).not.toHaveBeenCalled();
-      const operation = await f.operation();
-      expect(operation.effect_state).toBe('none');
-      expect(operation.plan.waitReason).toBe('provider_unavailable');
-      expect(operation.plan.effectAttempts).toBeUndefined();
-    } finally {
-      await database.pool.query(
-        'DROP TRIGGER selection_journal_failure ON server_events; DROP FUNCTION fail_selection_journal();',
-      );
-    }
-  });
+      try {
+        await f.run();
+        expect(write).not.toHaveBeenCalled();
+        const operation = await f.operation();
+        expect(operation.effect_state).toBe('none');
+        expect(operation.plan.waitReason).toBe('provider_unavailable');
+        expect(operation.plan.effectAttempts).toBeUndefined();
+      } finally {
+        await database.pool.query(
+          'DROP TRIGGER selection_journal_failure ON server_events; DROP FUNCTION fail_selection_journal();',
+        );
+      }
+    },
+  );
   it('checks host and process once after durable intent with one resource transaction', async () => {
     const f = await fixture('minecraft-content', plan());
     const order: string[] = [];
@@ -4301,17 +4399,23 @@ describe('Minecraft world selection without telemetry settling', () => {
     expect(summary.stages['stop.final']?.count).toBe(1);
     expect(summary.stages['stop.initial']).toBeUndefined();
   });
-  it.each([
-    ['upload', 'read'],
-    ['installation', 'read'],
-    ['compute', 'read'],
-    ['upload', 'prepared'],
-    ['installation', 'prepared'],
-    ['compute', 'prepared'],
-  ] as const)(
-    'refuses world selection when a %s reservation appears at %s',
-    async (kind, phase) => {
-      const f = await fixture('minecraft-content', plan());
+  it.each(
+    (['world-select', 'properties', 'player'] as const).flatMap((action) =>
+      (
+        [
+          ['upload', 'read'],
+          ['installation', 'read'],
+          ['compute', 'read'],
+          ['upload', 'prepared'],
+          ['installation', 'prepared'],
+          ['compute', 'prepared'],
+        ] as const
+      ).map(([kind, phase]) => ({ action, kind, phase })),
+    ),
+  )(
+    'refuses $action when a $kind reservation appears at $phase',
+    async ({ action, kind, phase }) => {
+      const f = await fixture('minecraft-content', metadataPlan(action));
       const other = kind === 'installation' ? await fixture('minecraft-content') : undefined;
       const write = vi.fn(async () => {});
       const reserve = async () => {

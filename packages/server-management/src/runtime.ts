@@ -12,7 +12,7 @@ import {
   getSecret,
   getSettings,
 } from '@nickhosting/database';
-import { evaluateGameAccess } from '@nickhosting/game-sdk';
+import { evaluateGameAccess, type FilemanReadService } from '@nickhosting/game-sdk';
 import {
   type ApplicationServer,
   type ContainerObserver,
@@ -37,6 +37,7 @@ import {
   reconcileServerStorageQuota,
 } from './external.js';
 import { createFileDiskUsageCache, trackFileDiskMutations } from './file-disk-usage.js';
+import { createFilemanReadService } from './fileman-read.js';
 import { createFilemanJobServices } from './fileman-transfers.js';
 import {
   createGameRuntimeDispatcher,
@@ -976,6 +977,7 @@ export async function createManagementRuntime(options: ManagementOptions) {
       context?: {
         timing?: OperationTiming;
         providerServer?: ApplicationServer | Promise<ApplicationServer>;
+        observerPreflight?: Promise<void>;
         deferFinalIntentCheck?: true;
         startAdmissionValidated?: true;
       },
@@ -1018,9 +1020,9 @@ export async function createManagementRuntime(options: ManagementOptions) {
       }
       const stage = <T>(name: string, work: () => Promise<T>) =>
         timed(jobId, serverId, `authorize_effect.${name}`, work);
-      const observerPreflight = stage('observer_preflight', () =>
-        verifyObservationHost(serverId, connection),
-      );
+      const observerPreflight =
+        context?.observerPreflight ??
+        stage('observer_preflight', () => verifyObservationHost(serverId, connection));
       // Even stop must re-read revocable authority after the external preflight.
       await observerPreflight;
       await stage('authorization', () =>
@@ -1447,6 +1449,67 @@ export async function createManagementRuntime(options: ManagementOptions) {
   ) {
     return withAccess(context, serverId, false, work, 'directory', timing);
   }
+  /** One private read phase: initial managed access plus a final authorization
+   * boundary before returning bytes, rather than repeated checks for each file. */
+  function fileReadScope<T>(
+    context: AuthContext,
+    serverId: string,
+    work: (
+      files: FilemanReadService,
+      ...args: Parameters<Parameters<typeof withAccess<T>>[3]>
+    ) => Promise<T>,
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
+    return fileReadAccess(context, serverId, async (identifier, connection, current, server) => {
+      const files = createFilemanReadService({
+        adapter,
+        identifier,
+        authorize: async () => {},
+        signal,
+        listDirectories: (directories) =>
+          fileDirectoryBatch(identifier, server, directories, signal),
+      });
+      const result = await work(files, identifier, connection, current, server);
+      signal?.throwIfAborted();
+      await authorizeTransfer(current, serverId, false, connection, undefined, server);
+      return result;
+    });
+  }
+  /** Optional preparation only. Grants stay inside the adapter and never confer
+   * permission to write; the eventual durable effect keeps its own final guards. */
+  async function prepareFileWrites(
+    context: AuthContext,
+    serverId: string,
+    paths: readonly string[],
+  ) {
+    if (!paths.length || paths.length > 4 || new Set(paths).size !== paths.length)
+      throw new DomainError('validation_failed');
+    for (const path of paths) {
+      relativePath(path);
+      if (Buffer.byteLength(path, 'utf8') > 4096 || /\p{C}/u.test(path))
+        throw new DomainError('validation_failed');
+    }
+    const outcome = await fileReadAccess(
+      context,
+      serverId,
+      async (identifier, connection, current, server) => {
+        try {
+          await authorizeTransfer(current, serverId, true, connection, undefined, server);
+          const prepared = await Promise.allSettled(
+            paths.map((path) => adapter.prepareFileWrite(identifier, path)),
+          );
+          for (const result of prepared) if (result.status === 'rejected') throw result.reason;
+          return {};
+        } catch (error) {
+          // Optional grant preparation can be unavailable to a reader or while a
+          // job is active. Neither contradicts the managed identity just proved.
+          return { error };
+        }
+      },
+    );
+    if ('error' in outcome) throw outcome.error;
+  }
   function fileMutationAccess<T>(
     context: AuthContext,
     serverId: string,
@@ -1530,6 +1593,8 @@ export async function createManagementRuntime(options: ManagementOptions) {
     listFiles,
     listDirectories,
     fileReadAccess,
+    fileReadScope,
+    prepareFileWrites,
     fileMutationAccess,
     fileDirectoryBatch,
     authorizeTransfer,

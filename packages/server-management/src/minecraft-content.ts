@@ -610,7 +610,10 @@ export async function applyMinecraftTextChange(
     await complete(context, step);
     return;
   }
-  if (!minecraftContentSelectsWorld(context.operation().plan.minecraftContent))
+  if (
+    !context.effectVerifiesStopped &&
+    !minecraftContentSelectsWorld(context.operation().plan.minecraftContent)
+  )
     await context.assertStopped();
   const preparedWorldSelection =
     knownPath &&
@@ -682,14 +685,7 @@ async function readTextSnapshot(
   knownPath = false,
 ) {
   safeArchivePath(path);
-  const files =
-    fileman ??
-    createFilemanReadService({
-      adapter: context.adapter,
-      identifier: context.server.pterodactyl_identifier ?? '',
-      authorize: context.authorize,
-      timing: context.timing?.child('freshFiles'),
-    });
+  const files = fileman ?? minecraftFileScope(context);
   // These fixed configuration paths are root files. One shared root observation
   // retains the symlink/case guard; the hash is computed from the bytes we edit.
   if (path.includes('/')) throw new DomainError('validation_failed');
@@ -724,27 +720,27 @@ async function applyTextPlan(
   knownPath = false,
   comparison?: Promise<Awaited<ReturnType<typeof readTextSnapshot>>>,
 ) {
+  const scopedFiles = files ?? minecraftFileScope(context);
   if (context.operation().plan.minecraftText === undefined) {
     // Builders may persist authority (for example a verified player UUID).
     // Read the latest plan only after they finish; an earlier spread loses it.
-    const changes = await measureContent(context, 'text.build', () =>
-      build(
-        files ??
-          createFilemanReadService({
-            adapter: context.adapter,
-            identifier: context.server.pterodactyl_identifier ?? '',
-            authorize: context.authorize,
-          }),
-      ),
-    );
+    const changes = await measureContent(context, 'text.build', () => build(scopedFiles));
     await measureContent(context, 'text.persist', () =>
       context.update({ plan: { ...context.operation().plan, minecraftText: changes } }),
     );
   }
   const plan = z.array(textChangeSchema).max(4).parse(context.operation().plan.minecraftText);
   await beforeEffects?.(plan);
-  for (const change of plan)
-    await applyMinecraftTextChange(context, change, files, knownPath, comparison);
+  // Only the first effect can share the builder's pre-mutation metadata.
+  // Initial configuration may write several files; each later effect is fresh.
+  for (const [index, change] of plan.entries())
+    await applyMinecraftTextChange(
+      context,
+      change,
+      index === 0 ? scopedFiles : undefined,
+      knownPath,
+      comparison,
+    );
 }
 const initialConfigurationSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('pending'), jobId: z.uuid().optional() }).strict(),
@@ -1082,7 +1078,7 @@ async function recoverMinecraftPlayerReceipt(
       !change ||
       change.path !== path ||
       sha256(change.content) !== change.afterSha256 ||
-      (await hashMinecraftRemoteFile(context, path))?.sha256 !== change.afterSha256
+      (await readTextSnapshot(context, path))?.hash !== change.afterSha256
     )
       throw new DomainError('operation_uncertain');
     const player = await resolveMinecraftPlayerChangeIdentity(
@@ -1126,7 +1122,7 @@ async function recoverMinecraftPlayerReceipt(
       throw new DomainError('operation_uncertain');
     await context.authorize();
     await context.assertStopped();
-    if ((await hashMinecraftRemoteFile(context, path))?.sha256 !== change.afterSha256)
+    if ((await readTextSnapshot(context, path))?.hash !== change.afterSha256)
       throw new DomainError('operation_uncertain');
     await context.update({
       plan: {
@@ -1391,9 +1387,9 @@ function targetsConfiguredMinecraftWorld(configured: string, target: string): bo
   );
 }
 
-/** One authorized metadata scope per world preflight. The durable effect checks
- * current authority again after local staging, before any provider mutation. */
-function worldFileScope(context: GameLifecycleContext): FilemanReadService {
+/** One Fileman metadata scope per private read phase. File bytes stay fresh;
+ * effects recheck current authority and recovery opens a new scope. */
+function minecraftFileScope(context: GameLifecycleContext): FilemanReadService {
   const hosted = context.fileman?.readScope?.();
   if (hosted) return hosted;
   let authorized: Promise<void> | undefined;
@@ -1422,7 +1418,7 @@ interface WorldFileScope {
   entries: readonly FilemanEntry[];
 }
 async function prepareWorldFiles(context: GameLifecycleContext): Promise<WorldFileScope> {
-  const files = worldFileScope(context);
+  const files = minecraftFileScope(context);
   return { files, entries: await prepareWorldRoot(files) };
 }
 
@@ -1787,13 +1783,19 @@ async function applyPreparedContent(
   );
   const command = minecraftContentCommandSchema.parse(prepared.command);
   await context.authorize();
-  if (!minecraftContentAllowsOnline(prepared) && !minecraftContentSelectsWorld(prepared))
+  if (
+    !context.effectVerifiesStopped &&
+    !minecraftContentAllowsOnline(prepared) &&
+    !minecraftContentSelectsWorld(prepared)
+  )
     await context.assertStopped();
   const selectionStep = stepId('modpack-selection', minecraftDigest(prepared));
   assertMinecraftModpackTransition(
     minecraftStoredConfigurationSchema.parse(profile.configuration).modpack,
     prepared,
-    command.kind === 'world-select' ? false : await completed(context, selectionStep),
+    command.kind === 'modpack' || command.kind === 'modpack-upload'
+      ? await completed(context, selectionStep)
+      : false,
   );
   let verifiedWorldArchive: ContentFileVerification | undefined;
   let worldFiles: WorldFileScope | undefined;
@@ -1846,10 +1848,7 @@ async function applyPreparedContent(
     )
       throw new DomainError('provenance_mismatch');
   } else await verifyInstalledRuntime(context, options);
-  const pending =
-    command.kind === 'world-select'
-      ? pendingContentState(profile.content_state)
-      : await measureContent(context, 'pending.read', () => pendingContent(context));
+  const pending = pendingContentState(profile.content_state);
   if (
     pending &&
     pending.jobId !== context.operation().job_id &&
@@ -2442,7 +2441,7 @@ async function applyWorldContent(
   assertMinecraftRuntimePathsPreserved([target], installedManifest);
   if (command.kind === 'world-select') {
     if (prepared.world.dataVersion === undefined) throw new DomainError('integration_unavailable');
-    const files = worldFileScope(context);
+    const files = minecraftFileScope(context);
     if (prepared.world.observation) {
       const observation = prepared.world.observation;
       if (observation.name !== target) throw new DomainError('conflict');
@@ -2675,7 +2674,7 @@ async function applyWorldContent(
           beforePublish: async (manifest) => {
             // This small current configuration read is the game's only publication
             // precondition; archive bytes/paths/admission belong to shared Fileman.
-            const current = await worldFileScope(context).read({
+            const current = await minecraftFileScope(context).read({
               path: 'server.properties',
               maxBytes: 1024 ** 2,
             });
@@ -2791,7 +2790,7 @@ async function applyWorldContent(
     onlineImport && !activeTarget && !prepared.world.existing && !prepared.backupBefore;
   if (context.operation().plan.minecraftWorldPrepared !== true) {
     if (!additiveOnline) {
-      const currentTarget = worldDirectoryEntry(await worldFileScope(context).list(''), target);
+      const currentTarget = worldDirectoryEntry(await minecraftFileScope(context).list(''), target);
       if (Boolean(currentTarget) !== prepared.world.existing) throw new DomainError('conflict');
       planMinecraftWorldReplacement(target, Boolean(currentTarget), command.replace);
     }

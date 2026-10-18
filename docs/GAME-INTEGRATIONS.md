@@ -544,6 +544,7 @@ from ViewerEngine's browser presentation extensions.
 - `list`/`listMany` share request-local directory snapshots. The runtime supplies
   Fileman's existing Owner-configured Blueprint directory batch adapter; native
   Client API/Wings remains the fallback when the optional endpoint is absent.
+  Single-directory reads use this same transport, including the root directory.
   No second cache, filesystem proxy, or provider credentials reach the browser.
 - `FilemanJobServices.readScope()` gives durable jobs the same bounded transport.
   A private read phase shares one authorization result and its directory metadata,
@@ -578,6 +579,34 @@ Minecraft Settings and Players read through this service. Player-file reads are
 prepared together. Text editing derives content and hash from one snapshot, keeps
 the final fresh precondition, and uses the acknowledged write as its receipt;
 uncertain write recovery still verifies the after-image before avoiding replay.
+Settings, Players and Worlds use one authorized API read scope, sharing the
+managed-identity proof and checking current access and provider binding again
+before returning. Settings overlaps independent profile/content lookups with the
+file read. Settings and Players prepare the few applicable private write grants
+in the background; an optional preparation failure cannot invalidate a valid
+identity proof or prevent browsing. No grants are sent to the browser.
+Live player commands confirm only the affected list or whitelist property with
+fresh reads, rather than rereading all player files. Stored configuration merges
+only that observed field; legacy profiles initialize both identity lists from
+the actual files once. The short online-roster cache also coalesces resource
+observations, keyed by provider binding and lifecycle state. Each caller retains
+current authorization. Saved lists and the online roster refresh independently
+in parallel; an old response cannot clear a newer uncertain command.
+Settings waits for confirmed job completion before reloading saved values.
+Completion patches are scoped to their originating game section, so navigating
+between sections cannot suppress the current section's refresh.
+Prepared property/player edits without a backup share the metadata lifecycle
+path: atomic journal preparation/completion under the server lock, without the
+global capacity lock or unrelated reservation deletion. Their resource exclusions
+are checked once at dispatch. One fresh physical stopped-process proof immediately
+before the write replaces repeated checks and the generic offline settling wait;
+current effect authorization follows that proof. This does not enable editing
+offline-only files while running. Pending transfers, installation/compute claims,
+concurrent file changes and uncertain writes remain guarded. Backup, runtime and
+installation operations keep their existing resource and recovery semantics.
+The physical proof and final authorization share one host-preflight promise for
+that handoff; permissions are checked again after it settles. The promise is not
+a cache across operations.
 Ordinary settings/player/world changes on confirmed installations reuse the
 installed runtime proof and validate the local mapping identity/digest, rather
 than downloading the runtime JAR again. Lifecycle authorization and provider

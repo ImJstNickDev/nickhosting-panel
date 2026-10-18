@@ -1,6 +1,6 @@
 import { createMinecraftUiController, minecraftUiModule } from '@nickhosting/minecraft/ui';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ApiError, idempotencyKey } from '../../api/client.js';
 import { useT } from '../../app/i18n.js';
 import { Tooltip } from '../../components/tooltip.js';
@@ -25,6 +25,7 @@ type Action =
   | 'pardon'
   | 'kick'
   | 'edit-operator';
+type DispatchReceipt = { action: Action; name?: string; uuid?: string };
 type Filter = 'all' | 'online' | 'operators' | 'whitelist' | 'banned';
 const filters: Filter[] = ['all', 'online', 'operators', 'whitelist', 'banned'];
 
@@ -123,7 +124,12 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
     requestKey: string;
     runtime: string;
   }>();
-  const [dispatched, setDispatched] = useState<{ action: Action; name?: string; uuid?: string }>();
+  const [dispatched, setDispatched] = useState<DispatchReceipt>();
+  const currentReceipt = useRef<DispatchReceipt | undefined>(undefined);
+  const updateDispatched = useCallback((receipt: DispatchReceipt | undefined) => {
+    currentReceipt.current = receipt;
+    setDispatched(receipt);
+  }, []);
   const [reason, setReason] = useState('');
   const [level, setLevel] = useState(4);
   const [bypass, setBypass] = useState(false);
@@ -179,7 +185,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
   }, [adding]);
   // A dispatch receipt is not an acknowledgement. Clear it only when saved server data agrees.
   useEffect(() => {
-    if (!dispatched || !snapshot) return;
+    if (!dispatched || currentReceipt.current !== dispatched || !snapshot) return;
     const contains = (players: readonly { name: string; uuid?: string }[]) =>
       players.some((player) =>
         dispatched.uuid
@@ -205,26 +211,30 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                       ? !contains(snapshot.banned)
                       : false;
     if (confirmed) {
-      setDispatched(undefined);
+      updateDispatched(undefined);
       setUncertainError(undefined);
     }
-  }, [snapshot, dispatched]);
+  }, [snapshot, dispatched, updateDispatched]);
 
-  async function refresh() {
+  async function refresh(refreshOnline = true, receipt = dispatched) {
     setRefreshError(undefined);
     try {
-      await props.reload();
-      if (running) {
-        const next = await online.refetch({ throwOnError: true });
+      // Saved membership and the online roster are independent observations.
+      const [, next] = await Promise.all([
+        props.reload(),
+        running && refreshOnline ? online.refetch({ throwOnError: true }) : undefined,
+      ]);
+      if (next) {
         if (
-          dispatched?.action === 'kick' &&
+          receipt?.action === 'kick' &&
+          currentReceipt.current === receipt &&
           next.data?.state === 'available' &&
           !next.data.players.some(
-            (player) => player.name.toLowerCase() === dispatched.name?.toLowerCase(),
+            (player) => player.name.toLowerCase() === receipt.name?.toLowerCase(),
           )
         ) {
           setUncertainError(undefined);
-          setDispatched(undefined);
+          updateDispatched(undefined);
         }
       }
     } catch (error) {
@@ -289,6 +299,10 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
       return;
     mutationLock.current = true;
     setBusy(true);
+    const receipt: DispatchReceipt = {
+      action: selection.action,
+      ...(selection.player ? { name: selection.player.name, uuid: selection.player.uuid } : {}),
+    };
     try {
       const { action, player } = selection;
       if (running && action !== 'edit-operator') {
@@ -301,7 +315,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
             ? { reason: reason.trim() }
             : {}),
         });
-        setDispatched({ action, ...(player ? { name: player.name, uuid: player.uuid } : {}) });
+        updateDispatched(receipt);
       } else if (offline) {
         const command =
           action === 'whitelist-on' || action === 'whitelist-off'
@@ -317,13 +331,13 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
                   : {}),
               };
         const result = await controller.operate(props.serverId, selection.requestKey, command);
-        props.onAccepted(result.jobId);
+        props.onAccepted(result.jobId, { quickCompletion: true });
       }
       setSelection(undefined);
       setVerified(undefined);
       setUsername('');
       setAdding(false);
-      if (running) await refresh();
+      if (running) await refresh(['kick', 'ban'].includes(selection.action), receipt);
     } catch (error) {
       if (
         running &&
@@ -333,10 +347,7 @@ export function MinecraftPlayersSection(props: GameSectionViewProps) {
           error.status === 0)
       ) {
         setUncertainError(error);
-        setDispatched({
-          action: selection.action,
-          ...(selection.player ? { name: selection.player.name, uuid: selection.player.uuid } : {}),
-        });
+        updateDispatched(receipt);
         setSelection(undefined);
       } else throw error;
     } finally {

@@ -174,6 +174,12 @@ describe('Minecraft settings browser journeys', () => {
       .fill('Weekend survival');
     await form().getByRole('radio', { name: 'Hard', exact: true }).press('Space');
     await form().getByLabel('Player limit', { exact: true }).fill('8');
+    let saveProfileReads = 0;
+    const countSaveRead = (request: import('@playwright/test').Request) => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname === profilePath())
+        saveProfileReads++;
+    };
+    page.on('request', countSaveRead);
     const responsePromise = acceptedResponse();
     await save().click();
     const response = await responsePromise;
@@ -198,6 +204,9 @@ describe('Minecraft settings browser journeys', () => {
         .executeTakeFirstOrThrow(),
     ).toEqual({ state: 'queued' });
     await browserExpect(form().getByLabel('Player limit', { exact: true })).toBeDisabled();
+    // Saving uses the already loaded form; no preflight or queued-state profile
+    // reread before the worker can have changed server.properties.
+    expect(saveProfileReads).toBe(0);
     await browserExpect(page.getByText('Changes saved', { exact: true })).toHaveCount(0);
     expect(
       parseMinecraftProperties((await provider.files()).get('server.properties')?.toString() ?? '')
@@ -214,6 +223,8 @@ describe('Minecraft settings browser journeys', () => {
     ).toEqual({ state: 'succeeded', error_code: null });
     await browserExpect(save()).toHaveCount(0);
     await browserExpect(form().getByLabel('Player limit', { exact: true })).toBeEnabled();
+    page.off('request', countSaveRead);
+    expect(saveProfileReads).toBe(1);
     expect(
       parseMinecraftProperties((await provider.files()).get('server.properties')?.toString() ?? ''),
     ).toMatchObject({ motd: 'Weekend survival', difficulty: 'hard', 'max-players': '8' });

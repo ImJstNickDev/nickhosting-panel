@@ -437,12 +437,8 @@ export function createMinecraftUiController(client: GameUiClient) {
       changes: UiValues,
       signal?: AbortSignal,
     ) {
-      const current = await profile(serverId, signal);
-      if (
-        !current.supportedProperties ||
-        Object.keys(changes).some((k) => !current.supportedProperties?.includes(k))
-      )
-        throw new MinecraftUiError('integration_unavailable', 'property_unavailable');
+      // The displayed form already limits editable fields. The API validates the
+      // current runtime's supported properties; another profile read is not authority.
       return operate(serverId, idempotencyKey, { kind: 'properties', changes }, signal);
     },
     async player(name: string, avatar = false, signal?: AbortSignal) {

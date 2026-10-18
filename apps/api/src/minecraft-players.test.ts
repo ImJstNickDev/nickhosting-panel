@@ -3,6 +3,7 @@ import { recordAudit } from '@nickhosting/database';
 import { verifyMinecraftPlayer } from '@nickhosting/minecraft';
 import { type ConsoleRelayOptions, PterodactylError } from '@nickhosting/pterodactyl-adapter';
 import {
+  createFilemanReadService,
   inspectMinecraftCombination,
   type ManagementRuntime,
 } from '@nickhosting/server-management';
@@ -10,7 +11,10 @@ import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
 import { resolveMinecraftStoredPlayers } from '../../../packages/server-management/src/minecraft-content.js';
-import { minecraftConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
+import {
+  minecraftConfigurationSchema,
+  minecraftStoredConfigurationSchema,
+} from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import type { Variables } from './app.js';
 import { observeMinecraftPlayers, registerMinecraftPlayerRoutes } from './minecraft-players.js';
 
@@ -40,7 +44,10 @@ function fixture() {
   const profile = {
     installed: true,
     combination_id: 'choice',
-    configuration: { eula: true, properties: {}, operators: [], whitelist: [] },
+    configuration: { eula: true, properties: {}, operators: [], whitelist: [] } as Record<
+      string,
+      unknown
+    >,
   };
   const files: Record<string, string> = {
     'ops.json': '[]',
@@ -55,8 +62,23 @@ function fixture() {
   };
   let stored: Record<string, unknown> | undefined;
   const update = {
-    set: (value: { configuration: string }) => {
-      stored = JSON.parse(value.configuration);
+    set: (value: {
+      configuration: {
+        toOperationNode(): {
+          sqlFragments: readonly string[];
+          parameters: readonly { kind: string; value?: unknown }[];
+        };
+      };
+    }) => {
+      const node = value.configuration.toOperationNode();
+      const patches = node.parameters
+        .filter((part) => part.kind === 'ValueNode')
+        .map((part) => JSON.parse(String(part.value)));
+      stored = structuredClone(profile.configuration);
+      if (node.sqlFragments.join('').includes('playerIdentities')) {
+        Object.assign(stored, patches[0]);
+        stored.playerIdentities = { ...((stored.playerIdentities as object) ?? {}), ...patches[1] };
+      } else stored.properties = { ...((stored.properties as object) ?? {}), ...patches[0] };
       return update;
     },
     where: () => update,
@@ -69,6 +91,8 @@ function fixture() {
     pterodactyl_uuid: 'uuid',
     external_id: 'external',
     updated_at: new Date(0),
+    runtime_state: 'running',
+    active_operation_id: null as string | null,
   };
   let denied = false;
   let writeDenied = false;
@@ -82,7 +106,7 @@ function fixture() {
   const service = {
     adapter: {
       prefetchDownloads: vi.fn(async () => {}),
-      readFileForEditor: vi.fn(async (_id, path) => {
+      readFileForEditor: vi.fn(async (_id, path): Promise<Buffer> => {
         if (!(path in files)) throw new DomainError('integration_unavailable');
         return Buffer.from(files[path] ?? '');
       }),
@@ -111,6 +135,22 @@ function fixture() {
     }),
     fileReadAccess: vi.fn(async (_context, _serverId, callback) => {
       if (denied) throw new DomainError('forbidden');
+      return callback('identifier', db, context, server);
+    }),
+    fileReadScope: vi.fn(async (_context, _serverId, callback) => {
+      if (denied) throw new DomainError('forbidden');
+      const files = createFilemanReadService({
+        adapter: service.adapter as never,
+        identifier: 'identifier',
+        authorize: async () => {},
+      });
+      const result = await callback(files, 'identifier', db, context, server);
+      await service.authorizeTransfer();
+      return result;
+    }),
+    prepareFileWrites: vi.fn(async () => {}),
+    fileMutationAccess: vi.fn(async (_context, _serverId, callback) => {
+      if (denied || writeDenied) throw new DomainError('forbidden');
       return callback('identifier', db, context, server);
     }),
     authorizeTransfer: vi.fn(async () => {
@@ -192,7 +232,13 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
       'banned-players.json',
       'server.properties',
     ]);
-    expect(f.service.fileReadAccess).toHaveBeenCalledOnce();
+    expect(f.service.fileReadScope).toHaveBeenCalledOnce();
+    expect(f.service.authorizeTransfer).toHaveBeenCalledOnce();
+    expect(f.service.prepareFileWrites).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      'server',
+      ['ops.json', 'whitelist.json', 'server.properties'],
+    );
     expect(f.service.access).not.toHaveBeenCalled();
     expect(f.db.updateTable).not.toHaveBeenCalled();
   });
@@ -281,6 +327,81 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
 
     expect(minecraftConfigurationSchema.safeParse(f.stored()).success).toBe(false);
   });
+  it.each(['op', 'whitelist-add'] as const)(
+    'initializes valid legacy UUID authority for %s without discarding the other list',
+    async (action) => {
+      const f = fixture();
+      const other = {
+        name: 'OtherPlayer',
+        uuid: '22222222-2222-2222-2222-222222222222',
+        level: 2,
+        bypassesPlayerLimit: true,
+      };
+      const target = action === 'op' ? 'operators' : 'whitelist';
+      const sibling = target === 'operators' ? 'whitelist' : 'operators';
+      // This account exists only in the live file, not in legacy stored names.
+      f.profile.configuration[sibling] = [];
+      f.files[sibling === 'operators' ? 'ops.json' : 'whitelist.json'] = JSON.stringify([other]);
+      f.service.adapter.sendCommand.mockImplementationOnce(async () => {
+        f.files[target === 'operators' ? 'ops.json' : 'whitelist.json'] = JSON.stringify([
+          { ...player, level: 4, bypassesPlayerLimit: false },
+        ]);
+      });
+      expect((await f.action({ action, name: player.name })).status).toBe(202);
+      const stored = minecraftStoredConfigurationSchema.parse(f.stored());
+      expect(stored[target]).toEqual([player.name]);
+      expect(stored[sibling]).toEqual([other.name]);
+      expect(stored.playerIdentities?.[target][0]?.uuid).toBe(player.uuid);
+      expect(stored.playerIdentities?.[sibling][0]?.uuid).toBe(other.uuid);
+      expect(f.service.adapter.readFileForEditor.mock.calls.map((call) => call[1]).sort()).toEqual([
+        'ops.json',
+        'whitelist.json',
+      ]);
+    },
+  );
+  it('reads and reconciles only the affected list for an existing complete profile', async () => {
+    const f = fixture();
+    const other = {
+      name: 'OtherPlayer',
+      uuid: '22222222-2222-2222-2222-222222222222',
+      source: 'server-file',
+      verifiedAt: new Date().toISOString(),
+    };
+    f.profile.configuration = {
+      ...f.profile.configuration,
+      properties: { motd: 'Preserve me', 'white-list': true },
+      whitelist: [other.name],
+      playerIdentities: { operators: [], whitelist: [other] },
+    };
+    delete f.files['whitelist.json'];
+    delete f.files['banned-players.json'];
+    delete f.files['server.properties'];
+    expect((await f.action({ action: 'op', name: player.name })).status).toBe(202);
+    const stored = minecraftStoredConfigurationSchema.parse(f.stored());
+    expect(stored.properties).toEqual({ motd: 'Preserve me', 'white-list': true });
+    expect(stored.whitelist).toEqual([other.name]);
+    expect(stored.playerIdentities?.whitelist).toEqual([other]);
+    expect(f.service.adapter.readFileForEditor.mock.calls.map((call) => call[1])).toEqual([
+      'ops.json',
+    ]);
+    expect(f.service.fileMutationAccess).toHaveBeenCalledOnce();
+    expect(f.service.access).not.toHaveBeenCalled();
+  });
+  it('keeps optional private write preparation independent from readable players', async () => {
+    const f = fixture();
+    f.service.prepareFileWrites.mockRejectedValueOnce(new DomainError('forbidden'));
+    expect((await f.app.request('/v1/servers/server/minecraft/players')).status).toBe(200);
+  });
+  it('rejects revoked access after a saved-list read instead of returning stale authority', async () => {
+    const f = fixture();
+    const read = f.service.adapter.readFileForEditor.getMockImplementation();
+    f.service.adapter.readFileForEditor.mockImplementation(async (...args) => {
+      const result = await read?.(...args);
+      f.denied(true);
+      return result as Buffer;
+    });
+    expect((await f.app.request('/v1/servers/server/minecraft/players')).status).toBe(403);
+  });
   it('reports ambiguous dispatch and never replays it', async () => {
     const f = fixture();
     f.service.adapter.sendCommand.mockRejectedValueOnce(new DomainError('integration_unavailable'));
@@ -295,6 +416,9 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     expect(await response.json()).toEqual({ code: 'operation_uncertain' });
     expect(f.service.adapter.sendCommand).toHaveBeenCalledOnce();
     expect(f.db.updateTable).not.toHaveBeenCalled();
+    expect(f.service.adapter.readFileForEditor.mock.calls.map((call) => call[1])).toEqual(
+      Array(4).fill('whitelist.json'),
+    );
   });
   it('keeps uncertainty when both post-dispatch audit and failure audit are unavailable', async () => {
     const f = fixture();
@@ -405,6 +529,7 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
       players: [{ name: 'PlayerOne' }],
     });
     expect(f.service.adapter.relayConsole).toHaveBeenCalledOnce();
+    expect(f.service.adapter.getResources).toHaveBeenCalledOnce();
     expect(f.requestLogs).not.toHaveBeenCalled();
     expect(f.relayClose).toHaveBeenCalledOnce();
     f.denied(true);
@@ -415,7 +540,15 @@ describe('Minecraft player HTTP handlers with isolated boundaries', () => {
     expect(f.service.adapter.relayConsole).toHaveBeenCalledTimes(2);
     f.server.updated_at = new Date();
     await f.app.request(path);
+    expect(f.service.adapter.relayConsole).toHaveBeenCalledTimes(2);
+    expect(f.service.adapter.getResources).toHaveBeenCalledTimes(2);
+    f.server.active_operation_id = 'new-start';
+    await f.app.request(path);
     expect(f.service.adapter.relayConsole).toHaveBeenCalledTimes(3);
+    f.server.runtime_state = 'offline';
+    f.state('offline');
+    expect(await (await f.app.request(path)).json()).toMatchObject({ state: 'offline' });
+    expect(f.service.adapter.getResources).toHaveBeenCalledTimes(4);
   });
   it('does not request a roster for a stopped server', async () => {
     const f = fixture();

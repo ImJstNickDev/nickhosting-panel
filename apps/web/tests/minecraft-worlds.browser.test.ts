@@ -333,6 +333,70 @@ describe('M5 Minecraft worlds through authorized APIs and durable provider jobs'
     }
   });
 
+  it('refreshes the current section when a world selection finishes after navigation', async () => {
+    const world = 'selection-navigation';
+    const files = await provider.files();
+    const originalProperties = files.get('server.properties');
+    const originalOperators = files.get('ops.json');
+    const originalBanned = files.get('banned-players.json');
+    await provider.adapter.createDirectory(identifier, '', world);
+    files.set(`${world}/level.dat`, browserLevelDat());
+    files.set(
+      'server.properties',
+      Buffer.from('level-name=world\nwhite-list=false\nenforce-whitelist=false\n'),
+    );
+    files.set('banned-players.json', Buffer.from('[]'));
+    files.set('ops.json', Buffer.from('[]'));
+    try {
+      await user.goto(route());
+      const dialog = await choose('Select world', world);
+      const accepted = user.waitForResponse(
+        (result) =>
+          result.request().method() === 'POST' && result.url().endsWith(`${api()}/operations`),
+      );
+      await dialog.getByRole('button', { name: 'Select world', exact: true }).click();
+      expect((await accepted).status()).toBe(202);
+      await user
+        .getByRole('navigation', { name: 'Minecraft', exact: true })
+        .getByRole('link', { name: 'Players', exact: true })
+        .click();
+      await browserExpect(
+        user.getByText('No players in the saved lists.', { exact: true }),
+      ).toBeVisible();
+      files.set(
+        'ops.json',
+        Buffer.from(
+          JSON.stringify([
+            {
+              name: 'ChangedPlayer',
+              uuid: '12345678-1234-4234-8234-123456789abc',
+              level: 4,
+              bypassesPlayerLimit: false,
+            },
+          ]),
+        ),
+      );
+      await provider.processPending();
+      // Worlds' confirmed local update cannot mark the unrelated Players cache
+      // as refreshed or suppress its authoritative completion read.
+      await browserExpect(user.locator('.minecraft-player')).toContainText('ChangedPlayer');
+      await browserExpect(
+        user.getByRole('button', { name: 'Add player', exact: true }),
+      ).toBeEnabled();
+    } finally {
+      // Settle this disposable fixture's accepted job before restoring its files,
+      // even if a UI assertion fails before the normal delivery call.
+      await provider.processPending();
+      if (originalBanned) files.set('banned-players.json', originalBanned);
+      else files.delete('banned-players.json');
+      if (originalProperties) files.set('server.properties', originalProperties);
+      else files.delete('server.properties');
+      if (originalOperators) files.set('ops.json', originalOperators);
+      else files.delete('ops.json');
+      await provider.adapter.deleteFiles(identifier, '', [world]);
+    }
+  });
+
   it('shows acknowledged import progress after a reload and refreshes worlds on completion', async () => {
     await user.goto(route());
     const dialog = await importDialog(

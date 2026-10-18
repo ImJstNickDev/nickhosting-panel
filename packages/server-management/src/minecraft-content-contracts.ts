@@ -190,6 +190,22 @@ export function minecraftContentSelectsWorld(input: unknown): boolean {
   );
 }
 
+/** These prepared edits neither allocate nor release compute. Their lifecycle
+ * uses local claim checks and atomic metadata journals, while retaining the
+ * appropriate final stopped proof; this never grants online editing. */
+export function minecraftContentChangesOnlyMetadata(input: unknown): boolean {
+  if (minecraftContentSelectsWorld(input)) return true;
+  if (!input || typeof input !== 'object') return false;
+  const plan = input as Partial<MinecraftPreparedContent>;
+  const command = minecraftContentCommandSchema.safeParse(plan.command);
+  return (
+    command.success &&
+    (command.data.kind === 'properties' || command.data.kind === 'player') &&
+    z.uuid().safeParse(plan.combinationId).success &&
+    plan.backupBefore === false
+  );
+}
+
 /** Derived from a trusted prepared plan, never a client-controlled online flag. */
 export function minecraftContentAllowsOnline(input: unknown): boolean {
   if (minecraftContentRemovesInactiveWorld(input)) return true;

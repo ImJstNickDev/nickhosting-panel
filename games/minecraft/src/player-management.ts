@@ -54,15 +54,18 @@ function list<T>(schema: z.ZodType<T>, source: string): T[] {
     throw new DomainError('integration_unavailable');
   }
 }
-export function parseMinecraftPlayerFiles(files: {
-  operators: string;
-  whitelist: string;
-  banned: string;
-  properties: string;
-}) {
-  if (Buffer.byteLength(files.properties) > 1048576)
-    throw new DomainError('integration_unavailable');
-  const properties = parseMinecraftProperties(files.properties);
+export function parseMinecraftOperators(source: string) {
+  return list(operator, source);
+}
+export function parseMinecraftWhitelist(source: string) {
+  return list(player, source);
+}
+export function parseMinecraftBannedPlayers(source: string) {
+  return list(banned, source);
+}
+export function parseMinecraftWhitelistProperties(source: string) {
+  if (Buffer.byteLength(source) > 1048576) throw new DomainError('integration_unavailable');
+  const properties = parseMinecraftProperties(source);
   if (properties['white-list'] !== 'true' && properties['white-list'] !== 'false')
     throw new DomainError('integration_unavailable');
   if (
@@ -72,11 +75,21 @@ export function parseMinecraftPlayerFiles(files: {
   )
     throw new DomainError('integration_unavailable');
   return {
-    operators: list(operator, files.operators),
-    whitelist: list(player, files.whitelist),
-    banned: list(banned, files.banned),
     whitelistEnabled: properties['white-list'] === 'true',
     enforceWhitelist: properties['enforce-whitelist'] === 'true',
+  };
+}
+export function parseMinecraftPlayerFiles(files: {
+  operators: string;
+  whitelist: string;
+  banned: string;
+  properties: string;
+}) {
+  return {
+    operators: parseMinecraftOperators(files.operators),
+    whitelist: parseMinecraftWhitelist(files.whitelist),
+    banned: parseMinecraftBannedPlayers(files.banned),
+    ...parseMinecraftWhitelistProperties(files.properties),
   };
 }
 /** Accept only vanilla server-thread output, never chat, plugin-prefixed lines or history.

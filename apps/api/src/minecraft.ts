@@ -12,7 +12,6 @@ import {
 } from '@nickhosting/minecraft';
 import {
   authorizeServer,
-  createFilemanReadService,
   createManagedServer,
   createMinecraftSourceStore,
   createServerSchema,
@@ -451,33 +450,27 @@ export function registerMinecraftRoutes(
     const service = await management();
     c.header('cache-control', 'no-store');
     return c.json(
-      await service.fileReadAccess(
+      await service.fileReadScope(
         context,
         serverId,
-        async (identifier, connection, current, server) => {
+        async (files, _identifier, connection, _current, server) => {
           const results = await Promise.allSettled([
             service.prepareWorldSelection(server, connection),
             inspectMinecraftWorlds(
               connection,
               service.adapter,
               serverId,
-              () => service.authorizeTransfer(current, serverId, false, connection),
+              async () => {},
               env,
               c.req.raw.signal,
-              createFilemanReadService({
-                adapter: service.adapter,
-                identifier,
-                signal: c.req.raw.signal,
-                authorize: () => service.authorizeTransfer(current, serverId, false, connection),
-                listDirectories: (paths) =>
-                  service.fileDirectoryBatch(identifier, server, paths, c.req.raw.signal),
-              }),
+              files,
               service.worldPreparation,
             ),
           ]);
           if (results[1].status === 'rejected') throw results[1].reason;
           return results[1].value;
         },
+        c.req.raw.signal,
       ),
     );
   });
@@ -491,31 +484,33 @@ export function registerMinecraftRoutes(
       .where('server_id', '=', serverId)
       .executeTakeFirst();
     if (!profile) throw new DomainError('not_found');
-    const choice = await inspectMinecraftCombination(db, profile.combination_id, env);
     const service = await management();
-    const effectiveProperties = await service.fileReadAccess(
-      context,
-      serverId,
-      async (identifier, connection, current) => {
-        const files = createFilemanReadService({
-          adapter: service.adapter,
-          identifier,
-          signal: c.req.raw.signal,
-          authorize: () => service.authorizeTransfer(current, serverId, false, connection),
-        });
-        const bytes = await files.read({ path: 'server.properties', maxBytes: 1048576 });
-        if (!bytes) throw new DomainError('not_found');
-        const properties = parseMinecraftProperties(Buffer.from(bytes).toString('utf8'));
-        return Object.fromEntries(
-          Object.entries(properties).filter(([key]) => minecraftEditablePropertyKeys.includes(key)),
-        );
-      },
-    );
-    const content = await db
-      .selectFrom('minecraft_content_items')
-      .select(['path', 'artifact', 'installed_at'])
-      .where('server_id', '=', serverId)
-      .execute();
+    c.header('Cache-Control', 'no-store');
+    const [effectiveProperties, choice, content] = await Promise.all([
+      service.fileReadScope(
+        context,
+        serverId,
+        async (files, _identifier, _connection, current) => {
+          // Optional grants remain private and do not delay showing the current file.
+          void service.prepareFileWrites(current, serverId, ['server.properties']).catch(() => {});
+          const bytes = await files.read({ path: 'server.properties', maxBytes: 1048576 });
+          if (!bytes) throw new DomainError('not_found');
+          const properties = parseMinecraftProperties(Buffer.from(bytes).toString('utf8'));
+          return Object.fromEntries(
+            Object.entries(properties).filter(([key]) =>
+              minecraftEditablePropertyKeys.includes(key),
+            ),
+          );
+        },
+        c.req.raw.signal,
+      ),
+      inspectMinecraftCombination(db, profile.combination_id, env),
+      db
+        .selectFrom('minecraft_content_items')
+        .select(['path', 'artifact', 'installed_at'])
+        .where('server_id', '=', serverId)
+        .execute(),
+    ]);
     return c.json({
       choiceId: profile.combination_id,
       version: choice.combination.release,

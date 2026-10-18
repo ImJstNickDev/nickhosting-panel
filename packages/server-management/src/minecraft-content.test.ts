@@ -24,7 +24,10 @@ import {
   resolveMinecraftPlayerChangeIdentity,
   resolveMinecraftStoredPlayers,
 } from './minecraft-content.js';
-import { minecraftStoredConfigurationSchema } from './minecraft-content-contracts.js';
+import {
+  minecraftContentChangesOnlyMetadata,
+  minecraftStoredConfigurationSchema,
+} from './minecraft-content-contracts.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function fixture(initial: Record<string, string> = {}) {
@@ -412,6 +415,19 @@ describe('Minecraft durable content safety', () => {
     expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
     expect(f.adapter.listFiles).toHaveBeenCalledTimes(1);
     expect(f.adapter.downloadFile).not.toHaveBeenCalled();
+  });
+  it('delegates stopped proof only to an explicitly guarded lifecycle effect', async () => {
+    const f = fixture({ 'server.properties': 'motd=Old\n' });
+    f.context.effectVerifiesStopped = true;
+    f.context.effect = async () => {
+      throw new DomainError('operation_uncertain');
+    };
+    await expect(applyMinecraftTextChange(f.context, change())).rejects.toMatchObject({
+      code: 'operation_uncertain',
+    });
+    expect(f.assertStopped).not.toHaveBeenCalled();
+    expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(1);
+    expect(f.adapter.writeFile).not.toHaveBeenCalled();
   });
   it('rejects edits to unrelated externally changed data without overwriting it', async () => {
     const f = fixture({ 'server.properties': 'motd=Owner changed this\n' });
@@ -876,4 +892,31 @@ describe('UUID-bound existing Minecraft player changes', () => {
     expect(f.adapter.readFileForEditor).toHaveBeenCalledTimes(2);
     expect(f.adapter.deleteFiles).not.toHaveBeenCalled();
   });
+});
+
+describe('metadata-only content completion', () => {
+  it.each([
+    { kind: 'properties', changes: { motd: 'updated' } },
+    { kind: 'player', list: 'operators', action: 'add', name: 'Player' },
+  ])('accepts valid $kind edits and rejects backup or malformed plans', (command) => {
+    const plan = { combinationId: randomUUID(), command, backupBefore: false };
+    expect(minecraftContentChangesOnlyMetadata(plan)).toBe(true);
+    expect(minecraftContentChangesOnlyMetadata({ ...plan, backupBefore: true })).toBe(false);
+    expect(minecraftContentChangesOnlyMetadata({ ...plan, combinationId: 'invalid' })).toBe(false);
+    expect(
+      minecraftContentChangesOnlyMetadata({ ...plan, command: { ...command, extra: true } }),
+    ).toBe(false);
+  });
+  it.each(['verify', 'world-remove', 'world-import', 'install', 'modpack'])(
+    'does not classify %s as metadata completion',
+    (kind) => {
+      expect(
+        minecraftContentChangesOnlyMetadata({
+          combinationId: randomUUID(),
+          command: { kind },
+          backupBefore: false,
+        }),
+      ).toBe(false);
+    },
+  );
 });

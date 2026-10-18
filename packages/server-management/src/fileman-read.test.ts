@@ -166,6 +166,38 @@ describe('shared Fileman reads for trusted integrations', () => {
     await expect(files.listMany(['a'])).rejects.toMatchObject({ upstreamStatus: 403 });
     expect(f.adapter.listFiles).not.toHaveBeenCalled();
   });
+  it('uses the batch transport for a single root read and coalesces concurrent callers', async () => {
+    const f = fixture();
+    const listDirectories = vi.fn(async (paths: string[]) =>
+      paths.map((directory) => ({ directory, files: [] })),
+    );
+    const files = createFilemanReadService({
+      adapter: f.adapter as unknown as PterodactylAdapter,
+      identifier: 'managed',
+      authorize: f.authorize,
+      listDirectories,
+    });
+    expect(await Promise.all([files.list(''), files.list('')])).toEqual([[], []]);
+    expect(listDirectories).toHaveBeenCalledExactlyOnceWith(['']);
+    expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    expect(f.authorize).toHaveBeenCalledTimes(2);
+  });
+  it.each(['not_found', 'unavailable', 'forbidden'] as const)(
+    'preserves a single-directory %s without listing it again',
+    async (error) => {
+      const f = fixture();
+      const files = createFilemanReadService({
+        adapter: f.adapter as unknown as PterodactylAdapter,
+        identifier: 'managed',
+        authorize: f.authorize,
+        listDirectories: async (paths) => paths.map((directory) => ({ directory, error })),
+      });
+      await expect(files.list('world')).rejects.toMatchObject({
+        upstreamStatus: error === 'not_found' ? 404 : error === 'forbidden' ? 403 : 503,
+      });
+      expect(f.adapter.listFiles).not.toHaveBeenCalled();
+    },
+  );
   it('falls back only for an absent optional batch endpoint and keeps missing distinct from unavailable', async () => {
     const f = fixture();
     f.adapter.listFiles.mockImplementation(async (...args: unknown[]) => {

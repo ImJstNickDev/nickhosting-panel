@@ -489,6 +489,8 @@ export function GameSections({
   const [trackedOperation, setTrackedOperation] = useState<{
     serverId: string;
     id: string;
+    gameId?: string;
+    sectionId?: string;
     confirmedUpdate?: GameSectionAcceptedOptions['confirmedUpdate'];
     refetchSectionOnSuccess?: boolean;
     quickUntil?: number;
@@ -504,6 +506,8 @@ export function GameSections({
     setTrackedOperation({
       serverId,
       id,
+      gameId,
+      sectionId,
       confirmedUpdate: options?.confirmedUpdate,
       refetchSectionOnSuccess: options?.refetchSectionOnSuccess,
       quickUntil: options?.quickCompletion ? Date.now() + 5000 : undefined,
@@ -618,20 +622,24 @@ export function GameSections({
     let cancelled = false;
     void (async () => {
       const update =
-        trackedOperation?.serverId === serverId && trackedOperation.id === operationId
+        trackedOperation?.serverId === serverId &&
+        trackedOperation.id === operationId &&
+        trackedOperation.gameId === gameId &&
+        trackedOperation.sectionId === sectionId
           ? trackedOperation.confirmedUpdate
           : undefined;
+      const patchKey = `${serverId}:${gameId}:${sectionId}:${operationId}`;
       if (
         operationState === 'succeeded' &&
         effectState === 'confirmed' &&
         update &&
-        patchedOperation.current !== operationId
+        patchedOperation.current !== patchKey
       ) {
         const queryKey = ['game-section', serverId, gameId, sectionId];
         // An older inventory response must not undo a confirmed change.
         await queryClient.cancelQueries({ queryKey, exact: true });
         if (cancelled) return;
-        patchedOperation.current = operationId;
+        patchedOperation.current = patchKey;
         queryClient.setQueryData<UiSectionData>(queryKey, (current) =>
           current ? update(current) : current,
         );
@@ -639,7 +647,7 @@ export function GameSections({
       const sectionAlreadyUpdated =
         operationState === 'succeeded' &&
         effectState === 'confirmed' &&
-        patchedOperation.current === operationId &&
+        patchedOperation.current === patchKey &&
         trackedOperation?.refetchSectionOnSuccess === false;
       const [sectionResult, serverResult] = await Promise.all([
         sectionAlreadyUpdated ? undefined : loaded.refetch(),
@@ -671,7 +679,7 @@ export function GameSections({
   const patchedCompletion =
     operationState === 'succeeded' &&
     effectState === 'confirmed' &&
-    patchedOperation.current === operationId;
+    patchedOperation.current === `${serverId}:${gameId}:${sectionId}:${operationId}`;
   const pendingOperation = Boolean(
     operationId &&
       (!operation.data ||
@@ -822,8 +830,7 @@ export function GameSections({
               refreshToken={refreshToken}
               completedOperationId={completedOperationId}
               onAccepted={(jobId) => {
-                setOperationId(jobId);
-                void loaded.refetch();
+                setOperationId(jobId, { quickCompletion: form.submitChangedOnly === true });
                 void server.refetch();
               }}
             />

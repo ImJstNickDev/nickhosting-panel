@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type AuthContext, DomainError } from '@nickhosting/core';
 import { type createDatabase, getSettings, recordAudit } from '@nickhosting/database';
+import type { FilemanReadService } from '@nickhosting/game-sdk';
 import { createMinecraftIdentityProvider, verifyMinecraftPlayer } from '@nickhosting/minecraft';
 import type { ConsoleRelay } from '@nickhosting/pterodactyl-adapter';
 import {
@@ -11,11 +12,17 @@ import {
   parse,
 } from '@nickhosting/server-management';
 import type { Context, Hono } from 'hono';
+import { sql } from 'kysely';
 import {
+  type MinecraftPlayerAction,
   minecraftPlayerActionSchema,
   minecraftPlayerCommand,
+  parseMinecraftBannedPlayers,
   parseMinecraftOnlinePlayers,
+  parseMinecraftOperators,
   parseMinecraftPlayerFiles,
+  parseMinecraftWhitelist,
+  parseMinecraftWhitelistProperties,
 } from '../../../games/minecraft/src/player-management.js';
 import { minecraftStoredConfigurationSchema } from '../../../packages/server-management/src/minecraft-content-contracts.js';
 import type { Variables } from './app.js';
@@ -34,13 +41,8 @@ type Online = {
   observedAt: string | null;
 };
 const unavailable = (): Online => ({ state: 'unavailable', players: [], observedAt: null });
-async function readPlayerFiles(
-  service: ManagementRuntime,
-  identifier: string,
-  authorize: () => Promise<void>,
-) {
+async function readPlayerFiles(files: FilemanReadService) {
   const paths = ['ops.json', 'whitelist.json', 'banned-players.json', 'server.properties'];
-  const files = createFilemanReadService({ adapter: service.adapter, identifier, authorize });
   const values = await files.readMany(
     paths.map((path) => ({
       path,
@@ -58,6 +60,40 @@ async function readPlayerFiles(
     banned: text('banned-players.json'),
     properties: text('server.properties'),
   });
+}
+/** Each confirmation opens a fresh read scope: a previous observation never
+ * confirms a later command, and unrelated lists are not fetched or reconciled. */
+async function readActionFile(
+  service: ManagementRuntime,
+  identifier: string,
+  action: MinecraftPlayerAction['action'],
+) {
+  const files = createFilemanReadService({
+    adapter: service.adapter,
+    identifier,
+    authorize: async () => {},
+  });
+  const path =
+    action === 'op' || action === 'deop'
+      ? 'ops.json'
+      : action === 'whitelist-add' || action === 'whitelist-remove'
+        ? 'whitelist.json'
+        : action === 'ban' || action === 'pardon'
+          ? 'banned-players.json'
+          : 'server.properties';
+  const bytes = await files.read({
+    path,
+    maxBytes: 1048576,
+    ...(path !== 'server.properties' ? { missing: 'allow' as const } : {}),
+  });
+  const source = bytes === undefined ? '[]' : Buffer.from(bytes).toString('utf8');
+  if (path === 'ops.json')
+    return { kind: 'operators' as const, players: parseMinecraftOperators(source) };
+  if (path === 'whitelist.json')
+    return { kind: 'whitelist' as const, players: parseMinecraftWhitelist(source) };
+  if (path === 'banned-players.json')
+    return { kind: 'banned' as const, players: parseMinecraftBannedPlayers(source) };
+  return { kind: 'properties' as const, ...parseMinecraftWhitelistProperties(source) };
 }
 /** A fresh relay receives only new output: requestLogs is deliberately never called. */
 export async function observeMinecraftPlayers(
@@ -136,10 +172,10 @@ export function registerMinecraftPlayerRoutes(
   app.get('/v1/servers/:id/minecraft/players', async (c) => {
     const context = await principal(c),
       service = await management();
-    const result = await service.fileReadAccess(
+    const result = await service.fileReadScope(
       context,
       c.req.param('id'),
-      async (id, connection, current) => {
+      async (files, _id, connection, current) => {
         const state = await profile(connection, c.req.param('id'));
         if (!state.supported || !state.value.installed)
           return {
@@ -151,14 +187,20 @@ export function registerMinecraftPlayerRoutes(
             whitelistEnabled: false,
             enforceWhitelist: false,
           };
+        void service
+          .prepareFileWrites(current, c.req.param('id'), [
+            'ops.json',
+            'whitelist.json',
+            'server.properties',
+          ])
+          .catch(() => {});
         return {
           supported: true,
           installed: true,
-          ...(await readPlayerFiles(service, id, () =>
-            service.authorizeTransfer(current, c.req.param('id'), false, connection),
-          )),
+          ...(await readPlayerFiles(files)),
         };
       },
+      c.req.raw.signal,
     );
     c.header('Cache-Control', 'no-store');
     return c.json(result);
@@ -180,26 +222,27 @@ export function registerMinecraftPlayerRoutes(
     );
     let result: Online = unavailable();
     if (state.supported && state.value.installed) {
-      const resources = await service.adapter.getResources(id);
-      if (resources.current_state !== 'running') {
-        result = { state: 'offline', players: [], observedAt: null };
-      } else {
-        const binding = await service.consoleBindingForServer(serverId);
-        const key = JSON.stringify([
-          serverId,
-          id,
-          server.pterodactyl_id,
-          server.pterodactyl_uuid,
-          server.external_id,
-          server.updated_at,
-          binding,
-        ]);
-        const cached = online.get(key);
-        let pending = cached && cached.expires > Date.now() ? cached.result : undefined;
-        if (!pending) {
-          for (const [key, entry] of online) if (entry.expires <= Date.now()) online.delete(key);
-          if (online.size >= 1000) throw new DomainError('resources_unavailable');
-          pending = observeMinecraftPlayers(service, id, async () => {
+      const binding = await service.consoleBindingForServer(serverId);
+      const key = JSON.stringify([
+        serverId,
+        id,
+        server.pterodactyl_id,
+        server.pterodactyl_uuid,
+        server.external_id,
+        server.runtime_state,
+        server.active_operation_id,
+        binding,
+      ]);
+      const cached = online.get(key);
+      let pending = cached && cached.expires > Date.now() ? cached.result : undefined;
+      if (!pending) {
+        for (const [key, entry] of online) if (entry.expires <= Date.now()) online.delete(key);
+        if (online.size >= 1000) throw new DomainError('resources_unavailable');
+        pending = (async () => {
+          const resources = await service.adapter.getResources(id);
+          if (resources.current_state !== 'running')
+            return { state: 'offline' as const, players: [], observedAt: null };
+          return observeMinecraftPlayers(service, id, async () => {
             try {
               await service.authorizeTransfer(context, serverId, false, db, undefined, server);
               return (await service.consoleBindingForServer(serverId)) === binding;
@@ -207,12 +250,12 @@ export function registerMinecraftPlayerRoutes(
               return false;
             }
           });
-          online.set(key, { expires: Date.now() + 5000, result: pending });
-        }
-        result = await pending;
-        if ((await service.consoleBindingForServer(serverId)) !== binding)
-          throw new DomainError('conflict');
+        })();
+        online.set(key, { expires: Date.now() + 5000, result: pending });
       }
+      result = await pending;
+      if ((await service.consoleBindingForServer(serverId)) !== binding)
+        throw new DomainError('conflict');
     }
     await service.authorizeTransfer(context, serverId, false, db, undefined, server);
     c.header('Cache-Control', 'no-store');
@@ -229,7 +272,7 @@ export function registerMinecraftPlayerRoutes(
             userAgent: (await getSettings(db, env)).values.contentMetadataUserAgent ?? '',
           })
         : undefined;
-    await service.access(context, serverId, true, async (id, connection, current) => {
+    await service.fileMutationAccess(context, serverId, async (id, connection, current) => {
       const state = await profile(connection, serverId);
       if (!state.supported || !state.value.installed) throw new DomainError('conflict');
       if ((await service.adapter.getResources(id)).current_state !== 'running')
@@ -240,16 +283,11 @@ export function registerMinecraftPlayerRoutes(
           input.action === 'whitelist-remove' ||
           input.action === 'pardon'
         ) {
-          const snapshot = await readPlayerFiles(service, id, () =>
-            service.authorizeTransfer(current, serverId, true, connection),
-          );
-          const entries =
-            input.action === 'deop'
-              ? snapshot.operators
-              : input.action === 'whitelist-remove'
-                ? snapshot.whitelist
-                : snapshot.banned;
-          if (!entries.some((entry) => entry.uuid === input.expectedUuid))
+          const snapshot = await readActionFile(service, id, input.action);
+          if (
+            snapshot.kind === 'properties' ||
+            !snapshot.players.some((entry) => entry.uuid === input.expectedUuid)
+          )
             throw new DomainError('conflict');
         }
         // Vanilla live commands accept a name, so independently prove that it still
@@ -281,61 +319,81 @@ export function registerMinecraftPlayerRoutes(
           let confirmed = false;
           for (let attempt = 0; attempt < 4; attempt++) {
             if (attempt) await delay(250 * attempt);
-            const snapshot = await readPlayerFiles(service, id, () =>
-              service.authorizeTransfer(current, serverId, true, connection),
-            );
-            const contains = (list: { name: string; uuid: string }[]) =>
+            const snapshot = await readActionFile(service, id, input.action);
+            const contains =
+              snapshot.kind !== 'properties' &&
               'name' in input &&
-              list.some((player) =>
+              snapshot.players.some((player) =>
                 input.expectedUuid
                   ? player.uuid === input.expectedUuid
                   : player.name.toLowerCase() === input.name.toLowerCase(),
               );
             const matches =
-              input.action === 'op'
-                ? contains(snapshot.operators)
-                : input.action === 'deop'
-                  ? !contains(snapshot.operators)
-                  : input.action === 'whitelist-add'
-                    ? contains(snapshot.whitelist)
-                    : input.action === 'whitelist-remove'
-                      ? !contains(snapshot.whitelist)
-                      : input.action === 'whitelist-on'
-                        ? snapshot.whitelistEnabled
-                        : input.action === 'whitelist-off'
-                          ? !snapshot.whitelistEnabled
-                          : input.action === 'ban'
-                            ? contains(snapshot.banned)
-                            : !contains(snapshot.banned);
+              snapshot.kind === 'properties'
+                ? snapshot.whitelistEnabled === (input.action === 'whitelist-on')
+                : ['deop', 'whitelist-remove', 'pardon'].includes(input.action)
+                  ? !contains
+                  : contains;
             if (!matches) continue;
-            const configuration = parse(
-              minecraftStoredConfigurationSchema,
-              state.value.configuration,
-            );
-            const observedAt = new Date().toISOString();
-            // Preserve authoritative UUIDs, including externally configured accounts.
-            // No per-player provider calls or invented Mojang identity attestations.
-            const observed = <T extends { uuid: string; name: string }>(players: T[]) =>
-              players.map((player) => ({
-                ...player,
-                source: 'server-file' as const,
-                verifiedAt: observedAt,
-              }));
-            configuration.operators = snapshot.operators.map((player) => player.name);
-            configuration.whitelist = snapshot.whitelist.map((player) => player.name);
-            configuration.playerIdentities = {
-              operators: observed(snapshot.operators),
-              whitelist: observed(snapshot.whitelist),
-            };
-            configuration.properties['white-list'] = snapshot.whitelistEnabled;
-            // Older versions do not have enforce-whitelist; do not invent that property.
-            if ('enforce-whitelist' in configuration.properties)
-              configuration.properties['enforce-whitelist'] = snapshot.enforceWhitelist;
-            await connection
-              .updateTable('minecraft_server_profiles')
-              .set({ configuration: JSON.stringify(configuration), updated_at: new Date() })
-              .where('server_id', '=', serverId)
-              .execute();
+            // Merge only the confirmed list/property into the latest stored object.
+            // A command touching one list must not overwrite unrelated settings.
+            if (snapshot.kind === 'operators' || snapshot.kind === 'whitelist') {
+              const configuration = parse(
+                minecraftStoredConfigurationSchema,
+                state.value.configuration,
+              );
+              const observedAt = new Date().toISOString();
+              const observe = <T extends { name: string; uuid: string }>(players: T[]) =>
+                players.map((player) => ({
+                  ...player,
+                  source: 'server-file' as const,
+                  verifiedAt: observedAt,
+                }));
+              const namePatch: Record<string, string[]> = {
+                [snapshot.kind]: snapshot.players.map((player) => player.name),
+              };
+              const identityPatch: Record<string, unknown> = {
+                [snapshot.kind]: observe(snapshot.players),
+              };
+              if (!configuration.playerIdentities) {
+                const sibling = snapshot.kind === 'operators' ? 'whitelist' : 'operators';
+                // Legacy profiles have no UUID authority at all. The actual sibling
+                // file can contain externally added accounts even when stored names
+                // are empty. Initialize it once without inventing or losing UUIDs.
+                const other = await readActionFile(
+                  service,
+                  id,
+                  sibling === 'operators' ? 'op' : 'whitelist-add',
+                );
+                if (other.kind !== sibling) throw new DomainError('integration_unavailable');
+                namePatch[sibling] = other.players.map((player) => player.name);
+                identityPatch[sibling] = observe(other.players);
+              }
+              await service.authorizeTransfer(current, serverId, true, connection);
+              const names = JSON.stringify(namePatch);
+              const observed = JSON.stringify(identityPatch);
+              await connection
+                .updateTable('minecraft_server_profiles')
+                .set({
+                  configuration: sql`configuration || ${names}::jsonb || jsonb_build_object('playerIdentities', coalesce(configuration->'playerIdentities', '{}'::jsonb) || ${observed}::jsonb)`,
+                  updated_at: new Date(),
+                })
+                .where('server_id', '=', serverId)
+                .execute();
+            } else if (snapshot.kind === 'properties') {
+              await service.authorizeTransfer(current, serverId, true, connection);
+              const properties = JSON.stringify({ 'white-list': snapshot.whitelistEnabled });
+              await connection
+                .updateTable('minecraft_server_profiles')
+                .set({
+                  configuration: sql`jsonb_set(configuration, '{properties}', coalesce(configuration->'properties', '{}'::jsonb) || ${properties}::jsonb)`,
+                  updated_at: new Date(),
+                })
+                .where('server_id', '=', serverId)
+                .execute();
+            }
+            if (snapshot.kind === 'banned')
+              await service.authorizeTransfer(current, serverId, true, connection);
             await recordAudit(connection, current, 'server.minecraft.players.reconciled', {
               ...metadata,
               outcome: 'confirmed',

@@ -25,6 +25,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
   let failFiles = false;
   let onlineUnavailable = false;
   let onlineGate: Promise<void> | undefined;
+  let onlinePlayerPresent = true;
+  let disconnectOnKick = false;
   const api = () => `/v1/servers/${provider.ids.serverId}/minecraft`;
   const route = () => `${fixture.origin}/servers/${provider.ids.serverId}/game/players`;
 
@@ -91,11 +93,15 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
         for (const stream of streams)
           stream.onEvent({
             type: 'console',
-            data: `[12:34:56] [Server thread/INFO]: There are 1 of a max of 20 players online: ${player.name}`,
+            data: onlinePlayerPresent
+              ? `[12:34:56] [Server thread/INFO]: There are 1 of a max of 20 players online: ${player.name}`
+              : '[12:34:56] [Server thread/INFO]: There are 0 of a max of 20 players online: ',
           });
         return;
       }
       commands.push(command);
+      if (disconnectOnKick && command.startsWith(`kick ${player.name}`))
+        onlinePlayerPresent = false;
       if (!confirmCommands) return;
       const files = await provider.files();
       const entry = { name: player.name, uuid };
@@ -139,6 +145,8 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     failFiles = false;
     onlineUnavailable = false;
     onlineGate = undefined;
+    onlinePlayerPresent = true;
+    disconnectOnKick = false;
   });
 
   async function running(value: boolean) {
@@ -338,6 +346,114 @@ describe('M5 Minecraft players through authorized APIs and provider file confirm
     await browserExpect(
       user.getByRole('switch', { name: 'Whitelist', exact: true }),
     ).not.toBeChecked();
+  });
+
+  it('clears the current kick receipt on the first refreshed absent-player observation', async () => {
+    await running(true);
+    await user.goto(route());
+    const dialog = await choose('Kick player');
+    disconnectOnKick = true;
+    await action(
+      () => dialog.getByRole('button', { name: 'Kick player', exact: true }).click(),
+      `kick ${player.name}`,
+    );
+    await browserExpect(user.locator('.minecraft-player-role--online')).toHaveCount(0);
+    await browserExpect(
+      user.getByText('Kick command sent. The player may reconnect.', { exact: true }),
+    ).toHaveCount(0);
+    // The next fixture case restores the player; expire this deliberately empty
+    // five-second observation before that independent scenario starts.
+    await delay(5100);
+  });
+
+  it('does not let an older kick refresh clear a later uncertain command', async () => {
+    await running(true);
+    (await provider.files()).set('ops.json', Buffer.from('[]'));
+    await user.goto(route());
+    let dialog = await choose('Kick player');
+    await action(
+      () => dialog.getByRole('button', { name: 'Kick player', exact: true }).click(),
+      `kick ${player.name}`,
+    );
+    await browserExpect(
+      user.getByRole('button', { name: 'Refresh players', exact: true }),
+    ).toBeEnabled();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let requested = false;
+    const onlineUrl = `**${api()}/players/online`;
+    await user.route(onlineUrl, async (route) => {
+      requested = true;
+      await gate;
+      await route.fulfill({
+        json: { state: 'available', players: [], observedAt: new Date().toISOString() },
+      });
+    });
+    try {
+      await user.getByRole('button', { name: 'Refresh players', exact: true }).click();
+      await browserExpect.poll(() => requested).toBe(true);
+      confirmCommands = false;
+      dialog = await choose('Make operator');
+      await action(
+        () => dialog.getByRole('button', { name: 'Make operator', exact: true }).click(),
+        `op ${player.name}`,
+        409,
+      );
+      await browserExpect(user.getByRole('alert')).toBeVisible();
+      release();
+      await browserExpect(
+        user.getByRole('button', { name: 'Refresh players', exact: true }),
+      ).toBeEnabled();
+      await browserExpect(user.getByRole('alert')).toBeVisible();
+      await browserExpect(
+        user.getByRole('button', { name: 'Add player', exact: true }),
+      ).toBeDisabled();
+    } finally {
+      release();
+      await user.unroute(onlineUrl);
+      confirmCommands = true;
+    }
+  });
+
+  it('refreshes saved lists and the online roster independently', async () => {
+    await running(true);
+    await user.goto(route());
+    const refresh = user.getByRole('button', { name: 'Refresh players', exact: true });
+    await browserExpect(refresh).toBeEnabled();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let listsRequested = false;
+    let handled: Promise<void> | undefined;
+    let onlineRequested = false;
+    const observe = (request: import('@playwright/test').Request) => {
+      if (new URL(request.url()).pathname === `${api()}/players/online`) onlineRequested = true;
+    };
+    const listUrl = `**${api()}/players`;
+    await user.route(listUrl, async (route) => {
+      listsRequested = true;
+      handled = (async () => {
+        await gate;
+        await route.continue();
+      })();
+      await handled;
+    });
+    user.on('request', observe);
+    try {
+      await refresh.click();
+      await browserExpect.poll(() => listsRequested).toBe(true);
+      // A held file response cannot delay the independent online observation.
+      await browserExpect.poll(() => onlineRequested).toBe(true);
+    } finally {
+      release();
+      user.off('request', observe);
+      await handled;
+      await user.unroute(listUrl);
+    }
+    await browserExpect(refresh).toBeEnabled();
   });
 
   it('keeps rejected and unconfirmed commands visible without inventing success', async () => {

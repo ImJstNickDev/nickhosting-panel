@@ -848,6 +848,71 @@ describe('management runtime execution-time authorization', () => {
     expect(observer.stopped).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['properties', false],
+    ['properties', true],
+    ['player', false],
+    ['player', true],
+  ] as const)(
+    'shares one host preflight for %s handoff while rechecking revocation=%s',
+    async (kind, revoke) => {
+      const queued = await stop();
+      await f.db
+        .updateTable('server_operations')
+        .set({
+          action: 'minecraft-content',
+          plan: JSON.stringify({
+            minecraftContent: {
+              combinationId: randomUUID(),
+              backupBefore: false,
+              command:
+                kind === 'properties'
+                  ? { kind, changes: { motd: 'fixture' } }
+                  : { kind, list: 'operators', action: 'add', name: 'Player' },
+            },
+          }),
+        })
+        .where('job_id', '=', queued.job)
+        .execute();
+      const remote = await providerIdentity(queued.server);
+      const getRemote = vi.fn(async () => remote);
+      Object.assign(f.adapter, { getApplicationServer: getRemote });
+      const observer = {
+        preflight: vi.fn(async () => {}),
+        stopped: vi.fn(async () => {
+          if (revoke)
+            await f.db
+              .updateTable('operation_jobs')
+              .set({ resource_owner_id: f.owner.subjectUserId })
+              .where('id', '=', queued.job)
+              .execute();
+          return true;
+        }),
+      };
+      const runtime = await createManagementRuntime({
+        db: f.db,
+        codec,
+        adapter: f.adapter,
+        containerObserver: observer,
+        env: { NH_OBSERVER_ID: 'isolated-observer' },
+      });
+      const write = vi.fn(async () => {});
+      const result = await processServerOperation(f.db, queued.job, {
+        ...runtime.lifecycle,
+        processGameContent: async (context) => {
+          await context.authorize();
+          await context.effect('minecraft.text.fixture', write);
+          return true;
+        },
+      });
+      expect(result).toBe(revoke ? 'failed' : 'succeeded');
+      expect(observer.preflight).toHaveBeenCalledTimes(1);
+      expect(observer.stopped).toHaveBeenCalledTimes(1);
+      expect(getRemote).toHaveBeenCalledTimes(1);
+      expect(write).toHaveBeenCalledTimes(revoke ? 0 : 1);
+    },
+  );
+
   it.each(['unchanged', 'allocation removed', 'host changed', 'permission revoked'] as const)(
     'uses one final world-selection proof and keeps current authority when %s',
     async (change) => {
@@ -1291,6 +1356,138 @@ describe('management runtime execution-time authorization', () => {
       expect(effect).not.toHaveBeenCalled();
     },
   );
+  async function interactiveFilesFixture() {
+    const serverId = await f.server();
+    const sessionId = randomUUID();
+    await database.pool.query(
+      'INSERT INTO session(id,token,"userId","expiresAt") VALUES($1,$2,$3,now()+interval \'1 hour\')',
+      [sessionId, randomUUID(), f.context.actorUserId],
+    );
+    const context = { ...f.context, [authSessionId]: sessionId };
+    const remote = await providerIdentity(serverId);
+    const getRemote = vi.fn(async () => remote);
+    const read = vi.fn(async () => Buffer.from('fixture'));
+    const batch = vi.fn(async (_id: string, directories: string[]) =>
+      directories.map((directory) => ({ directory, files: [] })),
+    );
+    const prepare = vi.fn(async () => {});
+    Object.assign(f.adapter, {
+      getApplicationServer: getRemote,
+      readFileForEditor: read,
+      getDirectoryBatchSettings: vi.fn(async () => ({
+        directoryBatchLimit: 48,
+        directoryConcurrency: 2,
+        directoryTimeoutSeconds: 10,
+      })),
+      listDirectoriesBatch: batch,
+      prepareFileWrite: prepare,
+    });
+    const runtime = await createManagementRuntime({ db: f.db, codec, adapter: f.adapter });
+    return { serverId, sessionId, context, getRemote, read, batch, prepare, runtime };
+  }
+
+  it('shares one interactive Fileman read phase and rechecks authority only at its boundaries', async () => {
+    const files = await interactiveFilesFixture();
+    const select = vi.spyOn(f.db, 'selectFrom');
+    try {
+      const result = await files.runtime.fileReadScope(
+        files.context,
+        files.serverId,
+        async (scope) => {
+          await scope.list('');
+          await scope.list('');
+          return scope.readMany([
+            { path: 'ops.json', maxBytes: 1024 },
+            { path: 'whitelist.json', maxBytes: 1024 },
+          ]);
+        },
+      );
+      expect(result.size).toBe(2);
+      expect(files.getRemote).toHaveBeenCalledTimes(1);
+      expect(files.batch).toHaveBeenCalledTimes(1);
+      expect(files.read).toHaveBeenCalledTimes(2);
+      expect(f.adapter.prefetchDownloads).toHaveBeenCalledTimes(1);
+      // Initial auth, fresh auth after remote identity proof, and final return guard.
+      expect(select.mock.calls.filter(([table]) => table === 'session')).toHaveLength(3);
+    } finally {
+      select.mockRestore();
+    }
+  });
+
+  it.each(['session revoked', 'provider binding changed'] as const)(
+    'rejects a private read result when %s while bytes are being read',
+    async (change) => {
+      const files = await interactiveFilesFixture();
+      files.read.mockImplementationOnce(async () => {
+        if (change === 'session revoked')
+          await f.db.deleteFrom('session').where('id', '=', files.sessionId).execute();
+        else
+          await f.db
+            .updateTable('managed_servers')
+            .set({ pterodactyl_identifier: 'changed-id' })
+            .where('id', '=', files.serverId)
+            .execute();
+        return Buffer.from('must not be returned');
+      });
+      await expect(
+        files.runtime.fileReadScope(files.context, files.serverId, (scope) =>
+          scope.read({ path: 'server.properties', maxBytes: 1024 }),
+        ),
+      ).rejects.toMatchObject({
+        code: change === 'session revoked' ? 'unauthenticated' : 'conflict',
+      });
+    },
+  );
+
+  it('prepares private write grants together only with current management authority', async () => {
+    const files = await interactiveFilesFixture();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    files.prepare.mockImplementation(async () => {
+      if (files.prepare.mock.calls.length === 3) entered.resolve();
+      await release.promise;
+    });
+    const pending = files.runtime.prepareFileWrites(files.context, files.serverId, [
+      'server.properties',
+      'ops.json',
+      'whitelist.json',
+    ]);
+    try {
+      await Promise.race([
+        entered.promise,
+        pending.then(() => {
+          throw new Error('Preparation finished before all grants started');
+        }),
+      ]);
+      expect(files.prepare).toHaveBeenCalledTimes(3);
+    } finally {
+      release.resolve();
+    }
+    await pending;
+    files.prepare.mockClear();
+    await f.db.deleteFrom('session').where('id', '=', files.sessionId).execute();
+    await expect(
+      files.runtime.prepareFileWrites(files.context, files.serverId, ['server.properties']),
+    ).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(files.prepare).not.toHaveBeenCalled();
+  });
+
+  it('keeps the shared identity proof when an active job prevents optional write preparation', async () => {
+    const files = await interactiveFilesFixture();
+    await files.runtime.fileReadScope(files.context, files.serverId, async () => undefined);
+    await f.db
+      .updateTable('managed_servers')
+      .set({ active_operation_id: randomUUID() })
+      .where('id', '=', files.serverId)
+      .execute();
+    await expect(
+      files.runtime.prepareFileWrites(files.context, files.serverId, ['ops.json']),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await files.runtime.fileReadScope(files.context, files.serverId, async () => undefined);
+    expect(files.prepare).not.toHaveBeenCalled();
+    expect(files.getRemote).toHaveBeenCalledTimes(1);
+  });
+
   it('blocks later interactive mutations after an ambiguous upload, while preserving authorized reads', async () => {
     const serverId = await f.server();
     const sessionId = randomUUID();

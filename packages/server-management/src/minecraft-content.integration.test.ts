@@ -25,6 +25,7 @@ import { canonicalMinecraftJarSha256 } from '../../../games/minecraft/src/genera
 import { planMinecraftPlayerList } from '../../../games/minecraft/src/management.js';
 import * as minecraftWorld from '../../../games/minecraft/src/world.js';
 import * as contentDisk from '../../content-providers/src/disk.js';
+import { createFilemanReadService } from './fileman-read.js';
 import {
   createFilemanJobServices,
   filemanTransferDigest,
@@ -934,7 +935,8 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       code: 'conflict',
     });
     expect(f.write).not.toHaveBeenCalled();
-    expect(f.list.mock.calls.map((call) => call[1] ?? '')).toEqual(['']);
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.listDirectories.mock.calls.map(([paths]) => paths)).toEqual([['', 'selected'], ['']]);
     expect(f.files.get('server.properties')?.toString()).toContain('motd=Created externally');
   });
   it('rejects an incompatible world without writing the selection', async () => {
@@ -1706,7 +1708,28 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
         .set({ startup: mapping.startup })
         .where('id', '=', f.f.mappingId)
         .execute();
+      const list = vi.spyOn(f.context.adapter, 'listFiles');
+      const read = vi.spyOn(f.context.adapter, 'readFileForEditor');
+      const readScope = vi.fn(() => {
+        let authorized: Promise<void> | undefined;
+        return createFilemanReadService({
+          adapter: f.context.adapter,
+          identifier: f.context.server.pterodactyl_identifier ?? '',
+          authorize: () => (authorized ??= f.context.authorize()),
+        });
+      });
+      f.context.fileman = {
+        readScope,
+        uploadStaged: async () => {
+          throw new Error('Unexpected staged upload');
+        },
+      };
       expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+      // Build and fresh pre-write comparison share one hosted directory snapshot,
+      // but always fetch the actual text twice to retain concurrent-edit detection.
+      expect(readScope).toHaveBeenCalledTimes(1);
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledTimes(2);
       expect(remote).not.toHaveBeenCalled();
       expect(image).not.toHaveBeenCalled();
       expect(download.mock.calls.some(([, path]) => path === 'server.jar')).toBe(false);
@@ -1715,6 +1738,93 @@ describe('Minecraft durable lifecycle and ingestion boundaries', () => {
       ).toContain(kind === 'properties' ? 'motd=Updated' : '[]');
     },
   );
+
+  it('retains a fresh source conflict check for hosted Settings file access', async () => {
+    const f = await minecraftFixture();
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: true, configuration_state: '{}' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    f.operation.action = 'minecraft-content';
+    f.operation.plan.minecraftContent = await prepareMinecraftContentPlan(
+      f.f.db,
+      f.serverId,
+      { kind: 'properties', changes: { motd: 'Requested' } },
+      { ...f.options, adapter: f.context.adapter },
+    );
+    const readScope = vi.fn(() =>
+      createFilemanReadService({
+        adapter: f.context.adapter,
+        identifier: f.context.server.pterodactyl_identifier ?? '',
+        authorize: f.context.authorize,
+      }),
+    );
+    f.context.fileman = {
+      readScope,
+      uploadStaged: async () => {
+        throw new Error('Unexpected staged upload');
+      },
+    };
+    const originalRead = f.context.adapter.readFileForEditor.bind(f.context.adapter);
+    let reads = 0;
+    vi.spyOn(f.context.adapter, 'readFileForEditor').mockImplementation(async (...args) => {
+      if (++reads === 2) f.files.set('server.properties', Buffer.from('motd=External edit\n'));
+      return originalRead(...args);
+    });
+    const write = vi.spyOn(f.context.adapter, 'writeFile');
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(readScope).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
+    expect(f.files.get('server.properties')?.toString()).toBe('motd=External edit\n');
+  });
+
+  it('opens a new hosted scope to reconcile a lost Settings write response without replay', async () => {
+    const f = await minecraftFixture();
+    await f.f.db
+      .updateTable('minecraft_server_profiles')
+      .set({ installed: true, configuration_state: '{}' })
+      .where('server_id', '=', f.serverId)
+      .execute();
+    f.operation.action = 'minecraft-content';
+    f.operation.plan.minecraftContent = await prepareMinecraftContentPlan(
+      f.f.db,
+      f.serverId,
+      { kind: 'properties', changes: { motd: 'Requested' } },
+      { ...f.options, adapter: f.context.adapter },
+    );
+    const readScope = vi.fn(() =>
+      createFilemanReadService({
+        adapter: f.context.adapter,
+        identifier: f.context.server.pterodactyl_identifier ?? '',
+        authorize: f.context.authorize,
+      }),
+    );
+    f.context.fileman = {
+      readScope,
+      uploadStaged: async () => {
+        throw new Error('Unexpected staged upload');
+      },
+    };
+    const originalWrite = f.context.adapter.writeFile.bind(f.context.adapter);
+    const write = vi
+      .spyOn(f.context.adapter, 'writeFile')
+      .mockImplementationOnce(async (...args) => {
+        await originalWrite(...args);
+        throw new Error('lost response');
+      });
+    await expect(processMinecraftContent(f.context, f.options)).rejects.toThrow('lost response');
+    expect(f.operation.effect_state).toBe('prepared');
+    readScope.mockClear();
+    const read = vi.spyOn(f.context.adapter, 'readFileForEditor');
+    expect(await processMinecraftContent(f.context, f.options)).toBe(true);
+    expect(readScope).toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(f.files.get('server.properties')?.toString()).toContain('motd=Requested');
+  });
 
   it('accepts only the exact same-job Fileman receipt when completing a world import', async () => {
     const f = await minecraftFixture();

@@ -615,6 +615,10 @@ export async function installBrowserFixtures(
       adapter.readFile(id, name, maxBytes, timing),
     prefetchDownloads: async () => {},
     invalidateFileDownloads: () => {},
+    prepareFileWrite: async (id, name) => {
+      remote(id);
+      path(name);
+    },
     writeFile: async (id, name, content) => put(remote(id), name, Buffer.from(content)),
     deleteFiles: async (id, directory, names) => {
       const r = remote(id);

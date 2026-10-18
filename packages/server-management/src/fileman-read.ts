@@ -165,6 +165,25 @@ export function createFilemanReadService(options: {
     if (!pending) {
       if (directories.size >= 128) throw new DomainError('validation_failed');
       pending = (async () => {
+        // Single-folder callers use the same configured transport as batch reads.
+        // listMany owns authorization and the missing-endpoint native fallback.
+        if (options.listDirectories) {
+          const result = (await listMany([directory]))[0];
+          if (!result || result.directory !== directory)
+            throw new DomainError('integration_unavailable');
+          if ('error' in result)
+            throw new PterodactylError(
+              result.error === 'not_found'
+                ? 'not_found'
+                : result.error === 'forbidden'
+                  ? 'permission_denied'
+                  : 'unavailable',
+              'client',
+              'rejected',
+              result.error === 'not_found' ? 404 : result.error === 'forbidden' ? 403 : 503,
+            );
+          return result.files;
+        }
         check();
         await authorize();
         const files = await measure('directory.native', () =>

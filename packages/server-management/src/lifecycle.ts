@@ -42,6 +42,7 @@ import { currentInteractiveContext } from './interactive-context.js';
 import { assertManagedIdentity, readManagedIdentity } from './managed-identity.js';
 import {
   minecraftContentAllowsOnline,
+  minecraftContentChangesOnlyMetadata,
   minecraftContentSelectsWorld,
 } from './minecraft-content-contracts.js';
 import { createOperationTiming, type OperationTiming } from './operation-timing.js';
@@ -71,6 +72,9 @@ export interface GameLifecycleContext {
   operation: () => Operation;
   authorize: () => Promise<void>;
   assertStopped: () => Promise<void>;
+  /** Trusted host guarantee for property/player edits: effect checks the physical
+   * process immediately before dispatch, so integrations need not repeat it. */
+  effectVerifiesStopped?: true;
   update: (patch: {
     phase?: string;
     effect_state?: Operation['effect_state'];
@@ -154,6 +158,8 @@ export interface LifecycleOptions {
     context?: {
       timing?: OperationTiming;
       providerServer?: ApplicationServer | Promise<ApplicationServer>;
+      /** Same-handoff host proof, never persisted or reused across operations. */
+      observerPreflight?: Promise<void>;
       /** Clean Start has matched fresh provider limits and reserved local resources. */
       startAdmissionValidated?: true;
       /** This caller performs authorizeIntent after every slow proof settles.
@@ -510,9 +516,9 @@ export async function processServerOperation(
     }
     const token = randomUUID();
     const at = nowOf(options);
-    const selectedWorld =
+    const metadataContent =
       operation.action === 'minecraft-content' &&
-      minecraftContentSelectsWorld(operation.plan.minecraftContent);
+      minecraftContentChangesOnlyMetadata(operation.plan.minecraftContent);
     const begin = async (connection: Kysely<Database>) => {
       await trace('load.lease', () =>
         connection
@@ -533,7 +539,7 @@ export async function processServerOperation(
           .execute(),
       );
     };
-    if (selectedWorld) await trace('load.begin', () => db.transaction().execute(begin));
+    if (metadataContent) await trace('load.begin', () => db.transaction().execute(begin));
     else await begin(db);
 
     const update = (
@@ -669,9 +675,9 @@ export async function processServerOperation(
       alreadyStopped = false,
       confirmedStopped = false,
     ): Promise<Result> => {
-      // Selecting a world changes no capacity. Keep its atomic completion under
-      // the server lock without waiting for unrelated resource admissions.
-      const selectionOnly = selectedWorld && !release && !alreadyStopped && !confirmedStopped;
+      // Settings, player lists and selected-world metadata change no capacity.
+      // Keep their atomic completion under the server lock without unrelated admission waits.
+      const metadataOnly = metadataContent && !release && !alreadyStopped && !confirmedStopped;
       let rollbackLimits: Record<string, unknown> | undefined;
       if (
         !success &&
@@ -700,7 +706,7 @@ export async function processServerOperation(
       }
       const completed = await trace('finish.transaction', () =>
         db.transaction().execute(async (tx) => {
-          if (selectionOnly)
+          if (metadataOnly)
             // Event foreign keys need these rows too. Match reconciliation's
             // user-before-server order without taking an exclusive user lock.
             await trace('finish.users', () =>
@@ -789,7 +795,7 @@ export async function processServerOperation(
               .execute();
           }
           if (
-            !selectionOnly &&
+            !metadataOnly &&
             (operation.plan.installConfirmed === true ||
               operation.plan.installationEffectPrepared !== true ||
               (operation.effect_state === 'none' && operation.plan.rejected === true))
@@ -927,17 +933,18 @@ export async function processServerOperation(
     const offlineWorldSelection =
       operation.action === 'minecraft-content' &&
       minecraftContentSelectsWorld(operation.plan.minecraftContent);
-    const worldFileContent = onlineWorldContent || offlineWorldSelection;
+    const offlineMetadataContent = metadataContent && !offlineWorldSelection;
+    const worldFileContent = onlineWorldContent || metadataContent;
     let providerFileEffects = false;
     let worldSelectionReadAuthorized = false;
-    // Reuse this delivery's identity for world file operations. Selection can
-    // obtain it from the shared browsing proof; long staging refreshes it.
+    // Reuse this delivery's identity for game file operations. Metadata edits
+    // share the browsing proof; long staging refreshes it.
     let worldContentIdentity: { remote: ApplicationServer; checkedAt: number } | undefined;
     const worldContentProvider = async () => {
       const age = nowOf(options).getTime() - (worldContentIdentity?.checkedAt ?? 0);
       if (!worldContentIdentity || age < 0 || age >= 60_000) {
         const remote = await timed('provider_identity', () =>
-          offlineWorldSelection && options.worldSelectionIdentity
+          metadataContent && options.worldSelectionIdentity
             ? options.worldSelectionIdentity(server, db)
             : ownedRemote(db, server, options),
         );
@@ -960,7 +967,7 @@ export async function processServerOperation(
         phaseTiming ? phaseTiming.measure(name, work) : work();
       return measure('resources', () =>
         db.transaction().execute(async (tx) => {
-          await measure('lock', () => lockResources(tx));
+          if (!metadataContent) await measure('lock', () => lockResources(tx));
           await measure('reservation', () => assertQuiescentReservation(tx));
         }),
       );
@@ -981,7 +988,7 @@ export async function processServerOperation(
     const requireEffectResources = () =>
       trace('effect.resources', () =>
         db.transaction().execute(async (tx) => {
-          if (!offlineWorldSelection) await trace('effect.resourceLock', () => lockResources(tx));
+          if (!metadataContent) await trace('effect.resourceLock', () => lockResources(tx));
           await assertNoPendingUpload(tx, server.id);
           if (
             await tx
@@ -992,7 +999,7 @@ export async function processServerOperation(
               .executeTakeFirst()
           )
             throw new DomainError('operation_uncertain');
-          if (offlineWorldSelection) await assertQuiescentReservation(tx);
+          if (metadataContent) await assertQuiescentReservation(tx);
         }),
       );
     const effect = async <T>(
@@ -1006,17 +1013,17 @@ export async function processServerOperation(
       // dispatch. Other callers (including recovery without a read) keep this guard.
       if (!offlineWorldSelection || !worldSelectionReadAuthorized)
         await timed('authorization', () =>
-          (offlineWorldSelection || ['power', 'initial_start'].includes(phase)
+          (metadataContent || ['power', 'initial_start'].includes(phase)
             ? (options.authorizeIntent ?? options.authorizeEffect)
             : options.authorizeEffect)(jobId, server.id, db, { timing: timing?.child('auth') }),
         );
       worldSelectionReadAuthorized = false;
-      // Selection only reads while preparing. Check all resource exclusions once,
-      // after durable intent, alongside its final local stopped-state guard.
-      if (!offlineWorldSelection) await requireEffectResources();
+      // Metadata edits only read while preparing. Check resource exclusions once,
+      // after durable intent, alongside their final stopped-state guard.
+      if (!metadataContent) await requireEffectResources();
       if (
         !onlineWorldContent &&
-        !offlineWorldSelection &&
+        !metadataContent &&
         ['configure', 'reinstall', 'wipe', 'restore', 'delete', 'minecraft-content'].includes(
           operation.action,
         )
@@ -1081,7 +1088,7 @@ export async function processServerOperation(
             .execute();
           await event('servers.operation.effect_prepared', { phase }, connection);
         };
-        if (offlineWorldSelection) {
+        if (metadataContent) {
           const before = operation;
           try {
             await db.transaction().execute(prepare);
@@ -1139,6 +1146,7 @@ export async function processServerOperation(
               current.provider_user_id !== server.provider_user_id
             )
               throw new DomainError('conflict');
+            let metadataObserverPreflight: Promise<void> | undefined;
             if (offlineWorldSelection) {
               // The server lock and active job exclude new power/upload work.
               // Check local claims, without waiting for the global admission lock.
@@ -1147,11 +1155,31 @@ export async function processServerOperation(
                 await verifyManagedIdentity(db, current, verifiedServer);
               if (!(await confirmWorldSelectionStopped()))
                 throw new DomainError('operation_uncertain');
+            } else if (offlineMetadataContent) {
+              await requireEffectResources();
+              if (!verifiedServer || !options.confirmAlreadyStopped)
+                throw new DomainError('operation_uncertain');
+              metadataObserverPreflight = options.verifyObservationHost?.(server.id, db);
+              const proofs = await Promise.allSettled([
+                metadataObserverPreflight,
+                options.confirmAlreadyStopped(server.id, db, {
+                  providerServer: Promise.resolve(verifiedServer),
+                  observerPreflight: metadataObserverPreflight,
+                }),
+              ]);
+              for (const proof of proofs) if (proof.status === 'rejected') throw proof.reason;
+              if (proofs[1].status !== 'fulfilled' || !proofs[1].value)
+                throw new DomainError('operation_uncertain');
             } else if (verifiedServer) await verifyManagedIdentity(db, current, verifiedServer);
             // Physical observations can wait; current authority belongs at dispatch.
             await trace('auth.final', () =>
-              (options.authorizeIntent ?? options.authorizeEffect)(jobId, server.id, db, {
+              (offlineMetadataContent
+                ? options.authorizeEffect
+                : (options.authorizeIntent ?? options.authorizeEffect))(jobId, server.id, db, {
                 timing: timing?.child('auth'),
+                ...(metadataObserverPreflight
+                  ? { observerPreflight: metadataObserverPreflight }
+                  : {}),
               }),
             );
           } else if (leanStart) {
@@ -1454,6 +1482,7 @@ export async function processServerOperation(
           );
           if (offlineWorldSelection) worldSelectionReadAuthorized = true;
         },
+        ...(offlineMetadataContent ? { effectVerifiesStopped: true as const } : {}),
         assertStopped: async () => {
           await requireQuiescentReservation();
           if (
@@ -2366,7 +2395,7 @@ export async function processServerOperation(
           await observation(db, server, initialResources, nowOf(options));
         } else {
           remote = await timed('provider_identity', () =>
-            offlineWorldSelection && options.worldSelectionIdentity
+            metadataContent && options.worldSelectionIdentity
               ? options.worldSelectionIdentity(server, db)
               : ownedRemote(db, server, options),
           );
@@ -2653,7 +2682,7 @@ export async function processServerOperation(
       }
       // The integration checks the selected world at dispatch. An unused folder
       // needs neither process telemetry nor an artificial offline settling period.
-      if (!onlineWorldContent && !offlineWorldSelection) {
+      if (!onlineWorldContent && !metadataContent) {
         await requireQuiescentReservation();
         if (!(await offline())) return wait('offline_confirmation');
       }

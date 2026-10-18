@@ -2,6 +2,7 @@ import { type AuthContext, DomainError } from '@nickhosting/core';
 import type { createDatabase } from '@nickhosting/database';
 import {
   authorizeServer,
+  createFilemanReadService,
   inspectMinecraftCombination,
   inspectMinecraftWorlds,
   type ManagementRuntime,
@@ -36,13 +37,25 @@ function fixture(connection = db) {
       error instanceof DomainError ? (error.status as 400) : 500,
     ),
   );
-  const authorizeTransfer = vi.fn(async () => {});
-  const access = vi.fn(async (_actor, _server, work) => work('provider', connection, actor));
+  const authorizeTransfer = vi.fn<ManagementRuntime['authorizeTransfer']>(async () => {});
+  const access = vi.fn(async (_actor, _server, work, signal) => {
+    const files = createFilemanReadService({
+      adapter: service.adapter,
+      identifier: 'provider',
+      signal,
+      authorize: async () => {},
+    });
+    const result = await work(files, 'provider', connection, actor, {});
+    await authorizeTransfer(actor, 'server', false, connection);
+    return result;
+  });
   const readFileForEditor = vi.fn(async () => Buffer.from('motd=Fixture\nmax-players=20\n'));
   const prepareWorldSelection = vi.fn(async () => {});
+  const prepareFileWrites = vi.fn(async () => {});
   const service = {
     adapter: { readFileForEditor },
-    fileReadAccess: access,
+    fileReadScope: access,
+    prepareFileWrites,
     prepareWorldSelection,
     authorizeTransfer,
   } as unknown as ManagementRuntime;
@@ -54,7 +67,15 @@ function fixture(connection = db) {
     body: async (c) => c.req.json(),
     management,
   });
-  return { app, access, management, authorizeTransfer, readFileForEditor, prepareWorldSelection };
+  return {
+    app,
+    access,
+    management,
+    authorizeTransfer,
+    readFileForEditor,
+    prepareWorldSelection,
+    prepareFileWrites,
+  };
 }
 beforeEach(() => {
   vi.mocked(authorizeServer)
@@ -70,7 +91,12 @@ describe('world snapshot HTTP access contract', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toEqual(snapshot);
     expect(authorizeServer).toHaveBeenCalledExactlyOnceWith(db, actor, 'server');
-    expect(f.access).toHaveBeenCalledExactlyOnceWith(actor, 'server', expect.any(Function));
+    expect(f.access).toHaveBeenCalledExactlyOnceWith(
+      actor,
+      'server',
+      expect.any(Function),
+      expect.any(AbortSignal),
+    );
     const authorize = vi.mocked(inspectMinecraftWorlds).mock.calls[0]?.[3];
     await authorize?.();
     expect(f.authorizeTransfer).toHaveBeenCalledExactlyOnceWith(actor, 'server', false, db);
@@ -104,12 +130,22 @@ describe('world snapshot HTTP access contract', () => {
       combination: { release: '26.1', profile: 'vanilla' },
     } as never);
     const f = fixture(connection);
+    const grants = Promise.withResolvers<void>();
+    f.prepareFileWrites.mockReturnValueOnce(grants.promise);
     const response = await f.app.request('/v1/servers/server/minecraft');
+    expect(f.prepareFileWrites).toHaveBeenCalledWith(actor, 'server', ['server.properties']);
+    grants.resolve();
+    expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       effectiveProperties: { motd: 'Fixture', 'max-players': '20' },
     });
-    expect(f.access).toHaveBeenCalledExactlyOnceWith(actor, 'server', expect.any(Function));
+    expect(f.access).toHaveBeenCalledExactlyOnceWith(
+      actor,
+      'server',
+      expect.any(Function),
+      expect.any(AbortSignal),
+    );
     expect(f.readFileForEditor).toHaveBeenCalledExactlyOnceWith(
       'provider',
       'server.properties',
