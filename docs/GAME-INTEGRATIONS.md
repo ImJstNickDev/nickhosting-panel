@@ -517,6 +517,9 @@ and uses Fileman's prepared Wings upload transport. Adjacent duplicate selection
 checks and unrelated modpack receipts are omitted. An initially missing properties
 file still requires a fresh listing to detect external creation. Uncertain replies
 read fresh bytes to reconcile the persisted after-image without replaying the write.
+Selection completion remains atomic under the server lock but does not acquire the
+global resource lock or delete installation reservations: it changes no capacity.
+Operations that reserve or release resources retain their existing locking.
 After confirmed job success, the UI changes `selectedWorld` in the already loaded
 inventory and cancels older reads. Selection does not trigger another world scan;
 acceptance alone never changes the selection. Explicit refresh/reopening the tab

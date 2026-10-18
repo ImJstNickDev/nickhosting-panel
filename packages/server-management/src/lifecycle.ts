@@ -669,6 +669,9 @@ export async function processServerOperation(
       alreadyStopped = false,
       confirmedStopped = false,
     ): Promise<Result> => {
+      // Selecting a world changes no capacity. Keep its atomic completion under
+      // the server lock without waiting for unrelated resource admissions.
+      const selectionOnly = selectedWorld && !release && !alreadyStopped && !confirmedStopped;
       let rollbackLimits: Record<string, unknown> | undefined;
       if (
         !success &&
@@ -697,7 +700,19 @@ export async function processServerOperation(
       }
       const completed = await trace('finish.transaction', () =>
         db.transaction().execute(async (tx) => {
-          await trace('finish.lock', () => lockResources(tx));
+          if (selectionOnly)
+            // Event foreign keys need these rows too. Match reconciliation's
+            // user-before-server order without taking an exclusive user lock.
+            await trace('finish.users', () =>
+              tx
+                .selectFrom('user')
+                .select('id')
+                .where('id', 'in', [server.owner_id, job.actor_id, job.subject_id])
+                .orderBy('id')
+                .forKeyShare()
+                .execute(),
+            );
+          else await trace('finish.lock', () => lockResources(tx));
           if (alreadyStopped) {
             const compute = await tx
               .selectFrom('resource_reservations')
@@ -774,9 +789,10 @@ export async function processServerOperation(
               .execute();
           }
           if (
-            operation.plan.installConfirmed === true ||
-            operation.plan.installationEffectPrepared !== true ||
-            (operation.effect_state === 'none' && operation.plan.rejected === true)
+            !selectionOnly &&
+            (operation.plan.installConfirmed === true ||
+              operation.plan.installationEffectPrepared !== true ||
+              (operation.effect_state === 'none' && operation.plan.rejected === true))
           )
             await tx
               .deleteFrom('installation_reservations')

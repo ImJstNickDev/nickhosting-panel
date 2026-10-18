@@ -3911,6 +3911,236 @@ describe('Minecraft world selection without telemetry settling', () => {
       backupBefore: false,
     },
   });
+  async function resourceBlockedWorker(jobId: string) {
+    const worker = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
+      options: `-c search_path=${database.schema} -c lock_timeout=200ms`,
+      application_name: `isolated-selection-${jobId}`,
+      max: 1,
+      connectionTimeoutMillis: 1000,
+    });
+    const blocker = await database.pool.connect();
+    const attempts: Promise<unknown>[] = [];
+    try {
+      const held = await blocker.query<{ acquired: boolean }>(
+        "select pg_try_advisory_lock(hashtextextended(current_schema() || ':resources',0)) as acquired",
+      );
+      expect(held.rows[0]?.acquired).toBe(true);
+    } catch (error) {
+      blocker.release();
+      await worker.db.destroy();
+      throw error;
+    }
+    return {
+      run(options: LifecycleOptions) {
+        const operation = processServerOperation(worker.db, jobId, options);
+        attempts.push(operation);
+        void operation.catch(() => {});
+        return operation;
+      },
+      async close() {
+        try {
+          await blocker.query(
+            "select pg_advisory_unlock(hashtextextended(current_schema() || ':resources',0))",
+          );
+        } finally {
+          blocker.release();
+          // An assertion must not leave the operation or borrowed connection alive.
+          await Promise.allSettled(attempts);
+          await worker.db.destroy();
+        }
+      },
+    };
+  }
+  it.each([false, true])(
+    'finishes selection with the global resource lock held and no reservation DELETE, rejected=%s',
+    async (rejected) => {
+      const f = await fixture('minecraft-content', plan());
+      const write = vi.fn(async () => {});
+      f.options.confirmAlreadyStopped = async () => true;
+      f.options.processGameContent = async (context) => {
+        if (rejected) throw new DomainError('conflict');
+        await context.effect('minecraft.text.fixture', write);
+        return true;
+      };
+      await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+      const reservation = await f.installationReservation();
+      const blocked = await resourceBlockedWorker(f.jobId);
+      try {
+        // Statement-level protection also detects the otherwise empty generic DELETE.
+        // Only this isolated worker is guarded; other fixture sessions are unaffected.
+        await database.pool.query(`
+          CREATE FUNCTION reject_selection_reservation_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            IF current_setting('application_name', true) = 'isolated-selection-${f.jobId}' THEN
+              RAISE EXCEPTION 'selection must not delete installation reservations';
+            END IF;
+            RETURN NULL;
+          END $$;
+          CREATE TRIGGER selection_reservation_delete BEFORE DELETE ON installation_reservations
+            FOR EACH STATEMENT EXECUTE FUNCTION reject_selection_reservation_delete();
+        `);
+        expect(await blocked.run(f.options)).toBe(rejected ? 'failed' : 'succeeded');
+        expect(write).toHaveBeenCalledTimes(rejected ? 0 : 1);
+        expect(await f.installationReservation()).toEqual(reservation);
+        expect((await f.server()).active_operation_id).toBeNull();
+        expect(await f.operation()).toMatchObject({
+          phase: rejected ? 'failed' : 'complete',
+          lease_token: null,
+          lease_until: null,
+        });
+        expect(
+          await f.db
+            .selectFrom('operation_jobs')
+            .select(['state', 'error_code', 'completed_at'])
+            .where('id', '=', f.jobId)
+            .executeTakeFirstOrThrow(),
+        ).toEqual({
+          state: rejected ? 'failed' : 'succeeded',
+          error_code: rejected ? 'conflict' : null,
+          completed_at: f.now(),
+        });
+        expect(
+          await f.db
+            .selectFrom('job_steps')
+            .select('step')
+            .where('job_id', '=', f.jobId)
+            .where('step', '=', `server.minecraft-content.${rejected ? 'failed' : 'complete'}`)
+            .execute(),
+        ).toHaveLength(1);
+        expect(
+          await f.db
+            .selectFrom('job_outbox')
+            .select('job_id')
+            .where('job_id', '=', f.jobId)
+            .execute(),
+        ).toEqual([]);
+      } finally {
+        await blocked.close();
+        await database.pool.query(`
+          DROP TRIGGER IF EXISTS selection_reservation_delete ON installation_reservations;
+          DROP FUNCTION IF EXISTS reject_selection_reservation_delete();
+        `);
+      }
+    },
+  );
+  it('retains the global lock when a confirmed stop finishes and releases reservations', async () => {
+    const f = await fixture('stop', { stopConfirmed: true });
+    await f.prepareReservation();
+    await f.options.reserveInstallation?.(f.serverId, f.jobId, f.db);
+    await f.db
+      .updateTable('server_operations')
+      .set({ phase: 'power', effect_state: 'confirmed', effect_started_at: f.now() })
+      .where('job_id', '=', f.jobId)
+      .execute();
+    f.options.confirmAlreadyStopped = vi.fn(async () => true);
+    const compute = await f.reservation();
+    const installation = await f.installationReservation();
+    const blocked = await resourceBlockedWorker(f.jobId);
+    try {
+      // PostgreSQL bounds the lock wait; no elapsed-time assertion is needed.
+      expect(await blocked.run(f.options)).toBe('waiting');
+      expect(f.options.confirmAlreadyStopped).toHaveBeenCalledOnce();
+      expect(await f.reservation()).toEqual(compute);
+      expect(await f.installationReservation()).toEqual(installation);
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      expect((await f.operation()).phase).toBe('power');
+      expect(
+        await f.db
+          .selectFrom('operation_jobs')
+          .select('completed_at')
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ completed_at: null });
+    } finally {
+      await blocked.close();
+    }
+    f.tick();
+    expect(await f.run()).toBe('succeeded');
+    expect(await f.reservation()).toBeUndefined();
+    expect(await f.installationReservation()).toBeUndefined();
+    expect((await f.server()).active_operation_id).toBeNull();
+    expect(f.adapter.power).not.toHaveBeenCalled();
+    expect(f.adapter.stopWithConfirmation).not.toHaveBeenCalled();
+  });
+  it('orders selection completion behind user locks before taking the server row', async () => {
+    const f = await fixture('minecraft-content', plan());
+    const ready = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const write = vi.fn(async () => {});
+    f.options.confirmAlreadyStopped = async () => true;
+    f.options.processGameContent = async (context) => {
+      await context.effect('minecraft.text.fixture', write);
+      // Earlier journal events also reference users. Hold the user only after
+      // those commits, so the observed wait belongs to terminal completion.
+      ready.resolve();
+      await finish.promise;
+      return true;
+    };
+    const blocker = await database.pool.connect();
+    const applicationName = `isolated-selection-order-${f.jobId}`;
+    const worker = createDatabase(process.env.NH_TEST_DATABASE_URL ?? '', {
+      options: `-c search_path=${database.schema} -c lock_timeout=3000ms`,
+      application_name: applicationName,
+      max: 1,
+      connectionTimeoutMillis: 1000,
+    });
+    let selecting: ReturnType<typeof processServerOperation> | undefined;
+    try {
+      selecting = processServerOperation(worker.db, f.jobId, f.options);
+      await Promise.race([
+        ready.promise,
+        selecting.then(() => {
+          throw new Error('Selection ended before the completion barrier');
+        }),
+      ]);
+      await blocker.query("BEGIN; SET LOCAL lock_timeout = '200ms'");
+      // Match reconciliation's resource -> user -> server order in this schema.
+      await blocker.query(
+        "select pg_advisory_xact_lock(hashtextextended(current_schema() || ':resources',0))",
+      );
+      await blocker.query('select id from "user" where id = $1 for update', [f.ownerId]);
+      const identity = await blocker.query<{ pid: number }>('select pg_backend_pid() as pid');
+      finish.resolve();
+      await vi.waitFor(async () => {
+        const waiting = await database.pool.query<{ blocked: boolean }>(
+          `select exists (
+            select 1 from pg_stat_activity
+            where application_name = $1 and $2::int = any(pg_blocking_pids(pid))
+          ) as blocked`,
+          [applicationName, identity.rows[0]?.pid],
+        );
+        expect(waiting.rows[0]?.blocked).toBe(true);
+      });
+      expect((await f.server()).active_operation_id).toBe(f.jobId);
+      expect(
+        await f.db
+          .selectFrom('operation_jobs')
+          .select(['state', 'completed_at'])
+          .where('id', '=', f.jobId)
+          .executeTakeFirstOrThrow(),
+      ).toEqual({ state: 'running', completed_at: null });
+      // A finish that took the server first would now fail with lock_timeout.
+      const server = await blocker.query<{ id: string }>(
+        'select id from managed_servers where id = $1 for update',
+        [f.serverId],
+      );
+      expect(server.rows[0]?.id).toBe(f.serverId);
+      await blocker.query('COMMIT');
+      expect(await selecting).toBe('succeeded');
+      expect(write).toHaveBeenCalledOnce();
+      expect((await f.server()).active_operation_id).toBeNull();
+      expect((await f.operation()).phase).toBe('complete');
+    } finally {
+      finish.resolve();
+      try {
+        await blocker.query('ROLLBACK');
+      } finally {
+        blocker.release();
+        await selecting?.catch(() => {});
+        await worker.db.destroy();
+      }
+    }
+  });
   it.each([
     ['debug', false],
     ['debug', true],

@@ -13681,3 +13681,59 @@ services and disposable schemas, cleaned by their harness; no live test assets
 were created or removed. Rollback: revert this code commit and retain all durable
 jobs/data; existing cache formats/expiry remain compatible. PR #21 stays open and
 unmerged; independent production-release gates, including issue #18, are unchanged.
+
+## Worlds Select: completion independent of resource admission — 2026-10-19
+
+The Owner's next Select on `6daa2a6` succeeded in **474.382 ms** from job creation
+to its stored completion timestamp, versus **372.861 ms** in the previous sample.
+Traced execution took **415.378 ms**. The file write was acknowledged about
+**300.462 ms** after creation, earlier than the preceding sample, but completion
+waited **155.785 ms** for the schema-wide resource advisory lock. The exact holder
+was not identified. Completion and lease-release spans overlap and must not be
+added together. These remain backend measurements, not browser click-to-paint.
+
+World selection changes no capacity. Its terminal transaction now skips that
+global lock and the unrelated installation-reservation DELETE. The server lock,
+server row lock, atomic terminal job/operation/event updates, notification and
+outbox cleanup remain. The exception applies only to a prepared existing-world
+selection without resource-release or confirmed-stop completion flags; other
+operations retain their resource locking and reservation cleanup. No new cache,
+provider call, delayed completion or optimistic success is introduced.
+
+Independent review found that simply removing the global lock could invert the
+user/server row-lock order with reconciliation through event foreign keys. The
+selection transaction therefore acquires shared key locks for the owner, actor
+and subject in ID order before the server row. This uses one local query, preserves
+concurrent non-key permission updates and avoids the lock-order inversion without
+serializing unrelated admissions.
+
+Validation on existing isolated services with disposable test schemas:
+
+```sh
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts -t 'Minecraft world selection without telemetry settling'
+scripts/dev.sh pnpm exec tsx scripts/test-env.ts --m2 pnpm exec vitest run --config vitest.integration.config.ts packages/server-management/src/lifecycle.integration.test.ts
+scripts/dev.sh pnpm exec tsc --noEmit
+scripts/dev.sh pnpm exec biome check packages/server-management/src/lifecycle.ts packages/server-management/src/lifecycle.integration.test.ts
+python3 scripts/check-governance.py
+git diff --cached --check
+```
+
+The initial targeted group passed **25/25** (269 unrelated cases excluded).
+After adding the lock-order regression, the complete lifecycle suite passed
+**295/295**. These overlapping runs are not summed. Four new regressions use real
+PostgreSQL lock contention: successful/rejected selection completes with the
+global lock held and no reservation DELETE; confirmed stop retains that lock;
+selection takes user locks before the server row during a concurrent transaction.
+Locks, connections and operations are settled in `finally`. TypeScript, scoped
+Biome, indexed governance and whitespace checks passed. Independent technical
+review found no remaining must-fix findings. No full historical M1–M5 matrix or
+browser suite was rerun for this backend-only change.
+
+Dev source watchers loaded the change; API/worker remained healthy, restart
+counters 0, public HTTPS 200. No manual restart, migration, rebuild, real game-file
+write, power command, Panel/Wings/Blueprint change or DNS operation occurred.
+Only disposable test schemas were created and cleaned; no live test assets were
+created or removed. Rollback is a code revert with durable state preserved.
+PR #21 remains open and unmerged; issue #18 remains an independent release gate.
+The next Owner Select supplies real post-change timing; fixture tests do not
+establish the 300 ms target or browser latency.
